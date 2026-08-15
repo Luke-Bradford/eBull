@@ -71,7 +71,7 @@ class TestTheShippedDeclaration:
         # first declared BEFORE its run). Moved deliberately, not loosened: the
         # pin exists to catch a DROPPED entry, and an addition that raises M is
         # the conservative direction — a larger M lowers the DSR.
-        assert TRIAL_REGISTER.declared_count == 266
+        assert TRIAL_REGISTER.declared_count == 272
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
 
     def test_the_c4_schedule13d_arms_are_counted_before_the_run(self) -> None:
@@ -117,7 +117,14 @@ class TestTheShippedDeclaration:
         winner, so counting it would inflate M and understate the DSR. The
         register's header states this test; this pins it.
         """
-        assert not any(trial.startswith(("s5", "s6")) for trial in TRIAL_REGISTER.trial_ids)
+        assert {
+            "s5-support-bounce",
+            "s6-resistance-breakout",
+            "s7-trend-pullback",
+            "s8-range-mean-reversion",
+            "s9-squeeze-expansion",
+            "s10-relative-strength-leader",
+        } <= TRIAL_REGISTER.trial_ids
 
 
 class TestSharpeVariance:

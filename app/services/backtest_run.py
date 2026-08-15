@@ -90,6 +90,7 @@ from app.services.equity_curve import (
     build_month_end_rebalanced_curve,
 )
 from app.services.indicator_series import BarSeries, Universe
+from app.services.market_regime import Regime
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.outcome_resolver import ExitLevels, UnresolvedReason, resolve_outcome
@@ -135,6 +136,12 @@ from app.services.strategies.validated_universe import (
     load_validated_universe,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
+from app.services.strategy_regime_evidence import (
+    RegimeCohort,
+    RegimeTradeObservation,
+    build_regime_cohorts,
+    store_result_regime_cohorts,
+)
 from app.services.strategy_registry import (
     SignalKind,
     StrategyIdentity,
@@ -466,6 +473,9 @@ class NamespaceMeasurement:
     #: on a survivor universe. Stored per result row by the ledger writer,
     #: which refuses a ``survivorship_free`` row without one.
     termination_census: Mapping[str, int] = field(default_factory=dict)
+    #: One causal signal-date cohort for every realised trade. The child rows
+    #: explain this result; they are not separate promotion candidates.
+    regime_cohorts: tuple[RegimeCohort, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -979,6 +989,7 @@ class _NamespaceBook:
     entry_dates: list[date] = field(default_factory=list)
     #: Positionally parallel to `entry_dates`; `TradeReturns` enforces that.
     exit_dates: list[date] = field(default_factory=list)
+    regime_observations: list[RegimeTradeObservation] = field(default_factory=list)
     instruments: set[int] = field(default_factory=set)
     positions: int = 0
     open_at_end: int = 0
@@ -1206,6 +1217,7 @@ def _absorb(
     books: Mapping[ResultNamespace, _NamespaceBook],
     close_sources: Counter[str],
     discarded: Counter[str],
+    market_regime_by_date: Mapping[date, Regime | None],
     termination_class: str | None = None,
 ) -> None:
     """Route one instrument's costed positions into their namespace books.
@@ -1309,6 +1321,14 @@ def _absorb(
             # #2623 gap 1. The exit bar was never lost here — the namespace split
             # above already reads it — only never carried into the metric set.
             book.exit_dates.append(close_bar_date)
+            book.regime_observations.append(
+                RegimeTradeObservation(
+                    instrument_key=instrument_id,
+                    signal_date=position.entry_signal_bar_date,
+                    net_return_pct=(exit_price - entry_price) / entry_price * 100.0,
+                    regime=market_regime_by_date.get(position.entry_signal_bar_date),
+                )
+            )
 
 
 @dataclass(frozen=True)
@@ -1566,6 +1586,13 @@ def _measure_namespace(
             f"{len(dates)} dates and the block bootstrap computed no effective sample size — criterion 3 forbids "
             "reporting a nominal n in its place, so no row can be written for it"
         )
+    regime_cohorts = build_regime_cohorts(book.regime_observations, root_seed=BACKTEST_BOOTSTRAP_SEED)
+    cohort_trade_count = sum(cohort.trade_count for cohort in regime_cohorts)
+    if cohort_trade_count != metrics.trade_count:
+        raise RuntimeError(
+            f"the {namespace} regime cohorts carry {cohort_trade_count} realised trades against the parent "
+            f"metric's {metrics.trade_count} — every realised trade must have exactly one causal signal-date label"
+        )
     return NamespaceMeasurement(
         namespace=namespace,
         metrics=metrics,
@@ -1584,6 +1611,7 @@ def _measure_namespace(
         short_funded_entries=curve.short_funded_entries,
         traded_notional_total=float(curve.traded_notional.sum()),
         termination_census=dict(book.terminations),
+        regime_cohorts=regime_cohorts,
     )
 
 
@@ -1633,6 +1661,7 @@ def evaluate_arm(
     # with no real connection.
     if regime_provider is None:
         regime_provider = MarketRegimeProvider.load_research(conn)
+    market_regime_by_date = dict(zip(corpus.axis, regime_provider.for_dates(corpus.axis).values, strict=True))
     started = time.monotonic()
     if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
         raise ValueError(f"unknown return basis {return_basis!r}")
@@ -1771,6 +1800,7 @@ def evaluate_arm(
             books=books,
             close_sources=close_sources,
             discarded=discarded,
+            market_regime_by_date=market_regime_by_date,
         )
         if collector is not None:
             collector.collect(
@@ -1933,6 +1963,7 @@ def evaluate_level_arms(
     # with no real connection.
     if regime_provider is None:
         regime_provider = MarketRegimeProvider.load_research(conn)
+    market_regime_by_date = dict(zip(corpus.axis, regime_provider.for_dates(corpus.axis).values, strict=True))
     started = time.monotonic()
     if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
         raise ValueError(f"unknown return basis {return_basis!r}")
@@ -2093,6 +2124,7 @@ def evaluate_level_arms(
                 books=books[ambiguity],
                 close_sources=close_sources[ambiguity],
                 discarded=discarded[ambiguity],
+                market_regime_by_date=market_regime_by_date,
                 termination_class=termination_label,
             )
             arm_collector = collectors[ambiguity]
@@ -3321,6 +3353,12 @@ def _write_rows(
                 for result_id, result in zip(ids, (masked, admitted), strict=True):
                     _store_universe_record(conn, result_id, result, arms=arms, validated=validated)
                     _store_ambiguity_record(conn, result_id, result, arms=arms)
+                    store_result_regime_cohorts(
+                        conn,
+                        result_id=result_id,
+                        cohorts=_regime_cohorts_for(arms, result),
+                        expected_trade_count=result.metrics.trade_count,
+                    )
                     if corpus.universe_basis == "survivorship_free":
                         store_termination_census(
                             conn,
@@ -3348,6 +3386,12 @@ def _write_rows(
                 )
                 _store_universe_record(conn, result_id, result, arms=arms, validated=validated)
                 _store_ambiguity_record(conn, result_id, result, arms=arms)
+                store_result_regime_cohorts(
+                    conn,
+                    result_id=result_id,
+                    cohorts=_regime_cohorts_for(arms, result),
+                    expected_trade_count=result.metrics.trade_count,
+                )
                 if corpus.universe_basis == "survivorship_free":
                     store_termination_census(
                         conn,
@@ -3592,6 +3636,20 @@ def _termination_census_for(
     raise RuntimeError(  # pragma: no cover - every stored row came from a measurement
         f"no measurement matches the stored row {result.identity.version}"
     )
+
+
+def _regime_cohorts_for(arms: Sequence[ArmMeasurement], result: StrategyResult) -> tuple[RegimeCohort, ...]:
+    """The causal regime cohorts produced by the exact measurement behind a row."""
+    for measurement in arms:
+        if (
+            measurement.strategy_id == result.identity.strategy_id
+            and measurement.quarantine_arm == result.identity.quarantine_arm
+            and measurement.ambiguity_arm in {None, result.identity.ambiguity_arm}
+        ):
+            outcome = measurement.namespaces.get(result.identity.namespace)
+            if outcome is not None:
+                return outcome.regime_cohorts
+    raise RuntimeError(f"no measurement matches the stored row {result.identity.version}")
 
 
 def _store_ambiguity_record(
