@@ -40,6 +40,7 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
 )
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
+from app.services.strategy_halt_identity import HALT_IDENTITY_RULE_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_opportunity_forecast import (
     FORECAST_POLICY_VERSION,
@@ -497,6 +498,10 @@ def test_harness_signal_is_rejected_before_runtime_or_broker_checks(
 
     assert result.verdict == "rejected"
     assert result.reason_code == "harness_validation_only"
+    assert ebull_test_conn.execute(
+        "SELECT halt_identity_rule_version FROM strategy_entry_preflights WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone() == (None,)
     broker.place_demo_strategy_order.assert_not_called()
 
 
@@ -515,6 +520,33 @@ def test_unregistered_signal_is_rejected_before_runtime_or_broker_checks(
 
     assert result.verdict == "rejected"
     assert result.reason_code == "strategy_not_capital_candidate"
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_plain_nasdaq_halt_refuses_an_etoro_session_variant(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    signal_id = _seed(ebull_test_conn)
+    ebull_test_conn.execute("UPDATE instruments SET symbol='TALLOC.RTH' WHERE instrument_id=2449001")
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_market_halts (
+            source, symbol, halt_at, market, reason_code, resumed_at, observed_at
+        ) VALUES ('nasdaq_trader_rss', 'TALLOC', %s, 'NASDAQ', 'T1', NULL, %s)
+        """,
+        (_NOW, _NOW),
+    )
+    ebull_test_conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "instrument_halted"
+    assert ebull_test_conn.execute(
+        "SELECT halt_identity_rule_version FROM strategy_entry_preflights WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone() == (HALT_IDENTITY_RULE_VERSION,)
     broker.place_demo_strategy_order.assert_not_called()
 
 
@@ -635,7 +667,8 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
     # insert outright — and a basis that named a path other than the one `_costs`
     # took would pass the CHECK while lying about provenance (#2598 step 4).
     assert conn.execute(
-        "SELECT verdict, allocated_amount, net_expectancy_pct, forecast_id, ranking_member_id, cost_basis "
+        "SELECT verdict, allocated_amount, net_expectancy_pct, forecast_id, ranking_member_id, cost_basis, "
+        "halt_identity_rule_version "
         "FROM strategy_entry_preflights WHERE signal_id=%s",
         (signal_id,),
     ).fetchone() == (
@@ -645,6 +678,7 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
         forecast_id[0],
         forecast_id[1],
         COST_BASIS_BROKER_PREFLIGHT_VALUE,
+        HALT_IDENTITY_RULE_VERSION,
     )
     conn.commit()
 
@@ -670,9 +704,9 @@ def test_missing_opportunity_forecast_refuses_before_broker_access(
     broker.get_account_risk_snapshot.assert_not_called()
     broker.place_demo_strategy_order.assert_not_called()
     assert conn.execute(
-        "SELECT forecast_id FROM strategy_entry_preflights WHERE signal_id=%s",
+        "SELECT forecast_id, halt_identity_rule_version FROM strategy_entry_preflights WHERE signal_id=%s",
         (signal_id,),
-    ).fetchone() == (None,)
+    ).fetchone() == (None, HALT_IDENTITY_RULE_VERSION)
 
 
 def test_unbatched_opportunity_refuses_before_broker_access(

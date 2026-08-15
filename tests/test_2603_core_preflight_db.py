@@ -128,6 +128,31 @@ def test_the_observation_binds_the_quote_and_exchange_to_the_instrument(
     ebull_test_conn.rollback()
 
 
+def test_core_preflight_matches_a_plain_halt_to_a_session_variant(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """Nasdaq's CORETEST halt applies to eToro's CORETEST.24-7 row."""
+    _seed_instrument(ebull_test_conn)
+    ebull_test_conn.execute(
+        "UPDATE instruments SET symbol='CORETEST.24-7' WHERE instrument_id=%s",
+        (INSTRUMENT_ID,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_market_halts (
+            source, symbol, halt_at, market, reason_code, resumed_at, observed_at
+        ) VALUES ('nasdaq_trader_rss', 'CORETEST', now(), 'NASDAQ', 'T1', NULL, now())
+        """
+    )
+
+    row = ebull_test_conn.execute(_PREFLIGHT_SQL, {"core_instrument_id": INSTRUMENT_ID}).fetchone()
+
+    assert row is not None
+    assert row[1] == "CORETEST.24-7"
+    assert row[6] is True
+    ebull_test_conn.rollback()
+
+
 # --------------------------------------------------------------------------
 # The lock contract
 # --------------------------------------------------------------------------
