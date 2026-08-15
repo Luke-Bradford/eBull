@@ -99,7 +99,16 @@ class _Fetcher:
         if wait > 0:
             time.sleep(wait)
         self._next_free = time.monotonic() + _MIN_INTERVAL_S
-        response = self._client.get(url)
+        # Transport failures (ReadTimeout, connection resets) surface as
+        # status 0 rather than an exception: every caller already handles a
+        # non-200, and over a ~14k-request multi-year run a single timeout
+        # must count as one failed fetch, not kill the year (measured: the
+        # first 2024 harvest died mid-run on httpx.ReadTimeout).
+        try:
+            response = self._client.get(url)
+        except httpx.HTTPError as exc:
+            logger.warning("%s: %s", url, type(exc).__name__)
+            return 0, ""
         return response.status_code, response.text
 
     def close(self) -> None:
