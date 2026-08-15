@@ -263,39 +263,52 @@ def _resolve_symbol(fetcher: _Fetcher, cik: str, before: date) -> tuple[str, str
     if status != 200:
         return None
     filings = json.loads(body).get("filings", {})
-    candidates = _cover_page_candidates(filings.get("recent", {}), before)
+
+    tried: set[str] = set()
+
+    def _scan(candidates: list[tuple[str, str, str]]) -> tuple[str, str] | None:
+        """Try the newest five UNTRIED candidates; None if all fail."""
+        untried = [c for c in sorted(candidates, reverse=True) if c[1] not in tried]
+        for _, accession, primary in untried[:5]:
+            tried.add(accession)
+            doc_status, document = fetcher.get(
+                f"{_ARCHIVES}/edgar/data/{int(cik)}/{accession.replace('-', '')}/{primary}"
+            )
+            if doc_status != 200:
+                continue
+            match = TRADING_SYMBOL_RE.search(document)
+            if match:
+                symbol = clean_trading_symbol(match.group(1))
+                if symbol:
+                    return symbol, accession
+        return None
+
     # ``recent`` holds the NEWEST filings, so any candidate it yields outranks
     # everything in the (strictly older) ``files[]`` pages for the
-    # newest-at-or-before-the-delisting scan below. The pages matter when
-    # ``recent`` yields fewer than the scan's five-candidate capacity — zero
-    # because the issuer kept filing past the cap, or too few to survive a
-    # fetch/parse failure on the top pick.
-    if len(candidates) < 5:
-        for page in filings.get("files", []):
-            name = page.get("name")
-            if not name:
-                continue
-            # Pages carry their span; skip any that BEGINS after the
-            # delisting. A page missing ``filingFrom`` is unknown-but-
-            # possibly-relevant and is fetched, not skipped.
-            if page.get("filingFrom", "") > before.isoformat():
-                continue
-            page_status, page_body = fetcher.get(f"https://data.sec.gov/submissions/{name}")
-            if page_status != 200:
-                continue
-            candidates.extend(_cover_page_candidates(json.loads(page_body), before))
+    # newest-at-or-before-the-delisting objective. Scan those first; the
+    # pages are fetched only if that scan RESOLVES NOTHING — whether because
+    # ``recent`` had no candidate at or before the cutoff, or because every
+    # attempted one failed to fetch/parse (a pre-loop count cannot see the
+    # second case — review round 3).
+    candidates = _cover_page_candidates(filings.get("recent", {}), before)
+    resolved = _scan(candidates)
+    if resolved is not None:
+        return resolved
 
-    for _, accession, primary in sorted(candidates, reverse=True)[:5]:
-        url = f"{_ARCHIVES}/edgar/data/{int(cik)}/{accession.replace('-', '')}/{primary}"
-        status, document = fetcher.get(url)
-        if status != 200:
+    for page in filings.get("files", []):
+        name = page.get("name")
+        if not name:
             continue
-        match = TRADING_SYMBOL_RE.search(document)
-        if match:
-            symbol = clean_trading_symbol(match.group(1))
-            if symbol:
-                return symbol, accession
-    return None
+        # Pages carry their span; skip any that BEGINS after the delisting.
+        # A page missing ``filingFrom`` is unknown-but-possibly-relevant and
+        # is fetched, not skipped.
+        if page.get("filingFrom", "") > before.isoformat():
+            continue
+        page_status, page_body = fetcher.get(f"https://data.sec.gov/submissions/{name}")
+        if page_status != 200:
+            continue
+        candidates.extend(_cover_page_candidates(json.loads(page_body), before))
+    return _scan(candidates)
 
 
 def resolve_symbols(conn: psycopg.Connection[tuple], fetcher: _Fetcher, year: int) -> int:
