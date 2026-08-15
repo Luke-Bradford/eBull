@@ -62,6 +62,7 @@ from app.services.strategy_result import EVALUATION_WINDOW_START, HOLDOUT_BOUNDA
 from app.services.strategy_result_ambiguity import (
     AMBIGUITY_RULE_VERSION,
     AmbiguityRecord,
+    load_promotion_ambiguity_refusals,
     load_result_ambiguities,
     store_result_ambiguity,
 )
@@ -183,6 +184,26 @@ def _ambiguity_record(conn: psycopg.Connection[Any], result_id: int) -> None:
         record=AmbiguityRecord(
             ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
             comparison_basis="shared_measurement",
+        ),
+    )
+
+
+def _arm_ambiguity_record(
+    conn: psycopg.Connection[Any],
+    result_id: int,
+    *,
+    threshold: float | None,
+) -> None:
+    """A real two-arm §3.4 record; ``None`` is holdout's honest local state."""
+    store_result_ambiguity(
+        conn,
+        result_id=result_id,
+        record=AmbiguityRecord(
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            comparison_basis="arm_sharpes",
+            best_case_sharpe=0.7,
+            worst_case_sharpe=0.4,
+            cohort_gap_threshold=threshold,
         ),
     )
 
@@ -1658,6 +1679,60 @@ def test_holdout_replay_uses_the_exact_in_sample_control_without_copying_it(
     ).fetchone() == (1, support_id)
 
 
+def test_holdout_ambiguity_replay_uses_exact_in_sample_support_without_cross_namespace_maths(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    support_id, holdout_id = _holdout_with_control_support(ebull_test_conn)
+    _arm_ambiguity_record(ebull_test_conn, holdout_id, threshold=None)
+    _arm_ambiguity_record(ebull_test_conn, support_id, threshold=0.5)
+
+    assert load_promotion_ambiguity_refusals(ebull_test_conn, [holdout_id]) == {holdout_id: ()}
+    # The holdout record remains its own measured-but-unjudged payload; support
+    # is replayed, never copied onto withheld evidence.
+    assert load_result_ambiguities(ebull_test_conn, [holdout_id])[holdout_id].cohort_gap_threshold is None
+
+
+def test_missing_local_holdout_ambiguity_cannot_be_rescued_by_support(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    support_id, holdout_id = _holdout_with_control_support(ebull_test_conn)
+    _arm_ambiguity_record(ebull_test_conn, support_id, threshold=0.5)
+
+    assert load_promotion_ambiguity_refusals(ebull_test_conn, [holdout_id]) == {
+        holdout_id: ("ambiguity_verdict_unrecorded",)
+    }
+
+
+def test_material_in_sample_ambiguity_blocks_the_composed_holdout(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    support_id, holdout_id = _holdout_with_control_support(ebull_test_conn)
+    _arm_ambiguity_record(ebull_test_conn, holdout_id, threshold=None)
+    _arm_ambiguity_record(ebull_test_conn, support_id, threshold=0.1)
+
+    assert load_promotion_ambiguity_refusals(ebull_test_conn, [holdout_id]) == {holdout_id: ("ambiguity_material",)}
+
+
+def test_corrupt_local_holdout_ambiguity_raises_before_support_can_rescue_it(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    support_id, holdout_id = _holdout_with_control_support(ebull_test_conn)
+    _arm_ambiguity_record(ebull_test_conn, support_id, threshold=0.5)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_result_ambiguity (
+            result_id, ambiguity_rule_version, comparison_basis,
+            best_case_sharpe, worst_case_sharpe, cohort_gap_threshold,
+            payload_sha256
+        ) VALUES (%s, %s, 'arm_sharpes', 0.7, 0.4, NULL, %s)
+        """,
+        (holdout_id, AMBIGUITY_RULE_VERSION, "0" * 64),
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguity hash mismatch"):
+        load_promotion_ambiguity_refusals(ebull_test_conn, [holdout_id])
+
+
 def test_a_failing_in_sample_control_fails_the_composed_holdout_verdict(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
@@ -1714,7 +1789,9 @@ def test_control_support_window_literals_track_the_runner_contract(
 def test_ambiguous_control_support_fails_closed(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
-    _support_id, holdout_id = _holdout_with_control_support(ebull_test_conn)
+    support_id, holdout_id = _holdout_with_control_support(ebull_test_conn)
+    _arm_ambiguity_record(ebull_test_conn, holdout_id, threshold=None)
+    _arm_ambiguity_record(ebull_test_conn, support_id, threshold=0.5)
     # A second full-corpus-looking in-sample identity differs only in its end
     # date. The derived view counts both; it never picks MIN(result_id).
     second_masked = _promotable_row(
@@ -1750,6 +1827,9 @@ def test_ambiguous_control_support_fails_closed(
         (holdout_id,),
     ).fetchone() == (2, None)
     assert "synthetic_control_not_run" in stored_result_promotion_refusals(ebull_test_conn, holdout_id)
+    assert load_promotion_ambiguity_refusals(ebull_test_conn, [holdout_id]) == {
+        holdout_id: ("ambiguity_arms_not_compared",)
+    }
 
 
 def test_historical_promotion_accepts_control_free_holdout_with_exact_support(
@@ -1765,11 +1845,12 @@ def test_historical_promotion_accepts_control_free_holdout_with_exact_support(
         promoted_by="operator",
         reason="register candidate",
     )
-    _support_id, holdout_id = _holdout_with_control_support(
+    support_id, holdout_id = _holdout_with_control_support(
         ebull_test_conn,
         strategy_id="S-GOV",
     )
-    _ambiguity_record(ebull_test_conn, holdout_id)
+    _arm_ambiguity_record(ebull_test_conn, holdout_id, threshold=None)
+    _arm_ambiguity_record(ebull_test_conn, support_id, threshold=0.5)
     store_promotion_evidence(
         ebull_test_conn,
         result_id=holdout_id,

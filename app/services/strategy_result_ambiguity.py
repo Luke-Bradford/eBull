@@ -280,6 +280,91 @@ def ambiguity_promotion_refusals(record: AmbiguityRecord | None) -> tuple[str, .
     return tuple(refusals)
 
 
+def composed_holdout_ambiguity_refusals(
+    local_record: AmbiguityRecord | None,
+    support_record: AmbiguityRecord | None,
+) -> tuple[str, ...]:
+    """Compose one holdout pair with its exact in-sample §3.4 support (#2749).
+
+    The holdout record is always authoritative when it is absent, corrupt
+    (raised while loading), unrecognised, material, or directly proves a zero
+    gap. Only the honest ``ambiguity_arms_not_compared`` state may consult the
+    derived in-sample companion. This never applies an in-sample threshold to
+    holdout Sharpes; it replays the companion's own complete verdict instead.
+
+    ``support_record is None`` covers both no unique identity-compatible
+    companion and a companion with no frozen ambiguity record. In either case
+    the local measured-but-unjudged verdict remains the truthful refusal.
+    """
+    local_refusals = ambiguity_promotion_refusals(local_record)
+    if local_refusals != ("ambiguity_arms_not_compared",) or support_record is None:
+        return local_refusals
+    return ambiguity_promotion_refusals(support_record)
+
+
+def exact_ambiguity_support_id(candidate_count: int, support_id: int | None) -> int | None:
+    """Accept only the view's one-candidate/one-id state.
+
+    The view already emits ``NULL`` unless its count is exactly one. Rechecking
+    both fields here is deliberate defence in depth: a future view must not be
+    able to hand promotion a favourable id while admitting multiple candidates.
+    """
+    if candidate_count != 1 or support_id is None:
+        return None
+    return support_id
+
+
+_SELECT_PROMOTION_SUPPORT = """
+    SELECT r.result_id, r.namespace,
+           COALESCE(s.candidate_count, 0), s.control_result_id
+    FROM strategy_results_store r
+    LEFT JOIN strategy_result_control_support s
+      ON s.holdout_result_id = r.result_id
+    WHERE r.result_id = ANY(%(result_ids)s::bigint[])
+"""
+
+
+def load_promotion_ambiguity_refusals(
+    conn: psycopg.Connection[Any], result_ids: Sequence[int]
+) -> dict[int, tuple[str, ...]]:
+    """Batched ambiguity replay for pinned results, including #2749 support.
+
+    The support view derives its candidate from immutable identity pins; no
+    caller supplies a support id and these reads record no holdout access. The
+    result is refusal codes rather than records, so this cannot become another
+    public door for reading withheld metrics.
+    """
+    if not result_ids:
+        return {}
+    rows = conn.execute(_SELECT_PROMOTION_SUPPORT, {"result_ids": list(result_ids)}).fetchall()
+    census = {int(row[0]): (str(row[1]), int(row[2]), None if row[3] is None else int(row[3])) for row in rows}
+    missing = set(result_ids) - set(census)
+    if missing:
+        raise RuntimeError(f"no stored result row for result_id(s) {sorted(missing)}")
+
+    local_records = load_result_ambiguities(conn, result_ids)
+    support_ids_by_result: dict[int, int] = {}
+    for result_id in result_ids:
+        namespace, candidate_count, support_id = census[result_id]
+        local_refusals = ambiguity_promotion_refusals(local_records.get(result_id))
+        exact_support = exact_ambiguity_support_id(candidate_count, support_id)
+        if namespace == "hold_out" and local_refusals == ("ambiguity_arms_not_compared",) and exact_support is not None:
+            support_ids_by_result[result_id] = exact_support
+    support_records = load_result_ambiguities(conn, sorted(set(support_ids_by_result.values())))
+
+    return {
+        result_id: (
+            composed_holdout_ambiguity_refusals(
+                local_records.get(result_id),
+                support_records.get(support_ids_by_result[result_id]) if result_id in support_ids_by_result else None,
+            )
+            if census[result_id][0] == "hold_out"
+            else ambiguity_promotion_refusals(local_records.get(result_id))
+        )
+        for result_id in result_ids
+    }
+
+
 __all__ = [
     "AMBIGUITY_RULE_VERSION",
     "LEGACY_AMBIGUITY_RULE_VERSION",
@@ -288,7 +373,10 @@ __all__ = [
     "ComparisonBasis",
     "ambiguity_promotion_refusals",
     "ambiguity_verdict",
+    "composed_holdout_ambiguity_refusals",
+    "exact_ambiguity_support_id",
     "load_result_ambiguity",
+    "load_promotion_ambiguity_refusals",
     "matched_control_margin",
     "record_sha256",
     "store_result_ambiguity",

@@ -2715,7 +2715,13 @@ def _ambiguity_record_for(
     best_sharpe = sharpes.get("best_case")
     worst_sharpe = sharpes.get("worst_case")
     threshold = None
-    if best_sharpe is not None and worst_sharpe is not None:
+    # The random-entry cohort is an in-sample construction. In a combined
+    # invocation ``ArmMeasurement.cohort`` still describes the in-sample
+    # Sharpe, so applying it to the sibling holdout measurement would either
+    # raise the provenance binding below or, if that binding were weakened,
+    # compare two different namespaces. The holdout record stays honestly
+    # unjudged and promotion may compose its exact in-sample verdict (#2749).
+    if result.identity.namespace == CONTROL_NAMESPACE and best_sharpe is not None and worst_sharpe is not None:
         threshold = matched_control_margin(
             None if by_arm["best_case"].cohort is None else by_arm["best_case"].cohort.control,
             None if by_arm["worst_case"].cohort is None else by_arm["worst_case"].cohort.control,

@@ -1159,13 +1159,22 @@ class TestAmbiguityMateriality:
     """A real level-arm delta cannot be waved through without its threshold."""
 
     @staticmethod
-    def _arm(ambiguity: str | None, sharpe: float, *, control: SyntheticControl | None = None) -> ArmMeasurement:
+    def _arm(
+        ambiguity: str | None,
+        sharpe: float,
+        *,
+        control: SyntheticControl | None = None,
+        holdout_sharpe: float | None = None,
+    ) -> ArmMeasurement:
+        namespaces = {"in_sample": _measurement(sharpe=sharpe)}
+        if holdout_sharpe is not None:
+            namespaces["hold_out"] = _measurement(namespace="hold_out", sharpe=holdout_sharpe)
         return ArmMeasurement(
             strategy_id="s4",
             strategy_version="v1",
             ambiguity_arm=ambiguity,  # type: ignore[arg-type]
             quarantine_arm="masked",
-            namespaces={"in_sample": _measurement(sharpe=sharpe)},
+            namespaces=namespaces,  # type: ignore[arg-type]
             holdout_positions_discarded=0,
             close_sources={},
             series_evaluated=1,
@@ -1177,6 +1186,18 @@ class TestAmbiguityMateriality:
     def _result() -> StrategyResult:
         return build_result(
             _measurement(),
+            strategy_id="s4",
+            strategy_version="v1",
+            purpose="capital_candidate",
+            ambiguity_arm="best_case",
+            quarantine_arm="masked",
+            deflated=None,
+        )
+
+    @staticmethod
+    def _holdout_result(*, sharpe: float) -> StrategyResult:
+        return build_result(
+            _measurement(namespace="hold_out", sharpe=sharpe),
             strategy_id="s4",
             strategy_version="v1",
             purpose="capital_candidate",
@@ -1217,6 +1238,27 @@ class TestAmbiguityMateriality:
         record = _ambiguity_record_for(arms, self._result())
         assert record.cohort_gap_threshold == pytest.approx(0.1)
         assert _ambiguity_material_for(arms, self._result()) is True
+
+    def test_a_combined_run_never_applies_the_in_sample_cohort_to_holdout_sharpes(self) -> None:
+        arms = (
+            self._arm(
+                "best_case",
+                0.6,
+                holdout_sharpe=0.8,
+                control=_control(ci_low=-0.1, ci_high=0.1, cohort_sharpe=0.2, strategy_sharpe=0.6),
+            ),
+            self._arm(
+                "worst_case",
+                0.4,
+                holdout_sharpe=0.3,
+                control=_control(ci_low=-0.1, ci_high=0.1, cohort_sharpe=0.3, strategy_sharpe=0.4),
+            ),
+        )
+
+        record = _ambiguity_record_for(arms, self._holdout_result(sharpe=0.8))
+
+        assert (record.best_case_sharpe, record.worst_case_sharpe) == (0.8, 0.3)
+        assert record.cohort_gap_threshold is None
 
     def test_a_non_finite_sharpe_reads_as_unpriced_rather_than_crashing(self) -> None:
         # ⚠ The old code reached `None` here BY ACCIDENT — `nan == nan` is

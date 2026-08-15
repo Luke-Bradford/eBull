@@ -28,7 +28,7 @@ from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
 from app.services.strategy_promotion_evidence import evidence_refusals
 from app.services.strategy_promotion_evidence_store import load_promotion_evidences
 from app.services.strategy_result import holdout_count_promotion_refusals, structural_promotion_refusals
-from app.services.strategy_result_ambiguity import ambiguity_promotion_refusals, load_result_ambiguities
+from app.services.strategy_result_ambiguity import load_promotion_ambiguity_refusals
 from app.services.strategy_result_universe import load_result_universes, universe_promotion_refusals
 
 Stage = Literal[
@@ -557,7 +557,7 @@ def promote_strategy(
             # record anywhere in the batch now raises before ANY result's
             # refusals are gathered. Within a result nothing moves.
             universes = load_result_universes(conn, result_ids)
-            ambiguities = load_result_ambiguities(conn, result_ids)
+            ambiguity_refusals = load_promotion_ambiguity_refusals(conn, result_ids)
             stored_refusals = stored_result_promotion_refusals_for(conn, result_ids)
             evidences = load_promotion_evidences(conn, result_ids)
             for result_id in result_ids:
@@ -580,7 +580,7 @@ def promote_strategy(
                 # frozen record rather than trusted. Same shape and the same
                 # argument as the universe replay above; the record stores the
                 # comparison's INPUTS so the verdict can be disagreed with.
-                refusals.extend(ambiguity_promotion_refusals(ambiguities.get(result_id)))
+                refusals.extend(ambiguity_refusals[result_id])
                 # #2625 — the row's own STRUCTURAL stamps. ⚠ These were
                 # persisted and never replayed: before this, a result stamped
                 # `survivor_only` / `carry_unmodelled` / `fx_unmodelled` — which
