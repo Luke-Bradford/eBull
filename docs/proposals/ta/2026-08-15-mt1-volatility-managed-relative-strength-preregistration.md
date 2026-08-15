@@ -39,9 +39,20 @@ termination, quarantine and cost policies. The implementation must expose a sepa
 strategy module and identity hash. Calling S-10's helpers is allowed; reading or relabelling
 an S-10 result is not.
 
-All target-weight decisions occur on the source rule's existing month-end decision dates.
-The overlay may not create an intramonth rebalance. The unscaled reference is recomputed
-fresh in the same invocation and under the same new trial contract.
+All target-weight decisions occur on the source rule's existing **first-session monthly
+decision dates**: exactly `s10_rebalance_dates`, the first weekday panel bar whose calendar
+month differs from the preceding weekday panel bar. Calling this a month-end clock would be
+wrong and non-causal: S-10 deliberately waits until the first bar of the new month rather
+than assuming on the prior bar that no later session will appear. The overlay may not create
+another intramonth rebalance. The unscaled reference is recomputed fresh in the same
+invocation and under the same new trial contract.
+
+Pre-outcome correction, 2026-08-15: the first frozen draft called these
+"month-end" decisions while also requiring an exact copy of S-10. Source inspection before
+the book implementation or any outcome access showed that phrase contradicted
+`s10_rebalance_dates`. This paragraph records the correction rather than silently editing
+the clock: the binding was and remains the source rule's exact dates; no price outcome was
+read and no choice was made between measured variants.
 
 ## Frozen volatility construction
 
@@ -102,10 +113,10 @@ The evaluator must compute all four pairs unconditionally before reporting any o
 4. the fresh S-8 unscaled reference.
 
 "Same overlay" on S-8 means the same aggregate portfolio-level formula, 120-month
-expanding training rule and month-end exposure-update clock. S-8 signals and exits may
-change the underlying reference book intramonth, but its exposure multiplier remains fixed
-until the next month-end. A per-entry, per-name or signal-date scaling rule is not this
-control and must refuse.
+expanding training rule and exact S-10 first-session monthly exposure-update clock. S-8
+signals and exits may change the underlying reference book between those monthly decisions,
+but its exposure multiplier remains fixed until the next one. A per-entry, per-name or
+signal-date scaling rule is not this control and must refuse.
 
 Before the first price/outcome read, add two exact trial-register entries: one for the MT-1
 scaled/unscaled controlled pair and one for the S-8 scaled/unscaled negative-control pair.
@@ -117,8 +128,8 @@ cap, clock, signal family or history policy is a new trial and a new strategy ve
 
 - Full `survivorship_free` research population and its point-in-time termination treatment.
 - Raw prices for signals/fills/cost bands; aligned total-return wealth prices for returns.
-- Signal at the declared month-end decision bar; fills and exits exactly as the source rule
-  permits. No shared signal/outcome print.
+- Signal at the declared first-session monthly decision bar; fills and exits exactly as the
+  source rule permits. No shared signal/outcome print.
 - Current complete cost-model identity, including spread, carry and FX stamps. A missing
   cost term is a structural refusal, never zero.
 - The fixed in-sample/hold-out boundary and all code-pinned recent windows used by the
@@ -131,7 +142,7 @@ cap, clock, signal family or history policy is a new trial and a new strategy ve
 Before any return, Sharpe, drawdown or expectancy value is exposed, report only structural
 counts and traded notional. Refuse outcome access if either scaled book:
 
-- introduces a decision date outside the frozen month-end clock;
+- introduces a decision date outside the frozen S-10 first-session monthly clock;
 - has annualised turnover above 600% (the repository's 50%-per-month viability bar); or
 - cannot reconcile every exposure change to the frozen formula and preceding information.
 
@@ -186,7 +197,7 @@ n = ceil(((z_0.975 + z_0.8) / 0.5)²)
   = 32 independent decision months
 ```
 
-The floor is raised to **36 independent month-end decision dates** to cover three complete
+The floor is raised to **36 independent monthly decision dates** to cover three complete
 calendar years. The calendar-duration floor is
 `ceil(36 × 365.25 / (12 × 7)) = 157 weeks`. These are floors, not a claim that monthly
 returns are independent; prospective inference must still block-bootstrap. A smaller true

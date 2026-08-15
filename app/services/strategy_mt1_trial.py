@@ -68,7 +68,8 @@ class ScaledBookStructuralAudit:
     """Outcome-free proof required for each scaled book before statistics.
 
     ``decision_dates`` are the dates on which exposure changed or was
-    reaffirmed. They must equal the evaluator-supplied frozen month-end clock;
+    reaffirmed. They must equal the evaluator-supplied frozen first-session
+    monthly clock;
     a subset is not accepted because silently omitting a decision can suppress
     turnover. ``annualised_turnover`` is a decimal multiple (``6`` = 600%).
     """
@@ -132,13 +133,13 @@ class MT1TrialResult:
 
 def _validate_structural_audit(label: str, audit: ScaledBookStructuralAudit) -> None:
     if not audit.expected_decision_dates:
-        raise MT1TrialRefused(f"{label} frozen month-end decision clock is empty")
+        raise MT1TrialRefused(f"{label} frozen first-session monthly decision clock is empty")
     if tuple(sorted(set(audit.expected_decision_dates))) != audit.expected_decision_dates:
         raise MT1TrialRefused(f"{label} expected decision dates must be sorted and unique")
     if tuple(sorted(set(audit.decision_dates))) != audit.decision_dates:
         raise MT1TrialRefused(f"{label} decision dates must be sorted and unique")
     if audit.decision_dates != audit.expected_decision_dates:
-        raise MT1TrialRefused(f"{label} decisions do not equal the frozen month-end clock")
+        raise MT1TrialRefused(f"{label} decisions do not equal the frozen first-session monthly clock")
     if not math.isfinite(audit.annualised_turnover) or audit.annualised_turnover < 0:
         raise MT1TrialRefused(f"{label} annualised turnover is not finite and non-negative")
     if audit.annualised_turnover > MAX_ANNUALISED_TURNOVER:
@@ -157,7 +158,7 @@ def structural_gate(
     _validate_structural_audit("MT-1 scaled", mt1_scaled)
     _validate_structural_audit("S-8 scaled", s8_scaled)
     if mt1_scaled.expected_decision_dates != s8_scaled.expected_decision_dates:
-        raise MT1TrialRefused("MT-1 and S-8 do not share the same frozen month-end exposure clock")
+        raise MT1TrialRefused("MT-1 and S-8 do not share the same frozen first-session monthly exposure clock")
     return StructuralGateReport(
         mt1_decision_dates=len(mt1_scaled.decision_dates),
         s8_decision_dates=len(s8_scaled.decision_dates),
