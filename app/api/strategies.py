@@ -41,7 +41,6 @@ from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERS
 from app.services.runtime_config import (
     RuntimeConfigCorrupt,
     RuntimeConfigNoOp,
-    get_runtime_config,
     update_runtime_config,
 )
 from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION
@@ -2582,15 +2581,21 @@ def update_strategy_paper_pool(
     try:
         if body.enabled and settings.etoro_env != "demo":
             raise StrategyControlError("paper automation can only be enabled in the demo environment")
-        readiness = get_strategy_overview(conn).automation_readiness if body.enabled else None
         conn.rollback()
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
+            runtime_row = conn.execute(
+                """SELECT enable_auto_trading, enable_live_trading
+                     FROM runtime_config WHERE id=TRUE FOR UPDATE"""
+            ).fetchone()
+            if runtime_row is None:
+                raise RuntimeConfigCorrupt("runtime_config singleton row missing")
+            runtime = cast(tuple[object, object], runtime_row)
             current_pool = load_paper_pool(conn)
+            readiness = get_strategy_overview(conn).automation_readiness if body.enabled else None
             if body.enabled and not current_pool.enabled and readiness is not None and not readiness.ready:
                 raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
-            runtime = get_runtime_config(conn)
-            if body.enabled and runtime.enable_live_trading:
+            if body.enabled and bool(runtime[1]):
                 raise StrategyControlError(
                     "paper automation cannot be enabled while system-wide live trading is enabled"
                 )
@@ -2600,7 +2605,7 @@ def update_strategy_paper_pool(
                 or current_pool.capital_mode != body.capital_mode
                 or current_pool.mandate.risk_profile != body.risk_profile
             )
-            automation_changed = runtime.enable_auto_trading != body.enabled
+            automation_changed = bool(runtime[0]) != body.enabled
             if not pool_changed and not automation_changed:
                 raise StrategyControlError(
                     "automation change must alter enabled state, capital limit, capital mode, or mandate"
