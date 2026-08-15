@@ -457,7 +457,7 @@ def _seed(
         """
         INSERT INTO runtime_config (
             id, enable_auto_trading, enable_live_trading, updated_by, reason
-        ) VALUES (true, %s, true, 'test', 'paper allocator fixture')
+        ) VALUES (true, %s, false, 'test', 'paper allocator fixture')
         ON CONFLICT (id) DO UPDATE SET
             enable_auto_trading=EXCLUDED.enable_auto_trading,
             enable_live_trading=EXCLUDED.enable_live_trading,
@@ -1052,6 +1052,27 @@ def test_disabled_global_switch_keeps_an_unfunded_shadow_arm(
         "SELECT verdict, reason_code FROM strategy_funding_decisions WHERE signal_id=%s",
         (signal_id,),
     ).fetchone() == ("rejected", "auto_trading_disabled")
+
+
+def test_global_live_switch_refuses_paper_execution_before_broker_access(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("UPDATE runtime_config SET enable_live_trading=true WHERE id=true")
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "live_trading_enabled"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+    assert conn.execute(
+        "SELECT verdict, reason_code FROM strategy_funding_decisions WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone() == ("rejected", "live_trading_enabled")
 
 
 def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
