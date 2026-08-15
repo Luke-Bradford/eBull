@@ -531,6 +531,8 @@ class AccountEquityEvidenceView(BaseModel):
     official_unrealised_pnl: Decimal | None
     local_eod_currency: str | None
     local_eod_value: Decimal | None
+    local_eod_positions_priced: int | None
+    local_eod_stale_mark_positions: int | None
     difference: Decimal | None
     comparable: Literal[False]
     incomplete_reasons: list[str]
@@ -1918,6 +1920,8 @@ def get_strategy_overview(
             official_unrealised_pnl=account_equity.official_unrealised_pnl,
             local_eod_currency=account_equity.local_eod_currency,
             local_eod_value=account_equity.local_eod_value,
+            local_eod_positions_priced=account_equity.local_eod_positions_priced,
+            local_eod_stale_mark_positions=account_equity.local_eod_stale_mark_positions,
             difference=account_equity.difference,
             comparable=account_equity.comparable,
             incomplete_reasons=list(account_equity.incomplete_reasons),

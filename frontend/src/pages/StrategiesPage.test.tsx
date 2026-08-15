@@ -99,6 +99,8 @@ const OVERVIEW: StrategyOverviewResponse = {
     official_unrealised_pnl: null,
     local_eod_currency: null,
     local_eod_value: null,
+    local_eod_positions_priced: null,
+    local_eod_stale_mark_positions: null,
     difference: null,
     comparable: false,
     incomplete_reasons: ["official_account_equity_missing"],
@@ -426,6 +428,8 @@ describe("StrategiesPage", () => {
         official_unrealised_pnl: "100.00",
         local_eod_currency: "USD",
         local_eod_value: "1020.00",
+        local_eod_positions_priced: 2,
+        local_eod_stale_mark_positions: 0,
         difference: "5.00",
         comparable: false,
         incomplete_reasons: ["local_eod_effective_time_unknown"],
@@ -435,7 +439,8 @@ describe("StrategiesPage", () => {
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("3 daily official snapshots")).toBeInTheDocument();
     expect(within(performance).getByText("US$1,025.00")).toBeInTheDocument();
-    expect(within(performance).getByText("Reconciliation collecting")).toBeInTheDocument();
+    expect(within(performance).getByText("Reconciliation incomplete")).toBeInTheDocument();
+    expect(within(performance).getByText("The effective dates of the local valuation marks were not recorded.")).toBeInTheDocument();
     expect(within(performance).getByText("No automated P&L yet")).toBeInTheDocument();
   });
 
@@ -455,6 +460,8 @@ describe("StrategiesPage", () => {
         official_unrealised_pnl: "100.00",
         local_eod_currency: null,
         local_eod_value: null,
+        local_eod_positions_priced: null,
+        local_eod_stale_mark_positions: null,
         difference: null,
         comparable: false,
         incomplete_reasons: ["account_currency_not_documented"],
@@ -465,6 +472,70 @@ describe("StrategiesPage", () => {
     expect(within(performance).getByText("Currency unverified")).toBeInTheDocument();
     expect(within(performance).queryByText("US$1,025.00")).not.toBeInTheDocument();
     expect(within(performance).queryByText(/1,025\.00/)).not.toBeInTheDocument();
+    expect(within(performance).getByText("The broker reported an account currency that is not documented for this USD-only trading lane.")).toBeInTheDocument();
+  });
+
+  it("shows carried-forward mark magnitude and never hides an unknown account-evidence reason", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      account_equity_evidence: {
+        status: "collecting",
+        days_collected: 4,
+        snapshot_date: "2026-08-12",
+        observed_at: "2026-08-12T19:00:00Z",
+        account_currency_id: 1,
+        currency: "USD",
+        official_equity: "1025.00",
+        official_available_cash: "525.00",
+        official_total_invested: "400.00",
+        official_unrealised_pnl: "100.00",
+        local_eod_currency: "USD",
+        local_eod_value: "1020.00",
+        local_eod_positions_priced: 7,
+        local_eod_stale_mark_positions: 3,
+        difference: "5.00",
+        comparable: false,
+        incomplete_reasons: [
+          "account_currency_assumed_not_observed",
+          "same_day_local_eod_snapshot_missing",
+          "local_eod_currency_mismatch",
+          "local_eod_valuation_incomplete",
+          "local_eod_marks_carried_forward",
+          "future_account_reason",
+        ],
+      },
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
+    expect(within(performance).getByText("This snapshot predates observed broker account currency; its currency cannot be trusted.")).toBeInTheDocument();
+    expect(within(performance).getByText("The same-day local end-of-day valuation is missing.")).toBeInTheDocument();
+    expect(within(performance).getByText("The broker account and local valuation currencies do not match.")).toBeInTheDocument();
+    expect(within(performance).getByText("The local valuation is missing at least one price or currency conversion.")).toBeInTheDocument();
+    expect(within(performance).getByText("3 of 7 priced positions use a carried-forward closing mark.")).toBeInTheDocument();
+    expect(within(performance).getByText("future_account_reason")).toBeInTheDocument();
+  });
+
+  it("states that reconciliation policy is missing when measurements have no named caveat", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      account_equity_evidence: {
+        ...OVERVIEW.account_equity_evidence,
+        status: "collecting",
+        days_collected: 4,
+        currency: "USD",
+        official_equity: "1025.00",
+        local_eod_currency: "USD",
+        local_eod_value: "1020.00",
+        local_eod_positions_priced: 2,
+        local_eod_stale_mark_positions: 0,
+        incomplete_reasons: [],
+      },
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
+    expect(within(performance).getByText("Comparison tolerance not defined")).toBeInTheDocument();
   });
 
   it("separates unapproved research from selectable strategies", async () => {

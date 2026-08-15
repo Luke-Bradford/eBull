@@ -46,6 +46,8 @@ def test_empty_account_equity_evidence_is_explicit(ebull_test_conn: psycopg.Conn
     evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
     assert evidence.status == "unavailable"
     assert evidence.days_collected == 0
+    assert evidence.local_eod_positions_priced is None
+    assert evidence.local_eod_stale_mark_positions is None
     assert evidence.incomplete_reasons == ("official_account_equity_missing",)
 
 
@@ -347,6 +349,8 @@ def test_marks_on_the_session_retire_the_effective_time_caveat(
     )
     evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
     assert evidence.incomplete_reasons == ()
+    assert evidence.local_eod_positions_priced == 2
+    assert evidence.local_eod_stale_mark_positions == 0
     # ⚠ Still not comparable. Clearing every named caveat does NOT make the two
     # totals reconciled — that needs item 4's declared tolerance, which this
     # slice does not ship. `comparable` staying False with an empty reason list
@@ -371,3 +375,5 @@ def test_a_carried_forward_mark_is_named_rather_than_absorbed(
     )
     evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
     assert evidence.incomplete_reasons == ("local_eod_marks_carried_forward",)
+    assert evidence.local_eod_positions_priced == 2
+    assert evidence.local_eod_stale_mark_positions == 1

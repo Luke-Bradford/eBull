@@ -369,6 +369,47 @@ function refusalLabel(refusal: string): string {
   return REFUSAL_LABELS[refusal] ?? refusal.replaceAll("_", " ");
 }
 
+const ACCOUNT_EVIDENCE_REASON_LABELS: Record<string, string> = {
+  official_account_equity_missing: "Official account equity starts collecting with the next portfolio sync.",
+  account_currency_assumed_not_observed: "This snapshot predates observed broker account currency; its currency cannot be trusted.",
+  account_currency_not_documented: "The broker reported an account currency that is not documented for this USD-only trading lane.",
+  same_day_local_eod_snapshot_missing: "The same-day local end-of-day valuation is missing.",
+  local_eod_currency_mismatch: "The broker account and local valuation currencies do not match.",
+  local_eod_valuation_incomplete: "The local valuation is missing at least one price or currency conversion.",
+  local_eod_effective_time_unknown: "The effective dates of the local valuation marks were not recorded.",
+};
+
+function accountEvidenceReasonLabel(
+  reason: string,
+  evidence: StrategyOverviewResponse["account_equity_evidence"],
+): string {
+  if (reason === "local_eod_marks_carried_forward") {
+    const stale = evidence.local_eod_stale_mark_positions;
+    const priced = evidence.local_eod_positions_priced;
+    if (typeof stale === "number" && typeof priced === "number") {
+      return `${stale} of ${priced} priced ${priced === 1 ? "position uses" : "positions use"} a carried-forward closing mark.`;
+    }
+    return "The local valuation includes carried-forward closing marks.";
+  }
+  // An upstream reason added before this UI is deployed must remain visible.
+  return ACCOUNT_EVIDENCE_REASON_LABELS[reason] ?? reason;
+}
+
+function AccountEvidenceReasons({
+  evidence,
+}: {
+  evidence: StrategyOverviewResponse["account_equity_evidence"];
+}) {
+  if (evidence.incomplete_reasons.length === 0) return null;
+  return (
+    <ul className="mt-2 space-y-1 text-amber-700 dark:text-amber-300">
+      {evidence.incomplete_reasons.map((reason) => (
+        <li key={reason}>{accountEvidenceReasonLabel(reason, evidence)}</li>
+      ))}
+    </ul>
+  );
+}
+
 function aggregate(overview: StrategyOverviewResponse) {
   const pnlValues = overview.strategies.map((strategy) => number(strategy.pnl.total_pnl));
   const forwardStrategies = overview.strategies.filter((strategy) => strategy.forward_outcome_supported);
@@ -470,35 +511,40 @@ function AccountEvidence({ overview }: { overview: StrategyOverviewResponse }) {
     return (
       <div className="mt-5 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
         <span className="font-medium text-slate-700 dark:text-slate-300">Account evidence</span>
-        <span className="ml-2">Official account equity starts collecting with the next portfolio sync.</span>
+        <AccountEvidenceReasons evidence={evidence} />
       </div>
     );
   }
   return (
-    <div className="mt-5 flex flex-wrap items-end justify-between gap-3 border-t border-slate-200 pt-3 text-xs dark:border-slate-800">
-      <div>
-        <span className="font-medium text-slate-700 dark:text-slate-300">Account evidence</span>
-        <span className="ml-2 text-slate-500">
-          {evidence.days_collected} daily official {evidence.days_collected === 1 ? "snapshot" : "snapshots"}
-        </span>
-      </div>
-      <div className="flex gap-5 text-right">
+    <div className="mt-5 border-t border-slate-200 pt-3 text-xs dark:border-slate-800">
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <span className="block text-slate-500">Broker equity</span>
-          {currency === null ? (
-            <strong className="text-amber-700 dark:text-amber-300">Currency unverified</strong>
-          ) : (
-            <strong>{formatMoney(evidence.official_equity === null ? null : Number(evidence.official_equity), currency)}</strong>
-          )}
+          <span className="font-medium text-slate-700 dark:text-slate-300">Account evidence</span>
+          <span className="ml-2 text-slate-500">
+            {evidence.days_collected} daily official {evidence.days_collected === 1 ? "snapshot" : "snapshots"}
+          </span>
         </div>
-        {evidence.local_eod_value !== null && evidence.local_eod_currency !== null ? (
+        <div className="flex gap-5 text-right">
           <div>
-            <span className="block text-slate-500">Local valuation</span>
-            <strong>{formatMoney(Number(evidence.local_eod_value), evidence.local_eod_currency)}</strong>
+            <span className="block text-slate-500">Broker equity</span>
+            {currency === null ? (
+              <strong className="text-amber-700 dark:text-amber-300">Currency unverified</strong>
+            ) : (
+              <strong>{formatMoney(evidence.official_equity === null ? null : Number(evidence.official_equity), currency)}</strong>
+            )}
           </div>
-        ) : null}
-        <div className="self-end text-amber-700 dark:text-amber-300">Reconciliation collecting</div>
+          {evidence.local_eod_value !== null && evidence.local_eod_currency !== null ? (
+            <div>
+              <span className="block text-slate-500">Local valuation</span>
+              <strong>{formatMoney(Number(evidence.local_eod_value), evidence.local_eod_currency)}</strong>
+            </div>
+          ) : null}
+          <div className="self-end text-amber-700 dark:text-amber-300">
+            {evidence.incomplete_reasons.length > 0 ? "Reconciliation incomplete" : "Comparison tolerance not defined"}
+          </div>
+        </div>
       </div>
+      <AccountEvidenceReasons evidence={evidence} />
     </div>
   );
 }
