@@ -184,7 +184,7 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
         MODEL,
         [
             (
-                "    if not candidate.evaluated_instrument_ids:\n"
+                "    if not candidate.evaluated_instrument_ids and not candidate.evaluated_series_ids:\n"
                 '        refusals.append("no_instruments_evaluated")\n'
                 "    elif candidate.evaluated_instrument_ids - candidate.validated_universe_ids:",
                 "    if candidate.evaluated_instrument_ids - candidate.validated_universe_ids:",
