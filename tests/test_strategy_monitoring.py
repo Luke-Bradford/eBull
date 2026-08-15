@@ -1286,6 +1286,75 @@ def test_shared_paper_pool_refuses_activation_outside_demo(
     assert get_runtime_config(conn) == runtime_before
 
 
+def test_shared_paper_pool_refuses_activation_while_live_trading_is_enabled(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    actual_overview = get_strategy_overview
+
+    def ready_overview(connection: psycopg.Connection[object]):
+        overview = actual_overview(connection)
+        overview.automation_readiness = overview.automation_readiness.model_copy(
+            update={"ready": True, "state": "ready", "blockers": []}
+        )
+        return overview
+
+    monkeypatch.setattr("app.api.strategies.get_strategy_overview", ready_overview)
+    runtime_before = get_runtime_config(conn)
+    if runtime_before.enable_auto_trading or not runtime_before.enable_live_trading:
+        update_runtime_config(
+            conn,
+            updated_by="test-precondition",
+            reason="prove paper enable refuses live state",
+            enable_auto_trading=False if runtime_before.enable_auto_trading else None,
+            enable_live_trading=True if not runtime_before.enable_live_trading else None,
+        )
+    conn.commit()
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            update_strategy_paper_pool(
+                StrategyPaperPoolUpdateRequest(
+                    enabled=True,
+                    capital_limit=Decimal("750"),
+                    capital_mode="fixed",
+                    risk_profile="balanced",
+                    reason="must remain paper-only",
+                ),
+                _session(),
+                conn,
+            )
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == ("paper automation cannot be enabled while system-wide live trading is enabled")
+        assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT enable_auto_trading,enable_live_trading FROM runtime_config WHERE id=TRUE"
+        ).fetchone() == (False, True)
+    finally:
+        current = get_runtime_config(conn)
+        if (
+            current.enable_auto_trading != runtime_before.enable_auto_trading
+            or current.enable_live_trading != runtime_before.enable_live_trading
+        ):
+            update_runtime_config(
+                conn,
+                updated_by="test-cleanup",
+                reason="restore runtime flags after live-state refusal proof",
+                enable_auto_trading=(
+                    runtime_before.enable_auto_trading
+                    if current.enable_auto_trading != runtime_before.enable_auto_trading
+                    else None
+                ),
+                enable_live_trading=(
+                    runtime_before.enable_live_trading
+                    if current.enable_live_trading != runtime_before.enable_live_trading
+                    else None
+                ),
+            )
+        conn.commit()
+
+
 def test_shared_paper_pool_refuses_activation_without_a_ready_candidate(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
