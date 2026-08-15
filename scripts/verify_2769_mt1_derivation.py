@@ -77,6 +77,15 @@ def verify_persisted_inputs(
     payload = row.get("structural_evidence_json")
     if not isinstance(payload, dict) or _canonical_digest(payload) != row.get("structural_evidence_sha256"):
         differences.append("structural_evidence_digest")
+    source_head = row.get("runner_source_head")
+    if (
+        not isinstance(source_head, str)
+        or len(source_head) != 40
+        or any(character not in "0123456789abcdef" for character in source_head)
+    ):
+        differences.append("runner_source_head_invalid")
+    if isinstance(payload, dict) and payload.get("runner_source_head") != source_head:
+        differences.append("runner_source_head_payload_mismatch")
     return sorted(differences)
 
 
@@ -92,7 +101,7 @@ def main() -> int:
                        trial_register_version, trial_contract_version, book_rule_version,
                        evaluator_version, metric_axis_rule_version, metric_axis_dates,
                        metric_axis_digest, opportunity_set_digest, structural_evidence_sha256,
-                       structural_evidence_json
+                       structural_evidence_json, runner_source_head
                   FROM strategy_mt1_structural_attempts
                  WHERE mt1_strategy_version = %s AND s8_strategy_version = %s
                 """,

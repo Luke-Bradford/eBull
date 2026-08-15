@@ -13,6 +13,7 @@ from app.services.strategy_mt1_preregistration import build_declarations
 
 _FAN = (("best_case", "masked"), ("best_case", "admitted"), ("worst_case", "masked"), ("worst_case", "admitted"))
 _SHA = "0" * 64
+_RUNNER_HEAD = "a" * 40
 _DECISION_DATES = [date(2020, 1, 2), date(2020, 2, 3)]
 
 
@@ -39,13 +40,13 @@ def _insert_attempt(conn: psycopg.Connection[tuple], *, passed: bool) -> int:
             trial_register_version, trial_contract_version, book_rule_version,
             evaluator_version, metric_axis_rule_version, metric_axis_dates,
             metric_axis_start, metric_axis_end, metric_axis_digest,
-            opportunity_set_digest, passed, refusal_code, refusal_detail,
+            opportunity_set_digest, runner_source_head, passed, refusal_code, refusal_detail,
             structural_evidence_sha256, structural_evidence_json
         ) VALUES (
             %s, %s, 'mt1-capped-volatility-managed-relative-strength-v1', %s,
             'mt1-s8-capped-volatility-negative-control-v1', %s, 'source-mt1', 'source-s8',
             'survivorship_free', 'corpus-v1', 'cost-v1', 'register-v1', 'contract-v1',
-            'book-v1', 'evaluator-v1', 'full-namespace-panel-v1', %s, %s, %s, %s, %s,
+            'book-v1', 'evaluator-v1', 'full-namespace-panel-v1', %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, '{}'::jsonb
         ) RETURNING structural_attempt_id
         """,
@@ -59,6 +60,7 @@ def _insert_attempt(conn: psycopg.Connection[tuple], *, passed: bool) -> int:
             _DECISION_DATES[-1],
             _SHA,
             _SHA,
+            _RUNNER_HEAD,
             passed,
             None if passed else "structural_gate_refused",
             None if passed else "synthetic structural refusal",
@@ -287,5 +289,5 @@ def test_committed_trial_evidence_is_immutable(ebull_test_conn: psycopg.Connecti
         _insert_result_cell(ebull_test_conn, result_id, arms, passed=True)
     ebull_test_conn.commit()
     with pytest.raises(psycopg.errors.RaiseException, match="evidence is immutable"):
-        ebull_test_conn.execute(statement)
+        ebull_test_conn.execute(statement)  # type: ignore[arg-type] - fixed test-only SQL cases above
     ebull_test_conn.rollback()

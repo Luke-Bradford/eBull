@@ -44,7 +44,7 @@ def test_derivation_replay_requires_every_source_dependent_input_pin() -> None:
     )
     mt1 = mt1_identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID)
     s8 = s8_control_identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID)
-    payload: dict[str, object] = {"structural": "header"}
+    payload: dict[str, object] = {"runner_source_head": "a" * 40, "structural": "header"}
     row: dict[str, object] = {
         "book_rule_version": BOOK_RULE_VERSION,
         "corpus_version": corpus_version_for(BACKTEST_UNIVERSE),
@@ -56,6 +56,7 @@ def test_derivation_replay_requires_every_source_dependent_input_pin() -> None:
         "mt1_source_strategy_version": mt1_source.version,
         "mt1_strategy_version": mt1.version,
         "opportunity_set_digest": record_sha256(opportunity),
+        "runner_source_head": "a" * 40,
         "s8_source_strategy_version": s8_source.version,
         "s8_strategy_version": s8.version,
         "structural_evidence_json": payload,

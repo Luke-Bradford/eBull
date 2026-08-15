@@ -59,6 +59,8 @@ def assert_exact_clean_main_source() -> dict[str, object]:
         raise SystemExit("refusing MT-1: the runner worktree is not clean")
     source_head = head.strip()
     main_head = main.strip()
+    if len(source_head) != 40 or any(character not in "0123456789abcdef" for character in source_head):
+        raise SystemExit("refusing MT-1: runner head is not an exact lower-case Git object ID")
     if source_head != main_head:
         raise SystemExit(
             f"refusing MT-1: runner head {source_head} is not exact origin/main {main_head}; merge and update first"
@@ -126,7 +128,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
-        stored = run_and_store_mt1_in_sample_evaluation(conn, progress=_progress)
+        stored = run_and_store_mt1_in_sample_evaluation(
+            conn,
+            runner_source_head=str(source["runner_source_head"]),
+            progress=_progress,
+        )
     if isinstance(stored, MT1StoredRefusal):
         sys.stdout.write(
             json.dumps(
