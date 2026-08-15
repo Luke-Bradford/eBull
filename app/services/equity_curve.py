@@ -60,7 +60,7 @@ recomputed fill could be expressed. The caller resolves them from the ledger.
 from __future__ import annotations
 
 from array import array
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Final
@@ -109,6 +109,15 @@ ENTRY_WEIGHT_DRIFT_RULE_ID: Final = "entry_weight_drift_v1"
 #: panel-calendar month end. It separates ordinary portfolio maintenance from
 #: v1's accidental coupling of turnover to how often any name opens or closes.
 MONTH_END_REBALANCE_RULE_ID: Final = "calendar_month_end_equal_weight_v1"
+
+#: MT-1's holdings-level overlay engine. The exposure decision is known before
+#: the declared monthly bar, but the synthetic portfolio trade is applied only
+#: AFTER that bar's mark; consequently the new target affects the following
+#: close-to-close return and cannot consume the decision bar's outcome. Source
+#: entries/exits retain their stored open fills. Overlay and event rebalances
+#: share step 4 below, so simultaneous trades are netted before the existing
+#: holding-specific half-spread is charged.
+CAPPED_TARGET_EXPOSURE_RULE_ID: Final = "capped_target_exposure_after_decision_close_v1"
 
 #: How criterion 7's buy-and-hold BENCHMARK is composed. ⚠ FROZEN AND HASHED —
 #: it is ``ResultIdentity.benchmark_rule``, and it exists as a separate id for
@@ -320,6 +329,7 @@ def _build_strategy_curve(
     starting_equity: float = 1.0,
     rebalance_events: bool,
     scheduled_rebalance_indices: frozenset[int] = frozenset(),
+    scheduled_exposure_by_index: Mapping[int, float] | None = None,
 ) -> EquityCurve:
     """Shared strategy walk; ``rebalance_events`` is the #2430 A/B switch.
 
@@ -385,6 +395,7 @@ def _build_strategy_curve(
     event_dates = 0
     short_funded = 0
     stale_marks = 0
+    target_exposure = 1.0 if scheduled_exposure_by_index is None else 0.0
 
     for day in range(date_count):
         opened_today = opening[day]
@@ -445,7 +456,7 @@ def _build_strategy_curve(
                 equity_ref += units[leg] * last_price[leg]
         basket = len(open_legs) + len(opened_today)
         for leg in opened_today:
-            target = equity_ref / basket
+            target = target_exposure * equity_ref / basket
             allocation = min(target, cash)
             if allocation < target:
                 short_funded += 1
@@ -475,6 +486,12 @@ def _build_strategy_curve(
         for leg in freezing_today:
             last_price[leg] = exit_price[leg]
             frozen.add(leg)
+
+        if scheduled_exposure_by_index is not None and frozen:
+            raise ValueError(
+                "a capped target-exposure curve cannot carry an untradeable frozen leg — "
+                "uniform portfolio scaling would be unreachable"
+            )
 
         # 3. MARK TO THE CLOSE. A leg whose series has no bar today keeps its
         #    previous mark (§3.3's halt) and the carry-forward is counted.
@@ -508,12 +525,16 @@ def _build_strategy_curve(
         #    a target the frozen leg can never move to and force every tradeable
         #    leg to absorb the shortfall, which is a different sizing rule.
         tradeable = [leg for leg in open_legs if leg not in frozen]
-        rebalance_now = (rebalance_events and event) or day in scheduled_rebalance_indices
+        exposure_changes = False
+        if scheduled_exposure_by_index is not None and day in scheduled_exposure_by_index:
+            exposure_changes = True
+            target_exposure = scheduled_exposure_by_index[day]
+        rebalance_now = (rebalance_events and event) or day in scheduled_rebalance_indices or exposure_changes
         if rebalance_now and tradeable:
             held = 0.0
             for leg in tradeable:
                 held += units[leg] * last_price[leg]
-            target = (cash + held) / len(tradeable)
+            target = target_exposure * (cash + held) / len(tradeable)
             buyers: list[int] = []
             for leg in tradeable:
                 value = units[leg] * last_price[leg]
@@ -618,6 +639,51 @@ def build_month_end_rebalanced_curve(
         starting_equity=starting_equity,
         rebalance_events=False,
         scheduled_rebalance_indices=month_ends,
+    )
+
+
+def build_capped_target_exposure_curve(
+    book: LegBook,
+    *,
+    dates: Sequence[date],
+    target_exposure_by_date: Mapping[date, float],
+    starting_equity: float = 1.0,
+) -> EquityCurve:
+    """Run one source book under a causal, unlevered exposure schedule.
+
+    Before the first supplied decision the sleeve remains in cash. On a
+    decision date the existing source holdings are marked first, then rebalanced
+    uniformly to the new aggregate target; that target therefore applies to the
+    *next* close-to-close return. Source entry/exit events between decisions
+    rebalance the book under the last target without changing it. All synthetic
+    trades use the same per-leg half-spread and sell-before-buy cash cap as the
+    production curve.
+
+    The caller must derive the dates and exposures from the frozen causal
+    history. This function validates shape and mechanics only; it deliberately
+    cannot invent a missing decision or exposure.
+    """
+    if any(later <= earlier for earlier, later in zip(dates, dates[1:], strict=False)):
+        raise ValueError("dates must be strictly increasing for a causal exposure schedule")
+    if not target_exposure_by_date:
+        raise ValueError("target exposure schedule is empty")
+    date_index = {when: index for index, when in enumerate(dates)}
+    scheduled: dict[int, float] = {}
+    for when, raw_target in target_exposure_by_date.items():
+        if when not in date_index:
+            raise ValueError(f"exposure decision {when} is outside the curve date axis")
+        if isinstance(raw_target, bool):
+            raise ValueError(f"exposure target on {when} must be numeric, not boolean")
+        target = float(raw_target)
+        if not np.isfinite(target) or not 0.0 <= target <= 1.0:
+            raise ValueError(f"exposure target on {when} must be finite and in [0, 1], got {raw_target!r}")
+        scheduled[date_index[when]] = target
+    return _build_strategy_curve(
+        book,
+        date_count=len(dates),
+        starting_equity=starting_equity,
+        rebalance_events=True,
+        scheduled_exposure_by_index=scheduled,
     )
 
 
@@ -792,6 +858,7 @@ def build_buy_and_hold_curve(
 
 
 __all__ = [
+    "CAPPED_TARGET_EXPOSURE_RULE_ID",
     "BENCHMARK_RULE_ID",
     "ENTRY_WEIGHT_DRIFT_RULE_ID",
     "MONTH_END_REBALANCE_RULE_ID",
@@ -799,6 +866,7 @@ __all__ = [
     "EquityCurve",
     "LegBook",
     "build_buy_and_hold_curve",
+    "build_capped_target_exposure_curve",
     "build_entry_weight_drift_curve",
     "build_equity_curve",
     "build_month_end_rebalanced_curve",
