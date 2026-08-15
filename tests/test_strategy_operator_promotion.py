@@ -34,7 +34,9 @@ from app.services.strategy_control_plane import (
     configure_paper_pool,
 )
 from app.services.strategy_operator_promotion import (
+    _load_complete_result_bundle,
     _load_current_prospective_evidence,
+    _require_preserved_result_bundle,
     advance_strategy_for_operator,
     load_forward_floor_evidence,
 )
@@ -152,20 +154,45 @@ def _session() -> SessionRow:
     return SessionRow("operator-promotion-session", uuid4(), "operator", now + timedelta(hours=1), now)
 
 
-def _seed_legacy_unlinked_paper_chain(conn: psycopg.Connection[tuple]) -> None:
-    conn.execute(
+def _seed_legacy_unlinked_paper_chain(
+    conn: psycopg.Connection[tuple],
+    *,
+    result_ids: tuple[int, ...] = (),
+    result_evidence_ref: str = "hist",
+) -> None:
+    promotions = conn.execute(
         """
         INSERT INTO strategy_promotions (
             strategy_id,strategy_version,from_stage,to_stage,gate_version,
             evidence_ref,promoted_by,reason
         ) VALUES
           (%s,%s,NULL,'research_candidate','test-v1',NULL,'test','registered'),
-          (%s,%s,'research_candidate','historical_validated','test-v1','hist','test','history'),
-          (%s,%s,'historical_validated','forward_observation','test-v1','forward','test','observe'),
+          (%s,%s,'research_candidate','historical_validated','test-v1',%s,'test','history'),
+          (%s,%s,'historical_validated','forward_observation','test-v1',%s,'test','observe'),
           (%s,%s,'forward_observation','paper_enabled','test-v1','paper','test','paper')
+        RETURNING promotion_id,to_stage
         """,
-        (_STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION),
-    )
+        (
+            _STRATEGY_ID,
+            _VERSION,
+            _STRATEGY_ID,
+            _VERSION,
+            result_evidence_ref,
+            _STRATEGY_ID,
+            _VERSION,
+            result_evidence_ref,
+            _STRATEGY_ID,
+            _VERSION,
+        ),
+    ).fetchall()
+    for promotion_id, stage in promotions:
+        if stage == "research_candidate":
+            continue
+        for result_id in result_ids:
+            conn.execute(
+                "INSERT INTO strategy_promotion_results (promotion_id,result_id) VALUES (%s,%s)",
+                (int(promotion_id), result_id),
+            )
 
 
 def _seed_prospective_assessment(
@@ -381,6 +408,79 @@ def test_complete_matrix_is_replayed_and_bare_rows_still_cannot_promote(
     ).fetchone() == (0,)
 
 
+def test_later_stage_refuses_an_incomplete_historical_pin(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _store_matrix(ebull_test_conn)
+    result_ids, evidence_ref = _load_complete_result_bundle(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+    )
+    promotion_id = ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_promotions (
+            strategy_id,strategy_version,from_stage,to_stage,gate_version,
+            evidence_ref,promoted_by,reason
+        ) VALUES (%s,%s,'research_candidate','historical_validated','test-v1',%s,'test','history')
+        RETURNING promotion_id
+        """,
+        (_STRATEGY_ID, _VERSION, evidence_ref),
+    ).fetchone()
+    assert promotion_id is not None
+    for result_id in result_ids[:-1]:
+        ebull_test_conn.execute(
+            "INSERT INTO strategy_promotion_results (promotion_id,result_id) VALUES (%s,%s)",
+            (int(promotion_id[0]), result_id),
+        )
+
+    with pytest.raises(StrategyControlError, match="does not preserve the exact current historical evidence bundle"):
+        _require_preserved_result_bundle(
+            ebull_test_conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_VERSION,
+            stage="historical_validated",
+            result_ids=result_ids,
+            evidence_ref=evidence_ref,
+        )
+
+
+def test_later_stage_accepts_only_the_exact_historical_pin(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    _store_matrix(ebull_test_conn)
+    result_ids, evidence_ref = _load_complete_result_bundle(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+    )
+    promotion_id = ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_promotions (
+            strategy_id,strategy_version,from_stage,to_stage,gate_version,
+            evidence_ref,promoted_by,reason
+        ) VALUES (%s,%s,'research_candidate','historical_validated','test-v1',%s,'test','history')
+        RETURNING promotion_id
+        """,
+        (_STRATEGY_ID, _VERSION, evidence_ref),
+    ).fetchone()
+    assert promotion_id is not None
+    for result_id in result_ids:
+        ebull_test_conn.execute(
+            "INSERT INTO strategy_promotion_results (promotion_id,result_id) VALUES (%s,%s)",
+            (int(promotion_id[0]), result_id),
+        )
+
+    _require_preserved_result_bundle(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        stage="historical_validated",
+        result_ids=result_ids,
+        evidence_ref=evidence_ref,
+    )
+
+
 def test_prospective_assessment_cannot_reuse_pre_forward_observations(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
@@ -558,7 +658,17 @@ def test_execution_policy_rejects_negative_net_expectancy_floor_before_database_
 def test_paper_retry_refuses_an_unresolvable_prospective_evidence_reference(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_legacy_unlinked_paper_chain(ebull_test_conn)
+    _store_matrix(ebull_test_conn)
+    result_ids, evidence_ref = _load_complete_result_bundle(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+    )
+    _seed_legacy_unlinked_paper_chain(
+        ebull_test_conn,
+        result_ids=result_ids,
+        result_evidence_ref=evidence_ref,
+    )
     with pytest.raises(StrategyControlError, match="prospective evidence link is missing"):
         advance_strategy_for_operator(
             ebull_test_conn,
