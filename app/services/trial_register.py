@@ -118,7 +118,7 @@ from typing import Final
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-15-r6"
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-15-r7"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -592,6 +592,36 @@ TRIAL_REGISTER: Final = TrialRegister(
                 ("s9-squeeze-expansion", "S-9 squeeze expansion"),
                 ("s10-relative-strength-leader", "S-10 relative-strength leader"),
             )
+        ),
+        # ⚠ DECLARED BEFORE EITHER CONTROLLED OUTCOME IS OPENED. These are two
+        # searches, not one: the S-8 negative control has its own scaled versus
+        # unscaled estimand and can falsify an overlay effect that appears on
+        # MT-1. The four monthly arms within the pair are jointly required by
+        # one difference-in-differences evaluator; no favourable arm can be
+        # selected, so the fan-collapse rule makes each pair one search.
+        DeclaredTrial(
+            trial_id="mt1-capped-volatility-managed-relative-strength-v1",
+            description=(
+                "MT-1 capped volatility-managed long-only relative strength: one preregistered scaled/unscaled "
+                "controlled pair, evaluated only inside the frozen four-arm difference-in-differences design."
+            ),
+            evidence=(
+                "docs/proposals/ta/2026-08-15-mt1-volatility-managed-relative-strength-preregistration.md "
+                "§'Arms and trial accounting' and §'Frozen primary estimand and inference'; issue #2437"
+            ),
+            exactness=TrialExactness.EXACT,
+        ),
+        DeclaredTrial(
+            trial_id="mt1-s8-capped-volatility-negative-control-v1",
+            description=(
+                "S-8 capped-volatility negative control: one preregistered scaled/unscaled controlled pair, "
+                "jointly required with MT-1 and never independently selectable."
+            ),
+            evidence=(
+                "docs/proposals/ta/2026-08-15-mt1-volatility-managed-relative-strength-preregistration.md "
+                "§'Arms and trial accounting' and §'Frozen primary estimand and inference'; issue #2437"
+            ),
+            exactness=TrialExactness.EXACT,
         ),
     ),
 )

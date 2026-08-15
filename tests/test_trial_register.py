@@ -6,6 +6,7 @@ from datetime import UTC
 
 import pytest
 
+from app.services.strategy_mt1_trial import NEGATIVE_CONTROL_TRIAL_ID, TRIAL_ID
 from app.services.trial_register import (
     TRIAL_REGISTER,
     TRIAL_REGISTER_CUTOFF,
@@ -22,7 +23,7 @@ def _trial(trial_id: str, exactness: TrialExactness = TrialExactness.EXACT) -> D
 
 class TestTheShippedDeclaration:
     def test_the_register_is_stamped_with_its_version(self) -> None:
-        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION
+        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-08-15-r7"
 
     def test_every_declared_trial_carries_its_evidence(self) -> None:
         """⚠ An entry nobody can trace is indistinguishable from one invented."""
@@ -67,12 +68,26 @@ class TestTheShippedDeclaration:
         the total is caught by neither and is why every family below is pinned
         individually as well.
         """
-        # ⚠ 259 (#2600's Gate D-0.1 reconstruction) + 7 (#2614's C-4 entry, the
-        # first declared BEFORE its run). Moved deliberately, not loosened: the
-        # pin exists to catch a DROPPED entry, and an addition that raises M is
-        # the conservative direction — a larger M lowers the DSR.
-        assert TRIAL_REGISTER.declared_count == 272
+        # ⚠ 259 (#2600's Gate D-0.1 reconstruction) + 7 (#2614's C-4 entry) +
+        # 6 S-5..S-10 declarations + 2 MT-1 controlled pairs. Moved
+        # deliberately, not loosened: the pin exists to catch a DROPPED entry,
+        # and an addition that raises M is the conservative direction — a
+        # larger M lowers the DSR.
+        assert TRIAL_REGISTER.declared_count == 274
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
+
+    def test_the_two_mt1_controlled_pairs_are_charged_before_outcomes(self) -> None:
+        expected = {
+            "mt1-capped-volatility-managed-relative-strength-v1",
+            "mt1-s8-capped-volatility-negative-control-v1",
+        }
+        assert expected == {TRIAL_ID, NEGATIVE_CONTROL_TRIAL_ID}
+        assert expected <= TRIAL_REGISTER.trial_ids
+        for trial in TRIAL_REGISTER.trials:
+            if trial.trial_id in expected:
+                assert trial.searches == 1
+                assert trial.exactness is TrialExactness.EXACT
+                assert "2026-08-15-mt1-volatility-managed-relative-strength-preregistration.md" in trial.evidence
 
     def test_the_c4_schedule13d_arms_are_counted_before_the_run(self) -> None:
         """#2614 — three arms that load their own bars, plus four 13G rule cells.
