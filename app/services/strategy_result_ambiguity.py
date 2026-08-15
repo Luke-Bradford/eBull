@@ -31,8 +31,8 @@ stay enforced at write time, where the arms exist, and the record makes no
 claim about them.
 
 Source rule: §3.4 fixes the materiality comparison (the arm gap versus the
-strategy's margin above the random cohort's 95th-percentile Sharpe). The cases §3.4 does not reach — a shared
-measurement, and an absent cohort — are fixed by
+strategy's margin above the random cohort's 95th-percentile Sharpe). The cases
+§3.4 does not reach — a shared measurement, and an absent cohort — are fixed by
 ``app.services.backtest_run._ambiguity_material_for``, the settled current
 implementation, and are cited from it rather than re-derived here.
 """
