@@ -49,6 +49,10 @@ from app.services.strategy_control_plane import (
     registered_strategy_purpose,
 )
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
+from app.services.strategy_halt_identity import (
+    HALT_IDENTITY_RULE_VERSION,
+    INSTRUMENT_HALT_SYMBOL_SQL,
+)
 from app.services.strategy_monitoring import load_paper_realised_pnl
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
 from app.services.strategy_opportunity_ranker import RANKING_POLICY_VERSION
@@ -221,11 +225,11 @@ def _load_intent(
     signal_id: int,
     ranking_member_id: int | None,
     now: datetime,
-) -> tuple[_Intent | None, str | None]:
-    """Load DB gates as one observation; return a closed reason on absence."""
+) -> tuple[_Intent | None, str | None, bool]:
+    """Load DB gates as one observation; return reason and halt-rule provenance."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT s.signal_id, s.strategy_id, s.strategy_version, s.instrument_id,
                    i.symbol, i.is_tradable, e.asset_class,
                    d.deployment_id, d.capital_limit, d.enabled, d.currency,
@@ -245,7 +249,7 @@ def _load_intent(
                    EXISTS (
                        SELECT 1 FROM strategy_market_halts mh
                        WHERE mh.source = 'nasdaq_trader_rss'
-                         AND mh.symbol = upper(i.symbol) AND mh.resumed_at IS NULL
+                         AND mh.symbol = {INSTRUMENT_HALT_SYMBOL_SQL} AND mh.resumed_at IS NULL
                    ) AS is_halted,
                    EXISTS (
                        SELECT 1 FROM strategy_execution_blocks b WHERE b.active
@@ -387,7 +391,7 @@ def _load_intent(
         )
         row = cur.fetchone()
     if row is None:
-        return None, "signal_not_fired_entry"
+        return None, "signal_not_fired_entry", False
     checks = (
         (bool(row["is_tradable"]), "instrument_not_tradable"),
         (row["asset_class"] == "us_equity", "unsupported_market_session"),
@@ -465,79 +469,83 @@ def _load_intent(
     )
     for passed, reason in checks:
         if not passed:
-            return None, reason
+            return None, reason, True
     quote_at = cast(datetime, row["quoted_at"])
     scan_at = cast(datetime, row["scan_at"])
     halt_feed_at = cast(datetime, row["halt_feed_at"])
     if not _age_ok(quote_at, now=now, max_seconds=int(row["max_quote_age_seconds"])):
-        return None, "quote_stale"
+        return None, "quote_stale", True
     if not _age_ok(scan_at, now=now, max_seconds=int(row["max_scan_age_seconds"])):
-        return None, "scan_stale"
+        return None, "scan_stale", True
     if not _age_ok(halt_feed_at, now=now, max_seconds=int(row["max_halt_feed_age_seconds"])):
-        return None, "halt_feed_stale"
+        return None, "halt_feed_stale", True
     forecast_decided_at = cast(datetime, row["forecast_decided_at"])
     forecast_valid_through = cast(datetime, row["forecast_valid_through"])
     if forecast_decided_at > now or forecast_valid_through < now:
-        return None, "opportunity_forecast_not_current"
+        return None, "opportunity_forecast_not_current", True
     if (
         row["calibration_holdout_end"] is None
         or cast(date, row["calibration_holdout_end"]) >= forecast_decided_at.date()
     ):
-        return None, "opportunity_calibration_knowledge_time_invalid"
+        return None, "opportunity_calibration_knowledge_time_invalid", True
     if row["prospective_assessment_checked_at"] is None or not _age_ok(
         cast(datetime, row["prospective_assessment_checked_at"]),
         now=now,
         max_seconds=int(row["max_assessment_age_days"]) * 86_400,
     ):
-        return None, "opportunity_assessment_stale"
+        return None, "opportunity_assessment_stale", True
     if not _session_is_open(now):
-        return None, "market_session_closed"
-    return _Intent(
-        signal_id=signal_id,
-        strategy_id=str(row["strategy_id"]),
-        strategy_version=str(row["strategy_version"]),
-        instrument_id=int(row["instrument_id"]),
-        symbol=str(row["symbol"]),
-        deployment_id=int(row["deployment_id"]),
-        currency=str(row["currency"]),
-        deployment_limit=Decimal(str(row["capital_limit"])),
-        pool_limit=Decimal(str(row["pool_limit"])),
-        capital_mode=cast(Literal["fixed", "compound"], row["capital_mode"]),
-        pool_reserved=Decimal(str(row["pool_reserved"])),
-        mandate_max_drawdown_pct=Decimal(str(row["mandate_max_drawdown_pct"])),
-        mandate_max_loss_per_position_pct=Decimal(str(row["mandate_max_loss_per_position_pct"])),
-        mandate_max_daily_loss_pct=Decimal(str(row["mandate_max_daily_loss_pct"])),
-        mandate_active_risk_budget_pct=Decimal(str(row["mandate_active_risk_budget_pct"])),
-        mandate_cash_reserve_pct=Decimal(str(row["mandate_cash_reserve_pct"])),
-        mandate_max_concurrent_positions=int(row["mandate_max_concurrent_positions"]),
-        forecast_id=int(row["forecast_id"]),
-        ranking_member_id=int(row["ranking_member_id"]),
-        policy_revision=int(row["policy_revision"]),
-        ticket_sizing_mode=cast(Literal["percent", "fixed"], row["ticket_sizing_mode"]),
-        ticket_fraction=Decimal(str(row["ticket_fraction"])) if row["ticket_fraction"] is not None else None,
-        fixed_ticket_amount=(
-            Decimal(str(row["fixed_ticket_amount"])) if row["fixed_ticket_amount"] is not None else None
+        return None, "market_session_closed", True
+    return (
+        _Intent(
+            signal_id=signal_id,
+            strategy_id=str(row["strategy_id"]),
+            strategy_version=str(row["strategy_version"]),
+            instrument_id=int(row["instrument_id"]),
+            symbol=str(row["symbol"]),
+            deployment_id=int(row["deployment_id"]),
+            currency=str(row["currency"]),
+            deployment_limit=Decimal(str(row["capital_limit"])),
+            pool_limit=Decimal(str(row["pool_limit"])),
+            capital_mode=cast(Literal["fixed", "compound"], row["capital_mode"]),
+            pool_reserved=Decimal(str(row["pool_reserved"])),
+            mandate_max_drawdown_pct=Decimal(str(row["mandate_max_drawdown_pct"])),
+            mandate_max_loss_per_position_pct=Decimal(str(row["mandate_max_loss_per_position_pct"])),
+            mandate_max_daily_loss_pct=Decimal(str(row["mandate_max_daily_loss_pct"])),
+            mandate_active_risk_budget_pct=Decimal(str(row["mandate_active_risk_budget_pct"])),
+            mandate_cash_reserve_pct=Decimal(str(row["mandate_cash_reserve_pct"])),
+            mandate_max_concurrent_positions=int(row["mandate_max_concurrent_positions"]),
+            forecast_id=int(row["forecast_id"]),
+            ranking_member_id=int(row["ranking_member_id"]),
+            policy_revision=int(row["policy_revision"]),
+            ticket_sizing_mode=cast(Literal["percent", "fixed"], row["ticket_sizing_mode"]),
+            ticket_fraction=Decimal(str(row["ticket_fraction"])) if row["ticket_fraction"] is not None else None,
+            fixed_ticket_amount=(
+                Decimal(str(row["fixed_ticket_amount"])) if row["fixed_ticket_amount"] is not None else None
+            ),
+            max_ticket_amount=Decimal(str(row["max_ticket_amount"])),
+            stop_loss_pct=Decimal(str(row["forecast_stop_barrier_pct"])),
+            take_profit_pct=Decimal(str(row["forecast_target_barrier_pct"])),
+            max_quote_age_seconds=int(row["max_quote_age_seconds"]),
+            max_scan_age_seconds=int(row["max_scan_age_seconds"]),
+            max_halt_feed_age_seconds=int(row["max_halt_feed_age_seconds"]),
+            max_cost_age_seconds=int(row["max_cost_age_seconds"]),
+            max_reconciliation_age_seconds=int(row["max_reconciliation_age_seconds"]),
+            max_instrument_exposure_pct=Decimal(str(row["max_instrument_exposure_pct"])),
+            max_portfolio_exposure_pct=Decimal(str(row["max_portfolio_exposure_pct"])),
+            max_drawdown_pct=Decimal(str(row["max_drawdown_pct"])),
+            min_net_expectancy_pct=Decimal(str(row["min_net_expectancy_pct"])),
+            cost_stress_multiplier=Decimal(str(row["cost_stress_multiplier"])),
+            quote_at=quote_at,
+            ask=Decimal(str(row["ask"])),
+            scan_at=scan_at,
+            halt_feed_at=halt_feed_at,
+            gross_expectancy_ci_low_pct=Decimal(str(row["expectancy_ci_low_pct"])),
+            reserved=Decimal(str(row["reserved"])),
         ),
-        max_ticket_amount=Decimal(str(row["max_ticket_amount"])),
-        stop_loss_pct=Decimal(str(row["forecast_stop_barrier_pct"])),
-        take_profit_pct=Decimal(str(row["forecast_target_barrier_pct"])),
-        max_quote_age_seconds=int(row["max_quote_age_seconds"]),
-        max_scan_age_seconds=int(row["max_scan_age_seconds"]),
-        max_halt_feed_age_seconds=int(row["max_halt_feed_age_seconds"]),
-        max_cost_age_seconds=int(row["max_cost_age_seconds"]),
-        max_reconciliation_age_seconds=int(row["max_reconciliation_age_seconds"]),
-        max_instrument_exposure_pct=Decimal(str(row["max_instrument_exposure_pct"])),
-        max_portfolio_exposure_pct=Decimal(str(row["max_portfolio_exposure_pct"])),
-        max_drawdown_pct=Decimal(str(row["max_drawdown_pct"])),
-        min_net_expectancy_pct=Decimal(str(row["min_net_expectancy_pct"])),
-        cost_stress_multiplier=Decimal(str(row["cost_stress_multiplier"])),
-        quote_at=quote_at,
-        ask=Decimal(str(row["ask"])),
-        scan_at=scan_at,
-        halt_feed_at=halt_feed_at,
-        gross_expectancy_ci_low_pct=Decimal(str(row["expectancy_ci_low_pct"])),
-        reserved=Decimal(str(row["reserved"])),
-    ), None
+        None,
+        True,
+    )
 
 
 def _persist_rejection(
@@ -548,6 +556,7 @@ def _persist_rejection(
     now: datetime,
     intent: _Intent | None = None,
     risk: BrokerAccountRiskSnapshot | None = None,
+    halt_identity_evaluated: bool = False,
 ) -> PaperExecutionResult:
     existing = _existing_result(conn, signal_id)
     conn.commit()
@@ -560,10 +569,10 @@ def _persist_rejection(
             INSERT INTO strategy_entry_preflights (
                 signal_id, deployment_id, policy_revision, forecast_id, ranking_member_id,
                 verdict, reason_code,
-                evaluated_at, quote_at, scan_at, halt_feed_at,
+                evaluated_at, quote_at, scan_at, halt_feed_at, halt_identity_rule_version,
                 broker_available_cash, account_equity, account_invested,
                 instrument_invested, gross_expectancy_ci_low_pct
-            ) VALUES (%s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 signal_id,
@@ -576,6 +585,7 @@ def _persist_rejection(
                 intent.quote_at if intent else None,
                 intent.scan_at if intent else None,
                 intent.halt_feed_at if intent else None,
+                HALT_IDENTITY_RULE_VERSION if intent is not None or halt_identity_evaluated else None,
                 risk.available_cash if risk else None,
                 risk.equity if risk else None,
                 risk.total_invested if risk else None,
@@ -1106,7 +1116,7 @@ def _execute_fired_paper_signal_locked(
         if health.active_block:
             return _persist_rejection(conn, signal_id=signal_id, reason_code="reconciliation_overdue", now=evaluated_at)
 
-    intent, reason = _load_intent(
+    intent, reason, halt_identity_evaluated = _load_intent(
         conn,
         signal_id=signal_id,
         ranking_member_id=ranking_member_id,
@@ -1119,6 +1129,7 @@ def _execute_fired_paper_signal_locked(
             signal_id=signal_id,
             reason_code=reason or "preflight_unavailable",
             now=evaluated_at,
+            halt_identity_evaluated=halt_identity_evaluated,
         )
 
     try:
@@ -1211,7 +1222,7 @@ def _execute_fired_paper_signal_locked(
             INSERT INTO strategy_entry_preflights (
                 signal_id, deployment_id, policy_revision, forecast_id, ranking_member_id,
                 verdict, reason_code,
-                evaluated_at, quote_at, scan_at, halt_feed_at,
+                evaluated_at, quote_at, scan_at, halt_feed_at, halt_identity_rule_version,
                 eligibility_checked_at, costs_at, broker_available_cash,
                 account_equity, account_invested, instrument_invested,
                 account_drawdown_pct, allocated_amount,
@@ -1219,7 +1230,7 @@ def _execute_fired_paper_signal_locked(
                 net_expectancy_pct, stop_loss_rate, take_profit_rate
             ) VALUES (
                 %s, %s, %s, %s, %s, 'allocated', 'all_paper_entry_gates_passed',
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
@@ -1232,6 +1243,7 @@ def _execute_fired_paper_signal_locked(
                 intent.quote_at,
                 intent.scan_at,
                 intent.halt_feed_at,
+                HALT_IDENTITY_RULE_VERSION,
                 evaluated_at,
                 costs.last_updated,
                 risk.available_cash,

@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, LiteralString
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -45,12 +45,13 @@ from app.services.strategy_core_submission_gate import (
     CORE_SUBMISSION_ADVISORY_LOCK,
     core_lock_held,
 )
+from app.services.strategy_halt_identity import INSTRUMENT_HALT_SYMBOL_SQL
 
 #: Frozen with the rule set it stamps.  v1 fixes, BY CONSTRUCTION: the two
 #: freshness bounds below (their INTERVAL is derived from each producer's cadence,
 #: their POSITION in that interval is a choice -- see the constants), the
 #: ``us_equity`` session allow-list, and the refusal precedence order.
-CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v1"
+CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v2"
 
 #: The one session calendar this repo has is US
 #: (``app/services/market_calendar.py::us_market_status``), so the only asset class
@@ -240,7 +241,7 @@ class CorePreflightObservation:
 #
 # ⚠ The instrument join is `i.exchange`, NOT `i.exchange_id` -- `exchanges` is keyed
 # by a TEXT id that `instruments` stores in a column of a different name.
-_PREFLIGHT_SQL: Final = """
+_PREFLIGHT_SQL: Final[LiteralString] = f"""
 SELECT (i.instrument_id IS NOT NULL) AS instrument_present,
        i.symbol,
        i.is_tradable,
@@ -250,7 +251,7 @@ SELECT (i.instrument_id IS NOT NULL) AS instrument_present,
        EXISTS (
            SELECT 1 FROM strategy_market_halts mh
            WHERE mh.source = 'nasdaq_trader_rss'
-             AND mh.symbol = upper(i.symbol) AND mh.resumed_at IS NULL
+             AND mh.symbol = {INSTRUMENT_HALT_SYMBOL_SQL} AND mh.resumed_at IS NULL
        ) AS is_halted,
        (SELECT fetched_at FROM strategy_halt_feed_state WHERE source = 'nasdaq_trader_rss')
            AS halt_feed_at,

@@ -9,6 +9,7 @@ from typing import Any
 import psycopg
 import pytest
 
+from app.services.strategy_halt_identity import INSTRUMENT_HALT_SYMBOL_SQL
 from app.services.strategy_halts import HaltFeedError, parse_halt_rss, store_halt_snapshot
 
 _XML = b"""<?xml version="1.0" encoding="utf-8"?>
@@ -134,3 +135,30 @@ def test_store_upserts_current_state_and_removes_old_rows(
     assert conn.execute(
         "SELECT symbol FROM strategy_market_halts WHERE resumed_at IS NULL ORDER BY symbol"
     ).fetchall() == [("HALT",), ("STILL",)]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("instrument_symbol", "expected_feed_symbol"),
+    [
+        ("AAPL.RTH", "AAPL"),
+        ("AAPL.24-7", "AAPL"),
+        ("ABT.US", "ABT"),
+        ("TCOM.CH", "TCOM"),
+        ("brk.b", "BRK.B"),
+        ("BF.A", "BF.A"),
+        ("ACLX.CVR", "ACLX.CVR"),
+        ("BBBY.WS", "BBBY.WS"),
+        ("ATH.old", "ATH.OLD"),
+    ],
+)
+def test_halt_identity_strips_only_measured_etoro_venue_suffixes(
+    ebull_test_conn: psycopg.Connection[Any],
+    instrument_symbol: str,
+    expected_feed_symbol: str,
+) -> None:
+    row = ebull_test_conn.execute(
+        f"SELECT {INSTRUMENT_HALT_SYMBOL_SQL} FROM (VALUES (%s::text)) AS i(symbol)",
+        (instrument_symbol,),
+    ).fetchone()
+    assert row == (expected_feed_symbol,)
