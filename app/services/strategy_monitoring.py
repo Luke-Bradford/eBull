@@ -142,7 +142,7 @@ class StrategyEntryBlockState:
 
     @property
     def new_entries_blocked(self) -> bool:
-        return self.global_kill_active or bool(self.execution_block_reasons) or not self.auto_trading_enabled
+        return self.global_kill_active or bool(self.execution_block_reasons)
 
 
 _ATTRIBUTION_SQL = """
@@ -731,8 +731,6 @@ def load_entry_block_state(conn: psycopg.Connection[Any]) -> StrategyEntryBlockS
         return StrategyEntryBlockState(True, "kill switch state unavailable", None, None, blocks, False, False)
     if runtime is None:
         blocks = (*blocks, "runtime configuration unavailable")
-    elif not bool(runtime["enable_auto_trading"]):
-        blocks = (*blocks, "automatic trading disabled")
     return StrategyEntryBlockState(
         global_kill_active=bool(kill["is_active"]),
         global_kill_reason=str(kill["reason"]) if kill["reason"] is not None else None,

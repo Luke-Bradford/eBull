@@ -38,11 +38,7 @@ from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
-from app.services.runtime_config import (
-    RuntimeConfigCorrupt,
-    RuntimeConfigNoOp,
-    update_runtime_config,
-)
+from app.services.runtime_config import RuntimeConfigCorrupt
 from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
@@ -1844,10 +1840,10 @@ def get_strategy_overview(
     return StrategyOverviewResponse(
         as_of=as_of,
         demo_connection=settings.etoro_env == "demo",
-        execution_enabled=entry_block.auto_trading_enabled,
+        execution_enabled=paper_pool.enabled,
         live_execution_enabled=entry_block.live_trading_enabled,
         entry_block=StrategyEntryBlockView(
-            new_entries_blocked=entry_block.new_entries_blocked,
+            new_entries_blocked=entry_block.new_entries_blocked or not paper_pool.enabled,
             global_kill_active=entry_block.global_kill_active,
             global_kill_reason=entry_block.global_kill_reason,
             global_kill_activated_at=entry_block.global_kill_activated_at,
@@ -2577,7 +2573,7 @@ def update_strategy_paper_pool(
     session: SessionRow = Depends(require_session),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> StrategyPaperPoolView:
-    """Set the shared strategy ceiling and its higher-level automation flag."""
+    """Set the strategy lane's shared ceiling and independent paper switch."""
     try:
         if body.enabled and settings.etoro_env != "demo":
             raise StrategyControlError("paper automation can only be enabled in the demo environment")
@@ -2585,17 +2581,17 @@ def update_strategy_paper_pool(
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
             runtime_row = conn.execute(
-                """SELECT enable_auto_trading, enable_live_trading
+                """SELECT enable_live_trading
                      FROM runtime_config WHERE id=TRUE FOR UPDATE"""
             ).fetchone()
             if runtime_row is None:
                 raise RuntimeConfigCorrupt("runtime_config singleton row missing")
-            runtime = cast(tuple[object, object], runtime_row)
+            live_trading_enabled = bool(cast(tuple[object], runtime_row)[0])
             current_pool = load_paper_pool(conn)
             readiness = get_strategy_overview(conn).automation_readiness if body.enabled else None
             if body.enabled and not current_pool.enabled and readiness is not None and not readiness.ready:
                 raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
-            if body.enabled and bool(runtime[1]):
+            if body.enabled and live_trading_enabled:
                 raise StrategyControlError(
                     "paper automation cannot be enabled while system-wide live trading is enabled"
                 )
@@ -2605,29 +2601,20 @@ def update_strategy_paper_pool(
                 or current_pool.capital_mode != body.capital_mode
                 or current_pool.mandate.risk_profile != body.risk_profile
             )
-            automation_changed = bool(runtime[0]) != body.enabled
-            if not pool_changed and not automation_changed:
+            if not pool_changed:
                 raise StrategyControlError(
                     "automation change must alter enabled state, capital limit, capital mode, or mandate"
                 )
-            if pool_changed:
-                configure_paper_pool(
-                    conn,
-                    enabled=body.enabled,
-                    capital_limit=body.capital_limit,
-                    capital_mode=body.capital_mode,
-                    risk_profile=body.risk_profile,
-                    changed_by=session.username,
-                    reason=body.reason,
-                )
-            if automation_changed:
-                update_runtime_config(
-                    conn,
-                    updated_by=session.username,
-                    reason=body.reason,
-                    enable_auto_trading=body.enabled,
-                )
-    except (StrategyControlError, RuntimeConfigCorrupt, RuntimeConfigNoOp) as exc:
+            configure_paper_pool(
+                conn,
+                enabled=body.enabled,
+                capital_limit=body.capital_limit,
+                capital_mode=body.capital_mode,
+                risk_profile=body.risk_profile,
+                changed_by=session.username,
+                reason=body.reason,
+            )
+    except (StrategyControlError, RuntimeConfigCorrupt) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return get_strategy_overview(conn).paper_pool
 

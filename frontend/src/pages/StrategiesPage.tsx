@@ -1018,30 +1018,30 @@ function AutomationControl({
   onUpdated: () => void;
 }) {
   const pool = overview.paper_pool;
-  const [enabled, setEnabled] = useState(pool.enabled && overview.execution_enabled);
+  const [enabled, setEnabled] = useState(pool.enabled);
   const [limit, setLimit] = useState(pool.capital_limit);
   const [capitalMode, setCapitalMode] = useState(pool.capital_mode);
   const [riskProfile, setRiskProfile] = useState(pool.mandate.risk_profile);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
-    setEnabled(pool.enabled && overview.execution_enabled);
+    setEnabled(pool.enabled);
     setLimit(pool.capital_limit);
     setCapitalMode(pool.capital_mode);
     setRiskProfile(pool.mandate.risk_profile);
-  }, [pool.enabled, pool.capital_limit, pool.capital_mode, pool.mandate.risk_profile, overview.execution_enabled]);
+  }, [pool.enabled, pool.capital_limit, pool.capital_mode, pool.mandate.risk_profile]);
   const parsed = Number(limit);
   const valid = Number.isFinite(parsed) && parsed >= 0 && (!enabled || parsed > 0);
-  const effectiveEnabled = pool.enabled && overview.execution_enabled;
+  const effectiveEnabled = pool.enabled;
   const dirty = enabled !== effectiveEnabled
     || parsed !== Number(pool.capital_limit)
     || capitalMode !== pool.capital_mode
     || riskProfile !== pool.mandate.risk_profile;
-  // This form owns both the paper-pool switch and the system-wide automatic
-  // trading flag through one atomic endpoint. Requiring execution_enabled here
-  // creates a circular first-enable gate: the flag can never become true
-  // because the control that changes it is disabled. The server independently
-  // rechecks evidence readiness, the demo boundary, and live-off state on every enable.
+  // The paper-pool event is this lane's master switch. It deliberately does
+  // not mutate the legacy system-wide automatic-trading flag, which controls
+  // a separate recommendation/order pipeline outside this bounded sleeve.
+  // The server independently rechecks evidence readiness, the demo boundary,
+  // and live-off state on every enable.
   const canEnable = overview.automation_readiness.ready
     && overview.demo_connection
     && !overview.live_execution_enabled

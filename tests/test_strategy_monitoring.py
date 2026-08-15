@@ -32,6 +32,7 @@ from app.security.sessions import SessionRow
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import get_runtime_config, update_runtime_config
+from app.services.strategy_control_plane import configure_paper_pool
 from app.services.strategy_monitoring import (
     load_attribution,
     load_control_state,
@@ -1234,16 +1235,16 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     ).fetchone() == (True, Decimal("750.000000"), "compound", "allocation-operator", "bounded paper workspace")
     assert conn.execute(
         "SELECT enable_auto_trading,enable_live_trading FROM runtime_config WHERE id=TRUE"
-    ).fetchone() == (True, False)
+    ).fetchone() == (False, False)
     assert conn.execute(
         """
-        SELECT old_value,new_value,changed_by,reason
+        SELECT count(*)
         FROM runtime_config_audit
         WHERE field='enable_auto_trading'
-        ORDER BY audit_id DESC
-        LIMIT 1
+          AND changed_by='allocation-operator'
+          AND reason='bounded paper workspace'
         """
-    ).fetchone() == ("false", "true", "allocation-operator", "bounded paper workspace")
+    ).fetchone() == (0,)
     conn.commit()
 
     with pytest.raises(HTTPException) as exc_info:
@@ -1260,6 +1261,69 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
         )
     assert exc_info.value.status_code == 409
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
+
+
+def test_disabling_strategy_paper_does_not_disable_legacy_automation(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    runtime_before = get_runtime_config(conn)
+    if not runtime_before.enable_auto_trading or runtime_before.enable_live_trading:
+        update_runtime_config(
+            conn,
+            updated_by="test-precondition",
+            reason="establish independently enabled legacy lane",
+            enable_auto_trading=True if not runtime_before.enable_auto_trading else None,
+            enable_live_trading=False if runtime_before.enable_live_trading else None,
+        )
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("750"),
+        risk_profile="balanced",
+        changed_by="test-precondition",
+        reason="establish enabled strategy lane",
+    )
+    conn.commit()
+    try:
+        response = update_strategy_paper_pool(
+            StrategyPaperPoolUpdateRequest(
+                enabled=False,
+                capital_limit=Decimal("750"),
+                capital_mode="fixed",
+                risk_profile="balanced",
+                reason="disable only the bounded strategy lane",
+            ),
+            _session(),
+            conn,
+        )
+
+        assert not response.enabled
+        assert conn.execute(
+            "SELECT enable_auto_trading,enable_live_trading FROM runtime_config WHERE id=TRUE"
+        ).fetchone() == (True, False)
+    finally:
+        current = get_runtime_config(conn)
+        if (
+            current.enable_auto_trading != runtime_before.enable_auto_trading
+            or current.enable_live_trading != runtime_before.enable_live_trading
+        ):
+            update_runtime_config(
+                conn,
+                updated_by="test-cleanup",
+                reason="restore runtime flags after lane-isolation proof",
+                enable_auto_trading=(
+                    runtime_before.enable_auto_trading
+                    if current.enable_auto_trading != runtime_before.enable_auto_trading
+                    else None
+                ),
+                enable_live_trading=(
+                    runtime_before.enable_live_trading
+                    if current.enable_live_trading != runtime_before.enable_live_trading
+                    else None
+                ),
+            )
+        conn.commit()
 
 
 def test_shared_paper_pool_refuses_activation_outside_demo(
@@ -1580,15 +1644,15 @@ def test_missing_runtime_singleton_is_visible_as_an_entry_block(
     assert not state.auto_trading_enabled
 
 
-def test_disabled_automatic_trading_is_visible_as_an_entry_block(
+def test_legacy_automatic_trading_switch_does_not_block_the_strategy_lane(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     ebull_test_conn.execute("UPDATE runtime_config SET enable_auto_trading=false")
 
     state = load_entry_block_state(ebull_test_conn)
 
-    assert state.new_entries_blocked
-    assert "automatic trading disabled" in state.execution_block_reasons
+    assert not state.new_entries_blocked
+    assert "automatic trading disabled" not in state.execution_block_reasons
     assert not state.auto_trading_enabled
 
 

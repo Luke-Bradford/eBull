@@ -144,7 +144,6 @@ def _authorise_forecast_scope(
 def _seed(
     conn: psycopg.Connection[Any],
     *,
-    auto: bool = True,
     ticket_sizing_mode: str = "percent",
 ) -> int:
     if conn.execute("SELECT 1 FROM strategy_paper_pool_events LIMIT 1").fetchone() is None:
@@ -378,14 +377,13 @@ def _seed(
         """
         INSERT INTO runtime_config (
             id, enable_auto_trading, enable_live_trading, updated_by, reason
-        ) VALUES (true, %s, true, 'test', 'paper allocator fixture')
+        ) VALUES (true, false, false, 'test', 'paper allocator fixture')
         ON CONFLICT (id) DO UPDATE SET
             enable_auto_trading=EXCLUDED.enable_auto_trading,
             enable_live_trading=EXCLUDED.enable_live_trading,
             updated_by=EXCLUDED.updated_by, reason=EXCLUDED.reason,
             updated_at=now()
-        """,
-        (auto,),
+        """
     )
     conn.execute(
         """
@@ -916,22 +914,18 @@ def test_capital_modes_use_realised_owned_pnl_and_refuse_unknown_pnl(
     assert _effective_capital_bases(conn, intent) == "realised_pnl_incomplete"
 
 
-def test_disabled_global_switch_keeps_an_unfunded_shadow_arm(
+def test_legacy_automatic_switch_does_not_control_the_bounded_strategy_lane(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
-    signal_id = _seed(ebull_test_conn, auto=False)
+    signal_id = _seed(ebull_test_conn)
     broker = _broker()
 
     result = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
 
-    assert result.verdict == "rejected"
-    assert result.reason_code == "auto_trading_disabled"
-    broker.get_account_risk_snapshot.assert_not_called()
-    broker.place_demo_strategy_order.assert_not_called()
-    assert ebull_test_conn.execute(
-        "SELECT verdict, reason_code FROM strategy_funding_decisions WHERE signal_id=%s",
-        (signal_id,),
-    ).fetchone() == ("rejected", "auto_trading_disabled")
+    assert result.verdict == "submitted"
+    assert result.reason_code == "broker_accepted"
+    broker.get_account_risk_snapshot.assert_called_once()
+    broker.place_demo_strategy_order.assert_called_once()
 
 
 def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
@@ -1251,6 +1245,7 @@ def test_disabled_pool_reason_precedes_unconfigured_mandate_reason(
         ) VALUES (false,2000,'USD','fixed','legacy','disabled pre-mandate authority')
         """
     )
+    conn.execute("UPDATE runtime_config SET enable_auto_trading=true WHERE id=true")
     conn.commit()
     broker = _broker()
 
