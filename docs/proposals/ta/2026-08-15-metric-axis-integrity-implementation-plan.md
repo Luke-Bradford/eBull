@@ -115,13 +115,23 @@ Spec: `docs/proposals/ta/2026-08-15-metric-axis-integrity.md`.
 3. Emit per-row—not aggregate-only—old/new endpoints, opportunity and comparator
    population, total return, CAGR, periods/year, volatility, Sharpe, Sortino,
    drawdown, exposure, turnover, benchmark return, excess return and synthetic
-   threshold deltas.
+   threshold deltas. Bind every row to the exact clean Git head and finish with
+   a reconciled expected/observed completion manifest; an interrupted JSONL file
+   has no completion record and is not evidence. A separate structural auditor
+   checks the exact strategy/ambiguity/quarantine key set, one common current
+   axis, finite/declared-null metric shapes, comparator-population equality and
+   synthetic-control completeness without reporting or ranking any value.
 
 ## 6. Gate, review, merge and rerun
 
-1. Run focused pure/DB tests and migration smoke only after worker 98349 releases
-   the database lock/CPU window. Run the derivation verifier, full in-sample A/B,
-   complete local gate and adversarial revert probes.
+1. After worker 98349 releases the database lock/CPU window, run
+   `scripts.audit_2697_legacy_metric_axis` first. It reads identity/provenance
+   fields only, requires the exact 40-row population, and proves every legacy
+   row is refused as `metric_axis_unproven` without consulting a metric. Then
+   run focused pure/DB tests, migration smoke, the full in-sample A/B, its
+   structural auditor, the complete local gate and adversarial revert probes.
+   The source-dependent derivation verifier cannot run here: no corrected rows
+   exist before merge.
 2. Self-review, run the required semantic diff review, push, read every CI/bot
    response, resolve each explicitly, re-run affected gates and merge only on
    the latest approved green commit.
