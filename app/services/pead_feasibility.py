@@ -171,7 +171,7 @@ def load_pre_outcome_windows(
             entry_return_usable=row[6],
             prior_sessions=int(row[7]),
             valid_liquidity_sessions=int(row[8]),
-            median_dollar_volume=None if row[9] is None else Decimal(row[9]),
+            median_dollar_volume=None if row[9] is None else Decimal(str(row[9])),
         )
         for row in rows
     )
