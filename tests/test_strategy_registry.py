@@ -22,6 +22,7 @@ from app.services.indicator_series import (
     sma_series,
 )
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
+from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.strategy_registry import (
     INPUT_RULE_SETS,
     NOT_EVALUABLE_REASONS,
@@ -38,6 +39,7 @@ from app.services.strategy_registry import (
     stage_cross_sectional_member,
 )
 from app.services.technical_analysis import OHLCVRow
+from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION
 
 U = "survivor_only"
 
@@ -248,6 +250,8 @@ class TestIdentityCoversMoreThanSource:
         assert dict(INPUT_RULE_SETS) == {
             "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
             "market_regime_provider": BENCHMARK_SOURCE_RULE_SET_VERSION,
+            "series_termination": TERMINATION_RULE_VERSION,
+            "universe_selection": UNIVERSE_SELECTION_RULE_VERSION,
         }
 
     def test_the_registry_constant_is_read_only(self) -> None:

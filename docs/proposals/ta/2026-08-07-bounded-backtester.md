@@ -723,6 +723,13 @@ CEF/FPI-shaped residue and eToro-listing bias, and non-US is not correctable at
 all. The result row therefore carries the **corpus version** alongside the basis,
 and `survivorship_free` is not a value any current corpus can produce.
 
+> ✅ **SUPERSEDED 2026-08-15 (#2721 step 3).** The corpus now carries the
+> `icyDenev/Intrader` survivorship-free vendor (fully quarantine-judged), a
+> Form 25 evidence linkage, and a wired termination rule — `survivorship_free`
+> IS producible under `universe_selection.UNIVERSE_SELECTION_RULE_VERSION`,
+> with the corpus version stamped per vendor exactly as this section asked.
+> See `2026-08-15-2721-step3-survivorship-free-universe.md`.
+
 Today every result is `survivor_only` — measured, the corpus holds **7,693
 series of which 2,424 have no `instruments` row**, and the delisted half is the
 purchase that lands at the validation gate (#2284). The gate's initial state is

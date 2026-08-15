@@ -44,6 +44,8 @@ from typing import Literal, Protocol, get_args
 from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import IndicatorSeries, MultiIndicatorSeries, Universe
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
+from app.services.series_termination import TERMINATION_RULE_VERSION
+from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION
 
 STRATEGY_SET_ID = "strategy-registry-v1"
 
@@ -95,6 +97,24 @@ INPUT_RULE_SETS: Mapping[str, str] = MappingProxyType(
         # to a real verdict, which is a changed input under an unchanged
         # strategy_version unless it is hashed here.
         "market_regime_provider": BENCHMARK_SOURCE_RULE_SET_VERSION,
+        # ⚠ #2721 step 3 — BOTH hand-maintained, like the entry above
+        # (strategies import neither module; the ENGINE consumes them), and
+        # both pinned by ``test_the_stored_mapping_is_the_hashed_one``.
+        #
+        # ``series_termination``: what a held position realises when its
+        # series stops — the survivorship treatment itself. Joined the hashed
+        # set at the SAME commit that first wired it into the backtest, per
+        # its own module docstring's freeze.
+        #
+        # ``universe_selection``: the vendor pins, admission rule, alive cut
+        # and capture date. The bare ``universe`` label on the identity does
+        # not version any of those (ckpt-1), and a changed admission is a
+        # changed universe under criterion 11. This over-invalidates
+        # survivor-only identities on a survivorship-free rule change —
+        # accepted deliberately, the same global-rule-set over-invalidation
+        # every entry in this mapping makes.
+        "series_termination": TERMINATION_RULE_VERSION,
+        "universe_selection": UNIVERSE_SELECTION_RULE_VERSION,
     }
 )
 

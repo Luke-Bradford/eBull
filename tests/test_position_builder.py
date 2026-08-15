@@ -685,6 +685,9 @@ class TestSpecConstants:
     typed out from ``2026-08-07-bounded-backtester.md`` §3's table."""
 
     SPEC_CLOSE_SOURCES = {"signal_pair", "level", "max_hold", "calendar", "ambiguous"}
+    #: #2721 step 3 — emitted by ``backtest_run``'s termination rule, never by
+    #: the builder itself; declared apart like the open-reason additions.
+    OUR_ADDITIONAL_CLOSE_SOURCES = {"series_termination"}
     #: ⚠ The spec's §3.2 rule 5 names exactly these two. The implementation's
     #: explicitly declared additions are deliberately absent here, so adopting
     #: a spec reason later cannot silently land on our side of the line.
@@ -693,11 +696,12 @@ class TestSpecConstants:
     SPEC_S4_MAX_HOLD_BARS = 40
 
     def test_the_close_source_vocabulary_is_the_specs(self) -> None:
-        assert set(CLOSE_SOURCES) == self.SPEC_CLOSE_SOURCES
+        assert set(CLOSE_SOURCES) == self.SPEC_CLOSE_SOURCES | self.OUR_ADDITIONAL_CLOSE_SOURCES
 
     def test_the_open_reason_vocabulary_is_the_specs_plus_ours(self) -> None:
         assert set(SPEC_OPEN_REASONS) == self.SPEC_OPEN_REASONS
         assert set(OPEN_REASONS) == self.SPEC_OPEN_REASONS | set(OUR_ADDITIONAL_OPEN_REASONS)
+        assert "termination_price_unlocatable" in OUR_ADDITIONAL_OPEN_REASONS
 
     def test_the_shipped_max_holds_are_the_specs(self) -> None:
         assert (S3_MAX_HOLD_BARS, S4_MAX_HOLD_BARS) == (self.SPEC_S3_MAX_HOLD_BARS, self.SPEC_S4_MAX_HOLD_BARS)
