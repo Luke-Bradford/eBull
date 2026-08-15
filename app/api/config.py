@@ -48,11 +48,13 @@ from app.services.ops_monitor import (
     get_kill_switch_status,
 )
 from app.services.runtime_config import (
+    RuntimeConfig,
     RuntimeConfigCorrupt,
     RuntimeConfigNoOp,
     get_runtime_config,
     update_runtime_config,
 )
+from app.services.strategy_control_plane import PAPER_ALLOCATOR_ADVISORY_LOCK, load_paper_pool
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +223,8 @@ def patch_config(
     Returns the post-update runtime config (not the full /config response;
     the caller can re-GET if they need kill switch state too).
     """
-    try:
-        updated = update_runtime_config(
+    def apply_patch() -> RuntimeConfig:
+        return update_runtime_config(
             conn,
             updated_by=body.updated_by,
             reason=body.reason,
@@ -234,6 +236,19 @@ def patch_config(
             llm_model_writer=body.llm_model_writer,
             llm_model_critic=body.llm_model_critic,
         )
+
+    try:
+        if body.enable_live_trading is True:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
+                if load_paper_pool(conn).enabled:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="live trading cannot be enabled while strategy paper automation is enabled",
+                    )
+                updated = apply_patch()
+        else:
+            updated = apply_patch()
     except RuntimeConfigCorrupt as exc:
         # #87: fixed string instead of str(exc) — see GET handler note.
         raise HTTPException(status_code=503, detail="runtime config unavailable") from exc
