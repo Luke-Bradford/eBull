@@ -80,6 +80,14 @@ PROBES: list[tuple[str, Path, str, str, str, str]] = [
         "test_acceptance_loads_both_price_and_regime_inputs_through_the_sealed_ceiling",
     ),
     (
+        "the A/B completion manifest skips its final exact-head check",
+        AB_RUNNER,
+        "    _assert_candidate_head_unchanged(candidate_head)\n    return {\n",
+        "    return {\n",
+        AB_TESTS,
+        "test_completion_manifest_cannot_bypass_the_final_head_check",
+    ),
+    (
         "the strategy price loader drops its database-side outcome ceiling",
         PRICE_STORE,
         "      AND (%(through_date)s::date IS NULL OR d.bar_date <= %(through_date)s::date)\n",

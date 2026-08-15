@@ -11,6 +11,8 @@ from app.services.synthetic_control_run import CohortCollector, SeriesPlacement
 from scripts import verify_2697_metric_axis_ab
 from scripts.verify_2697_metric_axis_ab import (
     _IN_SAMPLE_WINDOW,
+    _assert_candidate_head_unchanged,
+    _completion_record,
     _exact_candidate_head,
     _legacy_cohort_control,
     _load_sealed_inputs,
@@ -115,6 +117,20 @@ def test_exact_head_refuses_a_dirty_worktree(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(RuntimeError, match="clean worktree"):
         _exact_candidate_head()
+
+
+def test_completion_refuses_when_the_source_head_moved(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_2697_metric_axis_ab, "_exact_candidate_head", lambda: "b" * 40)
+
+    with pytest.raises(RuntimeError, match="started on .* and ended on"):
+        _assert_candidate_head_unchanged("a" * 40)
+
+
+def test_completion_manifest_cannot_bypass_the_final_head_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_2697_metric_axis_ab, "_exact_candidate_head", lambda: "b" * 40)
+
+    with pytest.raises(RuntimeError, match="started on .* and ended on"):
+        _completion_record("a" * 40, population="full", expected_rows=40, observed_rows=40)
 
 
 def test_the_legacy_arm_refuses_a_member_that_drops_a_declared_trade(

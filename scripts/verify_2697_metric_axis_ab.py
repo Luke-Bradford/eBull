@@ -115,6 +115,34 @@ def _exact_candidate_head() -> str:
     ).stdout.strip()
 
 
+def _assert_candidate_head_unchanged(candidate_head: str) -> None:
+    completed_head = _exact_candidate_head()
+    if completed_head != candidate_head:
+        raise RuntimeError(
+            f"the metric-axis A/B started on {candidate_head} and ended on {completed_head}; "
+            "its rows do not describe one exact source head"
+        )
+
+
+def _completion_record(
+    candidate_head: str,
+    *,
+    population: str,
+    expected_rows: int,
+    observed_rows: int,
+) -> dict[str, object]:
+    """Mint the completion manifest only after re-checking its source head."""
+    _assert_candidate_head_unchanged(candidate_head)
+    return {
+        "record_type": "acceptance_summary",
+        "candidate_head": candidate_head,
+        "population": population,
+        "expected_rows": expected_rows,
+        "observed_rows": observed_rows,
+        "complete": True,
+    }
+
+
 def _legacy_first_index_last_index_measurement(
     book: _NamespaceBook,
     *,
@@ -568,19 +596,13 @@ def main() -> None:
                         emitted_rows += 1
             if emitted_rows != expected_rows:
                 raise RuntimeError(f"A/B emitted {emitted_rows} rows; the declared population requires {expected_rows}")
-            print(
-                json.dumps(
-                    {
-                        "record_type": "acceptance_summary",
-                        "candidate_head": candidate_head,
-                        "population": population,
-                        "expected_rows": expected_rows,
-                        "observed_rows": emitted_rows,
-                        "complete": True,
-                    },
-                    sort_keys=True,
-                )
+            completion = _completion_record(
+                candidate_head,
+                population=population,
+                expected_rows=expected_rows,
+                observed_rows=emitted_rows,
             )
+            print(json.dumps(completion, sort_keys=True))
         finally:
             backtest_run._measure_namespace = original_measure
             backtest_run._run_cohort_for = original_run_cohort_for
