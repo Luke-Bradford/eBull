@@ -268,8 +268,8 @@ def test_paved_run_checks_authority_before_corpus_and_builds_only_the_complete_i
         events.append(("corpus", kwargs))
         return SimpleNamespace(universe_basis="survivorship_free")
 
-    def load_regime(_conn: object):
-        events.append("regime")
+    def load_regime(_conn: object, *, through_date: date | None = None):
+        events.append(("regime", through_date))
         return object()
 
     def evaluate(_conn: object, entry: object, **kwargs: object):
@@ -309,7 +309,7 @@ def test_paved_run_checks_authority_before_corpus_and_builds_only_the_complete_i
         {"universe_basis": "survivorship_free", "evaluation_window": runner.MT1_IN_SAMPLE_WINDOW},
     )
     assert runner.MT1_IN_SAMPLE_WINDOW.end < runner.HOLDOUT_BOUNDARY
-    assert events[2] == "regime"
+    assert events[2] == ("regime", runner.MT1_IN_SAMPLE_WINDOW.end)
     assert events[3:7] == [
         ("evaluate", runner.MT1_SOURCE_STRATEGY_ID, "admitted", ("in_sample",)),
         ("evaluate", runner.MT1_SOURCE_STRATEGY_ID, "masked", ("in_sample",)),

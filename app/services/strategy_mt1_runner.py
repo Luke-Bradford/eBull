@@ -355,7 +355,7 @@ def prepare_mt1_in_sample_evaluation(
     )
     if corpus.universe_basis != "survivorship_free":  # pragma: no cover - fixed argument and loader contract
         raise MT1RunnerRefused(f"MT-1 corpus returned unexpected universe {corpus.universe_basis!r}")
-    regime_provider = MarketRegimeProvider.load_research(conn)
+    regime_provider = MarketRegimeProvider.load_research(conn, through_date=MT1_IN_SAMPLE_WINDOW.end)
 
     source_entries = {
         MT1_SOURCE_STRATEGY_ID: STRATEGY_MANIFEST[MT1_SOURCE_STRATEGY_ID],
