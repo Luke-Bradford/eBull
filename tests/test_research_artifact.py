@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services import research_artifact
 from app.services.research_artifact import retain_research_artifact
 
 
@@ -120,3 +121,15 @@ def test_naive_capture_time_is_refused(tmp_path: Path) -> None:
     source.write_bytes(b"source")
     with pytest.raises(ValueError, match="timezone-aware"):
         retain_research_artifact(source, tmp_path / "retained", captured_at=datetime(2026, 8, 15))
+
+
+def test_new_publications_fsync_their_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "archive.zip"
+    source.write_bytes(b"source")
+    fsynced_directories: list[Path] = []
+
+    monkeypatch.setattr(research_artifact, "_fsync_directory", fsynced_directories.append)
+    retained = retain_research_artifact(source, tmp_path / "retained")
+
+    assert retained.path.parent == retained.metadata_path.parent
+    assert fsynced_directories.count(retained.path.parent) == 3

@@ -35,6 +35,16 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(handle, ALGORITHM).hexdigest()
 
 
+def _fsync_directory(path: Path) -> None:
+    """Make a newly published directory entry durable before returning."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _publish_text_once(path: Path, value: str) -> None:
     """Atomically create immutable small metadata, or verify the incumbent."""
     temporary = path.with_name(f".{path.name}.retaining-{uuid4().hex}")
@@ -48,6 +58,8 @@ def _publish_text_once(path: Path, value: str) -> None:
         except FileExistsError:
             if path.read_text(encoding="utf-8") != value:
                 raise ValueError(f"retained artifact metadata conflicts with existing file: {path}")
+        else:
+            _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -82,6 +94,8 @@ def _publish_metadata_once(path: Path, metadata: dict[str, object]) -> None:
             os.link(temporary, path)
         except FileExistsError:
             validate_existing()
+        else:
+            _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -118,8 +132,12 @@ def retain_research_artifact(
         try:
             os.link(temporary, retained)
         except FileExistsError:
+            # Re-hash instead of trusting sidecar metadata: this is an offline
+            # evidence boundary where corruption detection outweighs read cost.
             if retained.is_symlink() or retained.stat().st_size != size or _sha256(retained) != digest:
                 raise ValueError(f"content-addressed artifact target is corrupt: {retained}")
+        else:
+            _fsync_directory(artifact_dir)
     finally:
         temporary.unlink(missing_ok=True)
 
