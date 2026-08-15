@@ -682,6 +682,24 @@ def test_promotion_replays_the_frozen_universe_check(
     _universe_record(conn, mismatched_id, evaluated=frozenset({1, 2, 3}), universe=frozenset({1, 2, 3}))
     _refuses(mismatched_id, "evaluated_universe_count_mismatch")
 
+    # Same count and same validated set, but a different opportunity
+    # population from the one hashed into the result identity. Counts alone
+    # cannot distinguish these two sets.
+    expected_record = _result_universe_record(
+        evaluated=frozenset({1, 2}),
+        universe=frozenset({1, 2, 3}),
+    )
+    digest_mismatch_id = _promotable_pair(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        ambiguity_arm="worst_case",
+        evaluated_instrument_count=2,
+        opportunity_record=expected_record,
+    )
+    _universe_record(conn, digest_mismatch_id, evaluated=frozenset({2, 3}), universe=frozenset({1, 2, 3}))
+    _refuses(digest_mismatch_id, "metric_axis_unproven")
+
     # A consistent subset record plus passing evidence promotes. ⚠ The passing
     # row must now also clear #2639's replays — the arm pair, criterion 5's
     # counts, the DSR against today's register and §9's control — so it is built
