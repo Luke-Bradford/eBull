@@ -7,7 +7,14 @@ from decimal import Decimal
 
 import psycopg
 
-from app.api.strategies import ResultArm, _current_versions, _promotion_refusals, get_strategy_overview
+from app.api.strategies import (
+    _PRESENTATION,
+    _TITLES,
+    ResultArm,
+    _current_versions,
+    _promotion_refusals,
+    get_strategy_overview,
+)
 from app.services.cost_model import COST_MODEL_ID
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
@@ -26,6 +33,15 @@ def test_current_versions_cover_the_manifest_including_s4() -> None:
     assert set(versions) == set(STRATEGY_MANIFEST)
     assert "s4-volatility-compression-breakout" in versions
     assert all(version.startswith("strategy-registry-v1+") for version in versions.values())
+
+
+def test_every_manifest_strategy_has_operator_readable_presentation() -> None:
+    """A new strategy must not fall through to its internal id and generic copy."""
+
+    assert set(_TITLES) == set(STRATEGY_MANIFEST)
+    assert set(_PRESENTATION) == set(STRATEGY_MANIFEST)
+    assert all(title != strategy_id for strategy_id, title in _TITLES.items())
+    assert all(description != "Evidence-backed automated strategy." for description, _exit in _PRESENTATION.values())
 
 
 def test_result_refusals_fail_closed_without_expanding_the_database() -> None:
