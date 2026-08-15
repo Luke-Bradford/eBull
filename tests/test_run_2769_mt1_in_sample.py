@@ -61,7 +61,7 @@ def test_default_command_checks_authority_without_running_outcomes(
 def test_execution_requires_literal_and_reports_structural_refusal(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(command, "assert_exact_clean_main_source", lambda: {"source": "merged"})
+    monkeypatch.setattr(command, "assert_exact_clean_main_source", lambda: {"runner_source_head": "a" * 40})
     monkeypatch.setattr(command, "assert_policy_version_merged", lambda: {"policy": "merged"})
     monkeypatch.setattr(command.psycopg, "connect", lambda _url: _Connection())
     monkeypatch.setattr(
@@ -81,8 +81,8 @@ def test_exact_source_guard_refuses_an_unmerged_runner(monkeypatch: pytest.Monke
     monkeypatch.setattr(command, "refresh_main_ref", lambda: True)
     outputs = {
         ("status", "--porcelain"): "",
-        ("rev-parse", "HEAD"): "candidate-head\n",
-        ("rev-parse", "origin/main"): "merged-head\n",
+        ("rev-parse", "HEAD"): "a" * 40 + "\n",
+        ("rev-parse", "origin/main"): "b" * 40 + "\n",
     }
     monkeypatch.setattr(command, "_git_output", lambda *args: outputs[args])
 
@@ -94,14 +94,14 @@ def test_exact_source_guard_accepts_only_clean_exact_main(monkeypatch: pytest.Mo
     monkeypatch.setattr(command, "refresh_main_ref", lambda: True)
     outputs = {
         ("status", "--porcelain"): "",
-        ("rev-parse", "HEAD"): "merged-head\n",
-        ("rev-parse", "origin/main"): "merged-head\n",
+        ("rev-parse", "HEAD"): "a" * 40 + "\n",
+        ("rev-parse", "origin/main"): "a" * 40 + "\n",
     }
     monkeypatch.setattr(command, "_git_output", lambda *args: outputs[args])
 
     assert command.assert_exact_clean_main_source() == {
         "runner_source_clean": True,
-        "runner_source_head": "merged-head",
+        "runner_source_head": "a" * 40,
         "runner_source_matches_main": True,
     }
 

@@ -48,6 +48,7 @@ def main() -> int:
                        metric_axis_rule_version, cardinality(metric_axis_dates) AS metric_axis_dates,
                        metric_axis_start, metric_axis_end, metric_axis_digest,
                        opportunity_set_digest, corpus_version, cost_model_id,
+                       runner_source_head,
                        trial_register_version, trial_contract_version, book_rule_version,
                        evaluator_version, structural_evidence_sha256, structural_evidence_json
                   FROM strategy_mt1_structural_attempts
@@ -97,6 +98,7 @@ def main() -> int:
         "metric_axis_digest",
         "metric_axis_rule_version",
         "opportunity_set_digest",
+        "runner_source_head",
         "trial_contract_version",
         "trial_register_version",
     ):

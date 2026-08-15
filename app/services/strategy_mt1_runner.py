@@ -13,6 +13,7 @@ be selected from an incomplete fan.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -55,6 +56,7 @@ MT1_IN_SAMPLE_WINDOW: Final = Window(
     start=EVALUATION_WINDOW_START,
     end=HOLDOUT_BOUNDARY - timedelta(days=1),
 )
+_GIT_OBJECT_ID: Final = re.compile(r"^[0-9a-f]{40}$")
 
 RobustnessKey = tuple[AmbiguityArm, QuarantineArm]
 _EXPECTED_KEYS: Final[tuple[RobustnessKey, ...]] = tuple(
@@ -128,6 +130,7 @@ class MT1InSampleEvaluation:
     mt1_source_strategy_version: str
     s8_source_strategy_version: str
     corpus_version: str
+    runner_source_head: str
 
 
 @dataclass(frozen=True)
@@ -139,6 +142,7 @@ class MT1InSamplePreparation:
     mt1_source_strategy_version: str
     s8_source_strategy_version: str
     corpus_version: str
+    runner_source_head: str
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,7 @@ class MT1InSampleStructuralRefusal:
     mt1_source_strategy_version: str
     s8_source_strategy_version: str
     corpus_version: str
+    runner_source_head: str
 
 
 class MT1InSampleStructuralRefused(MT1RunnerRefused):
@@ -333,9 +338,12 @@ def assemble_mt1_in_sample_bundle(
 def prepare_mt1_in_sample_evaluation(
     conn: psycopg.Connection[Any],
     *,
+    runner_source_head: str,
     progress: ProgressCallback | None = None,
 ) -> MT1InSamplePreparation:
     """Build the one full-population in-sample structural fan; never holdout."""
+    if _GIT_OBJECT_ID.fullmatch(runner_source_head) is None:
+        raise MT1RunnerRefused("MT-1 runner source head must be one exact lower-case Git object ID")
     # This is deliberately the first DB-facing call. Tests pin the ordering so
     # a future convenience corpus preload cannot burn the pre-outcome boundary.
     authorities = validate_mt1_preregistrations(conn)
@@ -410,6 +418,7 @@ def prepare_mt1_in_sample_evaluation(
                 mt1_source_strategy_version=source_identities[MT1_SOURCE_STRATEGY_ID].version,
                 s8_source_strategy_version=source_identities[S8_SOURCE_STRATEGY_ID].version,
                 corpus_version=corpus_version_for(BACKTEST_UNIVERSE),
+                runner_source_head=runner_source_head,
             )
         ) from exc
     return MT1InSamplePreparation(
@@ -420,16 +429,22 @@ def prepare_mt1_in_sample_evaluation(
         mt1_source_strategy_version=source_identities[MT1_SOURCE_STRATEGY_ID].version,
         s8_source_strategy_version=source_identities[S8_SOURCE_STRATEGY_ID].version,
         corpus_version=corpus_version_for(BACKTEST_UNIVERSE),
+        runner_source_head=runner_source_head,
     )
 
 
 def run_mt1_in_sample_evaluation(
     conn: psycopg.Connection[Any],
     *,
+    runner_source_head: str,
     progress: ProgressCallback | None = None,
 ) -> MT1InSampleEvaluation:
     """Build and evaluate in memory; durable callers must use the two-phase store."""
-    preparation = prepare_mt1_in_sample_evaluation(conn, progress=progress)
+    preparation = prepare_mt1_in_sample_evaluation(
+        conn,
+        runner_source_head=runner_source_head,
+        progress=progress,
+    )
     return MT1InSampleEvaluation(
         authorities=preparation.authorities,
         bundle=evaluate_mt1_prepared_bundle(preparation.prepared),
@@ -438,6 +453,7 @@ def run_mt1_in_sample_evaluation(
         mt1_source_strategy_version=preparation.mt1_source_strategy_version,
         s8_source_strategy_version=preparation.s8_source_strategy_version,
         corpus_version=preparation.corpus_version,
+        runner_source_head=preparation.runner_source_head,
     )
 
 
