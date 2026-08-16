@@ -157,6 +157,43 @@ uv run python -m scripts.verify_2772_research_read_canary \
   --output /tmp/ebull-2772-read-canary.json
 ```
 
+The next step uses the genuine evaluator and collector but is still bounded:
+
+```bash
+uv run python -m scripts.verify_2772_production_worker_canary \
+  --series-limit 32 \
+  --output /tmp/ebull-2772-worker-canary.json
+```
+
+It runs S-1/masked over at most 100 survivor-only series, intercepts the exact
+production `run_cohort` boundary, executes the fixed worker canary and raises a
+private completion signal. The process therefore cannot enter the 1,000-member
+cohort or the result writer even when the canary succeeds.
+
+Observed production-collector curve on 2026-08-16:
+
+| admitted cap | placement series | trades/member | workers | member wall | throughput | aggregate peak RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 22 | 18,387 | 1 | 0.396s | 10.09 members/s | 295,714,816 bytes |
+| 32 | 22 | 18,387 | 4 | 0.126s | 31.73 members/s | 538,640,384 bytes |
+| 100 | 71 | 48,288 | 1 | 0.976s | 4.10 members/s | 339,148,800 bytes |
+| 100 | 71 | 48,288 | 4 | 0.301s | 13.31 members/s | 619,560,960 bytes |
+
+Every trial used member indices `0..3`, observed every requested process and
+was exactly equivalent. The 100-series command completed in 11.2 seconds and
+wrote nothing.
+
+The worker curve establishes useful parallel scaling, but it does not admit the
+full run. Compute grows approximately with the placed-trade population. A
+straight placement-count extrapolation from 71 series to legacy run 99585's
+10,493 placement series is roughly three hours for one 1,000-member control at
+the observed four-worker throughput, before allowing for a different trade mix.
+The child-RSS increase also cannot be assumed to remain below the 8 GiB budget.
+This is an intentionally conservative projection, not an outcome or an ETA
+claim. The next scale task is to stop copying the immutable collector into each
+spawned child and profile/vectorize the per-member placement/equity walk before
+attempting the full production pilot.
+
 The plan query reads series metadata only, selects five evenly spaced bar-count
 strata and hashes their IDs, counts and date bounds. The measured invocation is
 read-only, refuses a changed digest or more than 100,000 declared bars before a
