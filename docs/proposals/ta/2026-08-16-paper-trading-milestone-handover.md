@@ -19,13 +19,13 @@ claim is valid until the ordered research gates below complete.
 | Causal metric-axis correction | `fix/2697-metric-axis-integrity` / `7b87e567d90707fe41d8ae3ee0577c887f1e3f56` | #2757, base `main` | Pushed, clean, draft; hosted CI green; hosted review skipped because draft |
 | Recovered MT-1 and operator paper lane | `integration/ta-demo-mt1-operator`; implementation baseline `ca1ca82bd7bc00e7fc1d1551ebe42db708884000`, with this handover added at the branch tip | #2771, base `fix/2697-metric-axis-integrity` | Pushed, clean, stacked draft; main-only hosted workflows intentionally do not run on this base |
 
-Do not edit or reload `/Users/lukebradford/Dev/eBull` while the legacy worker
-below is active. It is an exact detached execution tree, not the development
-worktree.
+`/Users/lukebradford/Dev/eBull` remains the exact detached legacy execution
+tree. The oversized worker has been terminated; do not restart its request or
+use that tree for development.
 
-## In-flight exact legacy run
+## Terminated exact legacy run
 
-- PID: `81457`
+- former PID: `81457` (confirmed absent after exact-PID terminate)
 - command: `/Users/lukebradford/Dev/eBull/.venv/bin/python3 -m app.jobs`
 - detached head: `ef206555d05acf44750a79c35e02513f04c4885d`
 - job run: `99585`
@@ -36,46 +36,58 @@ worktree.
   {"control": {}, "params": {"synthetic_control": true, "trial_register_version": "trial-register-2026-08-15-r6"}}
   ```
 
-This is a long single-process legacy computation. Repeated narration adds no
-evidence. On resume, check the PID once. If it is still active and compute-bound,
-leave it alone and wait outside the coding loop. Do not query result, progress,
-metric, trade, comparator, bootstrap, deflation, or synthetic-control values.
+The operator approved termination on 2026-08-16 after a bounded operational
+audit projected an order-of-weeks completion time and found no usable progress
+telemetry. The durable terminate request was recorded, request `408` was
+rejected before restart, and only the jobs daemon was restarted. Run `99585`
+was reaped to `failure`; its automatic retry was cleared (`next_retry_at` is
+null), no later `strategy_backtest_run` was created, and the old worker ignored
+`SIGTERM` before the two exact orphan PIDs were killed. The stop row is closed
+with `observed_at` null, preserving the external-termination audit sentinel.
 
-After process exit, the **first result-related command** must be run from the
-metric-axis worktree:
+The structural auditor was then run from the metric-axis worktree:
 
 ```bash
 cd /Users/lukebradford/Dev/.ebull-ui
 uv run python -m scripts.audit_2697_legacy_metric_axis --run-id 99585
 ```
 
-The auditor must prove all of the following before any performance value is
-read: exact run/request/payload provenance, atomic success, the complete declared
-40-row identity population, no invented metric-axis fields, and current
-promotion refusal `metric_axis_unproven`. Any failure stops the sequence.
+It exited `2` at the terminal-failure guard and did not read result rows. The
+legacy structural audit and the full old/new A/B therefore remain unfulfilled.
+Do not relaunch either full-population run until #2772's observability,
+multi-size scale benchmark, launch-budget refusal, and optimized/reference
+differential gates pass. The legacy log exposure already recorded on #2697
+also means run `99585` could not have supported blind interpretation.
 
 ## Ordered #2757 completion
 
 1. Confirm `.ebull-ui` is clean and still exactly at `7b87e567d90707fe41d8ae3ee0577c887f1e3f56`.
-2. Pass the legacy structural audit above without reading performance.
-3. Run the full-population old/new A/B with output redirected, for example:
+2. Complete #2772: outcome-free progress/ETA, fixed multi-size scale benchmark,
+   declared runtime/memory launch budget, digest-bound reusable compute layout,
+   and differential equivalence to the slow reference engine.
+3. Validate fixtures, then a fixed wiring smoke, then the scale curve. Stop at
+   the first correctness or budget failure; any outcome-informed adjustment is
+   a new declared trial/version.
+4. Launch a new exact legacy structural run only if the measured projection is
+   inside budget, then pass its structural audit without reading performance.
+5. Run the full-population old/new A/B with output redirected, for example:
 
    ```bash
    uv run python -m scripts.verify_2697_metric_axis_ab \
      > /tmp/ebull-2697-metric-axis-ab-7b87e567.jsonl
    ```
 
-4. Before reading that output, run its structural auditor:
+6. Before reading that output, run its structural auditor:
 
    ```bash
    uv run python -m scripts.audit_2697_metric_axis_ab \
      /tmp/ebull-2697-metric-axis-ab-7b87e567.jsonl
    ```
 
-5. Require the declared current and legacy populations, sealed in-sample
+7. Require the declared current and legacy populations, sealed in-sample
    corpus/regime window, and final exact-head/clean-tree recheck.
-6. Only after the structural audit passes may the A/B values be interpreted.
-7. Update #2697 and #2757 with exact evidence, mark #2757 ready, wait for the
+8. Only after the structural audit passes may the A/B values be interpreted.
+9. Update #2697 and #2757 with exact evidence, mark #2757 ready, wait for the
    hosted implementation review, address every substantive response, rerun the
    final-SHA gates, and merge only when review and evidence are clean.
 
@@ -137,6 +149,7 @@ The stacked integration provides:
 | Ticket | Remaining disposition |
 | --- | --- |
 | #2697 | Close only through reviewed and merged #2757 after legacy audit and exact-head A/B |
+| #2772 | Blocking #2697 full-population relaunch: implement observability, scale gate, compute-layout optimization, and differential proof |
 | #2766 | Implemented in #2771; close only after final-base review verifies first paper enable and independent master switch |
 | #2767 | Implemented in #2771; close only after final-base worker-capacity verification |
 | #2768 | Implemented in #2771; close only after final-base real-Postgres lifecycle acceptance |
