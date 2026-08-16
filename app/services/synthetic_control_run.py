@@ -107,11 +107,13 @@ import sys
 import time
 from array import array
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date
 from multiprocessing import get_context
+from multiprocessing.shared_memory import SharedMemory
 from typing import Final, Protocol
 
 import numpy as np
@@ -169,14 +171,15 @@ HOLDOUT_CONTROL_REASON: Final = (
 #: than assuming one.
 _HALF_SPREAD: Final = float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)
 
-#: A resource bound, not an estimator parameter. Four workers leave CPU capacity
-#: for the jobs daemon and bound the number of simultaneously materialised
+#: A resource bound, not an estimator parameter. Eight workers leave two physical
+#: cores on the ten-core development host for the jobs daemon. Collector arrays
+#: are attached through shared memory, so workers materialise only their own
 #: member books. ``spawn`` is load-bearing: the job is invoked from a
 #: ThreadPoolExecutor and forking a multithreaded process would inherit psycopg
 #: connections and locks in an undefined state. Each child receives the
 #: collector once in its initializer; member tasks carry only their integer
 #: index, so the large placement arrays are never pickled 1,000 times.
-SYNTHETIC_CONTROL_MAX_WORKERS: Final = 4
+SYNTHETIC_CONTROL_MAX_WORKERS: Final = 8
 
 #: A production cohort must prove its own scale before the spawned pool is
 #: allowed to fan out.  The pilot consumes the exact first member indices, so
@@ -185,8 +188,13 @@ SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS: Final = 3
 SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR: Final = 1.5
 SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = 15 * 60.0
 SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S: Final = 4 * 60 * 60.0
-SYNTHETIC_CONTROL_WORKER_CANARY_MEMBERS: Final = 4
-SYNTHETIC_CONTROL_WORKER_CANARY_COUNTS: Final = (1, 2, 4)
+SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES: Final = 8 * 1024**3
+# Measured spawned workers are ~80-106 MiB before a large member book. Keep a
+# 128 MiB allowance per child rather than treating a zero-size pilot delta as a
+# zero-cost interpreter.
+SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES: Final = 128 * 1024**2
+SYNTHETIC_CONTROL_WORKER_CANARY_MEMBERS: Final = 8
+SYNTHETIC_CONTROL_WORKER_CANARY_COUNTS: Final = (1, 2, 4, 8)
 
 
 class ScaleBudgetExceeded(RuntimeError):
@@ -234,6 +242,7 @@ class WorkerCanaryTrial:
     parent_peak_rss_bytes: int
     max_child_peak_rss_bytes: int
     aggregate_peak_rss_bytes: int
+    aggregate_unique_peak_bound_bytes: int
     exact_equivalent: bool
 
 
@@ -244,6 +253,8 @@ class WorkerCanaryReport:
     member_indices: tuple[int, ...]
     placement_series: int
     trades_per_member: int
+    shared_input_bytes: int
+    shared_preparation_s: float
     trials: tuple[WorkerCanaryTrial, ...]
     stopped_before_full_cohort: bool = True
 
@@ -254,9 +265,10 @@ class SyntheticControlScaleBudget:
 
     max_cohort_s: float = SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S
     max_run_s: float = SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S
+    max_memory_bytes: int = SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES
     projected_run_s: float = 0.0
 
-    def reserve(self, *, label: str, projected_s: float) -> None:
+    def reserve(self, *, label: str, projected_s: float, projected_memory_bytes: int = 0) -> None:
         if projected_s > self.max_cohort_s:
             raise ScaleBudgetExceeded(
                 f"synthetic-control scale gate refused {label}: projected cohort wall time "
@@ -267,6 +279,11 @@ class SyntheticControlScaleBudget:
             raise ScaleBudgetExceeded(
                 f"synthetic-control scale gate refused {label}: cumulative projected run wall time "
                 f"{projected_run_s:.1f}s exceeds {self.max_run_s:.1f}s budget"
+            )
+        if projected_memory_bytes > self.max_memory_bytes:
+            raise ScaleBudgetExceeded(
+                f"synthetic-control scale gate refused {label}: projected unique-memory upper bound "
+                f"{projected_memory_bytes:,} bytes exceeds {self.max_memory_bytes:,} byte budget"
             )
         self.projected_run_s = projected_run_s
 
@@ -671,6 +688,127 @@ class _MemberInputs:
 
 
 _WORKER_INPUTS: _MemberInputs | None = None
+_WORKER_SHARED_HANDLES: tuple[SharedMemory, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PlacementSlice:
+    panel_start: int
+    panel_size: int
+    holds_start: int
+    holds_size: int
+    marks_start: int
+    marks_size: int
+    marks_first: int
+
+
+@dataclass(frozen=True)
+class _SharedMemberInputs:
+    """Names and offsets only; spawned workers attach instead of unpickling arrays."""
+
+    panel_name: str
+    panel_size: int
+    adjusted_open_name: str
+    adjusted_open_size: int
+    holds_name: str
+    holds_size: int
+    marks_name: str
+    marks_size: int
+    placements: tuple[_PlacementSlice, ...]
+    axis: tuple[date, ...]
+    benchmark: DatedEquityCurve | None
+    expected_trade_count: int
+    shared_input_bytes: int
+
+
+def _copy_to_shared(values: npt.NDArray[np.generic]) -> SharedMemory:
+    if values.nbytes < 1:
+        raise ValueError("a shared synthetic-control input cannot be empty")
+    shared = SharedMemory(create=True, size=values.nbytes)
+    np.ndarray(values.shape, dtype=values.dtype, buffer=shared.buf)[:] = values
+    return shared
+
+
+@contextmanager
+def _shared_member_inputs(inputs: _MemberInputs) -> Iterator[_SharedMemberInputs]:
+    """Pack four contiguous immutable arrays and release them after the pool."""
+    panel = np.concatenate([placement.panel for placement in inputs.placements]).astype(np.int64, copy=False)
+    adjusted = np.concatenate([placement.adjusted_open for placement in inputs.placements]).astype(
+        np.float64, copy=False
+    )
+    holds = np.concatenate([placement.holds for placement in inputs.placements]).astype(np.int64, copy=False)
+    marks = np.concatenate([placement.marks for placement in inputs.placements]).astype(np.float64, copy=False)
+    shared_handles: list[SharedMemory] = []
+    try:
+        for values in (panel, adjusted, holds, marks):
+            shared_handles.append(_copy_to_shared(values))
+        panel_cursor = holds_cursor = marks_cursor = 0
+        slices: list[_PlacementSlice] = []
+        for placement in inputs.placements:
+            slices.append(
+                _PlacementSlice(
+                    panel_start=panel_cursor,
+                    panel_size=int(placement.panel.size),
+                    holds_start=holds_cursor,
+                    holds_size=int(placement.holds.size),
+                    marks_start=marks_cursor,
+                    marks_size=int(placement.marks.size),
+                    marks_first=placement.marks_first,
+                )
+            )
+            panel_cursor += int(placement.panel.size)
+            holds_cursor += int(placement.holds.size)
+            marks_cursor += int(placement.marks.size)
+        yield _SharedMemberInputs(
+            panel_name=shared_handles[0].name,
+            panel_size=int(panel.size),
+            adjusted_open_name=shared_handles[1].name,
+            adjusted_open_size=int(adjusted.size),
+            holds_name=shared_handles[2].name,
+            holds_size=int(holds.size),
+            marks_name=shared_handles[3].name,
+            marks_size=int(marks.size),
+            placements=tuple(slices),
+            axis=inputs.axis,
+            benchmark=inputs.benchmark,
+            expected_trade_count=inputs.expected_trade_count,
+            shared_input_bytes=sum(handle.size for handle in shared_handles),
+        )
+    finally:
+        for shared in shared_handles:
+            shared.close()
+            shared.unlink()
+
+
+def _attach_shared_member_inputs(shared: _SharedMemberInputs) -> _MemberInputs:
+    global _WORKER_SHARED_HANDLES
+    handles = tuple(
+        SharedMemory(name=name, track=False)
+        for name in (shared.panel_name, shared.adjusted_open_name, shared.holds_name, shared.marks_name)
+    )
+    _WORKER_SHARED_HANDLES = handles
+    panel = np.ndarray((shared.panel_size,), dtype=np.int64, buffer=handles[0].buf)
+    adjusted = np.ndarray((shared.adjusted_open_size,), dtype=np.float64, buffer=handles[1].buf)
+    holds = np.ndarray((shared.holds_size,), dtype=np.int64, buffer=handles[2].buf)
+    marks = np.ndarray((shared.marks_size,), dtype=np.float64, buffer=handles[3].buf)
+    for values in (panel, adjusted, holds, marks):
+        values.setflags(write=False)
+    placements = tuple(
+        SeriesPlacement(
+            panel=panel[item.panel_start : item.panel_start + item.panel_size],
+            adjusted_open=adjusted[item.panel_start : item.panel_start + item.panel_size],
+            holds=holds[item.holds_start : item.holds_start + item.holds_size],
+            marks=marks[item.marks_start : item.marks_start + item.marks_size],
+            marks_first=item.marks_first,
+        )
+        for item in shared.placements
+    )
+    return _MemberInputs(
+        placements=placements,
+        axis=shared.axis,
+        benchmark=shared.benchmark,
+        expected_trade_count=shared.expected_trade_count,
+    )
 
 
 class _Barrier(Protocol):
@@ -689,13 +827,13 @@ class _WorkerCanarySample:
     peak_rss_bytes: int
 
 
-def _initialise_member_worker(inputs: _MemberInputs) -> None:
-    """Install the large collector payload once, never once per member."""
+def _initialise_member_worker(inputs: _SharedMemberInputs) -> None:
+    """Attach the immutable collector once; no placement array is unpickled."""
     global _WORKER_INPUTS
-    _WORKER_INPUTS = inputs
+    _WORKER_INPUTS = _attach_shared_member_inputs(inputs)
 
 
-def _initialise_canary_worker(inputs: _MemberInputs, barrier: _Barrier) -> None:
+def _initialise_canary_worker(inputs: _SharedMemberInputs, barrier: _Barrier) -> None:
     global _WORKER_CANARY_BARRIER
     _initialise_member_worker(inputs)
     _WORKER_CANARY_BARRIER = barrier
@@ -799,79 +937,96 @@ def run_worker_canary(
     parent_peak_rss_bytes = _peak_rss_bytes()
     baseline: tuple[MemberOutcome, ...] | None = None
     trials: list[WorkerCanaryTrial] = []
+    shared_started = time.monotonic()
+    with _shared_member_inputs(inputs) as shared:
+        shared_preparation_s = time.monotonic() - shared_started
+        parent_peak_rss_bytes = max(parent_peak_rss_bytes, _peak_rss_bytes())
+        for workers in config.worker_counts:
+            context = get_context("spawn")
+            barrier = context.Barrier(workers)
+            pool_started_ns = time.monotonic_ns()
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=context,
+                initializer=_initialise_canary_worker,
+                initargs=(shared, barrier),
+            ) as pool:
+                pending = {pool.submit(_measure_canary_member_in_worker, index): index for index in indices}
+                samples_by_index: dict[int, _WorkerCanarySample] = {}
+                try:
+                    for future in as_completed(pending):
+                        index = pending[future]
+                        sample = future.result()
+                        if sample.outcome.index != index:
+                            raise RuntimeError(
+                                f"worker canary task {index} returned member {sample.outcome.index}; identity moved"
+                            )
+                        samples_by_index[index] = sample
+                except BaseException:
+                    for future in pending:
+                        future.cancel()
+                    raise
+            total_wall_s = (time.monotonic_ns() - pool_started_ns) / 1_000_000_000.0
+            if set(samples_by_index) != set(indices):
+                raise RuntimeError("worker canary returned an incomplete fixed member set")
+            samples = tuple(samples_by_index[index] for index in indices)
+            pids = {sample.pid for sample in samples}
+            if len(pids) != workers:
+                raise RuntimeError(f"worker canary requested {workers} spawned workers but observed {len(pids)}")
 
-    for workers in config.worker_counts:
-        context = get_context("spawn")
-        barrier = context.Barrier(workers)
-        pool_started_ns = time.monotonic_ns()
-        with ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=context,
-            initializer=_initialise_canary_worker,
-            initargs=(inputs, barrier),
-        ) as pool:
-            pending = {pool.submit(_measure_canary_member_in_worker, index): index for index in indices}
-            samples_by_index: dict[int, _WorkerCanarySample] = {}
-            try:
-                for future in as_completed(pending):
-                    index = pending[future]
-                    sample = future.result()
-                    if sample.outcome.index != index:
-                        raise RuntimeError(
-                            f"worker canary task {index} returned member {sample.outcome.index}; identity moved"
-                        )
-                    samples_by_index[index] = sample
-            except BaseException:
-                for future in pending:
-                    future.cancel()
-                raise
-        total_wall_s = (time.monotonic_ns() - pool_started_ns) / 1_000_000_000.0
-        if set(samples_by_index) != set(indices):
-            raise RuntimeError("worker canary returned an incomplete fixed member set")
-        samples = tuple(samples_by_index[index] for index in indices)
-        pids = {sample.pid for sample in samples}
-        if len(pids) != workers:
-            raise RuntimeError(f"worker canary requested {workers} spawned workers but observed {len(pids)}")
+            outcomes = tuple(sample.outcome for sample in samples)
+            if baseline is None:
+                baseline = outcomes
+            exact_equivalent = outcomes == baseline
+            if not exact_equivalent:
+                raise RuntimeError(f"worker canary changed a member outcome at {workers} workers")
 
-        outcomes = tuple(sample.outcome for sample in samples)
-        if baseline is None:
-            baseline = outcomes
-        exact_equivalent = outcomes == baseline
-        if not exact_equivalent:
-            raise RuntimeError(f"worker canary changed a member outcome at {workers} workers")
-
-        first_measure_ns = min(sample.measure_started_ns for sample in samples)
-        final_measure_ns = max(
-            sample.measure_started_ns + round(sample.measure_elapsed_s * 1_000_000_000) for sample in samples
-        )
-        member_wall_s = max((final_measure_ns - first_measure_ns) / 1_000_000_000.0, 1e-12)
-        child_peak_by_pid = {pid: max(sample.peak_rss_bytes for sample in samples if sample.pid == pid) for pid in pids}
-        max_child_peak_rss_bytes = max(child_peak_by_pid.values())
-        aggregate_peak_rss_bytes = parent_peak_rss_bytes + sum(child_peak_by_pid.values())
-        trial = WorkerCanaryTrial(
-            workers=workers,
-            member_count=config.member_count,
-            distinct_worker_pids=len(pids),
-            startup_and_transfer_s=max((first_measure_ns - pool_started_ns) / 1_000_000_000.0, 0.0),
-            member_wall_s=member_wall_s,
-            total_wall_s=total_wall_s,
-            members_per_s=config.member_count / member_wall_s,
-            parent_peak_rss_bytes=parent_peak_rss_bytes,
-            max_child_peak_rss_bytes=max_child_peak_rss_bytes,
-            aggregate_peak_rss_bytes=aggregate_peak_rss_bytes,
-            exact_equivalent=True,
-        )
-        if aggregate_peak_rss_bytes > config.max_aggregate_peak_rss_bytes:
-            raise WorkerCanaryBudgetExceeded(
-                f"synthetic-control worker canary refused {workers} workers: aggregate peak RSS "
-                f"{aggregate_peak_rss_bytes:,} bytes exceeds {config.max_aggregate_peak_rss_bytes:,} byte budget"
+            first_measure_ns = min(sample.measure_started_ns for sample in samples)
+            final_measure_ns = max(
+                sample.measure_started_ns + round(sample.measure_elapsed_s * 1_000_000_000) for sample in samples
             )
-        trials.append(trial)
+            member_wall_s = max((final_measure_ns - first_measure_ns) / 1_000_000_000.0, 1e-12)
+            child_peak_by_pid = {
+                pid: max(sample.peak_rss_bytes for sample in samples if sample.pid == pid) for pid in pids
+            }
+            max_child_peak_rss_bytes = max(child_peak_by_pid.values())
+            aggregate_peak_rss_bytes = parent_peak_rss_bytes + sum(child_peak_by_pid.values())
+            # RSS counts the same shared pages once per process. This upper bound
+            # removes only those known duplicate mappings and retains every
+            # private byte plus one full copy of the shared input.
+            aggregate_unique_peak_bound_bytes = (
+                parent_peak_rss_bytes
+                + shared.shared_input_bytes
+                + sum(max(peak - shared.shared_input_bytes, 0) for peak in child_peak_by_pid.values())
+            )
+            trial = WorkerCanaryTrial(
+                workers=workers,
+                member_count=config.member_count,
+                distinct_worker_pids=len(pids),
+                startup_and_transfer_s=max((first_measure_ns - pool_started_ns) / 1_000_000_000.0, 0.0),
+                member_wall_s=member_wall_s,
+                total_wall_s=total_wall_s,
+                members_per_s=config.member_count / member_wall_s,
+                parent_peak_rss_bytes=parent_peak_rss_bytes,
+                max_child_peak_rss_bytes=max_child_peak_rss_bytes,
+                aggregate_peak_rss_bytes=aggregate_peak_rss_bytes,
+                aggregate_unique_peak_bound_bytes=aggregate_unique_peak_bound_bytes,
+                exact_equivalent=True,
+            )
+            if aggregate_unique_peak_bound_bytes > config.max_aggregate_peak_rss_bytes:
+                raise WorkerCanaryBudgetExceeded(
+                    f"synthetic-control worker canary refused {workers} workers: aggregate unique-memory upper bound "
+                    f"{aggregate_unique_peak_bound_bytes:,} bytes exceeds "
+                    f"{config.max_aggregate_peak_rss_bytes:,} byte budget"
+                )
+            trials.append(trial)
 
     return WorkerCanaryReport(
         member_indices=indices,
         placement_series=len(collector.placements),
         trades_per_member=collector.matchable_trade_count,
+        shared_input_bytes=shared.shared_input_bytes,
+        shared_preparation_s=shared_preparation_s,
         trials=tuple(trials),
     )
 
@@ -915,6 +1070,7 @@ def _run_members(
     first_parallel_index = 0
     if scale_budget is not None:
         pilot_size = min(SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS, cohort_size)
+        pilot_baseline_rss = _peak_rss_bytes()
         pilot_started = time.monotonic()
         for index in range(pilot_size):
             accept(index, _measure_member(index, inputs))
@@ -923,14 +1079,30 @@ def _run_members(
         projected_s = pilot_elapsed + (
             pilot_elapsed / pilot_size * remaining / max_workers * SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR
         )
-        scale_budget.reserve(label=label, projected_s=projected_s)
+        pilot_peak_rss = _peak_rss_bytes()
+        member_private_peak = max(pilot_peak_rss - pilot_baseline_rss, 0)
+        shared_input_bytes = sum(
+            placement.panel.nbytes + placement.adjusted_open.nbytes + placement.holds.nbytes + placement.marks.nbytes
+            for placement in inputs.placements
+        )
+        projected_memory_bytes = (
+            pilot_peak_rss
+            + shared_input_bytes
+            + max_workers * (SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES + member_private_peak)
+        )
+        scale_budget.reserve(
+            label=label,
+            projected_s=projected_s,
+            projected_memory_bytes=projected_memory_bytes,
+        )
         logger.info(
             "synthetic-control scale gate admitted %s: %d-member pilot %.1fs, projected cohort %.1fs, "
-            "cumulative projected run %.1fs",
+            "projected memory %.2f GiB, cumulative projected run %.1fs",
             label,
             pilot_size,
             pilot_elapsed,
             projected_s,
+            projected_memory_bytes / 1024**3,
             scale_budget.projected_run_s,
         )
         first_parallel_index = pilot_size
@@ -942,23 +1114,24 @@ def _run_members(
         # ⚠ ``spawn`` rather than ``fork``. Production reaches this code from a
         # ThreadPoolExecutor in a process holding psycopg connections and job
         # locks; a fork would clone those unsafe resources into every child.
-        with ProcessPoolExecutor(
-            max_workers=max_workers,
-            mp_context=get_context("spawn"),
-            initializer=_initialise_member_worker,
-            initargs=(inputs,),
-        ) as pool:
-            pending = {
-                pool.submit(_measure_member_in_worker, index): index
-                for index in range(first_parallel_index, cohort_size)
-            }
-            try:
-                for future in as_completed(pending):
-                    accept(pending[future], future.result())
-            except BaseException:
-                for future in pending:
-                    future.cancel()
-                raise
+        with _shared_member_inputs(inputs) as shared:
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=get_context("spawn"),
+                initializer=_initialise_member_worker,
+                initargs=(shared,),
+            ) as pool:
+                pending = {
+                    pool.submit(_measure_member_in_worker, index): index
+                    for index in range(first_parallel_index, cohort_size)
+                }
+                try:
+                    for future in as_completed(pending):
+                        accept(pending[future], future.result())
+                except BaseException:
+                    for future in pending:
+                        future.cancel()
+                    raise
 
     wanted = set(range(cohort_size))
     actual = set(by_index)
@@ -1074,6 +1247,7 @@ __all__ = [
     "PLACEMENT_SPACE_ID",
     "SYNTHETIC_CONTROL_MAX_WORKERS",
     "SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S",
+    "SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES",
     "SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S",
     "SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS",
     "SYNTHETIC_CONTROL_WORKER_CANARY_COUNTS",

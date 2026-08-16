@@ -620,13 +620,13 @@ class TestTheMatchIsExact:
         collector = _collector(exits_on_spike=True)
         report = run_worker_canary(collector, axis=AXIS)
 
-        assert report.member_indices == (0, 1, 2, 3)
+        assert report.member_indices == tuple(range(8))
         assert report.stopped_before_full_cohort is True
         assert report.placement_series == len(collector.placements)
         assert report.trades_per_member == collector.matchable_trade_count
-        assert [trial.workers for trial in report.trials] == [1, 2, 4]
+        assert [trial.workers for trial in report.trials] == [1, 2, 4, 8]
         for trial in report.trials:
-            assert trial.member_count == 4
+            assert trial.member_count == 8
             assert trial.distinct_worker_pids == trial.workers
             assert trial.startup_and_transfer_s > 0.0
             assert trial.member_wall_s > 0.0
@@ -635,14 +635,17 @@ class TestTheMatchIsExact:
             assert trial.parent_peak_rss_bytes > 0
             assert trial.max_child_peak_rss_bytes > 0
             assert trial.aggregate_peak_rss_bytes > trial.max_child_peak_rss_bytes
+            assert trial.aggregate_unique_peak_bound_bytes > trial.max_child_peak_rss_bytes
             assert trial.exact_equivalent is True
+        assert report.shared_input_bytes > 0
+        assert report.shared_preparation_s > 0.0
 
         keys = str(asdict(report)).lower()
         for forbidden in ("sharpe", "return_pct", "drawdown", "profit", "cohort_passed"):
             assert forbidden not in keys
 
     def test_the_worker_canary_memory_budget_fails_closed_after_fixed_work(self) -> None:
-        with pytest.raises(WorkerCanaryBudgetExceeded, match="aggregate peak RSS"):
+        with pytest.raises(WorkerCanaryBudgetExceeded, match="aggregate unique-memory upper bound"):
             run_worker_canary(
                 _collector(exits_on_spike=True),
                 axis=AXIS,
@@ -822,6 +825,12 @@ class TestScaleGate:
         with pytest.raises(ScaleBudgetExceeded, match="cumulative projected run wall time"):
             budget.reserve(label="second", projected_s=6.0)
         assert budget.projected_run_s == 10.0
+
+    def test_the_memory_budget_refuses_before_reserving_any_run_time(self) -> None:
+        budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=100.0, max_memory_bytes=999)
+        with pytest.raises(ScaleBudgetExceeded, match="projected unique-memory upper bound"):
+            budget.reserve(label="too-large", projected_s=10.0, projected_memory_bytes=1_000)
+        assert budget.projected_run_s == 0.0
 
 
 class TestSealedEvaluatorsDeclareTheirControl:

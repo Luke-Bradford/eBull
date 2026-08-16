@@ -452,18 +452,33 @@ def _build_strategy_curve(
     exit_price = np.asarray(book.exit_price, dtype=np.float64)
     half_spread = np.asarray(book.half_spread, dtype=np.float64)
     realised = list(book.realised)
+    # The walk below is scalar and path-dependent. Native Python scalars avoid
+    # constructing millions of NumPy scalar wrappers while preserving the exact
+    # operation order; the arrays above remain the vectorised shape validator.
+    entry_indices: list[int] = entry_index.tolist()
+    exit_indices: list[int] = exit_index.tolist()
+    entry_prices: list[float] = entry_price.tolist()
+    exit_prices: list[float] = exit_price.tolist()
+    half_spreads: list[float] = half_spread.tolist()
+    all_realised = all(realised)
     if isinstance(book, SharedMarkLegBook):
         mark_source = book.mark_source
         marks_by_source = book.marks_by_source
         marks_first_by_source = book.marks_first_by_source
+        mark_sources: list[int] = mark_source.tolist()
+        marks_first_by_leg: list[int] = marks_first_by_source[mark_source].tolist()
         mark_offset = np.empty(0, dtype=np.int64)
         marks = np.empty(0, dtype=np.float64)
+        mark_offsets: list[int] = []
     else:
         mark_source = np.empty(0, dtype=np.int32)
         marks_by_source = ()
         marks_first_by_source = np.empty(0, dtype=np.int64)
+        mark_sources = []
+        marks_first_by_leg = []
         mark_offset = np.asarray(book.mark_offset, dtype=np.int64)
         marks = np.frombuffer(book.marks, dtype=np.float64) if len(book.marks) else np.empty(0, dtype=np.float64)
+        mark_offsets = mark_offset.tolist()
 
     if n_legs and int(exit_index.max()) >= date_count:
         raise ValueError(
@@ -480,16 +495,16 @@ def _build_strategy_curve(
     opening: list[list[int]] = [[] for _ in range(date_count)]
     closing: list[list[int]] = [[] for _ in range(date_count)]
     for leg in range(n_legs):
-        opening[int(entry_index[leg])].append(leg)
-        closing[int(exit_index[leg])].append(leg)
+        opening[entry_indices[leg]].append(leg)
+        closing[exit_indices[leg]].append(leg)
 
     equity_path = np.zeros(date_count, dtype=np.float64)
     invested_path = np.zeros(date_count, dtype=np.float64)
     open_path = np.zeros(date_count, dtype=np.int32)
     traded_path = np.zeros(date_count, dtype=np.float64)
 
-    units = np.zeros(n_legs, dtype=np.float64)
-    last_price = np.zeros(n_legs, dtype=np.float64)
+    units = [0.0] * n_legs
+    last_price = [0.0] * n_legs
 
     cash = starting_equity
     open_legs: list[int] = []
@@ -524,14 +539,19 @@ def _build_strategy_curve(
         # the axis, and it is excluded from the rebalance because there is no
         # bar on which it could be traded.
         closing_now = closing[day]
-        closed_today = [leg for leg in closing_now if realised[leg] and int(entry_index[leg]) < day]
-        same_bar = [leg for leg in closing_now if realised[leg] and int(entry_index[leg]) == day]
-        freezing_today = [leg for leg in closing_now if not realised[leg]]
+        if all_realised:
+            closed_today = [leg for leg in closing_now if entry_indices[leg] < day]
+            same_bar = [leg for leg in closing_now if entry_indices[leg] == day]
+            freezing_today: list[int] = []
+        else:
+            closed_today = [leg for leg in closing_now if realised[leg] and entry_indices[leg] < day]
+            same_bar = [leg for leg in closing_now if realised[leg] and entry_indices[leg] == day]
+            freezing_today = [leg for leg in closing_now if not realised[leg]]
         event = bool(closed_today or opened_today)
 
         # 1. EXITS of positions opened EARLIER, at the stored net fill price.
         for leg in closed_today:
-            proceeds = units[leg] * exit_price[leg]
+            proceeds = units[leg] * exit_prices[leg]
             cash += proceeds
             traded_path[day] += proceeds
             units[leg] = 0.0
@@ -565,10 +585,10 @@ def _build_strategy_curve(
             if allocation < target:
                 short_funded += 1
             if allocation > _MIN_ALLOCATION:
-                units[leg] = allocation / entry_price[leg]
+                units[leg] = allocation / entry_prices[leg]
                 cash -= allocation
                 traded_path[day] += allocation
-            last_price[leg] = entry_price[leg]
+            last_price[leg] = entry_prices[leg]
             open_legs.append(leg)
 
         # 2b. SAME-BAR EXITS, after their own entry. ⚠ These legs never reach
@@ -576,7 +596,7 @@ def _build_strategy_curve(
         #     part in the mark or the rebalance below.
         if same_bar:
             for leg in same_bar:
-                proceeds = units[leg] * exit_price[leg]
+                proceeds = units[leg] * exit_prices[leg]
                 cash += proceeds
                 traded_path[day] += proceeds
                 units[leg] = 0.0
@@ -588,7 +608,7 @@ def _build_strategy_curve(
         #     usable bar opens and freezes on the same date rather than being
         #     frozen before it exists.
         for leg in freezing_today:
-            last_price[leg] = exit_price[leg]
+            last_price[leg] = exit_prices[leg]
             frozen.add(leg)
 
         if scheduled_exposure_by_index is not None and frozen:
@@ -602,20 +622,34 @@ def _build_strategy_curve(
         #    ⚠ A FROZEN leg is skipped: its series has no further bar at all, so
         #    counting each remaining date as a "stale mark" would report the
         #    window's tail as thousands of halts.
-        for leg in open_legs:
-            if leg in frozen:
-                continue
-            if marks_by_source:
-                source = int(mark_source[leg])
-                offset = day - int(marks_first_by_source[source])
-                mark = marks_by_source[source][offset]
-            else:
-                offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))
-                mark = marks[offset]
-            if np.isnan(mark):
-                stale_marks += 1
-            else:
-                last_price[leg] = mark
+        if all_realised:
+            for leg in open_legs:
+                if marks_by_source:
+                    source = mark_sources[leg]
+                    offset = day - marks_first_by_leg[leg]
+                    mark = marks_by_source[source][offset]
+                else:
+                    offset = mark_offsets[leg] + (day - entry_indices[leg])
+                    mark = marks[offset]
+                if np.isnan(mark):
+                    stale_marks += 1
+                else:
+                    last_price[leg] = mark
+        else:
+            for leg in open_legs:
+                if leg in frozen:
+                    continue
+                if marks_by_source:
+                    source = mark_sources[leg]
+                    offset = day - marks_first_by_leg[leg]
+                    mark = marks_by_source[source][offset]
+                else:
+                    offset = mark_offsets[leg] + (day - entry_indices[leg])
+                    mark = marks[offset]
+                if np.isnan(mark):
+                    stale_marks += 1
+                else:
+                    last_price[leg] = mark
 
         # 4. REBALANCE, sells first then buys, capped by cash so it can never
         #    go negative (see SIZING_RULE_ID note 3).
@@ -633,7 +667,7 @@ def _build_strategy_curve(
         #    alternative — dividing total equity by the total count — would set
         #    a target the frozen leg can never move to and force every tradeable
         #    leg to absorb the shortfall, which is a different sizing rule.
-        tradeable = [leg for leg in open_legs if leg not in frozen]
+        tradeable = open_legs if all_realised else [leg for leg in open_legs if leg not in frozen]
         exposure_changes = False
         if scheduled_exposure_by_index is not None and day in scheduled_exposure_by_index:
             exposure_changes = True
@@ -649,7 +683,7 @@ def _build_strategy_curve(
                 value = units[leg] * last_price[leg]
                 if value > target:
                     sold = value - target
-                    charge = sold * half_spread[leg]
+                    charge = sold * half_spreads[leg]
                     cash += sold - charge
                     units[leg] = target / last_price[leg]
                     traded_path[day] += sold
@@ -659,10 +693,10 @@ def _build_strategy_curve(
             for leg in buyers:
                 value = units[leg] * last_price[leg]
                 wanted = target - value
-                spend = min(wanted, cash / (1.0 + half_spread[leg]))
+                spend = min(wanted, cash / (1.0 + half_spreads[leg]))
                 if spend <= 0.0:
                     continue
-                charge = spend * half_spread[leg]
+                charge = spend * half_spreads[leg]
                 cash -= spend + charge
                 units[leg] += spend / last_price[leg]
                 traded_path[day] += spend

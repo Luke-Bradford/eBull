@@ -13,6 +13,7 @@ stop signal. No cohort result is built and no result row is written.
 from __future__ import annotations
 
 import argparse
+import cProfile
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -28,9 +29,16 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.random_entry_cohort import SPEC_COHORT_SIZE
 from app.services.strategies.s1_time_series_momentum import S1_STRATEGY_ID
 from app.services.strategy_manifest import STRATEGY_MANIFEST
-from app.services.synthetic_control_run import CohortCollector, WorkerCanaryReport, run_worker_canary
+from app.services.synthetic_control_run import (
+    CohortCollector,
+    WorkerCanaryReport,
+    _measure_member,
+    _MemberInputs,
+    run_worker_canary,
+)
 
 MAX_CANARY_SERIES = 100
+_PROFILE_OUTPUT: Path | None = None
 
 
 class _CanaryComplete(RuntimeError):
@@ -49,16 +57,29 @@ def _canary_only(
 ) -> None:
     if cohort_size != SPEC_COHORT_SIZE:
         raise RuntimeError(f"production boundary supplied cohort size {cohort_size}, expected {SPEC_COHORT_SIZE}")
+    if _PROFILE_OUTPUT is not None:
+        inputs = _MemberInputs(
+            placements=tuple(collector.placements),
+            axis=tuple(axis),
+            benchmark=benchmark,
+            expected_trade_count=collector.matchable_trade_count,
+        )
+        profiler = cProfile.Profile()
+        profiler.runcall(_measure_member, 0, inputs)
+        profiler.dump_stats(_PROFILE_OUTPUT)
     raise _CanaryComplete(run_worker_canary(collector, axis=axis, benchmark=benchmark))
 
 
 def main() -> int:
+    global _PROFILE_OUTPUT
     parser = argparse.ArgumentParser()
     parser.add_argument("--series-limit", type=int, default=32)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--profile-output", type=Path, help="optional cProfile data for fixed member 0; no outcomes")
     args = parser.parse_args()
     if not 2 <= args.series_limit <= MAX_CANARY_SERIES:
         parser.error(f"--series-limit must be between 2 and {MAX_CANARY_SERIES}")
+    _PROFILE_OUTPUT = args.profile_output
 
     universe = "survivor_only"
     entry = STRATEGY_MANIFEST[S1_STRATEGY_ID]
