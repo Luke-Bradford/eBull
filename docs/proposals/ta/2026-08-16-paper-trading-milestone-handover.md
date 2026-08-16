@@ -17,6 +17,7 @@ claim is valid until the ordered research gates below complete.
 | Purpose | Branch / exact head | PR | State |
 | --- | --- | --- | --- |
 | Causal metric-axis correction | `fix/2697-metric-axis-integrity` / `7b87e567d90707fe41d8ae3ee0577c887f1e3f56` | #2757, base `main` | Pushed, clean, draft; hosted CI green; hosted review skipped because draft |
+| Backtest scale gate and compact synthetic controls | `fix/2772-backtest-scale-gate` / `42def78b2f35490c0a12afc1aaad4e367011253e` | #2773, base `fix/2697-metric-axis-integrity` | Pushed, clean, stacked draft; exact-head local pre-push gate green; main-only hosted workflows intentionally do not run on this base |
 | Recovered MT-1 and operator paper lane | `integration/ta-demo-mt1-operator`; implementation baseline `ca1ca82bd7bc00e7fc1d1551ebe42db708884000`, with this handover added at the branch tip | #2771, base `fix/2697-metric-axis-integrity` | Pushed, clean, stacked draft; main-only hosted workflows intentionally do not run on this base |
 
 `/Users/lukebradford/Dev/eBull` remains the exact detached legacy execution
@@ -59,15 +60,46 @@ multi-size scale benchmark, launch-budget refusal, and optimized/reference
 differential gates pass. The legacy log exposure already recorded on #2697
 also means run `99585` could not have supported blind interpretation.
 
+## #2772 scale-readiness slice
+
+Draft PR #2773 now implements the code-level relaunch guardrails:
+
+- outcome-free global progress records include control and member ordinals,
+  elapsed time, processing rate, and ETA;
+- an exact three-member production pilot is retained in each final cohort and
+  must pass declared per-cohort and cumulative projected-wall budgets before
+  parallel fanout;
+- production synthetic members share immutable mark series instead of copying
+  every leg's complete mark history;
+- the compact and slow reference engines have an exact differential over
+  entries, exits, prices, returns, dates, curve arrays, and counters;
+- a fixed, digest-bound, outcome-free benchmark records wall time, CPU,
+  throughput, peak RSS, decoded bars, placement size, and reference
+  equivalence without querying the database or exposing strategy outcomes;
+- operational backtest logs have a static guard against outcome terms.
+
+The fixed local benchmark passed exact equivalence at all four declared sizes;
+its largest case measured 131,072 trades per member and three members. This is
+a compute-layout baseline, not a full-corpus forecast or strategy result.
+
+The remaining boundary is an actual exact three-member production pilot over
+the sealed corpus. Repeated strategy-by-strategy PostgreSQL reads and
+Decimal/object reconstruction have not yet been optimized. If that pilot is
+refused by the new budget, first implement a digest-bound columnar snapshot and
+prove `load_arms` equivalence against the current database/reference path. If
+the pilot is admitted, do not add that complexity before measured evidence
+requires it. No full-population run has been launched.
+
 ## Ordered #2757 completion
 
-1. Confirm `.ebull-ui` is clean and still exactly at `7b87e567d90707fe41d8ae3ee0577c887f1e3f56`.
-2. Complete #2772: outcome-free progress/ETA, fixed multi-size scale benchmark,
-   declared runtime/memory launch budget, digest-bound reusable compute layout,
-   and differential equivalence to the slow reference engine.
-3. Validate fixtures, then a fixed wiring smoke, then the scale curve. Stop at
-   the first correctness or budget failure; any outcome-informed adjustment is
-   a new declared trial/version.
+1. Review and merge stacked #2773 onto #2757, preserving exact-head local and
+   hosted gates when its base becomes eligible.
+2. Run the exact three-member production pilot over the sealed corpus. Stop at
+   the first correctness or budget refusal; do not expose outcome values.
+3. If the pilot is refused, implement a digest-bound columnar snapshot and
+   differential proof for `load_arms`, then repeat only the pilot. If it is
+   admitted, retain the existing database path until profiling justifies more
+   complexity. Any outcome-informed adjustment is a new declared trial/version.
 4. Launch a new exact legacy structural run only if the measured projection is
    inside budget, then pass its structural audit without reading performance.
 5. Run the full-population old/new A/B with output redirected, for example:
@@ -130,8 +162,11 @@ The stacked integration provides:
 
 ## Verification already completed
 
-- Both branch heads are clean and pushed.
+- All three branch heads are clean and pushed.
 - #2757 exact-head local pre-push gate and hosted CI are green.
+- #2773 exact-head local pre-push gate is green; its fixed scale benchmark
+  passed exact slow/compact equivalence, and the synthetic/statistics/equity/
+  metric-axis mutation probes caught 7/7, 29/29, and 7/7 mutations respectively.
 - #2757 result-model mutation probe caught 28/28 mutations; its dedicated
   metric-axis probe caught 7/7 structural reverts; 289 global probe anchors pass.
 - Integration whole-repository Ruff, formatting, and Pyright pass.
@@ -149,7 +184,7 @@ The stacked integration provides:
 | Ticket | Remaining disposition |
 | --- | --- |
 | #2697 | Close only through reviewed and merged #2757 after legacy audit and exact-head A/B |
-| #2772 | Blocking #2697 full-population relaunch: implement observability, scale gate, compute-layout optimization, and differential proof |
+| #2772 | Draft #2773 implements observability, compact controls, launch budgets, and exact differential proof; review/merge it, run the exact production pilot, and add a digest-bound columnar snapshot only if that pilot is refused |
 | #2766 | Implemented in #2771; close only after final-base review verifies first paper enable and independent master switch |
 | #2767 | Implemented in #2771; close only after final-base worker-capacity verification |
 | #2768 | Implemented in #2771; close only after final-base real-Postgres lifecycle acceptance |
