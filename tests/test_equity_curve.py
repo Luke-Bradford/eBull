@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from datetime import date
 
+import numpy as np
 import pytest
 
 from app.services.equity_curve import (
@@ -23,6 +24,7 @@ from app.services.equity_curve import (
     MONTH_END_REBALANCE_RULE_ID,
     SIZING_RULE_ID,
     LegBook,
+    SharedMarkLegBook,
     build_buy_and_hold_curve,
     build_capped_target_exposure_curve,
     build_entry_weight_drift_curve,
@@ -76,6 +78,65 @@ def _leg(
         realised=realised,
         marks=marks,
     )
+
+
+def _shared_book(
+    *,
+    entry: int,
+    exit_: int,
+    marks: list[float],
+    marks_first: int = 0,
+) -> SharedMarkLegBook:
+    return SharedMarkLegBook(
+        entry_index=np.asarray([entry], dtype=np.int64),
+        exit_index=np.asarray([exit_], dtype=np.int64),
+        entry_price=np.asarray([10.0], dtype=np.float64),
+        exit_price=np.asarray([12.0], dtype=np.float64),
+        half_spread=np.asarray([0.0], dtype=np.float64),
+        realised=np.asarray([True], dtype=np.bool_),
+        mark_source=np.asarray([0], dtype=np.int32),
+        marks_by_source=(np.asarray(marks, dtype=np.float64),),
+        marks_first_by_source=np.asarray([marks_first], dtype=np.int64),
+    )
+
+
+class TestSharedMarkLegBookValidation:
+    def test_a_leg_cannot_start_before_its_mark_source(self) -> None:
+        with pytest.raises(ValueError, match=r"outside source 0's mark range 1\.\.3"):
+            _shared_book(entry=0, exit_=2, marks=[10.0, 11.0, 12.0], marks_first=1)
+
+    def test_a_leg_cannot_end_after_its_mark_source(self) -> None:
+        with pytest.raises(ValueError, match=r"outside source 0's mark range 1\.\.2"):
+            _shared_book(entry=1, exit_=3, marks=[10.0, 11.0], marks_first=1)
+
+    def test_a_leg_cannot_close_before_it_opens(self) -> None:
+        with pytest.raises(ValueError, match="closes at index 1 before it opens at 2"):
+            _shared_book(entry=2, exit_=1, marks=[10.0, 11.0, 12.0])
+
+    def test_shared_marks_preserve_the_reference_missing_mark_path(self) -> None:
+        reference = LegBook()
+        _leg(
+            reference,
+            entry=0,
+            exit_=2,
+            entry_price=10.0,
+            exit_price=12.0,
+            marks=[10.0, float("nan"), 12.0],
+        )
+        shared = _shared_book(entry=0, exit_=2, marks=[10.0, float("nan"), 12.0])
+
+        reference_curve = build_equity_curve(reference, date_count=3)
+        shared_curve = build_equity_curve(shared, date_count=3)
+
+        assert shared_curve.stale_marks == reference_curve.stale_marks == 1
+        assert shared_curve.rebalance_costs == reference_curve.rebalance_costs
+        assert shared_curve.event_dates == reference_curve.event_dates
+        assert shared_curve.short_funded_entries == reference_curve.short_funded_entries
+        assert shared_curve.unrealised_held == reference_curve.unrealised_held
+        np.testing.assert_array_equal(shared_curve.equity, reference_curve.equity)
+        np.testing.assert_array_equal(shared_curve.invested, reference_curve.invested)
+        np.testing.assert_array_equal(shared_curve.open_count, reference_curve.open_count)
+        np.testing.assert_array_equal(shared_curve.traded_notional, reference_curve.traded_notional)
 
 
 class TestSpecConstants:

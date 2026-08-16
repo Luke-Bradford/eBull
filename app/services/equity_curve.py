@@ -307,6 +307,22 @@ class SharedMarkLegBook:
     marks_first_by_source: npt.NDArray[np.int64]
 
     def __post_init__(self) -> None:
+        for name in (
+            "entry_index",
+            "exit_index",
+            "entry_price",
+            "exit_price",
+            "half_spread",
+            "realised",
+            "mark_source",
+            "marks_first_by_source",
+        ):
+            value = getattr(self, name)
+            if value.ndim != 1:
+                raise ValueError(f"{name} must be one-dimensional, got shape {value.shape}")
+        for source, marks in enumerate(self.marks_by_source):
+            if marks.ndim != 1:
+                raise ValueError(f"mark source {source} must be one-dimensional, got shape {marks.shape}")
         size = int(self.entry_index.size)
         for name in ("exit_index", "entry_price", "exit_price", "half_spread", "realised", "mark_source"):
             actual = int(getattr(self, name).size)
@@ -318,6 +334,33 @@ class SharedMarkLegBook:
             )
         if size and (int(self.mark_source.min()) < 0 or int(self.mark_source.max()) >= len(self.marks_by_source)):
             raise ValueError("a shared-mark leg references a missing mark source")
+        if size and bool(np.any(self.exit_index < self.entry_index)):
+            leg = int(np.flatnonzero(self.exit_index < self.entry_index)[0])
+            raise ValueError(
+                f"shared-mark leg {leg} closes at index {int(self.exit_index[leg])} before it opens at "
+                f"{int(self.entry_index[leg])}"
+            )
+        if size:
+            # Fail at construction rather than allowing NumPy's negative-index
+            # wrap or an IndexError part-way through a multi-million-leg walk.
+            # The flat-mark ``LegBook.add`` validates the equivalent span on
+            # every leg; changing storage layout must not weaken that boundary.
+            source_starts = self.marks_first_by_source[self.mark_source]
+            source_lengths = np.fromiter(
+                (marks.size for marks in self.marks_by_source),
+                dtype=np.int64,
+                count=len(self.marks_by_source),
+            )
+            source_ends = source_starts + source_lengths[self.mark_source]
+            invalid_span = (self.entry_index < source_starts) | (self.exit_index >= source_ends)
+            if bool(np.any(invalid_span)):
+                leg = int(np.flatnonzero(invalid_span)[0])
+                source = int(self.mark_source[leg])
+                raise ValueError(
+                    f"shared-mark leg {leg} spans indices {int(self.entry_index[leg])}.."
+                    f"{int(self.exit_index[leg])} outside source {source}'s mark range "
+                    f"{int(source_starts[leg])}..{int(source_ends[leg]) - 1}"
+                )
 
     def __len__(self) -> int:
         return int(self.entry_index.size)

@@ -79,6 +79,32 @@ STATS_TESTS = "tests/test_strategy_statistics.py"
 #: (what the injected defect IS, source file, test file, [(anchor, replacement), ...], -k selector)
 PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
     (
+        # ⚠⚠ NumPy accepts negative indices by wrapping to the end of an array.
+        # Removing this guard therefore does not reliably crash: a compact leg
+        # whose source starts after its entry can consume a plausible but wrong
+        # close from the opposite end of the series.
+        "a compact leg allowed to read outside its shared mark source",
+        CURVE,
+        CURVE_TESTS,
+        [("            if bool(np.any(invalid_span)):", "            if False:")],
+        "test_a_leg_cannot_start_before_its_mark_source or test_a_leg_cannot_end_after_its_mark_source",
+    ),
+    (
+        # The flat LegBook refuses this shape in ``add``. Shared storage must
+        # retain the same boundary rather than letting the opening/closing
+        # buckets process a position backwards.
+        "a compact leg allowed to close before it opens",
+        CURVE,
+        CURVE_TESTS,
+        [
+            (
+                "        if size and bool(np.any(self.exit_index < self.entry_index)):",
+                "        if False:",
+            )
+        ],
+        "test_a_leg_cannot_close_before_it_opens",
+    ),
+    (
         "the sizing rule id renamed without the rule moving",
         CURVE,
         CURVE_TESTS,

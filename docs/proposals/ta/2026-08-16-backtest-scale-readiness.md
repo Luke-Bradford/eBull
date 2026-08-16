@@ -31,6 +31,15 @@ require identical member entries, exits, net prices, trade returns, date lists,
 equity, invested capital, open counts, traded notional and all curve counters.
 Member seeds remain the exact `member_seed(index)` mapping.
 
+Compact storage retains the reference builder's fail-closed span boundary.
+Construction rejects a leg that closes before it opens, starts before its mark
+source, ends after that source, or supplies a non-columnar source. This check is
+required because NumPy accepts a negative index by wrapping to the opposite end
+of the array; relying on the later walker to fail could therefore produce a
+finite but incorrect curve. Adversarial tests cover both bounds and an interior
+missing mark, and the equity/statistics mutation harness proves removal of each
+new guard is observed.
+
 ## Fixed scale curve
 
 Run:
