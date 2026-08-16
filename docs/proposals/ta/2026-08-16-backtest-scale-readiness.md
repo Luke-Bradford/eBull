@@ -138,3 +138,45 @@ A failed correctness or scale gate stops the run. A trigger or strategy change
 after reading an outcome is a new strategy version and declared trial. Full
 historical reruns are event-driven by a frozen strategy, corpus, cost, rule or
 window change; routine monitoring uses incremental forward/shadow/paper ledgers.
+
+## Bounded PostgreSQL and worker canaries
+
+The next launch boundary is split deliberately. `run_worker_canary` executes
+member indices `0..3` in newly spawned 1-, 2- and 4-worker pools, requires every
+requested process to initialise the real collector, measures startup/transfer,
+member wall time and conservative parent-plus-child peak RSS, proves the member
+outcomes are exactly invariant internally, and returns no outcomes. It has no
+full-cohort argument or continuation path and always stops after the fixed work.
+
+The database half is independently reproducible:
+
+```bash
+uv run python -m scripts.verify_2772_research_read_canary --plan
+uv run python -m scripts.verify_2772_research_read_canary \
+  --expected-selection-digest DIGEST \
+  --output /tmp/ebull-2772-read-canary.json
+```
+
+The plan query reads series metadata only, selects five evenly spaced bar-count
+strata and hashes their IDs, counts and date bounds. The measured invocation is
+read-only, refuses a changed digest or more than 100,000 declared bars before a
+bar query, calls `load_arms` once per selected series, and stops. It reports
+query/bar/resource/shape evidence only.
+
+Local baseline on 2026-08-16 against selection digest
+`8ba9077e48f55b2b2129135d12454528ffc88faee3ca7d2797d87f7fcccfabff`:
+
+| corpus series | eligible / fail-closed | selected declared/decoded bars | queries | wall | CPU | process lifetime peak RSS | arm shape |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 30,591 | 30,572 / 19 | 21,470 / 21,470 | 6 | 0.121s | 0.053s | 80,756,736 bytes | identical |
+
+The 19 exclusions have no coverage row for the current quarantine rule set.
+They are not silently treated as clean; they remain a visible coverage-refresh
+gap and decode zero bars until evaluated.
+
+This bounded result says the sampled PostgreSQL fetch and Decimal/object decode
+are not themselves a multi-hour operation. It does **not** extrapolate five
+series to the full strategy matrix or authorize the 1,000-member cohort. The
+remaining measured gate is the fixed worker canary over a real production
+collector; only its 1/2/4-worker time and aggregate-memory curve can decide
+whether the production pilot is safe.

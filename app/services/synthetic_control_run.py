@@ -101,6 +101,9 @@ satisfied by a seed that is the same one next time.
 from __future__ import annotations
 
 import logging
+import os
+import resource
+import sys
 import time
 from array import array
 from collections import Counter
@@ -109,7 +112,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import date
 from multiprocessing import get_context
-from typing import Final
+from typing import Final, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -182,10 +185,67 @@ SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS: Final = 3
 SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR: Final = 1.5
 SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = 15 * 60.0
 SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S: Final = 4 * 60 * 60.0
+SYNTHETIC_CONTROL_WORKER_CANARY_MEMBERS: Final = 4
+SYNTHETIC_CONTROL_WORKER_CANARY_COUNTS: Final = (1, 2, 4)
 
 
 class ScaleBudgetExceeded(RuntimeError):
     """Outcome-free refusal raised before an oversized cohort fans out."""
+
+
+class WorkerCanaryBudgetExceeded(RuntimeError):
+    """Outcome-free refusal raised by the fixed worker canary."""
+
+
+@dataclass(frozen=True)
+class WorkerCanaryConfig:
+    """Fixed work and resource ceiling for a canary that can never fan out."""
+
+    member_count: int = SYNTHETIC_CONTROL_WORKER_CANARY_MEMBERS
+    worker_counts: tuple[int, ...] = SYNTHETIC_CONTROL_WORKER_CANARY_COUNTS
+    max_aggregate_peak_rss_bytes: int = 8 * 1024 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if self.member_count < 1:
+            raise ValueError("worker canary member_count must be positive")
+        if not self.worker_counts or any(count < 1 for count in self.worker_counts):
+            raise ValueError("worker canary counts must be non-empty and positive")
+        if len(set(self.worker_counts)) != len(self.worker_counts):
+            raise ValueError("worker canary counts must be unique")
+        if any(count > SYNTHETIC_CONTROL_MAX_WORKERS for count in self.worker_counts):
+            raise ValueError(f"worker canary cannot exceed the production cap of {SYNTHETIC_CONTROL_MAX_WORKERS}")
+        if any(self.member_count % count != 0 for count in self.worker_counts):
+            raise ValueError("worker canary member_count must divide evenly across every worker count")
+        if self.max_aggregate_peak_rss_bytes < 1:
+            raise ValueError("worker canary RSS budget must be positive")
+
+
+@dataclass(frozen=True)
+class WorkerCanaryTrial:
+    """Outcome-free resource evidence for one spawned worker count."""
+
+    workers: int
+    member_count: int
+    distinct_worker_pids: int
+    startup_and_transfer_s: float
+    member_wall_s: float
+    total_wall_s: float
+    members_per_s: float
+    parent_peak_rss_bytes: int
+    max_child_peak_rss_bytes: int
+    aggregate_peak_rss_bytes: int
+    exact_equivalent: bool
+
+
+@dataclass(frozen=True)
+class WorkerCanaryReport:
+    """A bounded canary report containing resources and structure, never outcomes."""
+
+    member_indices: tuple[int, ...]
+    placement_series: int
+    trades_per_member: int
+    trials: tuple[WorkerCanaryTrial, ...]
+    stopped_before_full_cohort: bool = True
 
 
 @dataclass
@@ -613,16 +673,63 @@ class _MemberInputs:
 _WORKER_INPUTS: _MemberInputs | None = None
 
 
+class _Barrier(Protocol):
+    def wait(self, timeout: float | None = None) -> int: ...
+
+
+_WORKER_CANARY_BARRIER: _Barrier | None = None
+
+
+@dataclass(frozen=True)
+class _WorkerCanarySample:
+    outcome: MemberOutcome
+    pid: int
+    measure_started_ns: int
+    measure_elapsed_s: float
+    peak_rss_bytes: int
+
+
 def _initialise_member_worker(inputs: _MemberInputs) -> None:
     """Install the large collector payload once, never once per member."""
     global _WORKER_INPUTS
     _WORKER_INPUTS = inputs
 
 
+def _initialise_canary_worker(inputs: _MemberInputs, barrier: _Barrier) -> None:
+    global _WORKER_CANARY_BARRIER
+    _initialise_member_worker(inputs)
+    _WORKER_CANARY_BARRIER = barrier
+
+
 def _measure_member_in_worker(index: int) -> MemberOutcome:
     if _WORKER_INPUTS is None:  # pragma: no cover - ProcessPoolExecutor owns initialization
         raise RuntimeError("synthetic-control worker started without member inputs")
     return _measure_member(index, _WORKER_INPUTS)
+
+
+def _peak_rss_bytes() -> int:
+    """Normalise ``ru_maxrss`` to bytes on macOS and Linux."""
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return value if sys.platform == "darwin" else value * 1024
+
+
+def _measure_canary_member_in_worker(index: int) -> _WorkerCanarySample:
+    if _WORKER_INPUTS is None or _WORKER_CANARY_BARRIER is None:  # pragma: no cover - pool initializer owns it
+        raise RuntimeError("synthetic-control canary worker started without inputs or its barrier")
+    # One task per worker reaches each barrier generation. That forces all
+    # configured children to initialise the collector before any member starts,
+    # so a one-process scheduler cannot masquerade as a four-worker canary.
+    _WORKER_CANARY_BARRIER.wait(timeout=60.0)
+    started_ns = time.monotonic_ns()
+    outcome = _measure_member(index, _WORKER_INPUTS)
+    elapsed_s = (time.monotonic_ns() - started_ns) / 1_000_000_000.0
+    return _WorkerCanarySample(
+        outcome=outcome,
+        pid=os.getpid(),
+        measure_started_ns=started_ns,
+        measure_elapsed_s=elapsed_s,
+        peak_rss_bytes=_peak_rss_bytes(),
+    )
 
 
 def _measure_member(index: int, inputs: _MemberInputs) -> MemberOutcome:
@@ -658,6 +765,114 @@ def _measure_member(index: int, inputs: _MemberInputs) -> MemberOutcome:
         exposure_time_pct=metrics.exposure_time_pct,
         turnover_annualised=metrics.turnover_annualised,
         trade_count=metrics.trade_count,
+    )
+
+
+def run_worker_canary(
+    collector: CohortCollector,
+    *,
+    axis: Sequence[date],
+    benchmark: DatedEquityCurve | None = None,
+    config: WorkerCanaryConfig | None = None,
+) -> WorkerCanaryReport:
+    """Measure fixed spawned pools and stop without constructing a control.
+
+    The same member indices run under each worker count. Outcomes exist only
+    long enough to prove execution equivalence; the returned report exposes no
+    return, Sharpe, pass/fail, or other strategy result. Every pool is newly
+    spawned so ``startup_and_transfer_s`` includes interpreter startup plus the
+    one initializer transfer of the real collector payload.
+
+    This function has no cohort-size argument and no continuation callback. It
+    therefore cannot submit member 4 or transition into the production 1,000.
+    """
+    config = WorkerCanaryConfig() if config is None else config
+    if not collector.placements:
+        raise ValueError("worker canary requires at least one placeable series")
+    indices = tuple(range(config.member_count))
+    inputs = _MemberInputs(
+        placements=tuple(collector.placements),
+        axis=tuple(axis),
+        benchmark=benchmark,
+        expected_trade_count=collector.matchable_trade_count,
+    )
+    parent_peak_rss_bytes = _peak_rss_bytes()
+    baseline: tuple[MemberOutcome, ...] | None = None
+    trials: list[WorkerCanaryTrial] = []
+
+    for workers in config.worker_counts:
+        context = get_context("spawn")
+        barrier = context.Barrier(workers)
+        pool_started_ns = time.monotonic_ns()
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=context,
+            initializer=_initialise_canary_worker,
+            initargs=(inputs, barrier),
+        ) as pool:
+            pending = {pool.submit(_measure_canary_member_in_worker, index): index for index in indices}
+            samples_by_index: dict[int, _WorkerCanarySample] = {}
+            try:
+                for future in as_completed(pending):
+                    index = pending[future]
+                    sample = future.result()
+                    if sample.outcome.index != index:
+                        raise RuntimeError(
+                            f"worker canary task {index} returned member {sample.outcome.index}; identity moved"
+                        )
+                    samples_by_index[index] = sample
+            except BaseException:
+                for future in pending:
+                    future.cancel()
+                raise
+        total_wall_s = (time.monotonic_ns() - pool_started_ns) / 1_000_000_000.0
+        if set(samples_by_index) != set(indices):
+            raise RuntimeError("worker canary returned an incomplete fixed member set")
+        samples = tuple(samples_by_index[index] for index in indices)
+        pids = {sample.pid for sample in samples}
+        if len(pids) != workers:
+            raise RuntimeError(f"worker canary requested {workers} spawned workers but observed {len(pids)}")
+
+        outcomes = tuple(sample.outcome for sample in samples)
+        if baseline is None:
+            baseline = outcomes
+        exact_equivalent = outcomes == baseline
+        if not exact_equivalent:
+            raise RuntimeError(f"worker canary changed a member outcome at {workers} workers")
+
+        first_measure_ns = min(sample.measure_started_ns for sample in samples)
+        final_measure_ns = max(
+            sample.measure_started_ns + round(sample.measure_elapsed_s * 1_000_000_000) for sample in samples
+        )
+        member_wall_s = max((final_measure_ns - first_measure_ns) / 1_000_000_000.0, 1e-12)
+        child_peak_by_pid = {pid: max(sample.peak_rss_bytes for sample in samples if sample.pid == pid) for pid in pids}
+        max_child_peak_rss_bytes = max(child_peak_by_pid.values())
+        aggregate_peak_rss_bytes = parent_peak_rss_bytes + sum(child_peak_by_pid.values())
+        trial = WorkerCanaryTrial(
+            workers=workers,
+            member_count=config.member_count,
+            distinct_worker_pids=len(pids),
+            startup_and_transfer_s=max((first_measure_ns - pool_started_ns) / 1_000_000_000.0, 0.0),
+            member_wall_s=member_wall_s,
+            total_wall_s=total_wall_s,
+            members_per_s=config.member_count / member_wall_s,
+            parent_peak_rss_bytes=parent_peak_rss_bytes,
+            max_child_peak_rss_bytes=max_child_peak_rss_bytes,
+            aggregate_peak_rss_bytes=aggregate_peak_rss_bytes,
+            exact_equivalent=True,
+        )
+        if aggregate_peak_rss_bytes > config.max_aggregate_peak_rss_bytes:
+            raise WorkerCanaryBudgetExceeded(
+                f"synthetic-control worker canary refused {workers} workers: aggregate peak RSS "
+                f"{aggregate_peak_rss_bytes:,} bytes exceeds {config.max_aggregate_peak_rss_bytes:,} byte budget"
+            )
+        trials.append(trial)
+
+    return WorkerCanaryReport(
+        member_indices=indices,
+        placement_series=len(collector.placements),
+        trades_per_member=collector.matchable_trade_count,
+        trials=tuple(trials),
     )
 
 
@@ -861,11 +1076,18 @@ __all__ = [
     "SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S",
     "SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S",
     "SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS",
+    "SYNTHETIC_CONTROL_WORKER_CANARY_COUNTS",
+    "SYNTHETIC_CONTROL_WORKER_CANARY_MEMBERS",
     "CohortCollector",
     "CohortProgressCallback",
     "CohortResult",
     "SeriesPlacement",
     "ScaleBudgetExceeded",
     "SyntheticControlScaleBudget",
+    "WorkerCanaryBudgetExceeded",
+    "WorkerCanaryConfig",
+    "WorkerCanaryReport",
+    "WorkerCanaryTrial",
     "run_cohort",
+    "run_worker_canary",
 ]

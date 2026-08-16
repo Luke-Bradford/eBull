@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from dataclasses import asdict
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -57,7 +58,10 @@ from app.services.synthetic_control_run import (
     CohortCollector,
     ScaleBudgetExceeded,
     SyntheticControlScaleBudget,
+    WorkerCanaryBudgetExceeded,
+    WorkerCanaryConfig,
     run_cohort,
+    run_worker_canary,
 )
 from app.services.technical_analysis import OHLCVRow
 
@@ -611,6 +615,39 @@ class TestTheMatchIsExact:
         assert spawned.control == serial.control
         assert spawned.residual == serial.residual
         assert progress == [(completed, 12) for completed in range(1, 13)]
+
+    def test_the_worker_canary_measures_every_declared_pool_and_stops(self) -> None:
+        collector = _collector(exits_on_spike=True)
+        report = run_worker_canary(collector, axis=AXIS)
+
+        assert report.member_indices == (0, 1, 2, 3)
+        assert report.stopped_before_full_cohort is True
+        assert report.placement_series == len(collector.placements)
+        assert report.trades_per_member == collector.matchable_trade_count
+        assert [trial.workers for trial in report.trials] == [1, 2, 4]
+        for trial in report.trials:
+            assert trial.member_count == 4
+            assert trial.distinct_worker_pids == trial.workers
+            assert trial.startup_and_transfer_s > 0.0
+            assert trial.member_wall_s > 0.0
+            assert trial.total_wall_s >= trial.member_wall_s
+            assert trial.members_per_s > 0.0
+            assert trial.parent_peak_rss_bytes > 0
+            assert trial.max_child_peak_rss_bytes > 0
+            assert trial.aggregate_peak_rss_bytes > trial.max_child_peak_rss_bytes
+            assert trial.exact_equivalent is True
+
+        keys = str(asdict(report)).lower()
+        for forbidden in ("sharpe", "return_pct", "drawdown", "profit", "cohort_passed"):
+            assert forbidden not in keys
+
+    def test_the_worker_canary_memory_budget_fails_closed_after_fixed_work(self) -> None:
+        with pytest.raises(WorkerCanaryBudgetExceeded, match="aggregate peak RSS"):
+            run_worker_canary(
+                _collector(exits_on_spike=True),
+                axis=AXIS,
+                config=WorkerCanaryConfig(member_count=2, worker_counts=(1, 2), max_aggregate_peak_rss_bytes=1),
+            )
 
     def test_compact_shared_marks_are_exactly_equivalent_to_the_reference_book(self) -> None:
         """The optimized layout may remove copies, never change a draw or curve."""
