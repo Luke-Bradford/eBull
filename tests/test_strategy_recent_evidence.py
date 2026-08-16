@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.api.strategies import _evidence_window_counts
-from app.services.backtest_run import BacktestProgressEvent
+from app.services.backtest_run import BacktestProgressEvent, _ControlProgress
 from app.services.position_builder import Window
 from app.services.processes.param_metadata import MANUAL_TRIGGER_JOB_METADATA
 from app.services.strategy_recent_evidence import (
@@ -376,7 +376,68 @@ def test_progress_writer_does_not_claim_window_completion_before_commit() -> Non
         "ambiguity_arm": None,
         "series_seen": 50,
         "series_total": 100,
+        "work_unit": "series",
+        "elapsed_s": 0.0,
+        "rate_per_s": None,
+        "eta_s": None,
+        "control_seen": 0,
+        "control_total": None,
     }
+
+
+def test_progress_writer_publishes_outcome_free_rate_and_eta(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = MagicMock()
+    writer = scheduler._BacktestProgressWriter(  # noqa: SLF001 - payload contract under test
+        conn,
+        run_id=9,
+        total_windows=1,
+        already_complete=0,
+    )
+    writer.start_window("in_sample")
+    clock = iter((100.0, 106.0))
+    monkeypatch.setattr(scheduler.time, "monotonic", lambda: next(clock))
+
+    writer(BacktestProgressEvent(phase="synthetic_control", series_seen=3, series_total=1000))
+    writer(BacktestProgressEvent(phase="synthetic_control", series_seen=15, series_total=1000))
+
+    payload = conn.execute.call_args.args[1]["progress"].obj["active"]
+    assert payload["work_unit"] == "members"
+    assert payload["elapsed_s"] == 6.0
+    assert payload["rate_per_s"] == 2.0
+    assert payload["eta_s"] == 492.5
+    assert not ({"return", "sharpe", "passed", "profit"} & set(payload))
+
+
+def test_global_control_progress_counts_an_arm_once_across_member_ticks() -> None:
+    events: list[BacktestProgressEvent] = []
+    progress = _ControlProgress(events.append, total=40)
+    for seen in (1, 2, 25):
+        progress(
+            BacktestProgressEvent(
+                phase="synthetic_control",
+                strategy_id="s1",
+                quarantine_arm="admitted",
+                ambiguity_arm="worst_case",
+                series_seen=seen,
+                series_total=1000,
+            )
+        )
+    progress(
+        BacktestProgressEvent(
+            phase="synthetic_control",
+            strategy_id="s1",
+            quarantine_arm="admitted",
+            ambiguity_arm="best_case",
+            series_seen=1,
+            series_total=1000,
+        )
+    )
+    assert [(event.control_seen, event.control_total) for event in events] == [
+        (1, 40),
+        (1, 40),
+        (1, 40),
+        (2, 40),
+    ]
 
 
 def test_overview_counts_missing_members_and_empty_runnable_set_without_crashing() -> None:

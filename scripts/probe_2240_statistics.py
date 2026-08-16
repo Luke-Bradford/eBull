@@ -193,28 +193,36 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # ⚠ §3.3's halt. Overwriting the mark with the `nan` fabricates a
         # valuation of nothing, and every arithmetic downstream becomes NaN
         # silently.
-        # ⚠⚠ RE-ANCHORED, AND THE DUPLICATE IS ITS OWN PROBE (#2695). This block
-        # now exists TWICE — in `_build_strategy_curve` and again in
-        # `build_buy_and_hold_curve` — so the bare copy matched twice and proved
-        # nothing. Disambiguated by the frozen-leg `continue` that only the
-        # strategy curve has; the benchmark's copy is probed separately below,
-        # because a mark-carry defect in the BENCHMARK moves
+        # ⚠⚠ RE-ANCHORED TO THE SHARED/FLAT LOOKUP JOIN (#2772). The carry
+        # decision remains common to both strategy representations, while
+        # `build_buy_and_hold_curve` has its own copy and probe below. Anchoring
+        # on the representation join makes this mutation hit the production
+        # strategy walker exactly once rather than one storage branch.
+        # A mark-carry defect in the BENCHMARK moves
         # `return_vs_buy_and_hold_pct` on every result just as surely.
         "a missing bar overwriting the mark with NaN instead of carrying it forward",
         CURVE,
         CURVE_TESTS,
         [
             (
-                "                continue\n"
-                "            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
-                "            mark = marks[offset]\n"
+                "            if marks_by_source:\n"
+                "                source = int(mark_source[leg])\n"
+                "                offset = day - int(marks_first_by_source[source])\n"
+                "                mark = marks_by_source[source][offset]\n"
+                "            else:\n"
+                "                offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
+                "                mark = marks[offset]\n"
                 "            if np.isnan(mark):\n"
                 "                stale_marks += 1\n"
                 "            else:\n"
                 "                last_price[leg] = mark",
-                "                continue\n"
-                "            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
-                "            mark = marks[offset]\n"
+                "            if marks_by_source:\n"
+                "                source = int(mark_source[leg])\n"
+                "                offset = day - int(marks_first_by_source[source])\n"
+                "                mark = marks_by_source[source][offset]\n"
+                "            else:\n"
+                "                offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
+                "                mark = marks[offset]\n"
                 "            last_price[leg] = mark",
             )
         ],

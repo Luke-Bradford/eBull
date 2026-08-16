@@ -38,6 +38,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from app.services import synthetic_control_run
@@ -54,6 +55,8 @@ from app.services.synthetic_control_run import (
     CONTROL_NAMESPACE,
     PLACEMENT_SPACE_ID,
     CohortCollector,
+    ScaleBudgetExceeded,
+    SyntheticControlScaleBudget,
     run_cohort,
 )
 from app.services.technical_analysis import OHLCVRow
@@ -596,6 +599,44 @@ class TestTheMatchIsExact:
         assert spawned.residual == serial.residual
         assert progress == [(completed, 12) for completed in range(1, 13)]
 
+    def test_compact_shared_marks_are_exactly_equivalent_to_the_reference_book(self) -> None:
+        """The optimized layout may remove copies, never change a draw or curve."""
+        collector = _collector(exits_on_spike=True)
+        reference_rng = np.random.Generator(np.random.PCG64(member_seed(7)))
+        compact_rng = np.random.Generator(np.random.PCG64(member_seed(7)))
+        reference, reference_returns, reference_entries, reference_exits = synthetic_control_run._place_member(  # noqa: SLF001
+            reference_rng,
+            collector.placements,
+            axis=AXIS,
+        )
+        compact, compact_returns, compact_entries, compact_exits = (  # noqa: SLF001
+            synthetic_control_run._place_member_compact(
+                compact_rng,
+                collector.placements,
+                axis=AXIS,
+            )
+        )
+
+        np.testing.assert_array_equal(compact.entry_index, reference.entry_index)
+        np.testing.assert_array_equal(compact.exit_index, reference.exit_index)
+        np.testing.assert_array_equal(compact.entry_price, reference.entry_price)
+        np.testing.assert_array_equal(compact.exit_price, reference.exit_price)
+        assert compact_returns == reference_returns
+        assert compact_entries == reference_entries
+        assert compact_exits == reference_exits
+
+        reference_curve = build_equity_curve(reference, date_count=len(AXIS))
+        compact_curve = build_equity_curve(compact, date_count=len(AXIS))
+        assert compact_curve.rebalance_costs == reference_curve.rebalance_costs
+        assert compact_curve.event_dates == reference_curve.event_dates
+        assert compact_curve.short_funded_entries == reference_curve.short_funded_entries
+        assert compact_curve.stale_marks == reference_curve.stale_marks
+        assert compact_curve.unrealised_held == reference_curve.unrealised_held
+        np.testing.assert_array_equal(compact_curve.equity, reference_curve.equity)
+        np.testing.assert_array_equal(compact_curve.invested, reference_curve.invested)
+        np.testing.assert_array_equal(compact_curve.open_count, reference_curve.open_count)
+        np.testing.assert_array_equal(compact_curve.traded_notional, reference_curve.traded_notional)
+
     def test_the_run_offers_no_seed_override(self) -> None:
         """⚠⚠ THE OVERRIDE STAYED DELETED. An earlier draft took a ``root_seed``,
         recorded it on the row and still drew every member from
@@ -705,6 +746,32 @@ class TestRefusals:
         # neither matched nor counted against the in-sample cohort.
         assert collector.placements == []
         assert collector.matchable_trade_count == 0
+
+
+class TestScaleGate:
+    def test_a_production_cohort_refuses_after_the_fixed_pilot_before_fanout(self) -> None:
+        progress: list[tuple[int, int]] = []
+        budget = SyntheticControlScaleBudget(max_cohort_s=0.0, max_run_s=0.0)
+        with pytest.raises(ScaleBudgetExceeded, match="projected cohort wall time"):
+            run_cohort(
+                _collector(exits_on_spike=True),
+                axis=AXIS,
+                strategy_metrics=_sleeve_metrics(exits_on_spike=True),
+                benchmark=None,
+                cohort_size=1000,
+                progress=lambda completed, total: progress.append((completed, total)),
+                scale_budget=budget,
+                label="fixture/admitted",
+            )
+        assert progress == [(1, 1000), (2, 1000), (3, 1000)]
+        assert budget.projected_run_s == 0.0
+
+    def test_the_cumulative_budget_refuses_the_arm_that_would_cross_it(self) -> None:
+        budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=15.0)
+        budget.reserve(label="first", projected_s=10.0)
+        with pytest.raises(ScaleBudgetExceeded, match="cumulative projected run wall time"):
+            budget.reserve(label="second", projected_s=6.0)
+        assert budget.projected_run_s == 10.0
 
 
 class TestSealedEvaluatorsDeclareTheirControl:

@@ -115,7 +115,7 @@ import numpy as np
 import numpy.typing as npt
 
 from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND
-from app.services.equity_curve import LegBook, build_equity_curve
+from app.services.equity_curve import LegBook, SharedMarkLegBook, build_equity_curve
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import Window
 from app.services.position_costing import CostedPosition
@@ -172,6 +172,41 @@ _HALF_SPREAD: Final = float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)
 #: collector once in its initializer; member tasks carry only their integer
 #: index, so the large placement arrays are never pickled 1,000 times.
 SYNTHETIC_CONTROL_MAX_WORKERS: Final = 4
+
+#: A production cohort must prove its own scale before the spawned pool is
+#: allowed to fan out.  The pilot consumes the exact first member indices, so
+#: it is part of the declared cohort rather than a throw-away or a second trial.
+SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS: Final = 3
+SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR: Final = 1.5
+SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = 15 * 60.0
+SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S: Final = 4 * 60 * 60.0
+
+
+class ScaleBudgetExceeded(RuntimeError):
+    """Outcome-free refusal raised before an oversized cohort fans out."""
+
+
+@dataclass
+class SyntheticControlScaleBudget:
+    """Cumulative launch budget shared by every control in one backtest."""
+
+    max_cohort_s: float = SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S
+    max_run_s: float = SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S
+    projected_run_s: float = 0.0
+
+    def reserve(self, *, label: str, projected_s: float) -> None:
+        if projected_s > self.max_cohort_s:
+            raise ScaleBudgetExceeded(
+                f"synthetic-control scale gate refused {label}: projected cohort wall time "
+                f"{projected_s:.1f}s exceeds {self.max_cohort_s:.1f}s budget"
+            )
+        projected_run_s = self.projected_run_s + projected_s
+        if projected_run_s > self.max_run_s:
+            raise ScaleBudgetExceeded(
+                f"synthetic-control scale gate refused {label}: cumulative projected run wall time "
+                f"{projected_run_s:.1f}s exceeds {self.max_run_s:.1f}s budget"
+            )
+        self.projected_run_s = projected_run_s
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +480,8 @@ def run_cohort(
     cohort_size: int = SPEC_COHORT_SIZE,
     progress: CohortProgressCallback | None = None,
     max_workers: int | None = None,
+    scale_budget: SyntheticControlScaleBudget | None = None,
+    label: str = "cohort",
 ) -> CohortResult:
     """Place, price and measure ``cohort_size`` members. Pure; reads no database.
 
@@ -506,7 +543,17 @@ def run_cohort(
         benchmark=benchmark,
         expected_trade_count=expected,
     )
-    frozen = _run_members(inputs, cohort_size=cohort_size, max_workers=workers, progress=progress)
+    production_scale = cohort_size == SPEC_COHORT_SIZE and max_workers is None
+    if production_scale and scale_budget is None:
+        scale_budget = SyntheticControlScaleBudget()
+    frozen = _run_members(
+        inputs,
+        cohort_size=cohort_size,
+        max_workers=workers,
+        progress=progress,
+        scale_budget=scale_budget if production_scale else None,
+        label=label,
+    )
     return CohortResult(
         control=evaluate_control(
             frozen,
@@ -562,7 +609,7 @@ def _measure_member_in_worker(index: int) -> MemberOutcome:
 def _measure_member(index: int, inputs: _MemberInputs) -> MemberOutcome:
     """One index-keyed draw through the unchanged placement/curve/metric path."""
     rng = np.random.Generator(np.random.PCG64(member_seed(index)))
-    book, returns, entry_dates, exit_dates = _place_member(rng, inputs.placements, axis=inputs.axis)
+    book, returns, entry_dates, exit_dates = _place_member_compact(rng, inputs.placements, axis=inputs.axis)
     if len(book) != inputs.expected_trade_count:
         # ⚠ EQUALITY, per member. The permutation preserves the trade count by
         # construction, so a tolerance would hide exactly the dropped-hold
@@ -601,6 +648,8 @@ def _run_members(
     cohort_size: int,
     max_workers: int,
     progress: CohortProgressCallback | None,
+    scale_budget: SyntheticControlScaleBudget | None = None,
+    label: str = "cohort",
 ) -> tuple[MemberOutcome, ...]:
     """Measure every member and return the canonical ``0..N-1`` ordering.
 
@@ -629,10 +678,33 @@ def _run_members(
             # a member can cross the stale threshold; the DB writer throttles.
             progress(completed, cohort_size)
 
-    if max_workers == 1:
-        for index in range(cohort_size):
+    first_parallel_index = 0
+    if scale_budget is not None:
+        pilot_size = min(SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS, cohort_size)
+        pilot_started = time.monotonic()
+        for index in range(pilot_size):
             accept(index, _measure_member(index, inputs))
-    else:
+        pilot_elapsed = time.monotonic() - pilot_started
+        remaining = cohort_size - pilot_size
+        projected_s = pilot_elapsed + (
+            pilot_elapsed / pilot_size * remaining / max_workers * SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR
+        )
+        scale_budget.reserve(label=label, projected_s=projected_s)
+        logger.info(
+            "synthetic-control scale gate admitted %s: %d-member pilot %.1fs, projected cohort %.1fs, "
+            "cumulative projected run %.1fs",
+            label,
+            pilot_size,
+            pilot_elapsed,
+            projected_s,
+            scale_budget.projected_run_s,
+        )
+        first_parallel_index = pilot_size
+
+    if max_workers == 1:
+        for index in range(first_parallel_index, cohort_size):
+            accept(index, _measure_member(index, inputs))
+    elif first_parallel_index < cohort_size:
         # ⚠ ``spawn`` rather than ``fork``. Production reaches this code from a
         # ThreadPoolExecutor in a process holding psycopg connections and job
         # locks; a fork would clone those unsafe resources into every child.
@@ -642,7 +714,10 @@ def _run_members(
             initializer=_initialise_member_worker,
             initargs=(inputs,),
         ) as pool:
-            pending = {pool.submit(_measure_member_in_worker, index): index for index in range(cohort_size)}
+            pending = {
+                pool.submit(_measure_member_in_worker, index): index
+                for index in range(first_parallel_index, cohort_size)
+            }
             try:
                 for future in as_completed(pending):
                     accept(pending[future], future.result())
@@ -698,14 +773,80 @@ def _place_member(
     return book, returns, entry_dates, exit_dates
 
 
+def _place_member_compact(
+    rng: np.random.Generator,
+    placements: Sequence[SeriesPlacement],
+    *,
+    axis: Sequence[date],
+) -> tuple[SharedMarkLegBook, array[float], list[date], list[date]]:
+    """Place one member without copying a mark span for every selected leg.
+
+    ``_place_member`` remains the deliberately slow reference used by the
+    metric-axis legacy arm and differential tests.  This path changes only the
+    storage layout: entries, exits, prices and member-index seed are identical,
+    while marks point back to the collector's immutable per-series arrays.
+    """
+    size = sum(int(placement.holds.size) for placement in placements)
+    entry_index = np.empty(size, dtype=np.int64)
+    exit_index = np.empty(size, dtype=np.int64)
+    entry_prices = np.empty(size, dtype=np.float64)
+    exit_prices = np.empty(size, dtype=np.float64)
+    mark_source = np.empty(size, dtype=np.int32)
+    returns: array[float] = array("d")
+    entry_dates: list[date] = []
+    exit_dates: list[date] = []
+    cursor = 0
+    for source, placement in enumerate(placements):
+        entries, permuted = place_entries(rng, eligible=int(placement.panel.size), holds=placement.holds)
+        placed = int(entries.size)
+        end = cursor + placed
+        net_entries = net_entry_prices(placement.adjusted_open[entries], np.full(placed, _HALF_SPREAD))
+        exit_slot = entries + permuted
+        net_exits = net_exit_prices(placement.adjusted_open[exit_slot], np.full(placed, _HALF_SPREAD))
+        entry_panel = placement.panel[entries]
+        exit_panel = placement.panel[exit_slot]
+        entry_index[cursor:end] = entry_panel
+        exit_index[cursor:end] = exit_panel
+        entry_prices[cursor:end] = net_entries
+        exit_prices[cursor:end] = net_exits
+        mark_source[cursor:end] = source
+        returns.extend(((net_exits - net_entries) / net_entries * 100.0).tolist())
+        entry_dates.extend(axis[int(index)] for index in entry_panel)
+        exit_dates.extend(axis[int(index)] for index in exit_panel)
+        cursor = end
+    if cursor != size:
+        raise RuntimeError(f"compact member placed {cursor:,} legs against its preallocated {size:,}")
+    return (
+        SharedMarkLegBook(
+            entry_index=entry_index,
+            exit_index=exit_index,
+            entry_price=entry_prices,
+            exit_price=exit_prices,
+            half_spread=np.full(size, _HALF_SPREAD, dtype=np.float64),
+            realised=np.ones(size, dtype=np.bool_),
+            mark_source=mark_source,
+            marks_by_source=tuple(placement.marks for placement in placements),
+            marks_first_by_source=np.asarray([placement.marks_first for placement in placements], dtype=np.int64),
+        ),
+        returns,
+        entry_dates,
+        exit_dates,
+    )
+
+
 __all__ = [
     "CONTROL_NAMESPACE",
     "HOLDOUT_CONTROL_REASON",
     "PLACEMENT_SPACE_ID",
     "SYNTHETIC_CONTROL_MAX_WORKERS",
+    "SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S",
+    "SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S",
+    "SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS",
     "CohortCollector",
     "CohortProgressCallback",
     "CohortResult",
     "SeriesPlacement",
+    "ScaleBudgetExceeded",
+    "SyntheticControlScaleBudget",
     "run_cohort",
 ]

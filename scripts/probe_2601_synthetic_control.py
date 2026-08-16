@@ -4,7 +4,7 @@
 
 Sister to ``scripts/probe_2240_random_entry_cohort.py``, which probes the
 CONSTRUCTION (``random_entry_cohort``). This one probes the ORCHESTRATION — the
-placement space, the total-return carry and the per-member axis — and the five
+placement space, the total-return carry and the compact shared-mark mapping — and the five
 guards in that script's header apply unchanged:
 
 1. ⚠ **Every anchor must occur EXACTLY ONCE**, asserted before the replace. A
@@ -144,20 +144,20 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_a_bar_whose_close_is_missing_is_not_placeable",
     ),
     (
-        # ⚠⚠ THE MEMBER'S OWN AXIS ABANDONED. §5 truncates an equity axis to the
-        # closed span of its own positions, and `_measure_namespace` does that
-        # for the sleeve. A member measured on absolute indices against its own
-        # truncated date count is annualising over a window it did not trade.
-        "the member's legs left on the evaluation axis while its dates are truncated",
+        # ⚠⚠ EVERY COMPACT LEG POINTS AT SERIES ZERO. The optimization is valid
+        # only because it removes duplicate storage while retaining the exact
+        # per-series mark source. A wrong source can still produce finite curves
+        # and therefore needs the reference differential to catch it.
+        "the compact member reads every leg from the first series' marks",
         CONTROL,
         TESTS,
         [
             (
-                "        curve = build_equity_curve(book.rebased(low), date_count=len(dates))",
-                "        curve = build_equity_curve(book, date_count=len(dates))",
+                "        mark_source[cursor:end] = source",
+                "        mark_source[cursor:end] = 0",
             )
         ],
-        "test_every_member_trades_the_strategys_own_position_count",
+        "test_compact_shared_marks_are_exactly_equivalent_to_the_reference_book",
     ),
 ]
 

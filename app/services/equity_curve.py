@@ -286,6 +286,44 @@ class LegBook:
 
 
 @dataclass(frozen=True)
+class SharedMarkLegBook:
+    """Columnar legs whose marks reference immutable per-series arrays.
+
+    Synthetic-control members redraw millions of entries over the same price
+    series.  Flattening each selected leg's mark span into ``LegBook.marks``
+    duplicates the corpus once per member and was the dominant memory cost of
+    full controls.  This representation stores only one source id per leg; the
+    equity walker below remains the single sizing/cost implementation.
+    """
+
+    entry_index: npt.NDArray[np.int64]
+    exit_index: npt.NDArray[np.int64]
+    entry_price: npt.NDArray[np.float64]
+    exit_price: npt.NDArray[np.float64]
+    half_spread: npt.NDArray[np.float64]
+    realised: npt.NDArray[np.bool_]
+    mark_source: npt.NDArray[np.int32]
+    marks_by_source: tuple[npt.NDArray[np.float64], ...]
+    marks_first_by_source: npt.NDArray[np.int64]
+
+    def __post_init__(self) -> None:
+        size = int(self.entry_index.size)
+        for name in ("exit_index", "entry_price", "exit_price", "half_spread", "realised", "mark_source"):
+            actual = int(getattr(self, name).size)
+            if actual != size:
+                raise ValueError(f"{name} has {actual} entries against {size} legs")
+        if int(self.marks_first_by_source.size) != len(self.marks_by_source):
+            raise ValueError(
+                f"{self.marks_first_by_source.size} mark starts against {len(self.marks_by_source)} mark sources"
+            )
+        if size and (int(self.mark_source.min()) < 0 or int(self.mark_source.max()) >= len(self.marks_by_source)):
+            raise ValueError("a shared-mark leg references a missing mark source")
+
+    def __len__(self) -> int:
+        return int(self.entry_index.size)
+
+
+@dataclass(frozen=True)
 class EquityCurve:
     """The daily path, and every narrowing that produced it.
 
@@ -336,7 +374,7 @@ class EquityCurve:
 
 
 def _build_strategy_curve(
-    book: LegBook,
+    book: LegBook | SharedMarkLegBook,
     *,
     date_count: int,
     starting_equity: float = 1.0,
@@ -371,8 +409,18 @@ def _build_strategy_curve(
     exit_price = np.asarray(book.exit_price, dtype=np.float64)
     half_spread = np.asarray(book.half_spread, dtype=np.float64)
     realised = list(book.realised)
-    mark_offset = np.asarray(book.mark_offset, dtype=np.int64)
-    marks = np.frombuffer(book.marks, dtype=np.float64) if len(book.marks) else np.empty(0, dtype=np.float64)
+    if isinstance(book, SharedMarkLegBook):
+        mark_source = book.mark_source
+        marks_by_source = book.marks_by_source
+        marks_first_by_source = book.marks_first_by_source
+        mark_offset = np.empty(0, dtype=np.int64)
+        marks = np.empty(0, dtype=np.float64)
+    else:
+        mark_source = np.empty(0, dtype=np.int32)
+        marks_by_source = ()
+        marks_first_by_source = np.empty(0, dtype=np.int64)
+        mark_offset = np.asarray(book.mark_offset, dtype=np.int64)
+        marks = np.frombuffer(book.marks, dtype=np.float64) if len(book.marks) else np.empty(0, dtype=np.float64)
 
     if n_legs and int(exit_index.max()) >= date_count:
         raise ValueError(
@@ -514,8 +562,13 @@ def _build_strategy_curve(
         for leg in open_legs:
             if leg in frozen:
                 continue
-            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))
-            mark = marks[offset]
+            if marks_by_source:
+                source = int(mark_source[leg])
+                offset = day - int(marks_first_by_source[source])
+                mark = marks_by_source[source][offset]
+            else:
+                offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))
+                mark = marks[offset]
             if np.isnan(mark):
                 stale_marks += 1
             else:
@@ -593,7 +646,7 @@ def _build_strategy_curve(
 
 
 def build_equity_curve(
-    book: LegBook,
+    book: LegBook | SharedMarkLegBook,
     *,
     date_count: int,
     starting_equity: float = 1.0,
@@ -879,6 +932,7 @@ __all__ = [
     "SIZING_RULE_ID",
     "EquityCurve",
     "LegBook",
+    "SharedMarkLegBook",
     "build_buy_and_hold_curve",
     "build_capped_target_exposure_curve",
     "build_entry_weight_drift_curve",
