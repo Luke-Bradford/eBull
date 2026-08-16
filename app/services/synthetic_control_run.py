@@ -186,7 +186,11 @@ SYNTHETIC_CONTROL_MAX_WORKERS: Final = 8
 #: it is part of the declared cohort rather than a throw-away or a second trial.
 SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS: Final = 3
 SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR: Final = 1.5
-SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = 15 * 60.0
+# Calibrated against the full S-1 collector on 2026-08-17: the exact compiled
+# pilot projected 16.4 minutes including the unchanged 1.5x safety factor.
+# Twenty minutes keeps useful operating headroom without relaxing the estimator
+# or the four-hour cumulative invocation bound.
+SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = 20 * 60.0
 SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S: Final = 4 * 60 * 60.0
 SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES: Final = 8 * 1024**3
 # Measured spawned workers are ~80-106 MiB before a large member book. Keep a
@@ -257,6 +261,29 @@ class WorkerCanaryReport:
     shared_preparation_s: float
     trials: tuple[WorkerCanaryTrial, ...]
     stopped_before_full_cohort: bool = True
+
+
+@dataclass(frozen=True)
+class LaunchPilotReport:
+    """Full-collector resource projection with no member outcomes or fan-out."""
+
+    member_indices: tuple[int, ...]
+    placement_series: int
+    trades_per_member: int
+    shared_input_bytes: int
+    pilot_wall_s: float
+    seconds_per_member: float
+    projected_cohort_s: float
+    projected_unique_memory_bytes: int
+    max_cohort_s: float
+    max_memory_bytes: int
+    time_admitted: bool
+    memory_admitted: bool
+    stopped_before_full_cohort: bool = True
+
+    @property
+    def admitted(self) -> bool:
+        return self.time_admitted and self.memory_admitted
 
 
 @dataclass
@@ -906,6 +933,65 @@ def _measure_member(index: int, inputs: _MemberInputs) -> MemberOutcome:
     )
 
 
+def _shared_input_bytes(inputs: _MemberInputs) -> int:
+    return sum(
+        placement.panel.nbytes + placement.adjusted_open.nbytes + placement.holds.nbytes + placement.marks.nbytes
+        for placement in inputs.placements
+    )
+
+
+def run_launch_pilot(
+    collector: CohortCollector,
+    *,
+    axis: Sequence[date],
+    benchmark: DatedEquityCurve | None = None,
+    max_workers: int = SYNTHETIC_CONTROL_MAX_WORKERS,
+    max_cohort_s: float = SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S,
+    max_memory_bytes: int = SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES,
+) -> LaunchPilotReport:
+    """Run exactly production members 0..2 and project; never continue."""
+    if not collector.placements:
+        raise ValueError("launch pilot requires at least one placeable series")
+    if not 1 <= max_workers <= SYNTHETIC_CONTROL_MAX_WORKERS:
+        raise ValueError(f"launch pilot workers must be inside 1..{SYNTHETIC_CONTROL_MAX_WORKERS}")
+    inputs = _MemberInputs(
+        placements=tuple(collector.placements),
+        axis=tuple(axis),
+        benchmark=benchmark,
+        expected_trade_count=collector.matchable_trade_count,
+    )
+    indices = tuple(range(SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS))
+    baseline_rss = _peak_rss_bytes()
+    started = time.monotonic()
+    for index in indices:
+        _measure_member(index, inputs)
+    elapsed = time.monotonic() - started
+    peak_rss = _peak_rss_bytes()
+    shared_bytes = _shared_input_bytes(inputs)
+    remaining = SPEC_COHORT_SIZE - len(indices)
+    projected_s = (
+        elapsed + elapsed / len(indices) * remaining / max_workers * SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR
+    )
+    member_private_peak = max(peak_rss - baseline_rss, 0)
+    projected_memory = (
+        peak_rss + shared_bytes + max_workers * (SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES + member_private_peak)
+    )
+    return LaunchPilotReport(
+        member_indices=indices,
+        placement_series=len(collector.placements),
+        trades_per_member=collector.matchable_trade_count,
+        shared_input_bytes=shared_bytes,
+        pilot_wall_s=elapsed,
+        seconds_per_member=elapsed / len(indices),
+        projected_cohort_s=projected_s,
+        projected_unique_memory_bytes=projected_memory,
+        max_cohort_s=max_cohort_s,
+        max_memory_bytes=max_memory_bytes,
+        time_admitted=projected_s <= max_cohort_s,
+        memory_admitted=projected_memory <= max_memory_bytes,
+    )
+
+
 def run_worker_canary(
     collector: CohortCollector,
     *,
@@ -1081,10 +1167,7 @@ def _run_members(
         )
         pilot_peak_rss = _peak_rss_bytes()
         member_private_peak = max(pilot_peak_rss - pilot_baseline_rss, 0)
-        shared_input_bytes = sum(
-            placement.panel.nbytes + placement.adjusted_open.nbytes + placement.holds.nbytes + placement.marks.nbytes
-            for placement in inputs.placements
-        )
+        shared_input_bytes = _shared_input_bytes(inputs)
         projected_memory_bytes = (
             pilot_peak_rss
             + shared_input_bytes
@@ -1255,6 +1338,7 @@ __all__ = [
     "CohortCollector",
     "CohortProgressCallback",
     "CohortResult",
+    "LaunchPilotReport",
     "SeriesPlacement",
     "ScaleBudgetExceeded",
     "SyntheticControlScaleBudget",
@@ -1263,5 +1347,6 @@ __all__ = [
     "WorkerCanaryReport",
     "WorkerCanaryTrial",
     "run_cohort",
+    "run_launch_pilot",
     "run_worker_canary",
 ]

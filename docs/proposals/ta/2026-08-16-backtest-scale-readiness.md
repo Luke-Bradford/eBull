@@ -10,7 +10,7 @@ cohort; their seeds and outcomes are neither discarded nor redrawn.
 
 The launch is refused when either bound would be crossed:
 
-- one projected cohort: 15 minutes;
+- one projected cohort: 20 minutes;
 - cumulative projected controls in one backtest invocation: four hours.
 
 These are operational resource bounds, not estimator parameters. Refusal
@@ -26,10 +26,19 @@ leg's complete mark history. The old flat-mark `LegBook` path remains the slow
 reference implementation used by the metric-axis legacy arm and differential
 tests.
 
-The optimized and reference layouts share the same equity-curve walker. Tests
-require identical member entries, exits, net prices, trade returns, date lists,
-equity, invested capital, open counts, traded notional and all curve counters.
-Member seeds remain the exact `member_seed(index)` mapping.
+The optimized shared-mark layout uses a Numba-compiled event/mark walker; the
+flat-mark layout remains the independent Python reference. The kernel keeps
+stable leg ordering, sequential floating-point operations and the exact
+exits-before-entries event order; it does not enable `fastmath`. Tests require
+identical member entries, exits, net prices, trade returns, date lists, equity,
+invested capital, open counts, traded notional and all curve counters. Member
+seeds remain the exact `member_seed(index)` mapping.
+
+The immutable collector arrays are packed into four named shared-memory blocks
+and attached read-only by spawned workers. The scale gate counts those blocks
+once, then adds a conservative private-process allowance for every child. This
+avoids repeated pickling and avoids counting the same shared pages once per
+worker when projecting unique memory.
 
 Compact storage retains the reference builder's fail-closed span boundary.
 Construction rejects a leg that closes before it opens, starts before its mark
@@ -99,14 +108,15 @@ stage), decoded bars, placement and trade counts, wall time, CPU time, throughpu
 peak process RSS and reference equivalence. It deliberately contains no return,
 Sharpe, drawdown, profitability or strategy verdict.
 
-Initial local baseline on 2026-08-16 (Apple Silicon development host):
+Current local baseline on 2026-08-17 (Apple Silicon development host, after the
+first-call compiler warm-up):
 
 | case | reference wall | shared-mark wall | exact equivalent |
 | --- | ---: | ---: | --- |
-| wiring | 0.0215s | 0.0008s | yes |
-| small | 0.0119s | 0.0092s | yes |
-| medium | 0.1315s | 0.1018s | yes |
-| scale | 1.0817s | 0.8010s | yes |
+| wiring | 0.0058s | 0.8292s | yes (includes compilation) |
+| small | 0.0105s | 0.0024s | yes |
+| medium | 0.1101s | 0.0171s | yes |
+| scale | 0.9452s | 0.1299s | yes |
 
 The timings establish direction and wiring, not a full-corpus forecast. The
 production pilot measures the actual collector because trade count, holding
@@ -120,9 +130,10 @@ yet eliminate the strategy-by-strategy `research_price_daily` fetch and Decimal
 object reconstruction. A digest-bound Arrow/Parquet or equivalent corpus
 snapshot may remove that repeated read, but it must first be differentially
 proved against `load_arms`; switching numeric representation without that proof
-could change signal thresholds. Until then, the production pilot and cumulative
-budget are the fail-closed boundary: the full run may proceed only if the actual
-work fits, otherwise the snapshot/read-layout work remains required.
+could change signal thresholds. The full S-1 preparation currently takes roughly
+14–16 minutes and is therefore the next reusable-corpus optimization, but it is
+no longer a blocker to the first bounded run. The production pilot and
+cumulative budget remain the fail-closed boundary.
 
 ## Workflow and cadence
 
@@ -142,7 +153,7 @@ window change; routine monitoring uses incremental forward/shadow/paper ledgers.
 ## Bounded PostgreSQL and worker canaries
 
 The next launch boundary is split deliberately. `run_worker_canary` executes
-member indices `0..3` in newly spawned 1-, 2- and 4-worker pools, requires every
+member indices `0..7` in newly spawned 1-, 2-, 4- and 8-worker pools, requires every
 requested process to initialise the real collector, measures startup/transfer,
 member wall time and conservative parent-plus-child peak RSS, proves the member
 outcomes are exactly invariant internally, and returns no outcomes. It has no
@@ -170,7 +181,8 @@ production `run_cohort` boundary, executes the fixed worker canary and raises a
 private completion signal. The process therefore cannot enter the 1,000-member
 cohort or the result writer even when the canary succeeds.
 
-Observed production-collector curve on 2026-08-16:
+Observed production-collector curve before shared memory and compilation on
+2026-08-16:
 
 | admitted cap | placement series | trades/member | workers | member wall | throughput | aggregate peak RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -183,16 +195,21 @@ Every trial used member indices `0..3`, observed every requested process and
 was exactly equivalent. The 100-series command completed in 11.2 seconds and
 wrote nothing.
 
-The worker curve establishes useful parallel scaling, but it does not admit the
-full run. Compute grows approximately with the placed-trade population. A
-straight placement-count extrapolation from 71 series to legacy run 99585's
-10,493 placement series is roughly three hours for one 1,000-member control at
-the observed four-worker throughput, before allowing for a different trade mix.
-The child-RSS increase also cannot be assumed to remain below the 8 GiB budget.
-This is an intentionally conservative projection, not an outcome or an ETA
-claim. The next scale task is to stop copying the immutable collector into each
-spawned child and profile/vectorize the per-member placement/equity walk before
-attempting the full production pilot.
+The full-production launch pilot has now exercised S-1/masked over the complete
+survivorship-free corpus. It performs no worker fan-out and returns no member
+outcomes; the command intercepts the production `run_cohort` boundary and stops
+after exact members `0..2`.
+
+| engine | placement series | trades/member | pilot/member | projected cohort (1.5x) | projected unique memory |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Python reference | 10,492 | 4,227,215 | 28.398s | 5,393.858s (89.9m) | 4,647,837,480 bytes |
+| compiled shared-mark | 10,492 | 4,227,215 | 5.183s | 984.505s (16.4m) | 4,393,377,576 bytes |
+
+The compiled result is an 81.7% reduction in projected cohort time. It admits
+under the calibrated 20-minute cohort and 8 GiB memory ceilings while preserving
+the 1.5x projection safety factor and four-hour cumulative bound. The first
+production invocation remains S-1 only; it is an operational proof before the
+full registered strategy set, not evidence for changing a signal.
 
 The plan query reads series metadata only, selects five evenly spaced bar-count
 strata and hashes their IDs, counts and date bounds. The measured invocation is

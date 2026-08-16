@@ -61,6 +61,7 @@ from app.services.synthetic_control_run import (
     WorkerCanaryBudgetExceeded,
     WorkerCanaryConfig,
     run_cohort,
+    run_launch_pilot,
     run_worker_canary,
 )
 from app.services.technical_analysis import OHLCVRow
@@ -651,6 +652,22 @@ class TestTheMatchIsExact:
                 axis=AXIS,
                 config=WorkerCanaryConfig(member_count=2, worker_counts=(1, 2), max_aggregate_peak_rss_bytes=1),
             )
+
+    def test_the_launch_pilot_runs_only_three_members_and_emits_no_outcomes(self) -> None:
+        collector = _collector(exits_on_spike=True)
+        report = run_launch_pilot(collector, axis=AXIS)
+
+        assert report.member_indices == (0, 1, 2)
+        assert report.stopped_before_full_cohort
+        assert report.placement_series == len(collector.placements)
+        assert report.trades_per_member == collector.matchable_trade_count
+        assert report.shared_input_bytes > 0
+        assert report.pilot_wall_s > 0.0
+        assert report.projected_cohort_s > report.pilot_wall_s
+        assert report.projected_unique_memory_bytes > report.shared_input_bytes
+        keys = str(asdict(report)).lower()
+        for forbidden in ("sharpe", "return_pct", "drawdown", "profit", "cohort_passed"):
+            assert forbidden not in keys
 
     def test_compact_shared_marks_are_exactly_equivalent_to_the_reference_book(self) -> None:
         """The optimized layout may remove copies, never change a draw or curve."""
