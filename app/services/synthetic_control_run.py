@@ -106,7 +106,7 @@ from array import array
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from multiprocessing import get_context
 from typing import Final
@@ -120,10 +120,12 @@ from app.services.indicator_series import BarSeries
 from app.services.position_builder import Window
 from app.services.position_costing import CostedPosition
 from app.services.random_entry_cohort import (
+    MATCH_QUALITY_POLICY_ID,
     SPEC_COHORT_SIZE,
     MatchResidual,
     MemberOutcome,
     SyntheticControl,
+    SyntheticControlMatchQuality,
     evaluate_control,
     match_residual,
     member_seed,
@@ -554,8 +556,18 @@ def run_cohort(
         scale_budget=scale_budget if production_scale else None,
         label=label,
     )
-    return CohortResult(
-        control=evaluate_control(
+    residual = match_residual(
+        frozen,
+        # ⚠ THE MATCHABLE COUNT, not ``metrics.trade_count``. See the header:
+        # the cohort is permuted from the realised, costed, placeable
+        # population, and comparing it against a wider one would report a
+        # residual for a match nobody attempted.
+        strategy_trade_count=expected,
+        strategy_exposure_time_pct=strategy_metrics.exposure_time_pct,
+        strategy_turnover_annualised=strategy_metrics.turnover_annualised,
+    )
+    control = replace(
+        evaluate_control(
             frozen,
             strategy_sharpe=strategy_metrics.sharpe,
             strategy_return_pct=strategy_metrics.total_return_pct,
@@ -563,16 +575,23 @@ def run_cohort(
             # which is ``COHORT_ROOT_SEED``, the same constant ``member_seed``
             # keys on. One root, both uses, no way for them to disagree.
         ),
-        residual=match_residual(
-            frozen,
-            # ⚠ THE MATCHABLE COUNT, not ``metrics.trade_count``. See the header:
-            # the cohort is permuted from the realised, costed, placeable
-            # population, and comparing it against a wider one would report a
-            # residual for a match nobody attempted.
-            strategy_trade_count=expected,
-            strategy_exposure_time_pct=strategy_metrics.exposure_time_pct,
-            strategy_turnover_annualised=strategy_metrics.turnover_annualised,
+        match_quality=SyntheticControlMatchQuality(
+            policy_id=MATCH_QUALITY_POLICY_ID,
+            placement_space_id=PLACEMENT_SPACE_ID,
+            matchable_trade_count=residual.strategy_trade_count,
+            cohort_mean_trade_count=residual.cohort_mean_trade_count,
+            unmatchable_by_reason=dict(collector.unmatchable),
+            no_slack_series=collector.no_slack_series,
+            series_placed=len(collector.placements),
+            strategy_exposure_time_pct=residual.strategy_exposure_time_pct,
+            cohort_mean_exposure_time_pct=residual.cohort_mean_exposure_time_pct,
+            strategy_turnover_annualised=residual.strategy_turnover_annualised,
+            cohort_mean_turnover_annualised=residual.cohort_mean_turnover_annualised,
         ),
+    )
+    return CohortResult(
+        control=control,
+        residual=residual,
         placement_space_id=PLACEMENT_SPACE_ID,
         unmatchable=dict(collector.unmatchable),
         no_slack_series=collector.no_slack_series,

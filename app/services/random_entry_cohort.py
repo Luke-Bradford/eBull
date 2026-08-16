@@ -68,8 +68,10 @@ the Deflated Sharpe.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Final
 
 import numpy as np
@@ -106,6 +108,12 @@ COHORT_ROOT_SEED: Final = 20260808
 #: floor and this matches it so the two intervals in one result are not drawn
 #: from differently-sized bootstraps.
 COHORT_BOOTSTRAP_RESAMPLES: Final = 2000
+
+#: No source fixes a tolerance for §9's requirement that the null be matched on
+#: universe, dates, exposure and turnover.  The durable policy therefore admits
+#: exact structural equality only; a future tolerance is a new named policy,
+#: never a favourable constant slipped into the existing result identity.
+MATCH_QUALITY_POLICY_ID: Final = "synthetic-control-exact-match-v1"
 
 
 def member_seed(index: int) -> np.random.SeedSequence:
@@ -294,6 +302,80 @@ class MatchResidual:
         return self.cohort_mean_turnover_annualised - self.strategy_turnover_annualised
 
 
+@dataclass(frozen=True)
+class SyntheticControlMatchQuality:
+    """Durable structural evidence that the random cohort matches its sleeve."""
+
+    policy_id: str
+    placement_space_id: str
+    matchable_trade_count: int
+    cohort_mean_trade_count: float
+    unmatchable_by_reason: Mapping[str, int]
+    no_slack_series: int
+    series_placed: int
+    strategy_exposure_time_pct: float
+    cohort_mean_exposure_time_pct: float
+    strategy_turnover_annualised: float
+    cohort_mean_turnover_annualised: float
+
+    def __post_init__(self) -> None:
+        if not self.policy_id or not self.placement_space_id:
+            raise ValueError("synthetic-control match policy and placement space are required")
+        for name in ("matchable_trade_count", "no_slack_series", "series_placed"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
+        if self.series_placed < 1:
+            raise ValueError("series_placed must be positive when match evidence exists")
+        numeric_measurements = {
+            "cohort_mean_trade_count": self.cohort_mean_trade_count,
+            "strategy_exposure_time_pct": self.strategy_exposure_time_pct,
+            "cohort_mean_exposure_time_pct": self.cohort_mean_exposure_time_pct,
+            "strategy_turnover_annualised": self.strategy_turnover_annualised,
+            "cohort_mean_turnover_annualised": self.cohort_mean_turnover_annualised,
+        }
+        for name, value in numeric_measurements.items():
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite, got {value}")
+        if self.cohort_mean_trade_count < 0.0:
+            raise ValueError(f"cohort_mean_trade_count must be non-negative, got {self.cohort_mean_trade_count}")
+        if not 0.0 <= self.strategy_exposure_time_pct <= 100.0:
+            raise ValueError(f"strategy exposure is outside [0, 100]: {self.strategy_exposure_time_pct}")
+        if not 0.0 <= self.cohort_mean_exposure_time_pct <= 100.0:
+            raise ValueError(f"cohort exposure is outside [0, 100]: {self.cohort_mean_exposure_time_pct}")
+        if self.strategy_turnover_annualised < 0.0 or self.cohort_mean_turnover_annualised < 0.0:
+            raise ValueError("strategy and cohort turnover must be non-negative")
+        for reason, count in self.unmatchable_by_reason.items():
+            if not reason or count < 1:
+                raise ValueError(f"unmatchable reason/count must be non-empty and positive, got {reason!r}={count}")
+        # The dataclass is frozen, so its nested census must be too: otherwise a
+        # caller could change the promotion verdict after validation.
+        object.__setattr__(self, "unmatchable_by_reason", MappingProxyType(dict(self.unmatchable_by_reason)))
+
+    @property
+    def unmatchable_count(self) -> int:
+        return sum(self.unmatchable_by_reason.values())
+
+    @property
+    def trade_count_matches(self) -> bool:
+        return self.cohort_mean_trade_count == self.matchable_trade_count
+
+    @property
+    def population_matches(self) -> bool:
+        return self.trade_count_matches and self.unmatchable_count == 0 and self.no_slack_series == 0
+
+    @property
+    def exposure_matches(self) -> bool:
+        return self.cohort_mean_exposure_time_pct == self.strategy_exposure_time_pct
+
+    @property
+    def turnover_matches(self) -> bool:
+        return self.cohort_mean_turnover_annualised == self.strategy_turnover_annualised
+
+    @property
+    def passed(self) -> bool:
+        return self.population_matches and self.exposure_matches and self.turnover_matches
+
+
 def percentile_bootstrap_mean(
     values: npt.NDArray[np.float64],
     *,
@@ -390,6 +472,9 @@ class SyntheticControl:
     #: literature uses. See the module header for why it does not gate.
     cohort_return_threshold_pct: float
     strategy_return_pct: float
+    #: Legacy controls predate durable match evidence and read back as ``None``;
+    #: promotion refuses them rather than assuming the omitted residual was safe.
+    match_quality: SyntheticControlMatchQuality | None = None
 
     def __post_init__(self) -> None:
         if self.cohort_size < 1:
@@ -496,12 +581,14 @@ __all__ = [
     "COHORT_BOOTSTRAP_RESAMPLES",
     "COHORT_MODEL_ID",
     "COHORT_ROOT_SEED",
+    "MATCH_QUALITY_POLICY_ID",
     "SPEC_CI_PERCENT",
     "SPEC_COHORT_SIZE",
     "SPEC_SHARPE_PERCENTILE",
     "MatchResidual",
     "MemberOutcome",
     "SyntheticControl",
+    "SyntheticControlMatchQuality",
     "cohort_threshold",
     "decimal_net_prices",
     "evaluate_control",

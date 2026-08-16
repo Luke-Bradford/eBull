@@ -77,7 +77,7 @@ from typing import Final, Literal, cast, get_args
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
-from app.services.random_entry_cohort import SyntheticControl
+from app.services.random_entry_cohort import MATCH_QUALITY_POLICY_ID, SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
 from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION, LEGACY_AMBIGUITY_RULE_VERSION
 from app.services.strategy_promotion_evidence import PromotionEvidence, evidence_refusals
@@ -304,6 +304,11 @@ PromotionRefusal = Literal[
     #: magnitudes, verbatim. So the magnitude refusals here are the spec's, not
     #: invented, and their absence would be the omission.
     "synthetic_control_not_run",
+    "synthetic_control_match_evidence_missing",
+    "synthetic_control_match_policy_unrecognised",
+    "synthetic_control_population_mismatch",
+    "synthetic_control_exposure_mismatch",
+    "synthetic_control_turnover_mismatch",
     "synthetic_control_cohort_shows_edge",
     "synthetic_control_sharpe_below_cohort",
     "promotion_evidence_missing",
@@ -811,6 +816,18 @@ class StrategyResult:
                     f"the synthetic control was evaluated against a total return of {control.strategy_return_pct} "
                     f"but the metric set carries {self.metrics.total_return_pct}"
                 )
+            match = control.match_quality
+            if match is not None:
+                if match.strategy_exposure_time_pct != self.metrics.exposure_time_pct:
+                    raise ValueError(
+                        f"the synthetic match was measured against exposure {match.strategy_exposure_time_pct} "
+                        f"but the metric set carries {self.metrics.exposure_time_pct}"
+                    )
+                if match.strategy_turnover_annualised != self.metrics.turnover_annualised:
+                    raise ValueError(
+                        f"the synthetic match was measured against turnover {match.strategy_turnover_annualised} "
+                        f"but the metric set carries {self.metrics.turnover_annualised}"
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -1102,6 +1119,18 @@ def synthetic_control_promotion_refusals(control: SyntheticControl | None) -> tu
     if control is None:
         return ("synthetic_control_not_run",)
     refusals: list[PromotionRefusal] = []
+    match = control.match_quality
+    if match is None:
+        refusals.append("synthetic_control_match_evidence_missing")
+    else:
+        if match.policy_id != MATCH_QUALITY_POLICY_ID:
+            refusals.append("synthetic_control_match_policy_unrecognised")
+        if not match.population_matches:
+            refusals.append("synthetic_control_population_mismatch")
+        if not match.exposure_matches:
+            refusals.append("synthetic_control_exposure_mismatch")
+        if not match.turnover_matches:
+            refusals.append("synthetic_control_turnover_mismatch")
     if not control.mean_return_ci_contains_zero:
         refusals.append("synthetic_control_cohort_shows_edge")
     if not control.sharpe_exceeds_cohort:

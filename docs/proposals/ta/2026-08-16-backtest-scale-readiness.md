@@ -40,6 +40,41 @@ finite but incorrect curve. Adversarial tests cover both bounds and an interior
 missing mark, and the equity/statistics mutation harness proves removal of each
 new guard is observed.
 
+## Durable match-quality gate
+
+A synthetic-control outcome is not promotion evidence unless the stored row
+also says what population it actually matched. Each new control therefore
+carries a versioned match-quality block containing its placement-space id,
+matchable trade count, cohort mean trade count, reasoned exclusion census,
+no-slack series count, placed-series count, and the strategy/cohort exposure and
+annualised turnover measurements.
+
+`synthetic-control-exact-match-v1` admits exact equality only. No published
+project source defines a favourable tolerance, so adding one later requires a
+new policy id and review rather than changing old verdicts silently. Promotion
+fails closed, with separate reasons, when:
+
+- a legacy control has no durable match evidence;
+- the policy id is unknown;
+- any realised trade was excluded, any series had no placement slack, or the
+  cohort did not preserve trade count;
+- exposure differs; or
+- annualised turnover differs.
+
+The thirteen-field block is all-or-nothing in PostgreSQL. Its derived verdict
+must agree with its inputs; the application independently re-derives the reason
+census and verdict when reading. Strategy-side exposure and turnover are bound
+to the result's metric set, just as the existing control binds Sharpe and total
+return. Legacy rows remain readable but cannot promote. Non-finite measurements
+are rejected before storage and the in-memory exclusion census is immutable
+after validation.
+
+This gate is intentionally diagnostic as well as restrictive. A pilot can now
+show whether the blocker is population construction, exposure, or turnover
+before any 1,000-member fan-out. A non-exact pilot stops; it is evidence to fix
+the cohort construction or explicitly specify a reviewed new policy, not a
+reason to spend the full run.
+
 ## Fixed scale curve
 
 Run:

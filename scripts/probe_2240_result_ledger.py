@@ -399,6 +399,20 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         ],
         "test_a_split_round_trips_through_the_table",
     ),
+    (
+        "the synthetic-control match policy omitted from the durable row",
+        LEDGER,
+        DB_TESTS,
+        [('                "synthetic_control_match_policy_id": match.policy_id,\n', "")],
+        "test_a_result_carrying_the_synthetic_control_survives_the_round_trip",
+    ),
+    (
+        "durable synthetic-control match evidence discarded on read",
+        LEDGER,
+        DB_TESTS,
+        [("            match_quality=match_quality,\n", "            match_quality=None,\n")],
+        "test_a_result_carrying_the_synthetic_control_survives_the_round_trip",
+    ),
 ]
 
 

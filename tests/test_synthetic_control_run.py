@@ -506,6 +506,19 @@ class TestTheMatchIsExact:
         assert result.control.cohort_size == _TEST_COHORT
         assert result.placement_space_id == PLACEMENT_SPACE_ID
 
+        match = result.control.match_quality
+        assert match is not None
+        assert match.placement_space_id == result.placement_space_id
+        assert match.matchable_trade_count == result.residual.strategy_trade_count
+        assert match.cohort_mean_trade_count == result.residual.cohort_mean_trade_count
+        assert match.unmatchable_by_reason == result.unmatchable
+        assert match.no_slack_series == result.no_slack_series
+        assert match.series_placed == result.series_placed
+        assert match.strategy_exposure_time_pct == result.residual.strategy_exposure_time_pct
+        assert match.cohort_mean_exposure_time_pct == result.residual.cohort_mean_exposure_time_pct
+        assert match.strategy_turnover_annualised == result.residual.strategy_turnover_annualised
+        assert match.cohort_mean_turnover_annualised == result.residual.cohort_mean_turnover_annualised
+
     def test_every_member_is_measured_on_the_complete_fixed_axis(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Random placement may move a member's legs, never its metric dates."""
         measured_axes: list[tuple[date, ...]] = []
