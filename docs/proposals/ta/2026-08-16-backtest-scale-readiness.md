@@ -234,3 +234,35 @@ series to the full strategy matrix or authorize the 1,000-member cohort. The
 remaining measured gate is the fixed worker canary over a real production
 collector; only its 1/2/4-worker time and aggregate-memory curve can decide
 whether the production pilot is safe.
+
+## Parked acceptance gap — 2026-08-17
+
+The compiled production path and launch pilot are preserved on draft PR #2773,
+but the PR is **not merge- or launch-ready**. The ordinary focused suite is
+green (223 tests), Ruff and Pyright are green, and every fixed benchmark case is
+exactly reference-equivalent. The full S-1 pilot projects 16.4 minutes and 4.39
+GB under the calibrated bounds.
+
+The remaining required task is to update `scripts/probe_2240_statistics.py` for
+the split Python-reference/compiled-production implementation. Five anchors
+still name the old scalar expressions, and two mutations currently target the
+compiled branch while their selected tests exercise only the reference branch.
+Do not bypass this as an administrative check: add compiled-path adversarial
+tests where needed, re-anchor the probes so both implementations' cash cap,
+spread charge, event ordering and missing-mark behaviour are killed, then run:
+
+```bash
+uv run python scripts/probe_2240_statistics.py
+uv run python scripts/probe_2601_synthetic_control.py
+uv run python scripts/probe_2697_metric_axis.py
+git push origin fix/2772-backtest-scale-gate
+```
+
+Only after the normal pre-push gate passes should #2773 leave draft, merge into
+its stacked base, and the jobs daemon be restarted from the merged checkout.
+There is currently no active `strategy_backtest_run`; requests 396 and 408 are
+terminally rejected and S-1 has no stored synthetic-control result. The first
+post-merge invocation should therefore be S-1 only with
+`synthetic_control=true` and the current trial-register version. Watch
+`job_runs.progress_json` and do not expose outcome fields before its structural
+audit completes.
