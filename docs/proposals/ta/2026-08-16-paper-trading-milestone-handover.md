@@ -17,7 +17,7 @@ claim is valid until the ordered research gates below complete.
 | Purpose | Branch / exact head | PR | State |
 | --- | --- | --- | --- |
 | Causal metric-axis correction | `fix/2697-metric-axis-integrity` / `7b87e567d90707fe41d8ae3ee0577c887f1e3f56` | #2757, base `main` | Pushed, clean, draft; hosted CI green; hosted review skipped because draft |
-| Backtest scale gate and compact synthetic controls | `fix/2772-backtest-scale-gate` / `f358fc9d78688557481c63df9e25032f4c1ad8b1` | #2773, base `fix/2697-metric-axis-integrity` | Pushed, clean, stacked draft; exact-head local pre-push gate green; main-only hosted workflows intentionally do not run on this base |
+| Backtest scale gate and compact synthetic controls | `fix/2772-backtest-scale-gate` / `510cd60bc7aac491edba5e30b4521c672177f2b3` | #2773, base `fix/2697-metric-axis-integrity` | Pushed, clean, merge-clean stacked draft; exact-head local pre-push gate green; no review/bot response yet; main-only hosted workflows intentionally do not run on this base |
 | Recovered MT-1 and operator paper lane | `integration/ta-demo-mt1-operator`; implementation baseline `ca1ca82bd7bc00e7fc1d1551ebe42db708884000`, with this handover added at the branch tip | #2771, base `fix/2697-metric-axis-integrity` | Pushed, clean, stacked draft; main-only hosted workflows intentionally do not run on this base |
 
 `/Users/lukebradford/Dev/eBull` remains the exact detached legacy execution
@@ -79,31 +79,38 @@ Draft PR #2773 now implements the code-level relaunch guardrails:
   throughput, peak RSS, decoded bars, placement size, and reference
   equivalence without querying the database or exposing strategy outcomes;
 - operational backtest logs have a static guard against outcome terms.
+- every new control durably records its placement space, matched trade count,
+  reasoned exclusion/no-slack census, placed-series count, exposure and turnover;
+- promotion fails closed independently on missing/unknown match evidence and on
+  population, exposure or turnover residuals under the exact versioned policy;
+- PostgreSQL enforces the thirteen-field block and its derived exact verdict;
+  legacy controls remain readable but cannot promote, while failed matches
+  remain storable as negative evidence.
 
 The fixed local benchmark passed exact equivalence at all four declared sizes;
 its largest case measured 131,072 trades per member and three members. This is
 a compute-layout baseline, not a full-corpus forecast or strategy result.
 
-The audit after the first slice found four gates that must precede the actual
-production pilot: durable fail-closed match-quality evidence; a production
-memory refusal; measurement of spawned-worker startup, input copying, worker
-RSS, and observed parallel scaling; and an outcome-blind differential over
-stratified real-corpus shapes. Repeated strategy-by-strategy PostgreSQL reads
-and Decimal/object reconstruction also remain outside the current projection.
-A digest-bound reusable corpus representation with `load_arms` equivalence is
-therefore required before the pilot, not deferred until after a refusal. No
-full-population run has been launched.
+The durable match-quality gate is now complete. The next bounded slice must add
+a production memory refusal and measure spawned-worker startup, collector/input
+transfer, worker RSS, observed parallel scaling, and the existing
+strategy-by-strategy PostgreSQL read/Decimal reconstruction cost. It must stop
+after fixed small members and publish structural/resource evidence only. That
+measurement decides whether the current read path can be documented as inside
+budget or a digest-bound reusable corpus representation with `load_arms`
+equivalence must land first. An outcome-blind differential over stratified
+real-corpus shapes also remains. No full-population run has been launched.
 
 ## Ordered #2757 completion
 
-1. Persist the synthetic cohort's unmatchable/no-slack census and exposure/
-   turnover match residual, and make unacceptable or absent structural evidence
-   refuse promotion rather than disappear from the durable result.
-2. Add a production memory budget and a parallel canary that measures process
-   startup, collector transfer, worker RSS, and observed scaling.
-3. Build a digest-bound reusable corpus representation, prove `load_arms`
-   equivalence on deterministic and stratified real-corpus samples, and include
-   its read/decode cost in the launch projection.
+1. Add a production memory budget and a bounded parallel canary that measures
+   process startup, collector transfer/input copying, worker RSS, observed
+   scaling, and current PostgreSQL read/decode cost without exposing outcomes.
+2. Use that fixed measurement to either document the current read path inside
+   budget or build a digest-bound reusable corpus representation; in the latter
+   case prove `load_arms` equivalence on deterministic and stratified
+   real-corpus samples and include read/decode cost in the projection.
+3. Complete the outcome-blind differential on stratified real-corpus shapes.
 4. Review and merge stacked #2773 onto #2757, preserving exact-head local and
    hosted gates when its base becomes eligible, then run only the exact
    three-member production pilot. Stop at the first correctness or time/memory
@@ -173,8 +180,11 @@ The stacked integration provides:
 
 - All three branch heads are clean and pushed.
 - #2757 exact-head local pre-push gate and hosted CI are green.
-- #2773 exact-head local pre-push gate is green; its fixed scale benchmark
-  passed exact slow/compact equivalence, and the synthetic/statistics/equity/
+- #2773 exact head `510cd60bc7aac491edba5e30b4521c672177f2b3`
+  passed the full local pre-push gate with 303 global mutation anchors; 309
+  focused result/backtest/ledger/synthetic-control tests and 138 real-Postgres
+  namespace/result-table tests are green. Its fixed scale benchmark passed
+  exact slow/compact equivalence, and the synthetic/statistics/equity/
   metric-axis mutation probes caught 7/7, 31/31, and 7/7 mutations respectively.
 - #2757 result-model mutation probe caught 28/28 mutations; its dedicated
   metric-axis probe caught 7/7 structural reverts; 291 global probe anchors pass.
@@ -193,7 +203,7 @@ The stacked integration provides:
 | Ticket | Remaining disposition |
 | --- | --- |
 | #2697 | Close only through reviewed and merged #2757 after legacy audit and exact-head A/B |
-| #2772 | Draft #2773 implements observability, compact controls, time budgets, exact fixture differential proof, and fail-closed mark spans; durable match evidence, production memory/parallel measurement, reusable corpus reads, and stratified differential proof remain before review/merge or pilot |
+| #2772 | Draft #2773 implements observability, compact controls, time budgets, exact fixture differential proof, fail-closed mark spans, and durable exact match evidence; production memory/parallel/read-cost measurement and stratified differential proof remain, with reusable corpus work conditional on the bounded measurement |
 | #2766 | Implemented in #2771; close only after final-base review verifies first paper enable and independent master switch |
 | #2767 | Implemented in #2771; close only after final-base worker-capacity verification |
 | #2768 | Implemented in #2771; close only after final-base real-Postgres lifecycle acceptance |
