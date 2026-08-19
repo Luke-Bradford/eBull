@@ -282,11 +282,38 @@ class LaunchPilotReport:
     max_memory_bytes: int
     time_admitted: bool
     memory_admitted: bool
+    #: ⚠ The projection's two terms, reported separately so a refusal says WHICH
+    #: it is and what would change it. ``projected_unique_memory_bytes`` is
+    #: ``parent_peak_bytes + max_workers * per_worker_unique_bytes``, and
+    #: ``max_workers`` changes execution only — spawned members are byte-for-byte
+    #: the serial ones — so a memory refusal at one worker count can be re-asked
+    #: at another from these two numbers alone, without re-running a corpus pass.
+    parent_peak_bytes: int = 0
+    per_worker_unique_bytes: int = 0
+    #: ⚠ ``False`` means ``per_worker_unique_bytes`` is the FLOOR, not a
+    #: measurement, and nothing may be extrapolated from it.
+    per_worker_measured: bool = False
+    projection_max_workers: int = 0
     stopped_before_full_cohort: bool = True
 
     @property
     def admitted(self) -> bool:
         return self.time_admitted and self.memory_admitted
+
+    def admissible_workers(self, *, max_memory_bytes: int | None = None) -> int | None:
+        """The largest worker count whose projection fits the memory ceiling.
+
+        ⚠ ``None`` means the per-worker figure was never measured, so there is
+        nothing to divide by — dividing a ceiling by the FLOOR would over-state
+        how wide a fan-out fits, which is the one direction this must not err in.
+        ⚠ Zero is a different answer: the PARENT alone already exceeds the
+        ceiling, which no worker count can fix. That is a corpus-representation
+        problem rather than a fan-out one, and the two want different next moves.
+        """
+        if not self.per_worker_measured or self.per_worker_unique_bytes <= 0:
+            return None
+        ceiling = self.max_memory_bytes if max_memory_bytes is None else max_memory_bytes
+        return max((ceiling - self.parent_peak_bytes) // self.per_worker_unique_bytes, 0)
 
 
 @dataclass
@@ -929,7 +956,7 @@ def _project_unique_memory_bytes(
     *,
     max_workers: int,
     measure_child: bool,
-) -> tuple[int, int]:
+) -> tuple[int, int, bool]:
     """Projected unique memory for the fan-out, and the per-worker figure in it.
 
     ⚠⚠ ONE COPY OF THIS RULE, DELIBERATELY (#2775). It was written twice — once
@@ -949,16 +976,24 @@ def _project_unique_memory_bytes(
     those blocks measures the real cost instead of modelling it, so there is no
     coefficient to get wrong.
 
+    ⚠ WHETHER TO MEASURE IS THE CALLER'S CALL, not a function of the worker
+    count. It used to be gated on ``max_workers > 1`` here, which quietly
+    returned the FLOOR for a one-worker projection — harmless while the figure
+    was only summed, and unsafe as soon as it was reported, because dividing a
+    ceiling by a floor over-states how wide a fan-out would fit. The third
+    return value says whether the figure was measured, so no caller can mistake
+    the floor for a measurement.
+
     ⚠ The child's own peak includes the shared pages it mapped, so they are
     subtracted before multiplying: counting them once per worker would over-state
     unique memory eightfold. This is the same accounting the worker canary uses.
     """
     per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
-    if measure_child and max_workers > 1:
+    if measure_child:
         child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)
         per_worker_unique_bytes = max(child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)
     parent_peak_bytes = _peak_rss_bytes()
-    return parent_peak_bytes + max_workers * per_worker_unique_bytes, per_worker_unique_bytes
+    return parent_peak_bytes + max_workers * per_worker_unique_bytes, per_worker_unique_bytes, measure_child
 
 
 def _measure_canary_member_in_worker(index: int) -> _WorkerCanarySample:
@@ -1055,11 +1090,12 @@ def run_launch_pilot(
     )
     # ⚠ The pilot projects a fan-out it will never start, so it measures the
     # child and the post-shared parent peak exactly as the real launch does.
-    projected_memory, _per_worker_unique_bytes = _project_unique_memory_bytes(
+    projected_memory, per_worker_unique_bytes, per_worker_measured = _project_unique_memory_bytes(
         inputs,
         max_workers=max_workers,
         measure_child=True,
     )
+    parent_peak_bytes = projected_memory - max_workers * per_worker_unique_bytes
     return LaunchPilotReport(
         member_indices=indices,
         placement_series=len(collector.placements),
@@ -1073,6 +1109,10 @@ def run_launch_pilot(
         max_memory_bytes=max_memory_bytes,
         time_admitted=projected_s <= max_cohort_s,
         memory_admitted=projected_memory <= max_memory_bytes,
+        parent_peak_bytes=parent_peak_bytes,
+        per_worker_unique_bytes=per_worker_unique_bytes,
+        per_worker_measured=per_worker_measured,
+        projection_max_workers=max_workers,
     )
 
 
@@ -1248,10 +1288,12 @@ def _run_members(
         projected_s = pilot_elapsed + (
             pilot_elapsed / pilot_size * remaining / max_workers * SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR
         )
-        projected_memory_bytes, per_worker_unique_bytes = _project_unique_memory_bytes(
+        projected_memory_bytes, per_worker_unique_bytes, _measured = _project_unique_memory_bytes(
             inputs,
             max_workers=max_workers,
-            measure_child=pilot_size < cohort_size,
+            # No pool is spawned in the serial path, so there is no child to
+            # measure and nothing to extrapolate from.
+            measure_child=max_workers > 1 and pilot_size < cohort_size,
         )
         scale_budget.reserve(
             label=label,
