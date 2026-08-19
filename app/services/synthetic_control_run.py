@@ -186,12 +186,41 @@ SYNTHETIC_CONTROL_MAX_WORKERS: Final = 8
 #: it is part of the declared cohort rather than a throw-away or a second trial.
 SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS: Final = 3
 SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR: Final = 1.5
-# Calibrated against the full S-1 collector on 2026-08-17: the exact compiled
-# pilot projected 16.4 minutes including the unchanged 1.5x safety factor.
-# Twenty minutes keeps useful operating headroom without relaxing the estimator
-# or the four-hour cumulative invocation bound.
-SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = 20 * 60.0
+#: The cumulative wall-time budget for ONE backtest invocation. This is the real
+#: guard against a runaway: an invocation is the whole strategy set, so this is
+#: the number that says how long the box may be occupied.
 SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S: Final = 4 * 60 * 60.0
+
+#: A single cohort may not eat more than this share of the invocation's budget.
+#:
+#: ⚠⚠ DERIVED, BECAUSE THE FLAT VERSION DESTROYED A RUN (2026-08-19). It was
+#: `20 * 60.0` — itself a recalibration from 15 minutes made after one full-S-1
+#: pilot measured 16.4, i.e. a threshold fitted to a single sample with no margin
+#: for variance. The variance is real and large: two arms of the SAME strategy
+#: projected 862.7s and 1245.1s, a 44% spread. The second one exceeded the bound
+#: by 45 seconds — 3.8% — and aborted a full-set invocation that had already
+#: completed a 1,000-member cohort, losing about ninety minutes of compute and
+#: persisting nothing. The bound prevented a cohort taking 21 minutes instead of
+#: 20, at the cost of the entire run.
+#:
+#: A per-cohort bound is still worth having: it catches ONE pathological cohort
+#: early rather than after the cumulative budget has drained. But it must not be
+#: an independent invented number, because then two thresholds have to be kept in
+#: step by hand and the tighter one silently wins. Expressed as a share of the
+#: invocation budget it stays a genuine runaway guard — a cohort claiming a third
+#: of the whole invocation is pathological by construction — while it cannot
+#: refuse a cohort the invocation could otherwise afford.
+#:
+#: ⚠ Note the projection it is compared against is itself optimistic: the pilot
+#: measures members serially in the parent and divides by the worker count, but
+#: workers contend for memory bandwidth and run ~1.7x slower per member than the
+#: parent did. Measured 2026-08-19: 862.7s projected against 960.6s actual, 11%
+#: over, DESPITE the 1.5x safety factor. So the effective bound is looser than it
+#: reads, which is a further reason not to fit it tightly to one sample.
+SYNTHETIC_CONTROL_COHORT_BUDGET_SHARE: Final = 1.0 / 3.0
+SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = (
+    SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S * SYNTHETIC_CONTROL_COHORT_BUDGET_SHARE
+)
 
 
 def _physical_memory_bytes() -> int:
