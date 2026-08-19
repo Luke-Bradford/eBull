@@ -56,6 +56,7 @@ from app.services.synthetic_control_run import (
     CONTROL_NAMESPACE,
     PLACEMENT_SPACE_ID,
     CohortCollector,
+    LaunchPilotReport,
     ScaleBudgetExceeded,
     SyntheticControlScaleBudget,
     WorkerCanaryBudgetExceeded,
@@ -930,6 +931,46 @@ class TestScaleGate:
         assert events == ["child", "peak"], "the parent mark must be read after the shared blocks have existed"
         assert per_worker >= synthetic_control_run.SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
         assert projected > 2 * per_worker, "the parent's own footprint is missing from the projection"
+
+    @staticmethod
+    def _report(*, parent: int, per_worker: int, ceiling: int) -> LaunchPilotReport:
+        return LaunchPilotReport(
+            member_indices=(0, 1, 2),
+            placement_series=1,
+            trades_per_member=1,
+            shared_input_bytes=0,
+            pilot_wall_s=1.0,
+            seconds_per_member=1.0,
+            projected_cohort_s=1.0,
+            projected_unique_memory_bytes=parent + 8 * per_worker,
+            max_cohort_s=1200.0,
+            max_memory_bytes=ceiling,
+            time_admitted=True,
+            memory_admitted=parent + 8 * per_worker <= ceiling,
+            parent_peak_bytes=parent,
+            per_worker_unique_bytes=per_worker,
+            projection_max_workers=8,
+        )
+
+    def test_a_memory_refusal_says_which_worker_counts_would_still_fit(self) -> None:
+        """⚠ ``max_workers`` changes execution only — spawned members are
+        byte-for-byte the serial ones — so a memory refusal at one worker count
+        is a question about the fan-out, not about the estimator. Reporting the
+        projection's two terms answers it without a second corpus pass.
+        """
+        report = self._report(parent=4_000, per_worker=1_000, ceiling=8_000)
+        assert not report.memory_admitted
+        assert report.admissible_workers() == 4
+        assert report.admissible_workers(max_memory_bytes=20_000) == 8 + 8
+
+    def test_a_parent_that_alone_exceeds_the_ceiling_admits_NO_worker_count(self) -> None:
+        """⚠ Zero is a different diagnosis, and the distinction is the point: no
+        fan-out size fixes a parent that does not fit, so the next move is the
+        corpus representation rather than a smaller pool.
+        """
+        report = self._report(parent=9_000, per_worker=1_000, ceiling=8_000)
+        assert report.admissible_workers() == 0
+        assert self._report(parent=1_000, per_worker=0, ceiling=8_000).admissible_workers() == 0
 
     def test_the_memory_budget_refuses_before_reserving_any_run_time(self) -> None:
         budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=100.0, max_memory_bytes=999)

@@ -282,11 +282,31 @@ class LaunchPilotReport:
     max_memory_bytes: int
     time_admitted: bool
     memory_admitted: bool
+    #: ⚠ The projection's two terms, reported separately so a refusal says WHICH
+    #: it is and what would change it. ``projected_unique_memory_bytes`` is
+    #: ``parent_peak_bytes + max_workers * per_worker_unique_bytes``, and
+    #: ``max_workers`` changes execution only — spawned members are byte-for-byte
+    #: the serial ones — so a memory refusal at one worker count can be re-asked
+    #: at another from these two numbers alone, without re-running a corpus pass.
+    parent_peak_bytes: int = 0
+    per_worker_unique_bytes: int = 0
+    projection_max_workers: int = 0
     stopped_before_full_cohort: bool = True
 
     @property
     def admitted(self) -> bool:
         return self.time_admitted and self.memory_admitted
+
+    def admissible_workers(self, *, max_memory_bytes: int | None = None) -> int:
+        """The largest worker count whose projection fits the memory ceiling.
+
+        ⚠ Zero means the PARENT alone already exceeds it, which no worker count
+        can fix — that is a corpus-representation problem, not a fan-out one.
+        """
+        ceiling = self.max_memory_bytes if max_memory_bytes is None else max_memory_bytes
+        if self.per_worker_unique_bytes <= 0:
+            return 0
+        return max((ceiling - self.parent_peak_bytes) // self.per_worker_unique_bytes, 0)
 
 
 @dataclass
@@ -1055,11 +1075,12 @@ def run_launch_pilot(
     )
     # ⚠ The pilot projects a fan-out it will never start, so it measures the
     # child and the post-shared parent peak exactly as the real launch does.
-    projected_memory, _per_worker_unique_bytes = _project_unique_memory_bytes(
+    projected_memory, per_worker_unique_bytes = _project_unique_memory_bytes(
         inputs,
         max_workers=max_workers,
         measure_child=True,
     )
+    parent_peak_bytes = projected_memory - max_workers * per_worker_unique_bytes
     return LaunchPilotReport(
         member_indices=indices,
         placement_series=len(collector.placements),
@@ -1073,6 +1094,9 @@ def run_launch_pilot(
         max_memory_bytes=max_memory_bytes,
         time_admitted=projected_s <= max_cohort_s,
         memory_admitted=projected_memory <= max_memory_bytes,
+        parent_peak_bytes=parent_peak_bytes,
+        per_worker_unique_bytes=per_worker_unique_bytes,
+        projection_max_workers=max_workers,
     )
 
 
