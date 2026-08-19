@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -924,9 +924,10 @@ class TestScaleGate:
             benchmark=None,
             expected_trade_count=collector.matchable_trade_count,
         )
-        projected, per_worker = synthetic_control_run._project_unique_memory_bytes(
+        projected, per_worker, measured = synthetic_control_run._project_unique_memory_bytes(
             inputs, max_workers=2, measure_child=True
         )
+        assert measured is True
 
         assert events == ["child", "peak"], "the parent mark must be read after the shared blocks have existed"
         assert per_worker >= synthetic_control_run.SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
@@ -949,6 +950,7 @@ class TestScaleGate:
             memory_admitted=parent + 8 * per_worker <= ceiling,
             parent_peak_bytes=parent,
             per_worker_unique_bytes=per_worker,
+            per_worker_measured=True,
             projection_max_workers=8,
         )
 
@@ -970,7 +972,16 @@ class TestScaleGate:
         """
         report = self._report(parent=9_000, per_worker=1_000, ceiling=8_000)
         assert report.admissible_workers() == 0
-        assert self._report(parent=1_000, per_worker=0, ceiling=8_000).admissible_workers() == 0
+
+    def test_an_UNMEASURED_per_worker_figure_refuses_to_answer_at_all(self) -> None:
+        """⚠⚠ The floor is not a measurement, and dividing a ceiling by it
+        over-states how wide a fan-out fits — the one direction this must not
+        err in. ``None`` and ``0`` are deliberately different answers: nothing
+        to divide by, versus a parent no pool size can rescue.
+        """
+        unmeasured = replace(self._report(parent=4_000, per_worker=1_000, ceiling=8_000), per_worker_measured=False)
+        assert unmeasured.admissible_workers() is None
+        assert replace(self._report(parent=1_000, per_worker=0, ceiling=8_000)).admissible_workers() is None
 
     def test_the_memory_budget_refuses_before_reserving_any_run_time(self) -> None:
         budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=100.0, max_memory_bytes=999)

@@ -179,7 +179,7 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         [
             (
                 "    per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES\n"
-                "    if measure_child and max_workers > 1:\n"
+                "    if measure_child:\n"
                 "        child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)\n"
                 "        per_worker_unique_bytes = max("
                 "child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)",
