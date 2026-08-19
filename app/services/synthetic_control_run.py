@@ -192,7 +192,34 @@ SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR: Final = 1.5
 # or the four-hour cumulative invocation bound.
 SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = 20 * 60.0
 SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S: Final = 4 * 60 * 60.0
-SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES: Final = 8 * 1024**3
+
+
+def _physical_memory_bytes() -> int:
+    """Total RAM on this host, or 0 where the platform will not say."""
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+    except ValueError, OSError, AttributeError:  # pragma: no cover - platform dependent
+        return 0
+
+
+#: The share of RAM one backtest invocation's projected unique memory may claim.
+#: ⚠⚠ THIS BOUND IS A FUNCTION OF THE MACHINE, NOT A CONSTANT, and that is the
+#: whole point. It was `8 * 1024**3` — a flat 8 GiB invented while the projection
+#: was being written, with no measurement or published rule behind it. On a
+#: 24 GiB host that refused a cohort projecting 8.49 GiB, which is 35% of RAM and
+#: in no danger of exhausting anything; the refusal was an artefact of the
+#: number's origin rather than of the machine. A ceiling that exists to stop the
+#: box thrashing has to be derived from the box.
+#:
+#: Two thirds leaves the remaining third for PostgreSQL, the jobs daemon and the
+#: operating system, which is the co-tenancy this actually shares. Where the
+#: platform will not report its memory, the old flat 8 GiB stands as the
+#: fallback — an unknown machine is the one case where a conservative constant
+#: beats a derived one.
+SYNTHETIC_CONTROL_MEMORY_BUDGET_SHARE: Final = 2.0 / 3.0
+SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES: Final = (
+    int(_physical_memory_bytes() * SYNTHETIC_CONTROL_MEMORY_BUDGET_SHARE) or 8 * 1024**3
+)
 # Measured spawned workers are ~80-106 MiB before a large member book. This is
 # the FLOOR under the per-worker unique-memory figure, which is otherwise
 # measured in a freshly spawned child (#2775). ⚠ It was previously an additive

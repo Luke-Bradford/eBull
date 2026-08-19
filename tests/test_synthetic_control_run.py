@@ -983,6 +983,23 @@ class TestScaleGate:
         assert unmeasured.admissible_workers() is None
         assert replace(self._report(parent=1_000, per_worker=0, ceiling=8_000)).admissible_workers() is None
 
+    def test_the_memory_ceiling_is_a_function_of_the_MACHINE_not_a_constant(self) -> None:
+        """⚠⚠ It was a flat 8 GiB, invented while the projection was written.
+
+        On the 24 GiB development host that refused a cohort projecting
+        8.49 GiB — 35% of RAM, nowhere near exhausting anything — so the refusal
+        came from the number's origin rather than from the machine. A ceiling
+        that exists to stop the box thrashing has to be derived from the box.
+        The assertions below are bounds rather than a literal, because the
+        answer is deliberately different on different hardware.
+        """
+        physical = synthetic_control_run._physical_memory_bytes()
+        if physical <= 0:  # pragma: no cover - platform without sysconf
+            pytest.skip("platform does not report physical memory")
+        ceiling = synthetic_control_run.SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES
+        assert ceiling == int(physical * synthetic_control_run.SYNTHETIC_CONTROL_MEMORY_BUDGET_SHARE)
+        assert 0 < ceiling < physical, "the budget must leave room for PostgreSQL, the daemon and the OS"
+
     def test_the_memory_budget_refuses_before_reserving_any_run_time(self) -> None:
         budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=100.0, max_memory_bytes=999)
         with pytest.raises(ScaleBudgetExceeded, match="projected unique-memory upper bound"):
