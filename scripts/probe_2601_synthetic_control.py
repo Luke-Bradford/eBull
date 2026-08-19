@@ -166,6 +166,29 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         ],
         "test_compact_shared_marks_are_exactly_equivalent_to_the_reference_book",
     ),
+    (
+        # ⚠⚠ #2775. ``ru_maxrss`` is a process LIFETIME high-water mark, so the
+        # per-worker allowance used to be a difference of two PARENT readings —
+        # which is zero from the second cohort of an invocation onward, and the
+        # memory arm of the scale gate then admitted a fan-out on a measurement
+        # of nothing. Deleting the fresh-child measurement restores exactly that
+        # collapse, and nothing about the resulting run looks wrong.
+        "the per-worker memory figure taken from the flat base instead of a fresh child",
+        CONTROL,
+        TESTS,
+        [
+            (
+                "        per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES\n"
+                "        if max_workers > 1 and pilot_size < cohort_size:\n"
+                "            child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)\n"
+                "            per_worker_unique_bytes = max(\n"
+                "                child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES\n"
+                "            )",
+                "        per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES",
+            )
+        ],
+        "test_the_memory_projection_measures_a_FRESH_CHILD_ON_EVERY_COHORT",
+    ),
 ]
 
 

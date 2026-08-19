@@ -843,6 +843,54 @@ class TestScaleGate:
             budget.reserve(label="second", projected_s=6.0)
         assert budget.projected_run_s == 10.0
 
+    def test_the_memory_projection_measures_a_FRESH_CHILD_ON_EVERY_COHORT(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2775 — the per-worker figure cannot come from a parent-side delta.
+
+        ⚠ The assertion is STRUCTURAL rather than numeric, and deliberately so.
+        ``ru_maxrss`` is a process lifetime high-water mark, so the defect was
+        not a wrong arithmetic result but a measurement that silently reads zero
+        once the process has already been that large — every cohort after the
+        first in one invocation. A numeric bound cannot see it on a fixture this
+        small either: the child's unique footprint here is its interpreter,
+        which is below the floor, so both the correct and the collapsed
+        projection land on ``SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES``. What
+        discriminates the two is whether a fresh child is consulted AT ALL, and
+        on every cohort rather than only the first.
+        """
+        measured: list[int] = []
+        real = synthetic_control_run._measure_child_member_peak
+
+        def spy(inputs: object, *, index: int) -> tuple[int, int]:
+            measured.append(index)
+            return real(inputs, index=index)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(synthetic_control_run, "_measure_child_member_peak", spy)
+
+        # ⚠ Driven through ``_run_members`` rather than ``run_cohort`` because
+        # the gate engages only at production scale, and a 1,000-member cohort
+        # is not a unit test. This is the function that owns the projection.
+        collector = _collector(exits_on_spike=True)
+        inputs = synthetic_control_run._MemberInputs(
+            placements=tuple(collector.placements),
+            axis=tuple(AXIS),
+            benchmark=None,
+            expected_trade_count=collector.matchable_trade_count,
+        )
+        budget = SyntheticControlScaleBudget()
+        for arm in ("fixture/admitted", "fixture/masked"):
+            synthetic_control_run._run_members(
+                inputs,
+                cohort_size=8,
+                max_workers=2,
+                progress=None,
+                scale_budget=budget,
+                label=arm,
+            )
+        assert measured == [0, 0], "each cohort must re-measure a child; the second is where the delta collapsed"
+        assert budget.projected_run_s > 0.0
+
     def test_the_memory_budget_refuses_before_reserving_any_run_time(self) -> None:
         budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=100.0, max_memory_bytes=999)
         with pytest.raises(ScaleBudgetExceeded, match="projected unique-memory upper bound"):

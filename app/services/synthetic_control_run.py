@@ -193,9 +193,12 @@ SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR: Final = 1.5
 SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S: Final = 20 * 60.0
 SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S: Final = 4 * 60 * 60.0
 SYNTHETIC_CONTROL_MAX_PROJECTED_MEMORY_BYTES: Final = 8 * 1024**3
-# Measured spawned workers are ~80-106 MiB before a large member book. Keep a
-# 128 MiB allowance per child rather than treating a zero-size pilot delta as a
-# zero-cost interpreter.
+# Measured spawned workers are ~80-106 MiB before a large member book. This is
+# the FLOOR under the per-worker unique-memory figure, which is otherwise
+# measured in a freshly spawned child (#2775). ⚠ It was previously an additive
+# base on top of a parent-side ``ru_maxrss`` delta, and that delta is zero from
+# the second cohort of an invocation onward, so this constant silently became
+# the whole per-worker estimate.
 SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES: Final = 128 * 1024**2
 SYNTHETIC_CONTROL_WORKER_CANARY_MEMBERS: Final = 8
 SYNTHETIC_CONTROL_WORKER_CANARY_COUNTS: Final = (1, 2, 4, 8)
@@ -878,6 +881,49 @@ def _peak_rss_bytes() -> int:
     return value if sys.platform == "darwin" else value * 1024
 
 
+def _measure_member_peak_in_worker(index: int) -> int:
+    """One member in this child, then the child's OWN lifetime peak."""
+    if _WORKER_INPUTS is None:  # pragma: no cover - the pool initializer owns it
+        raise RuntimeError("synthetic-control worker started without inputs")
+    _measure_member(index, _WORKER_INPUTS)
+    return _peak_rss_bytes()
+
+
+def _measure_child_member_peak(inputs: _MemberInputs, *, index: int) -> tuple[int, int]:
+    """Measure one member in a FRESH child and return its peak and the shared bytes.
+
+    ⚠⚠ THE PARENT CANNOT MEASURE THIS, AND SUBTRACTING TWO OF ITS READINGS IS
+    NOT A MEASUREMENT (#2775). ``ru_maxrss`` is a process LIFETIME high-water
+    mark and never decreases, so ``after - before`` around a pilot answers *"how
+    much did this pilot push the record up"* rather than *"what does a member
+    cost"*. That difference is ZERO as soon as the process has already been that
+    large — which is every cohort after the first in one invocation (``run_cohort``
+    is called once per ambiguity x quarantine arm against one shared budget), and
+    any cohort at all in a daemon that peaked earlier serving another job. The
+    per-worker allowance then collapsed to the flat base and the memory arm of
+    the gate admitted a fan-out on a measurement of nothing, with every logged
+    field internally consistent.
+
+    A freshly spawned child starts with its own mark, so its peak IS the figure
+    the projection needs. ⚠ The peak includes the shared pages the child
+    touched, so the caller subtracts them exactly as the worker canary does;
+    counting them once per worker would over-state unique memory eightfold.
+
+    ⚠ The outcome is DISCARDED rather than accepted. Seeds are a pure function
+    of the member index, so this repeats work the parent pilot already did; it
+    adds no member, moves no draw and changes no cohort identity.
+    """
+    with _shared_member_inputs(inputs) as shared:
+        with ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=get_context("spawn"),
+            initializer=_initialise_member_worker,
+            initargs=(shared,),
+        ) as pool:
+            child_peak = int(pool.submit(_measure_member_peak_in_worker, index).result())
+        return child_peak, int(shared.shared_input_bytes)
+
+
 def _measure_canary_member_in_worker(index: int) -> _WorkerCanarySample:
     if _WORKER_INPUTS is None or _WORKER_CANARY_BARRIER is None:  # pragma: no cover - pool initializer owns it
         raise RuntimeError("synthetic-control canary worker started without inputs or its barrier")
@@ -1156,7 +1202,6 @@ def _run_members(
     first_parallel_index = 0
     if scale_budget is not None:
         pilot_size = min(SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS, cohort_size)
-        pilot_baseline_rss = _peak_rss_bytes()
         pilot_started = time.monotonic()
         for index in range(pilot_size):
             accept(index, _measure_member(index, inputs))
@@ -1166,13 +1211,19 @@ def _run_members(
             pilot_elapsed / pilot_size * remaining / max_workers * SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR
         )
         pilot_peak_rss = _peak_rss_bytes()
-        member_private_peak = max(pilot_peak_rss - pilot_baseline_rss, 0)
         shared_input_bytes = _shared_input_bytes(inputs)
-        projected_memory_bytes = (
-            pilot_peak_rss
-            + shared_input_bytes
-            + max_workers * (SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES + member_private_peak)
-        )
+        # ⚠⚠ THE PER-WORKER FIGURE COMES FROM A FRESH CHILD, NEVER FROM A PARENT
+        # DELTA (#2775) — see ``_measure_child_member_peak`` for why a difference
+        # of two lifetime marks reads zero from the second cohort onward. The
+        # base stays as a FLOOR: a child that measures below it has measured its
+        # own interpreter badly, not a cheaper worker.
+        per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
+        if max_workers > 1 and pilot_size < cohort_size:
+            child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)
+            per_worker_unique_bytes = max(
+                child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
+            )
+        projected_memory_bytes = pilot_peak_rss + shared_input_bytes + max_workers * per_worker_unique_bytes
         scale_budget.reserve(
             label=label,
             projected_s=projected_s,
@@ -1180,12 +1231,14 @@ def _run_members(
         )
         logger.info(
             "synthetic-control scale gate admitted %s: %d-member pilot %.1fs, projected cohort %.1fs, "
-            "projected memory %.2f GiB, cumulative projected run %.1fs",
+            "projected memory %.2f GiB (%.0f MiB unique per worker, measured in a fresh child), "
+            "cumulative projected run %.1fs",
             label,
             pilot_size,
             pilot_elapsed,
             projected_s,
             projected_memory_bytes / 1024**3,
+            per_worker_unique_bytes / 1024**2,
             scale_budget.projected_run_s,
         )
         first_parallel_index = pilot_size
