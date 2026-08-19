@@ -205,15 +205,42 @@ after exact members `0..2`.
 | Python reference | 10,492 | 4,227,215 | 28.398s | 5,393.858s (89.9m) | 4,647,837,480 bytes |
 | compiled shared-mark | 10,492 | 4,227,215 | 5.183s | 984.505s (16.4m) | 4,393,377,576 bytes |
 
-⚠ **The two projected-memory figures above are SUPERSEDED and are both
-under-statements** (#2775, 2026-08-19). They were produced by a projection that
-inferred per-worker memory from a difference of two `ru_maxrss` readings — a
-process lifetime mark, so the difference is zero once the process has already
-been that large — and that added the shared-input cost once where the parent
-pays it about twice. Both are fixed; the time figures are unaffected, because
-`time.monotonic()` differences are intervals. **The launch pilot must be re-run
-before the first bounded invocation so the 8 GiB ceiling is checked against a
-corrected projection**, which will be larger than 4.39 GB.
+⚠⚠ **The two projected-memory figures above are SUPERSEDED, were both
+under-statements, and the corrected projection REFUSES this cohort** (#2775,
+2026-08-19). The old projection inferred per-worker memory from a difference of
+two `ru_maxrss` readings — a process lifetime mark, so the difference is zero
+once the process has already been that large — and added the shared-input cost
+once where the parent pays it about twice. The time figures are unaffected,
+because `time.monotonic()` differences are intervals.
+
+Re-measured on the full S-1 survivorship-free corpus with the corrected
+projection, zero database writes and zero outcome fields:
+
+| term | value |
+| --- | ---: |
+| parent peak | 4.54 GiB |
+| per worker unique | 0.49 GiB |
+| workers | 8 |
+| **projected unique memory** | **8.49 GiB** against the 8 GiB ceiling — refused |
+| projected cohort time | 14.7 min against the 20 min ceiling — admitted |
+
+⚠ **The first bounded S-1 invocation is therefore refused before fan-out, which
+is the gate working.** Time has headroom while memory binds, and the two trade
+against each other through `max_workers`; the report now carries the
+projection's two terms so that question is arithmetic rather than another
+corpus pass.
+
+⚠ **Do not tune the worker count to the edge on one pilot.** Two identical
+full-corpus runs on the same commit projected 12.20 GiB and 8.49 GiB (seconds
+per member 3.12 and 4.64), so the parent term varies by roughly 40% run to run
+and any "N workers would fit" conclusion sits inside that spread. Both refuse at
+eight. The gate is unaffected — each invocation measures itself — but a worker
+count picked from one pilot is not evidence.
+
+⚠ The parent alone is over half the ceiling, so even a single worker projects
+about 5 GiB and no pool size buys much. The lever is the remaining performance
+boundary below — the per-strategy `research_price_daily` fetch and Decimal
+reconstruction — not the fan-out width.
 
 The compiled result is an 81.7% reduction in projected cohort time. It admits
 under the calibrated 20-minute cohort and 8 GiB memory ceilings while preserving
