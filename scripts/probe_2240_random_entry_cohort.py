@@ -63,6 +63,7 @@ COHORT = Path("app/services/random_entry_cohort.py")
 SOURCES = (COHORT,)
 
 TESTS = "tests/test_random_entry_cohort.py"
+RESULT_TESTS = "tests/test_strategy_result.py"
 
 #: (what the injected defect IS, source file, test file, [(anchor, replacement), ...], -k selector)
 PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
@@ -291,6 +292,70 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
             )
         ],
         "test_the_interval_brackets_the_mean",
+    ),
+    (
+        "the exact trade-count match weakened to a nanounit tolerance",
+        COHORT,
+        RESULT_TESTS,
+        [
+            (
+                "        return self.cohort_mean_trade_count == self.matchable_trade_count",
+                "        return math.isclose(self.cohort_mean_trade_count, self.matchable_trade_count, abs_tol=1e-9)",
+            )
+        ],
+        "test_exact_policy_does_not_hide_sub_nanounit_residuals",
+    ),
+    (
+        "the exact exposure match weakened to a nanounit tolerance",
+        COHORT,
+        RESULT_TESTS,
+        [
+            (
+                "        return self.cohort_mean_exposure_time_pct == self.strategy_exposure_time_pct",
+                "        return math.isclose(self.cohort_mean_exposure_time_pct, "
+                "self.strategy_exposure_time_pct, abs_tol=1e-9)",
+            )
+        ],
+        "test_exact_policy_does_not_hide_sub_nanounit_residuals",
+    ),
+    (
+        "the exact turnover match weakened to a nanounit tolerance",
+        COHORT,
+        RESULT_TESTS,
+        [
+            (
+                "        return self.cohort_mean_turnover_annualised == self.strategy_turnover_annualised",
+                "        return math.isclose(self.cohort_mean_turnover_annualised, "
+                "self.strategy_turnover_annualised, abs_tol=1e-9)",
+            )
+        ],
+        "test_exact_policy_does_not_hide_sub_nanounit_residuals",
+    ),
+    (
+        "non-finite synthetic-control match measurements admitted",
+        COHORT,
+        RESULT_TESTS,
+        [
+            (
+                '            if not math.isfinite(value):\n                raise ValueError(f"{name} must be finite, '
+                'got {value}")\n',
+                "",
+            )
+        ],
+        "test_non_finite_match_measurements_are_refused",
+    ),
+    (
+        "the validated unmatchable census left mutable",
+        COHORT,
+        RESULT_TESTS,
+        [
+            (
+                '        object.__setattr__(self, "unmatchable_by_reason", '
+                "MappingProxyType(dict(self.unmatchable_by_reason)))\n",
+                "",
+            )
+        ],
+        "test_the_reason_census_cannot_change_after_validation",
     ),
 ]
 

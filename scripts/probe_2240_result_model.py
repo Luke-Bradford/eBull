@@ -364,6 +364,36 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
         ],
         "test_the_corpus_version_names_the_vendor_and_the_frozen_last_bar",
     ),
+    (
+        "legacy synthetic controls admitted without durable match evidence",
+        MODEL,
+        [('        refusals.append("synthetic_control_match_evidence_missing")\n', "")],
+        "test_a_legacy_control_without_match_evidence_is_refused",
+    ),
+    (
+        "an unknown synthetic-control match policy admitted",
+        MODEL,
+        [('            refusals.append("synthetic_control_match_policy_unrecognised")\n', "")],
+        "test_an_unknown_match_policy_is_refused",
+    ),
+    (
+        "a mismatched synthetic-control population admitted",
+        MODEL,
+        [('            refusals.append("synthetic_control_population_mismatch")\n', "")],
+        "test_every_match_dimension_is_checked_independently",
+    ),
+    (
+        "a synthetic-control exposure residual admitted",
+        MODEL,
+        [('            refusals.append("synthetic_control_exposure_mismatch")\n', "")],
+        "test_every_match_dimension_is_checked_independently",
+    ),
+    (
+        "a synthetic-control turnover residual admitted",
+        MODEL,
+        [('            refusals.append("synthetic_control_turnover_mismatch")\n', "")],
+        "test_every_match_dimension_is_checked_independently",
+    ),
 ]
 
 

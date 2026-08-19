@@ -192,6 +192,7 @@ from app.services.synthetic_control_run import (
     HOLDOUT_CONTROL_REASON,
     CohortCollector,
     CohortResult,
+    SyntheticControlScaleBudget,
     run_cohort,
 )
 from app.services.technical_analysis import OHLCVRow
@@ -229,9 +230,29 @@ class BacktestProgressEvent:
     ambiguity_arm: AmbiguityArm | None = None
     series_seen: int = 0
     series_total: int | None = None
+    control_seen: int = 0
+    control_total: int | None = None
 
 
 ProgressCallback = Callable[[BacktestProgressEvent], None]
+
+
+@dataclass
+class _ControlProgress:
+    """Add a global control ordinal without exposing a member outcome."""
+
+    callback: ProgressCallback | None
+    total: int
+    seen: dict[tuple[object, ...], int] = field(default_factory=dict)
+
+    def __call__(self, event: BacktestProgressEvent) -> None:
+        if self.callback is None:
+            return
+        current = len(self.seen)
+        if event.phase == "synthetic_control":
+            key = (event.strategy_id, event.quarantine_arm, event.ambiguity_arm)
+            current = self.seen.setdefault(key, len(self.seen) + 1)
+        self.callback(dataclasses.replace(event, control_seen=current, control_total=self.total))
 
 
 def _emit_progress(callback: ProgressCallback | None, event: BacktestProgressEvent) -> None:
@@ -1705,6 +1726,7 @@ def evaluate_arm(
     return_basis: str = TOTAL_RETURN_BASIS,
     sizing_rule: str = SIZING_RULE_ID,
     cohort_size: int | None = None,
+    scale_budget: SyntheticControlScaleBudget | None = None,
     regime_provider: MarketRegimeProvider | None = None,
 ) -> ArmMeasurement:
     """One ``(strategy, quarantine arm)`` corpus pass, end to end.
@@ -1939,6 +1961,7 @@ def evaluate_arm(
             strategy_id=entry.strategy_id,
             quarantine_arm=quarantine_arm,
             ambiguity_arm=ambiguity_arm,
+            scale_budget=scale_budget,
         ),
     )
 
@@ -1973,6 +1996,7 @@ def _run_cohort_for(
     quarantine_arm: QuarantineArm,
     ambiguity_arm: AmbiguityArm | None = None,
     progress: ProgressCallback | None = None,
+    scale_budget: SyntheticControlScaleBudget | None = None,
 ) -> CohortResult | None:
     """§9's control for this arm, once the sleeve it is compared against exists.
 
@@ -2013,23 +2037,17 @@ def _run_cohort_for(
         benchmark=None,
         cohort_size=cohort_size,
         progress=report_member if progress is not None else None,
+        scale_budget=scale_budget,
+        label=label,
     )
     logger.info(
-        "strategy_backtest_run: %s synthetic control — %d members over %d series in %.1fs (%.3fs/member), "
-        "cohort mean %.3f%% CI [%.3f, %.3f], cohort Sharpe p%.0f %.4f against %.4f, passed=%s, unmatchable %s",
+        "strategy_backtest_run: %s synthetic control completed — %d members over %d series in %.1fs "
+        "(%.3fs/member); outcomes withheld pending structural completion audit",
         label,
         result.control.cohort_size,
         result.series_placed,
         result.elapsed_s,
         result.seconds_per_member,
-        result.control.mean_return_pct,
-        result.control.mean_return_ci_low_pct,
-        result.control.mean_return_ci_high_pct,
-        result.control.sharpe_percentile,
-        result.control.cohort_sharpe_threshold,
-        result.control.strategy_sharpe,
-        result.control.passed,
-        result.unmatchable,
     )
     return result
 
@@ -2046,6 +2064,7 @@ def evaluate_level_arms(
     return_basis: str = TOTAL_RETURN_BASIS,
     sizing_rule: str = SIZING_RULE_ID,
     cohort_size: int | None = None,
+    scale_budget: SyntheticControlScaleBudget | None = None,
     regime_provider: MarketRegimeProvider | None = None,
 ) -> tuple[ArmMeasurement, ...]:
     """Evaluate both daily-OHLC ambiguity projections from one corpus pass.
@@ -2300,6 +2319,7 @@ def evaluate_level_arms(
                     strategy_id=entry.strategy_id,
                     quarantine_arm=quarantine_arm,
                     ambiguity_arm=ambiguity,
+                    scale_budget=scale_budget,
                 ),
             )
         )
@@ -3186,6 +3206,15 @@ def run_backtest(
     ]
     assert_no_existing_results(conn, planned)
 
+    planned_controls = 0
+    if cohort_size is not None:
+        for entry_id in runnable:
+            ambiguity_passes = (
+                2 if _regime_for(manifest[entry_id], corpus.axis).level_based or corpus.termination else 1
+            )
+            planned_controls += len(QUARANTINE_ARM_ORDER) * ambiguity_passes
+    progress = _ControlProgress(progress, planned_controls)
+
     logger.info(
         "strategy_backtest_run: %d runnable strategy(ies) %s x %d quarantine arm(s) over %d series, "
         "namespaces %s, %d rows planned",
@@ -3210,6 +3239,7 @@ def run_backtest(
 
     # 1. Evaluate every strategy x quarantine arm, holding metrics in memory.
     arms: list[ArmMeasurement] = []
+    scale_budget = SyntheticControlScaleBudget() if cohort_size is not None else None
     for entry_id in runnable:
         regime = _regime_for(manifest[entry_id], corpus.axis)
         for quarantine in QUARANTINE_ARM_ORDER:
@@ -3223,6 +3253,7 @@ def run_backtest(
                     namespaces=namespaces,
                     progress=progress,
                     cohort_size=cohort_size,
+                    scale_budget=scale_budget,
                 )
             else:
                 measurements = (
@@ -3236,20 +3267,20 @@ def run_backtest(
                         namespaces=namespaces,
                         progress=progress,
                         cohort_size=cohort_size,
+                        scale_budget=scale_budget,
                     ),
                 )
             for measurement in measurements:
                 _assert_ambiguity_contract(measurement)
                 arms.append(measurement)
                 logger.info(
-                    "strategy_backtest_run: %s/%s/%s evaluated %d series in %.1fs — %s, hold-out discarded %d",
+                    "strategy_backtest_run: %s/%s/%s evaluation completed over %d series in %.1fs; "
+                    "outcomes withheld pending structural completion audit",
                     entry_id,
                     measurement.ambiguity_arm or "shared",
                     quarantine,
                     measurement.series_evaluated,
                     measurement.elapsed_s,
-                    {name: outcome.position_count for name, outcome in measurement.namespaces.items()},
-                    measurement.holdout_positions_discarded,
                 )
             if release_read_locks:
                 # An arm is a full corpus pass, and the arms are independent —
@@ -3275,13 +3306,6 @@ def run_backtest(
         deflations[group] = deflation
         if reason is not None:
             refusals[f"{group[0]}/{group[1]}/{group[2]}"] = reason
-            logger.warning(
-                "strategy_backtest_run: no Deflated Sharpe for %s/%s/%s — %s",
-                group[0],
-                group[1],
-                group[2],
-                reason,
-            )
 
     # 3. Write, one transaction per arm pair.
     _emit_progress(progress, BacktestProgressEvent(phase="write"))
@@ -3771,16 +3795,10 @@ def _cut_splits(
             bar_counts=corpus.in_sample_bar_counts,
         )
         logger.info(
-            "strategy_backtest_run: %s/%s split %s over %d observation(s) of %d in-sample position(s) — "
-            "embargo %s, purged %s, embargoed %s",
+            "strategy_backtest_run: %s/%s split %s prepared; census withheld pending structural completion audit",
             measurement.strategy_id,
             measurement.quarantine_arm,
             split.model_id,
-            split.observation_count,
-            outcome.position_count,
-            [record.embargo_bars for record in split.folds],
-            [record.census.purged for record in split.folds],
-            [record.census.embargoed for record in split.folds],
         )
         # ⚠⚠ A DUPLICATE KEY IS REFUSED, NOT OVERWRITTEN. ``run_backtest`` builds
         # ``arms`` one per ``(strategy, quarantine arm)`` so this cannot fire
@@ -4039,7 +4057,7 @@ def _assert_every_runnable_produced_rows(
 
 
 def log_report(report: BacktestRunReport) -> None:
-    """Spec §11's per-run report, emitted by the job rather than by a script."""
+    """Outcome-free completion report; values stay behind the structural audit."""
     logger.info(
         "strategy_backtest_run: %d row(s) over %s; hold-out %s; trial register %s (M = %d)",
         report.rows_written,
@@ -4061,61 +4079,27 @@ def log_report(report: BacktestRunReport) -> None:
         logger.info("  EXCLUDED %s: %s", excluded.strategy_id, excluded.reason)
     for measurement in report.arms:
         logger.info(
-            "  %s/%s %.1fs series=%d close_sources=%s holdout_discarded=%d",
+            "  %s/%s/%s %.1fs series=%d; outcomes withheld pending structural audit",
             measurement.strategy_id,
+            measurement.ambiguity_arm or "shared",
             measurement.quarantine_arm,
             measurement.elapsed_s,
             measurement.series_evaluated,
-            dict(sorted(measurement.close_sources.items())),
-            measurement.holdout_positions_discarded,
         )
-        for namespace, outcome in sorted(measurement.namespaces.items()):
-            logger.info(
-                "    %s axis %s…%s positions=%d instruments=%d sharpe=%.4f ess=%s",
-                namespace,
-                outcome.axis_first,
-                outcome.axis_last,
-                outcome.position_count,
-                len(outcome.evaluated_instrument_ids),
-                outcome.metrics.sharpe,
-                outcome.metrics.effective_sample_size,
-            )
         cohort = measurement.cohort
-        if cohort is None:
-            # ⚠ SAID, not omitted. §11's report is what an operator reads to
-            # find out why a row refuses, and "the control does not appear in
-            # the report" is indistinguishable from "the control was lost".
-            logger.info("    synthetic control: NOT RUN — the invocation did not ask for one")
-        else:
+        if cohort is not None:
             logger.info(
-                "    synthetic control %s/%s: %d members, %d series, %.1fs (%.3fs/member); "
-                "mean %.3f%% CI [%.3f, %.3f] contains_zero=%s; sharpe p%.0f %.4f vs strategy %.4f exceeds=%s; "
-                "passed=%s; exposure %+.2fpp turnover %+.3f; unmatchable=%s no_slack_series=%d",
+                "    synthetic control %s/%s: %d members, %d series, %.1fs (%.3fs/member); outcomes withheld",
                 cohort.control.model_id,
                 cohort.placement_space_id,
                 cohort.control.cohort_size,
                 cohort.series_placed,
                 cohort.elapsed_s,
                 cohort.seconds_per_member,
-                cohort.control.mean_return_pct,
-                cohort.control.mean_return_ci_low_pct,
-                cohort.control.mean_return_ci_high_pct,
-                cohort.control.mean_return_ci_contains_zero,
-                cohort.control.sharpe_percentile,
-                cohort.control.cohort_sharpe_threshold,
-                cohort.control.strategy_sharpe,
-                cohort.control.sharpe_exceeds_cohort,
-                cohort.control.passed,
-                cohort.residual.exposure_delta_pct_points,
-                cohort.residual.turnover_delta,
-                dict(sorted(cohort.unmatchable.items())),
-                cohort.no_slack_series,
             )
-    for group, reason in sorted(report.deflation_refusals.items()):
-        logger.warning("  no Deflated Sharpe for %s: %s", group, reason)
     for row in report.rows:
         logger.info(
-            "    stored %s %s/%s/%s %s instruments=%d folds=%d refusals=%s",
+            "    stored %s %s/%s/%s %s instruments=%d folds=%d; outcomes withheld",
             row.strategy_id,
             row.namespace,
             row.ambiguity_arm,
@@ -4123,7 +4107,6 @@ def log_report(report: BacktestRunReport) -> None:
             row.result_version,
             row.evaluated_instrument_count,
             row.folds_written,
-            list(row.refusals),
         )
 
 

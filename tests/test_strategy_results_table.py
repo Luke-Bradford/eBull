@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 _BASE: dict[str, object] = {
     "strategy_id": "S-TEST",
@@ -120,6 +121,20 @@ _BASE: dict[str, object] = {
     "synthetic_control_sharpe_threshold": None,
     "synthetic_control_return_threshold_pct": None,
     "synthetic_control_passed": None,
+    # --- sql/361, durable synthetic-control match quality -----------------
+    "synthetic_control_match_policy_id": None,
+    "synthetic_control_placement_space_id": None,
+    "synthetic_control_matchable_trade_count": None,
+    "synthetic_control_cohort_mean_trade_count": None,
+    "synthetic_control_unmatchable_count": None,
+    "synthetic_control_unmatchable_by_reason": None,
+    "synthetic_control_no_slack_series": None,
+    "synthetic_control_series_placed": None,
+    "synthetic_control_strategy_exposure_time_pct": None,
+    "synthetic_control_cohort_mean_exposure_time_pct": None,
+    "synthetic_control_strategy_turnover_annualised": None,
+    "synthetic_control_cohort_mean_turnover_annualised": None,
+    "synthetic_control_match_passed": None,
 }
 
 #: A COMPLETE §9 control that this row's own `sharpe` (0.27) CLEARS: the cohort
@@ -136,6 +151,22 @@ _SYNTH: dict[str, object] = {
     "synthetic_control_sharpe_threshold": "0.11",
     "synthetic_control_return_threshold_pct": "6.20",
     "synthetic_control_passed": True,
+}
+
+_MATCH: dict[str, object] = {
+    "synthetic_control_match_policy_id": "synthetic-control-exact-match-v1",
+    "synthetic_control_placement_space_id": "test-fixed-panel-v1",
+    "synthetic_control_matchable_trade_count": 100,
+    "synthetic_control_cohort_mean_trade_count": "100.0",
+    "synthetic_control_unmatchable_count": 0,
+    "synthetic_control_unmatchable_by_reason": Jsonb({}),
+    "synthetic_control_no_slack_series": 0,
+    "synthetic_control_series_placed": 3,
+    "synthetic_control_strategy_exposure_time_pct": "62.1",
+    "synthetic_control_cohort_mean_exposure_time_pct": "62.1",
+    "synthetic_control_strategy_turnover_annualised": "3.05",
+    "synthetic_control_cohort_mean_turnover_annualised": "3.05",
+    "synthetic_control_match_passed": True,
 }
 
 #: A COMPLETE criterion-6 block, on a declared trial count. ⚠ Includes
@@ -194,7 +225,13 @@ _INSERT = """
         synthetic_control_mean_return_pct, synthetic_control_mean_return_ci_low_pct,
         synthetic_control_mean_return_ci_high_pct, synthetic_control_sharpe_percentile,
         synthetic_control_sharpe_threshold, synthetic_control_return_threshold_pct,
-        synthetic_control_passed
+        synthetic_control_passed, synthetic_control_match_policy_id, synthetic_control_placement_space_id,
+        synthetic_control_matchable_trade_count, synthetic_control_cohort_mean_trade_count,
+        synthetic_control_unmatchable_count, synthetic_control_unmatchable_by_reason,
+        synthetic_control_no_slack_series, synthetic_control_series_placed,
+        synthetic_control_strategy_exposure_time_pct, synthetic_control_cohort_mean_exposure_time_pct,
+        synthetic_control_strategy_turnover_annualised, synthetic_control_cohort_mean_turnover_annualised,
+        synthetic_control_match_passed
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
         %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(purpose)s,
@@ -219,7 +256,13 @@ _INSERT = """
         %(synthetic_control_mean_return_pct)s, %(synthetic_control_mean_return_ci_low_pct)s,
         %(synthetic_control_mean_return_ci_high_pct)s, %(synthetic_control_sharpe_percentile)s,
         %(synthetic_control_sharpe_threshold)s, %(synthetic_control_return_threshold_pct)s,
-        %(synthetic_control_passed)s
+        %(synthetic_control_passed)s, %(synthetic_control_match_policy_id)s,
+        %(synthetic_control_placement_space_id)s, %(synthetic_control_matchable_trade_count)s,
+        %(synthetic_control_cohort_mean_trade_count)s, %(synthetic_control_unmatchable_count)s,
+        %(synthetic_control_unmatchable_by_reason)s, %(synthetic_control_no_slack_series)s,
+        %(synthetic_control_series_placed)s, %(synthetic_control_strategy_exposure_time_pct)s,
+        %(synthetic_control_cohort_mean_exposure_time_pct)s, %(synthetic_control_strategy_turnover_annualised)s,
+        %(synthetic_control_cohort_mean_turnover_annualised)s, %(synthetic_control_match_passed)s
     )
 """
 
@@ -417,6 +460,40 @@ def test_result_purpose_cannot_be_relabelled_after_write(
             },
         ),
         ("a fail whose inputs both hold", {**_SYNTH, "synthetic_control_passed": False}),
+        # --- sql/361, durable synthetic-control match evidence ------------
+        (
+            "a partial synthetic-control match block",
+            {**_SYNTH, **_MATCH, "synthetic_control_match_policy_id": None},
+        ),
+        ("match evidence with no synthetic control", _MATCH),
+        (
+            "a blank synthetic-control match policy",
+            {**_SYNTH, **_MATCH, "synthetic_control_match_policy_id": "  "},
+        ),
+        (
+            "a blank placement space",
+            {**_SYNTH, **_MATCH, "synthetic_control_placement_space_id": ""},
+        ),
+        (
+            "an array instead of a reason census",
+            {**_SYNTH, **_MATCH, "synthetic_control_unmatchable_by_reason": Jsonb([])},
+        ),
+        (
+            "zero placed series",
+            {**_SYNTH, **_MATCH, "synthetic_control_series_placed": 0},
+        ),
+        (
+            "exposure outside its percentage range",
+            {**_SYNTH, **_MATCH, "synthetic_control_cohort_mean_exposure_time_pct": "100.1"},
+        ),
+        (
+            "a pass hiding a sub-nanounit exposure residual",
+            {**_SYNTH, **_MATCH, "synthetic_control_cohort_mean_exposure_time_pct": "62.1000000005"},
+        ),
+        (
+            "a failed match whose inputs are exact",
+            {**_SYNTH, **_MATCH, "synthetic_control_match_passed": False},
+        ),
     ],
 )
 def test_results_table_rejects(ebull_test_conn: psycopg.Connection[tuple], label: str, overrides: dict) -> None:
@@ -622,6 +699,36 @@ def test_a_complete_synthetic_control_is_accepted(ebull_test_conn: psycopg.Conne
             ("S-TEST",),
         ).fetchone()
     assert stored == ("permuted-entry-uniform-gap-v1", 1000, True)
+
+
+def test_a_complete_synthetic_match_block_is_accepted(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    with ebull_test_conn.transaction():
+        _insert(ebull_test_conn, **_SYNTH, **_MATCH)
+        stored = ebull_test_conn.execute(
+            "SELECT synthetic_control_match_policy_id, synthetic_control_match_passed "
+            "FROM strategy_results_store WHERE strategy_id = %s",
+            ("S-TEST",),
+        ).fetchone()
+    assert stored == ("synthetic-control-exact-match-v1", True)
+
+
+def test_a_nonmatching_population_is_stored_as_evidence_not_discarded(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    failed_match = {
+        **_MATCH,
+        "synthetic_control_unmatchable_count": 1,
+        "synthetic_control_unmatchable_by_reason": Jsonb({"open_at_window_end": 1}),
+        "synthetic_control_match_passed": False,
+    }
+    with ebull_test_conn.transaction():
+        _insert(ebull_test_conn, **_SYNTH, **failed_match)
+        stored = ebull_test_conn.execute(
+            "SELECT synthetic_control_unmatchable_count, synthetic_control_match_passed "
+            "FROM strategy_results_store WHERE strategy_id = %s",
+            ("S-TEST",),
+        ).fetchone()
+    assert stored == (1, False)
 
 
 def test_a_failing_control_is_storable_because_a_failure_is_a_result(

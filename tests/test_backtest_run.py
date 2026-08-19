@@ -70,9 +70,11 @@ from app.services.price_structure import StructureBar
 from app.services.random_entry_cohort import (
     COHORT_MODEL_ID,
     COHORT_ROOT_SEED,
+    MATCH_QUALITY_POLICY_ID,
     SPEC_COHORT_SIZE,
     SPEC_SHARPE_PERCENTILE,
     SyntheticControl,
+    SyntheticControlMatchQuality,
 )
 from app.services.research_price_structure_store import (
     QUARANTINE_ARMS,
@@ -166,6 +168,19 @@ def _control(
         strategy_sharpe=strategy_sharpe,
         cohort_return_threshold_pct=1.0,
         strategy_return_pct=2.0,
+        match_quality=SyntheticControlMatchQuality(
+            policy_id=MATCH_QUALITY_POLICY_ID,
+            placement_space_id="test-fixed-panel-v1",
+            matchable_trade_count=10,
+            cohort_mean_trade_count=10.0,
+            unmatchable_by_reason={},
+            no_slack_series=0,
+            series_placed=2,
+            strategy_exposure_time_pct=40.0,
+            cohort_mean_exposure_time_pct=40.0,
+            strategy_turnover_annualised=1.5,
+            cohort_mean_turnover_annualised=1.5,
+        ),
     )
 
 

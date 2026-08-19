@@ -5389,10 +5389,14 @@ class _BacktestProgressWriter:
         self._window_id: str | None = None
         self._last_flush = 0.0
         self._last_stage: tuple[object, ...] | None = None
+        self._stage_started_at: float | None = None
+        self._stage_started_seen = 0
 
     def start_window(self, window_id: str) -> None:
         self._window_id = window_id
         self._last_stage = None
+        self._stage_started_at = None
+        self._stage_started_seen = 0
 
     def __call__(self, event: object) -> None:
         from app.services.backtest_run import BacktestProgressEvent
@@ -5407,6 +5411,14 @@ class _BacktestProgressWriter:
         )
         now = time.monotonic()
         stage_changed = stage != self._last_stage
+        if stage_changed:
+            self._stage_started_at = now
+            self._stage_started_seen = event.series_seen
+        elapsed_s = 0.0 if self._stage_started_at is None else max(0.0, now - self._stage_started_at)
+        advanced = max(0, event.series_seen - self._stage_started_seen)
+        rate_per_s = advanced / elapsed_s if elapsed_s > 0.0 and advanced > 0 else None
+        remaining = None if event.series_total is None else max(0, event.series_total - event.series_seen)
+        eta_s = remaining / rate_per_s if remaining is not None and rate_per_s is not None else None
         final_tick = event.series_total is not None and event.series_seen == event.series_total
         if not stage_changed and not final_tick and now - self._last_flush < _BACKTEST_PROGRESS_FLUSH_SECONDS:
             return
@@ -5419,6 +5431,12 @@ class _BacktestProgressWriter:
                 "ambiguity_arm": event.ambiguity_arm,
                 "series_seen": event.series_seen,
                 "series_total": event.series_total,
+                "work_unit": "members" if event.phase == "synthetic_control" else "series",
+                "elapsed_s": elapsed_s,
+                "rate_per_s": rate_per_s,
+                "eta_s": eta_s,
+                "control_seen": event.control_seen,
+                "control_total": event.control_total,
             }
         )
         try:

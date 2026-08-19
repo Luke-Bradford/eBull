@@ -4,7 +4,7 @@
 
 Sister to ``scripts/probe_2240_random_entry_cohort.py``, which probes the
 CONSTRUCTION (``random_entry_cohort``). This one probes the ORCHESTRATION — the
-placement space, the total-return carry and the per-member axis — and the five
+placement space, the total-return carry and the compact shared-mark mapping — and the five
 guards in that script's header apply unchanged:
 
 1. ⚠ **Every anchor must occur EXACTLY ONCE**, asserted before the replace. A
@@ -44,6 +44,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+# ⚠⚠ Invoking this file by PATH puts ``scripts/`` on sys.path and NOT the repo
+# root, so the cross-script import below raises ModuleNotFoundError under the
+# exact command the #2772 handover documents. Prepending the root makes both
+# that form and ``-m scripts.<name>`` work — the same fix #2357/#2695 already
+# applied to the sibling probes, missed here (#2772).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED, run, selected
 
@@ -144,20 +151,66 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_a_bar_whose_close_is_missing_is_not_placeable",
     ),
     (
-        # ⚠⚠ THE MEMBER'S OWN AXIS ABANDONED. §5 truncates an equity axis to the
-        # closed span of its own positions, and `_measure_namespace` does that
-        # for the sleeve. A member measured on absolute indices against its own
-        # truncated date count is annualising over a window it did not trade.
-        "the member's legs left on the evaluation axis while its dates are truncated",
+        # ⚠⚠ EVERY COMPACT LEG POINTS AT SERIES ZERO. The optimization is valid
+        # only because it removes duplicate storage while retaining the exact
+        # per-series mark source. A wrong source can still produce finite curves
+        # and therefore needs the reference differential to catch it.
+        "the compact member reads every leg from the first series' marks",
         CONTROL,
         TESTS,
         [
             (
-                "        curve = build_equity_curve(book.rebased(low), date_count=len(dates))",
-                "        curve = build_equity_curve(book, date_count=len(dates))",
+                "        mark_source[cursor:end] = source",
+                "        mark_source[cursor:end] = 0",
             )
         ],
-        "test_every_member_trades_the_strategys_own_position_count",
+        "test_compact_shared_marks_are_exactly_equivalent_to_the_reference_book",
+    ),
+    (
+        # ⚠⚠ #2775. ``ru_maxrss`` is a process LIFETIME high-water mark, so the
+        # per-worker allowance used to be a difference of two PARENT readings —
+        # which is zero from the second cohort of an invocation onward, and the
+        # memory arm of the scale gate then admitted a fan-out on a measurement
+        # of nothing. Deleting the fresh-child measurement restores exactly that
+        # collapse, and nothing about the resulting run looks wrong.
+        "the per-worker memory figure taken from the flat base instead of a fresh child",
+        CONTROL,
+        TESTS,
+        [
+            (
+                "    per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES\n"
+                "    if measure_child and max_workers > 1:\n"
+                "        child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)\n"
+                "        per_worker_unique_bytes = max("
+                "child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)",
+                "    per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES",
+            )
+        ],
+        "test_the_memory_projection_measures_a_FRESH_CHILD_ON_EVERY_COHORT",
+    ),
+    (
+        # ⚠⚠ #2775, second defect. Building the shared inputs costs the PARENT
+        # about twice ``shared_input_bytes`` — ``_shared_member_inputs``
+        # concatenates the per-series arrays into four contiguous temporaries
+        # AND allocates equally sized SharedMemory blocks to copy them into, and
+        # the temporaries stay referenced for the pool's lifetime. Reading the
+        # parent peak BEFORE the child probe builds those blocks under-states it
+        # by a whole copy of the corpus, which near the ceiling is the difference
+        # between admitting and refusing.
+        "the parent peak read before the shared inputs it has to pay for",
+        CONTROL,
+        TESTS,
+        [
+            (
+                "        per_worker_unique_bytes = max("
+                "child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)\n"
+                "    parent_peak_bytes = _peak_rss_bytes()",
+                "        per_worker_unique_bytes = max("
+                "child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)\n"
+                "    parent_peak_bytes = 0",
+            )
+        ],
+        "test_the_parent_peak_is_read_AFTER_the_shared_inputs_are_built",
     ),
 ]
 

@@ -23,7 +23,11 @@ from decimal import Decimal
 import pytest
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
-from app.services.random_entry_cohort import SyntheticControl
+from app.services.random_entry_cohort import (
+    MATCH_QUALITY_POLICY_ID,
+    SyntheticControl,
+    SyntheticControlMatchQuality,
+)
 from app.services.strategy_promotion_evidence import (
     EVIDENCE_VERSION,
     REQUIRED_CHALLENGERS,
@@ -231,9 +235,54 @@ def _passing_control(**overrides: object) -> SyntheticControl:
         "strategy_sharpe": 0.33,
         "cohort_return_threshold_pct": 5.0,
         "strategy_return_pct": 21.0,
+        "match_quality": SyntheticControlMatchQuality(
+            policy_id=MATCH_QUALITY_POLICY_ID,
+            placement_space_id="test-fixed-panel-v1",
+            matchable_trade_count=100,
+            cohort_mean_trade_count=100.0,
+            unmatchable_by_reason={},
+            no_slack_series=0,
+            series_placed=3,
+            strategy_exposure_time_pct=61.0,
+            cohort_mean_exposure_time_pct=61.0,
+            strategy_turnover_annualised=2.5,
+            cohort_mean_turnover_annualised=2.5,
+        ),
     }
     base.update(overrides)
     return SyntheticControl(**base)  # type: ignore[arg-type]
+
+
+class TestSyntheticControlMatchQuality:
+    def test_exact_policy_does_not_hide_sub_nanounit_residuals(self) -> None:
+        match = _passing_control().match_quality
+        assert match is not None
+        changed = replace(
+            match,
+            cohort_mean_trade_count=match.cohort_mean_trade_count + 5e-10,
+            cohort_mean_exposure_time_pct=match.cohort_mean_exposure_time_pct + 5e-10,
+            cohort_mean_turnover_annualised=match.cohort_mean_turnover_annualised + 5e-10,
+        )
+        assert not changed.population_matches
+        assert not changed.exposure_matches
+        assert not changed.turnover_matches
+        assert not changed.passed
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("cohort_mean_trade_count", float("nan")), ("cohort_mean_turnover_annualised", float("inf"))],
+    )
+    def test_non_finite_match_measurements_are_refused(self, field: str, value: float) -> None:
+        match = _passing_control().match_quality
+        assert match is not None
+        with pytest.raises(ValueError, match="must be finite"):
+            replace(match, **{field: value})
+
+    def test_the_reason_census_cannot_change_after_validation(self) -> None:
+        match = _passing_control().match_quality
+        assert match is not None
+        with pytest.raises(TypeError):
+            match.unmatchable_by_reason["late mutation"] = 1  # type: ignore[index]
 
 
 def _deflated_result(**overrides: object) -> DeflatedSharpeResult:
@@ -1018,6 +1067,44 @@ class TestPromotionGateRefusals:
         candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=None))
         assert "synthetic_control_not_run" in check_promotable(candidate)
 
+    def test_a_legacy_control_without_match_evidence_is_refused(self) -> None:
+        control = replace(_passing_control(), match_quality=None)
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert set(check_promotable(candidate)) == {"synthetic_control_match_evidence_missing"}
+
+    def test_an_unknown_match_policy_is_refused(self) -> None:
+        control = _passing_control()
+        assert control.match_quality is not None
+        control = replace(
+            control,
+            match_quality=replace(control.match_quality, policy_id="synthetic-control-favourable-tolerance-v99"),
+        )
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert set(check_promotable(candidate)) == {"synthetic_control_match_policy_unrecognised"}
+
+    def test_every_match_dimension_is_checked_independently(self) -> None:
+        """No favourable cohort can hide a population, exposure, or turnover
+        mismatch behind the two outcome thresholds."""
+        control = _passing_control()
+        assert control.match_quality is not None
+        control = replace(
+            control,
+            match_quality=replace(
+                control.match_quality,
+                cohort_mean_trade_count=99.0,
+                unmatchable_by_reason={"open_at_window_end": 1},
+                no_slack_series=1,
+                cohort_mean_exposure_time_pct=60.0,
+                cohort_mean_turnover_annualised=2.4,
+            ),
+        )
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert set(check_promotable(candidate)) == {
+            "synthetic_control_population_mismatch",
+            "synthetic_control_exposure_mismatch",
+            "synthetic_control_turnover_mismatch",
+        }
+
     def test_a_cohort_whose_mean_return_excludes_zero_blocks_the_result(self) -> None:
         """§9's FIRST threshold, and it is a verdict on the HARNESS rather than
         on the strategy — *"a harness that finds edge in noise is broken
@@ -1242,6 +1329,11 @@ _HELPER_CODES: dict[str, frozenset[str]] = {
     "synthetic": frozenset(
         {
             "synthetic_control_not_run",
+            "synthetic_control_match_evidence_missing",
+            "synthetic_control_match_policy_unrecognised",
+            "synthetic_control_population_mismatch",
+            "synthetic_control_exposure_mismatch",
+            "synthetic_control_turnover_mismatch",
             "synthetic_control_cohort_shows_edge",
             "synthetic_control_sharpe_below_cohort",
         }

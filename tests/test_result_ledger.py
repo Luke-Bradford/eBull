@@ -22,7 +22,11 @@ import psycopg
 import pytest
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
-from app.services.random_entry_cohort import SyntheticControl
+from app.services.random_entry_cohort import (
+    MATCH_QUALITY_POLICY_ID,
+    SyntheticControl,
+    SyntheticControlMatchQuality,
+)
 from app.services.result_ledger import (
     HOLDOUT_ACCESS_KINDS,
     HoldoutAccess,
@@ -138,6 +142,19 @@ def build_control(metrics: StrategyMetrics, **overrides: object) -> SyntheticCon
         "strategy_sharpe": metrics.sharpe,
         "cohort_return_threshold_pct": -96.39971148,
         "strategy_return_pct": metrics.total_return_pct,
+        "match_quality": SyntheticControlMatchQuality(
+            policy_id=MATCH_QUALITY_POLICY_ID,
+            placement_space_id="test-fixed-panel-v1",
+            matchable_trade_count=3133100,
+            cohort_mean_trade_count=3133100.0,
+            unmatchable_by_reason={},
+            no_slack_series=0,
+            series_placed=3,
+            strategy_exposure_time_pct=metrics.exposure_time_pct,
+            cohort_mean_exposure_time_pct=metrics.exposure_time_pct,
+            strategy_turnover_annualised=metrics.turnover_annualised,
+            cohort_mean_turnover_annualised=metrics.turnover_annualised,
+        ),
     }
     base.update(overrides)
     return SyntheticControl(**base)  # type: ignore[arg-type]

@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import inspect
 import re
+from dataclasses import asdict
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from app.services import synthetic_control_run
@@ -54,7 +56,13 @@ from app.services.synthetic_control_run import (
     CONTROL_NAMESPACE,
     PLACEMENT_SPACE_ID,
     CohortCollector,
+    ScaleBudgetExceeded,
+    SyntheticControlScaleBudget,
+    WorkerCanaryBudgetExceeded,
+    WorkerCanaryConfig,
     run_cohort,
+    run_launch_pilot,
+    run_worker_canary,
 )
 from app.services.technical_analysis import OHLCVRow
 
@@ -503,6 +511,19 @@ class TestTheMatchIsExact:
         assert result.control.cohort_size == _TEST_COHORT
         assert result.placement_space_id == PLACEMENT_SPACE_ID
 
+        match = result.control.match_quality
+        assert match is not None
+        assert match.placement_space_id == result.placement_space_id
+        assert match.matchable_trade_count == result.residual.strategy_trade_count
+        assert match.cohort_mean_trade_count == result.residual.cohort_mean_trade_count
+        assert match.unmatchable_by_reason == result.unmatchable
+        assert match.no_slack_series == result.no_slack_series
+        assert match.series_placed == result.series_placed
+        assert match.strategy_exposure_time_pct == result.residual.strategy_exposure_time_pct
+        assert match.cohort_mean_exposure_time_pct == result.residual.cohort_mean_exposure_time_pct
+        assert match.strategy_turnover_annualised == result.residual.strategy_turnover_annualised
+        assert match.cohort_mean_turnover_annualised == result.residual.cohort_mean_turnover_annualised
+
     def test_every_member_is_measured_on_the_complete_fixed_axis(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Random placement may move a member's legs, never its metric dates."""
         measured_axes: list[tuple[date, ...]] = []
@@ -595,6 +616,96 @@ class TestTheMatchIsExact:
         assert spawned.control == serial.control
         assert spawned.residual == serial.residual
         assert progress == [(completed, 12) for completed in range(1, 13)]
+
+    def test_the_worker_canary_measures_every_declared_pool_and_stops(self) -> None:
+        collector = _collector(exits_on_spike=True)
+        report = run_worker_canary(collector, axis=AXIS)
+
+        assert report.member_indices == tuple(range(8))
+        assert report.stopped_before_full_cohort is True
+        assert report.placement_series == len(collector.placements)
+        assert report.trades_per_member == collector.matchable_trade_count
+        assert [trial.workers for trial in report.trials] == [1, 2, 4, 8]
+        for trial in report.trials:
+            assert trial.member_count == 8
+            assert trial.distinct_worker_pids == trial.workers
+            assert trial.startup_and_transfer_s > 0.0
+            assert trial.member_wall_s > 0.0
+            assert trial.total_wall_s >= trial.member_wall_s
+            assert trial.members_per_s > 0.0
+            assert trial.parent_peak_rss_bytes > 0
+            assert trial.max_child_peak_rss_bytes > 0
+            assert trial.aggregate_peak_rss_bytes > trial.max_child_peak_rss_bytes
+            assert trial.aggregate_unique_peak_bound_bytes > trial.max_child_peak_rss_bytes
+            assert trial.exact_equivalent is True
+        assert report.shared_input_bytes > 0
+        assert report.shared_preparation_s > 0.0
+
+        keys = str(asdict(report)).lower()
+        for forbidden in ("sharpe", "return_pct", "drawdown", "profit", "cohort_passed"):
+            assert forbidden not in keys
+
+    def test_the_worker_canary_memory_budget_fails_closed_after_fixed_work(self) -> None:
+        with pytest.raises(WorkerCanaryBudgetExceeded, match="aggregate unique-memory upper bound"):
+            run_worker_canary(
+                _collector(exits_on_spike=True),
+                axis=AXIS,
+                config=WorkerCanaryConfig(member_count=2, worker_counts=(1, 2), max_aggregate_peak_rss_bytes=1),
+            )
+
+    def test_the_launch_pilot_runs_only_three_members_and_emits_no_outcomes(self) -> None:
+        collector = _collector(exits_on_spike=True)
+        report = run_launch_pilot(collector, axis=AXIS)
+
+        assert report.member_indices == (0, 1, 2)
+        assert report.stopped_before_full_cohort
+        assert report.placement_series == len(collector.placements)
+        assert report.trades_per_member == collector.matchable_trade_count
+        assert report.shared_input_bytes > 0
+        assert report.pilot_wall_s > 0.0
+        assert report.projected_cohort_s > report.pilot_wall_s
+        assert report.projected_unique_memory_bytes > report.shared_input_bytes
+        keys = str(asdict(report)).lower()
+        for forbidden in ("sharpe", "return_pct", "drawdown", "profit", "cohort_passed"):
+            assert forbidden not in keys
+
+    def test_compact_shared_marks_are_exactly_equivalent_to_the_reference_book(self) -> None:
+        """The optimized layout may remove copies, never change a draw or curve."""
+        collector = _collector(exits_on_spike=True)
+        reference_rng = np.random.Generator(np.random.PCG64(member_seed(7)))
+        compact_rng = np.random.Generator(np.random.PCG64(member_seed(7)))
+        reference, reference_returns, reference_entries, reference_exits = synthetic_control_run._place_member(  # noqa: SLF001
+            reference_rng,
+            collector.placements,
+            axis=AXIS,
+        )
+        compact, compact_returns, compact_entries, compact_exits = (  # noqa: SLF001
+            synthetic_control_run._place_member_compact(
+                compact_rng,
+                collector.placements,
+                axis=AXIS,
+            )
+        )
+
+        np.testing.assert_array_equal(compact.entry_index, reference.entry_index)
+        np.testing.assert_array_equal(compact.exit_index, reference.exit_index)
+        np.testing.assert_array_equal(compact.entry_price, reference.entry_price)
+        np.testing.assert_array_equal(compact.exit_price, reference.exit_price)
+        assert compact_returns == reference_returns
+        assert compact_entries == reference_entries
+        assert compact_exits == reference_exits
+
+        reference_curve = build_equity_curve(reference, date_count=len(AXIS))
+        compact_curve = build_equity_curve(compact, date_count=len(AXIS))
+        assert compact_curve.rebalance_costs == reference_curve.rebalance_costs
+        assert compact_curve.event_dates == reference_curve.event_dates
+        assert compact_curve.short_funded_entries == reference_curve.short_funded_entries
+        assert compact_curve.stale_marks == reference_curve.stale_marks
+        assert compact_curve.unrealised_held == reference_curve.unrealised_held
+        np.testing.assert_array_equal(compact_curve.equity, reference_curve.equity)
+        np.testing.assert_array_equal(compact_curve.invested, reference_curve.invested)
+        np.testing.assert_array_equal(compact_curve.open_count, reference_curve.open_count)
+        np.testing.assert_array_equal(compact_curve.traded_notional, reference_curve.traded_notional)
 
     def test_the_run_offers_no_seed_override(self) -> None:
         """⚠⚠ THE OVERRIDE STAYED DELETED. An earlier draft took a ``root_seed``,
@@ -705,6 +816,126 @@ class TestRefusals:
         # neither matched nor counted against the in-sample cohort.
         assert collector.placements == []
         assert collector.matchable_trade_count == 0
+
+
+class TestScaleGate:
+    def test_a_production_cohort_refuses_after_the_fixed_pilot_before_fanout(self) -> None:
+        progress: list[tuple[int, int]] = []
+        budget = SyntheticControlScaleBudget(max_cohort_s=0.0, max_run_s=0.0)
+        with pytest.raises(ScaleBudgetExceeded, match="projected cohort wall time"):
+            run_cohort(
+                _collector(exits_on_spike=True),
+                axis=AXIS,
+                strategy_metrics=_sleeve_metrics(exits_on_spike=True),
+                benchmark=None,
+                cohort_size=1000,
+                progress=lambda completed, total: progress.append((completed, total)),
+                scale_budget=budget,
+                label="fixture/admitted",
+            )
+        assert progress == [(1, 1000), (2, 1000), (3, 1000)]
+        assert budget.projected_run_s == 0.0
+
+    def test_the_cumulative_budget_refuses_the_arm_that_would_cross_it(self) -> None:
+        budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=15.0)
+        budget.reserve(label="first", projected_s=10.0)
+        with pytest.raises(ScaleBudgetExceeded, match="cumulative projected run wall time"):
+            budget.reserve(label="second", projected_s=6.0)
+        assert budget.projected_run_s == 10.0
+
+    def test_the_memory_projection_measures_a_FRESH_CHILD_ON_EVERY_COHORT(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2775 — the per-worker figure cannot come from a parent-side delta.
+
+        ⚠ The assertion is STRUCTURAL rather than numeric, and deliberately so.
+        ``ru_maxrss`` is a process lifetime high-water mark, so the defect was
+        not a wrong arithmetic result but a measurement that silently reads zero
+        once the process has already been that large — every cohort after the
+        first in one invocation. A numeric bound cannot see it on a fixture this
+        small either: the child's unique footprint here is its interpreter,
+        which is below the floor, so both the correct and the collapsed
+        projection land on ``SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES``. What
+        discriminates the two is whether a fresh child is consulted AT ALL, and
+        on every cohort rather than only the first.
+        """
+        measured: list[int] = []
+        real = synthetic_control_run._measure_child_member_peak
+
+        def spy(inputs: object, *, index: int) -> tuple[int, int]:
+            measured.append(index)
+            return real(inputs, index=index)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(synthetic_control_run, "_measure_child_member_peak", spy)
+
+        # ⚠ Driven through ``_run_members`` rather than ``run_cohort`` because
+        # the gate engages only at production scale, and a 1,000-member cohort
+        # is not a unit test. This is the function that owns the projection.
+        collector = _collector(exits_on_spike=True)
+        inputs = synthetic_control_run._MemberInputs(
+            placements=tuple(collector.placements),
+            axis=tuple(AXIS),
+            benchmark=None,
+            expected_trade_count=collector.matchable_trade_count,
+        )
+        budget = SyntheticControlScaleBudget()
+        for arm in ("fixture/admitted", "fixture/masked"):
+            synthetic_control_run._run_members(
+                inputs,
+                cohort_size=8,
+                max_workers=2,
+                progress=None,
+                scale_budget=budget,
+                label=arm,
+            )
+        assert measured == [0, 0], "each cohort must re-measure a child; the second is where the delta collapsed"
+        assert budget.projected_run_s > 0.0
+
+    def test_the_parent_peak_is_read_AFTER_the_shared_inputs_are_built(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#2775, second defect — the parent pays for the shared inputs twice.
+
+        ``_shared_member_inputs`` concatenates the per-series arrays into four
+        contiguous temporaries AND allocates equally sized ``SharedMemory``
+        blocks to copy them into, keeping the temporaries referenced for the
+        pool's lifetime. Reading the parent's mark before any of that exists
+        under-states it by a whole copy of the corpus. Order is the fix, so
+        order is what this pins.
+        """
+        events: list[str] = []
+        real_child = synthetic_control_run._measure_child_member_peak
+        real_peak = synthetic_control_run._peak_rss_bytes
+
+        def child_spy(inputs: object, *, index: int) -> tuple[int, int]:
+            events.append("child")
+            return real_child(inputs, index=index)  # type: ignore[arg-type]
+
+        def peak_spy() -> int:
+            events.append("peak")
+            return real_peak()
+
+        monkeypatch.setattr(synthetic_control_run, "_measure_child_member_peak", child_spy)
+        monkeypatch.setattr(synthetic_control_run, "_peak_rss_bytes", peak_spy)
+
+        collector = _collector(exits_on_spike=True)
+        inputs = synthetic_control_run._MemberInputs(
+            placements=tuple(collector.placements),
+            axis=tuple(AXIS),
+            benchmark=None,
+            expected_trade_count=collector.matchable_trade_count,
+        )
+        projected, per_worker = synthetic_control_run._project_unique_memory_bytes(
+            inputs, max_workers=2, measure_child=True
+        )
+
+        assert events == ["child", "peak"], "the parent mark must be read after the shared blocks have existed"
+        assert per_worker >= synthetic_control_run.SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
+        assert projected > 2 * per_worker, "the parent's own footprint is missing from the projection"
+
+    def test_the_memory_budget_refuses_before_reserving_any_run_time(self) -> None:
+        budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=100.0, max_memory_bytes=999)
+        with pytest.raises(ScaleBudgetExceeded, match="projected unique-memory upper bound"):
+            budget.reserve(label="too-large", projected_s=10.0, projected_memory_bytes=1_000)
+        assert budget.projected_run_s == 0.0
 
 
 class TestSealedEvaluatorsDeclareTheirControl:
