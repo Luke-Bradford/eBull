@@ -205,6 +205,16 @@ after exact members `0..2`.
 | Python reference | 10,492 | 4,227,215 | 28.398s | 5,393.858s (89.9m) | 4,647,837,480 bytes |
 | compiled shared-mark | 10,492 | 4,227,215 | 5.183s | 984.505s (16.4m) | 4,393,377,576 bytes |
 
+⚠ **The two projected-memory figures above are SUPERSEDED and are both
+under-statements** (#2775, 2026-08-19). They were produced by a projection that
+inferred per-worker memory from a difference of two `ru_maxrss` readings — a
+process lifetime mark, so the difference is zero once the process has already
+been that large — and that added the shared-input cost once where the parent
+pays it about twice. Both are fixed; the time figures are unaffected, because
+`time.monotonic()` differences are intervals. **The launch pilot must be re-run
+before the first bounded invocation so the 8 GiB ceiling is checked against a
+corrected projection**, which will be larger than 4.39 GB.
+
 The compiled result is an 81.7% reduction in projected cohort time. It admits
 under the calibrated 20-minute cohort and 8 GiB memory ceilings while preserving
 the 1.5x projection safety factor and four-hour cumulative bound. The first

@@ -924,6 +924,43 @@ def _measure_child_member_peak(inputs: _MemberInputs, *, index: int) -> tuple[in
         return child_peak, int(shared.shared_input_bytes)
 
 
+def _project_unique_memory_bytes(
+    inputs: _MemberInputs,
+    *,
+    max_workers: int,
+    measure_child: bool,
+) -> tuple[int, int]:
+    """Projected unique memory for the fan-out, and the per-worker figure in it.
+
+    ⚠⚠ ONE COPY OF THIS RULE, DELIBERATELY (#2775). It was written twice — once
+    in ``_run_members`` and once in ``run_launch_pilot`` — and the first repair
+    fixed only one of them, which is the failure mode the equity-curve harness
+    had just been rebuilt around. Both callers now go through here.
+
+    ⚠⚠ THE PARENT PEAK IS READ LAST, AND THAT ORDER IS THE POINT. Building the
+    shared inputs costs the parent about TWICE ``shared_input_bytes`` on top of
+    the placements it already holds: ``_shared_member_inputs`` concatenates the
+    per-series arrays into four contiguous temporaries AND allocates equally
+    sized ``SharedMemory`` blocks to copy them into, and the temporaries stay
+    referenced for the pool's whole lifetime. A projection that adds
+    ``shared_input_bytes`` once under-states the parent by a whole copy of the
+    corpus, which on a large one is the difference between admitting and
+    refusing. Reading ``ru_maxrss`` AFTER the child probe has built and released
+    those blocks measures the real cost instead of modelling it, so there is no
+    coefficient to get wrong.
+
+    ⚠ The child's own peak includes the shared pages it mapped, so they are
+    subtracted before multiplying: counting them once per worker would over-state
+    unique memory eightfold. This is the same accounting the worker canary uses.
+    """
+    per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
+    if measure_child and max_workers > 1:
+        child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)
+        per_worker_unique_bytes = max(child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)
+    parent_peak_bytes = _peak_rss_bytes()
+    return parent_peak_bytes + max_workers * per_worker_unique_bytes, per_worker_unique_bytes
+
+
 def _measure_canary_member_in_worker(index: int) -> _WorkerCanarySample:
     if _WORKER_INPUTS is None or _WORKER_CANARY_BARRIER is None:  # pragma: no cover - pool initializer owns it
         raise RuntimeError("synthetic-control canary worker started without inputs or its barrier")
@@ -1007,20 +1044,21 @@ def run_launch_pilot(
         expected_trade_count=collector.matchable_trade_count,
     )
     indices = tuple(range(SYNTHETIC_CONTROL_SCALE_PILOT_MEMBERS))
-    baseline_rss = _peak_rss_bytes()
     started = time.monotonic()
     for index in indices:
         _measure_member(index, inputs)
     elapsed = time.monotonic() - started
-    peak_rss = _peak_rss_bytes()
     shared_bytes = _shared_input_bytes(inputs)
     remaining = SPEC_COHORT_SIZE - len(indices)
     projected_s = (
         elapsed + elapsed / len(indices) * remaining / max_workers * SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR
     )
-    member_private_peak = max(peak_rss - baseline_rss, 0)
-    projected_memory = (
-        peak_rss + shared_bytes + max_workers * (SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES + member_private_peak)
+    # ⚠ The pilot projects a fan-out it will never start, so it measures the
+    # child and the post-shared parent peak exactly as the real launch does.
+    projected_memory, _per_worker_unique_bytes = _project_unique_memory_bytes(
+        inputs,
+        max_workers=max_workers,
+        measure_child=True,
     )
     return LaunchPilotReport(
         member_indices=indices,
@@ -1210,20 +1248,11 @@ def _run_members(
         projected_s = pilot_elapsed + (
             pilot_elapsed / pilot_size * remaining / max_workers * SYNTHETIC_CONTROL_PROJECTION_SAFETY_FACTOR
         )
-        pilot_peak_rss = _peak_rss_bytes()
-        shared_input_bytes = _shared_input_bytes(inputs)
-        # ⚠⚠ THE PER-WORKER FIGURE COMES FROM A FRESH CHILD, NEVER FROM A PARENT
-        # DELTA (#2775) — see ``_measure_child_member_peak`` for why a difference
-        # of two lifetime marks reads zero from the second cohort onward. The
-        # base stays as a FLOOR: a child that measures below it has measured its
-        # own interpreter badly, not a cheaper worker.
-        per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
-        if max_workers > 1 and pilot_size < cohort_size:
-            child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)
-            per_worker_unique_bytes = max(
-                child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
-            )
-        projected_memory_bytes = pilot_peak_rss + shared_input_bytes + max_workers * per_worker_unique_bytes
+        projected_memory_bytes, per_worker_unique_bytes = _project_unique_memory_bytes(
+            inputs,
+            max_workers=max_workers,
+            measure_child=pilot_size < cohort_size,
+        )
         scale_budget.reserve(
             label=label,
             projected_s=projected_s,

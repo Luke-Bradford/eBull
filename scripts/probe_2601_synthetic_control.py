@@ -178,16 +178,39 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         TESTS,
         [
             (
-                "        per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES\n"
-                "        if max_workers > 1 and pilot_size < cohort_size:\n"
-                "            child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)\n"
-                "            per_worker_unique_bytes = max(\n"
-                "                child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES\n"
-                "            )",
-                "        per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES",
+                "    per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES\n"
+                "    if measure_child and max_workers > 1:\n"
+                "        child_peak_bytes, shared_block_bytes = _measure_child_member_peak(inputs, index=0)\n"
+                "        per_worker_unique_bytes = max("
+                "child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)",
+                "    per_worker_unique_bytes = SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES",
             )
         ],
         "test_the_memory_projection_measures_a_FRESH_CHILD_ON_EVERY_COHORT",
+    ),
+    (
+        # ⚠⚠ #2775, second defect. Building the shared inputs costs the PARENT
+        # about twice ``shared_input_bytes`` — ``_shared_member_inputs``
+        # concatenates the per-series arrays into four contiguous temporaries
+        # AND allocates equally sized SharedMemory blocks to copy them into, and
+        # the temporaries stay referenced for the pool's lifetime. Reading the
+        # parent peak BEFORE the child probe builds those blocks under-states it
+        # by a whole copy of the corpus, which near the ceiling is the difference
+        # between admitting and refusing.
+        "the parent peak read before the shared inputs it has to pay for",
+        CONTROL,
+        TESTS,
+        [
+            (
+                "        per_worker_unique_bytes = max("
+                "child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)\n"
+                "    parent_peak_bytes = _peak_rss_bytes()",
+                "        per_worker_unique_bytes = max("
+                "child_peak_bytes - shared_block_bytes, SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES)\n"
+                "    parent_peak_bytes = 0",
+            )
+        ],
+        "test_the_parent_peak_is_read_AFTER_the_shared_inputs_are_built",
     ),
 ]
 

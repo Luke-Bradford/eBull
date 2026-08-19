@@ -891,6 +891,46 @@ class TestScaleGate:
         assert measured == [0, 0], "each cohort must re-measure a child; the second is where the delta collapsed"
         assert budget.projected_run_s > 0.0
 
+    def test_the_parent_peak_is_read_AFTER_the_shared_inputs_are_built(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#2775, second defect — the parent pays for the shared inputs twice.
+
+        ``_shared_member_inputs`` concatenates the per-series arrays into four
+        contiguous temporaries AND allocates equally sized ``SharedMemory``
+        blocks to copy them into, keeping the temporaries referenced for the
+        pool's lifetime. Reading the parent's mark before any of that exists
+        under-states it by a whole copy of the corpus. Order is the fix, so
+        order is what this pins.
+        """
+        events: list[str] = []
+        real_child = synthetic_control_run._measure_child_member_peak
+        real_peak = synthetic_control_run._peak_rss_bytes
+
+        def child_spy(inputs: object, *, index: int) -> tuple[int, int]:
+            events.append("child")
+            return real_child(inputs, index=index)  # type: ignore[arg-type]
+
+        def peak_spy() -> int:
+            events.append("peak")
+            return real_peak()
+
+        monkeypatch.setattr(synthetic_control_run, "_measure_child_member_peak", child_spy)
+        monkeypatch.setattr(synthetic_control_run, "_peak_rss_bytes", peak_spy)
+
+        collector = _collector(exits_on_spike=True)
+        inputs = synthetic_control_run._MemberInputs(
+            placements=tuple(collector.placements),
+            axis=tuple(AXIS),
+            benchmark=None,
+            expected_trade_count=collector.matchable_trade_count,
+        )
+        projected, per_worker = synthetic_control_run._project_unique_memory_bytes(
+            inputs, max_workers=2, measure_child=True
+        )
+
+        assert events == ["child", "peak"], "the parent mark must be read after the shared blocks have existed"
+        assert per_worker >= synthetic_control_run.SYNTHETIC_CONTROL_WORKER_BASE_RSS_BYTES
+        assert projected > 2 * per_worker, "the parent's own footprint is missing from the projection"
+
     def test_the_memory_budget_refuses_before_reserving_any_run_time(self) -> None:
         budget = SyntheticControlScaleBudget(max_cohort_s=100.0, max_run_s=100.0, max_memory_bytes=999)
         with pytest.raises(ScaleBudgetExceeded, match="projected unique-memory upper bound"):
