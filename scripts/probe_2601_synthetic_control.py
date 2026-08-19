@@ -45,6 +45,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# ⚠⚠ Invoking this file by PATH puts ``scripts/`` on sys.path and NOT the repo
+# root, so the cross-script import below raises ModuleNotFoundError under the
+# exact command the #2772 handover documents. Prepending the root makes both
+# that form and ``-m scripts.<name>`` work — the same fix #2357/#2695 already
+# applied to the sibling probes, missed here (#2772).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED, run, selected
 
 CONTROL = Path("app/services/synthetic_control_run.py")

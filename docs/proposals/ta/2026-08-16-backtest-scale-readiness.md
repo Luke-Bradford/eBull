@@ -235,34 +235,62 @@ remaining measured gate is the fixed worker canary over a real production
 collector; only its 1/2/4-worker time and aggregate-memory curve can decide
 whether the production pilot is safe.
 
-## Parked acceptance gap — 2026-08-17
+## Parked acceptance gap — CLOSED 2026-08-19
 
-The compiled production path and launch pilot are preserved on draft PR #2773,
-but the PR is **not merge- or launch-ready**. The ordinary focused suite is
-green (223 tests), Ruff and Pyright are green, and every fixed benchmark case is
-exactly reference-equivalent. The full S-1 pilot projects 16.4 minutes and 4.39
-GB under the calibrated bounds.
+The parked task was `scripts/probe_2240_statistics.py` outliving the
+compiled/reference split. Measured before the fix, over the twelve equity-curve
+probes: five printed `*** BAD ANCHOR ***` because the split had moved their
+anchor text, and two printed `*** NOT CAUGHT ***` because they mutated the
+compiled kernel while their selectors built a `LegBook` and therefore executed
+only the Python reference. Seven of twelve curve probes were proving nothing
+while the PR body reported "31/31 caught".
 
-The remaining required task is to update `scripts/probe_2240_statistics.py` for
-the split Python-reference/compiled-production implementation. Five anchors
-still name the old scalar expressions, and two mutations currently target the
-compiled branch while their selected tests exercise only the reference branch.
-Do not bypass this as an administrative check: add compiled-path adversarial
-tests where needed, re-anchor the probes so both implementations' cash cap,
-spread charge, event ordering and missing-mark behaviour are killed, then run:
+`build_equity_curve` dispatches on the storage type, so one rule now lives in up
+to three copies: the Numba kernel, the reference walk's `all_realised` fast half,
+and the half that can carry a frozen leg. Each copy now carries its own probe and
+a selector whose fixture provably enters that copy. Two tests were added for the
+copies that had none.
 
-```bash
-uv run python scripts/probe_2240_statistics.py
-uv run python scripts/probe_2601_synthetic_control.py
-uv run python scripts/probe_2697_metric_axis.py
-git push origin fix/2772-backtest-scale-gate
-```
+`TestCompiledSharedWalkEquivalence` builds one adversarial book in both storages
+and asserts byte-exact equality of every curve field, which is legitimate only
+because the kernel keeps sequential operation order and does not enable
+`fastmath`. It is the only test that executes the kernel's arithmetic, and its
+fixture makes each duplicated rule load-bearing: a same-date exit-then-entry, a
+`bars_held = 0` leg, two legs opening on one date so the basket denominator is
+not one, a halted bar inside a live hold on each mark source, and a cash-capped
+two-sided rebalance. `TestUnrealisedWalkOrdering` carries an unrealised leg,
+which is the only way to reach the general half, and discriminates on
+`open_count` because it is integer-exact.
 
-Only after the normal pre-push gate passes should #2773 leave draft, merge into
-its stacked base, and the jobs daemon be restarted from the merged checkout.
+The harness is now forty probes, every one `CAUGHT`, with the restored suite
+green. `@njit(cache=True)` does not defeat it: numba re-keys its on-disk cache on
+the source file, so a rewritten file recompiles rather than serving the
+pre-mutation kernel — proved by the compiled probes reporting `CAUGHT` at all.
+
+The lesson is recorded in `docs/review-prevention-log.md` and in the harness's own
+module docstring: when a function grows a second implementation of a rule, a probe
+over that rule needs one probe per copy, each with a selector whose fixture
+provably enters it.
+
+## Launch sequence from here
+
+#2773 leaves draft, merges into its stacked base `fix/2697-metric-axis-integrity`,
+and only then is the jobs daemon restarted from the merged checkout. The merge
+order is that way round deliberately: #2757's acceptance step 3 is a
+full-population old/new A/B, and that is only affordable with this branch's
+compiled path and scale gates in place.
+
 There is currently no active `strategy_backtest_run`; requests 396 and 408 are
-terminally rejected and S-1 has no stored synthetic-control result. The first
-post-merge invocation should therefore be S-1 only with
+terminally rejected and S-1 has no stored synthetic-control result. Measured on
+the dev DB on 2026-08-19, neither rejection is a fail-closed metric-axis refusal:
+run 98349 (request 396) and run 99585 (request 408) both ended `failure` /
+`internal_error` with `orphaned: reaped at boot (owning worker thread died
+without a terminal status)`, and 99585 finished on 2026-08-16 11:39 UTC. Request
+408's own row records `operator terminate: oversized backtest stopped before
+jobs-daemon restart` — the oversized run this branch exists to bound. Nothing is
+still pending on either.
+
+The first post-merge invocation should therefore be S-1 only with
 `synthetic_control=true` and the current trial-register version. Watch
 `job_runs.progress_json` and do not expose outcome fields before its structural
 audit completes.

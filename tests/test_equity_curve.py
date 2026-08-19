@@ -139,6 +139,160 @@ class TestSharedMarkLegBookValidation:
         np.testing.assert_array_equal(shared_curve.traded_notional, reference_curve.traded_notional)
 
 
+#: ⚠⚠ ONE ADVERSARIAL BOOK EXPRESSED TWICE. ``build_equity_curve`` dispatches on
+#: the STORAGE type — a ``SharedMarkLegBook`` reaches the compiled kernel and a
+#: ``LegBook`` reaches the Python reference walk — so a test built on one book
+#: shape cannot observe a defect in the other implementation, and the two carry
+#: separate copies of the same rules. #2772 shipped exactly that hole: the
+#: leverage-cap and free-sell-side revert probes mutated the KERNEL while their
+#: tests only ever ran the REFERENCE, and both reported ``NOT CAUGHT``.
+#:
+#: Every rule the kernel duplicates is load-bearing on this book. Leg 2 closes
+#: on the date leg 3 opens (§3.2 rule 4's exit-before-entry); leg 4 opens and
+#: closes on date 6 (``bars_held = 0``, ``sql/256``); both mark sources carry a
+#: halted bar inside a live hold (§3.3); and seven staggered entries at a 2%
+#: half-spread make the rebalance buy cash-capped with both sides charged.
+#:
+#: ⚠ LEGS 3 AND 6 BOTH OPEN ON DATE 5, WHICH IS ALSO THE DATE LEG 2 CLOSES, and
+#: that coincidence is the only thing that makes the basket denominator
+#: observable at all. An entry takes ``min(target, cash)``, so on a fully
+#: invested sleeve every entry binds on CASH and the denominator cancels out —
+#: the compiled copy's probe reported ``NOT CAUGHT`` against a first fixture
+#: whose two same-date entries had no exit to fund them. Exits run before
+#: entries within a date, so a same-date close is what leaves the target
+#: binding.
+_ADVERSARIAL_DATE_COUNT = 10
+#: Two shared mark sources, each spanning the whole axis, as the production
+#: collector emits them — one array per series, referenced rather than copied.
+_ADVERSARIAL_SOURCES: tuple[list[float], ...] = (
+    [100.0, 102.0, 104.0, 103.0, math.nan, 106.0, 108.0, 107.0, 109.0, 110.0],
+    [50.0, 49.0, 51.0, 52.0, 53.0, 51.0, 50.0, math.nan, 48.0, 47.0],
+)
+#: ``(entry, exit, entry price, exit price, half spread, mark source)``. ⚠ In
+#: instrument order rather than date order, which is what ``build_positions``
+#: actually emits.
+_ADVERSARIAL_LEGS: tuple[tuple[int, int, float, float, float, int], ...] = (
+    (0, 9, 100.0, 110.0, 0.02, 0),
+    (1, 9, 50.0, 47.0, 0.02, 1),
+    (2, 5, 104.0, 106.0, 0.02, 0),
+    (5, 8, 51.0, 48.0, 0.02, 1),
+    (6, 6, 108.0, 109.0, 0.02, 0),
+    (3, 9, 52.0, 47.0, 0.02, 1),
+    (5, 7, 106.0, 107.0, 0.02, 0),
+)
+
+
+def _adversarial_reference_book() -> LegBook:
+    """The same legs in flat-mark storage: each leg owns a copy of its span."""
+    book = LegBook()
+    for entry, exit_, entry_price, exit_price, half_spread, source in _ADVERSARIAL_LEGS:
+        book.add(
+            entry_index=entry,
+            exit_index=exit_,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            half_spread=half_spread,
+            realised=True,
+            marks=_ADVERSARIAL_SOURCES[source][entry : exit_ + 1],
+        )
+    return book
+
+
+def _adversarial_shared_book() -> SharedMarkLegBook:
+    """The same legs in shared-mark storage: one index per leg into a source."""
+    return SharedMarkLegBook(
+        entry_index=np.asarray([leg[0] for leg in _ADVERSARIAL_LEGS], dtype=np.int64),
+        exit_index=np.asarray([leg[1] for leg in _ADVERSARIAL_LEGS], dtype=np.int64),
+        entry_price=np.asarray([leg[2] for leg in _ADVERSARIAL_LEGS], dtype=np.float64),
+        exit_price=np.asarray([leg[3] for leg in _ADVERSARIAL_LEGS], dtype=np.float64),
+        half_spread=np.asarray([leg[4] for leg in _ADVERSARIAL_LEGS], dtype=np.float64),
+        realised=np.ones(len(_ADVERSARIAL_LEGS), dtype=np.bool_),
+        mark_source=np.asarray([leg[5] for leg in _ADVERSARIAL_LEGS], dtype=np.int32),
+        marks_by_source=tuple(np.asarray(marks, dtype=np.float64) for marks in _ADVERSARIAL_SOURCES),
+        marks_first_by_source=np.zeros(len(_ADVERSARIAL_SOURCES), dtype=np.int64),
+    )
+
+
+class TestCompiledSharedWalkEquivalence:
+    def test_the_compiled_walk_is_EXACTLY_the_reference_on_an_adversarial_book(self) -> None:
+        """⚠⚠ THE TEST THAT RUNS THE COMPILED KERNEL'S ARITHMETIC AT ALL.
+
+        Equality is EXACT, not approximate, and that is a claim about the
+        kernel rather than a convenience: it keeps stable leg ordering, the
+        same sequential floating-point operation order and the exact
+        exits-before-entries event order, and it does not enable ``fastmath``.
+        An approximate comparison here would accept a reordering that a
+        3.1 M-leg cohort compounds.
+
+        ⚠ The three assertions before the comparison are not decoration. Each
+        one names a rule this fixture has to keep exercising for the equality
+        below to prove anything; a book that stopped halting, stopped
+        rebalancing or started borrowing would compare equal while proving
+        strictly less.
+        """
+        reference_curve = build_equity_curve(_adversarial_reference_book(), date_count=_ADVERSARIAL_DATE_COUNT)
+        shared_curve = build_equity_curve(_adversarial_shared_book(), date_count=_ADVERSARIAL_DATE_COUNT)
+
+        # Source 0 halts on date 4 under legs 0 and 2; source 1 halts on date 7
+        # under legs 1, 3 and 5.
+        assert reference_curve.stale_marks == 5
+        assert reference_curve.rebalance_costs > 0.0
+        assert min(reference_curve.equity - reference_curve.invested) >= -1e-12
+
+        assert shared_curve.rebalance_costs == reference_curve.rebalance_costs
+        assert shared_curve.event_dates == reference_curve.event_dates
+        assert shared_curve.short_funded_entries == reference_curve.short_funded_entries
+        assert shared_curve.stale_marks == reference_curve.stale_marks
+        assert shared_curve.unrealised_held == reference_curve.unrealised_held
+        np.testing.assert_array_equal(shared_curve.equity, reference_curve.equity)
+        np.testing.assert_array_equal(shared_curve.invested, reference_curve.invested)
+        np.testing.assert_array_equal(shared_curve.open_count, reference_curve.open_count)
+        np.testing.assert_array_equal(shared_curve.traded_notional, reference_curve.traded_notional)
+
+
+class TestUnrealisedWalkOrdering:
+    """⚠ The reference walk splits on ``all_realised``, and the fast half cannot
+    observe the general half. An all-realised book never reaches the branch that
+    filters ``realised[leg]`` out of the exit buckets, skips a frozen leg in the
+    mark loop, or excludes one from the rebalance — so the exit split, the
+    same-bar split and §3.3's halt carry each need a book that carries an
+    unrealised leg to be exercised at all.
+    """
+
+    def test_an_unrealised_book_keeps_the_exit_split_the_same_bar_split_and_the_halt(self) -> None:
+        """⚠ ``open_count`` is the discriminator rather than a cash figure
+        because it is integer-exact: a leg that never left the open set because
+        its bucket was emptied shows up in it directly, with no tolerance to
+        choose. Every price here is flat at 100 and every spread is zero, so the
+        sleeve neither gains nor loses and the final equity is the starting
+        equity by construction.
+        """
+        book = LegBook()
+        # Realised, and closes on the date the next leg opens.
+        _leg(book, entry=0, exit_=2, entry_price=100.0, exit_price=100.0)
+        _leg(book, entry=2, exit_=4, entry_price=100.0, exit_price=100.0)
+        # Realised, opens and closes on one bar.
+        _leg(book, entry=3, exit_=3, entry_price=100.0, exit_price=100.0)
+        # Realised, halted for one bar mid-hold.
+        _leg(
+            book,
+            entry=0,
+            exit_=4,
+            entry_price=100.0,
+            exit_price=100.0,
+            marks=[100.0, 100.0, math.nan, 100.0, 100.0],
+        )
+        # UNREALISED, which is the leg that forces the general walk.
+        _leg(book, entry=0, exit_=4, entry_price=100.0, exit_price=100.0, realised=False)
+
+        curve = build_equity_curve(book, date_count=5)
+
+        assert curve.unrealised_held == 1
+        assert curve.stale_marks == 1
+        np.testing.assert_array_equal(curve.open_count, np.asarray([3, 3, 3, 3, 1], dtype=np.int32))
+        assert curve.equity[-1] == pytest.approx(1.0)
+
+
 class TestSpecConstants:
     def test_the_sizing_rule_id_is_the_declared_one(self) -> None:
         assert SIZING_RULE_ID == SPEC_SIZING_RULE
