@@ -172,7 +172,7 @@ def s2_identity(*, universe: Universe, cost_model_id: str) -> StrategyIdentity:
 
 
 def rebalance_dates(calendar: Iterable[date]) -> frozenset[date]:
-    """The dates on which the panel rebalances, from its union calendar.
+    """First WEEKDAY bar of each new month, from the panel's union calendar.
 
     §4: *"the first bar whose calendar month differs from the previous bar's —
     i.e. act at the start of the new month"*. Causal by construction: the last
@@ -189,15 +189,58 @@ def rebalance_dates(calendar: Iterable[date]) -> frozenset[date]:
     happened), and is stated here because it is a reading rather than a
     quotation.
 
-    ⚠ The FIRST date in the calendar is not a rebalance — there is no previous
+    ⚠⚠ SATURDAYS AND SUNDAYS ARE DROPPED BEFORE THE MONTH RULE RUNS (#2797).
+    Source rule: the validated universe is US-listed stock (§4.0) and US equity
+    venues hold no regular weekend sessions (NYSE/Nasdaq holiday-and-hours
+    calendars), so a weekend row is a corpus artefact and not a bar §4 can mean.
+    ``price_daily`` carries them anyway, and because the FIRST qualifying bar
+    takes the month, one artefact hands the whole month's rebalance to a handful
+    of names and the real first trading day then never rebalances at all.
+
+    Measured on the validated universe at 2026-08-20 (6,774 instruments,
+    3,673,648 bars): **3,669 weekend bars** across 389 instruments and 329
+    distinct weekend dates — 0.0998% of the corpus, controlling **13 of 73**
+    rebalance dates (17.8%). On those dates the panel ran 4–117 names against
+    3,629–5,747 on every real one. The most recent, Sat 2026-08-01, had 9
+    eligible names — below ``MIN_CROSS_SECTION`` — and Mon 2026-08-03 had 5,380,
+    which is the whole of S-2's zero fired signals in production. Reproduce::
+
+        select count(*), count(distinct instrument_id), count(distinct price_date)
+        from price_daily where extract(isodow from price_date) >= 6;
+
+    ⚠ The failure this removes was SILENT: the junk instruments are not
+    frontier-eligible, so the scan wrote no row of any kind for 2026-08-01 — not
+    even a ``thin_cross_section`` refusal. An absent month and a quiet month
+    render identically.
+
+    ⚠ A corpus-hole WEEKDAY still takes its month and is then refused by
+    ``MIN_CROSS_SECTION``; that month simply does not rebalance. Deliberately not
+    fixed here, for S-10's reason: teaching this pure function participation
+    counts it cannot verify is worse than a self-healing hole.
+
+    ⚠ DUPLICATED, NOT SHARED, with ``s10_relative_strength_leader
+    .s10_rebalance_dates`` — identical rule, two modules, and that is a choice
+    rather than an oversight. Both identities move in #2797 regardless (a
+    docstring edit moves ``_source_hash``), so co-location was not ruled out on
+    cost. It is ruled out because the binding that catches drift has to be
+    behavioural: two independent implementations checked against each other is
+    evidence, whereas a test over one shared import is the tautology this repo
+    has already shipped once (prevention log, *"a reference that IMPORTS the
+    constant it validates"*). The binding is ``TestNoDriftAgainstS10`` in
+    ``tests/test_2797_s2_weekday_rebalance.py``, which compares them over four
+    years of DENSE calendar (every date, weekends included) and again over one
+    punched with holes — not the real union calendar, which is sparser than
+    both and would exercise fewer month-boundary shapes.
+
+    ⚠ The FIRST weekday in the calendar is not a rebalance — there is no previous
     bar for its month to differ from. Unreachable in practice (every member is
     inside its 273-bar warm-up there) and defined anyway, because "unreachable"
     is a property of today's data.
     """
-    ordered = sorted(set(calendar))
+    weekdays = [when for when in sorted(set(calendar)) if when.weekday() < 5]
     return frozenset(
         when
-        for previous, when in zip(ordered, ordered[1:], strict=False)
+        for previous, when in zip(weekdays, weekdays[1:], strict=False)
         if (when.year, when.month) != (previous.year, previous.month)
     )
 
