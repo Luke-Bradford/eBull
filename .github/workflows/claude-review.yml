@@ -153,6 +153,7 @@ jobs:
         if: steps.docs_only.outputs.docs_only != 'true'
         run: |
           cat > build_prompt.py << 'PYEOF'
+          import copy
           import json
 
           diff = open('pr.diff', encoding='utf-8', errors='replace').read()
@@ -328,7 +329,12 @@ jobs:
           # the primary call returns zero text blocks (thinking consumed the
           # whole max_tokens on a huge diff) — low effort thinks far less,
           # leaving room for the review text.
-          payload_low = dict(payload)
+          # ⚠ deepcopy, not dict(): a shallow copy shares `messages`, `system`
+          # and every other nested structure with `payload`, so a later edit that
+          # mutates one in place would silently change both request files. The
+          # two calls must differ in EXACTLY one field — the effort — or the
+          # retry stops being the same prompt.
+          payload_low = copy.deepcopy(payload)
           payload_low["output_config"] = {"effort": "low"}
           with open('request_low.json', 'w') as f:
               json.dump(payload_low, f)
