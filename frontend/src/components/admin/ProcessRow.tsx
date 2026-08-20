@@ -16,6 +16,7 @@ import { memo, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { ProcessRowResponse } from "@/api/types";
+import { Badge } from "@/components/ui/Badge";
 import { formatDateTime } from "@/lib/format";
 
 import {
@@ -193,13 +194,9 @@ function ProcessRowImpl({
         ) : null}
       </td>
       <td className="px-2 py-2">
-        <span
-          data-testid="lane-chip"
-          aria-label={`Lane: ${row.lane}`}
-          className="inline-flex rounded-full border bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
-        >
+        <Badge tone="neutral" uppercase data-testid="lane-chip" aria-label={`Lane: ${row.lane}`}>
           {row.lane}
-        </span>
+        </Badge>
       </td>
       <td className="px-2 py-2">
         <StatusPill row={row} />
@@ -298,15 +295,17 @@ function StatusPill({ row }: { row: ProcessRowResponse }) {
   const visual = VERDICT_VISUAL[row.health_verdict];
   const tooltip = row.self_healing ? PENDING_RETRY_TOOLTIP : undefined;
   return (
-    <span
+    <Badge
+      tone={visual.tone}
+      uppercase
+      className={visual.extraClass}
       data-testid="status-pill"
       data-verdict={row.health_verdict}
       title={tooltip}
       aria-label={`Health: ${visual.label}`}
-      className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${visual.toneClass}`}
     >
       {visual.label}
-    </span>
+    </Badge>
   );
 }
 

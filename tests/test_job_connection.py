@@ -81,15 +81,26 @@ def test_unknown_job_name_not_in_registry():
     assert scheduler._JOBS_BY_NAME.get("sec_rebuild") is None
 
 
-def test_tracked_job_finalize_writes_stay_raw():
-    # Codex ckpt-1 #1: _tracked_job's own record_job_* writes must NOT use
-    # connect_job — the per-job cap would otherwise bound the self-heal write
-    # itself, which could strand the row in 'running'.
+def test_tracked_job_finalize_writes_use_bounded_background_pool():
+    # The terminal write must not open a new raw client at the exact cadence
+    # boundary where the body connections peak. It also must not use
+    # connect_job: the body statement timeout must not bound self-healing.
     src = inspect.getsource(inspect.unwrap(scheduler._tracked_job))
     code = "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("#"))
-    assert "connect_job(" not in code  # no bounded connect in the finalize path
-    assert "psycopg.connect(" in code  # finalize writes stay raw
+    assert "connect_job(" not in code
+    assert "psycopg.connect(" not in code
+    assert "background_write_connection(autocommit=False)" in code
     assert "record_job_finish(" in code
+
+
+def test_job_body_connection_gets_attributable_application_name(monkeypatch):
+    captured = _capture_connect(monkeypatch)
+    token = jc.job_application_name.set("strategy_paper_cycle")
+    try:
+        jc.connect_job()
+    finally:
+        jc.job_application_name.reset(token)
+    assert captured["kw"]["application_name"] == "ebull-job-body:strategy_paper_cycle"
 
 
 # -- #1693 (PR4c): service-helper-owned connects reached from steady-state job

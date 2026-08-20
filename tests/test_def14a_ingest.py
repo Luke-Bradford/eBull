@@ -21,6 +21,8 @@ import psycopg.rows
 import pytest
 
 from app.services.def14a_ingest import (
+    _PARSER_VERSION_DEF14A,
+    _supersede_dropped_holdings,
     bootstrap_def14a,
     discover_pending_def14a,
     ingest_def14a,
@@ -357,7 +359,10 @@ class TestIngestDef14a:
             document_kind="def14a_body",
         )
         assert doc is not None
-        assert doc.parser_version == "def14a-v2"
+        # Reference the live constant — literal pins went stale across three
+        # version bumps because this is db-tier, off the fast push gate
+        # (#2100 fresh-agent review).
+        assert doc.parser_version == _PARSER_VERSION_DEF14A
         assert doc.source_url == url
         assert len(doc.require_payload()) > 0
 
@@ -406,6 +411,194 @@ class TestIngestDef14a:
             row = cur.fetchone()
         assert row is not None
         assert row[0] == 3
+
+    def test_re_ingest_supersedes_renamed_holders_and_revives_the_rest(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#2140 D6 — the observations conflict key is DERIVED from the parsed
+        name (``holder_name_key = lower(trim(holder_name))``), so a parser fix
+        that changes a name writes the corrected row under a NEW key. Unless
+        the filing's prior rows are superseded first, the broken row stays
+        live and ``refresh_def14a_current`` — which prunes from that same set —
+        keeps its ``_current`` row alive forever.
+
+        Asserts BOTH halves of the mechanism: a holder the re-parse no longer
+        emits stays tombstoned, and one it still emits is REVIVED (the
+        ``known_to = NULL`` clause in ``record_def14a_observation``).
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000009"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _live_names() -> set[str]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT holder_name FROM ownership_def14a_observations
+                     WHERE source_document_id = %s AND known_to IS NULL
+                    """,
+                    (accession,),
+                )
+                return {r[0] for r in cur.fetchall()}
+
+        first_names = _live_names()
+        assert first_names, "first ingest wrote no observations"
+
+        # Simulate a parser fix that RENAMES one holder: rewrite one stored
+        # observation under a broken key, as the pre-#2140 parser would have.
+        broken, *rest = sorted(first_names)
+        conn.execute(
+            """
+            UPDATE ownership_def14a_observations
+               SET holder_name = %s
+             WHERE source_document_id = %s AND holder_name = %s
+            """,
+            ("999,999", accession, broken),
+        )
+        conn.execute("DELETE FROM def14a_ingest_log WHERE accession_number = %s", (accession,))
+        conn.commit()
+        assert "999,999" in _live_names()
+
+        # Re-ingest under the current (fixed) parser.
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        live = _live_names()
+        # The broken key is no longer emitted -> superseded, not resurrected.
+        assert "999,999" not in live
+        # Every name the parse still emits is live again, including the one
+        # whose row had been rewritten (revive clause) and the untouched rest.
+        assert live == first_names, f"expected {first_names}, got {live}"
+        # I6: superseded, never hard-deleted — the audit row survives.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT known_to IS NOT NULL FROM ownership_def14a_observations
+                 WHERE source_document_id = %s AND holder_name = %s
+                """,
+                (accession, "999,999"),
+            )
+            row = cur.fetchone()
+        assert row is not None and row[0] is True
+
+    def test_reparse_drops_typed_rows_the_new_parse_no_longer_emits(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#2140 (Codex pre-push) — ``_upsert_holding`` is keyed on
+        ``(instrument_id, accession_number, holder_name)``, so a parser bump
+        that RENAMES a holder writes the corrected row under a new key and
+        leaves the old one live in ``def14a_beneficial_holdings``, which the
+        rollup / drillthrough / drift readers use. ``rewash_filings`` already
+        deleted the accession's typed rows, but the MANIFEST re-drive path that
+        the v6->v7 bump triggers did not.
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000011"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _typed_names() -> set[str]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT holder_name FROM def14a_beneficial_holdings WHERE accession_number = %s",
+                    (accession,),
+                )
+                return {r[0] for r in cur.fetchall()}
+
+        first = _typed_names()
+        assert first
+
+        # Simulate the pre-fix parser output: rename one stored holder.
+        stale = sorted(first)[0]
+        conn.execute(
+            """
+            UPDATE def14a_beneficial_holdings
+               SET holder_name = %s
+             WHERE accession_number = %s AND holder_name = %s
+            """,
+            ("999,999", accession, stale),
+        )
+        conn.execute("DELETE FROM def14a_ingest_log WHERE accession_number = %s", (accession,))
+        conn.commit()
+        assert "999,999" in _typed_names()
+
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        after = _typed_names()
+        assert "999,999" not in after, "renamed row survived the reparse"
+        assert after == first
+
+    def test_zero_row_reparse_preserves_existing_typed_rows(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Review bot BLOCKING on PR #2159 — ``holder_name <> ALL('{}')`` is
+        VACUOUSLY TRUE in Postgres, so an empty holder-name list would delete
+        every typed row for the accession instead of preserving them, turning a
+        zero-row re-parse into silent data loss.
+
+        Exercises ``_supersede_dropped_holdings`` directly: the call sites pass
+        the parse's names unconditionally, so the guard has to live in the
+        helper.
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000012"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _typed_count() -> int:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM def14a_beneficial_holdings WHERE accession_number = %s",
+                    (accession,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+        before = _typed_count()
+        assert before > 0
+
+        deleted = _supersede_dropped_holdings(
+            conn,
+            accession_number=accession,
+            instrument_ids=[769_100],
+            holder_names=[],
+        )
+        conn.commit()
+        assert deleted == 0
+        assert _typed_count() == before, "a zero-row re-parse wiped the accession's typed rows"
 
     def test_unrecognisable_table_tombstones_partial(
         self,

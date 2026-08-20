@@ -32,7 +32,7 @@ from app.services.processes.param_metadata import (
     materialise_scheduled_params,
     validate_job_params,
 )
-from app.workers.scheduler import SCHEDULED_JOBS
+from app.workers.scheduler import JOB_STRATEGY_OUTCOME_RESOLUTION, SCHEDULED_JOBS
 
 _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
     {
@@ -86,6 +86,8 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # Lane disjoint from sec_rate (CDN serves both endpoints with
         # one shared throttle).
         "finra",
+        "nasdaq",
+        "cboe",
         # #1526 — jobs_liveness_watchdog + jobs_retry_sweeper extracted from the
         # catch-all ``db`` lane into their own single-job lanes. On ``db`` they
         # lost the ``job_source:db`` advisory-lock race to
@@ -121,6 +123,33 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # @02:00 rehash and skip a day (the #1526/#1527 starvation class). See
         # app/jobs/sources.py::Lane.
         "db_size_sample",
+        # #1919 PR-B — thesis_refresh single-job lane. A batch of ≤5 local-LLM
+        # generations holds the lane ~20+ min; on any shared lane that hold is
+        # the #1526/#1527 starvation class. Cross-path writes serialise
+        # per-instrument via the K.3 instrument_lock, not the lane. See
+        # app/jobs/sources.py::Lane.
+        "llm_thesis",
+        # #2052 — thesis_dq_audit + thesis_break_scan single-job lanes. On the
+        # catch-all ``db`` lane the 02:30 fundamentals_sync held the lock
+        # 6-11h+ nightly (released only by the next daemon restart) and the
+        # 05:12/05:22 audit slots silently starved (dq_audit: zero scheduled
+        # fires ever). SEPARATE lanes (the #1526 db_liveness/db_retry lesson):
+        # boot catch-up / manual triggers co-fire them despite the stagger.
+        # See app/jobs/sources.py::Lane.
+        "db_thesis_dq",
+        "db_thesis_break",
+        # #2002 — thesis_outcome_capture single-job lane (same #2052/#1526
+        # rationale); sole writer of thesis_outcomes.
+        "db_thesis_outcomes",
+        # #2394 §3.1 — strategy_signal_scan single-job lane. Unlike the
+        # starvation-driven lanes above, this one is load-bearing for
+        # CORRECTNESS: strategy_signals has no ON CONFLICT, so two overlapping
+        # scans raise a UniqueViolation and abort a batch rather than
+        # de-duplicating. See app/jobs/sources.py::Lane.
+        "strategy_scan",
+        # #2450 — demo strategy order reconciliation, owned-position
+        # protection and paper entry share one bounded lifecycle lane.
+        "strategy_execution",
     }
 )
 
@@ -141,6 +170,15 @@ class TestScheduledJobSourceField:
     def test_every_source_is_valid_lane(self) -> None:
         bad = [(j.name, j.source) for j in SCHEDULED_JOBS if j.source not in _ALLOWED_SOURCES]
         assert not bad, f"jobs with invalid source: {bad}"
+
+    def test_forward_outcomes_run_between_signal_scan_and_retention_on_the_same_lane(self) -> None:
+        job = next(item for item in SCHEDULED_JOBS if item.name == JOB_STRATEGY_OUTCOME_RESOLUTION)
+        assert (job.source, job.cadence.kind, job.cadence.hour, job.cadence.minute) == (
+            "strategy_scan",
+            "daily",
+            6,
+            55,
+        )
 
     def test_no_legacy_sec_lane_leak(self) -> None:
         """Regression — pre-#1020 catch-all lane='sec' MUST NOT appear in source keys.
@@ -231,6 +269,10 @@ class TestSourceRegistry:
         # sec_bulk_download is a bootstrap-only invoker mapped to its
         # own source bucket per _STAGE_LANE_OVERRIDES.
         assert source_for("sec_bulk_download") == "sec_bulk_download"
+        # #2052 — the two nightly thesis audit scans own single-job lanes so
+        # the 02:30 fundamentals_sync db-lane hold can no longer starve them.
+        assert source_for("thesis_dq_audit") == "db_thesis_dq"
+        assert source_for("thesis_break_scan") == "db_thesis_break"
 
 
 class TestOrchestratorAdapterSourceCoverage:

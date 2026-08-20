@@ -25,6 +25,7 @@ from psycopg.types.json import Jsonb
 from app.services.budget import FxRateUnavailable, compute_budget_state
 from app.services.fx import FxRateNotFound, convert
 from app.services.sector_classification import resolve_sector_spdr
+from app.services.thesis_subject_identity import is_thesis_usable
 from app.services.valuation import PortfolioValuation, compute_portfolio_valuation
 
 logger = logging.getLogger(__name__)
@@ -227,21 +228,70 @@ def _positions_opened_closed(
     return opened, closed
 
 
+def _select_rank_movers(
+    rows: list[dict[str, Any]],
+    *,
+    top_n: int = 10,
+) -> list[dict[str, Any]]:
+    """Pick the rows that belong on the statement, from one row per instrument.
+
+    `rows` is already collapsed to one row per instrument (its single
+    largest move in the period) and sorted by `rank_delta` DESC, so
+    risers lead and fallers trail.
+
+    Takes `top_n` from EACH direction rather than the top `2 * top_n` by
+    magnitude — the same shape `_compute_contributors` uses for
+    contributors/drags. Pure magnitude skews hard in practice: for June
+    2026 the top 20 by `ABS(rank_delta)` are 4 risers and 16 fallers, so
+    a section titled "Rank movers" would read as a market-wide collapse.
+    The pre-cap total travels alongside as `score_changes_total`, so the
+    exhibit never claims to be the whole set.
+    """
+    risers = [r for r in rows if r["rank_delta"] > 0][:top_n]
+    fallers = [r for r in rows if r["rank_delta"] < 0]
+    # `rows` is DESC, so fallers trail with the most-negative last. Take
+    # them from the tail via an index, NOT `[-top_n:]` — a negative slice
+    # turns `top_n=0` into `[-0:]`, which is the whole list.
+    return risers + fallers[max(len(fallers) - top_n, 0) :]
+
+
 def _score_changes(
     conn: psycopg.Connection[Any],
     period_start: date,
     period_end: date,
     min_rank_delta: int = 5,
-) -> list[dict[str, Any]]:
-    """Significant rank movements in the report period.
+    *,
+    top_n: int = 10,
+) -> tuple[list[dict[str, Any]], int]:
+    """Biggest rank movers in the report period — capped for the statement.
 
-    Filters to rows where ABS(rank_delta) >= min_rank_delta.
+    Returns `(movers, total)`. One row per instrument — its single
+    largest-magnitude `rank_delta` in the window — then
+    `_select_rank_movers` caps each direction at `top_n`. `total` is the
+    pre-cap instrument count, stored as `score_changes_total` so the
+    exhibit never reads as the full movement set.
+
+    **Why per-row `rank_delta` and never a start-vs-end rank diff:** a
+    report period routinely spans a `model_version` bump (June 2026 spans
+    v1.1/v1.2/v1.3-balanced), and settled-decisions "Rank delta
+    comparison" holds that ranks are only comparable within one
+    model_version. `scoring._fetch_prior_ranks` filters
+    `model_version = %(mv)s`, so every STORED `rank_delta` is
+    version-safe by construction; subtracting two ranks across the
+    window is not, and would report the model change as instrument
+    movement.
+
+    `ABS(rank_delta) >= min_rank_delta` is retained but near-inert on the
+    live universe (June median |rank_delta| = 301 across ~3,900 names) —
+    `top_n` is what actually bounds the payload.
+
     rank and rank_delta were added to scores in migration 007.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT s.instrument_id,
+            SELECT DISTINCT ON (s.instrument_id)
+                   s.instrument_id,
                    i.symbol,
                    s.total_score,
                    s.rank,
@@ -253,22 +303,26 @@ def _score_changes(
               AND s.scored_at < %(end)s::date + 1
               AND s.rank_delta IS NOT NULL
               AND ABS(s.rank_delta) >= %(min_delta)s
-            ORDER BY ABS(s.rank_delta) DESC
+            ORDER BY s.instrument_id, ABS(s.rank_delta) DESC, s.scored_at DESC
             """,
             {"start": period_start, "end": period_end, "min_delta": min_rank_delta},
         )
         rows = cur.fetchall()
-    return [
+    movers: list[dict[str, Any]] = [
         {
             "instrument_id": r["instrument_id"],
             "symbol": r["symbol"],
             "total_score": _dec(r["total_score"]),
             "rank": r["rank"],
-            "rank_delta": r["rank_delta"],
+            "rank_delta": int(r["rank_delta"]),
             "scored_at": r["scored_at"].isoformat() if r["scored_at"] is not None else None,
         }
         for r in rows
     ]
+    # SQL orders by instrument_id (DISTINCT ON requires it), so re-sort
+    # by signed delta: risers first, fallers last.
+    collapsed = sorted(movers, key=lambda r: int(r["rank_delta"]), reverse=True)
+    return _select_rank_movers(collapsed, top_n=top_n), len(collapsed)
 
 
 def _budget_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
@@ -556,16 +610,19 @@ def _thesis_accuracy(
                    t.bear_value,
                    t.stance,
                    t.confidence_score,
+                   t.thesis_id,
+                   t.subject_identity_ok,
                    f_exit.price AS exit_price
             FROM attribution a
             JOIN instruments i USING (instrument_id)
             LEFT JOIN LATERAL (
-                SELECT base_value, bull_value, bear_value, stance, confidence_score
+                SELECT thesis_id, base_value, bull_value, bear_value, stance, confidence_score,
+                       subject_identity_ok
                 FROM theses
                 WHERE instrument_id = a.instrument_id
                   AND a.entry_anchor IS NOT NULL
                   AND created_at <= a.entry_anchor
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, thesis_version DESC
                 LIMIT 1
             ) t ON true
             LEFT JOIN fills f_exit ON f_exit.fill_id = a.exit_fill_id
@@ -577,9 +634,22 @@ def _thesis_accuracy(
     results: list[dict[str, Any]] = []
     for r in rows:
         exit_price = r["exit_price"]
-        bull_value = r["bull_value"]
-        base_value = r["base_value"]
-        bear_value = r["bear_value"]
+        # #2436 — attribution says WHICH target a realised exit hit. Judged
+        # against a band written about a different company it does not produce
+        # a weak label, it produces a confident wrong one, which is worse:
+        # `target_hit` is read as a statement about the thesis's accuracy.
+        #
+        # ⚠ The WHOLE thesis contribution goes, not just the three bands. The
+        # stance and the confidence are that same memo's, and a row carrying an
+        # authoritative-looking stance beside a null band is a mixed record.
+        # thesis_id separates "no thesis existed at entry" from "one existed
+        # and was refused" — the LEFT JOIN LATERAL nulls every column in both
+        # cases, so the verdict column alone cannot tell them apart.
+        thesis_present = r["thesis_id"] is not None
+        thesis_usable = is_thesis_usable(r)
+        bull_value = r["bull_value"] if thesis_usable else None
+        base_value = r["base_value"] if thesis_usable else None
+        bear_value = r["bear_value"] if thesis_usable else None
 
         target_hit: str | None
         if exit_price is None or bull_value is None or base_value is None or bear_value is None:
@@ -598,8 +668,9 @@ def _thesis_accuracy(
                 "instrument_id": r["instrument_id"],
                 "symbol": r["symbol"],
                 "gross_return_pct": _dec(r["gross_return_pct"]),
-                "stance": r["stance"],
-                "confidence_score": _dec(r["confidence_score"]),
+                "stance": r["stance"] if thesis_usable else None,
+                "confidence_score": _dec(r["confidence_score"]) if thesis_usable else None,
+                "thesis_quarantined": thesis_present and not thesis_usable,
                 "exit_price": _dec(exit_price),
                 "base_value": _dec(base_value),
                 "bull_value": _dec(bull_value),
@@ -866,6 +937,38 @@ def _compute_contributors(
     return {"contributors": contributors, "drags": drags}
 
 
+# Ceiling on one serialized snapshot (#2180).
+#
+# ROW-COUNT RETENTION IS DELIBERATELY *NOT* THE GUARD HERE, and must not be
+# added later: `_prior_v2_chain` selects EVERY prior v2 snapshot with no LIMIT,
+# and `_cover_and_performance` chain-links those returns into `si_return` and
+# takes `si_start` from `chained_rows[0]`. Deleting the oldest rows would
+# silently move the inception date forward — since-inception would quietly
+# become since-the-retention-window, and the risk section's drawdown index
+# would truncate with it. The history is load-bearing, so it stays.
+#
+# What actually caused #2180's 7.62 MB was not row COUNT but row SIZE: six
+# pre-#2178 rows each carrying the full run × instrument product (up to 14,473
+# elements). With every list field capped, a snapshot is ~3-4 KB and 52 weeklies
+# a year cost ~170 KB — growth that needs no pruning at all. So the durable
+# guard is a size assertion at the write, which catches the NEXT builder that
+# ships an uncapped field on its first run instead of after it has accumulated
+# silently for months.
+#
+# 64 KiB is ~16x the largest legitimate snapshot observed and well under the
+# smallest uncapped one (88 KB) — wide enough that ordinary content growth
+# never trips it, tight enough that an uncapped collection always does.
+_MAX_SNAPSHOT_BYTES = 64 * 1024
+
+
+class ReportSnapshotTooLarge(ValueError):
+    """A snapshot exceeded ``_MAX_SNAPSHOT_BYTES`` — almost always an uncapped
+    list field (#2180 / #2178). Raised rather than warned: eBull does not
+    silently bypass a failed check, and a loud job failure is strictly better
+    than a megabyte-scale leak that only surfaces months later in an API
+    response."""
+
+
 def persist_report_snapshot(
     conn: psycopg.Connection[Any],
     *,
@@ -878,7 +981,29 @@ def persist_report_snapshot(
 
     Idempotent: ON CONFLICT replaces the snapshot for the same
     (report_type, period_start) pair. The caller owns the commit.
+
+    Raises ``ReportSnapshotTooLarge`` before writing when the serialized
+    snapshot exceeds ``_MAX_SNAPSHOT_BYTES`` (#2180) — the check sits here
+    because a write is the only way this table grows, so it catches every
+    producer without a scheduled sweep that could drift out of sync.
     """
+    encoded_bytes = len(json.dumps(snapshot, default=str).encode("utf-8"))
+    if encoded_bytes > _MAX_SNAPSHOT_BYTES:
+        # Name the biggest collection: an uncapped list is the cause every
+        # time this has fired, and the operator needs to know WHICH one.
+        biggest = max(
+            ((k, len(v)) for k, v in snapshot.items() if isinstance(v, list)),
+            key=lambda kv: kv[1],
+            default=("<no list field>", 0),
+        )
+        raise ReportSnapshotTooLarge(
+            f"{report_type} snapshot for {period_start} is "
+            f"{encoded_bytes:,} bytes, over the "
+            f"{_MAX_SNAPSHOT_BYTES:,}-byte cap. Largest list field: "
+            f"{biggest[0]!r} with {biggest[1]:,} elements — cap it to a "
+            f"top-N exhibit and carry the pre-cap count alongside "
+            f"(the #2178 shape)."
+        )
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1615,6 +1740,13 @@ def _thesis_summary(thesis_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "hits": len(hits),
         "misses": len(misses),
         "not_evaluable": not_evaluable,
+        # #2436 — a refused thesis and an absent one both land in
+        # not_evaluable, and the summary is exactly where that conflation does
+        # damage: a rising not_evaluable count reads as "we lack data" when the
+        # truth is "we hold data we refuse to score against"
+        # (docs/review-prevention-log.md:2820). Published as its own number, a
+        # subset of not_evaluable, never instead of it.
+        "quarantined": sum(1 for r in thesis_rows if r.get("thesis_quarantined")),
         "buy": _rate("buy"),
         "avoid": _rate("avoid"),
     }
@@ -1646,7 +1778,7 @@ def generate_weekly_report(
     # remains in the snapshot shape as an empty list so existing
     # readers (frontend, downstream report consumers) don't NPE.
     upcoming_earnings: list[dict[str, Any]] = []
-    score_changes = _score_changes(conn, period_start, period_end)
+    score_changes, score_changes_total = _score_changes(conn, period_start, period_end)
     budget = _budget_snapshot(conn)
     positions_now = _positions_snapshot(conn)
     prior = _load_prior_snapshot(conn, report_type="weekly", period_start=period_start)
@@ -1696,6 +1828,9 @@ def generate_weekly_report(
         "positions_closed": positions_closed,
         "upcoming_earnings": upcoming_earnings,
         "score_changes": score_changes,
+        # Pre-cap mover count — `score_changes` is a top-N exhibit, and
+        # the statement must not imply it is the full set (#2178).
+        "score_changes_total": score_changes_total,
         "budget": budget,
         # Per-instrument position snapshot so the *next* weekly
         # snapshot can compute period contribution against it.
@@ -1737,7 +1872,7 @@ def generate_monthly_report(
     # Rank movers were weekly-only pre-#1596 (committee finding: the
     # monthly model-review section cited a key the monthly builder
     # never wrote).
-    score_changes = _score_changes(conn, period_start, period_end)
+    score_changes, score_changes_total = _score_changes(conn, period_start, period_end)
     prior = _load_prior_snapshot(conn, report_type="monthly", period_start=period_start)
     # When `prior` is absent OR lacks the `positions` key (pre-feature
     # snapshots from before Slice 4), pass `None` so
@@ -1803,6 +1938,9 @@ def generate_monthly_report(
         "risk": risk,
         "thesis_summary": thesis_summary,
         "score_changes": score_changes,
+        # Pre-cap mover count — `score_changes` is a top-N exhibit, and
+        # the statement must not imply it is the full set (#2178).
+        "score_changes_total": score_changes_total,
         "pnl": pnl,
         "position_pnl": position_pnl,
         "win_rate": win_rate_data["win_rate_pct"],

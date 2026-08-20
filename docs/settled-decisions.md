@@ -175,11 +175,20 @@ Use this constrained set in application code:
 - `monthly` = 30 days
 
 ### Thesis prompt budget
-Use capped context in v1:
+Use capped context in v2 (#1987):
 - latest 1 prior thesis
 - latest 3 filing events
 - latest snapshot + up to 4 prior fundamental snapshots
 - latest 10 news items from the last 30 days
+- risk-evidence block (#1632): instrument_risk_metrics_current scalars, statused, as-of-stamped
+- price anchor (#1987): latest price_daily close (native currency) + 52w range + persisted returns
+- valuation block (#1987): instrument_valuation row when present; structurally-absent otherwise
+  (quotes-gated view — absence is statused, not an error)
+- analytics evidence (#1987): latest scores.analytics_json, shaped compact, scored_at-stamped
+- TA state (#1987): latest price_daily indicator columns + derived sma-cross/price-vs-200d signals
+
+All blocks follow the #1632 evidence discipline: statuses verbatim, as-of stamps, missing data
+stays missing. Context-shape changes bump `_PROMPT_VERSION`.
 
 ### Critic invocation
 - run the critic call for every thesis generation in v1
@@ -466,7 +475,7 @@ Entity-level data (10-K text, business summary, financial facts) is
 denormalised across siblings — acceptable for the small share-class
 population (~10 known instruments). If the population grows to 50+, file
 a follow-up to introduce a proper `entities` layer (Option B from the
-#1094 design discussion).
+Issue #1094 design discussion).
 
 `canonical_instrument_id` (#819) is a **different** mechanism for `.RTH`
 operational duplicates — same security, two ticker variants. Don't
@@ -776,6 +785,371 @@ Rules:
 - Own `db_eod_snapshot` JobLock lane (write-disjoint; #1527 starvation class).
 
 **Spec:** `docs/proposals/etl/2026-06-13-portfolio-value-v2-fx-eod.md` (PR-A).
+
+---
+
+## Coverage tier → review_frequency assignment (#1996, settled 2026-07-16)
+
+`coverage.review_frequency` is ASSIGNED from the coverage tier, single
+mapping: **T1='weekly', T2='monthly', T3='monthly'**
+(`TIER_REVIEW_FREQUENCY` in `app/services/coverage.py` — the only writer
+source). Every path that sets `coverage_tier` (seed, bootstrap
+gap-filler, promote/demote/override via `_apply_tier_change`) writes the
+frequency in the same statement; sql/233 backfills pre-writer NULL rows.
+
+Rationale: filing-event triggers (#273) cover real-news regen instantly;
+the `review_frequency` age window is only a drift catch-all, and the
+long-horizon posture (not day-trading) needs no daily rewrites. The
+VALUE mapping (daily=1/weekly=7/monthly=30 days) was already settled;
+this fixes the ASSIGNMENT. Matches the 2026-07-10 interim dev seed.
+
+---
+
+## Thesis staleness v2 thresholds (#1988, settled 2026-07-16)
+
+Three structural data-driven regen triggers in `find_stale_instruments`
+(additive; #273 semantics + existing reason order preserved; ordered
+break_fired → price_move → band_exit → news_spike → cadence):
+
+- **price_move: |move since mint| ≥ 0.30** — universe-derived
+  (~5.7% 30d exceedance). **PROVISIONAL**: the 7-day-old corpus has a
+  degenerate own distribution; MUST re-verify the actual fire rate
+  ~30d post-ship (target ~2-8%/month; fvb R-retune precedent).
+- **band_exit** — close outside [bear, bull] having minted INSIDE
+  (arm-at-mint per #2012 Design 5; the 15/60 minted-outside class is
+  premise and never fires). No state table: mint close is deterministic
+  history.
+- **news_spike: 7d importance-mass rate ≥ 3× prior-23d baseline rate
+  AND 7d mass ≥ 2.0** — the absolute floor kills tiny-baseline ratio
+  explosions; baseline-less names are not evaluated.
+- **Price-input guards:** both closes > 0, latest close ≤ 10d old
+  (#2012 price freshness bound) — else the price rules are NOT
+  evaluated (#1632 NULL-never-0).
+
+**Spec:** `docs/specs/thesis/2026-07-16-thesis-staleness-v2.md`.
+
+---
+
+## v1 strategy capital universe is US-only (#2605, settled 2026-08-12)
+
+**A v1 strategy capital candidate is validated on, and eligible to hold capital
+only in, the §4.0 validated universe: US listing venue + eToro `Stocks` type +
+tradable.** Not issuer domicile, not quote currency — ADRs and US-listed foreign
+private issuers are IN, a UK-listed issuer is OUT.
+
+Already measured reality, recorded here because it was leaking implicitly: the
+implicit version already produced one wrong "exhaustively tested" claim (#2597).
+
+⚠ **"Eligible to hold capital" is a policy statement, not a live pre-trade
+rule.** No order gate enforces it —
+`app/services/strategies/validated_universe.py` says so itself (*"NO ORDER GATE
+LIVES HERE"*; §4.0 puts the hard pre-trade rule in `execution_guard`, which is
+phase 7 and unbuilt). What is enforced today is the evidence side, below.
+
+**Where it binds — and where it does not.** ⚠ The two halves are different
+paths and only the first is enforced today:
+
+- **Result production — enforced.** `check_promotable`
+  (`app/services/strategy_result.py:850`) refuses
+  `instrument_outside_validated_universe` when
+  `evaluated_instrument_ids - validated_universe_ids` is non-empty, and the sole
+  writer of `strategy_results_store` fills that set from
+  `load_validated_universe` (`app/services/backtest_run.py:1204` →
+  `_Corpus.universe` → the candidate at `:2837`). The scope definition itself is
+  `app/services/strategies/validated_universe.py`, pinned by
+  `tests/test_validated_universe.py`.
+- **The promotion transition — enforced since #2621 (2026-08-12).**
+  `run_backtest` freezes each result's universe inputs in
+  `strategy_result_universe` (evaluated ids + the validated universe as the run
+  loaded it, immutable + hashed, written in the pair's own transaction), and
+  `promote_strategy` replays `evaluated ⊆ validated` from that record for every
+  pinned result at the evidence stages. A pinned result without a record —
+  every pre-#2621 row, and anything a non-`run_backtest` writer inserts —
+  refuses `evaluated_universe_unrecorded`. ⚠ The replay is against the universe
+  FROZEN AT RESULT TIME, deliberately: today's `is_tradable` would let a later
+  delisting retroactively invalidate a passing result, and the order-time rule
+  against the CURRENT universe is the execution guard's (phase 7), not
+  promotion's. The decision and its reasons live in
+  `app/services/strategy_result_universe.py`'s module docstring.
+
+**Why the restriction exists.** Every survivorship-free price source found *so
+far* is US-only, and Form 25 delisting evidence is US-only
+(`.claude/skills/data-sources/research-price-corpus.md`, whose measured landscape
+is dated #2284 2026-08-05 / #2346 2026-08-07). Non-US tradable instruments
+therefore cannot currently be validated survivorship-free at all. ⚠ That is a
+claim about the *searched set* on those dates, not about the world — which is
+why lifting the restriction is a data event, below, and not a re-argument.
+
+⚠ The venue axis is eToro's `exchanges.asset_class`, a provider-maintained
+classification with no foreign key behind it — §4.0's "necessary, not
+sufficient" warning applies to the venue half as much as the type half.
+
+**Reproduce the population — do not quote a figure from this file.** These move
+with every `sync_universe` run, and `us_equity` tradable is a WIDER set than the
+validated universe (the script prints the type split that accounts for the
+difference; conflating the two sets is the prevention-log entry on §5.1's M23).
+The script also ASSERTS, and exits non-zero on, the two properties this decision
+leans on — that the venue axis is coherent, and that the validated universe is
+uniformly USD-quoted:
+
+```bash
+PYTHONPATH=. uv run python scripts/measure_2605_universe_scope.py
+```
+
+Out of scope for the restriction:
+
+- **core allocation (#2603)** — the core instrument is a mandate/eligibility
+  question, not a strategy-validation one. A non-US-listed core instrument is
+  permitted if its eligibility proof passes.
+- **advisory/manual surfaces** (v1.5 scoring → thesis → portfolio manager) —
+  unchanged, because the strategy/mandate path is the sole autonomous executor
+  (#2437's 2026-08-12 requirements comment, decision 1). That requirement is
+  cited here, not established here.
+
+**Lifting requires ALL of** a survivorship-free non-US source, its licence
+review, and broker eligibility/FX/tax review for the venue. A data event AND a
+review event, not either alone.
+
+**Spec:** `docs/proposals/ta/strategy-catalogue-and-backtest-validity.md` §4.0
+(#2289). Refs #2437, #2597, #2363.
+
+---
+
+## Live-gate evidence windows are single-entry (#2612, settled 2026-08-13)
+
+**A `(strategy_id, strategy_version)` pair arrives at `forward_observation` at
+most once, and at `paper_enabled` at most once.** The forward-evidence window and
+the paper window therefore each have exactly one start, and the
+splice-versus-accumulate question #2612 raised **does not currently exist** —
+there is no second arrival to splice from.
+
+⚠ **This is the rule, in place of the one #2612 asked for.** The ticket asked us
+to choose splice or accumulate and implement it. Implementing either would have
+encoded "re-entry is expected" into a lifecycle that forbids it, and left dead
+policy guarding an unreachable state.
+
+**Where it is enforced — two independent barriers, both required:**
+
+- `app/services/strategy_control_plane.py::_NEXT_STAGE` is a DAG with no
+  back-edge. Only `historical_validated` has an edge into `forward_observation`,
+  only `forward_observation` has one into `paper_enabled`, and the exits run
+  `paused` → `retired` → nothing. `promote_strategy` checks it under the
+  per-version advisory lock before any evidence work.
+- The partial UNIQUE index `idx_strategy_promotions_one_successor` on
+  `(strategy_id, strategy_version, from_stage)`
+  (`sql/281_strategy_promotion_ownership.sql:46`) — each stage may be departed
+  exactly once, so the bound holds even when the service check is bypassed. It
+  routinely is: five test modules INSERT into `strategy_promotions` directly.
+
+**What reads it.** `assess_live_gate` anchors both windows on
+`max(promoted_at) FILTER (WHERE to_stage=...)`, which is the true window start
+only under this rule. `strategy_live_gate` cannot see `_NEXT_STAGE`, so the
+coupling is held by `LiveGateFacts.forward_observation_entries` /
+`paper_enabled_entries` (counted in the same scan), the fail-closed refusals
+`forward_window_ambiguous` / `paper_window_ambiguous`, and a pure coupling guard
+in `tests/test_2612_forward_window_single_entry.py`.
+
+**Changing this is a real decision, not a refactor.** Adding a re-entry edge
+(`paused` → `forward_observation` is the plausible one) makes the
+splice-versus-accumulate question live for the first time. The guard test fails
+the moment such an edge is added and names `assess_live_gate` as the thing to
+revisit; #2599's contract-frozen forward-shadow floor reads `forward_days` and
+`forward_decision_dates` off these windows, so the choice binds capital
+authority. Decide it there, and update this entry.
+
+**Blast radius when settled:** `strategy_promotions` held **0 rows** on dev
+(measured 2026-08-13) — no strategy has ever been promoted, so nothing existing
+depends on either reading.
+
+**Refs** #2612, #2599, #2621.
+
+---
+
+## The promotion transition's replay policy (#2625, settled 2026-08-13; completed by #2639)
+
+`check_promotable` runs at RESULT PRODUCTION. `promote_strategy` cannot call it
+— it has no `StrategyResult` to hand it, and two of the gate's inputs cost an
+audited read — so it re-derives each input individually from a persisted record.
+**Which input replays against what is now fixed, and keyed on
+`PromotionCandidate`'s FIELDS rather than on refusal codes** (codes are a
+many-to-many projection of the inputs, so a code-keyed rule is satisfiable while
+an input goes unclassified).
+
+Three rules, and no fourth:
+
+- **`frozen`** — replayed from a record written at result time, never re-derived
+  from today's world. The default. Covers the universe (#2621), the §3.4
+  ambiguity comparison (#2625) and the row's own structural stamps.
+- **`today`** — re-evaluated against the current world, and legitimate **ONLY**
+  in one of **three declared shapes**. A today-check outside them is an
+  undeclared freshness rule — the reason #2621 froze the universe instead of
+  re-loading it. **A test pins the exact member set**, so a fourth cannot be
+  added quietly.
+  1. the record DECLARES its own validity window — `promotion_evidence`, whose
+     `cost_observed_on` / `cost_valid_through` say when executable costs go stale;
+  2. the record is explicitly supersedable;
+  3. **(#2639)** the record is an append-only AUDIT LOG, the clause is a
+     comparison between that log and the rows it audits, and the criterion the
+     clause serves requires the comparison to be CURRENT — criterion 5's
+     `holdout_evaluations` / `recorded_accesses` against
+     `strategy_holdout_accesses`. ⚠ Worded this narrowly on purpose: the draft
+     form "a ledger of our own conduct" would admit any mutable operational
+     counter, which is most of the database.
+- **`not_re_read`** — neither persisted nor re-derived. ⚠⚠ **THIS NAMES A GAP,
+  NOT COVERAGE.** The transition does not enforce that clause at all and still
+  trusts a write-time verdict that died with `WrittenRow`. ⚠ **The set is EMPTY
+  since #2639** and `unenforced_candidate_fields()` returns `frozenset()`; the
+  rule stays in the vocabulary so the next unclassifiable input has an honest
+  label to land on, and the assertion stays so a newly-classified-but-unwired
+  input fails a test rather than arriving as a clause nobody applies.
+
+The policy lives in `app/services/strategy_promotion_replay.py` with a reason on
+every entry. **Do not add an input to the transition without classifying it
+there** — `tests/test_strategy_promotion_replay.py` fails on an unclassified
+`PromotionCandidate` field, in both inclusion directions.
+
+⚠ **`replayed_at_transition` is a separate axis from the rule, and the two must
+not be conflated.** "This input's rule is frozen" and "the transition checks it"
+are different claims; every gap is a field where the first is true and the
+second is false. Before #2625, `grep` for
+`universe_basis|carry_unmodelled|fx_unmodelled` in `strategy_control_plane.py`
+returned **nothing** — the stamps were persisted and never read, so Tier 1's
+refusals could all close and promotion still would not consult them.
+
+⚠ Why not just replay the whole gate: the gate has no single as-of — most
+inputs are frozen and three are today — which one `check_promotable(candidate)`
+call cannot express. #2639 does rebuild the row through
+`result_ledger._result_from_row`, but behind
+`stored_result_promotion_refusals`, which returns **refusal codes and never a
+`StrategyResult`**: a public `load_result_by_id` would be a new unaudited door
+to the withheld side, and 300 of the 324 stored results are `hold_out`.
+`read_holdout_results` stays the sanctioned door and still records first.
+
+### What #2639 added (2026-08-13)
+
+- **Criterion 5's two counts replay against TODAY**, because **frozen defeats
+  the criterion**: both counts are scoped to `(strategy_id, strategy_version)`,
+  so a pair frozen at result time is blind to a later unrecorded look at the
+  same version's hold-out — which is the leak criterion 5 exists to catch. The
+  clause is strategy-version-wide (one unrecorded evaluation blocks every result
+  of that version) and it heals as well as blocks. `holdout_access_counts` is
+  now ONE statement with two scalar subqueries, so the pair comes from one
+  snapshot. ⚠ It is **not** atomic with the promotion INSERT — the hold-out
+  writers do not take `promote_strategy`'s advisory lock — and that bound is
+  stated rather than assumed away.
+- **Criterion 9's arm pair is RE-DERIVED from the identity hash**, not recorded.
+  `result_ledger.quarantine_arm_pair_present` does the count and records
+  nothing; `quarantine_arms_compared` records and then calls it, so the door
+  that writes a `read` access stays the one criterion 5 governs and the
+  transition does not write into the log it is auditing. ⚠ **A stored
+  `sibling_result_id` pointer was the first design and was killed at Codex
+  checkpoint 1**: a pointer is chosen by the writer and can name a compatible
+  row that is not the one the identity admits, whereas
+  `ResultIdentity.version` is a hash and admits exactly one sibling.
+- **The row's own purpose, deflation, effective-sample-size and §9 clauses**
+  replay through four pure functions — `purpose_promotion_refusals`,
+  `holdout_count_promotion_refusals`, `deflation_promotion_refusals`,
+  `synthetic_control_promotion_refusals` — which are the copies
+  `check_promotable` itself calls, the `structural_promotion_refusals` move.
+- ⚠ **The row's own `purpose` was a latent gap.** `promote_strategy` refuses on
+  `registered_strategy_purpose` — the MANIFEST's — and never compared it to the
+  row's stamp. Measured 2026-08-13: all 324 stored rows and all four registered
+  strategies are `harness_validation`, so they agree today; the moment a
+  manifest entry becomes `capital_candidate`, its older harness-stamped rows
+  become pinnable. Same M9 shape — the control exists on a path the decision
+  does not take.
+- ⚠ **`result` stays `frozen`.** `trial_register_superseded` compares a frozen
+  column against the CURRENT `TRIAL_REGISTER` constant; a frozen-field-versus-
+  constant comparison does not make a field `today` (what makes
+  `promotion_evidence` today is the current DATE).
+- ⚠ **The transition keeps its OWN read of the structural stamps.**
+  `_result_from_row` coerces `carry_unmodelled` with `bool(...)`, so a NULL
+  would read as *modelled* — fail-open on a Tier 1 refusal — while the
+  transition's read coerces NULL to `True`. Both columns are `NOT NULL`
+  (`sql/262`, `sql/335`), so this is defence in depth; the two coercions must
+  not be collapsed onto the weaker one.
+- ⚠ **A corrupt row RAISES rather than refusing**, per `load_result_ambiguity`'s
+  precedent, which aborts before the remaining refusals are gathered and so
+  MASKS them. Verified on the full population: 324 of 324 rows reconstruct.
+
+**Blast radius when settled:** `strategy_promotions` held **0 rows** and
+`strategy_result_ambiguity` **0 rows** against 324 results (measured 2026-08-13),
+so all 324 refuse `ambiguity_verdict_unrecorded` and nothing existing was
+promotable to begin with.
+
+**Blast radius of #2639**, measured on dev over the full population with
+`PYTHONPATH=. uv run python scripts/verify_2639_promotion_replay.py --all`:
+324 of 324 rows reconstruct; the new row-level census is 324
+`harness_validation_only`, 324 `synthetic_control_not_run`, 204
+`trial_register_superseded`, 56 `deflated_sharpe_not_computed`, 56
+`trial_count_undeclared`, and **0 `quarantine_arms_not_compared`** — every row's
+flipped-arm sibling is stored. **0 of 324 rows become less refused**, which is
+the direction that matters: a replay closing a gap must only ever ADD refusals.
+Criterion 5's clause passes on all eight `(strategy_id, strategy_version)` pairs
+(evaluations equal accesses on every one).
+
+**Refs** #2639, #2625, #2621, #2505, #2599, #2437.
+
+---
+
+## A refused outcome-access attempt is audited from a SEPARATE transaction (#2611)
+
+`record_holdout_access` / `require_outcome_access` used to raise
+`PreregDeclarationRefused` and write nothing. `sql/340`
+(`strategy_holdout_access_refusals`) records the attempt; `_refuse_access` is the
+single exit that writes it.
+
+**The rule, and it is an asymmetry — not an inconsistency with #2599:**
+
+- An **access** record is a claim about DATA. It stays in the caller's
+  transaction, because `sql/264`'s trigger must see it alongside the hold-out row
+  it authorises and a rolled-back evaluation did not happen.
+  `record_holdout_access`'s docstring is unchanged and still correct.
+- A **refusal** record is a claim about an ACT OF THE CALLER. It completes when
+  the exception is constructed; the caller rolling back does not un-attempt it,
+  and a caller that retries N times attempted N times. Postgres has no autonomous
+  transaction, so it is written on a second connection — otherwise it would be
+  lost in every case it exists for, the refusal being an exception.
+
+**Consequences, each load-bearing and none of them cosmetic:**
+
+- ⚠⚠ **Its own relation, never `strategy_holdout_accesses`.** That table is read
+  as *looks that happened* by `holdout_access_counts` (criterion 5),
+  `supersede_preregistration` (`supersession_trial_already_exposed`),
+  `app/api/strategies.py`, `trial_register`, `scripts/sealed_rerun_gate.py` and
+  `sql/264`'s own write trigger. A refusal row there would inflate criterion 5
+  AND permanently strand the trial from #2634's repair over a look that returned
+  nothing.
+- ⚠⚠ **No advisory lock in the audit write, and no FK on `declaration_id`.**
+  Measured 2026-08-13: `pg_advisory_xact_lock` **blocks across connections**.
+  `record_holdout_access` holds the trial lock when it refuses, so an audit that
+  took it would block until the caller's transaction ended. An FK is the same
+  hazard quieter: it locks the parent row and cannot see a declaration the caller
+  froze in its own open transaction.
+- ⚠ **The audit DSN is derived from the caller's connection**
+  (`make_conninfo(conn.info.dsn, password=conn.info.password)` — `dsn` strips the
+  password, measured on psycopg 3.3.3), never from the process settings. The
+  settings URL would write a DB test's refusal into the operator's dev database.
+- ⚠ **Best effort, and it never masks the refusal.** A failed audit logs at ERROR
+  **with the codes inline** and the refusal still raises. A gate that can be
+  disabled by breaking its audit is not a gate.
+- **Out of scope on purpose:** `freeze_preregistration` /
+  `supersede_preregistration` refusals (attempts to WRITE a declaration, which
+  open nothing), `_refuse_declared_stamp_substitution` (a result-write refusal),
+  and `verify_outcome_access_provenance` (already requires a real `access_id`, so
+  the attempt it re-checks is recorded). A `RuntimeError` from a malformed
+  declaration chain also denies access and is deliberately NOT audited — this
+  table records POLICY refusals, not every way a look can fail.
+
+**Blast radius, measured on dev over the full population with
+`PYTHONPATH=. uv run python scripts/verify_2611_refusal_audit.py`:** 8 trials,
+304 access rows, 324 results (300 `hold_out`), **0 declarations** and 0 refusal
+rows. All 8 trials refuse `preregistration_not_frozen` at `require_outcome_access`
+and are permitted at `record_holdout_access` — **the same decision this branch and
+`origin/main` both make.** The PR adds a row after the decision and changes no
+decision.
+
+**Refs** #2611, #2599, #2634, #2614, #2437.
 
 ---
 

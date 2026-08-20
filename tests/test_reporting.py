@@ -106,6 +106,8 @@ def _fake_valuation() -> Any:
         cash_balance=10000.0,
         mirror_equity=0.0,
         total_aum=10000.0,
+        cash_currency="USD",
+        fx_incomplete=False,
         raw_rows=(),
         rates={},
         rates_meta={},
@@ -260,6 +262,7 @@ class TestPersistReportSnapshot:
 
         conn = MagicMock()
         cursor = MagicMock()
+        cursor.rowcount = 0
         conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -706,6 +709,7 @@ def _holding(
         sector=sector,
         sector_name=sector_name,
         native_currency="USD",
+        currency="USD",
         open_date=date(2026, 1, 5),
         source="ebull",
         updated_at=datetime(2026, 6, 1, tzinfo=UTC),
@@ -728,6 +732,8 @@ def _valuation_with(holdings: tuple[HoldingValuation, ...], *, cash: float = 500
         cash_balance=cash,
         mirror_equity=0.0,
         total_aum=total_market + cash,
+        cash_currency="USD",
+        fx_incomplete=False,
         raw_rows=(),
         rates={},
         rates_meta={},
@@ -1068,3 +1074,222 @@ class TestRollingWindowContiguity:
         from app.services.reporting import _is_contiguous_monthly
 
         assert _is_contiguous_monthly([], date(2026, 5, 1)) is True
+
+
+class TestSelectRankMovers:
+    """Rank movers is a capped statement exhibit (#2178).
+
+    Pre-#2178 the builder shipped every scored row in the period —
+    29,281 for June 2026, 4.38 MB of a 4.39 MB snapshot — and the
+    frontend rendered one router `<Link>` per row, freezing the page.
+    """
+
+    @staticmethod
+    def _rows(deltas: list[int]) -> list[dict[str, Any]]:
+        """Rows as `_score_changes` hands them over: one per instrument,
+        already sorted by `rank_delta` DESC."""
+        return [
+            {"instrument_id": i, "symbol": f"S{i}", "rank_delta": d}
+            for i, d in enumerate(sorted(deltas, reverse=True), start=1)
+        ]
+
+    def test_caps_each_direction_independently(self) -> None:
+        """Both directions survive even when one dominates by magnitude.
+
+        The June 2026 shape: the top 20 by ABS(rank_delta) are 4 risers
+        and 16 fallers. Selecting by pure magnitude would render "Rank
+        movers" as an almost-uniform collapse. Here the fallers are
+        strictly larger in magnitude than every riser, so a magnitude
+        cut would return zero risers.
+        """
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([10, 20, 30, 40] + [-100, -200, -300, -400, -500])
+        result = _select_rank_movers(rows, top_n=2)
+
+        assert [r["rank_delta"] for r in result] == [40, 30, -400, -500]
+
+    def test_keeps_biggest_movers_not_the_first_encountered(self) -> None:
+        """Fallers trail a DESC list, so the biggest sit at the END."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([-1, -2, -3, -50, -60])
+        result = _select_rank_movers(rows, top_n=2)
+
+        assert [r["rank_delta"] for r in result] == [-50, -60]
+
+    def test_output_stays_descending(self) -> None:
+        """The statement list reads risers-first; the FE does no sorting."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([5, -5, 900, -900, 1, -1])
+        result = _select_rank_movers(rows, top_n=3)
+        deltas = [r["rank_delta"] for r in result]
+
+        assert deltas == sorted(deltas, reverse=True)
+
+    def test_fewer_movers_than_cap_returns_all(self) -> None:
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([7, -7])
+        assert len(_select_rank_movers(rows, top_n=10)) == 2
+
+    def test_one_sided_period_returns_only_that_side(self) -> None:
+        """A period where every mover fell must not fabricate risers."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([-3, -4, -5])
+        result = _select_rank_movers(rows, top_n=2)
+
+        assert [r["rank_delta"] for r in result] == [-4, -5]
+
+    def test_zero_cap_selects_nothing(self) -> None:
+        """Guards the negative-slice trap: `[-0:]` is the WHOLE list, so
+        a naive tail slice would turn the tightest cap into no cap."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([10, 20, -10, -20])
+        assert _select_rank_movers(rows, top_n=0) == []
+
+    def test_empty_input(self) -> None:
+        from app.services.reporting import _select_rank_movers
+
+        assert _select_rank_movers([], top_n=10) == []
+
+
+class TestSnapshotSizeGuard2180:
+    """#2180 — the six stale rows were 7.62 MB of a 7.63 MB table because a
+    builder shipped an uncapped list field and nothing noticed for months."""
+
+    @staticmethod
+    def _conn() -> tuple[MagicMock, MagicMock]:
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        return conn, cursor
+
+    def test_oversized_snapshot_is_refused_before_the_write(self) -> None:
+        from app.services.reporting import ReportSnapshotTooLarge, persist_report_snapshot
+
+        conn, cursor = self._conn()
+        # The real shape of the bug: one uncapped run x instrument product.
+        snapshot = {
+            "report_type": "weekly",
+            "score_changes": [{"symbol": f"S{i}", "rank_delta": i} for i in range(14473)],
+        }
+        with pytest.raises(ReportSnapshotTooLarge, match="score_changes"):
+            persist_report_snapshot(
+                conn,
+                report_type="weekly",
+                period_start=date(2026, 6, 8),
+                period_end=date(2026, 6, 14),
+                snapshot=snapshot,
+            )
+        # Refused BEFORE the write — nothing reaches the table.
+        cursor.execute.assert_not_called()
+
+    def test_error_names_the_offending_field_and_its_length(self) -> None:
+        from app.services.reporting import ReportSnapshotTooLarge, persist_report_snapshot
+
+        conn, _ = self._conn()
+        snapshot = {"holdings": [{"symbol": f"S{i}", "note": "x" * 200} for i in range(500)]}
+        with pytest.raises(ReportSnapshotTooLarge) as exc:
+            persist_report_snapshot(
+                conn,
+                report_type="monthly",
+                period_start=date(2026, 6, 1),
+                period_end=date(2026, 6, 30),
+                snapshot=snapshot,
+            )
+        assert "holdings" in str(exc.value)
+        assert "500" in str(exc.value)
+
+    def test_capped_snapshot_passes(self) -> None:
+        """A #2178-shaped snapshot — 20-row exhibit plus the pre-cap count —
+        is ~3-4 KB on dev and must be nowhere near the ceiling."""
+        from app.services.reporting import persist_report_snapshot
+
+        conn, cursor = self._conn()
+        snapshot = {
+            "report_type": "weekly",
+            "score_changes": [{"symbol": f"S{i}", "rank_delta": 100 - i} for i in range(20)],
+            "score_changes_total": 14473,
+        }
+        persist_report_snapshot(
+            conn,
+            report_type="weekly",
+            period_start=date(2026, 6, 8),
+            period_end=date(2026, 6, 14),
+            snapshot=snapshot,
+        )
+        cursor.execute.assert_called_once()
+
+    def test_snapshot_with_dates_serialises_for_the_size_check(self) -> None:
+        """The guard must not itself become the failure: snapshots carry
+        `date`/`Decimal` values, which plain json.dumps cannot encode."""
+        from app.services.reporting import persist_report_snapshot
+
+        conn, cursor = self._conn()
+        persist_report_snapshot(
+            conn,
+            report_type="weekly",
+            period_start=date(2026, 6, 8),
+            period_end=date(2026, 6, 14),
+            snapshot={"as_of": date(2026, 6, 14), "pnl": Decimal("1.25")},
+        )
+        cursor.execute.assert_called_once()
+
+
+class TestZeroRankDeltaIsUnrepresentable2180:
+    """Review WARNING on PR #2195: sql/244's `kept` CTE partitions on
+    `rank_delta > 0` / `< 0`, so a zero would be dropped. It cannot occur —
+    and this pins BOTH reasons so the rebuttal cannot silently rot."""
+
+    def test_builder_uses_the_same_strict_sign_split(self) -> None:
+        """The migration must match `_select_rank_movers`, not improve on it:
+        a zero handled differently in the two places would make a repaired row
+        disagree with a natively-written one."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = [
+            {"symbol": "UP", "rank_delta": 10},
+            {"symbol": "FLAT", "rank_delta": 0},
+            {"symbol": "DOWN", "rank_delta": -10},
+        ]
+        result = _select_rank_movers(rows, top_n=10)
+        assert [r["symbol"] for r in result] == ["UP", "DOWN"]
+
+    def test_score_changes_filters_below_the_min_delta(self) -> None:
+        """`_score_changes` takes `min_rank_delta=5` and the SQL filters on
+        ABS(rank_delta) >= it, so a zero never reaches the array at all."""
+        import inspect
+
+        from app.services.reporting import _score_changes
+
+        sig = inspect.signature(_score_changes)
+        assert sig.parameters["min_rank_delta"].default == 5
+
+
+class TestRetentionDeletionIsDeliberatelyAbsent2180:
+    def test_no_delete_path_on_report_snapshots(self) -> None:
+        """Row-count retention must NOT be added: `_prior_v2_chain` selects
+        EVERY prior v2 snapshot with no LIMIT, and `si_return` / `si_start`
+        are chained from it. Deleting the oldest rows would silently move the
+        inception date forward (Codex ckpt-2 on PR #2195)."""
+        import inspect
+
+        from app.services import reporting
+
+        src = inspect.getsource(reporting)
+        assert "DELETE FROM report_snapshots" not in src
+
+    def test_prior_chain_query_is_unbounded(self) -> None:
+        """Pins the reason: if this ever grows a LIMIT, the no-retention
+        constraint above can be revisited."""
+        import inspect
+
+        from app.services.reporting import _prior_v2_chain
+
+        src = inspect.getsource(_prior_v2_chain)
+        assert "LIMIT" not in src.upper()

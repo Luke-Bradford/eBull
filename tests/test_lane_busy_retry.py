@@ -248,3 +248,124 @@ def test_patient_backoff_rides_out_a_hold_the_default_would_skip(
     assert patient_ran == [1]  # patient window rides out the hold and runs
     assert patient_state["enter"] == 5  # 4 failed acquires + 1 success
     assert _slots_available(fresh_slots) == runtime._MAX_CONCURRENT_LANE_WAITERS  # slot released
+
+
+# ---------------------------------------------------------------------------
+# #2052 — both lane-busy skip exits write a job_runs skip row (telemetry).
+# ---------------------------------------------------------------------------
+
+
+def test_exhaust_skip_records_lane_busy_row(
+    monkeypatch: pytest.MonkeyPatch, fresh_slots: threading.BoundedSemaphore
+) -> None:
+    state = {"enter": 0, "fail_n": 99}  # always busy
+    monkeypatch.setattr(runtime, "JobLock", _fake_joblock_factory(state))
+    recorded: list[tuple[str, str, str, object]] = []
+    monkeypatch.setattr(
+        runtime,
+        "_record_lane_busy_skip",
+        lambda url, name, detail, params: recorded.append((url, name, detail, params)),
+    )
+
+    runtime._fire_scheduled_with_lane_retry(
+        "db://x", "job", lambda: None, backoff=_BACKOFF, sleep=lambda _s: None, params={"k": 1}
+    )
+
+    assert len(recorded) == 1
+    url, name, detail, params = recorded[0]
+    assert (url, name) == ("db://x", "job")
+    assert "retry window" in detail
+    assert params == {"k": 1}
+
+
+def test_no_slot_skip_records_lane_busy_row(
+    monkeypatch: pytest.MonkeyPatch, fresh_slots: threading.BoundedSemaphore
+) -> None:
+    for _ in range(runtime._MAX_CONCURRENT_LANE_WAITERS):
+        assert fresh_slots.acquire(blocking=False)
+    state = {"enter": 0, "fail_n": 99}
+    monkeypatch.setattr(runtime, "JobLock", _fake_joblock_factory(state))
+    recorded: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        runtime,
+        "_record_lane_busy_skip",
+        lambda _url, name, detail, _params: recorded.append((name, detail)),
+    )
+
+    runtime._fire_scheduled_with_lane_retry("db://x", "job", lambda: None, backoff=_BACKOFF, sleep=lambda _s: None)
+
+    assert len(recorded) == 1
+    assert "lane-retry slots" in recorded[0][1]
+
+
+def test_successful_run_records_no_skip_row(
+    monkeypatch: pytest.MonkeyPatch, fresh_slots: threading.BoundedSemaphore
+) -> None:
+    state = {"enter": 0, "fail_n": 1}  # one lost acquire, then runs
+    monkeypatch.setattr(runtime, "JobLock", _fake_joblock_factory(state))
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        runtime,
+        "_record_lane_busy_skip",
+        lambda _url, name, _detail, _params: recorded.append(name),
+    )
+
+    runtime._fire_scheduled_with_lane_retry("db://x", "job", lambda: None, backoff=_BACKOFF, sleep=lambda _s: None)
+
+    assert recorded == []
+
+
+def test_body_origin_job_already_running_records_no_skip_row(
+    monkeypatch: pytest.MonkeyPatch, fresh_slots: threading.BoundedSemaphore
+) -> None:
+    state = {"enter": 0, "fail_n": 0}
+    monkeypatch.setattr(runtime, "JobLock", _fake_joblock_factory(state))
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        runtime,
+        "_record_lane_busy_skip",
+        lambda _url, name, _detail, _params: recorded.append(name),
+    )
+
+    def _body() -> None:
+        raise JobAlreadyRunning("body-origin")
+
+    with pytest.raises(JobAlreadyRunning):
+        runtime._fire_scheduled_with_lane_retry("db://x", "job", _body, backoff=_BACKOFF, sleep=lambda _s: None)
+
+    assert recorded == []
+
+
+def test_record_lane_busy_skip_composes_prefix_and_swallows_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer prepends the machine-checkable prefix and never raises."""
+    from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX
+
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    class _FakeConn:
+        def __enter__(self) -> _FakeConn:
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    def _fake_record(
+        conn: object, job_name: str, reason: str, *, params_snapshot: dict[str, object] | None = None
+    ) -> int:
+        calls.append((job_name, reason, params_snapshot))
+        return 1
+
+    monkeypatch.setattr(runtime.psycopg, "connect", lambda *_a, **_k: _FakeConn())
+    monkeypatch.setattr(runtime, "record_job_skip", _fake_record)
+
+    runtime._record_lane_busy_skip("db://x", "job", "lane stayed busy", {"p": 2})
+    assert calls == [("job", LANE_BUSY_SKIP_PREFIX + "lane stayed busy", {"p": 2})]
+
+    # Writer failure is logged, never raised.
+    def _boom(*_a: object, **_k: object) -> int:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(runtime, "record_job_skip", _boom)
+    runtime._record_lane_busy_skip("db://x", "job", "lane stayed busy", None)  # must not raise

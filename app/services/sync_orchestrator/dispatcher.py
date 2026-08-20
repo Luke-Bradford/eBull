@@ -305,13 +305,71 @@ def reset_stale_in_flight(
     to ``pending`` so boot-drain replays them. Singleton-fence
     invariant guarantees the rows are not held by a live process.
 
-    Skips rows whose linked job_runs / sync_runs already reached a
-    terminal status — those completed before the crash and must not
-    double-run.
+    First reconciles rows whose linked ``job_runs`` / ``sync_runs`` already
+    reached a terminal status.  A successful linked run completes the queue
+    request; a failed linked run rejects it with the recorded error.  This is
+    not cosmetic: leaving such a request ``claimed``/``dispatched`` makes it
+    look active forever and can block later operator work even though boot's
+    orphan reaper has already proved that no worker owns it.
+
+    Rows without a terminal linked run are then reset for replay.  The two
+    actions are deliberately in this order so completed work is never run
+    twice.
 
     Returns the number of rows reset.
     """
     with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH latest AS (
+                SELECT DISTINCT ON (linked_request_id)
+                       linked_request_id, status, error_msg
+                FROM job_runs
+                WHERE linked_request_id IS NOT NULL
+                  AND status IN ('success', 'failure', 'degraded')
+                ORDER BY linked_request_id, run_id DESC
+            )
+            UPDATE pending_job_requests pjr
+            SET status = CASE
+                    WHEN latest.status IN ('success', 'degraded') THEN 'completed'
+                    ELSE 'rejected'
+                END,
+                error_msg = CASE
+                    WHEN latest.status = 'failure'
+                    THEN COALESCE(latest.error_msg, 'linked job failed before queue finalisation')
+                    ELSE pjr.error_msg
+                END
+            FROM latest
+            WHERE pjr.request_id = latest.linked_request_id
+              AND pjr.status IN ('claimed', 'dispatched')
+              AND pjr.claimed_by IS DISTINCT FROM %(current_boot_id)s
+            """,
+            {"current_boot_id": current_boot_id},
+        )
+        cur.execute(
+            """
+            WITH latest AS (
+                SELECT DISTINCT ON (linked_request_id)
+                       linked_request_id, status, error_category
+                FROM sync_runs
+                WHERE linked_request_id IS NOT NULL
+                  AND status IN ('complete', 'failed', 'partial', 'cancelled')
+                ORDER BY linked_request_id, sync_run_id DESC
+            )
+            UPDATE pending_job_requests pjr
+            SET status = CASE WHEN latest.status = 'complete' THEN 'completed' ELSE 'rejected' END,
+                error_msg = CASE
+                    WHEN latest.status <> 'complete'
+                    THEN COALESCE(latest.error_category, 'linked sync did not complete')
+                    ELSE pjr.error_msg
+                END
+            FROM latest
+            WHERE pjr.request_id = latest.linked_request_id
+              AND pjr.status IN ('claimed', 'dispatched')
+              AND pjr.claimed_by IS DISTINCT FROM %(current_boot_id)s
+            """,
+            {"current_boot_id": current_boot_id},
+        )
         cur.execute(
             """
             UPDATE pending_job_requests pjr
@@ -322,7 +380,17 @@ def reset_stale_in_flight(
               AND NOT EXISTS (
                 SELECT 1 FROM job_runs jr
                 WHERE jr.linked_request_id = pjr.request_id
-                  AND jr.status IN ('success', 'failure')
+                  -- #2218 — 'degraded' belongs here: the job RAN, it simply
+                  -- made no progress. Without it, a crash between the terminal
+                  -- row and mark_request_completed replays a request that
+                  -- already executed.
+                  --
+                  -- ⚠ Deliberately NOT app.services.ops_monitor's full
+                  -- TERMINAL_STATUS_SQL. This set is narrower on purpose:
+                  -- 'skipped' and 'cancelled' mean the work was NOT done, and
+                  -- whether a boot recovery should re-fire those is a separate
+                  -- question this ticket does not answer.
+                  AND jr.status IN ('success', 'failure', 'degraded')
               )
               AND NOT EXISTS (
                 SELECT 1 FROM sync_runs sr

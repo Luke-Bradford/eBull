@@ -9,7 +9,7 @@
  * InsiderByOfficer convention — jsdom can't lay out
  * ResponsiveContainer.
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -149,8 +149,13 @@ describe("ReportsPage — v2 monthly statement", () => {
       expect(screen.getByText("Sector exposure")).toBeInTheDocument();
     });
     // Named sector appears in both the holdings table and the exposure
-    // bars — both render the resolved name, never a numeric id.
-    expect(screen.getAllByText("Technology").length).toBeGreaterThanOrEqual(2);
+    // bars — both render the resolved name, never a numeric id. The
+    // name is the canonical SIC-derived GICS label (#1634/#1851/#1951),
+    // not eToro's coarse "Technology"; the fixture carried the stale
+    // coarse value until it was regenerated (#2178).
+    expect(
+      screen.getAllByText("Information Technology").length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("footer carries generated_at and the benchmark basis", async () => {
@@ -229,5 +234,77 @@ describe("ReportsPage — states and legacy routing", () => {
     await waitFor(() => {
       expect(mockedMonthly).toHaveBeenCalledWith(100);
     });
+  });
+});
+
+describe("ReportsPage — unbounded-payload defences (#2178)", () => {
+  /** A pre-#2178 snapshot: the builder shipped every scored row in the
+   *  period, so the stored monthly for June 2026 carries 29,281. Those
+   *  rows are already persisted, so the builder fix does not rescue
+   *  them — the page must survive them on its own. */
+  function monthlyWithMovers(count: number): Record<string, unknown> {
+    return {
+      ...(monthlyFixture as Record<string, unknown>),
+      // Override the fixture's own total (0) so the header stays
+      // coherent with the array this helper builds.
+      score_changes_total: count,
+      score_changes: Array.from({ length: count }, (_, i) => ({
+        instrument_id: i + 1,
+        symbol: `S${i + 1}`,
+        total_score: "50",
+        rank: i + 1,
+        rank_delta: count - i,
+        scored_at: "2026-06-15T00:00:00Z",
+      })),
+    };
+  }
+
+  it("caps the rendered mover list regardless of payload size", async () => {
+    mockedMonthly.mockResolvedValue([row(monthlyWithMovers(500))]);
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Model & thesis review")).toBeInTheDocument();
+    });
+    // Symbols are S1..S500 in rank_delta-DESC order; only the first 50
+    // may reach the DOM. S1 is in, S51 is not.
+    expect(screen.getByText("S1")).toBeInTheDocument();
+    expect(screen.queryByText("S51")).not.toBeInTheDocument();
+  });
+
+  it("discloses the pre-cap total so the exhibit never reads as the full set", async () => {
+    mockedMonthly.mockResolvedValue([
+      row({ ...monthlyWithMovers(20), score_changes_total: 3898 }),
+    ]);
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/20 of 3898 shown/)).toBeInTheDocument();
+    });
+  });
+
+  it("falls back to the array length when a pre-#2178 snapshot has no total", async () => {
+    // A genuinely pre-#2178 snapshot has no score_changes_total at all —
+    // strip the key the current builder now always writes. The array IS
+    // the full set there, so claiming a different number invents data.
+    const legacy = { ...monthlyWithMovers(12) };
+    delete legacy["score_changes_total"];
+    mockedMonthly.mockResolvedValue([row(legacy)]);
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/12 of 12 shown/)).toBeInTheDocument();
+    });
+  });
+
+  it("does not build the raw-JSON appendix until the operator opens it", async () => {
+    mockedMonthly.mockResolvedValue([row(monthlyFixture as Record<string, unknown>)]);
+    const { container } = renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Appendix: snapshot data")).toBeInTheDocument();
+    });
+    // `<details>` would have committed the <pre> while merely collapsed;
+    // state-gating means there is no <pre> at all.
+    expect(container.querySelector("pre")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Raw JSON" }));
+    expect(container.querySelector("pre")).not.toBeNull();
   });
 });

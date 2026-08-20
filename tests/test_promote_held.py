@@ -22,6 +22,9 @@ class TestPromoteHeldToTier1:
         assert "coverage_tier = 1" in sql
         assert "current_units > 0" in sql
         assert "coverage_tier != 1" in sql
+        # #1996: every coverage_tier write assigns review_frequency
+        assert "review_frequency = %(freq)s" in sql
+        assert conn.execute.call_args[0][1] == {"freq": "weekly"}
 
     def test_zero_when_all_already_tier1(self) -> None:
         conn = MagicMock()

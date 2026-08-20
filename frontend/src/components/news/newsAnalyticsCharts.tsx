@@ -1,9 +1,11 @@
 /**
  * Charts for the news-analytics drill (#593): a bicolor sentiment trend, a
  * weekly news-volume bar, and a source-breakdown donut. All read the pure
- * shapes from `@/lib/newsAnalytics` and take every colour from
- * `useChartTheme()` `theme.*` — never `lightTheme.*` (prevention-log 1917,
- * the #591 risk-drill regression).
+ * shapes from `@/lib/newsAnalytics` and take every colour from the resolved
+ * `useChartTheme()` palette — never from either raw palette imported by name
+ * out of `@/lib/chartTheme` (prevention-log 1917, the #591 risk-drill
+ * regression). Named in prose, not quoted: `charts:check` is line-based, so a
+ * quoted example here is a violation with nothing to fix (#1908 PR-2, #2190).
  */
 import {
   Area,
@@ -113,7 +115,7 @@ export function SentimentTrendChart({ series }: { series: SentimentSeries }): JS
           <ReferenceLine y={0} stroke={theme.borderColor} />
           <Tooltip content={<SentimentTooltip />} cursor={{ stroke: theme.gridLine }} />
           <Area
-            type="monotone"
+            type="linear"
             dataKey="rolling"
             baseValue={0}
             stroke="url(#newsSentStroke)"

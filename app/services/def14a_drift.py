@@ -183,7 +183,12 @@ def _compute_drift_pct(
             return None
         return Decimal("999")
     diff = abs(def14a_shares - form4_cumulative)
-    return diff / def14a_shares
+    # Saturate at the same 999 sentinel: a tiny DEF 14A figure against a
+    # large Form 4 cumulative can push the ratio past NUMERIC(10,4)'s
+    # 10^6 ceiling (#966 full-population seed run overflowed on dev).
+    # Any drift this side of 25% is critical regardless — the magnitude
+    # beyond the sentinel carries no additional signal.
+    return min(diff / def14a_shares, Decimal("999"))
 
 
 _normalise_name = normalise_name
@@ -217,18 +222,80 @@ def _delete_alert(
     )
 
 
+def _reconcile_alert_rows(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int | None,
+) -> None:
+    """One set-based DELETE converging the alert table to
+    latest-accession-only rows for holders that still exist (#966).
+
+    Covers BOTH lingering classes in one statement (review WARNING on
+    the earlier per-holder DELETE-in-loop shape — 23k round trips per
+    global run):
+
+      * superseded accessions (Codex ckpt-1 HIGH) — the correlated
+        subquery returns the holder's latest accession and
+        ``IS DISTINCT FROM`` deletes rows minted from any other;
+      * vanished/renamed holders (Codex ckpt-2 HIGH) — a rewash
+        DELETE+re-INSERT can drop the holder from
+        ``def14a_beneficial_holdings`` entirely, the subquery returns
+        NULL, and ``IS DISTINCT FROM`` (NULL-safe) deletes the orphan.
+
+    Scoped to the run's instrument filter; idempotent.
+    """
+    conn.execute(
+        """
+        DELETE FROM def14a_drift_alerts a
+        WHERE (%(iid)s::BIGINT IS NULL OR a.instrument_id = %(iid)s::BIGINT)
+          AND a.accession_number IS DISTINCT FROM (
+            SELECT h.accession_number
+            FROM def14a_beneficial_holdings h
+            WHERE h.instrument_id = a.instrument_id
+              AND h.holder_name = a.holder_name
+              AND h.issuer_cik <> %(sentinel)s
+              AND h.shares IS NOT NULL
+            ORDER BY h.as_of_date DESC NULLS LAST, h.accession_number DESC
+            LIMIT 1
+          )
+        """,
+        {"iid": instrument_id, "sentinel": _CIK_MISSING_SENTINEL},
+    )
+
+
 def _upsert_alert(conn: psycopg.Connection[tuple], alert: DriftAlert) -> None:
-    """Idempotent INSERT — refreshes ``detected_at`` on conflict."""
+    """Idempotent INSERT — refreshes ``detected_at`` on conflict.
+
+    Guarded (#966 Codex ckpt-2 MED): the INSERT is conditional on the
+    alert's accession still being the holder's LATEST row in
+    ``def14a_beneficial_holdings`` at write time. Two detectors
+    processing different accessions of the same issuer serialize per
+    accession only — without the guard, a detector that read before a
+    newer accession landed could re-mint a stale alert after the newer
+    run's purge. With it, the stale write is a no-op in either commit
+    order. The subquery mirrors ``_select_latest_def14a_holders``'s
+    ordering exactly.
+    """
     conn.execute(
         """
         INSERT INTO def14a_drift_alerts (
             instrument_id, holder_name, matched_filer_cik,
             def14a_shares, form4_cumulative, drift_pct,
             severity, accession_number, as_of_date
-        ) VALUES (
+        )
+        SELECT
             %(iid)s, %(name)s, %(cik)s,
             %(def14a)s, %(form4)s, %(drift)s,
             %(severity)s, %(accession)s, %(as_of)s
+        WHERE %(accession)s = (
+            SELECT h.accession_number
+            FROM def14a_beneficial_holdings h
+            WHERE h.instrument_id = %(iid)s
+              AND h.holder_name = %(name)s
+              AND h.issuer_cik <> %(sentinel)s
+              AND h.shares IS NOT NULL
+            ORDER BY h.as_of_date DESC NULLS LAST, h.accession_number DESC
+            LIMIT 1
         )
         ON CONFLICT (instrument_id, holder_name, accession_number) DO UPDATE SET
             matched_filer_cik = EXCLUDED.matched_filer_cik,
@@ -249,6 +316,7 @@ def _upsert_alert(conn: psycopg.Connection[tuple], alert: DriftAlert) -> None:
             "severity": alert.severity,
             "accession": alert.accession_number,
             "as_of": alert.as_of_date,
+            "sentinel": _CIK_MISSING_SENTINEL,
         },
     )
 
@@ -361,6 +429,10 @@ def detect_drift(
         )
         alerts_emitted += 1
         by_severity[severity] += 1
+
+    # Single set-based reconcile (superseded accessions + vanished
+    # holders) — see _reconcile_alert_rows.
+    _reconcile_alert_rows(conn, instrument_id=instrument_id)
 
     return DriftReport(
         holders_evaluated=holders_evaluated,

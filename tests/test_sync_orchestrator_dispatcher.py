@@ -239,13 +239,11 @@ def test_reset_stale_in_flight_revives_orphaned_rows(
     assert row[0] == "pending"
 
 
-def test_reset_stale_in_flight_skips_completed_runs(
+def test_reset_stale_in_flight_finalises_completed_runs(
     _dev_conn: psycopg.Connection[Any],
     _cleanup_requests: list[int],
 ) -> None:
-    """A row whose linked_request_id matches a terminal job_runs row
-    must NOT be reset — the work already completed before the crash.
-    """
+    """A terminal linked run finalises rather than replays its queue row."""
     request_id = publish_manual_job_request("fundamentals_sync")
     _cleanup_requests.append(request_id)
 
@@ -283,7 +281,7 @@ def test_reset_stale_in_flight_skips_completed_runs(
             )
             row = cur.fetchone()
         assert row is not None
-        assert row[0] == "dispatched"  # NOT reset
+        assert row[0] == "completed"
     finally:
         with _dev_conn.cursor() as cur:
             cur.execute("DELETE FROM job_runs WHERE run_id=%s", (run_id,))

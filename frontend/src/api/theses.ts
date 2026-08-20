@@ -3,7 +3,30 @@ import type {
   GenerateThesisResponse,
   ThesisDetail,
   ThesisHistoryResponse,
+  ThesisLibraryResponse,
 } from "@/api/types";
+
+// #1902 — GET /theses (latest thesis per instrument + display context)
+export interface ThesesLibraryParams {
+  heldOnly?: boolean;
+  stale?: boolean;
+  stance?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export function fetchThesesLibrary(
+  params: ThesesLibraryParams = {},
+): Promise<ThesisLibraryResponse> {
+  const search = new URLSearchParams();
+  if (params.heldOnly) search.set("held_only", "true");
+  if (params.stale) search.set("stale", "true");
+  if (params.stance) search.set("stance", params.stance);
+  if (params.offset !== undefined) search.set("offset", String(params.offset));
+  if (params.limit !== undefined) search.set("limit", String(params.limit));
+  const qs = search.toString();
+  return apiFetch<ThesisLibraryResponse>(`/theses${qs ? `?${qs}` : ""}`);
+}
 
 export function fetchLatestThesis(
   instrumentId: number,
@@ -29,9 +52,12 @@ export function fetchThesisHistory(
 
 export function generateInstrumentThesis(
   symbol: string,
+  force = false,
 ): Promise<GenerateThesisResponse> {
+  // force=true (#1919) bypasses the 24h cache — used by the library's
+  // per-row "request fresh" action (#1902).
   return apiFetch<GenerateThesisResponse>(
-    `/instruments/${encodeURIComponent(symbol)}/thesis`,
+    `/instruments/${encodeURIComponent(symbol)}/thesis${force ? "?force=true" : ""}`,
     { method: "POST" },
   );
 }

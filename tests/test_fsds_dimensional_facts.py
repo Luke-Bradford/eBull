@@ -221,9 +221,11 @@ def test_lock_templates_byte_identical() -> None:
 
     bulk = _lock_sql("app/services/fsds_dimensional_facts.py")
     store = _lock_sql("app/services/dimensional_facts_store.py")
+    notes = _lock_sql("app/services/fsnds_notes_facts.py")
     assert bulk, "no pg_advisory_xact_lock template found in fsds_dimensional_facts.py"
     assert store, "no pg_advisory_xact_lock template found in dimensional_facts_store.py"
-    assert bulk == store, f"advisory-lock templates desynced: bulk={bulk} store={store}"
+    assert notes, "no pg_advisory_xact_lock template found in fsnds_notes_facts.py"
+    assert bulk == store == notes, f"advisory-lock templates desynced: bulk={bulk} store={store} notes={notes}"
 
 
 # --- DB integration: convergence guard + CIK fan-out + 10-K filter --------------

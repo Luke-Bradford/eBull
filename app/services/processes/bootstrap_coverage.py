@@ -81,12 +81,20 @@ _BOOTSTRAP_STAGE_FRESHNESS_SOURCES: Final[dict[str, frozenset[ManifestSource]]] 
     # is deliberately NOT covered (steady-state manifest-worker discovers it).
     "mf_directory_sync": frozenset(),
     "bootstrap_validation": frozenset(),
+    # #2024 — terminal fair-value-band first-load. Derived read layer (writes
+    # fair_value_band_observations/_current from financial_periods_ttm + price_daily),
+    # NOT a manifest source → no freshness sink (like fundamentals_sync above).
+    "fair_value_band": frozenset(),
 }
 
 # Union of every covered source. Excluded by construction (NOT bootstrap-
 # covered): ``finra_short_interest`` / ``finra_regsho_daily`` (steady-state
-# FINRA lanes) and ``sec_n_csr`` (steady-state discovery) — their freshness
-# rows are seeded post-complete, not by a bootstrap stage.
+# FINRA lanes), ``sec_n_csr`` (steady-state discovery), and the episodic
+# signal sources ``sec_nt`` / ``sec_pre14a`` / ``sec_424b`` / ``sec_tender``
+# (#1816 / #1982 —
+# going-forward discovery + their own backfill drives seed them; leaving them
+# uncovered keeps a never-run poll from reading a false green) — their
+# freshness rows are seeded post-complete, not by a bootstrap stage.
 BOOTSTRAP_COVERED_FRESHNESS_SOURCES: Final[frozenset[ManifestSource]] = frozenset(
     src for srcs in _BOOTSTRAP_STAGE_FRESHNESS_SOURCES.values() for src in srcs
 )

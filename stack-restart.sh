@@ -145,7 +145,7 @@ if [[ "$jobs" -eq 1 ]]; then
   echo "Restarting jobs process..."
   kill_jobs_process
   start_detached "jobs" \
-    uv run python -m app.jobs
+    uv run python -m app.jobs.dev_reload
 fi
 
 if [[ "$frontend" -eq 1 ]]; then

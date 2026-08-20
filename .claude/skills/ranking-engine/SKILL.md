@@ -1,6 +1,6 @@
 ---
 name: ranking-engine
-description: eBull deterministic scoring + ranking — the v1.3 model (families, penalties, Calmar reward, completeness), where it's stored and read, and the invariants it must preserve.
+description: eBull deterministic scoring + ranking — the v1.5 model (families, penalties, Calmar reward, completeness), where it's stored and read, and the invariants it must preserve.
 ---
 
 # ranking-engine
@@ -9,7 +9,8 @@ description: eBull deterministic scoring + ranking — the v1.3 model (families,
 
 Any change to `app/services/scoring.py`, the `scores` table, the ranked-candidate
 read path (`app/services/portfolio.py::_load_ranked_scores`), or the
-`/recommendations` / score endpoints. Also read it before touching how the
+`/recommendations` (`app/api/recommendations.py`) / `/rankings`
+(`app/api/scores.py`) endpoints. Also read it before touching how the
 portfolio action layer consumes a score.
 
 ## What it is
@@ -25,9 +26,11 @@ Eligibility (`compute_rankings`): `is_tradable = TRUE`, a `coverage` row with
 data}. No tier gate — T3 names are scored so the weekly coverage review can
 promote on deterministic signal alone.
 
-## The v1.3 model
+## The model (v1.5-balanced current)
 
-Default `model_version = "v1.3-balanced"`. `model_version` encodes the scoring
+Default `model_version = "v1.5-balanced"` (v1.4 #1857: value family priced off
+latest price_daily close; v1.5 #1939: FPI ADR/ADS cap-basis suppression).
+`model_version` encodes the scoring
 mode; `rank_delta` is only ever compared **within the same model_version**.
 
 **Six families** (weighted sum -> `raw_total` in [0,1]):
@@ -96,6 +99,44 @@ backtest (#1815 §8) + operator sign-off promotes them.
 - `scores` is append-only; `rank_delta` compares within a model_version against
   the most recent prior run only.
 - Each score row must carry enough detail to explain how it was produced.
+
+## Promotion decisions — model_version bumps are EVIDENCE-gated, not person-gated
+
+Operator direction (2026-07-23, #1857/PR2115): a ticket labelled
+"operator-gated (model_version)" does NOT wait for a human. The #1815 §8
+backtest machinery is unbuilt (#1822 blocked), so the gate's whole content is
+an evidence review — perform it, record it, merge. Bump + merge autonomously
+when ALL hold:
+
+1. **Invariants followed** — bump on an existing metric's input/computation
+   change; family weights + prefix gates carried forward; prior-version rows
+   untouched (append-only history = the rollback path).
+2. **Full-population A/B assembled** — run `compute_rankings` under the NEW
+   version label on dev (version-isolated: endpoints stay pinned to the
+   deployed default until merge). Report: score-distribution shift, median/max
+   |Δrank|, top-20 turnover, top-10 sanity eyeball.
+3. **Cross-source spot check EXACT** for at least one input figure
+   (e.g. #1857: AAPL EPS_ttm 8.26 vs stockanalysis.com 8.25).
+4. **Blast radius is rankings/research surfaces only.** Anything touching a
+   live-trade/capital path stays person-gated — that is the ONLY remaining
+   human gate ([[feedback_never_close_positions]]).
+
+Precedents: v1.4 (#1857 — value priced off price_daily; 78% un-freeze, 13/20
+top-20 turnover) and v1.5 (#1939 — FPI ADR/ADS basis suppression). When #1822
+lands a real backtest gate, it SUPERSEDES clauses 2-3 here.
+
+## Market-cap basis (what the value family may divide by)
+
+`resolve_market_cap_basis` (app/services/xbrl_derived_stats.py) is the single
+authority. Bases: `total_company` (curated dual-class Σ class×price),
+`multiclass_unavailable` (known dual-class, no clean total → suppress),
+`fpi_adr_unavailable` (#1939 — Rule 3b-4 FPI ADR/ADS, ordinary-share count vs
+per-ADS price, ratio not ingested → suppress ALL price-bearing ratios incl.
+pe_ratio/dividend_yield, wider than the dual-class list), `not_multiclass`
+(legacy shares×price, exact). FPI detection reuses
+`coverage.filings_status = 'fpi'` — never re-derive the form fingerprint.
+Known residual: domestic-form ADR filers (AKTX class) pass the fingerprint and
+stay wrong until ADS-ratio ingestion (#1939 step-2).
 
 ## Failure conditions
 

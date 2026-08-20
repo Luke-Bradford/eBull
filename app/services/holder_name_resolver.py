@@ -16,8 +16,9 @@ the v1 spec for #789.
 
 Match precedence:
 
-  1. Latest Form 4 ``post_transaction_shares`` for the same instrument
-     whose normalised filer_name equals the normalised holder_name.
+  1. Latest Form 4 ``post_transaction_shares`` for the same issuer
+     entity (the instrument's share-class sibling union, #2108) whose
+     normalised filer_name equals the normalised holder_name.
      Tie-broken by ``txn_date DESC, id DESC``.
   2. Falling back to ``insider_initial_holdings`` (Form 3 baseline)
      when no Form 4 row matches. Same DISTINCT ON cap.
@@ -40,6 +41,8 @@ from decimal import Decimal
 
 import psycopg
 import psycopg.rows
+
+from app.services.sec_identity import sibling_instruments_for_instrument
 
 
 def normalise_name(holder_name: str) -> str:
@@ -107,6 +110,17 @@ def resolve_holder_to_filer(
     if not normalised:
         return (False, None, None)
 
+    # #2108: entity-level insider rows carry ONE bookkeeping
+    # instrument_id inside the issuer's sibling set, so a direct
+    # ``instrument_id = X`` filter only matches on the sibling holding
+    # the row (GOOGL's proxy holders would miss Form 4 baselines
+    # stored under GOOG). Widen to the share-class sibling union —
+    # ``[X]`` for single-CIK instruments, so behaviour there is
+    # unchanged. The union never reaches outside the issuer entity
+    # (#828 PR-1 keeps entity rows inside the sibling set by
+    # construction).
+    sibling_ids = sibling_instruments_for_instrument(conn, instrument_id)
+
     # Form 4 first — the cumulative running total. The DISTINCT ON cap
     # pre-collapses multi-transaction filer histories to one row each
     # (the latest), so the Python filter sees one row per filer
@@ -128,13 +142,13 @@ def resolve_holder_to_filer(
             SELECT DISTINCT ON (COALESCE(filer_cik, ''), filer_name)
                 filer_cik, filer_name, post_transaction_shares
             FROM insider_transactions
-            WHERE instrument_id = %(iid)s
+            WHERE instrument_id = ANY(%(iids)s)  -- #2108 sibling union
               AND post_transaction_shares IS NOT NULL
               AND NOT txn_date_invalid  -- #1687 — a future-dated typo must not win the latest balance
             ORDER BY COALESCE(filer_cik, ''), filer_name,
                      txn_date DESC NULLS LAST, id DESC
             """,
-            {"iid": instrument_id},
+            {"iids": sibling_ids},
         )
         rows = sorted(
             cur.fetchall(),
@@ -159,13 +173,13 @@ def resolve_holder_to_filer(
             SELECT DISTINCT ON (COALESCE(filer_cik, ''), filer_name)
                 filer_cik, filer_name, shares
             FROM insider_initial_holdings
-            WHERE instrument_id = %(iid)s
+            WHERE instrument_id = ANY(%(iids)s)  -- #2108 sibling union
               AND shares IS NOT NULL
               AND is_derivative = FALSE
             ORDER BY COALESCE(filer_cik, ''), filer_name,
                      as_of_date DESC NULLS LAST
             """,
-            {"iid": instrument_id},
+            {"iids": sibling_ids},
         )
         rows = sorted(
             cur.fetchall(),

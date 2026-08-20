@@ -12,6 +12,7 @@ so the existing parser chain is reused unchanged:
   per-CIK JSON
     -> _extract_facts_from_section(gaap_section, taxonomy="us-gaap")
     -> _extract_facts_from_section(dei_section, taxonomy="dei")
+    -> _extract_facts_from_section(ifrs_section, taxonomy="ifrs-full")   # #2232
     -> upsert_facts_for_instrument(conn, instrument_id, facts, ingestion_run_id)
 
 Spec: docs/superpowers/specs/2026-05-08-bulk-datasets-first-bootstrap.md
@@ -33,6 +34,7 @@ import psycopg
 from app.providers.fundamentals import XbrlFact
 from app.providers.implementations.sec_fundamentals import (
     _ALL_TRACKED_DEI_TAGS,
+    _ALL_TRACKED_IFRS_TAGS,
     _ALL_TRACKED_TAGS,
     _default_retention_cutoff,
     _extract_facts_from_section,
@@ -76,7 +78,7 @@ def extract_facts_from_companyfacts_payload(
 ) -> list[XbrlFact]:
     """Public wrapper around the existing per-section extractor.
 
-    Routes the ``us-gaap`` + ``dei`` sections through
+    Routes the ``us-gaap`` + ``dei`` + ``ifrs-full`` sections through
     ``_extract_facts_from_section`` (the canonical extractor used by
     the per-CIK API path) and returns one flat ``list[XbrlFact]``.
 
@@ -98,6 +100,7 @@ def extract_facts_from_companyfacts_payload(
     raw_facts: dict[str, Any] = payload.get("facts", {})
     gaap_section = raw_facts.get("us-gaap", {})
     dei_section = raw_facts.get("dei", {})
+    ifrs_section = raw_facts.get("ifrs-full", {})
     retention_cutoff = _default_retention_cutoff()
     facts: list[XbrlFact] = []
     if gaap_section:
@@ -115,6 +118,15 @@ def extract_facts_from_companyfacts_payload(
                 dei_section,
                 taxonomy="dei",
                 allowed_tags=_ALL_TRACKED_DEI_TAGS,
+                retention_cutoff=retention_cutoff,
+            )
+        )
+    if ifrs_section:
+        facts.extend(
+            _extract_facts_from_section(
+                ifrs_section,
+                taxonomy="ifrs-full",
+                allowed_tags=_ALL_TRACKED_IFRS_TAGS,
                 retention_cutoff=retention_cutoff,
             )
         )

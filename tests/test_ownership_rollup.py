@@ -67,10 +67,16 @@ def _seed_outstanding(
     shares: str,
     period_end: date = date(2026, 3, 31),
     treasury: str | None = None,
+    taxonomy: str = "dei",
 ) -> None:
     """Seed shares_outstanding (and optionally treasury_shares) via
     ``financial_periods`` + ``financial_facts_raw`` so the
-    ``instrument_share_count_latest`` view returns the row."""
+    ``instrument_share_count_latest`` view returns the row.
+
+    ``taxonomy`` defaults to ``dei`` (the cover-page count), which is what every
+    pre-#2232 caller wants. Pass ``us-gaap`` to seed ONLY the balance-sheet
+    parenthetical and leave the issuer with no cover-page count at all — the
+    fingerprint the #2232 partial-denominator guard keys on."""
     conn.execute(
         """
         INSERT INTO financial_periods (
@@ -101,12 +107,14 @@ def _seed_outstanding(
             instrument_id, taxonomy, concept, unit, period_end, val,
             form_type, filed_date, accession_number,
             fiscal_year, fiscal_period
-        ) VALUES (%s, 'dei', 'EntityCommonStockSharesOutstanding',
+        ) VALUES (%s, %s, %s,
                   'shares', %s, %s, '10-Q', %s, %s, %s, 'Q4')
         ON CONFLICT DO NOTHING
         """,
         (
             instrument_id,
+            taxonomy,
+            "EntityCommonStockSharesOutstanding" if taxonomy == "dei" else "CommonStockSharesOutstanding",
             period_end,
             Decimal(shares),
             period_end,
@@ -1075,8 +1083,12 @@ class TestResidualAndCoverage:
         return conn
 
     def test_residual_label_and_value(self, _setup: psycopg.Connection[tuple]) -> None:
-        """30M known + 10M treasury → residual = 60M, label =
-        Public / unattributed, oversubscribed=False."""
+        """30M known of 100M outstanding → residual = 70M.
+
+        The 10M treasury is NOT deducted (#2217): ``shares_outstanding`` already
+        excludes treasury (shares issued = outstanding + treasury), so the old
+        60M expectation double-counted it. This assertion is what pinned the bug
+        in place — it was asserting the defect, not the contract."""
         conn = _setup
         _seed_form4(
             conn,
@@ -1092,10 +1104,44 @@ class TestResidualAndCoverage:
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="RESID", instrument_id=789_020)
 
         assert rollup.residual.label == "Public / unattributed"
-        assert rollup.residual.shares == Decimal("60000000")
+        assert rollup.residual.shares == Decimal("70000000")
         assert rollup.residual.oversubscribed is False
         # Concentration: 30M / 100M = 30% (treasury excluded from numerator).
         assert rollup.concentration.pct_outstanding_known == Decimal("0.30")
+
+    def test_treasury_exceeding_outstanding_does_not_zero_residual(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Regression for #2217, in the shape that made it operator-visible.
+
+        A serial repurchaser can carry treasury far in excess of shares
+        outstanding — Goldman Sachs held 199.9% at the time of the fix, which is
+        only possible *because* outstanding excludes treasury. Deducting it drove
+        the residual negative before a single holder was counted, so public float
+        rendered as ZERO and the warning bar blamed 13F snapshot lag for it.
+
+        200% treasury with only 30% attributed must leave the remaining 70%
+        public and the flag clear."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_021, symbol="BUYBACK")
+        _seed_outstanding(conn, instrument_id=789_021, shares="100000000", treasury="200000000")
+        _seed_form4(
+            conn,
+            accession="0001234500-25-000125",
+            instrument_id=789_021,
+            filer_cik="0009999002",
+            filer_name="Big Holder Inc",
+            txn_date=date(2026, 3, 1),
+            post_transaction_shares="30000000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="BUYBACK", instrument_id=789_021)
+
+        assert rollup.treasury_shares == Decimal("200000000")
+        assert rollup.residual.shares == Decimal("70000000")
+        assert rollup.residual.oversubscribed is False
 
     def test_oversubscribed_clamps_residual_to_zero(self, _setup: psycopg.Connection[tuple]) -> None:
         """Stale 13F + fresh 13D: holders sum to 110% of outstanding.
@@ -2273,3 +2319,95 @@ def test_sum_sibling_class_shares_filters_to_period(
     assert ownership_rollup._sum_sibling_class_shares(conn, cik, target) == Decimal("11350000000")
     # A period with no rows → None.
     assert ownership_rollup._sum_sibling_class_shares(conn, cik, date(2020, 1, 1)) is None
+
+
+class TestPartialClassDenominator:
+    """#2232 end-to-end: a FRESH denominator that does not cover the whole entity
+    suppresses the card instead of publishing an impossible percentage.
+
+    Modelled on AEVEX Corp (CIK 0002096300), measured 2026-08-08: companyfacts holds
+    only the undimensioned ``us-gaap:CommonStockSharesOutstanding`` = 1,000 from the
+    Q1-2026 10-Q balance-sheet parenthetical, because both cover-page
+    ``dei:EntityCommonStockSharesOutstanding`` values (Class A 50,744,176 / Class B
+    63,297,524) carry a ``StatementClassOfStockAxis`` member and are stripped
+    (sec-edgar §7.17 — ``companyconcept`` returns HTTP 404 for the dei concept). One
+    13F filer reports 57,564,830 shares against that 1,000.
+
+    Periods are relative to ``date.today()`` so the #1581 548-day freshness bound is
+    exercised deterministically: the point of this guard is that the figure is FRESH
+    and still unusable, which ``stale_denominator`` cannot express.
+    """
+
+    _IID = 2_232_100
+    _FRESH = date.today() - timedelta(days=60)
+
+    def _setup(self, conn: psycopg.Connection[tuple], *, taxonomy: str, holder_shares: str) -> None:
+        _seed_instrument(conn, iid=self._IID, symbol="ZAVEX")
+        _seed_outstanding(
+            conn,
+            instrument_id=self._IID,
+            shares="1000",
+            period_end=self._FRESH,
+            taxonomy=taxonomy,
+        )
+        _seed_inst_holding(
+            conn,
+            accession="0002232100-26-000001",
+            instrument_id=self._IID,
+            # ⚠ NOT a curated-family CIK. `_reconcile_institutional_families`
+            # runs `_value_is_sane` over family channel rows and DROPS a holding
+            # that is implausible against `outstanding` — seeding this as Vanguard
+            # (0000102909) makes the oversized row vanish before the pie is built,
+            # and the test then passes for the wrong reason.
+            filer_cik="0001999901",
+            filer_name="Unaffiliated Manager",
+            filer_type="INV",
+            period_of_report=self._FRESH,
+            shares=holder_shares,
+        )
+        conn.commit()
+
+    def test_suppresses_when_no_cover_count_and_a_holder_exceeds_it(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        self._setup(conn, taxonomy="us-gaap", holder_shares="57564830")
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="ZAVEX", instrument_id=self._IID)
+        assert rollup.no_data_reason == "partial_class_denominator"
+        assert rollup.banner.state == "no_data"
+        assert rollup.shares_outstanding is None
+        assert rollup.slices == ()
+        # The as_of survives and is FRESH — the discriminator the pre-#2232 frontend
+        # would have mis-read as "too stale".
+        assert rollup.shares_outstanding_as_of == self._FRESH
+        assert "too stale" not in rollup.banner.body.lower()
+
+    def test_cover_count_on_file_keeps_rendering(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Control 1 — same impossible arithmetic, but the issuer DOES file a
+        cover-page count. §7.17's argument does not hold, so the over-100% holder is
+        a numerator problem (#2230 / #2231) and must stay visible for those tickets
+        to remain measurable."""
+        conn = ebull_test_conn
+        self._setup(conn, taxonomy="dei", holder_shares="57564830")
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="ZAVEX", instrument_id=self._IID)
+        assert rollup.no_data_reason is None
+        assert rollup.shares_outstanding == Decimal("1000")
+        assert rollup.sanity.largest_single_holder_pct > 1
+
+    def test_no_cover_count_but_holders_fit_keeps_rendering(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Control 2 — Alphabet's shape. No cover-page count (all classes
+        dimensional), but the undimensioned us-gaap figure IS the combined total, so
+        every holder fits inside it and nothing is suppressed."""
+        conn = ebull_test_conn
+        self._setup(conn, taxonomy="us-gaap", holder_shares="400")
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="ZAVEX", instrument_id=self._IID)
+        assert rollup.no_data_reason is None
+        assert rollup.shares_outstanding == Decimal("1000")
+        assert rollup.sanity.largest_single_holder_pct == Decimal("0.4")

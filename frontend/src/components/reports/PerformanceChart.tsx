@@ -85,7 +85,7 @@ export function PerformanceChart({
             <ReferenceLine y={100} stroke={theme.gridLine} />
             <Tooltip content={<PerformanceTooltip />} cursor={{ stroke: theme.crosshair }} />
             <Line
-              type="monotone"
+              type="linear"
               dataKey="portfolio"
               stroke={theme.primaryLine}
               strokeWidth={1.5}
@@ -95,7 +95,7 @@ export function PerformanceChart({
             />
             {hasBenchmark ? (
               <Line
-                type="monotone"
+                type="linear"
                 dataKey="benchmark"
                 stroke={theme.accent[1]}
                 strokeWidth={1.5}

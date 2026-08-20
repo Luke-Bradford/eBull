@@ -56,7 +56,7 @@ import type { InstrumentFinancialRow, InstrumentSummary } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
 import { formatBigNumber } from "@/lib/format";
-import { defaultTooltipStyle, lightTheme } from "@/lib/chartTheme";
+import { defaultTooltipStyle } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { useCallback, useId, useMemo } from "react";
@@ -318,6 +318,7 @@ function FundamentalsGrid({
 }: {
   readonly series: ReadonlyArray<SeriesRow>;
 }): JSX.Element {
+  const theme = useChartTheme();
   const revenue = buildCellPoints(series, (r) => r.revenue);
   const opIncome = buildCellPoints(series, (r) => r.operatingIncome);
   const netIncome = buildCellPoints(series, (r) => r.netIncome);
@@ -340,7 +341,7 @@ function FundamentalsGrid({
         points={revenue}
         nonNull={nonNullCount(revenue)}
         totalLen={totalLen}
-        fillColor={lightTheme.accent[1]}
+        fillColor={theme.accent[1]}
       />
       <FundamentalCell
         label="Op income"
@@ -348,7 +349,7 @@ function FundamentalsGrid({
         points={opIncome}
         nonNull={nonNullCount(opIncome)}
         totalLen={totalLen}
-        fillColor={lightTheme.up}
+        fillColor={theme.up}
       />
       <FundamentalCell
         label="Net income"
@@ -356,7 +357,7 @@ function FundamentalsGrid({
         points={netIncome}
         nonNull={nonNullCount(netIncome)}
         totalLen={totalLen}
-        fillColor={lightTheme.up}
+        fillColor={theme.up}
       />
       <FundamentalCell
         label="Total debt"
@@ -364,7 +365,7 @@ function FundamentalsGrid({
         points={totalDebt}
         nonNull={nonNullCount(totalDebt)}
         totalLen={totalLen}
-        fillColor={lightTheme.accent[3]}
+        fillColor={theme.accent[3]}
       />
     </div>
   );
@@ -390,14 +391,17 @@ function FundamentalCell({
   const delta = yoyDelta(points);
   const lastIdx = lastNonNullIndex(points);
   const latestVal = lastIdx >= 0 ? points[lastIdx]!.value : null;
+  // Every branch carries its dark partner (#2152 review): a bare text colour
+  // has no lint gate, so a ternary themed on only one arm renders half its
+  // states washed out in dark and stays green on `dark:check`.
   const deltaClass =
     delta === null
-      ? "text-slate-400"
+      ? "text-slate-400 dark:text-slate-500"
       : delta.pct > 0
-        ? "text-emerald-600"
+        ? "text-emerald-600 dark:text-emerald-400"
         : delta.pct < 0
-          ? "text-rose-600"
-          : "text-slate-500";
+          ? "text-red-600 dark:text-red-400"
+          : "text-slate-500 dark:text-slate-400";
   // Per-instance + per-label gradient id (Codex review): two
   // FundamentalsPane instances in the same DOM previously collided.
   const gradId = `fund-grad-${idPrefix}-${label.replace(/[^a-z]/gi, "")}`;
@@ -472,7 +476,7 @@ function FundamentalCell({
                 contentStyle={defaultTooltipStyle(theme)}
               />
               <Area
-                type="monotone"
+                type="linear"
                 dataKey="value"
                 stroke={fillColor}
                 strokeWidth={1.75}

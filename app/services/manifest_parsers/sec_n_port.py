@@ -35,7 +35,7 @@ id from the XML payload.
 observation upsert retries via 1h backoff; deterministic constraint
 violations write the audit-log row with status='failed' and
 tombstone the manifest. See
-``app/services/manifest_parsers/_classify.py``.
+``app/services/upsert_classify.py``.
 
 Raw-payload invariant (#938): registered with
 ``requires_raw_payload=True``; the parser stores the body BEFORE
@@ -53,10 +53,6 @@ import psycopg
 
 from app.config import settings
 from app.providers.implementations.sec_edgar import SecFilingsProvider
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
 from app.services.n_port_ingest import (
     _PARSER_VERSION_NPORT,
     NPortMissingSeriesError,
@@ -73,6 +69,10 @@ from app.services.ownership_observations import (
     upsert_sec_fund_series,
 )
 from app.services.raw_filings import store_raw
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 
 logger = logging.getLogger(__name__)
 

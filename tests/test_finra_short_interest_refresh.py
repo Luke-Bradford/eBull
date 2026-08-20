@@ -12,13 +12,14 @@ ScheduledJob-level integration against ``ebull_test_conn``. Covers:
 * FinraNotFound on one target → benign skip; other targets processed.
 * Fetch 5xx → per-file failed; ``RuntimeError`` raised at end.
 * Empty file (0 bytes) → per-file failed; no store_raw attempted.
-* Match-rate < 50% → WARNING logger captured.
+* A partial-universe match (11%) logs NO warning (#2337), and
+  ``_previous_stored_resolved`` picks the newest strictly-earlier date.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -26,8 +27,12 @@ import psycopg
 import pytest
 
 from app.jobs.finra_short_interest_refresh import (
+    _MAX_ANCHOR_WALKBACK_DAYS,
     FinraRefreshStats,
     _compute_targets,
+    _fetch_designated_file,
+    _is_disseminated,
+    _previous_stored_resolved,
     _settlement_dates_to_fetch,
     _walk_back_to_weekday,
     run_finra_short_interest_refresh,
@@ -286,6 +291,177 @@ def test_run_happy_path_writes_observations(
 
 
 # ----------------------------------------------------------------------
+# 4b — Designated-calendar resolution (#2234)
+# ----------------------------------------------------------------------
+#
+# FINRA DESIGNATES the settlement calendar (Rule 4560(a)) rather than
+# publishing a formula, so ``_settlement_dates_to_fetch`` derives an
+# ANCHOR and the fetch step resolves it. Good Friday 2022-04-15 is the
+# live case: the CDN serves shrt20220414.csv, not shrt20220415.csv.
+
+
+def test_fetch_designated_file_walks_back_over_a_holiday() -> None:
+    provider = _FakeProvider(notfound={date(2022, 4, 15)})
+
+    resolved = _fetch_designated_file(
+        provider,  # type: ignore[arg-type]
+        date(2022, 4, 15),
+        allow_walkback=True,
+    )
+
+    assert resolved is not None
+    designated, payload = resolved
+    assert designated == date(2022, 4, 14)
+    assert payload.startswith(b"accountingYearMonthNumber|")
+    assert provider.calls == [date(2022, 4, 15), date(2022, 4, 14)]
+
+
+def test_fetch_designated_file_without_walkback_probes_once() -> None:
+    """The two most-recent anchors get a single probe.
+
+    There a 403/404 means "not disseminated yet" — FINRA publishes about
+    a week after the Rule 4560(a) due date — so walking back would spend
+    a request per day rediscovering a file that does not exist.
+    """
+    provider = _FakeProvider(notfound={date(2026, 7, 31)})
+
+    resolved = _fetch_designated_file(
+        provider,  # type: ignore[arg-type]
+        date(2026, 7, 31),
+        allow_walkback=False,
+    )
+
+    assert resolved is None
+    assert provider.calls == [date(2026, 7, 31)]
+
+
+def test_fetch_designated_file_stops_at_already_ingested_date() -> None:
+    """A holiday-shifted date already held is not re-downloaded each fire."""
+    provider = _FakeProvider(notfound={date(2022, 4, 15)})
+
+    resolved = _fetch_designated_file(
+        provider,  # type: ignore[arg-type]
+        date(2022, 4, 15),
+        allow_walkback=True,
+        skip_dates=frozenset({date(2022, 4, 14)}),
+    )
+
+    assert resolved is None
+    assert provider.calls == [date(2022, 4, 15)]
+
+
+def test_fetch_designated_file_bounded_walkback() -> None:
+    """Nothing served in range → ``None`` after exactly bound+1 probes."""
+    anchor = date(2022, 4, 15)
+    provider = _FakeProvider(notfound={anchor - timedelta(days=n) for n in range(_MAX_ANCHOR_WALKBACK_DAYS + 3)})
+
+    resolved = _fetch_designated_file(
+        provider,  # type: ignore[arg-type]
+        anchor,
+        allow_walkback=True,
+    )
+
+    assert resolved is None
+    assert len(provider.calls) == _MAX_ANCHOR_WALKBACK_DAYS + 1
+    # The bound must not reach the adjacent half-month's designated date.
+    assert min(provider.calls) > date(2022, 3, 31)
+
+
+@pytest.mark.parametrize(
+    "anchor, expected",
+    [
+        (date(2026, 5, 1), False),  # 0 days old — FINRA has not published
+        (date(2026, 4, 17), False),  # 14 days — still inside the lag
+        (date(2026, 4, 16), True),  # 15 days — publication window has passed
+        (date(2026, 3, 31), True),
+    ],
+)
+def test_is_disseminated_boundary(anchor: date, expected: bool) -> None:
+    """A 403 only means "never designated" once FINRA has had time to publish.
+
+    Rule 4560(a) puts the report due on the second business day after
+    settlement; FINRA's published schedule runs publication about a week
+    beyond that.
+    """
+    assert _is_disseminated(anchor, datetime(2026, 5, 1, 12, 0, tzinfo=UTC)) is expected
+
+
+def test_run_revision_window_re_fetches_a_holiday_shifted_date(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A shifted date already ingested is STILL re-fetched while its anchor
+    is in the revision window.
+
+    Codex ckpt 2 (#2234): the designated date is never itself an anchor,
+    so without dropping ``skip_dates`` inside the window it would land in
+    the skip list forever and receive no in-place-revision coverage.
+    """
+    _seed_panel(ebull_test_conn)
+    # 2024-01-15 (MLK) is designated 2024-01-12; seed that as parsed.
+    _seed_parsed_finra_manifest(ebull_test_conn, date(2024, 1, 12))
+    ebull_test_conn.commit()
+
+    # The real MLK weekend: Sat 13th, Sun 14th, holiday Mon 15th — the
+    # CDN serves none of them, so the walk-back has to reach the 12th.
+    provider = _FakeProvider(notfound={date(2024, 1, 15), date(2024, 1, 14), date(2024, 1, 13)})
+    # 2024-01-15 is then 16 days old — past the dissemination lag, so
+    # walk-back is allowed — and still one of the two candidates, so it
+    # is inside the revision window.
+    now = datetime(2024, 1, 31, 12, 0, tzinfo=UTC)
+
+    run_finra_short_interest_refresh(
+        ebull_test_conn,
+        now=now,
+        backfill_window_days=20,  # candidates = [2024-01-15, 2024-01-31]
+        provider=provider,  # type: ignore[arg-type]
+    )
+
+    assert date(2024, 1, 12) in provider.calls, "shifted date must be re-fetched for revisions"
+
+
+def test_run_holiday_anchor_stores_under_designated_date(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Job-level: observations land under the DESIGNATED date, not the anchor.
+
+    Window is wide enough that the holiday anchor is outside the
+    revision window, which is what enables walk-back.
+    """
+    _seed_panel(ebull_test_conn)
+    provider = _FakeProvider(notfound={date(2022, 4, 15)})
+    now = datetime(2022, 5, 20, 12, 0, tzinfo=UTC)
+
+    stats = run_finra_short_interest_refresh(
+        ebull_test_conn,
+        now=now,
+        backfill_window_days=40,
+        provider=provider,  # type: ignore[arg-type]
+    )
+
+    assert stats.failed_files == 0
+    stored = {s.settlement_date for s in stats.settlement_files}
+    assert date(2022, 4, 14) in stored
+    assert date(2022, 4, 15) not in stored
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM finra_short_interest_observations WHERE settlement_date = %s",
+            (date(2022, 4, 14),),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 5
+
+        cur.execute(
+            "SELECT COUNT(*) FROM sec_filing_manifest WHERE accession_number = %s",
+            ("FINRA_SI_20220414",),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 1
+
+
+# ----------------------------------------------------------------------
 # 5 — FinraNotFound on one target → benign skip
 # ----------------------------------------------------------------------
 
@@ -368,27 +544,77 @@ def test_run_empty_file_records_failed(
 
 
 # ----------------------------------------------------------------------
-# 8 — Match-rate < 50% logs WARNING
+# 8 — A partial-universe match is NOT a fault (#2337)
 # ----------------------------------------------------------------------
 
 
-def test_run_match_rate_below_threshold_logs_warning(
+def test_run_partial_universe_match_logs_no_warning(
     ebull_test_conn: psycopg.Connection[tuple], caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Seed only 1 of 5 panel symbols → match rate = 1/9 = 11% (well below 50%).
+    """1 of 9 rows resolving (11%) must stay silent.
+
+    This test previously asserted the OPPOSITE — it pinned a WARNING when the
+    match rate fell below an absolute 0.50 floor. #2337 measured that floor
+    against every stored payload
+    (``scripts/audit_2337_finra_match_rate.py``): the real operating range is
+    25.47%-26.58% and 34 of 34 files sat below the floor, so the arm fired on
+    every normal fire and detected nothing. The ratio's two sides are governed
+    by different populations — FINRA reports every US-reported symbol, our
+    resolver holds ``instruments WHERE is_tradable`` — so a low match rate is
+    the healthy state, not a signal. The alarm now sits on the arms in
+    ``evaluate_file_sentinels``; this asserts the false positive is gone.
+    """
+    # Seed only 1 of 5 panel symbols → match rate = 1/9 = 11%.
     _seed_instrument(ebull_test_conn, instrument_id=1001, symbol="AAPL")
     provider = _FakeProvider(settlements={date(2026, 4, 30): _PRISTINE.read_bytes()})
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
     with caplog.at_level(logging.WARNING, logger="app.jobs.finra_short_interest_refresh"):
-        run_finra_short_interest_refresh(
+        stats = run_finra_short_interest_refresh(
             ebull_test_conn,
             now=now,
             backfill_window_days=20,
             provider=provider,  # type: ignore[arg-type]
         )
 
-    assert any("match rate" in rec.message and "below 50%" in rec.message for rec in caplog.records)
+    # The 20-day window covers both April anchors, and the fake rebadges the
+    # pristine fixture for the one not explicitly supplied — 2 files x 9 rows,
+    # 1 resolving each, so an 11% match rate on both.
+    assert stats.total_resolved == 2
+    assert stats.total_parsed == 18
+    assert [rec.message for rec in caplog.records] == []
+
+
+def test_run_reports_the_previous_stored_settlement_date(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """``_previous_stored_resolved`` picks the newest STRICTLY-earlier date.
+
+    Exercises the LATERAL against real rows rather than a mocked cursor: the
+    retention arm is silent whenever the lookup wrongly returns nothing, so a
+    broken query fails open.
+    """
+    _seed_instrument(ebull_test_conn, instrument_id=1001, symbol="AAPL")
+    provider = _FakeProvider(settlements={date(2026, 4, 30): _PRISTINE.read_bytes()})
+    run_finra_short_interest_refresh(
+        ebull_test_conn,
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        backfill_window_days=20,
+        provider=provider,  # type: ignore[arg-type]
+    )
+
+    assert _previous_stored_resolved(ebull_test_conn, []) == {}
+    # The fire ingested both April anchors, so 04-30's baseline is 04-15 — the
+    # newest STRICTLY-earlier stored date, with the row count actually stored.
+    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 4, 30)]) == {
+        date(2026, 4, 30): (date(2026, 4, 15), 1)
+    }
+    # Nothing is stored before the oldest ingested date.
+    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 4, 15)]) == {}
+    # A later date skips past nothing — it still picks the newest, not the oldest.
+    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 5, 15)]) == {
+        date(2026, 5, 15): (date(2026, 4, 30), 1)
+    }
 
 
 # ----------------------------------------------------------------------

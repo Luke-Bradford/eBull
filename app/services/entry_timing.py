@@ -25,6 +25,8 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
+from app.services.thesis_subject_identity import QUARANTINE_REASON
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -90,13 +92,14 @@ def _load_recommendation_with_thesis(
             SELECT tr.recommendation_id, tr.instrument_id, tr.action,
                    tr.target_entry, tr.suggested_size_pct, tr.status,
                    t.base_value, t.buy_zone_low, t.buy_zone_high,
-                   t.confidence_score
+                   t.confidence_score, t.thesis_id, t.subject_identity_ok
             FROM trade_recommendations tr
             LEFT JOIN LATERAL (
-                SELECT base_value, buy_zone_low, buy_zone_high, confidence_score
+                SELECT thesis_id, base_value, buy_zone_low, buy_zone_high, confidence_score,
+                       subject_identity_ok
                 FROM theses
                 WHERE instrument_id = tr.instrument_id
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, thesis_version DESC
                 LIMIT 1
             ) t ON TRUE
             WHERE tr.recommendation_id = %(rid)s
@@ -345,7 +348,23 @@ def evaluate_entry_conditions(
     entry_price_raw = rec["target_entry"]
     entry_price = Decimal(str(entry_price_raw)) if entry_price_raw is not None else None
 
-    base_value_raw = rec["base_value"]
+    # #2436 — the take-profit is an ORDER PARAMETER derived from the thesis
+    # base_value, so a memo written about a different company would set the
+    # level at which a real position is closed. A quarantined thesis yields no
+    # TP at all; the stop-loss is ATR-derived and unaffected.
+    #
+    # ⚠ The condition is `is not True`, not `is False`: an unchecked row
+    # (NULL verdict — written before sql/332, or with no subject to check
+    # against) is not evidence of correctness. Same fail-closed rule as
+    # thesis_subject_identity.is_thesis_usable, which this mirrors on a
+    # flattened row rather than a thesis dict.
+    #
+    # ⚠ The thesis_id test is what separates "refused" from "never written".
+    # The LATERAL is a LEFT JOIN, so an instrument with no thesis at all also
+    # arrives with subject_identity_ok NULL — reporting THAT as quarantined
+    # would be the relabelling this ticket exists to prevent, in reverse.
+    thesis_quarantined = rec.get("thesis_id") is not None and rec.get("subject_identity_ok") is not True
+    base_value_raw = None if thesis_quarantined else rec["base_value"]
     base_value = Decimal(str(base_value_raw)) if base_value_raw is not None else None
 
     sl: Decimal | None = None
@@ -355,6 +374,12 @@ def evaluate_entry_conditions(
         sl = _compute_stop_loss(entry_price, atr_dec)
         tp = _compute_take_profit(entry_price, base_value)
 
+    # #2436 — a withheld TP must say WHY. "no TP" and "we refuse the only
+    # number that could have set one" are different facts, and the rationale
+    # is the audit trail an operator reads.
+    if thesis_quarantined:
+        all_details["thesis_subject_identity"] = QUARANTINE_REASON
+
     # Verdict: defer if any condition is unfavorable.
     # Entry timing is conservative — one red flag is enough to defer.
     if unfavorable:
@@ -363,6 +388,8 @@ def evaluate_entry_conditions(
             rationale_parts.append(f"SL={sl:.6f}")
         if tp is not None:
             rationale_parts.append(f"TP={tp:.6f}")
+        elif thesis_quarantined:
+            rationale_parts.append(f"no TP ({QUARANTINE_REASON})")
         return EntryEvaluation(
             verdict="defer",
             stop_loss_rate=sl,
@@ -379,6 +406,8 @@ def evaluate_entry_conditions(
         rationale_parts.append(f"SL={sl:.6f}")
     if tp is not None:
         rationale_parts.append(f"TP={tp:.6f}")
+    elif thesis_quarantined:
+        rationale_parts.append(f"no TP ({QUARANTINE_REASON})")
     return EntryEvaluation(
         verdict="pass",
         stop_loss_rate=sl,

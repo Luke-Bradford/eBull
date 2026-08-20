@@ -34,6 +34,7 @@ import psycopg.rows
 
 from app.services.data_freshness import cadence_for
 from app.services.job_liveness import cadence_period
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, TERMINAL_STATUS_SQL
 from app.services.processes import (
     ActiveRunSummary,
     ErrorClassSummary,
@@ -178,6 +179,9 @@ _RUN_STATUS_TO_SUMMARY: dict[str, RunStatus] = {
     "failure": "failure",
     "skipped": "skipped",
     "cancelled": "cancelled",
+    # #2218 — carried through as its own member, NOT folded into "partial";
+    # see the RunStatus comment in app/services/processes/__init__.py.
+    "degraded": "degraded",
 }
 
 
@@ -222,6 +226,12 @@ def _status_for(
         return "failed"
     if last_terminal_status == "success":
         return "ok"
+    # #2218. ⚠ Placed BEFORE the fall-through, which is the whole point: an
+    # unhandled terminal status lands on `pending_first_run` — "never ran" —
+    # so a new status added without touching this function would report the
+    # single most misleading state available.
+    if last_terminal_status == "degraded":
+        return "degraded"
     if last_terminal_status == "cancelled":
         return "cancelled"
     if last_terminal_status == "skipped":
@@ -278,13 +288,13 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
     """Latest terminal job_runs row (success / failure / skipped / cancelled)."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT run_id, started_at, finished_at, status, row_count,
                    error_msg, error_classes, rows_skipped_by_reason,
                    rows_errored, cancelled_at, next_retry_at, attempt
               FROM job_runs
              WHERE job_name = %(name)s
-               AND status   IN ('success', 'failure', 'skipped', 'cancelled')
+               AND status   IN {TERMINAL_STATUS_SQL}
              ORDER BY started_at DESC
              LIMIT 1
             """,
@@ -299,6 +309,47 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
     # keyed on ``run_id``.
     row["terminal_kind"] = "job_run"
     return row
+
+
+def _is_lane_busy_skip(row: dict[str, Any] | None) -> bool:
+    """True when *row* is a ``lane_busy`` skip (#2052).
+
+    A lane-busy skip means "work was due, couldn't start" — unlike a benign
+    prereq/gate skip it must NOT anchor the ``expected_fire_at`` clock, or a
+    permanently-starved job would read green forever (each nightly skip row
+    resetting the schedule-missed threshold).
+    """
+    return (
+        row is not None
+        and row.get("status") == "skipped"
+        and str(row.get("error_msg") or "").startswith(LANE_BUSY_SKIP_PREFIX)
+    )
+
+
+def _read_latest_anchor_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
+    """Latest terminal run eligible to anchor ``expected_fire_at`` (#2052).
+
+    Same population as ``_read_latest_terminal_run`` MINUS ``lane_busy`` skip
+    rows. Deliberately a SECOND resolver: the unfiltered latest terminal keeps
+    driving ``last_run`` / the status pill / the retry+cancel look-throughs,
+    and this one is only consulted when the latest terminal IS a lane-busy
+    skip (the rare starved path), so the extra query costs nothing on the
+    steady-state path. Only the columns the anchor math reads are selected.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT run_id, started_at, finished_at, status
+              FROM job_runs
+             WHERE job_name = %(name)s
+               AND status   IN {TERMINAL_STATUS_SQL}
+               AND NOT (status = 'skipped' AND error_msg LIKE %(lane_busy_pat)s)
+             ORDER BY started_at DESC
+             LIMIT 1
+            """,
+            {"name": job_name, "lane_busy_pat": LANE_BUSY_SKIP_PREFIX + "%"},
+        )
+        return cur.fetchone()
 
 
 # #1474 Part 2 — orchestrator-driven jobs record completions in
@@ -855,13 +906,28 @@ def _build_row(
     # next fire from compute_next_run(cadence, now), so it could never
     # satisfy ``< now - threshold`` and the rule was unreachable.
     expected_fire_at: datetime | None = None
-    if terminal_row is not None and terminal_row.get("started_at") is not None:
+    # #2052 — a ``lane_busy`` skip must not anchor the overdue clock ("work
+    # was due, couldn't start" is not a completed cycle). When the latest
+    # terminal is one, re-resolve the anchor from the latest NON-lane-busy
+    # terminal; when the ENTIRE history is lane-busy skips, fall back to the
+    # persisted ``job_first_seen`` anchor (#1508 C6 — the ``terminal_row is
+    # None`` never-started path below cannot arm here because the skip rows
+    # make ``terminal_row`` non-null). Benign skips (prereq/gate) still
+    # anchor exactly as before.
+    anchor_row = terminal_row
+    if _is_lane_busy_skip(terminal_row) and terminal_row is not None and terminal_row.get("terminal_kind") == "job_run":
+        anchor_row = _read_latest_anchor_terminal_run(conn, job_name=job.name)
+        if anchor_row is None:
+            first_seen = _job_first_seen(conn, job_name=job.name)
+            if first_seen is not None:
+                expected_fire_at = compute_next_run(job.cadence, first_seen)
+    if anchor_row is not None and anchor_row.get("started_at") is not None:
         # C1 (#1508): anchor on the LATER of started_at / finished_at so a
         # run that just completed resets the overdue clock — a long run that
         # finishes after a nominal slot must not read overdue the instant it
         # ends.
-        anchor = terminal_row["started_at"]
-        finished = terminal_row.get("finished_at")
+        anchor = anchor_row["started_at"]
+        finished = anchor_row.get("finished_at")
         if finished is not None and finished > anchor:
             anchor = finished
         expected_fire_at = compute_next_run(job.cadence, anchor)
@@ -1054,12 +1120,12 @@ def list_runs(conn: psycopg.Connection[Any], *, process_id: str, days: int) -> l
         raise ValueError("days must be positive")
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT run_id, started_at, finished_at, status, row_count,
                    rows_skipped_by_reason, rows_errored, cancelled_at
               FROM job_runs
              WHERE job_name   = %(name)s
-               AND status     IN ('success', 'failure', 'skipped', 'cancelled')
+               AND status     IN {TERMINAL_STATUS_SQL}
                AND started_at >= now() - (%(days)s::int * INTERVAL '1 day')
              ORDER BY started_at DESC
             """,

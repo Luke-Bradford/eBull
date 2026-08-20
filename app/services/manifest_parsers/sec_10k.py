@@ -76,10 +76,6 @@ from app.services.business_summary import (
 )
 from app.services.dimensional_facts import discover_xbrl_files, extract_dimensional_facts
 from app.services.dimensional_facts_store import replace_accession_rows
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
 from app.services.manifest_parsers._siblings import (
     CIK_MISSING_SENTINEL as _CIK_MISSING_SENTINEL,
 )
@@ -87,6 +83,10 @@ from app.services.manifest_parsers._siblings import (
     resolve_siblings as _resolve_siblings,
 )
 from app.services.raw_filings import store_raw
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 
 logger = logging.getLogger(__name__)
 

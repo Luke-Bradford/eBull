@@ -43,10 +43,12 @@ from app.services.dimensional_facts import (
     _AXIS_METRICS,
     _CONCEPT_TO_METRIC,
     _INSTANT_METRICS,
+    PER_FILING_AXES,
     DimensionalAxis,
     DimensionalFact,
     DimensionalMetric,
     mark_value_overage_subtotals,
+    prettify_localname,
 )
 from app.services.fsds_class_shares import iter_fsds_num, read_fsds_sub
 from app.services.sec_identity import siblings_for_issuer_cik
@@ -108,17 +110,9 @@ def _classify_fsds_segments(segments_cell: str) -> tuple[DimensionalAxis, str] |
     return None
 
 
-def _prettify_member(localname: str) -> str:
-    """Quick-tier member label: split camelCase to spaced words (no label linkbase in
-    FSDS). ``SpecialtyDiagnostics`` → ``Specialty Diagnostics``; ``US`` → ``US``;
-    ``FoodAndBeverage`` → ``Food And Beverage``. The per-filing rewash replaces this
-    with the real linkbase label on convergence."""
-    out: list[str] = []
-    for i, ch in enumerate(localname):
-        if i > 0 and ch.isupper() and (localname[i - 1].islower() or localname[i - 1].isdigit()):
-            out.append(" ")
-        out.append(ch)
-    return "".join(out)
+# Quick-tier member label (shared with the FSNDS notes loader). The
+# per-filing rewash replaces it with the real linkbase label on convergence.
+_prettify_member = prettify_localname
 
 
 def _subtract_months(d: date, months: int) -> date:
@@ -218,9 +212,13 @@ def _write_bulk_accession(
         "SELECT pg_advisory_xact_lock(hashtext(%s::text || ':' || %s::text)::bigint)",
         (instrument_id, accession),
     )
+    # Axis-scoped existence check (#844): the FSNDS notes loader writes
+    # ``award_type`` rows for the same 10-K accessions — an unscoped check
+    # would see them and permanently skip this accession's segment facts.
     existing = conn.execute(
-        "SELECT 1 FROM instrument_dimensional_facts WHERE instrument_id = %s AND source_accession = %s LIMIT 1",
-        (instrument_id, accession),
+        "SELECT 1 FROM instrument_dimensional_facts"
+        " WHERE instrument_id = %s AND source_accession = %s AND axis = ANY(%s) LIMIT 1",
+        (instrument_id, accession, list(PER_FILING_AXES)),
     ).fetchone()
     if existing is not None or not facts:
         return 0

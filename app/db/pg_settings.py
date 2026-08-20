@@ -160,37 +160,25 @@ EXPECTED, not observed: #1472's RCA saw ``credential_health`` LISTEN ×3
 (a duplicate-instance bug PR3 fixes). The budget models the intended
 topology so it never blesses that bug."""
 
-JOBS_STEADY_STATE_EXEC_CONNS: Final[int] = 1
-"""Models the ONE always-running NON-sec_rate job's ``JobLock`` advisory-lock
-connection.  The jobs process almost always has ≥1 non-sec_rate scheduled
-job executing (``orchestrator_high_frequency_sync`` every 5 min being the
-canonical example), and each such job holds one ``JobLock`` advisory-lock
-connection for its whole body (``app/jobs/locks.py`` ``JobLock.__enter__``
-opens it, ``__exit__`` closes it).
+JOBS_NON_SEC_MAX_CONCURRENCY: Final[int] = 2
+"""Maximum scheduled/catch-up/manual executions outside the ``sec_rate``
+lane. ``JobRuntime`` enforces this before opening any job lock or body
+connection. Two lets a long LLM thesis run coexist with portfolio/strategy
+work without reopening the cadence herd."""
 
-``sec_rate`` jobs are NOT counted here — after #1542 they route through the
-in-process ``SecLaneGate`` and open **zero** ``JobLock`` connections.  Their
-concurrent bodies are charged separately via ``SEC_LANE_MAX_CONCURRENCY``
-(``app/jobs/sec_lane_gate.py``), so the two terms are additive and
-non-overlapping (no double-count).
+JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION: Final[int] = 2
+"""Worst-case connections held by one non-SEC execution: one session-scoped
+``JobLock`` connection plus one body/run-scoped connection. Some jobs use
+fewer, but the budget must charge the upper bound."""
 
-This term is per-execution, not process-lifetime — it is NOT a
-``JOBS_FIXED_LONGLIVED_CONNS`` member — but ≥1 is live at steady state
-(the RCA idle snapshot caught exactly 1), so the budget counts one.
-Concurrent execution beyond 1 is part of the cadence-boundary burst that
-PR2/PR4 bound, NOT PR1 (Codex ckpt-2)."""
+JOBS_BACKTEST_PROGRESS_CONNECTIONS: Final[int] = 1
+"""Additional body connection held by the one strategy backtest execution.
 
-ORCHESTRATOR_GATE_CHECK_CONN: Final[int] = 1
-"""The sync orchestrator's ``_run_layers_loop`` holds ONE run-scoped
-autocommit connection for the per-layer read gate-checks (cancel poll,
-credential health, layer init, dependency lookup) for the whole walk
-(#1472 PR4a — replaces the prior fresh-connect-per-check-per-layer herd).
-The orchestrator high-frequency sync fires every 5 min and is frequently
-the steady-state executing job, so the budget counts this slot as held
-alongside ``JOBS_STEADY_STATE_EXEC_CONNS`` (the same job's JobLock conn).
-Conservative: the slot is released between walks (``finally: gate_conn.close``),
-so counting it always over-estimates. Single sync run at a time (advisory
-lock + sync_runs single-running unique index) bounds it to exactly one."""
+The backtest keeps its evidence transaction isolated from best-effort progress
+telemetry, so ``pg_stat_activity`` shows two labelled body connections plus its
+ordinary ``JobLock``. The source lane serialises strategy backtests; at most one
+such extra connection can coexist with the two generic non-SEC executions.
+"""
 
 CONNECTION_BUDGET_RESERVE: Final[int] = 3
 """Headroom over the steady-state baseline for transient connections
@@ -285,8 +273,8 @@ def _dev_profile_connection_demand() -> int:
         + JOBS_POOL_MAX_SIZE
         + BACKGROUND_POOL_MAX_SIZE
         + JOBS_FIXED_LONGLIVED_CONNS
-        + JOBS_STEADY_STATE_EXEC_CONNS
-        + ORCHESTRATOR_GATE_CHECK_CONN
+        + JOBS_NON_SEC_MAX_CONCURRENCY * JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION
+        + JOBS_BACKTEST_PROGRESS_CONNECTIONS
         + SEC_LANE_MAX_CONCURRENCY
     )
 

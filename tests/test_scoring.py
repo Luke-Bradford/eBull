@@ -20,15 +20,18 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from contextlib import ExitStack, contextmanager
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.services.scoring import (
+    _WEIGHT_MODES,
     FamilyScores,
     PenaltyRecord,
     ScoreResult,
+    _analytics_inputs,
     _calmar_reward,
     _clip,
     _compute_penalties,
@@ -37,12 +40,14 @@ from app.services.scoring import (
     _momentum_score,
     _quality_score,
     _realized_risk_penalties,
+    _score_from_data,
     _sentiment_score,
     _turnaround_score,
     _value_score,
     compute_rankings,
     compute_score,
 )
+from app.services.thesis_subject_identity import QUARANTINE_REASON
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -928,15 +933,27 @@ def _quote_row(spread_flag: bool, last: float, bid: float, ask: float) -> dict[s
 
 def _thesis_row(
     confidence_score: float,
-    base_value: float,
-    bear_value: float,
+    base_value: float | None,
+    bear_value: float | None,
     created_at: datetime,
+    stance: str = "buy",
+    subject_identity_ok: bool | None = True,
 ) -> dict[str, object]:
+    """A latest-thesis row as ``_load_instrument_data`` selects it.
+
+    ⚠ ``subject_identity_ok`` is not optional decoration (#2436). The scoring
+    read is FAIL-CLOSED — anything but ``True`` drops the thesis — so a fixture
+    that omits the column silently exercises the REFUSED path while looking
+    like an ordinary thesis. Defaulting to True keeps these cases testing what
+    their names say; pass False/None deliberately to test the quarantine.
+    """
     return {
         "confidence_score": confidence_score,
         "base_value": base_value,
         "bear_value": bear_value,
+        "stance": stance,
         "created_at": created_at,
+        "subject_identity_ok": subject_identity_ok,
     }
 
 
@@ -957,6 +974,7 @@ def _make_fake_conn(
     last_10kq: object = None,
     price_td: int = 0,
     news_90d: int = 0,
+    share_count_row: dict[str, object] | None = None,
 ) -> MagicMock:
     """
     Return a MagicMock psycopg connection that supports the cursor(row_factory=...)
@@ -965,14 +983,19 @@ def _make_fake_conn(
     psycopg cursor semantics: cur.execute(sql) is called, then cur.fetchone() /
     cur.fetchall() is called on the *same* cursor object. We model this by having
     execute() mutate cur.fetchone / cur.fetchall as a side effect, dispatching
-    results in order: fundamentals, price, quote, thesis, news, red_flag,
+    results in order: fundamentals, share count, price, quote, thesis, news, red_flag,
     valuation, risk (#1633 risk_v1 3y). (analyst_estimates retired with FMP under #539.)
+
+    ⚠ This iterator is POSITIONAL — it dispatches on call order, not on SQL. Adding a
+    read to `_load_instrument_data` without adding an entry here fails with a bare
+    `StopIteration` several frames away from the cause (#2411).
     """
     rf_row: dict[str, object] = {"avg_red_flag": avg_red_flag}
 
     # Ordered list of (fetch_method, return_value) per execute() call.
     responses: list[tuple[str, object]] = [
         ("fetchall", fund_rows),
+        ("fetchone", share_count_row),  # #2411 analytics denominator
         ("fetchone", price_row),
         ("fetchone", quote_row),
         ("fetchone", thesis_row),
@@ -1084,6 +1107,55 @@ class TestComputeScore:
         # promotion relies on deterministic signals, not thesis).
         assert "stale_thesis" not in penalty_names
 
+    # ----- #2436 subject-identity quarantine -------------------------------
+    # Co-located here rather than in tests/test_thesis_subject_identity_quarantine.py
+    # because they need this class's autouse analytics stub: the fake conn is a
+    # POSITIONAL response iterator and compute_score's IAR reads are not in it.
+
+    def _quarantine_conn(self, subject_identity_ok: bool | None) -> MagicMock:
+        return _make_fake_conn(
+            fund_rows=[_fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
+            price_row=_price_row(0.05, 0.20, 0.35, 120.0),
+            quote_row=_quote_row(False, 120.0, 119.5, 120.5),
+            thesis_row=_thesis_row(0.80, 200.0, 90.0, _RECENT, subject_identity_ok=subject_identity_ok),
+            news_rows=[],
+            avg_red_flag=0.0,
+        )
+
+    def test_quarantined_thesis_is_named_in_the_value_explanation(self) -> None:
+        """#2436 — without this the explanation reads "value: base_value
+        missing", which is true of the arithmetic and false about the world: a
+        base_value exists and we refused it. The fundamentals fallback that
+        produced the score is a legitimate independent computation, but the
+        operator must be able to see which path ran and why."""
+        result = compute_score(1, self._quarantine_conn(False), "v1-balanced")
+        assert f"thesis {QUARANTINE_REASON}" in result.explanation
+
+    def test_unchecked_thesis_is_refused_like_a_failed_one(self) -> None:
+        """NULL verdict = nobody decided, which is not evidence of
+        correctness. Fail closed, same as a False verdict."""
+        result = compute_score(1, self._quarantine_conn(None), "v1-balanced")
+        assert f"thesis {QUARANTINE_REASON}" in result.explanation
+
+    def test_usable_thesis_is_not_flagged_as_quarantined(self) -> None:
+        result = compute_score(1, self._quarantine_conn(True), "v1-balanced")
+        assert QUARANTINE_REASON not in result.explanation
+
+    def test_thesis_without_targets_notes_stance_not_absence(self) -> None:
+        # #2005: an avoid thesis with null targets must not be reported
+        # as "(no thesis)" in the value-family explanation.
+        conn = _make_fake_conn(
+            fund_rows=[_fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
+            price_row=_price_row(0.05, 0.20, 0.35, 120.0),
+            quote_row=_quote_row(False, 120.0, 119.5, 120.5),
+            thesis_row=_thesis_row(0.20, None, None, _RECENT, stance="avoid"),
+            news_rows=[],
+            avg_red_flag=0.0,
+        )
+        result = compute_score(1, conn, "v1-balanced")
+        assert "thesis without targets, stance: avoid" in result.explanation
+        assert "(no thesis)" not in result.explanation
+
     def test_unknown_model_version_raises(self) -> None:
         conn = MagicMock()
         with pytest.raises(KeyError, match="unknown-mode"):
@@ -1102,6 +1174,88 @@ class TestComputeScore:
         result = compute_score(1, conn, "v1-balanced")
         assert result.total_score >= 0.0
         assert result.total_score <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# _score_from_data / _analytics_inputs — the pure scoring core (#2127)
+# ---------------------------------------------------------------------------
+
+
+def _full_data(
+    *,
+    sector_code: str | None = "1",
+    sic: str | None = None,
+    valuation_row: dict[str, object] | None = None,
+    risk_row: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """A loaded-data dict of the shape _load_instrument_data / _bulk_load produce."""
+    return {
+        "sector_code": sector_code,
+        "sic": sic,
+        "fund_rows": [_fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
+        "price_row": _price_row(0.05, 0.20, 0.35, 120.0),
+        "quote_row": _quote_row(False, 120.0, 119.5, 120.5),
+        "thesis_row": _thesis_row(0.75, 180.0, 90.0, _RECENT),
+        "news_rows": [_news_row(0.6, 0.8), _news_row(0.5, 1.0)],
+        "avg_red_flag_score": 0.15,
+        "valuation_row": valuation_row,
+        "risk_row": risk_row,
+        "fund_present": True,
+        "last_10kq_date": None,
+        "price_td_count": 300,
+        "news_90d_count": 3,
+        # The analytics denominator is its OWN read (#2411), not fund_rows[0]. The
+        # count here deliberately DIFFERS from the fund_rows one above so a test that
+        # passes by reading the wrong source cannot pass by coincidence.
+        "share_count_row": {
+            "shares_outstanding": 12_500_000.0,
+            "shares_outstanding_filed_date": date(2026, 6, 30),
+        },
+    }
+
+
+class TestScoreFromData:
+    """The pure scoring core takes preloaded data + analytics + now, no conn (#2127)."""
+
+    def test_pure_core_produces_valid_result(self) -> None:
+        result = _score_from_data(
+            7, _full_data(), _WEIGHT_MODES["v1-balanced"], "v1-balanced", _NOW, {"schema": "iar_v1"}
+        )
+        assert isinstance(result, ScoreResult)
+        assert result.instrument_id == 7
+        assert result.model_version == "v1-balanced"
+        assert result.analytics == {"schema": "iar_v1"}  # passed straight through
+        assert result.sector == "1"  # from data["sector_code"]
+        assert 0.0 <= result.total_score <= 1.0
+        assert result.penalties == []  # recent thesis, tight spread, high confidence
+        assert result.total_score == pytest.approx(result.raw_total, abs=1e-6)
+
+    def test_unknown_model_version_raises_via_missing_weights(self) -> None:
+        # weights is resolved by the caller; a bad mode surfaces as KeyError there.
+        with pytest.raises(KeyError):
+            _ = _WEIGHT_MODES["nope"]
+
+    def test_analytics_inputs_pure_extraction(self) -> None:
+        gics, shares, filed = _analytics_inputs(_full_data(sic=None))
+        assert shares == pytest.approx(12_500_000.0)
+        assert filed == date(2026, 6, 30)
+        assert gics is None  # sic None -> no SPDR sector
+
+    def test_analytics_inputs_ignores_fund_rows(self) -> None:
+        """#2411 — the denominator does NOT come from fundamentals_snapshot. Emptying
+        fund_rows must not touch it; that coupling is the defect this ticket removed."""
+        data = _full_data()
+        data["fund_rows"] = []
+        _gics, shares, filed = _analytics_inputs(data)
+        assert shares == pytest.approx(12_500_000.0)
+        assert filed == date(2026, 6, 30)
+
+    def test_analytics_inputs_no_share_count_row(self) -> None:
+        data = _full_data()
+        data["share_count_row"] = None
+        _gics, shares, filed = _analytics_inputs(data)
+        assert shares is None
+        assert filed is None
 
 
 # ---------------------------------------------------------------------------
@@ -1176,15 +1330,38 @@ def _make_rankings_conn(
     return conn
 
 
+@contextmanager
+def _stub_scoring(results_in_order: list[ScoreResult]):
+    """Stub the load + analytics + pure-core so compute_rankings tests exercise ONLY
+    rank / rank_delta assignment (#2127: compute_rankings now calls
+    _bulk_load_instrument_data + assemble_instrument_analytics_bulk + _score_from_data,
+    not compute_score). Stubbing the two bulk readers keeps the fake conn's 2-cursor
+    model valid — the only conn use left is the eligible query + the prior-rank fetch +
+    inserts. Results are returned in instrument-id iteration order."""
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "app.services.scoring._bulk_load_instrument_data",
+                side_effect=lambda conn, ids, now: {iid: {} for iid in ids},
+            )
+        )
+        stack.enter_context(patch("app.services.scoring._analytics_inputs", return_value=(None, None)))
+        stack.enter_context(
+            patch(
+                "app.services.scoring.assemble_instrument_analytics_bulk",
+                side_effect=lambda conn, ids, **kw: {iid: {} for iid in ids},
+            )
+        )
+        mock_score = stack.enter_context(patch("app.services.scoring._score_from_data"))
+        mock_score.side_effect = results_in_order
+        yield mock_score
+
+
 class TestComputeRankings:
     def test_rank_assigned_descending_by_total_score(self) -> None:
         # Instrument 2 scores higher → should be rank 1
         conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.side_effect = [
-                _make_score_result(1, 0.60),
-                _make_score_result(2, 0.80),
-            ]
+        with _stub_scoring([_make_score_result(1, 0.60), _make_score_result(2, 0.80)]):
             result = compute_rankings(conn, "v1-balanced")
 
         by_id = {r.instrument_id: r for r in result.scored}
@@ -1194,8 +1371,7 @@ class TestComputeRankings:
     def test_rank_delta_positive_when_rank_improved(self) -> None:
         # Instrument 1 was rank 3 last run; this run it becomes rank 1 → delta = +2
         conn = _make_rankings_conn(instrument_ids=[1], prior_rank_rows=[(1, 3)])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.return_value = _make_score_result(1, 0.75)
+        with _stub_scoring([_make_score_result(1, 0.75)]):
             result = compute_rankings(conn, "v1-balanced")
 
         assert result.scored[0].rank == 1
@@ -1204,11 +1380,7 @@ class TestComputeRankings:
     def test_rank_delta_negative_when_rank_worsened(self) -> None:
         # Instrument 1 was rank 1; now rank 2 → delta = -1
         conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[(1, 1), (2, 2)])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.side_effect = [
-                _make_score_result(1, 0.50),  # lower score this run
-                _make_score_result(2, 0.80),  # higher score this run
-            ]
+        with _stub_scoring([_make_score_result(1, 0.50), _make_score_result(2, 0.80)]):
             result = compute_rankings(conn, "v1-balanced")
 
         by_id = {r.instrument_id: r for r in result.scored}
@@ -1220,11 +1392,7 @@ class TestComputeRankings:
     def test_rank_delta_none_on_first_run(self) -> None:
         # No prior rows → rank_delta is None for all instruments
         conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.side_effect = [
-                _make_score_result(1, 0.70),
-                _make_score_result(2, 0.60),
-            ]
+        with _stub_scoring([_make_score_result(1, 0.70), _make_score_result(2, 0.60)]):
             result = compute_rankings(conn, "v1-balanced")
 
         for r in result.scored:
@@ -1248,8 +1416,7 @@ class TestComputeRankings:
         outside the transaction, this test will fail.
         """
         conn = _make_rankings_conn(instrument_ids=[1], prior_rank_rows=[])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.return_value = _make_score_result(1, 0.70)
+        with _stub_scoring([_make_score_result(1, 0.70)]):
             compute_rankings(conn, "v1-balanced")
 
         # Collect the names of all calls made on `conn` in order

@@ -38,6 +38,7 @@ CI gate: `scripts/check_etl_source_docs.sh` enforces.
 | company_tickers_exchange | [company_tickers_exchange.md](company_tickers_exchange.md) | SEC bulk reference | ticker ↔ exchange |
 | sec_13f_securities_list | [sec_13f_securities_list.md](sec_13f_securities_list.md) | SEC bulk reference | 13F Official List |
 | etoro_candles | [etoro_candles.md](etoro_candles.md) | broker REST | market data |
+| cboe_vix | [cboe_vix.md](cboe_vix.md) | Cboe public reference | volatility-regime context |
 
 ---
 
@@ -86,6 +87,7 @@ of truth. Vocabulary:
 | company_tickers_exchange | `ResilientClient` backoff | `RuntimeError` on empty body | job-level; bundled call logs-but-doesn't-raise |
 | sec_13f_securities_list | HTTP errors propagate to caller | per-row drop (CUSIP regex miss) | job-level; defensive per-row parse |
 | etoro_candles | broker retry (429 → back-off; 5xx → retry budget) | — | 401 → token refresh; per-instrument isolated |
+| cboe_vix | HTTP failure raises; scheduler records failure and retries next due/catch-up | exact-schema or invalid-OHLC rejection; transaction rolls back | 304 → benign no-op; conditional `If-Modified-Since` |
 
 ---
 
@@ -104,7 +106,7 @@ worker (Form 5 is — see note).
 |---|---|---|
 | `6-K`, `6-K/A` | Foreign private issuer interim report — no manifest parser, and deliberately excluded from fundamentals (typically lacks structured XBRL, so companyfacts yields no new rows — `FUNDAMENTALS_FORMS` in `app/services/fundamentals/__init__.py`). | `filing_events` metadata-only. |
 | `20-F`, `20-F/A`, `40-F`, `40-F/A` | Foreign private issuer annual — no manifest ownership/insider parser. **Fundamentals ARE ingested** for these, but via the companyfacts (`sec_xbrl_facts`) path keyed by CIK (`FUNDAMENTALS_FORMS`), not by form→source discovery. | Fundamentals: companyfacts / XBRL; `filing_events` metadata-only otherwise. |
-| `S-1`, `S-3`, `S-4`, `F-1/3/4`, `424B2/3/4/5/7/8` | Registration / prospectus capital-action filings — no ownership, fundamentals, or insider payload to parse. | New-instrument discovery is via `company_tickers`, not form discovery; `filing_events` metadata-only. |
+| `S-1`, `S-3`, `S-4`, `F-1/3/4`, `424B8` | Registration / prospectus capital-action filings — no ownership, fundamentals, or insider payload to parse. (424B1-B7 ARE ingested as `sec_424b` — tier-1 #1816 + volume-gated B2 #1975, cover offering extraction; B8 stays out as a late-filing duplicate of another 424(b) paragraph.) | New-instrument discovery is via `company_tickers`, not form discovery; `filing_events` metadata-only. |
 | `13F-NT`, `13F-NT/A` | Institutional **notice-only** (manager reports nothing this quarter) — no holdings table. | `filing_events` metadata-only, used for institutional-filer classification. **Note:** dropping NT at discovery is the known gap behind stale-parent 13F double-counts — see `docs/review-prevention-log.md` (Vanguard/AAPL). |
 | `144` | Proposed restricted-share sale notice — intent, not an executed transaction. | `filing_events` metadata-only (insider-overhang signal). |
 | `11-K` | Employee stock-purchase-plan annual report — no instrument-level ownership. | `filing_events` metadata-only. |

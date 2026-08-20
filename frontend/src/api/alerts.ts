@@ -4,6 +4,9 @@ import type {
   GuardRejectionsResponse,
   PositionAlertsResponse,
   RankMovesResponse,
+  ThesisBreaksResponse,
+  ThesisChangesResponse,
+  ThesisStalenessResponse,
 } from "@/api/types";
 
 /**
@@ -100,4 +103,47 @@ export function markRankMovesSeen(
 
 export function dismissAllRankMoves(): Promise<void> {
   return apiFetch<void>("/alerts/rank-moves/dismiss-all", { method: "POST" });
+}
+
+// --- #2013 thesis-change endpoints -------------------------------------------
+// Cursor feed on theses.thesis_id; a dismiss with the newest listed id clears
+// everything older, so there is no separate dismiss-all endpoint.
+
+export function fetchThesisChanges(): Promise<ThesisChangesResponse> {
+  return apiFetch<ThesisChangesResponse>("/alerts/thesis-changes");
+}
+
+export function markThesisChangesSeen(seenThroughThesisId: number): Promise<void> {
+  return apiFetch<void>("/alerts/thesis-changes/seen", {
+    method: "POST",
+    body: JSON.stringify({ seen_through_thesis_id: seenThroughThesisId }),
+  });
+}
+
+// --- #2051 thesis-break endpoints (PR-B of #2012) -----------------------------
+// Cursor feed on thesis_break_events.break_event_id; dismiss with the newest
+// listed id clears everything older, so there is no dismiss-all endpoint
+// (same contract as thesis-changes).
+
+export function fetchThesisBreaks(): Promise<ThesisBreaksResponse> {
+  return apiFetch<ThesisBreaksResponse>("/alerts/thesis-breaks");
+}
+
+export function markThesisBreaksSeen(
+  seenThroughBreakEventId: number,
+): Promise<void> {
+  return apiFetch<void>("/alerts/thesis-breaks/seen", {
+    method: "POST",
+    body: JSON.stringify({
+      seen_through_break_event_id: seenThroughBreakEventId,
+    }),
+  });
+}
+
+// --- #1902 thesis-staleness snapshot ----------------------------------------
+// Standing condition, no cursor endpoints — clears when the thesis
+// regenerates, not when acknowledged.
+
+export function fetchThesisStaleness(): Promise<ThesisStalenessResponse> {
+  return apiFetch<ThesisStalenessResponse>("/alerts/thesis-staleness");
 }

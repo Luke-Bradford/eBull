@@ -20,29 +20,40 @@ catch-up-on-boot and tests.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
-from collections.abc import Callable, Generator, Mapping
+import time
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from zoneinfo import ZoneInfo
 
 import psycopg
 import psycopg.rows
 import psycopg.sql
 from psycopg.types.json import Jsonb
 
+if TYPE_CHECKING:
+    from app.services.strategy_halts import HaltSnapshot
+
 from app.config import settings
-from app.jobs.job_connection import connect_job, job_statement_timeout_ms
+from app.db.background_write import background_write_connection
+from app.jobs.job_connection import connect_job, job_application_name, job_statement_timeout_ms
 from app.jobs.sources import Lane
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
 from app.providers.implementations.etoro import EtoroMarketDataProvider
 from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
-from app.services.anthropic_client import make_anthropic_client
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.canonical_instrument_redirects import JOB_POPULATE_CANONICAL_REDIRECTS
-from app.services.coverage import bootstrap_missing_coverage_rows, review_coverage, seed_coverage
+from app.services.coverage import (
+    bootstrap_missing_coverage_rows,
+    review_coverage,
+    review_frequency_for_tier,
+    seed_coverage,
+)
 from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.entry_timing import evaluate_entry_conditions
 from app.services.etoro_lookups import refresh_etoro_lookups
@@ -50,8 +61,10 @@ from app.services.exchange_directory import refresh_exchange_directory
 from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
-from app.services.fundamentals import refresh_fundamentals
-from app.services.market_data import refresh_market_data
+from app.services.job_progress import JobProgress, degradation_reason
+from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
+from app.services.market_calendar import latest_completed_us_session, us_market_status
+from app.services.market_data import refresh_market_data, refresh_quotes
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
@@ -67,21 +80,17 @@ from app.services.position_monitor import (
     persist_position_alerts,
 )
 from app.services.processes.param_metadata import ParamMetadata
-from app.services.refresh_cascade import (
-    demote_to_rerank_needed,
-    instrument_lock,
-)
 from app.services.return_attribution import (
     SUMMARY_WINDOWS,
     compute_attribution_summary,
     persist_attribution_summary,
 )
-from app.services.scoring import compute_rankings
+from app.services.scoring import _DEFAULT_MODEL_VERSION, compute_rankings
 from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.sync_orchestrator.progress import report_progress
 from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
-from app.services.thesis import find_stale_instruments, generate_thesis
+from app.services.thesis import StaleInstrument, find_stale_instruments, generate_thesis, instrument_lock
 from app.services.trade_events import compute_history_min_date, fetch_trade_history_safely
 from app.services.universe import sync_universe
 from app.services.watermarks import get_watermark, set_watermark
@@ -324,12 +333,25 @@ JOB_DAILY_CANDLE_REFRESH = "daily_candle_refresh"
 JOB_DAILY_CIK_REFRESH = "daily_cik_refresh"
 JOB_DAILY_RESEARCH_REFRESH = "daily_research_refresh"
 JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
-JOB_DAILY_THESIS_REFRESH = "daily_thesis_refresh"
+# #1919 PR-B — revived from the dormant ``daily_thesis_refresh`` (never in
+# SCHEDULED_JOBS/_INVOKERS, zero job_runs rows ever recorded), renamed at
+# re-registration. Hourly, held ∪ top-ranked scope, batch-bounded.
+JOB_THESIS_REFRESH = "thesis_refresh"
+JOB_THESIS_DQ_AUDIT = "thesis_dq_audit"
+JOB_THESIS_BREAK_SCAN = "thesis_break_scan"
+JOB_THESIS_OUTCOME_CAPTURE = "thesis_outcome_capture"
 JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
 JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
 JOB_FX_RATES_REFRESH = "fx_rates_refresh"
+# #2271 — the scheduled writer for the ``quotes`` table. Restores the
+# headless quote refresh that #502 removed along with the FX cadence cut:
+# that PR dropped fx_rates_refresh's batch-quote phase as "redundant for
+# visibility-driven workflows", which is true of the browser and false of
+# scoring, portfolio, execution_guard, position_monitor, valuation,
+# transaction_cost and coverage — all of which read ``quotes`` headless.
+JOB_QUOTES_REFRESH = "quotes_refresh"
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_PORTFOLIO_EOD_SNAPSHOT = "portfolio_eod_snapshot"
@@ -342,6 +364,44 @@ JOB_FX_HISTORY_BACKFILL = "fx_history_backfill"
 # SCHEDULED_JOBS (the layer's own weekly cadence + freshness gate the DAG
 # walk; a ScheduledJob row would double-fire alongside the orchestrator).
 JOB_RISK_METRICS_REFRESH = "risk_metrics_refresh"
+# #2009 — deterministic fair-value band recompute. Same orchestrator-driven +
+# manual-trigger-only shape as JOB_RISK_METRICS_REFRESH (NOT in SCHEDULED_JOBS;
+# the DAG layer's 24h cadence + freshness gate the walk).
+JOB_FAIR_VALUE_BAND_REFRESH = "fair_value_band_refresh"
+# #2261 — impossible-bar quarantine recompute (phase 0a of #2240). Same
+# orchestrator-driven + manual-trigger-only shape as JOB_RISK_METRICS_REFRESH.
+# Must follow candles: the verdicts are derived from price_daily and a refresh
+# that rewrote bars leaves them describing a series that no longer exists.
+JOB_PRICE_QUARANTINE_REFRESH = "price_quarantine_refresh"
+# #2394 §3.1 — the daily signal scan. SCHEDULED (not orchestrator-driven): its
+# "after the candle refresh" prerequisite is structural rather than a DAG edge —
+# if candles have not moved, the frontier has not moved, and the watermark makes
+# the run a no-op. See app/services/strategy_signal_scan.py.
+JOB_STRATEGY_SIGNAL_SCAN = "strategy_signal_scan"
+# #2474 — bounded forward outcome resolver. Shares ``strategy_scan`` so it
+# cannot race the signal producer or retention while selecting immutable fills.
+JOB_STRATEGY_OUTCOME_RESOLUTION = "strategy_outcome_resolution"
+# #2448 — range-partition retention. Shares ``strategy_scan`` so a partition
+# cannot be dropped while the scanner is inserting into it.
+JOB_STRATEGY_OBSERVATION_RETENTION = "strategy_observation_retention"
+# #2477 -- prospective, bounded eToro intraday research collection.  Shares
+# the provider lane (not strategy_scan): the eToro client's request floor is
+# the rate budget, while the storage writer carries its own tier locks.
+JOB_STRATEGY_INTRADAY_HARVEST = "strategy_intraday_harvest"
+# #2507 — primary-source Nasdaq halt state. Safety input only: a fresh
+# snapshot can refuse an order but can never create trading authority.
+JOB_STRATEGY_HALT_FEED_REFRESH = "strategy_halt_feed_refresh"
+# #2574 — one bounded official daily Cboe VIX context refresh.
+JOB_CBOE_VIX_REFRESH = "cboe_vix_refresh"
+# #2450 — bounded demo execution/reconciliation/owned-position health loop.
+JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
+# #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
+# expensive: half an hour is a scheduled job's workload. The reasons are
+# governance — criterion 5 requires a hold-out purpose a cron fire cannot
+# supply, and a stored row is meaningless if its identity moved between runs.
+# Source-lock "strategy_backtest" in MANUAL_TRIGGER_JOB_SOURCES; params in
+# MANUAL_TRIGGER_JOB_METADATA. See app/services/backtest_run.py.
+JOB_STRATEGY_BACKTEST_RUN = "strategy_backtest_run"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 # JOB_WEEKLY_COVERAGE_AUDIT + JOB_WEEKLY_COVERAGE_REVIEW retired in Chunk 2 of
@@ -382,6 +442,7 @@ JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
 JOB_SEC_DEF14A_INGEST = "sec_def14a_ingest"
 JOB_SEC_DEF14A_BOOTSTRAP = "sec_def14a_bootstrap"
+JOB_DRS_DISCLOSURE_REFRESH = "drs_disclosure_refresh"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
@@ -537,6 +598,33 @@ def _has_scoreable_instruments(conn: psycopg.Connection[Any]) -> PrerequisiteRes
     return (False, "no scoreable instruments")
 
 
+def _llm_provider_resolvable(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True when the configured LLM provider can be constructed (#1919 PR-B).
+
+    The local-first ``openai_compatible`` default always resolves (no key
+    needed — Ollama ignores it); only ``llm_provider='anthropic'`` with no
+    ``ANTHROPIC_API_KEY`` fails. Construction is config resolution plus, on
+    a LOCAL endpoint, at most ONE cached ``/api/version`` probe per process
+    (#2431 — it decides whether the endpoint is Ollama, which decides whether
+    ``num_ctx`` can be set at all). ⚠ The probe cannot turn this config gate
+    into a connectivity gate: it swallows every transport error and falls back
+    to the OpenAI provider, so an unreachable server resolves clients exactly
+    as before rather than raising here. ``RuntimeConfigCorrupt`` deliberately
+    propagates so a corrupt config surfaces as a failure, never a silent skip
+    (fail closed, PR-A contract).
+    """
+    try:
+        make_llm_clients(conn)
+    except LLMProviderNotConfigured as exc:
+        # Marker-wrapped so the scheduled-fire path's record_job_skip row
+        # classifies as PREREQ_SKIP (fresh_by_audit counts ONLY marked
+        # skips — types.py:PREREQ_SKIP_MARKER) — identical classification
+        # to the in-body manual-path guard, which applies the same marker
+        # via _record_prereq_skip. Codex ckpt-2 finding.
+        return (False, prereq_skip_reason(str(exc)))
+    return (True, "")
+
+
 def _all_of(*prereqs: PrerequisiteFn) -> PrerequisiteFn:
     """Compose multiple prerequisite checks into a single one.
 
@@ -580,6 +668,62 @@ def _bootstrap_complete(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     ):
         return (True, "")
     return (False, "first-install bootstrap not complete; visit /admin to run")
+
+
+_NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _strategy_intraday_collection_window_open(now: datetime) -> bool:
+    """Whether a scheduled harvest can collect a newly completed US bar.
+
+    The provider returns extended-hours candles, but this evidence panel owns
+    NYSE regular-session bars only.  Start at 09:35 ET, after the first 5m bar
+    can have completed, and leave ten minutes after the regular/early close for
+    provider publication lag.  Manual ``Run now`` bypasses prerequisites, so an
+    operator can still repair a gap outside this automatic request window.
+    """
+    if now.tzinfo is None:
+        raise ValueError("intraday collection window requires an aware datetime")
+    local = now.astimezone(_NEW_YORK)
+    status = us_market_status(local.date())
+    if status == "closed":
+        return False
+    minute = local.hour * 60 + local.minute
+    close_minute = 13 * 60 if status == "half_day" else 16 * 60
+    return 9 * 60 + 35 <= minute <= close_minute + 10
+
+
+def _strategy_intraday_collection_due(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """Gate automatic provider calls to bootstrap-complete US sessions."""
+    bootstrap_met, reason = _bootstrap_complete(conn)
+    if not bootstrap_met:
+        return (False, reason)
+    if not _strategy_intraday_collection_window_open(datetime.now(tz=UTC)):
+        return (False, "outside the completed US regular-session bar collection window")
+    return (True, "")
+
+
+def _strategy_halt_collection_window_open(now: datetime) -> bool:
+    """Bound automatic halt polling to the US pre-open/RTH safety window."""
+    if now.tzinfo is None:
+        raise ValueError("halt collection window requires an aware datetime")
+    local = now.astimezone(_NEW_YORK)
+    status = us_market_status(local.date())
+    if status == "closed":
+        return False
+    minute = local.hour * 60 + local.minute
+    close_minute = 13 * 60 if status == "half_day" else 16 * 60
+    return 9 * 60 <= minute <= close_minute + 15
+
+
+def _strategy_halt_collection_due(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """Gate scheduled polls while manual repair remains available off-hours."""
+    bootstrap_met, reason = _bootstrap_complete(conn)
+    if not bootstrap_met:
+        return (False, reason)
+    if not _strategy_halt_collection_window_open(datetime.now(tz=UTC)):
+        return (False, "outside the US pre-open/regular-session halt safety window")
+    return (True, "")
 
 
 def _has_actionable_recommendations(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
@@ -706,9 +850,37 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=True,
         exempt_from_universal_bootstrap_gate=True,
     ),
-    # -- Outside-DAG jobs (5 kept on their own cron triggers) ------------
+    # -- Outside-DAG jobs (own cron triggers) ----------------------------
     # These have empty JOB_TO_LAYERS entries and remain independently
     # scheduled; they do not participate in the orchestrator DAG.
+    #
+    # The count that used to sit in this banner ("5 kept") was the Phase-4
+    # migration tally, not a description of the section, and had already
+    # drifted well past 5 before #2271 added another. Dropped rather than
+    # bumped: a hand-maintained count in a section header is a comment that
+    # goes stale on the next append, silently, and nothing reads it.
+    ScheduledJob(
+        name=JOB_QUOTES_REFRESH,
+        display_name="Quote refresh",
+        source="etoro",
+        description="Refresh the quotes table for held + benchmark + Tier 1/2 instruments.",
+        # Hourly, NOT every_n_minutes, for two reasons. (1) Cadence: hourly is
+        # what quote freshness had before #502, and the headless readers are
+        # slower than that — the execution guard fires daily, position monitor
+        # and portfolio hourly. (2) The #1526/#1527 lane tick-race: a 5-min-
+        # aligned slot loses its lane tick to a same-lane every_5min job.
+        # :23 is not 5-min-aligned and collides with nothing else on the
+        # ``etoro`` lane (execute_approved_orders 06:30, exchanges_metadata
+        # Mon 04:00, etoro_lookups Mon 04:30).
+        #
+        # Cost: ~1,390 instruments / 50 IDs per rates request = ~28 GETs per
+        # fire, i.e. ~0.5 req/min against eToro's 60 GET/min shared budget.
+        cadence=Cadence.hourly(minute=23),
+        # Fire on boot when overdue — a process restart otherwise leaves every
+        # headless reader on quotes up to an hour old for no reason, and the
+        # fetch is bounded (28 GETs).
+        catch_up_on_boot=True,
+    ),
     ScheduledJob(
         name=JOB_EXECUTE_APPROVED_ORDERS,
         display_name="Execute approved orders",
@@ -758,6 +930,108 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.hourly(minute=15),
         prerequisite=_has_open_positions,
         catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_THESIS_REFRESH,
+        display_name="Thesis refresh (LLM writer + critic)",
+        # #1919 PR-B — own single-job lane (#1526/#1527 class): a batch of
+        # ≤5 local-LLM generations holds the lane ~20+ min (≈260s/thesis on
+        # a local 14B), which would starve any lanemate. Its write set
+        # (theses / thesis_runs / coverage.last_reviewed_at / rankings
+        # retry-queue demote) is shared only with the filing cascade and
+        # the manual POST path — all three serialise per-instrument via
+        # the K.3 ``instrument_lock`` advisory lock, not via the lane.
+        source="llm_thesis",
+        description=(
+            "Hourly LLM thesis generation (#1919): held ∪ top-20-ranked "
+            "instruments, filtered by the #273 staleness predicate (no "
+            "thesis / review_frequency elapsed / superseding 10-K, 10-Q, "
+            "8-K), bounded to 5 generations per run. The hourly cadence × "
+            "batch bound is the bounded bootstrap drain — no separate "
+            "bulk job (spec §6)."
+        ),
+        # :07 — not 5-min-aligned (daily_news_refresh precedent hygiene);
+        # the dedicated lane already removes any tick-race exposure.
+        cadence=Cadence.hourly(minute=7),
+        # A missed slot is re-covered within the hour; a boot catch-up
+        # would fire a multi-minute LLM batch on every dev-stack restart.
+        catch_up_on_boot=False,
+        prerequisite=_llm_provider_resolvable,
+    ),
+    ScheduledJob(
+        name=JOB_THESIS_DQ_AUDIT,
+        display_name="Thesis DQ audit",
+        # #2052 — own single-job lane. On the catch-all ``db`` lane the 02:30
+        # fundamentals_sync held the lock 6-11h+ nightly (released only by the
+        # next daemon restart) and this job had ZERO scheduled fires ever —
+        # the patient acquire-retry window (~11.5s) is no match for an
+        # hours-long holder. Read-only body → write-disjoint by construction.
+        source="db_thesis_dq",
+        description=(
+            "Nightly full-population DQ scan of the latest stored thesis "
+            "per instrument (#2014): target ordering, buy-zone sanity, "
+            "zoneless buys, base-vs-anchor-close distance, availability "
+            "claim-lint vs the run's context summary, stale price anchors. "
+            "Read-only; findings are operator-triage candidates (no "
+            "auto-regen). row_count = total violations."
+        ),
+        # 05:12 UTC — after the 02:30 fundamentals_sync + 03:30 ownership
+        # repair window so the scan reads the freshest nightly data (the slot
+        # is data-readiness, not lane-contention: since #2052 the job owns its
+        # lane and no longer races the db-lane holders).
+        cadence=Cadence.daily(hour=5, minute=12),
+        # A missed night is re-covered next night; nothing accumulates.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_THESIS_BREAK_SCAN,
+        display_name="Thesis break scan",
+        # #2052 — own single-job lane (same starvation as thesis_dq_audit;
+        # SEPARATE lane, not shared with it — boot catch-up / manual triggers
+        # co-fire the two scans despite the 05:12/05:22 stagger, the
+        # db_liveness/db_retry #1526 lesson). Sole writer of the
+        # thesis_break_* tables; see app/jobs/sources.py::Lane.
+        source="db_thesis_break",
+        description=(
+            "Nightly evaluation of machine-checkable thesis break "
+            "predicates (#2012): extract closed-vocabulary predicates "
+            "from the latest thesis per instrument, baseline/arm them, "
+            "and emit at most one break event per predicate per thesis "
+            "version on a genuine false→true transition. Fired events "
+            "mark the thesis stale (break_fired) for the existing "
+            "thesis_refresh drain. row_count = events emitted."
+        ),
+        # 05:22 UTC — same post-fundamentals data-readiness window as
+        # thesis_dq_audit's 05:12 slot; the stagger is layout hygiene only
+        # since #2052 (each scan owns its lane, so they cannot contend).
+        cadence=Cadence.daily(hour=5, minute=22),
+        # A missed night is re-covered next night; nothing accumulates.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_THESIS_OUTCOME_CAPTURE,
+        display_name="Thesis outcome capture",
+        # Own single-job lane per the #2052/#1526 lesson (boot catch-up /
+        # manual triggers co-fire the 05:1x-05:3x scans despite the
+        # stagger). Sole writer of thesis_outcomes; see
+        # app/jobs/sources.py::Lane.
+        source="db_thesis_outcomes",
+        description=(
+            "Nightly calibration-ledger capture (#2002): insert realized "
+            "returns per thesis version at 30/90/365d horizons into the "
+            "append-only thesis_outcomes table. Maturity is data-anchored "
+            "(max price_date >= anchor + horizon), anchors re-read from "
+            "price_daily — deterministic, no LLM. row_count = outcome rows "
+            "inserted (0 = healthy steady state)."
+        ),
+        # 05:32 UTC — post-fundamentals data-readiness window, offset from
+        # dq_audit 05:12 / break_scan 05:22, non-5-minute-aligned (#1707).
+        cadence=Cadence.daily(hour=5, minute=32),
+        # A missed night is re-covered next night; nothing accumulates.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_PORTFOLIO_EOD_SNAPSHOT,
@@ -1079,6 +1353,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
     ),
     ScheduledJob(
+        name=JOB_DRS_DISCLOSURE_REFRESH,
+        display_name="DRS disclosure refresh",
+        source="sec_rate",
+        description=(
+            "Weekly refresh of the issuer-disclosed registered-vs-street "
+            "(DRS) share split for the curated cohort "
+            "(drs_disclosure.DRS_DISCLOSURE_CIKS — GME + AMC at v1, #844). "
+            "Monotone frontier per CIK: parses manifest 10-K/10-K/A/10-Q "
+            "filings newer than the newest stored observation (a "
+            "non-disclosing filing costs at most one re-fetch per run). "
+            "Bounded: ≤ a handful of primary-doc fetches per fire via the "
+            "shared SEC rate budget. Deliberately NOT a manifest parser — "
+            "the sec_10q synth no-op is a defended decision and a "
+            "parser-version bump would rescope the whole 10-K lane for a "
+            "2-issuer feature (spec "
+            "docs/specs/etl/2026-07-23-drs-rsu-issuer-disclosures.md)."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=5, minute=10),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
         name=JOB_RAW_DATA_RETENTION_SWEEP,
         display_name="Raw data retention sweep",
         source="db",
@@ -1323,7 +1619,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "against ``instruments.symbol``; promotions land in "
             "``external_identifiers (provider='openfigi')`` and "
             "negative verdicts tombstone ``openfigi_unknown`` / "
-            "``openfigi_no_instrument`` so the selection cursor "
+            "``openfigi_no_instrument`` / ``openfigi_invalid_identifier`` so the selection cursor "
             "advances (pre-#740 the sweep re-scanned the same "
             "alphabet-head 1000 forever). Also runs the pre-sweep "
             "extid tombstone, the post-sweep coverage compute, and "
@@ -1748,6 +2044,134 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
+        name=JOB_STRATEGY_SIGNAL_SCAN,
+        display_name="Strategy signal scan (#2394 §3.1)",
+        source="strategy_scan",
+        description=(
+            "Daily 06:45 UTC — evaluates every strategy in "
+            "STRATEGY_MANIFEST over the validated universe. Fired signals are "
+            "durable; routine detail is retained 90 days with durable counts. "
+            "Runs one bar in ARREARS: a signal on "
+            "the last bar of a series has no t+1, so it is "
+            "not_evaluable/no_fill_bar, and the stores have no ON "
+            "CONFLICT to correct it with — a same-day scan would "
+            "record 6,185 real fired decisions a day as permanently "
+            "unevaluable (measured, full population). The date it "
+            "writes is the bar before the MODAL last bar across the "
+            "loadable universe, not max(price_date), and the day is "
+            "REFUSED if the modal share is below 2/3 — a refresh "
+            "still in flight would otherwise be recorded as terminal "
+            "refusals. Resumes from a per-(strategy_id, "
+            "strategy_version) frontier watermark, so a re-run on the "
+            "same frontier is a no-op and a market holiday neither "
+            "writes nor wedges. Signals only: the 06:55 outcome job "
+            "consumes manifest-owned level brackets and leaves immature "
+            "windows pending rather than storing a false terminal result. Spec "
+            "docs/proposals/ta/2026-08-08-strategy-signal-scan.md."
+        ),
+        # After the 03:00 orchestrator_full_sync has driven candles →
+        # price_quarantine. The gap is generous on purpose: the scan reads
+        # through the quarantine coverage table, so a run that overtakes the
+        # quarantine recompute would see a stale rule-set version and load
+        # fail-closed zeros for the affected instruments.
+        cadence=Cadence.daily(hour=6, minute=45),
+        # A missed window rolls forward: the next run's watermark is behind the
+        # new frontier, so it writes the whole gap. Catching up on boot would
+        # fire a ~2-minute full-corpus pass on every dev-stack restart for a day
+        # the next scheduled fire covers anyway.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_OUTCOME_RESOLUTION,
+        display_name="Strategy forward outcome resolution (#2474)",
+        source="strategy_scan",
+        description=(
+            "Daily 06:55 UTC — after the signal scan, resolves mature current-version "
+            "level-based fills and immutable opportunity forecasts against the fail-closed "
+            "live corpus. Incomplete windows remain pending without a database write; "
+            "terminal outcomes are one immutable row per decision and rule-version pair, "
+            "processed round-robin in bounded batches."
+        ),
+        cadence=Cadence.daily(hour=6, minute=55),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_INTRADAY_HARVEST,
+        display_name="Strategy intraday evidence harvest (#2477)",
+        source="etoro",
+        description=(
+            "Every five minutes during the US regular-session collection window -- fetches at "
+            "most twelve predeclared eToro research windows, "
+            "retains completed NYSE-RTH bars only, removes watermark overlap and records gaps "
+            "without imputation. One batch also records best bid/ask or an explicit missing/invalid "
+            "coverage row for each unique panel instrument, at most once per five-minute bucket. "
+            "The active versioned panel is deliberately small; storage remains retention-capped. "
+            "Operator Run uses the same collector and can repair bars outside the automatic window."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
+        catch_up_on_boot=False,
+        prerequisite=_strategy_intraday_collection_due,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_OBSERVATION_RETENTION,
+        display_name="Strategy observation retention (#2448)",
+        source="strategy_scan",
+        description=(
+            "Daily 07:05 UTC — after the 06:45 scan and 06:55 outcome pass, drops whole expired "
+            "range partitions: negative signal detail after 90 days, 30m bars "
+            "after 24 months, 5m bars after 12 months and 1m bars after 30 days. "
+            "Prospective five-minute quote samples expire after 24 months. Fired signals and "
+            "daily counts are durable; quote outcomes retain their compact cost attribution."
+        ),
+        cadence=Cadence.daily(hour=7, minute=5),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_HALT_FEED_REFRESH,
+        display_name="Nasdaq strategy halt safety feed (#2507)",
+        source="nasdaq",
+        description=(
+            "Every five minutes from 09:00 ET through the regular/early close plus 15 minutes — "
+            "refreshes Nasdaq Trader's primary-source halt RSS into one current feed-state row "
+            "and a 90-day provider-identity history. Missing, malformed or stale publication "
+            "timestamps fail visibly; this safety feed can refuse but never create a trade."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
+        catch_up_on_boot=False,
+        prerequisite=_strategy_halt_collection_due,
+    ),
+    ScheduledJob(
+        name=JOB_CBOE_VIX_REFRESH,
+        display_name="Cboe VIX daily context (#2574)",
+        source="cboe",
+        description=(
+            "Daily 02:12 UTC — fetches Cboe official VIX daily OHLC history once, "
+            "retains only 2021 onward as an internal non-tradable research series, "
+            "and records source hash/freshness. Historical decisions may use only "
+            "a close from an earlier New York date; no rolling indicators are stored."
+        ),
+        cadence=Cadence.daily(hour=2, minute=12),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_PAPER_CYCLE,
+        display_name="Strategy paper lifecycle (#2450)",
+        source="strategy_execution",
+        description=(
+            "Every five minutes — demo-only reconciliation, current health "
+            "blocks, exact owned-position protection and at most five newest "
+            "eligible fired entries. Real credentials are refused; health "
+            "polling updates five bounded rows rather than appending heartbeats."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
         name=JOB_SEC_COMPANYFACTS_BULK_REFRESH,
         display_name="SEC companyfacts.zip daily refresh",
         source="sec_bulk_download",
@@ -1936,6 +2360,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
     # nests for the orchestrator inner-adapter re-entry.
     _job = _JOBS_BY_NAME.get(job_name)
     _timeout_token = job_statement_timeout_ms.set(_job.statement_timeout_ms if _job is not None else None)
+    _application_name_token = job_application_name.set(job_name)
     try:
         if pre_allocated_run_id is not None:
             tracker.run_id = pre_allocated_run_id
@@ -1949,7 +2374,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                         classify_exception,
                     )
 
-                    with psycopg.connect(settings.database_url) as conn:
+                    with background_write_connection(autocommit=False) as conn:
                         record_job_finish(
                             conn,
                             tracker.run_id,
@@ -1962,14 +2387,8 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                 raise
             else:
                 try:
-                    with psycopg.connect(settings.database_url) as conn:
-                        record_job_finish(
-                            conn,
-                            tracker.run_id,
-                            status="success",
-                            row_count=tracker.row_count,
-                            error_msg=tracker.note,
-                        )
+                    with background_write_connection(autocommit=False) as conn:
+                        _finish_tracked(conn, tracker)
                         if tracker.row_count is not None:
                             spike = check_row_count_spike(
                                 conn,
@@ -1984,7 +2403,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             return
 
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with background_write_connection(autocommit=False) as conn:
                 tracker.run_id = record_job_start(
                     conn,
                     job_name,
@@ -2003,7 +2422,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                 # Function-local import: scheduler is above classify_exception in the orchestrator graph.
                 from app.services.sync_orchestrator.exception_classifier import classify_exception
 
-                with psycopg.connect(settings.database_url) as conn:
+                with background_write_connection(autocommit=False) as conn:
                     record_job_finish(
                         conn,
                         tracker.run_id,
@@ -2016,14 +2435,8 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             raise
         else:
             try:
-                with psycopg.connect(settings.database_url) as conn:
-                    record_job_finish(
-                        conn,
-                        tracker.run_id,
-                        status="success",
-                        row_count=tracker.row_count,
-                        error_msg=tracker.note,
-                    )
+                with background_write_connection(autocommit=False) as conn:
+                    _finish_tracked(conn, tracker)
                     # Check for row-count spikes after recording the successful run.
                     # Exclude the current run_id so we compare against the *previous*
                     # successful run, not the one we just wrote.
@@ -2034,6 +2447,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             except Exception:
                 logger.error("Failed to record job success for %s", job_name, exc_info=True)
     finally:
+        job_application_name.reset(_application_name_token)
         job_statement_timeout_ms.reset(_timeout_token)
 
 
@@ -2046,6 +2460,13 @@ class _JobTracker:
     the body ran cleanly but the operator should know nothing happened.
     Leaving it ``None`` records the success row with NULL error_msg
     (the historical contract).
+
+    ``progress`` (#2218) — optional :class:`JobProgress` the body fills in
+    with what it SAW versus what it PRODUCED. When set and
+    ``degradation_reason`` fires, the terminal row is written
+    ``status='degraded'`` instead of ``'success'``. Leaving it ``None``
+    keeps the historical contract exactly, so this is opt-in per job and
+    inert for every job that has not been wired.
     """
 
     def __init__(self, job_name: str) -> None:
@@ -2053,6 +2474,49 @@ class _JobTracker:
         self.run_id: int = 0
         self.row_count: int | None = None
         self.note: str | None = None
+        self.progress: JobProgress | None = None
+
+    def checkpoint_progress(self) -> None:
+        """Persist an in-flight aggregate before a long, partial-commit sweep."""
+        if self.run_id <= 0 or self.progress is None:
+            return
+        with background_write_connection(autocommit=False) as conn:
+            conn.execute(
+                "UPDATE job_runs SET progress_json = %(progress)s WHERE run_id = %(run_id)s",
+                {"progress": Jsonb(self.progress.as_json()), "run_id": self.run_id},
+            )
+
+
+def _finish_tracked(conn: psycopg.Connection[Any], tracker: _JobTracker) -> None:
+    """Write the non-failure terminal row for a tracked job (#2218).
+
+    Both of ``_tracked_job``'s success paths route through here so the
+    degraded verdict cannot apply on one and not the other — the early-return
+    branch and the main branch were byte-identical duplicates, which is
+    exactly how a rule ends up enforced in one place and not the other.
+
+    ⚠ The reason goes into ``error_msg`` on purpose: that is the field the
+    admin row and ``/system/jobs`` already surface, so a degraded run explains
+    itself without a second read. ``tracker.note`` still wins when the body
+    set one — a soft-skip digest is a deliberate operator message and must not
+    be overwritten by a derived string.
+
+    ``or`` rather than ``is not None`` is deliberate: an EMPTY note is not a
+    message, so falling through to the reason is the better outcome. Writing
+    ``""`` into ``error_msg`` would leave a degraded row with no explanation at
+    all, which is the one thing this function exists to prevent.
+    """
+    reason = degradation_reason(tracker.progress)
+    record_job_finish(
+        conn,
+        tracker.run_id,
+        status="degraded" if reason else "success",
+        row_count=tracker.row_count,
+        error_msg=tracker.note or reason,
+        progress=tracker.progress.as_json() if tracker.progress is not None else None,
+    )
+    if reason:
+        logger.warning("%s: DEGRADED — %s", tracker.job_name, reason)
 
 
 def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
@@ -2136,12 +2600,13 @@ def _promote_held_to_tier1(conn: psycopg.Connection[Any]) -> int:
     result = conn.execute(
         """
         UPDATE coverage
-        SET coverage_tier = 1
+        SET coverage_tier = 1, review_frequency = %(freq)s
         WHERE instrument_id IN (
             SELECT instrument_id FROM positions WHERE current_units > 0
         )
           AND coverage_tier != 1
-        """
+        """,
+        {"freq": review_frequency_for_tier(1)},
     )
     return result.rowcount
 
@@ -2250,11 +2715,50 @@ def nightly_universe_sync() -> None:
             tracker.row_count = row_count
 
 
-# Max T3 instruments to include in candle refresh for bootstrap
-# scoring. Prevents hitting API rate limits while giving enough T3
-# instruments price data to enable T3→T2 promotion via the
-# scoring/coverage pipeline.
-_T3_BOOTSTRAP_BATCH_SIZE = 200
+# Ceiling on T3 instruments fetched per candle-refresh run (#2254).
+#
+# This is a SAFETY CEILING, not a rationing device. It was 200 while the
+# T3 branch was seed-only; a cap below the T3 population would now mean
+# permanent partial coverage with a rotating fresh set, which is the
+# defect #2254 is fixing rather than a smaller version of the fix.
+#
+# Sized from two independent bounds, whichever is tighter:
+#   * population — 3,838 priced T3 + 27 still-unseeded gate-passers
+#     (measured 2026-08-04, full population), so 5,000 leaves ~29% growth
+#     headroom before the cap can bind;
+#   * wall clock — the provider paces reads at 1.1s (_ETORO_READ_INTERVAL_S,
+#     ≈55 req/min under eToro's 60/min limit), so 5,000 is ~92 min worst
+#     case, on top of ~26 min for held + T1/T2 + benchmark.
+#
+# RAISED 5,000 -> 12,000 (#2262), and this is the deliberate cost decision
+# the comment above said it would be, not a side effect. Replacing the
+# fundamentals-shaped seeding gate with design decision 9's price-eligibility
+# predicate admits 7,242 instruments, taking the T3 population to ~11,100.
+# At 5,000 the cap would have BOUND on the very first run — the branch would
+# have logged its WARNING nightly and left an unknown remainder stale, which
+# reads as "everything is current" to every coverage number that counts it.
+#
+#   * population — measured on the full dev population 2026-08-04, the T3
+#     scope query returns 10,483 rows under the new predicate (the seed arm
+#     goes 27 -> 7,269, admitting exactly the 7,242), so 12,000 leaves ~13%
+#     headroom;
+#   * wall clock — ~2.2h of the 55 req/min budget for the one-off seeding
+#     sweep. Thereafter these join #2254's freshness-based maintenance arm at
+#     ~1.1s each per night, and the supply-less exclusion above removes the
+#     ~108 that will never advance.
+#
+# Headroom is thinner than the previous 29% by design: the population is now
+# the whole price-eligible universe rather than a filtered slice of it, so it
+# grows with eToro's catalogue rather than with SEC coverage. When the cap
+# binds, daily_candle_refresh logs a WARNING — a silently truncated sweep
+# would read as "everything is current" when it is not.
+_T3_CANDLE_BATCH_SIZE = 12000
+
+# #2262 — supply-less exclusion parameters, mirroring
+# ``market_data._SUPPLY_LESS_CONSECUTIVE_MISSES``. The re-check interval is what
+# makes the exclusion EXPIRE rather than LATCH.
+_T3_SUPPLY_LESS_MISSES = 5
+_T3_SUPPLY_LESS_RECHECK = "7 days"
 
 # Benchmark instruments (S&P 500 + Nasdaq-100 + 11 GICS sector SPDRs)
 # always candle-refreshed regardless of coverage tier so the risk layer
@@ -2276,39 +2780,92 @@ BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
     {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
 )
 
-# T3 candle bootstrap eligibility query.
+# T3 candle eligibility query.
 # Module-level constant so the test suite imports the same SQL the
 # scheduler executes — eliminates the drift risk Codex flagged on
 # PR 0 (#515): a copy-pasted test SQL could stay green after a
-# production regression. Tests import _T3_BOOTSTRAP_SELECT directly.
+# production regression. Tests import _T3_CANDLE_SELECT directly.
 #
-# Eligibility branches (post-#515 PR 0):
-#   1. Tradable + tier 3 + no candles + has fundamentals (original).
-#   2. OR tradable + tier 3 + no candles + non-fundamentals-bearing
-#      asset class (crypto / fx / commodity / index — those classes
-#      never get a fundamentals_snapshot row by design).
-# Instruments on exchanges with asset_class='unknown' stay gated;
-# operator curates the row first via the #503 PR 4 admin path.
-_T3_BOOTSTRAP_SELECT = """
+# TWO ARMS, deliberately carrying DIFFERENT predicates (#2254):
+#
+#   SEED arm — tier 3, no candles at all, and PRICE-ELIGIBLE per design
+#   decision 9 (settled by S6 #2246): tradable, on an exchange whose
+#   asset_class is known and is not 'unknown'.
+#
+#   ⚠ REPLACED the fundamentals-shaped gate (#2262). The old predicate
+#   was "has a fundamentals_snapshot row OR sits in a
+#   non-fundamentals-bearing asset class". coverage_tier and
+#   fundamentals_snapshot are SEC-fed, so keying price seeding on them
+#   made the price universe US-FILER ONLY while presenting as "the
+#   market" — 7,242 price-eligible instruments (4,749 non-US equity +
+#   2,493 us_equity carrying no fundamentals row) were unpriced for that
+#   reason alone. Price-data eligibility is defined on the PRICE path;
+#   it is orthogonal to fundamentals coverage. The gap was an accident,
+#   not a scope boundary — eToro serves the international set (27 of 28
+#   probed non-US instruments returned bars current to the prior close).
+#
+#   Instruments on exchanges with asset_class='unknown' stay gated (194:
+#   CME 192 + 2); the operator curates the exchange row first via the
+#   #503 PR 4 admin path. That is the ONE thing this narrowing keeps
+#   rejecting, and it renders as "no data", not as absent.
+#
+#   MAINTENANCE arm — tier 3 that ALREADY has a series and is behind
+#   the most recent trading day. NO eligibility gate: the seeding gate
+#   answers "is a first fetch worth spending", which is a question
+#   already settled for an instrument that has bars. Applying it here
+#   would strand 274 priced us_equity T3 that carry no
+#   fundamentals_snapshot row (259 of them already >30d stale,
+#   measured 2026-08-04 on the full population).
+#
+# WHY the split exists at all (#2254): this query previously carried a
+# single `NOT EXISTS (price_daily)` for both purposes, which selects on
+# the ABSENCE of the rows the job writes — so a T3 left candle-refresh
+# scope permanently on its first bar and nothing took over. 3,523 of
+# 3,838 priced T3 had no bar in 30 days and every crypto / FX /
+# commodity series in the DB was ~2 months stale. A stale close is not
+# an absent value; it renders, scores and backtests as a wrong one.
+#
+# The maintenance predicate must stay FRESHNESS-based, never
+# existence-based: an exclusion that expires keeps the instrument in
+# scope tomorrow, an exclusion that latches makes this a seeder again.
+# `%(fresh_through)s` is the last officially completed US session — the SAME
+# boundary passed to `_candles_are_fresh` when deciding whether to fetch — so
+# scope membership and the per-instrument freshness skip cannot drift.
+# SUPPLY-LESS DE-PRIORITISATION (#2262). An instrument whose series has
+# not advanced on %(supply_misses)s consecutive attempted fetches stops
+# consuming a nightly slot — but the exclusion EXPIRES, it does not
+# LATCH: after %(supply_recheck)s it is probed again, and one advancing
+# fetch resets the counter to zero. A latching exclusion would make this
+# a seeder again (the #2254 defect), and a relisted or newly-supplied
+# instrument would never come back on its own.
+_T3_CANDLE_SELECT = """
 SELECT i.instrument_id, i.symbol
 FROM instruments i
 JOIN coverage c ON c.instrument_id = i.instrument_id
 LEFT JOIN exchanges e ON e.exchange_id = i.exchange
+LEFT JOIN instrument_price_supply s ON s.instrument_id = i.instrument_id
+LEFT JOIN LATERAL (
+    SELECT MAX(p.price_date) AS last_bar
+    FROM price_daily p
+    WHERE p.instrument_id = i.instrument_id
+) pd ON TRUE
 WHERE i.is_tradable = TRUE
   AND c.coverage_tier = 3
   AND i.symbol <> ALL(%(benchmark_symbols)s)
-  AND NOT EXISTS (
-      SELECT 1 FROM price_daily p
-      WHERE p.instrument_id = i.instrument_id
+  AND (
+      (pd.last_bar IS NOT NULL AND pd.last_bar < %(fresh_through)s)
+      OR (
+          pd.last_bar IS NULL
+          AND e.asset_class IS NOT NULL
+          AND e.asset_class <> 'unknown'
+      )
   )
   AND (
-      EXISTS (
-          SELECT 1 FROM fundamentals_snapshot f
-          WHERE f.instrument_id = i.instrument_id
-      )
-      OR e.asset_class IN ('crypto', 'fx', 'commodity', 'index')
+      s.instrument_id IS NULL
+      OR s.consecutive_no_advance < %(supply_misses)s
+      OR s.last_attempt_at < now() - %(supply_recheck)s::interval
   )
-ORDER BY i.symbol, i.instrument_id
+ORDER BY pd.last_bar ASC NULLS FIRST, i.symbol, i.instrument_id
 LIMIT %(limit)s
 """
 
@@ -2322,15 +2879,24 @@ def daily_candle_refresh() -> None:
          the operator needs current price context for anything in the
          portfolio even if it's been demoted below T2.
       2. All Tier 1/2 covered instruments (uncapped).
-      3. Up to ``_T3_BOOTSTRAP_BATCH_SIZE`` Tier 3 instruments that
-         already have fundamentals, ordered by symbol for determinism.
-         Enables T3→T2 promotion by seeding candle history.
+      3. Up to ``_T3_CANDLE_BATCH_SIZE`` Tier 3 instruments, stalest
+         first (see ``_T3_CANDLE_SELECT``): those with no candles yet
+         and eligible for a first fetch (seeds history, enabling T3→T2
+         promotion), PLUS those whose existing series is behind the
+         most recent trading day (#2254 — the branch used to drop an
+         instrument permanently once it had its first bar, freezing
+         3,523 series).
 
     Fetches up to 1000 daily candles per instrument (post-#603 — eToro's
     hard ceiling, ≈4 calendar years of trading-day price points).
     Quotes are skipped (owned by the hourly job).
 
-    Runs daily at 22:00 UTC, after US market close. Watchlist scope
+    Fired by the orchestrator full sync (03:00 UTC) as the ``candles``
+    DataLayer — NOT the "22:00 UTC after US close" this docstring used
+    to claim; there is no ``ScheduledJob`` entry for it. The run freezes the
+    last officially completed NYSE session, so it neither requires nor stores
+    a forming same-day bar merely because the UTC civil date advanced.
+    Watchlist scope
     (spec §1.3 bullet 2) lands once the watchlist table exists
     (Phase 3.2). High-frequency held-position refresh (5-min cadence
     during market hours) is Phase 4 (live quotes).
@@ -2344,7 +2910,23 @@ def daily_candle_refresh() -> None:
     with _tracked_job(JOB_DAILY_CANDLE_REFRESH) as tracker:
         with (
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
-            connect_job() as conn,
+            # autocommit=True is LOAD-BEARING (#2269), not a style choice.
+            # ``refresh_market_data`` wraps each instrument's fetch + upsert +
+            # feature-compute in ``with conn.transaction()`` and documents that
+            # as a per-instrument commit boundary. Under the default
+            # autocommit=False that claim is FALSE: the scope SELECTs below
+            # open an implicit transaction, so psycopg3 downgrades every
+            # ``transaction()`` to a SAVEPOINT and the whole ~12k-instrument
+            # sweep commits once, at connection close. Measured on dev PG17:
+            # zero rows visible to a concurrent session for the entire run.
+            # The jobs daemon restarts on any ``app/**`` edit
+            # (``app.jobs.dev_reload``), so four consecutive sweeps were reaped
+            # mid-run and lost 100% of their work; a fifth survived 3h53m only
+            # because nothing happened to restart it. Prevention log:
+            # "``conn.transaction()`` savepoint release does not commit the
+            # outer transaction" / "``with conn.transaction()`` inside an open
+            # implicit psycopg3 tx is SAVEPOINT not COMMIT".
+            connect_job(autocommit=True) as conn,
         ):
             # Held positions — always included, regardless of coverage
             # tier OR is_tradable status. A delisted/suspended instrument
@@ -2389,16 +2971,46 @@ def daily_candle_refresh() -> None:
                 {"symbols": sorted(BENCHMARK_SYMBOLS)},
             ).fetchall()
 
-            # T3: bootstrap batch (see _T3_BOOTSTRAP_SELECT comment).
+            # T3: seed + maintenance batch (see _T3_CANDLE_SELECT comment).
             # refresh_market_data fetches up to 1000 candles per
             # instrument in a single API call (post-#603), so a
-            # "partial" bootstrap still gives enough data for momentum
-            # scoring. If the API call fails entirely, no rows are
-            # inserted and the instrument retries next run.
+            # "partial" seed still gives enough data for momentum
+            # scoring, and a stale series with a gap wider than the
+            # incremental window is healed in one call by
+            # _candles_fetch_count's backfill fallback. If the API call
+            # fails entirely, no rows are inserted and the instrument
+            # retries next run.
+            #
+            # T3 is deliberately LAST in `ordered` below: held / T1/T2 /
+            # benchmark are fetched first, so if the batch circuit-breaker
+            # (#1833) trips part-way through a long T3 sweep, the scoped
+            # instruments that must be current already are.
+            # The run fires at 03:00 UTC, before the same civil day's US
+            # session. A weekday label is therefore not a completed-session
+            # watermark. Freeze the official last completed NYSE session once
+            # for scope selection and the aggregate population record (#2572).
+            completed_session = latest_completed_us_session(datetime.now(UTC))
             t3_rows = conn.execute(
-                _T3_BOOTSTRAP_SELECT,
-                {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)},
+                _T3_CANDLE_SELECT,
+                {
+                    "limit": _T3_CANDLE_BATCH_SIZE,
+                    "benchmark_symbols": sorted(BENCHMARK_SYMBOLS),
+                    "fresh_through": completed_session,
+                    "supply_misses": _T3_SUPPLY_LESS_MISSES,
+                    "supply_recheck": _T3_SUPPLY_LESS_RECHECK,
+                },
             ).fetchall()
+            if len(t3_rows) == _T3_CANDLE_BATCH_SIZE:
+                # #2254 "no silent caps" — a truncated sweep leaves an
+                # unknown number of T3 series stale while the run still
+                # reports success. Surface it; the cap is a safety
+                # ceiling and binding means the population outgrew it.
+                logger.warning(
+                    "daily_candle_refresh: T3 scope hit the %d-instrument cap "
+                    "(_T3_CANDLE_BATCH_SIZE) — an unknown number of T3 series stay stale "
+                    "this run. Stalest are fetched first; raise the cap or add cadence.",
+                    _T3_CANDLE_BATCH_SIZE,
+                )
 
             # Dedupe across scopes. A held T1 instrument must not be
             # fetched twice; set semantics keyed on instrument_id preserve
@@ -2427,7 +3039,8 @@ def daily_candle_refresh() -> None:
                 return
 
             logger.info(
-                "daily_candle_refresh: %d held + %d T1/T2 + %d benchmark + %d T3 bootstrap = %d unique instruments",
+                "daily_candle_refresh: %d held + %d T1/T2 + %d benchmark + %d T3 (seed + stale) "
+                "= %d unique instruments",
                 len(held_rows),
                 len(tier12_rows),
                 len(benchmark_rows),
@@ -2436,10 +3049,75 @@ def daily_candle_refresh() -> None:
             )
 
             instruments = ordered
-            # skip_quotes=True: quote freshness is owned by the hourly
-            # fx_rates_refresh job; daily candle job must not shadow
-            # those fresher values with stale end-of-day data.
-            summary = refresh_market_data(provider, conn, instruments, skip_quotes=True)
+            scope_fingerprint = hashlib.sha256(
+                ",".join(str(instrument_id) for instrument_id, _ in instruments).encode()
+            ).hexdigest()[:16]
+            watermark_context: dict[str, object] = {
+                "contract_version": "candle-population-watermark-v1",
+                "source_version": f"etoro/{settings.etoro_env}/daily-candles-v1",
+                "scope_version": "daily-candle-refresh-resolved-v1",
+                "scope_fingerprint": scope_fingerprint,
+                "provider_session": completed_session.isoformat(),
+                "population_status": "running",
+            }
+            tracker.progress = JobProgress(
+                candidates_seen=len(instruments),
+                outcomes={"attempted": 0, "successful": 0, "usable": 0, "unavailable": 0},
+                errors={"failed": 0},
+                context=watermark_context,
+            )
+            # Per-instrument commits intentionally survive a worker restart.
+            # Persist the denominator first so an orphaned sweep cannot leave
+            # partial bars with no population identity.
+            tracker.checkpoint_progress()
+            # skip_quotes=True: quote freshness is owned by ``quotes_refresh``
+            # (hourly @ :23, #2271) — NOT by fx_rates_refresh, which gave up
+            # its batch-quote phase in #502 and which this comment named as
+            # the owner for months afterwards. Keeping quotes out of this job
+            # is still right on its own merits: a 70-minute candle sweep would
+            # stamp instruments quoted at wildly different times, and the
+            # instruments it touches last would carry the stalest marks.
+            summary = refresh_market_data(
+                provider,
+                conn,
+                instruments,
+                skip_quotes=True,
+                fresh_through=completed_session,
+            )
+            usable_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT instrument_id
+                    FROM price_daily
+                    WHERE instrument_id = ANY(%(instrument_ids)s)
+                      AND price_date >= %(provider_session)s
+                    GROUP BY instrument_id
+                ) AS usable
+                """,
+                {
+                    "instrument_ids": [instrument_id for instrument_id, _ in instruments],
+                    "provider_session": completed_session,
+                },
+            ).fetchone()
+            usable = int(usable_row[0]) if usable_row is not None else 0
+            attempted = len(instruments) - summary.candles_skipped
+            successful = attempted - summary.candles_failed
+            unavailable = len(instruments) - usable
+            tracker.progress = JobProgress(
+                candidates_seen=len(instruments),
+                outcomes={
+                    "attempted": attempted,
+                    "successful": successful,
+                    "usable": usable,
+                    "unavailable": unavailable,
+                },
+                errors={"failed": summary.candles_failed},
+                context={
+                    **watermark_context,
+                    "population_status": "partial" if summary.candles_failed or unavailable else "complete",
+                },
+            )
         tracker.row_count = summary.candle_rows_upserted
 
     logger.info(
@@ -2493,6 +3171,133 @@ def daily_candle_refresh() -> None:
                 len(instruments) - summary.candles_skipped,
                 summary.candles_skipped,
             )
+
+
+def quotes_refresh() -> None:
+    """Refresh the ``quotes`` table for every instrument read headlessly.
+
+    #2271. The ``quotes`` table had no scheduled writer at all. Its only two
+    writers are the WS subscriber — which is visibility-driven by design
+    (#498: "Boots quiet … no Subscribe frame until an SSE stream lands"), so
+    it writes nothing unless an operator has the page open — and
+    ``market_data._upsert_quote``, which was unreachable because both callers
+    of ``refresh_market_data`` pass ``skip_quotes=True``.
+
+    Meanwhile eight non-browser services read the table: scoring,
+    portfolio, execution_guard, position_monitor, valuation,
+    transaction_cost, coverage and the quotes-gated valuation view. None of
+    them bounds ``quoted_at``, so a stale row is indistinguishable from a
+    fresh one — measured 2026-08-04, all five held positions were marked from
+    quotes 14-22 hours old. The settled "AUM basis" rule covers a *missing*
+    quote ("fall back to cost basis"); a stale one never triggers it.
+
+    Scope mirrors the readers, not the universe:
+      1. Held positions — portfolio marks, the execution guard's spread gate,
+         and position monitoring all price these.
+      2. Benchmarks — the reporting comparison (same reasoning as
+         ``daily_candle_refresh``).
+      3. Tier 1/2 — the scored set; scoring reads ``spread_flag``/``last``/
+         ``bid``/``ask`` per instrument.
+
+    Tier 3 is deliberately excluded: nothing scores it, and it would take the
+    fetch from ~28 to ~240 requests per fire for data no headless reader
+    consumes. A T3 instrument the operator actually opens still gets live WS
+    ticks, which is the visibility-driven path working as intended.
+    """
+    creds = _load_etoro_credentials(JOB_QUOTES_REFRESH)
+    if creds is None:
+        _record_prereq_skip(JOB_QUOTES_REFRESH, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_QUOTES_REFRESH) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            # autocommit=True for the same reason as daily_candle_refresh
+            # (#2269): the scope SELECT below opens an implicit transaction,
+            # which would turn refresh_quotes' per-instrument
+            # ``with conn.transaction()`` into a savepoint and make the whole
+            # batch commit once, at connection close.
+            connect_job(autocommit=True) as conn,
+        ):
+            rows = conn.execute(
+                """
+                SELECT DISTINCT ON (i.instrument_id) i.instrument_id, i.symbol
+                FROM instruments i
+                LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
+                LEFT JOIN positions p ON p.instrument_id = i.instrument_id AND p.current_units > 0
+                WHERE p.instrument_id IS NOT NULL
+                   OR (i.is_tradable = TRUE AND c.coverage_tier IN (1, 2))
+                   OR (i.is_tradable = TRUE AND i.symbol = ANY(%(benchmarks)s))
+                   -- #2603 step 3b-1: the ENABLED core mandate's instrument, which
+                   -- none of the three arms above reaches on the first rebalance.
+                   -- The first core buy is by definition not yet HELD, and a
+                   -- mandate may name any tradable instrument -- measured on dev,
+                   -- IVV / VTI / SPY.RTH are all Tier 3, unheld and absent from
+                   -- BENCHMARK_SYMBOLS, so a mandate naming one of them would
+                   -- never be quoted and `core_quote_missing` would be PERMANENT
+                   -- rather than transient (strategy_core_preflight.py).
+                   -- `ORDER BY revision DESC LIMIT 1` (no WHERE) matches
+                   -- load_core_mandate: THE mandate is the latest revision, not the
+                   -- latest enabled one. The CASE yields NULL when that revision is
+                   -- disabled, and `instrument_id = NULL` is never true -- so a
+                   -- disabled mandate drops out of scope without a second subquery.
+                   OR (i.is_tradable = TRUE AND i.instrument_id = (
+                          SELECT CASE WHEN m.enabled THEN m.core_instrument_id END
+                          FROM strategy_core_mandate_events m
+                          ORDER BY m.revision DESC
+                          LIMIT 1
+                       ))
+                ORDER BY i.instrument_id, i.symbol
+                """,
+                {"benchmarks": sorted(BENCHMARK_SYMBOLS)},
+            ).fetchall()
+
+            instruments = [(int(r[0]), str(r[1])) for r in rows]
+            if not instruments:
+                # Same reasoning as daily_candle_refresh's empty-scope branch
+                # (#1293): an empty scope here is anomalous (no held positions,
+                # no T1/T2 coverage, no benchmarks) and must not read as a
+                # healthy no-op.
+                logger.warning(
+                    "quotes_refresh: scope is EMPTY (0 held + 0 T1/T2 + 0 benchmark + no enabled core "
+                    "mandate) — nothing to quote; universe/coverage may not be seeded"
+                )
+                tracker.row_count = 0
+                return
+
+            summary = refresh_quotes(provider, conn, instruments)
+            if summary.batch_error is not None:
+                # #2218 shape — a total upstream failure must NOT report as a
+                # clean run that simply found no quotes. This has to raise
+                # INSIDE the ``_tracked_job`` block: once the context exits,
+                # the job_runs row is already stamped success/row_count=0 and
+                # the job's success state has advanced (Codex round 2).
+                #
+                # Re-raising the provider's original exception (rather than
+                # logging and returning) lets ``classify_exception`` recover
+                # AUTH_EXPIRED / RATE_LIMITED / SOURCE_DOWN from the httpx
+                # type, so the existing retry + operator-remedy paths fire.
+                logger.warning(
+                    "quotes_refresh: eToro batch quote fetch FAILED for all %d instruments — "
+                    "no quotes written; every headless reader (scoring, portfolio, execution "
+                    "guard) continues on the previously stored values",
+                    summary.instruments_requested,
+                )
+                raise summary.batch_error
+        tracker.row_count = summary.quotes_updated
+
+    logger.info(
+        # ``wide_spreads_fetched``, not ``spread_flags``: the count is of quotes
+        # eToro returned with a wide spread, which is not the same as rows now
+        # flagged in the table — a stale snapshot rejected by the monotonicity
+        # guard still counts here (review NITPICK on #2275).
+        "quotes_refresh complete: requested=%d updated=%d no_quote=%d wide_spreads_fetched=%d",
+        summary.instruments_requested,
+        summary.quotes_updated,
+        summary.quotes_skipped,
+        summary.spread_flags_set,
+    )
 
 
 def _cik_destination_is_empty(conn: psycopg.Connection) -> bool:  # type: ignore[type-arg]
@@ -2734,66 +3539,23 @@ def daily_research_refresh() -> None:
                 """
             ).fetchall()
 
-            # Build symbol→CIK mapping for SEC fundamentals.
-            # #540: scope to primary CIKs only so the producer cohort
-            # matches the reader's freshness check (which now also
-            # filters on is_primary=TRUE). Without this, a demoted
-            # historical CIK row could feed the refresh against the
-            # wrong issuer while the reader counted the instrument as
-            # missing — silent issuer-mix corruption.
-            cik_rows = conn.execute(
-                """
-                SELECT i.symbol, ei.identifier_value
-                FROM external_identifiers ei
-                JOIN instruments i ON i.instrument_id = ei.instrument_id
-                WHERE ei.provider = 'sec'
-                  AND ei.identifier_type = 'cik'
-                  AND ei.is_primary = TRUE
-                  AND i.is_tradable = TRUE
-                """
-            ).fetchall()
-
         if not rows:
             logger.info("daily_research_refresh: no tradable instruments found, skipping")
             tracker.row_count = 0
             return
 
-        symbols = [(row[0], row[1]) for row in rows]
         instrument_ids = [row[1] for row in rows]
-        cik_map = {row[0].upper(): row[1] for row in cik_rows}
         from_date = date.today() - timedelta(days=30)
         to_date = date.today()
 
         total_rows = 0
 
-        # Fundamentals — SEC XBRL (primary, free, US equities)
-        # Chunk #414: when ``enable_sec_fundamentals_dedupe`` is True,
-        # skip this call entirely. ``fundamentals_sync`` phase 1b already
-        # refreshes ``fundamentals_snapshot`` for every CIK-mapped
-        # tradable instrument daily at 02:30 UTC — same data, one HTTP
-        # path. Companies House filings below run regardless.
-        sec_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() in cik_map]
-        if settings.enable_sec_fundamentals_dedupe:
-            logger.info(
-                "SEC fundamentals refresh: skipped (enable_sec_fundamentals_dedupe=True); "
-                "relying on fundamentals_sync phase 1b for fundamentals_snapshot"
-            )
-        elif sec_symbols:
-            with (
-                SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
-                connect_job() as conn,
-            ):
-                sec_fund.set_cik_cache(cik_map)
-                summary = refresh_fundamentals(sec_fund, conn, sec_symbols)
-            total_rows += summary.snapshots_upserted
-            logger.info(
-                "SEC fundamentals refresh: attempted=%d upserted=%d skipped=%d",
-                summary.symbols_attempted,
-                summary.snapshots_upserted,
-                summary.symbols_skipped,
-            )
-        else:
-            logger.info("daily_research_refresh: no CIK mappings, skipping SEC fundamentals")
+        # Fundamentals: no SEC snapshot sweep here anymore (#2008).
+        # ``fundamentals_snapshot`` is a write-through from the normalized
+        # financial_periods rows inside ``normalize_financial_periods``
+        # (driven by ``daily_financial_facts``); the former
+        # ``refresh_fundamentals`` companyfacts sweep re-selected periods
+        # JSON-side and rotted across issuer tag migrations.
 
         # Filings — SEC EDGAR
         # Chunk L: when ``enable_filings_fetch_dedupe`` is True, skip
@@ -2938,91 +3700,33 @@ def daily_financial_facts() -> None:
                 # remains the liveness signal.
                 tracker.row_count = 0
 
-            # Phase 3: cascade refresh (#276 Chunk K.1). The bare
-            # ``conn.commit()`` is reached only on the success path of
-            # Phase 1 + Phase 2 — Python exception propagation skips
-            # this line on any prior raise, and ``psycopg.connect()``
-            # as a context manager rolls back the connection on
-            # exception. The commit is required because
-            # ``normalize_financial_periods`` uses savepoints, not
-            # commit, and cascade reads must see committed state.
-            # Cascade runs even on submissions-only days (8-K thesis
-            # context update) as long as there were successful
-            # non-seed CIKs.
+            # (Former Phase 3 — LLM cascade refresh — removed by #2065.
+            # New-filing thesis staleness drains through the hourly
+            # ``thesis_refresh`` job's bounded batch on the ``llm_thesis``
+            # lane; thesis LLM failures surface on ``thesis_runs`` rows,
+            # not on this data job. The commit persists Phase 1+2 state.)
             conn.commit()
-            if settings.anthropic_api_key:
-                from app.services.refresh_cascade import (
-                    cascade_refresh,
-                    changed_instruments_from_outcome,
-                )
-
-                # Cascade fires unconditionally when the API key is
-                # set so the retry outbox (K.2) gets drained even on
-                # days with zero new SEC work. ``cascade_refresh``
-                # returns the empty-noop CascadeOutcome when both
-                # the retry queue and instrument_ids are empty.
-                changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
-                cascade_client = make_anthropic_client(settings.anthropic_api_key)
-                cascade_outcome = cascade_refresh(conn, cascade_client, changed_ids)
-                # Persist any cascade-side writes before the
-                # failure-surfacing raise below. compute_rankings
-                # writes score rows inside a
-                # ``with conn.transaction():`` block that may be
-                # nested as a savepoint under this connection's
-                # implicit outer tx — without this explicit
-                # commit, the raise propagates to
-                # psycopg.connect()'s CM rollback and discards
-                # any successful ranking writes AND any retry-queue
-                # mutations made by cascade's deferred-clear /
-                # marker path. On the failure path where
-                # compute_rankings itself rolled back (cascade_refresh's
-                # inner handler), this commit is a no-op on clean
-                # state. Thesis rows are already durably committed
-                # by generate_thesis per #293 and are unaffected
-                # either way.
-                conn.commit()
-                logger.info(
-                    "cascade_refresh outcome: considered=%d retries_drained=%d "
-                    "thesis_refreshed=%d rankings=%s failed=%d",
-                    cascade_outcome.instruments_considered,
-                    cascade_outcome.retries_drained,
-                    cascade_outcome.thesis_refreshed,
-                    cascade_outcome.rankings_recomputed,
-                    len(cascade_outcome.failed),
-                )
-                cascade_failures: list[tuple[int, str]] = list(cascade_outcome.failed)
-            else:
-                logger.info(
-                    "daily_financial_facts: ANTHROPIC_API_KEY not set — "
-                    "skipping cascade refresh (facts + normalization still committed)"
-                )
-                cascade_failures = []
 
             # Surface every partial-failure channel in a single combined raise
-            # AFTER all commits so successful CIKs' facts, rankings, and
-            # retry-queue mutations all land durably. Channels:
+            # AFTER the commit so successful CIKs' facts land durably.
+            # Channels:
             #   - outcome.failed        — per-CIK XBRL extract failures (#353)
             #   - plan.failed_plan_ciks — planner-phase skips (transient
             #                             submissions.json fetches that never
             #                             reached the executor)
-            #   - cascade_failures      — per-instrument thesis failures AND
-            #                             the -1 rerank sentinel
-            # Without a combined raise, a day where 20% of CIKs fail XBRL but
-            # cascade succeeds leaves tracker status='success', phase-1
-            # failed_phases empty, and Admin health green — masking a real
-            # partial outage. Re-entry path: the K.2 retry outbox re-queues
-            # failed executor CIKs, un-advanced master-index watermarks
-            # re-plan the planner-skipped CIKs, RERANK_NEEDED markers retry
-            # rankings — so all three failure channels converge back to
+            # Without a combined raise, a day where 20% of CIKs fail XBRL
+            # leaves tracker status='success', phase-1 failed_phases empty,
+            # and Admin health green — masking a real partial outage.
+            # Re-entry path: un-advanced master-index watermarks re-plan the
+            # planner-skipped CIKs, so both failure channels converge back to
             # green without manual intervention once the upstream source
             # recovers.
-            if outcome.failed or plan.failed_plan_ciks or cascade_failures:
+            if outcome.failed or plan.failed_plan_ciks:
                 raise RuntimeError(
                     "daily_financial_facts: "
                     f"xbrl_failed={len(outcome.failed)} ({outcome.failed}); "
                     f"planner_skipped={len(plan.failed_plan_ciks)} ({plan.failed_plan_ciks}); "
-                    f"cascade_failed={len(cascade_failures)} ({cascade_failures}); "
-                    "facts/normalization/cascade writes for successful CIKs were committed"
+                    "facts/normalization writes for successful CIKs were committed"
                 )
 
 
@@ -3065,112 +3769,243 @@ def daily_news_refresh() -> None:
         )
 
 
-def daily_thesis_refresh() -> None:
+# #1919 PR-B — thesis_refresh scope + batch bounds (spec §6). Volume on dev
+# (2026-07-09): held=5, top-20 ranked → ≤25 candidates; ≈260s per generation
+# on a local 14B ⇒ a full batch ≈ 22 min/run worst case. Naive T1+T2
+# enablement (674 theses ≈ 17-40h serial) is exactly what the candidate
+# scope exists to avoid.
+_THESIS_REFRESH_TOP_N = 20
+_THESIS_REFRESH_BATCH_LIMIT = 5
+
+
+def _thesis_refresh_candidates(conn: psycopg.Connection[Any]) -> list[int]:
+    """Candidate instrument_ids: held, then top-N ranked, then has-thesis.
+
+    Held = ``positions.current_units > 0`` — the portfolio manager needs
+    held theses fresh first (thesis-break monitoring + EXIT evaluation).
+    Top-N = the current ranked cohort: rows from the LATEST scoring run
+    (``MAX(scored_at)``) for the default model_version, rank ascending —
+    the same cohort definition as ``GET /scores``
+    (``app/api/scores.py``). A per-instrument latest-row shape would
+    resurrect names from older runs that are no longer ranked (Codex
+    ckpt-2 finding). Order is the batch priority order.
+
+    Has-thesis (#2065, third leg) = every tradable instrument with an
+    existing thesis, symbol-ordered — replaces the removed
+    fundamentals_sync cascade's refresh coverage for names outside
+    held ∪ top-N whose thesis a new filing supersedes.
+    ``is_tradable = TRUE`` mirrors the cascade's own
+    ``changed_instruments_from_outcome`` filter (behaviour parity; the
+    held leg keeps including non-tradable held names, unchanged). By
+    construction this leg adds zero ``no_thesis`` first-mints — the
+    wide-backfill operator gate stays intact.
     """
-    Regenerate theses for stale Tier 1 instruments.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.instrument_id
+            FROM positions p
+            JOIN instruments i ON i.instrument_id = p.instrument_id
+            WHERE p.current_units > 0
+            ORDER BY i.symbol
+            """
+        )
+        held = [int(row[0]) for row in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT s.instrument_id
+            FROM scores s
+            WHERE s.model_version = %(mv)s
+              AND s.rank IS NOT NULL
+              AND s.scored_at = (
+                  SELECT MAX(scored_at) FROM scores WHERE model_version = %(mv)s
+              )
+            ORDER BY s.rank
+            LIMIT %(top_n)s
+            """,
+            {"mv": _DEFAULT_MODEL_VERSION, "top_n": _THESIS_REFRESH_TOP_N},
+        )
+        ranked = [int(row[0]) for row in cur.fetchall()]
+        # Deliberately un-LIMITed: candidates are only an ORDERING input.
+        # Cost is bounded downstream — find_stale_instruments filters to
+        # actually-stale rows and _select_thesis_batch caps generations at
+        # _THESIS_REFRESH_BATCH_LIMIT per run; the query itself is one
+        # indexed scan over ~hundreds of thesis-bearing instruments.
+        cur.execute(
+            """
+            SELECT i.instrument_id
+            FROM instruments i
+            WHERE i.is_tradable = TRUE
+              AND EXISTS (
+                  SELECT 1 FROM theses t
+                  WHERE t.instrument_id = i.instrument_id
+              )
+            ORDER BY i.symbol, i.instrument_id
+            """
+        )
+        has_thesis = [int(row[0]) for row in cur.fetchall()]
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for iid in held + ranked + has_thesis:
+        if iid not in seen:
+            seen.add(iid)
+            ordered.append(iid)
+    return ordered
 
-    An instrument is stale when:
-      - it has no thesis row, or
-      - its most recent thesis is older than coverage.review_frequency allows.
 
-    Requires ANTHROPIC_API_KEY. Skips silently if not set.
-    Each instrument is processed independently — a failure on one does not
-    abort the rest of the batch.
+def _select_thesis_batch(
+    candidate_ids: Sequence[int],
+    stale: Sequence[StaleInstrument],
+) -> tuple[list[StaleInstrument], int]:
+    """Order stale items by candidate priority and apply the batch bound.
+
+    Returns ``(batch, deferred_count)``. Pure — table-tested without a
+    DB. Candidates that ``find_stale_instruments`` did not return (fresh
+    thesis, or filtered by the #268 analysability gate) drop out here.
     """
-    if not settings.anthropic_api_key:
-        logger.error("daily_thesis_refresh: ANTHROPIC_API_KEY not set, skipping")
-        _record_prereq_skip(JOB_DAILY_THESIS_REFRESH, "anthropic api key missing")
-        return
+    by_id = {item.instrument_id: item for item in stale}
+    queue = [by_id[iid] for iid in candidate_ids if iid in by_id]
+    batch = queue[:_THESIS_REFRESH_BATCH_LIMIT]
+    return batch, len(queue) - len(batch)
 
-    with _tracked_job(JOB_DAILY_THESIS_REFRESH) as tracker:
-        logger.info("daily_thesis_refresh: checking for stale Tier 1/2 instruments")
-        # Previously: except Exception: log + return silent-success.
-        # That left the layer looking fresh after a DB failure. Now:
-        # let the exception propagate — _tracked_job records failure.
+
+def thesis_refresh() -> None:
+    """
+    Hourly LLM thesis generation for held ∪ top-ranked stale instruments
+    (#1919 PR-B, spec §6 of docs/specs/thesis/2026-07-09-byo-llm-thesis-live.md).
+
+    Scope: held positions ∪ top-N ranked, intersected with the existing
+    staleness predicate (``find_stale_instruments``: no thesis /
+    review_frequency elapsed / superseding 10-K, 10-Q, 8-K per #273),
+    bounded to ≤5 generations per run, serial, per-instrument
+    advisory-locked (K.3). The hourly cadence × batch bound IS the
+    bounded bootstrap drain — a 25-name first load drains in <1 day
+    with no separate bulk job.
+
+    Gate: configured LLM provider resolvable via ``make_llm_clients`` —
+    no longer ANTHROPIC_API_KEY-gated; the local-first default needs no
+    key. Each instrument is processed independently — a failure on one
+    does not abort the rest of the batch, and every attempt lands on a
+    ``thesis_runs`` row (trigger='scheduled') via ``generate_thesis``.
+    """
+    # PREREQ_SKIP before _tracked_job (prevention-log rule) — this also
+    # covers the manual-trigger path, which does not run
+    # ScheduledJob.prerequisite. Raw autocommit connect, matching
+    # _record_prereq_skip's own style (#1690: runs before _tracked_job
+    # sets the statement-timeout var). Catches the exception directly
+    # (not via _llm_provider_resolvable, whose reason is already
+    # marker-wrapped for the scheduled path — _record_prereq_skip wraps
+    # again). A raised RuntimeConfigCorrupt propagates — fail closed,
+    # never a silent skip.
+    # The guard's clients are reused for the whole run — providers hold no
+    # connection after construction (make_llm_clients only reads config).
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        try:
+            clients = make_llm_clients(conn)
+        except LLMProviderNotConfigured as exc:
+            logger.error("thesis_refresh: %s, skipping", exc)
+            _record_prereq_skip(JOB_THESIS_REFRESH, str(exc))
+            return
+
+    with _tracked_job(JOB_THESIS_REFRESH) as tracker:
         with connect_job() as conn:
-            # Generate theses for T1 and T2 instruments.  T2 instruments
-            # need theses to be promoted to T1 (coverage.py requires
-            # thesis for T2→T1).  The portfolio manager also requires a
-            # thesis with stance="buy" before recommending a BUY.
-            stale_t1 = find_stale_instruments(conn, tier=1)
-            stale_t2 = find_stale_instruments(conn, tier=2)
-            stale = stale_t1 + stale_t2
+            candidates = _thesis_refresh_candidates(conn)
+            stale = find_stale_instruments(conn, tier=None, instrument_ids=candidates) if candidates else []
 
-        if not stale:
-            logger.info("daily_thesis_refresh: no stale Tier 1/2 instruments found")
+        batch, deferred = _select_thesis_batch(candidates, stale)
+        if not batch:
+            logger.info(
+                "thesis_refresh: no stale candidates (candidates=%d)",
+                len(candidates),
+            )
             tracker.row_count = 0
             return
 
+        # No silent caps: everything past the batch bound is counted in
+        # the log + note and picked up on the next hourly fire.
         logger.info(
-            "daily_thesis_refresh: %d stale instrument(s) to refresh (T1=%d T2=%d)",
+            "thesis_refresh: candidates=%d stale=%d batch=%d deferred_to_next_run=%d provider=%s writer=%s critic=%s",
+            len(candidates),
             len(stale),
-            len(stale_t1),
-            len(stale_t2),
+            len(batch),
+            deferred,
+            clients.writer.provider_name,
+            clients.writer.model,
+            clients.critic.model,
         )
-
-        claude_client = make_anthropic_client(settings.anthropic_api_key)
 
         generated = 0
         skipped = 0
         locked_skipped = 0
-        total = len(stale)
-        for idx, item in enumerate(stale, start=1):
-            try:
-                with connect_job() as conn:
-                    with instrument_lock(conn, item.instrument_id) as acquired:
-                        if not acquired:
-                            logger.info(
-                                "daily_thesis_refresh: LOCKED_BY_SIBLING symbol=%s instrument_id=%d",
-                                item.symbol,
-                                item.instrument_id,
-                            )
-                            locked_skipped += 1
-                        else:
-                            generate_thesis(
-                                instrument_id=item.instrument_id,
-                                conn=conn,
-                                client=claude_client,
-                            )
-                            # Increment BEFORE demote so a demote
-                            # failure can't silently under-count
-                            # a successful thesis write. The thesis
-                            # row is already committed by
-                            # generate_thesis (#293); the demote
-                            # call is a separate queue-mutation
-                            # side-effect we want to best-effort.
-                            generated += 1
-                            # Daily's thesis write resolves any pending
-                            # cascade thesis signal but does not run
-                            # compute_rankings, so demote rather than
-                            # delete — preserves RERANK_NEEDED rows
-                            # untouched and converts thesis-failure /
-                            # LOCKED_BY_SIBLING rows to RERANK_NEEDED.
-                            try:
-                                demote_to_rerank_needed(conn, item.instrument_id)
-                            except Exception:
-                                logger.exception(
-                                    "daily_thesis_refresh: demote_to_rerank_needed failed "
-                                    "for instrument_id=%d — queue signal stale until next run",
+        total = len(batch)
+        # #2187: the local model stays warm for the whole batch (a reload
+        # per generation would cost seconds each), then is released in
+        # ``finally`` — including when the batch dies mid-way, which is
+        # exactly when the weights would otherwise sit resident until the
+        # next hourly fire.
+        #
+        # Gated on ``load_attempted``, set immediately before the ONLY
+        # call that can pull a model into memory. A non-empty batch is
+        # not sufficient: a batch that is entirely LOCKED_BY_SIBLING
+        # never generates here, and on this shared box the sibling
+        # holding those locks is plausibly mid-generation with the same
+        # local model — an unconditional release would de-warm it
+        # (Codex ckpt-2).
+        load_attempted = False
+        try:
+            for idx, item in enumerate(batch, start=1):
+                try:
+                    with connect_job() as conn:
+                        with instrument_lock(conn, item.instrument_id) as acquired:
+                            if not acquired:
+                                logger.info(
+                                    "thesis_refresh: LOCKED_BY_SIBLING symbol=%s instrument_id=%d",
+                                    item.symbol,
                                     item.instrument_id,
                                 )
-            except Exception:
-                logger.warning(
-                    "daily_thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
-                    item.symbol,
-                    item.instrument_id,
-                    exc_info=True,
-                )
-                skipped += 1
-            report_progress(idx, total)
+                                locked_skipped += 1
+                            else:
+                                load_attempted = True
+                                generate_thesis(
+                                    instrument_id=item.instrument_id,
+                                    conn=conn,
+                                    clients=clients,
+                                    trigger="scheduled",
+                                )
+                                # Thesis row is committed by generate_thesis
+                                # (#293). Rankings pick the fresh thesis up at
+                                # the next morning_candidate_review scoring
+                                # run (#2065 — the cascade rerank path is
+                                # gone; that daily recompute was already the
+                                # only rerank landing in practice).
+                                generated += 1
+                except Exception:
+                    logger.warning(
+                        "thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
+                        item.symbol,
+                        item.instrument_id,
+                        exc_info=True,
+                    )
+                    skipped += 1
+                report_progress(idx, total)
+        finally:
+            if load_attempted:
+                release_local_models(clients)
 
         report_progress(total, total, force=True)
         tracker.row_count = generated
+        tracker.note = (
+            f"candidates={len(candidates)} stale={len(stale)} "
+            f"generated={generated} failed={skipped} "
+            f"locked_skipped={locked_skipped} deferred={deferred}"
+        )
 
     logger.info(
-        "daily_thesis_refresh complete: generated=%d skipped=%d locked_skipped=%d",
+        "thesis_refresh complete: generated=%d failed=%d locked_skipped=%d deferred=%d",
         generated,
         skipped,
         locked_skipped,
+        deferred,
     )
 
 
@@ -3182,6 +4017,7 @@ def daily_portfolio_sync() -> None:
     if credentials are missing.
     """
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.account_equity_evidence import record_account_equity_snapshot
 
     creds = _load_etoro_credentials(JOB_DAILY_PORTFOLIO_SYNC)
     if creds is None:
@@ -3204,9 +4040,31 @@ def daily_portfolio_sync() -> None:
             # None on fetch failure — positions still sync; the
             # unmoved watermark re-covers the window next tick.
             trade_history = fetch_trade_history_safely(broker, history_min_date)
+            account_snapshot = None
+            if settings.etoro_env == "demo":
+                try:
+                    account_snapshot = broker.get_account_risk_snapshot()
+                except Exception:
+                    logger.warning(
+                        "Portfolio sync: official account-equity evidence unavailable; portfolio sync will continue",
+                        exc_info=True,
+                    )
 
         with connect_job() as conn:
             result = sync_portfolio(conn, portfolio, trade_history=trade_history)
+            if account_snapshot is not None:
+                try:
+                    # sync_portfolio has already opened the outer transaction;
+                    # this nested context is a savepoint so evidence failure
+                    # cannot roll back the primary portfolio refresh.
+                    with conn.transaction():
+                        record_account_equity_snapshot(conn, environment="demo", snapshot=account_snapshot)
+                except Exception:
+                    logger.warning(
+                        "Portfolio sync: official account-equity evidence could not be stored; "
+                        "portfolio sync will continue",
+                        exc_info=True,
+                    )
 
             # Auto-promote held instruments to Tier 1 so market data,
             # FX rates, and downstream jobs fire for them. Without this,
@@ -3978,66 +4836,10 @@ def fundamentals_sync() -> None:
             )
             failed_phases.append("phase 1 (XBRL + normalization)")
 
-        # --- Phase 1b: SEC fundamentals snapshot refresh -----------------
-        # Collapses the dual SEC ``companyfacts`` fetch path identified
-        # in issue #414. Only runs when the operator has flipped
-        # ``enable_sec_fundamentals_dedupe=True`` in settings — the
-        # matching gate in ``daily_research_refresh`` skips its own SEC
-        # section when the flag is on, so exactly one job per day hits
-        # ``data.sec.gov/api/xbrl/companyfacts/…``.
-        #
-        # Isolated like phase 0/1: a transient snapshot failure must not
-        # block audit/review. Coverage reads ``fundamentals_snapshot`` so
-        # stale rows still beat a missed audit.
-        phase1b_rows = 0
-        if settings.enable_sec_fundamentals_dedupe:
-            try:
-                with connect_job() as conn:
-                    # ``ei.is_primary = TRUE`` matches the phase-2 audit
-                    # query. Without it, an instrument with a demoted
-                    # historical SEC CIK row would appear twice in the
-                    # result and the cik_map dict would non-deterministically
-                    # pick whichever row came last — critical now that
-                    # this query is the sole SEC snapshot driver under
-                    # the dedupe flag.
-                    cik_rows = conn.execute(
-                        """
-                        SELECT i.symbol, i.instrument_id::text, ei.identifier_value
-                        FROM instruments i
-                        JOIN external_identifiers ei
-                            ON ei.instrument_id = i.instrument_id
-                           AND ei.provider = 'sec'
-                           AND ei.identifier_type = 'cik'
-                           AND ei.is_primary = TRUE
-                        WHERE i.is_tradable = TRUE
-                        """
-                    ).fetchall()
-                    conn.commit()
-                if cik_rows:
-                    sec_symbols = [(str(row[0]), str(row[1])) for row in cik_rows]
-                    cik_map = {str(row[0]).upper(): str(row[2]) for row in cik_rows}
-                    with (
-                        SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
-                        connect_job() as conn,
-                    ):
-                        sec_fund.set_cik_cache(cik_map)
-                        snap_summary = refresh_fundamentals(sec_fund, conn, sec_symbols)
-                    phase1b_rows = snap_summary.snapshots_upserted
-                    logger.info(
-                        "fundamentals_sync phase 1b (SEC snapshot) complete: attempted=%d upserted=%d skipped=%d",
-                        snap_summary.symbols_attempted,
-                        snap_summary.snapshots_upserted,
-                        snap_summary.symbols_skipped,
-                    )
-                else:
-                    logger.info("fundamentals_sync phase 1b (SEC snapshot) skipped: no CIK-mapped tradable instruments")
-            except Exception:
-                logger.error(
-                    "fundamentals_sync phase 1b (SEC snapshot) failed — "
-                    "continuing to audit/review on last-known snapshot",
-                    exc_info=True,
-                )
-                failed_phases.append("phase 1b (SEC snapshot)")
+        # (Former phase 1b — SEC snapshot sweep — removed by #2008.
+        # ``fundamentals_snapshot`` is written through from the normalized
+        # financial_periods rows inside phase 1's normalize step; the
+        # second daily companyfacts sweep it replaced is gone with it.)
 
         # --- Phase 2: coverage audit + eligibility-gated backfill --------
         outcomes: dict[BackfillOutcome, int] = {o: 0 for o in BackfillOutcome}
@@ -4133,11 +4935,7 @@ def fundamentals_sync() -> None:
             logger.error("fundamentals_sync phase 3 (review) failed", exc_info=True)
             failed_phases.append("phase 3 (review)")
 
-        # Phase 1b snapshots are counted separately from phase-2/3 rows
-        # so the row-count contract (tracker = rows written / audit-
-        # consistent) still holds when this job becomes the sole SEC
-        # companyfacts writer under #414.
-        tracker.row_count = audit_rows + review_rows + phase1b_rows
+        tracker.row_count = audit_rows + review_rows
 
         # Raise at the end so all phases ran first, but the outer
         # _tracked_job marks the job failed and the health surfaces
@@ -4163,7 +4961,8 @@ def fx_rates_refresh() -> None:
     """Refresh live FX rates from Frankfurter (ECB reference rates).
 
     Per the visibility-driven live-prices spec
-    (docs/superpowers/specs/2026-04-25-visibility-driven-live-prices-spec.md):
+    (docs/proposals/etl/visibility-driven-live-prices.md — moved from
+    docs/superpowers/specs/, see docs/_archive/path-migration-map.md):
 
     - Cadence cut from hourly to once daily at 17:00 CET. ECB
       publishes reference rates once per working day ~16:00 CET, so
@@ -4173,6 +4972,17 @@ def fx_rates_refresh() -> None:
       pipeline (#274) writes to the ``quotes`` table directly for
       every instrument an SSE stream subscribes to, making the
       batch-quote path redundant for visibility-driven workflows.
+
+      ⚠ That last clause was load-bearing and only half true (#2271).
+      It holds for the browser and fails for everything else: scoring,
+      portfolio, execution_guard, position_monitor, valuation,
+      transaction_cost and coverage all read ``quotes`` with no browser
+      involved, and the WS writes nothing for them because it only
+      subscribes to what is on screen. Dropping phase 2 therefore left
+      the table with NO scheduled writer for ~3 months. Restored as the
+      dedicated ``quotes_refresh`` job (hourly @ :23) rather than
+      re-added here — the FX cadence cut in #502 was correct and daily
+      is the right cadence for ECB rates, but wrong for marks.
 
     Conditional ETag (#275): sends If-None-Match against the last
     persisted ETag. A 304 is a no-op upsert.
@@ -4314,6 +5124,672 @@ def risk_metrics_refresh() -> None:
     with _tracked_job(JOB_RISK_METRICS_REFRESH) as tracker:
         with connect_job() as conn:
             tracker.row_count = compute_and_store_risk_metrics(conn)
+
+
+def fair_value_band_refresh() -> None:
+    """Recompute + persist the deterministic fair-value band for the full
+    universe (#2009).
+
+    DB-only producer (no external I/O): resolves the single price-anchored
+    as-of date, materializes the SIC cohort percentiles (pass-1), then
+    per-instrument synthesises + write-throughs the two-layer
+    ``fair_value_band_observations`` / ``fair_value_band_current`` band.
+    Orchestrator-driven via the ``fair_value_band`` DAG layer (24h cadence,
+    depends on candles + fundamentals) and operator-triggerable via the
+    ``fair_value_band`` manual lane. Mirrors ``risk_metrics_refresh``'s
+    ``_tracked_job`` + own-connection + ``tracker.row_count`` shape.
+
+    ``row_count`` counts every persisted row (real bands + statused-absent
+    rows, #1632) so a universe that computes only absence rows still reports
+    SUCCESS (work done), not NO_WORK.
+    """
+    from app.services.fair_value_band import refresh_fair_value_band_batch
+
+    with _tracked_job(JOB_FAIR_VALUE_BAND_REFRESH) as tracker:
+        with connect_job() as conn:
+            result = refresh_fair_value_band_batch(conn, instrument_ids=None)
+            tracker.row_count = result["written"] + result["statused"]
+
+
+def price_quarantine_refresh() -> None:
+    """Recompute + persist bar/transition quarantine verdicts (#2261).
+
+    DB-only producer (no external I/O): reads ``price_daily``, runs the pure
+    rule set in ``app.services.price_quarantine`` over each instrument's series,
+    and replaces the derived verdicts in ``price_bar_quarantine`` /
+    ``price_transition_quarantine`` / ``price_series_break``. Orchestrator-driven
+    via the ``price_quarantine`` DAG layer (24h cadence, depends on candles) and
+    operator-triggerable via the ``price_quarantine`` manual lane. Mirrors
+    ``risk_metrics_refresh``'s ``_tracked_job`` + own-connection +
+    ``tracker.row_count`` shape.
+
+    ``row_count`` counts INSTRUMENTS evaluated, not rows written. The verdict
+    tables are sparse by design (492 bar rows on a 3.2M-bar corpus), so a
+    row-count would report a near-zero number for a completely successful run
+    and read as NO_WORK.
+    """
+    from app.services.price_quarantine_store import refresh_price_quarantine
+
+    with _tracked_job(JOB_PRICE_QUARANTINE_REFRESH) as tracker:
+        with connect_job() as conn:
+            tracker.row_count = refresh_price_quarantine(conn).instruments
+
+
+def strategy_signal_scan() -> None:
+    """Write one day of the shadow track record (#2394 §3.1).
+
+    DB-only (no external I/O): reads ``price_daily`` through the fail-closed
+    masked loader, runs every ``STRATEGY_MANIFEST`` entry over the validated
+    universe, and writes ``strategy_signals`` one bar behind the corpus frontier.
+
+    ⚠⚠ ``autocommit=True`` IS LOAD-BEARING, NOT TIDINESS. ``run_signal_scan``
+    commits per ``(strategy_id, frontier)`` via ``conn.transaction()``, and on a
+    non-autocommit connection the reads it does first open an implicit
+    transaction — which turns every one of those into a SAVEPOINT and collapses
+    the per-strategy boundary into a single batch (prevention log: *"psycopg3
+    savepoint ≠ commit"*). The service refuses a non-autocommit connection
+    rather than trusting this call site.
+
+    ⚠ ``row_count`` is signals WRITTEN, and zero is a legitimate success: a
+    holiday leaves the frontier unmoved and a same-day re-run is a watermark
+    no-op. The status to read is in the logged report, not in the row count.
+    """
+    from app.services.strategy_signal_scan import run_signal_scan
+
+    with _tracked_job(JOB_STRATEGY_SIGNAL_SCAN) as tracker:
+        with connect_job(autocommit=True) as conn:
+            report = run_signal_scan(conn)
+            tracker.row_count = report.rows_written
+            failed = sorted(result.strategy_id for result in report.per_strategy if result.status == "failed")
+        # ⚠ INSIDE the tracker, so a per-strategy failure fails the JOB — while
+        # every healthy strategy's batch stays committed, which is the isolation
+        # §8 asks for made visible rather than swallowed. Raised outside it, the
+        # run would be recorded green with a strategy silently dark.
+        if failed:
+            raise RuntimeError(f"strategy_signal_scan: {len(failed)} strategy(ies) failed: {failed}")
+
+
+def strategy_outcome_resolution() -> None:
+    """Resolve mature forward brackets without persisting immature windows."""
+    from app.services.strategy_forecast_assessment import run_forecast_assessments
+    from app.services.strategy_forecast_outcome_resolution import run_forecast_outcome_resolution
+    from app.services.strategy_outcome_resolution import run_outcome_resolution
+
+    with _tracked_job(JOB_STRATEGY_OUTCOME_RESOLUTION) as tracker:
+        with connect_job(autocommit=True) as conn:
+            report = run_outcome_resolution(conn)
+            forecast_report = run_forecast_outcome_resolution(conn)
+            assessment_report = run_forecast_assessments(conn)
+        tracker.row_count = report.written + forecast_report.written + assessment_report.evidence_rows_written
+        tracker.note = (
+            f"selected={report.selected} written={report.written} "
+            f"immature={report.immature} ambiguous={report.ambiguous}; "
+            f"forecasts_selected={forecast_report.selected} "
+            f"forecasts_written={forecast_report.written} "
+            f"forecasts_immature={forecast_report.immature} "
+            f"forecasts_ambiguous={forecast_report.ambiguous}; "
+            f"assessment_policy={assessment_report.policy_id or 'missing'} "
+            f"assessment_scopes={assessment_report.scopes_selected} "
+            f"assessment_passed={assessment_report.passed_scopes}"
+        )
+
+
+def strategy_observation_retention() -> None:
+    """Drop only complete expired #2448 observation partitions."""
+    from datetime import UTC, datetime
+
+    from app.services.strategy_observation_storage import drop_expired_partitions
+    from app.services.strategy_quote_observation import retire_quote_observations
+
+    with _tracked_job(JOB_STRATEGY_OBSERVATION_RETENTION) as tracker:
+        with connect_job() as conn:
+            as_of = datetime.now(tz=UTC)
+            plan = drop_expired_partitions(conn, as_of=as_of, dry_run=False)
+            quote_rows = retire_quote_observations(conn, as_of=as_of, dry_run=False)
+            tracker.row_count = len(plan.partitions) + plan.intraday_gap_rows + quote_rows
+        logger.info(
+            "strategy_observation_retention: dropped %d signal + %d intraday partitions + %d gap rows + %d quote rows",
+            len(plan.signal_partitions),
+            len(plan.intraday_partitions),
+            plan.intraday_gap_rows,
+            quote_rows,
+        )
+
+
+def strategy_intraday_harvest() -> None:
+    """Collect bounded completed bars and prospective eToro quote evidence."""
+    from app.services.strategy_intraday_harvest import run_intraday_harvest
+    from app.services.strategy_quote_observation import capture_active_universe_quotes
+
+    creds = _load_etoro_credentials(JOB_STRATEGY_INTRADAY_HARVEST)
+    if creds is None:
+        _record_prereq_skip(JOB_STRATEGY_INTRADAY_HARVEST, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_STRATEGY_INTRADAY_HARVEST) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            # Each instrument is an independent durable unit: a bad/unsupported
+            # member must not roll back bars already collected for its peers.
+            connect_job(autocommit=True) as conn,
+        ):
+            observed_at = datetime.now(tz=UTC)
+            report = run_intraday_harvest(conn, provider, observed_at=observed_at)
+            quote_report = capture_active_universe_quotes(conn, provider)
+        tracker.row_count = report.written + quote_report.rows_written
+        tracker.note = (
+            f"universe={report.universe_version} selected={report.selected} fetched={report.fetched} "
+            f"completed_rth={report.completed_rth} written={report.written} "
+            f"gaps={report.gaps_recorded} quote_expected={quote_report.expected} "
+            f"quote_observed={quote_report.observed} quote_missing={quote_report.missing} "
+            f"quote_invalid={quote_report.invalid} quote_written={quote_report.rows_written} "
+            f"failures={len(report.failures) + len(quote_report.failures)}"
+        )
+        if report.failures or quote_report.failures:
+            detail = "; ".join(
+                [f"{failure.timeframe}/{failure.symbol}: {failure.reason}" for failure in report.failures]
+                + [f"quote/{failure.symbol}: {failure.reason}" for failure in quote_report.failures]
+            )
+            raise RuntimeError(
+                "strategy_intraday_harvest: "
+                f"{len(report.failures) + len(quote_report.failures)} member(s) failed: {detail}"
+            )
+
+
+def _refresh_strategy_halt_feed() -> HaltSnapshot:
+    """Fetch without a DB connection, then atomically store the snapshot."""
+    import httpx
+
+    from app.services.strategy_halts import fetch_halt_snapshot, store_halt_snapshot
+
+    with httpx.Client(follow_redirects=True) as client:
+        snapshot = fetch_halt_snapshot(client)
+    fetched_at = datetime.now(tz=UTC)
+    with connect_job() as conn, conn.transaction():
+        store_halt_snapshot(conn, snapshot=snapshot, fetched_at=fetched_at)
+    return snapshot
+
+
+def strategy_halt_feed_refresh() -> None:
+    """Refresh the bounded Nasdaq halt safety observation."""
+    with _tracked_job(JOB_STRATEGY_HALT_FEED_REFRESH) as tracker:
+        snapshot = _refresh_strategy_halt_feed()
+        tracker.row_count = len(snapshot.halts)
+        tracker.note = f"source_pub_at={snapshot.source_pub_at.isoformat()} items={len(snapshot.halts)}"
+
+
+def cboe_vix_refresh() -> None:
+    """Refresh the bounded primary-source VIX regime series (#2574)."""
+    import httpx
+
+    from app.services.cboe_vix import refresh_cboe_vix
+
+    with _tracked_job(JOB_CBOE_VIX_REFRESH) as tracker:
+        with (
+            httpx.Client(timeout=20.0, follow_redirects=True) as client,
+            connect_job(autocommit=True) as conn,
+        ):
+            report = refresh_cboe_vix(conn, client=client)
+        tracker.row_count = report.retained_bars
+        tracker.note = (
+            f"status={report.status} retained={report.retained_bars} "
+            f"range={report.first_bar or '-'}..{report.last_bar or '-'}"
+        )
+
+
+def strategy_paper_cycle() -> None:
+    """Run the bounded demo strategy lifecycle; never select live credentials."""
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.strategy_paper_runtime import run_strategy_paper_cycle
+
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_STRATEGY_PAPER_CYCLE, "strategy paper lifecycle requires demo environment")
+        return
+    creds = _load_etoro_credentials(JOB_STRATEGY_PAPER_CYCLE)
+    if creds is None:
+        _record_prereq_skip(JOB_STRATEGY_PAPER_CYCLE, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_STRATEGY_PAPER_CYCLE) as tracker:
+        # Refresh immediately before any entry evaluation. The independent
+        # scheduled poll keeps monitoring alive when automation is disabled;
+        # this second fail-closed read prevents same-tick job ordering or a
+        # tight policy age from making the execution cycle use stale state.
+        halt_snapshot = _refresh_strategy_halt_feed()
+        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
+            with connect_job() as conn:
+                result = run_strategy_paper_cycle(conn, broker=broker)
+        tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
+        tracker.note = (
+            f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
+            f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
+            f"halt_source_pub_at={halt_snapshot.source_pub_at.isoformat()}"
+        )
+
+
+_BACKTEST_PROGRESS_FLUSH_SECONDS: Final = 5.0
+
+
+class _BacktestProgressWriter:
+    """Best-effort transient telemetry on a connection outside evidence work."""
+
+    def __init__(
+        self,
+        conn: psycopg.Connection[Any],
+        *,
+        run_id: int,
+        total_windows: int,
+        already_complete: int,
+    ) -> None:
+        self._conn: psycopg.Connection[Any] | None = conn
+        self._run_id = run_id
+        self._total_windows = total_windows
+        self._already_complete = already_complete
+        self._completed = 0
+        self._window_id: str | None = None
+        self._last_flush = 0.0
+        self._last_stage: tuple[object, ...] | None = None
+
+    def start_window(self, window_id: str) -> None:
+        self._window_id = window_id
+        self._last_stage = None
+
+    def __call__(self, event: object) -> None:
+        from app.services.backtest_run import BacktestProgressEvent
+
+        if not isinstance(event, BacktestProgressEvent) or self._conn is None:
+            return
+        stage = (
+            event.phase,
+            event.strategy_id,
+            event.quarantine_arm,
+            event.ambiguity_arm,
+        )
+        now = time.monotonic()
+        stage_changed = stage != self._last_stage
+        final_tick = event.series_total is not None and event.series_seen == event.series_total
+        if not stage_changed and not final_tick and now - self._last_flush < _BACKTEST_PROGRESS_FLUSH_SECONDS:
+            return
+        payload = self._payload(
+            active={
+                "window_id": self._window_id,
+                "phase": event.phase,
+                "strategy_id": event.strategy_id,
+                "quarantine_arm": event.quarantine_arm,
+                "ambiguity_arm": event.ambiguity_arm,
+                "series_seen": event.series_seen,
+                "series_total": event.series_total,
+            }
+        )
+        try:
+            self._conn.execute(
+                """
+                UPDATE job_runs
+                   SET progress_json = %(progress)s,
+                       processed_count = %(processed)s,
+                       target_count = %(target)s,
+                       last_progress_at = now()
+                 WHERE run_id = %(run_id)s AND status = 'running'
+                """,
+                {
+                    "progress": Jsonb(payload),
+                    "processed": event.series_seen,
+                    "target": event.series_total,
+                    "run_id": self._run_id,
+                },
+            )
+        except Exception:
+            # Telemetry happens after the job row exists and is never evidence.
+            # Disabling it cannot turn committed or in-flight evidence into a
+            # failure, and avoids repeated pool/lock pressure after one fault.
+            logger.warning("strategy evidence progress telemetry disabled after write failure", exc_info=True)
+            self.close()
+            return
+        self._last_flush = now
+        self._last_stage = stage
+
+    def record_window_commit(self, *, rows_written: int, completed: int) -> bool:
+        """Publish only a checkpoint the evidence connection already committed."""
+        if self._conn is None:
+            return False
+        self._completed = completed
+        try:
+            self._conn.execute(
+                """
+                UPDATE job_runs
+                   SET row_count = %(rows)s,
+                       progress_json = %(progress)s,
+                       processed_count = 0,
+                       target_count = NULL,
+                       last_progress_at = now()
+                 WHERE run_id = %(run_id)s AND status = 'running'
+                """,
+                {
+                    "rows": rows_written,
+                    "progress": Jsonb(self._payload(active=None)),
+                    "run_id": self._run_id,
+                },
+            )
+        except Exception:
+            logger.warning("strategy evidence checkpoint telemetry disabled after write failure", exc_info=True)
+            self.close()
+            return False
+        return True
+
+    def _payload(self, *, active: Mapping[str, object] | None) -> dict[str, object]:
+        return {
+            "candidates_seen": self._total_windows,
+            "outcomes": {
+                "already_complete": self._already_complete,
+                "completed": self._completed,
+            },
+            "errors": {},
+            "active": None if active is None else dict(active),
+        }
+
+    def close(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            logger.warning("failed to close strategy evidence progress connection", exc_info=True)
+
+
+def _open_backtest_progress_writer(
+    *,
+    run_id: int,
+    total_windows: int,
+    already_complete: int,
+) -> _BacktestProgressWriter | None:
+    if run_id <= 0:
+        return None
+    try:
+        # One short-lived connection for the refresh, not one connection per
+        # heartbeat. Tight SQL/lock bounds make telemetry unable to queue behind
+        # the evidence writer or amplify a saturated connection pool.
+        conn = connect_job(
+            autocommit=True,
+            connect_timeout=3,
+            options="-c statement_timeout=2000 -c lock_timeout=500",
+        )
+    except Exception:
+        logger.warning("strategy evidence progress telemetry unavailable", exc_info=True)
+        return None
+    return _BacktestProgressWriter(
+        conn,
+        run_id=run_id,
+        total_windows=total_windows,
+        already_complete=already_complete,
+    )
+
+
+def strategy_backtest_run(params: Mapping[str, Any]) -> None:
+    """Persist criterion 9's arm pairs for every runnable strategy (#2394 §3.2).
+
+    DB-only (no external I/O): reads the frozen corpus selected by
+    ``backtest_run.BACKTEST_UNIVERSE`` and stamps its matching corpus version;
+    writes ``strategy_results`` / ``strategy_results_store`` +
+    ``strategy_holdout_accesses`` through ``result_ledger``. It touches no
+    broker path and no live-data path.
+
+    ⚠⚠ ONE INVOCATION IS THE WHOLE STRATEGY SET. Criterion 6's Deflated Sharpe
+    deflates by the variance of Sharpes ACROSS the measured trials, and
+    ``deflated_sharpe.MIN_MEASURED_TRIALS`` is 2 — so a per-strategy run writes
+    rows the gate refuses with ``deflated_sharpe_not_computed``, a refusal no
+    re-run of that one strategy can clear. ``strategy_id`` narrows the set for a
+    debugging run and the report then DECLARES the deflation absent with its
+    reason.
+
+    Honoured params (declared in ``MANUAL_TRIGGER_JOB_METADATA``):
+
+    * ``strategy_id`` (enum) — narrow to one runnable strategy. See above.
+    * ``holdout_purpose`` / ``holdout_accessed_by`` (string) — REQUIRED TOGETHER
+      and non-empty, or the withheld side is neither computed nor written (§4).
+      ``ParamMetadata`` has no conditional model, so the pairing is checked in
+      the service body before any corpus work.
+    * ``trial_register_version`` (string) — optional assertion. A run cannot
+      silently deflate against a register that has moved.
+    * ``evidence_window`` (enum) — one pinned recent-evidence window. Raw dates
+      are never accepted; selecting one also requires the audited hold-out pair.
+    * ``refresh_recent`` (bool) — complete every missing pinned recent window.
+      Each window commits independently, so a killed process resumes at the
+      next missing identity. Existing evidence is immutable and skipped.
+    * ``synthetic_control`` (bool) — compute §9's random-entry cohort per arm
+      and store it, closing ``synthetic_control_not_run`` (#2601). ⚠ REFUSED in
+      combination with ``refresh_recent``: that path runs every pinned window in
+      one invocation, so a control there would multiply the run's dominant cost
+      by the window count. Ask for one window at a time via ``evidence_window``.
+
+    ⚠ ``row_count`` is RESULT ROWS written. Zero is never a success here: the
+    service raises if a runnable strategy produced no row, because an absent row
+    indexes to nothing and a short write would otherwise read as a clean run.
+
+    ⚠ NOT autocommit, unlike ``strategy_signal_scan``. ``result_ledger``'s pair
+    writers own their own ``conn.transaction()`` and their whole claim is that
+    the lone-arm state is unreachable; on an autocommit connection the first
+    insert of a pair would commit before the second failed.
+    """
+    from app.services.backtest_run import run_backtest
+    from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS, recent_evidence_window
+
+    with _tracked_job(JOB_STRATEGY_BACKTEST_RUN) as tracker:
+        refresh_recent = params.get("refresh_recent") is True
+        evidence_window_id = _optional_str(params.get("evidence_window"))
+        synthetic_control = params.get("synthetic_control") is True
+        if refresh_recent and (evidence_window_id is not None or _optional_str(params.get("strategy_id")) is not None):
+            raise ValueError("refresh_recent cannot be combined with evidence_window or strategy_id")
+        if refresh_recent and synthetic_control:
+            # ⚠ REFUSED, not ignored. `refresh_recent` runs every pinned window
+            # in one invocation and the control is the run's dominant cost, so
+            # honouring it here would multiply that by the window count; and
+            # silently dropping it would hand back rows that say
+            # `synthetic_control_not_run` to an operator who asked for one.
+            raise ValueError(
+                "refresh_recent cannot be combined with synthetic_control — the control is a per-arm cohort and "
+                "this path runs every pinned window; ask for one window at a time through evidence_window"
+            )
+        evaluation_window = None if evidence_window_id is None else recent_evidence_window(evidence_window_id).window
+        with connect_job() as conn:
+            if refresh_recent:
+                complete, partial = _recent_evidence_completion(conn)
+                # That census reads the strategy result relations and so opened
+                # this connection's transaction. Close it here: `run_backtest`
+                # refuses `release_read_locks` on a connection that is already in
+                # one, precisely so it can never discard a caller's pending work.
+                conn.rollback()
+                if partial:
+                    raise RuntimeError(
+                        "recent evidence contains partial immutable windows "
+                        f"{sorted(partial)}; operator repair is required before a safe resume"
+                    )
+                rows_written = 0
+                newly_completed = 0
+                progress_writer = _open_backtest_progress_writer(
+                    run_id=tracker.run_id,
+                    total_windows=len(RECENT_EVIDENCE_WINDOWS),
+                    already_complete=len(complete),
+                )
+                try:
+                    for window_id, item in RECENT_EVIDENCE_WINDOWS.items():
+                        if window_id in complete:
+                            continue
+                        if progress_writer is not None:
+                            progress_writer.start_window(window_id)
+                        report = run_backtest(
+                            conn,
+                            holdout_purpose=_optional_str(params.get("holdout_purpose")),
+                            holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
+                            trial_register_version=_optional_str(params.get("trial_register_version")),
+                            evaluation_window=item.window,
+                            progress=progress_writer,
+                            release_read_locks=True,
+                        )
+                        # A window is the restart boundary. The ledger identities
+                        # are immutable, so keeping earlier windows uncommitted
+                        # would make an hours-long refresh start from zero.
+                        # ⚠ A no-op since #2628 — `run_backtest` now commits its
+                        # own write phase — and kept because it is the statement
+                        # of that boundary and holds if the flag is ever dropped.
+                        conn.commit()
+                        rows_written += report.rows_written
+                        newly_completed += 1
+                        tracker.row_count = rows_written
+                        tracker.progress = JobProgress(
+                            candidates_seen=len(RECENT_EVIDENCE_WINDOWS),
+                            outcomes={
+                                "already_complete": len(complete),
+                                "completed": newly_completed,
+                            },
+                        )
+                        checkpoint_recorded = progress_writer is not None and progress_writer.record_window_commit(
+                            rows_written=rows_written,
+                            completed=newly_completed,
+                        )
+                        if tracker.run_id and not checkpoint_recorded:
+                            # Fallback after telemetry connection failure. This
+                            # runs only after the evidence commit and therefore
+                            # cannot expose a partial immutable window.
+                            conn.execute(
+                                """
+                                UPDATE job_runs
+                                SET row_count = %(rows)s,
+                                    progress_json = %(progress)s,
+                                    last_progress_at = now()
+                                WHERE run_id = %(run_id)s AND status = 'running'
+                                """,
+                                {
+                                    "rows": rows_written,
+                                    "progress": Jsonb(tracker.progress.as_json()),
+                                    "run_id": tracker.run_id,
+                                },
+                            )
+                            conn.commit()
+                finally:
+                    if progress_writer is not None:
+                        progress_writer.close()
+                tracker.row_count = rows_written
+                tracker.progress = JobProgress(
+                    candidates_seen=len(RECENT_EVIDENCE_WINDOWS),
+                    outcomes={
+                        "already_complete": len(complete),
+                        "completed": newly_completed,
+                    },
+                )
+                tracker.note = (
+                    "all pinned recent evidence was already complete"
+                    if newly_completed == 0
+                    else f"completed {newly_completed} missing recent evidence window(s)"
+                )
+                return
+            report = run_backtest(
+                conn,
+                strategy_id=_optional_str(params.get("strategy_id")),
+                holdout_purpose=_optional_str(params.get("holdout_purpose")),
+                holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
+                trial_register_version=_optional_str(params.get("trial_register_version")),
+                evaluation_window=evaluation_window,
+                synthetic_control=synthetic_control,
+                release_read_locks=True,
+            )
+            tracker.row_count = report.rows_written
+
+
+def _recent_evidence_completion(
+    conn: psycopg.Connection[Any],
+) -> tuple[set[str], set[str]]:
+    """Return structurally complete and partial pinned recent windows.
+
+    Expected result versions use the writer's complete immutable identity.
+    Counting dates alone could mistake stale cost, corpus or rule-set rows for
+    current evidence.
+    """
+    from app.services.backtest_run import (
+        BACKTEST_UNIVERSE,
+        RESULT_SCOPE,
+        corpus_version_for,
+        runnable_strategies,
+    )
+    from app.services.cost_model import COST_MODEL_ID
+    from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
+    from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+    from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
+    from app.services.research_price_structure_store import (
+        QUARANTINE_ARMS,
+        QUARANTINE_RULE_SET_VERSION,
+        QuarantineArm,
+    )
+    from app.services.strategy_manifest import STRATEGY_MANIFEST
+    from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
+    from app.services.strategy_result import (
+        AMBIGUITY_ARMS,
+        TOTAL_RETURN_BASIS,
+        AmbiguityArm,
+        ResultIdentity,
+    )
+    from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION
+
+    runnable, _excluded = runnable_strategies()
+    expected: dict[str, set[str]] = {}
+    for window_id, item in RECENT_EVIDENCE_WINDOWS.items():
+        versions: set[str] = set()
+        for strategy_id in runnable:
+            entry = STRATEGY_MANIFEST[strategy_id]
+            strategy_version = entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
+            for ambiguity_arm in AMBIGUITY_ARMS:
+                for quarantine_arm in QUARANTINE_ARMS:
+                    versions.add(
+                        ResultIdentity(
+                            strategy_id=strategy_id,
+                            strategy_version=strategy_version,
+                            result_scope=RESULT_SCOPE,
+                            namespace="hold_out",
+                            ambiguity_arm=cast(AmbiguityArm, ambiguity_arm),
+                            quarantine_arm=cast(QuarantineArm, quarantine_arm),
+                            sizing_rule=SIZING_RULE_ID,
+                            benchmark_rule=BENCHMARK_RULE_ID,
+                            cost_model_id=COST_MODEL_ID,
+                            corpus_version=corpus_version_for(BACKTEST_UNIVERSE),
+                            window_start=item.window.start,
+                            window_end=item.window.end,
+                            position_rule_set_version=POSITION_RULE_SET_VERSION,
+                            outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
+                            input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+                            return_basis=TOTAL_RETURN_BASIS,
+                            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+                        ).version
+                    )
+        expected[window_id] = versions
+
+    all_versions = [version for versions in expected.values() for version in versions]
+    existing = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT result_version FROM strategy_results_store WHERE result_version = ANY(%s)",
+            (all_versions,),
+        ).fetchall()
+    }
+    complete = {window_id for window_id, versions in expected.items() if versions and versions <= existing}
+    partial = {
+        window_id for window_id, versions in expected.items() if versions & existing and not versions <= existing
+    }
+    return complete, partial
+
+
+def _optional_str(value: object) -> str | None:
+    """A params value as a non-empty string, or ``None``.
+
+    ⚠ A BLANK IS ``None`` AND NOT ``""``. The #2286 shape: a present-but-empty
+    field passes a presence check, and here that would let a hold-out run start
+    with an audit record whose purpose is the empty string. The service refuses
+    a half-supplied pair, so this collapses "absent" and "blank" into the one
+    state it can judge.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def exchanges_metadata_refresh() -> None:
@@ -4793,6 +6269,92 @@ def raw_payload_retention_sweep(params: Mapping[str, Any]) -> None:
             dict(sorted(summary.by_source.items(), key=lambda kv: kv[1], reverse=True)),
             summary.dry_run,
         )
+
+
+def thesis_dq_audit() -> None:
+    """Nightly full-population DQ scan of stored theses (#2014).
+
+    Thin wrapper around
+    :func:`app.services.thesis_dq_audit.compute_thesis_dq_report` —
+    read-only, no writes beyond job_runs telemetry. ``row_count`` is the
+    total violation+flag+candidate count (info classes excluded) so ops
+    health / /system/jobs surfaces the number without a new table.
+    Findings themselves are served compute-on-read via
+    ``GET /theses/dq-audit``.
+    """
+    from app.services.thesis_dq_audit import compute_thesis_dq_report
+
+    with _tracked_job(JOB_THESIS_DQ_AUDIT) as tracker:
+        with connect_job() as conn:
+            report = compute_thesis_dq_report(conn)
+        tracker.row_count = report.total_violations
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(report.class_counts.items())) or "clean"
+        if report.total_violations:
+            logger.warning(
+                "thesis_dq_audit: %d violation(s) across %d theses — %s",
+                report.total_violations,
+                report.scanned,
+                summary,
+            )
+        else:
+            logger.info("thesis_dq_audit: clean — scanned=%d (%s)", report.scanned, summary)
+
+
+def thesis_break_scan() -> None:
+    """Nightly machine-checkable break-predicate scan (#2012).
+
+    Thin wrapper around
+    :func:`app.services.thesis_break_scan.run_thesis_break_scan`.
+    ``row_count`` is the number of break events EMITTED this run (0 on a
+    healthy night — every fire costs a re-thesis, so a quiet scan is the
+    steady state). The full census (baseline states, eval statuses,
+    sector-gated count) lands in the tracker note for /system/jobs.
+    """
+    from app.services.thesis_break_scan import run_thesis_break_scan
+
+    with _tracked_job(JOB_THESIS_BREAK_SCAN) as tracker:
+        with connect_job() as conn:
+            report = run_thesis_break_scan(conn)
+        tracker.row_count = report.fired
+        states = ", ".join(f"{k}={v}" for k, v in sorted(report.state_counts.items())) or "none"
+        evals = ", ".join(f"{k}={v}" for k, v in sorted(report.eval_counts.items())) or "none"
+        tracker.note = (
+            f"theses={report.scanned_theses} predicates={report.predicates_total} "
+            f"inserted={report.predicates_inserted} sector_gated={report.sector_gated} "
+            f"fired={report.fired}; states: {states}; evals: {evals}"
+        )
+        if report.fired:
+            logger.warning("thesis_break_scan: %d break event(s) fired — states: %s", report.fired, states)
+        else:
+            logger.info("thesis_break_scan: no fires — predicates=%d (%s)", report.predicates_total, states)
+
+
+def thesis_outcome_capture() -> None:
+    """Nightly calibration-ledger outcome capture (#2002).
+
+    Thin wrapper around
+    :func:`app.services.thesis_outcomes.capture_thesis_outcomes`.
+    ``row_count`` is the number of outcome rows INSERTED this run (0 is
+    the healthy steady state — pairs mature slowly by design). The full
+    census (anchorless, immature split, dead series, skips) lands in the
+    tracker note for /system/jobs.
+    """
+    from app.services.thesis_outcomes import capture_thesis_outcomes
+
+    with _tracked_job(JOB_THESIS_OUTCOME_CAPTURE) as tracker:
+        with connect_job() as conn:
+            report = capture_thesis_outcomes(conn)
+        tracker.row_count = report.inserted
+        tracker.note = (
+            f"theses={report.scanned_theses} anchorless={report.anchorless} "
+            f"mature={report.mature_pairs} inserted={report.inserted} "
+            f"immature_current={report.immature_data_current} "
+            f"immature_stalled={report.immature_series_stalled} "
+            f"series_dead={report.series_dead} "
+            f"missing_close={report.skipped_missing_close} "
+            f"nonpositive_close={report.skipped_nonpositive_close}"
+        )
+        logger.info("thesis_outcome_capture: %s", tracker.note)
 
 
 def financial_facts_retention_sweep() -> None:
@@ -5325,6 +6887,26 @@ def sec_def14a_bootstrap() -> None:
         )
 
 
+def drs_disclosure_refresh() -> None:
+    """Weekly DRS registered-vs-street split refresh (#844 PR-2).
+
+    Frontier-based over the curated cohort; see
+    :func:`app.services.drs_disclosure.refresh_drs_disclosures` for the
+    extraction contract (corpus-verified 18/18 disclosing filings, zero
+    false positives on the 9 non-disclosing era filings).
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.drs_disclosure import refresh_drs_disclosures
+
+    with _tracked_job(JOB_DRS_DISCLOSURE_REFRESH) as tracker:
+        with (
+            connect_job() as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = refresh_drs_disclosures(conn, provider)
+        tracker.row_count = result.filings_extracted
+
+
 def ownership_observations_sync() -> None:
     """Self-healing repair sweep for ``ownership_*_current`` (#892 / #873).
 
@@ -5414,22 +6996,42 @@ def ownership_observations_backfill() -> None:
     sweep), which only refreshes ``_current`` and assumes
     ``_observations`` is already populated.
     """
+    from app.services.def14a_drift import DriftReport, detect_drift
     from app.services.ownership_observations_sync import sync_all
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_BACKFILL) as tracker:
         with connect_job() as conn:
             result = sync_all(conn)
+            # Weekly global DEF 14A vs Form 4 drift repair (#966) — the
+            # convergence net behind the three per-filing hooks. Drift is
+            # an AUGMENT: savepoint-isolated + best-effort (same #1700
+            # contract as run_drift_detection_best_effort) so a detector
+            # failure rolls back drift ONLY and never aborts sync_all's
+            # already-applied batch (review round-3 WARNING).
+            drift = DriftReport(
+                holders_evaluated=0,
+                alerts_emitted=0,
+                alerts_by_severity={"info": 0, "warning": 0, "critical": 0},
+            )
+            try:
+                with conn.transaction():
+                    drift = detect_drift(conn)
+            except Exception:  # noqa: BLE001 — best-effort augment; never propagate
+                logger.exception("ownership_observations_backfill: drift repair failed")
 
         tracker.row_count = result.total_observations_recorded
         logger.info(
             "ownership_observations_backfill: total_observations=%d "
-            "insiders=%d institutions=%d blockholders=%d treasury=%d def14a=%d",
+            "insiders=%d institutions=%d blockholders=%d treasury=%d def14a=%d "
+            "drift_holders=%d drift_alerts=%d",
             result.total_observations_recorded,
             result.insiders.observations_recorded,
             result.institutions.observations_recorded,
             result.blockholders.observations_recorded,
             result.treasury.observations_recorded,
             result.def14a.observations_recorded,
+            drift.holders_evaluated,
+            drift.alerts_emitted,
         )
 
 
@@ -5454,7 +7056,7 @@ def cusip_universe_backfill() -> None:
         logger.info(
             "cusip_universe_backfill: list_rows=%d instruments_seen=%d "
             "inserted=%d already_mapped=%d unresolvable=%d ambiguous=%d "
-            "conflict=%d sweep_promoted=%d sweep_rewashed=%d",
+            "conflict=%d option_pseudo_cusip=%d sweep_promoted=%d sweep_rewashed=%d",
             result.list_rows,
             result.instruments_seen,
             result.inserted,
@@ -5462,6 +7064,7 @@ def cusip_universe_backfill() -> None:
             result.tombstoned_unresolvable,
             result.tombstoned_ambiguous,
             result.tombstoned_conflict,
+            result.tombstoned_option_pseudo_cusip,
             result.sweep.promoted,
             result.sweep.rewashed,
         )
@@ -6089,9 +7692,53 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
                 conn.commit()
 
         tracker.row_count = report.promoted
+        # #2218 — the counters below were logged and nothing else. A pass where
+        # every CUSIP errored recorded `success / row_count 0`, which is how
+        # OpenFIGI resolution stayed dark from 2026-06-18 to 2026-08-02 (#2213).
+        # `resolved`, `no_instrument_match` and `unresolved_by_openfigi` are ALL
+        # outcomes: a CUSIP the resolver answered for is work completed, whatever
+        # the answer was. Each one tombstones the row, which is what makes it
+        # terminal.
+        #
+        # ⚠ `unresolved_by_openfigi` is the one worth defending, because it looks
+        # like a miss. It cannot mean a transport/HTTP failure —
+        # `OpenFigiResolver` raises `OpenFigiTransportError` / `OpenFigiRateLimited`
+        # on those, so they land in `api_errors`.
+        #
+        # #2304 CLOSED the caveat this comment used to carry. It read: the counter
+        # "is NOT exclusively 'OpenFIGI said no' — `_parse_entry` returns None for a
+        # per-item `{"error": ...}` too", so the justification rested on the
+        # DISTRIBUTION rather than purity. `_entry_to_outcome` now discriminates,
+        # and `unresolved_by_openfigi` counts ONLY `OpenFigiNoMatch` — OpenFIGI
+        # accepted the identifier and has no US-primary mapping. It is a clean
+        # outcome on purity now, not on volume.
+        #
+        # `invalid_identifier` joins it as an outcome: OpenFIGI rejected the
+        # identifier, the row is tombstoned terminally, the work is complete.
+        # The other three are ERRORS and SHOULD degrade the run — each leaves its
+        # row pending, so nothing was decided. `item_errors` in particular is the
+        # tripwire for OpenFIGI returning a per-item error shape we have not
+        # classified; if it fires, do not widen the classifier without probing.
+        tracker.progress = JobProgress(
+            candidates_seen=report.candidates_seen,
+            outcomes={
+                "resolved": report.resolved,
+                "promoted": report.promoted,
+                "no_instrument_match": report.no_instrument_match,
+                "unresolved_by_openfigi": report.unresolved_by_openfigi,
+                "invalid_identifier": report.invalid_identifier,
+            },
+            errors={
+                "api_errors": report.api_errors,
+                "item_errors": report.item_errors,
+                "malformed_entries": report.malformed_entries,
+                "not_returned": report.not_returned,
+            },
+        )
         logger.info(
             "cusip_resolver_post_bulk_sweep: passes=%d candidates=%d resolved=%d promoted=%d "
-            "no_instrument_match=%d unresolved_by_openfigi=%d api_errors=%d "
+            "no_instrument_match=%d unresolved_by_openfigi=%d invalid_identifier=%d "
+            "item_errors=%d malformed_entries=%d not_returned=%d api_errors=%d "
             "coverage=%d/%d=%.2f%% floor=%.0f%% met=%s",
             report.passes,
             report.candidates_seen,
@@ -6099,6 +7746,10 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
             report.promoted,
             report.no_instrument_match,
             report.unresolved_by_openfigi,
+            report.invalid_identifier,
+            report.item_errors,
+            report.malformed_entries,
+            report.not_returned,
             report.api_errors,
             coverage.mapped,
             coverage.cohort,
@@ -6674,6 +8325,25 @@ def ncen_classifier_yearly() -> None:
             report = classify_filers_via_ncen(conn, sec)
 
         tracker.row_count = report.classifications_written
+        # #2218 — this job ran ONCE (2026-06-04), reported success, wrote 0
+        # rows, and on a yearly cadence would not have fired again until 2027
+        # while `classify_filer_type` fell through to INV for all 11,464 filers
+        # (#2214). `no_ncen_found` is an OUTCOME, not an error: a filer with no
+        # N-CEN census filing is a resolved question, and the docstring's
+        # "empty filer-seed list = natural no-op" case is preserved because
+        # `filers_seen` is then 0 and the stall rule does not fire.
+        tracker.progress = JobProgress(
+            candidates_seen=report.filers_seen,
+            outcomes={
+                "classifications_written": report.classifications_written,
+                "no_ncen_found": report.no_ncen_found,
+            },
+            errors={
+                "parse_failures": report.parse_failures,
+                "fetch_failures": report.fetch_failures,
+                "crash_failures": report.crash_failures,
+            },
+        )
         logger.info(
             "ncen_classifier_yearly: filers_seen=%d classifications_written=%d "
             "no_ncen_found=%d parse_failures=%d fetch_failures=%d crash_failures=%d",

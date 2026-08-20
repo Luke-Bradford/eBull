@@ -38,6 +38,8 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
+from app.services.thesis_subject_identity import QUARANTINE_REASON, is_thesis_usable
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -449,16 +451,35 @@ def _load_instrument_details(
                 buy_zone_low,
                 buy_zone_high,
                 base_value,
-                break_conditions_json
+                break_conditions_json,
+                subject_identity_ok
             FROM theses
             WHERE instrument_id = ANY(%(ids)s)
-            ORDER BY instrument_id, created_at DESC
+            ORDER BY instrument_id, created_at DESC, thesis_version DESC
             """,
             {"ids": instrument_ids},
         )
         for r in cur.fetchall():
             iid = int(r["instrument_id"])
-            details[iid]["thesis"] = dict(r)
+            # #2436 — ONE guard, at the only place a thesis enters this module.
+            # Every downstream rule (_evaluate_exit's valuation target,
+            # _evaluate_add's conviction delta, the buy stance check,
+            # _target_entry's buy zone) reads details[iid]["thesis"], so
+            # withholding it here withholds the fabricated band from all of
+            # them at once.
+            #
+            # ⚠⚠ SKIP, NEVER FALL BACK to an older passing thesis (#2436): a
+            # valuation band from months ago presented as current is a second
+            # wrong number replacing the first.
+            #
+            # ⚠ The separate flag is not decoration. Absence and "we refuse to
+            # use what we have" are different facts, and collapsing them would
+            # report a quarantined instrument as an ordinary no-thesis one —
+            # the relabelling hazard in docs/review-prevention-log.md:2820.
+            if is_thesis_usable(r):
+                details[iid]["thesis"] = dict(r)
+            else:
+                details[iid]["thesis_quarantined"] = True
 
     # Previous thesis (second most recent) — for confidence delta
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -466,7 +487,8 @@ def _load_instrument_details(
             """
             SELECT DISTINCT ON (instrument_id)
                 instrument_id,
-                confidence_score
+                confidence_score,
+                subject_identity_ok
             FROM theses
             WHERE instrument_id = ANY(%(ids)s)
               AND thesis_version < (
@@ -474,12 +496,18 @@ def _load_instrument_details(
                   FROM theses t2
                   WHERE t2.instrument_id = theses.instrument_id
               )
-            ORDER BY instrument_id, created_at DESC
+            ORDER BY instrument_id, created_at DESC, thesis_version DESC
             """,
             {"ids": instrument_ids},
         )
         for r in cur.fetchall():
             iid = int(r["instrument_id"])
+            # #2436 — the ADD rule's conviction delta is (latest - previous)
+            # confidence. A quarantined PREDECESSOR poisons the delta just as
+            # surely as a quarantined latest poisons the band, so it is
+            # withheld on the same rule and the delta simply goes absent.
+            if not is_thesis_usable(r):
+                continue
             details[iid]["prev_thesis_confidence"] = (
                 float(r["confidence_score"]) if r["confidence_score"] is not None else None
             )
@@ -604,23 +632,44 @@ def _evaluate_exit(
     Return (should_exit, reason).
 
     EXIT if any of:
-      1. break_conditions present AND max_red_flag >= EXIT_RED_FLAG_THRESHOLD
-         (thesis break / severe risk event)
+      1. max_red_flag >= EXIT_RED_FLAG_THRESHOLD (severe risk event)
       2. current_price >= thesis.base_value (valuation target achieved)
+
+    Rule 1 deliberately does NOT consult ``break_conditions_json`` (#2050):
+    the old ``break_conditions and …`` term was a tautology on the full
+    population (345/345 latest theses carry a non-empty array) whose only
+    reachable effect was DANGEROUS — a thesis with an empty/missing array and
+    a severe red flag would silently HOLD, gating the severe-risk exit on
+    memo formatting. ADD/BUY already apply the same threshold
+    unconditionally. Thesis BREAKS reach EXIT via regeneration, not here
+    (#2012 Design 1: break event → ``break_fired`` stale → thesis_refresh →
+    the regenerated stance/targets drive this evaluator).
     """
     thesis = details.get("thesis")
-    if thesis is None:
+    quarantined = details.get("thesis_quarantined") is True
+    if thesis is None and not quarantined:
         return False, ""
 
-    # Rule 1 — thesis break / severe red flag
+    # Rule 1 — severe risk event
+    # ⚠⚠ #2436 — a QUARANTINED thesis must still reach this rule. Rule 1 reads
+    # no thesis field; it was only ever gated on the thesis by the early return
+    # above. Withholding the thesis object without this branch would have
+    # SILENTLY REMOVED the severe-risk exit from every quarantined instrument,
+    # 4 of which are currently held — a narrowing far worse than the defect,
+    # and invisible because the exit that stops firing leaves no row.
+    # ``docs/settled-decisions.md:277`` lists severe risk event as its own v1
+    # EXIT trigger, independent of the thesis.
     max_red_flag: float | None = details.get("max_red_flag")
-    break_conditions = thesis.get("break_conditions_json")
-    if break_conditions and max_red_flag is not None and max_red_flag >= EXIT_RED_FLAG_THRESHOLD:
+    if max_red_flag is not None and max_red_flag >= EXIT_RED_FLAG_THRESHOLD:
         return (
             True,
-            f"Thesis break triggered: max_red_flag={max_red_flag:.2f} "
-            f">= threshold={EXIT_RED_FLAG_THRESHOLD}; break conditions present",
+            f"Severe risk event: max_red_flag={max_red_flag:.2f} >= threshold={EXIT_RED_FLAG_THRESHOLD}",
         )
+
+    if thesis is None:
+        # Quarantined: rule 2 below is band-derived and the band is the thing
+        # we refuse to read. There is no third rule.
+        return False, ""
 
     # Rule 2 — valuation target achieved
     base_value = float(thesis["base_value"]) if thesis.get("base_value") is not None else None
@@ -787,7 +836,11 @@ def _evaluate_buy(
         # Allow BUY on strong deterministic score alone (no AI spend needed).
         # Below this threshold, thesis validation is required.
         if total_score < MIN_SCORE_ONLY_BUY:
-            return False, f"No thesis and score {total_score:.3f} below score-only threshold={MIN_SCORE_ONLY_BUY}"
+            # #2436 — name WHICH absence. A quarantined thesis is not a missing
+            # one, and an operator reading "No thesis" for an instrument whose
+            # thesis page shows a memo has been told something false.
+            absent = _thesis_absence_reason(details)
+            return False, f"{absent} and score {total_score:.3f} below score-only threshold={MIN_SCORE_ONLY_BUY}"
     elif thesis.get("stance") != "buy":
         return False, f"Thesis stance {thesis.get('stance')!r} is not 'buy'"
 
@@ -819,7 +872,7 @@ def _evaluate_buy(
 
     rank = latest_score.get("rank")
     cash_note = "" if cash is not None else "; cash_check_deferred (ledger empty)"
-    thesis_note = "" if thesis is not None else "; score-only entry (no thesis)"
+    thesis_note = "" if thesis is not None else f"; score-only entry ({_thesis_absence_reason(details).lower()})"
     return (
         True,
         f"Entry candidate: score={total_score:.3f} rank={rank}; "
@@ -830,6 +883,23 @@ def _evaluate_buy(
 # ---------------------------------------------------------------------------
 # Target entry price
 # ---------------------------------------------------------------------------
+
+
+def _thesis_absence_reason(details: dict[str, Any]) -> str:
+    """Why is there no thesis here — none written, or one refused? (#2436)
+
+    Two different facts, and the operator-facing rationale must not collapse
+    them. ``details["thesis"]`` is withheld in both cases, so the flag set
+    beside it is the only thing that can tell them apart at this point.
+
+    Returns a bare LABEL, not a sentence — both call sites embed it, one as
+    ``"{label} and score …"`` and one as ``"score-only entry ({label})"``, so a
+    label carrying its own leading noun or parenthetical reads redundantly in
+    at least one of them (review NITPICK on PR #2608).
+    """
+    if details.get("thesis_quarantined") is True:
+        return QUARANTINE_REASON
+    return "No thesis"
 
 
 def _target_entry(thesis: dict[str, Any] | None, current_price: float | None) -> float | None:

@@ -1,3 +1,8 @@
+---
+name: metrics-analyst
+description: eBull metrics analyst — what we measure, where it comes from, where it renders. Every operator-visible metric mapped source → transform → table → endpoint → chart, with caveats and validation steps. Read before answering "what is X?" / "where does Y come from?" or exposing a new operator panel.
+---
+
 # eBull metrics analyst — what we measure, where it comes from, where it renders
 
 > Read this when answering "what is X?", "where does Y come from?", "where does Z render?", or when choosing what to expose on a new operator panel. Every metric below is anchored `path:line` so an agent can verify before quoting. All paths are repo-relative.
@@ -18,6 +23,7 @@
 | 13F holdings change (last quarter) | Filings + events | `ownership_institutions_observations` | `/instruments/{symbol}/institutional-holdings` |
 | 52-week range | Market data | (deferred) | `/instruments/{symbol}/summary` returns NULL |
 | 8-K event categorisation | Filings + events | `eight_k_structured_events.items[].severity` | `/instruments/{symbol}/eight_k_filings` |
+| 424B prospectus offering | Filings + events | `prospectus_offerings` (sql/216, #1816) | `/filings/{instrument_id}` → `items[].offering` |
 | ATR-14 | Market data | `price_daily.atr_14` | (TA scoring) |
 | AUM | Risk + portfolio | positions × quotes × cash_ledger | `/portfolio` |
 | Available for deployment | Risk + portfolio | `budget_config` + computed | `/budget` |
@@ -43,6 +49,7 @@
 | Credential health (eToro) | Pipeline | `broker_credentials_health_state` | `/system/status.credential_health` |
 | CGT / estimated tax | Risk + portfolio | `tax_disposals` + `budget_config.cgt_scenario` | `/budget` |
 | Daily candle (OHLCV) | Market data | `price_daily` | `/instruments/{symbol}/candles?range=...` |
+| Day change (close-to-close) | Market data | computed from `price_daily.close` (two most-recent positive closes) | `/instruments/{symbol}/summary.price.day_change{,_pct,_as_of}` |
 | DEF 14A beneficial holdings | Ownership | `def14a_beneficial_holdings` → rollup `def14a_unmatched` | `/instruments/{symbol}/ownership-rollup` |
 | DEF 14A vote summary | Filings + events | (planned) | — |
 | Dividend per share (latest) | Capital returns | `instrument_dividend_summary.latest_dps` | `/instruments/{symbol}/dividends` |
@@ -50,9 +57,10 @@
 | Dividend yield (TTM) | Capital returns | `instrument_dividend_summary.ttm_yield_pct` | `/instruments/{symbol}/summary`, `/instruments/{symbol}/dividends` |
 | EBITDA TTM | Fundamentals | `instrument_valuation.ebitda_ttm` | (scoring) |
 | EPS basic / diluted | Fundamentals | `financial_periods.eps_basic / eps_diluted` | `/instruments/{symbol}/financials?statement=income` |
+| Executive compensation (DEF 14A SCT) | Filings + events | `def14a_exec_compensation` (sql/215, #1945) | `/instruments/{symbol}/exec-compensation` |
 | ETL freshness per source | Pipeline | `data_freshness_index` | (admin via DB) |
 | Exit recommendation | Portfolio | `trade_recommendations.action='EXIT'` | `/recommendations` |
-| FCF (period) | Fundamentals | derived `operating_cf - capex` | `/instruments/{symbol}/financials?statement=cashflow` (FE-derived) |
+| FCF (period) | Fundamentals | derived `operating_cf − ABS(COALESCE(capex, 0))` | `/instruments/{symbol}/financials?statement=cashflow` (FE-derived) |
 | FCF TTM | Fundamentals | `instrument_valuation.fcf_ttm` | (scoring) |
 | FCF yield | Fundamentals | `instrument_valuation.fcf_yield` | (scoring; planned operator surface #671) |
 | Float concentration info chip | Ownership | rollup `concentration.pct_outstanding_known` | `/instruments/{symbol}/ownership-rollup` |
@@ -65,7 +73,7 @@
 | Job runs success rate | Pipeline | `job_runs` | `/system/status`, `/system/jobs` |
 | Kill switch state | Pipeline | `runtime_config` | `/system/status.kill_switch` |
 | Last close | Market data | `quotes.last`, fallback `price_daily.close` | `/portfolio`, `/instruments/{symbol}/summary` |
-| Last 10-K / 10-Q / 8-K date | Filings + events | `filing_events.filing_date` | `/filings`, `/instruments/{symbol}/ten_k_history`, `/instruments/{symbol}/eight_k_filings` |
+| Last 10-K / 10-Q / 8-K date | Filings + events | `filing_events.filing_date` | `/filings/{instrument_id}`, `/instruments/{symbol}/filings/10-k/history`, `/instruments/{symbol}/eight_k_filings` |
 | Live volume V2 | Market data | (planned: #608) | — |
 | MACD line / signal / histogram | Market data | `price_daily.macd_*` | (TA scoring) |
 | Market cap (live) | Fundamentals / Market | `instrument_share_count_latest` × quote midpoint | `/instruments/{symbol}/summary.identity.market_cap` |
@@ -105,6 +113,8 @@
 | TTM DPS | Capital returns | `instrument_dividend_summary.ttm_dps` | `/instruments/{symbol}/dividends` |
 | Universe coverage banner | Ownership | rollup `coverage.state` | `/instruments/{symbol}/ownership-rollup` |
 | Unrealised P&L (per position) | Risk + portfolio | derived from `quotes.last` | `/portfolio` |
+| DRS registered/street split (#844 PR-2) | Ownership | `ownership_drs_observations` (weekly `drs_disclosure_refresh`, curated cohort `DRS_DISCLOSURE_CIKS` — GME+AMC) → rollup `drs`; voluntary Item-5-style narrative, absence ≠ zero, 400d staleness | `/instruments/{symbol}/ownership-rollup` |
+| Unvested RSU/PSU memo (#844) | Ownership | `instrument_dimensional_facts` axis `award_type` (FSNDS notes loader) → rollup `nonvested_awards` — no-sum read rule (default → single-std member → RSU-of-many → abstain), 548d staleness, overlay only (never a wedge) | `/instruments/{symbol}/ownership-rollup` |
 | Volume (daily) | Market data | `price_daily.volume` | `/instruments/{symbol}/candles` |
 | VWAP | Market data | (deferred) | — |
 | Yield-on-cost | Capital returns | derived FE | dividends drilldown |
@@ -136,7 +146,7 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 - **Formula**: `Σ slice.holders.shares / shares_outstanding × 100`. Each holder's `shares` is highest-priority surviving row across `(form4 > form3)` per `(filer_cik, ownership_nature)`.
 - **Source data**: SEC Form 3 + Form 4 → [app/services/insider_transactions.py](../../../app/services/insider_transactions.py), [app/services/insider_form3_ingest.py](../../../app/services/insider_form3_ingest.py).
 - **Storage**: `ownership_insiders_observations` (write-through, partitioned quarterly) → `ownership_insiders_current`.
-- **Service**: [app/services/ownership_rollup.py:347](../../../app/services/ownership_rollup.py#L347) (insiders block) + dedup priority at `:326` (`_PRIORITY_RANK`).
+- **Service**: [app/services/ownership_rollup.py:716](../../../app/services/ownership_rollup.py#L716) (`_collect_canonical_holders_from_current`, insiders block) + dedup priority at `:695` (`_PRIORITY_RANK`).
 - **Endpoint**: `GET /instruments/{symbol}/ownership-rollup` slice `category="insiders"`.
 - **Chart**: `OwnershipPanel.tsx:38` + `OwnershipSunburst.tsx:133` (ring 2 wedge, blue).
 - **Cadence**: write-through on every Form 3/4 ingest; backfill `POST /jobs/ownership_observations_backfill/run` (Sun 03:00 UTC).
@@ -149,11 +159,12 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 - **Formula**: `Σ surviving 13F holdings / shares_outstanding × 100`, equity-only (PUT/CALL exposures dropped).
 - **Source**: SEC 13F-HR XML + quarterly 13F Securities List. Parse: [app/services/sec_13f_dataset_ingest.py](../../../app/services/sec_13f_dataset_ingest.py), filer directory: [app/services/sec_13f_filer_directory.py](../../../app/services/sec_13f_filer_directory.py), CUSIP resolution: [app/services/cusip_resolver.py](../../../app/services/cusip_resolver.py). EdgarTools 13F drop-in via #925.
 - **Storage**: `ownership_institutions_observations` (partitioned, `is_put_call IS NULL` filter at read time) → `ownership_institutions_current` with `exposure_kind = 'EQUITY'` filter.
-- **Service**: [app/services/ownership_rollup.py:434-460](../../../app/services/ownership_rollup.py#L434-L460).
-- **Endpoint**: `GET /instruments/{symbol}/ownership-rollup` slices `category="institutions"` and `category="etfs"`; flat list at `GET /instruments/{symbol}/institutional-holdings` ([app/api/instruments.py:3262](../../../app/api/instruments.py#L3262)).
+- **Service**: [app/services/ownership_rollup.py:716](../../../app/services/ownership_rollup.py#L716) (`_collect_canonical_holders_from_current`, institutions block).
+- **Endpoint**: `GET /instruments/{symbol}/ownership-rollup` slices `category="institutions"` and `category="etfs"`; flat list at `GET /instruments/{symbol}/institutional-holdings` ([app/api/instruments.py:4098](../../../app/api/instruments.py#L4098)).
 - **Chart**: `OwnershipPanel.tsx` ring 2 (institutions+etfs).
 - **Cadence**: `sec_13f_quarterly_sweep` Sat 02:00 UTC, 6h deadline. Filer directory walks last 4 closed quarters.
-- **Caveats**: AAPL was historically under-counted ~10× until #840-A through #840-F landed full decomposition. Universe expansion via #841 still pending — institutional totals can lag reality. CUSIP coverage gates the join: 7.4% on dev as of #914 vs 80% target.
+- **Caveats**: AAPL was historically under-counted ~10× until #840-A through #840-F landed full decomposition. Universe expansion via #841 still pending — institutional totals can lag reality.
+  - ⚠ **CUSIP resolution gates the join, and `institutional_holdings.instrument_id` is `NOT NULL` — so an unresolved CUSIP is a DROPPED holding, not a degraded one. Every institutional % is a lower bound.** Measured 2026-08-03: 7,419,463 resolved holding rows vs **33,319,332 unresolved observations** across 109,630 CUSIPs (18.2% by observation). Most unresolved are legitimately out of universe (bonds, options, foreign, non-eToro) so a low absolute rate is EXPECTED and is not itself the defect. **The defect is #2213: the OpenFIGI leg has been dark since 2026-06-18** while the surrounding sweeps kept reporting `success`, and 44,195 CUSIPs (11.2M observations) carry `resolution_status IS NULL` — never attempted, still growing. This is the direct cause of `coverage.state = 'unknown_universe'` on the ownership card for all five golden-panel instruments. (Supersedes the old "7.4% on dev as of #914 vs 80% target" figure.)
 - **Validation**: cross-check vs WhaleWisdom / SEC EDGAR direct; track `unresolved_13f_cusips` count.
 - **denominator_basis**: `pie_wedge`. ETF filer-type holdings come from same 13F data but render as separate slice for legibility.
 
@@ -162,11 +173,11 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 - **Formula**: `Σ fund_series_holdings.shares / shares_outstanding × 100`, with `denominator_basis="institution_subset"`.
 - **Source**: SEC Form N-PORT-P parsed via [app/services/n_port_ingest.py](../../../app/services/n_port_ingest.py) (stdlib ElementTree; EdgarTools rewrite punted #932).
 - **Storage**: `ownership_funds_observations` (partitioned) → `ownership_funds_current` keyed `(instrument_id, fund_series_id)`.
-- **Service**: [app/services/ownership_rollup.py:465](../../../app/services/ownership_rollup.py#L465) (`_collect_funds_from_current`). Slice constructed at `:850-870` with `denominator_basis="institution_subset"`.
+- **Service**: [app/services/ownership_rollup.py:922](../../../app/services/ownership_rollup.py#L922) (`_collect_funds_from_current`). Slice constructed with `denominator_basis="institution_subset"` (`:2360`).
 - **Endpoint**: same `/ownership-rollup`, slice `category="funds"`.
 - **Chart**: `OwnershipPanel.tsx` renders memo overlay separately (filtered out of pie math at `:1366-1367`).
 - **Cadence**: `sec_n_port_ingest` monthly day 22 03:00 UTC. Filer directory walker `sec_nport_filer_directory_sync` seeds CIK-trust set (#963).
-- **Caveats**: per `docs/proposals/etl/ownership-full-decomposition.md`, funds are strict subset of institutional pie wedge and must NEVER add to it. Enforced via `denominator_basis` checks in residual/concentration sums (`:927`, `:948`, `:1366-1367`). PR #962 cutover specifically.
+- **Caveats**: per `docs/proposals/etl/ownership-full-decomposition.md`, funds are strict subset of institutional pie wedge and must NEVER add to it. Enforced via `denominator_basis` checks in the residual/concentration computations (`_compute_residual:2591`, `_compute_concentration:2626`). PR #962 cutover specifically.
 - **Validation**: cross-check Vanguard 500's AAPL position separately against Vanguard 13F-HR aggregate — should NOT sum.
 - **denominator_basis**: `institution_subset`.
 
@@ -175,8 +186,8 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 - **Formula**: `Σ blockholder.aggregate_amount_owned / shares_outstanding × 100`. Latest amendment per filer wins.
 - **Source**: SEC 13D/G/D-A/G-A. Parser: [app/services/blockholders.py](../../../app/services/blockholders.py).
 - **Storage**: `ownership_blockholders_observations` → `ownership_blockholders_current`.
-- **Service**: [app/services/ownership_rollup.py:401](../../../app/services/ownership_rollup.py#L401) (sources `'13d'` / `'13g'`).
-- **Endpoint**: `/ownership-rollup` slice `category="blockholders"`; flat list at `/instruments/{symbol}/blockholders` ([app/api/instruments.py:3512](../../../app/api/instruments.py#L3512)).
+- **Service**: [app/services/ownership_rollup.py:716](../../../app/services/ownership_rollup.py#L716) (`_collect_canonical_holders_from_current`, sources `'13d'` / `'13g'`).
+- **Endpoint**: `/ownership-rollup` slice `category="blockholders"`; flat list at `/instruments/{symbol}/blockholders` ([app/api/instruments.py:4348](../../../app/api/instruments.py#L4348)).
 - **Chart**: `OwnershipPanel.tsx` ring 2.
 - **Cadence**: write-through on each 13D/G ingest; daily filings sync.
 - **Caveats**: 13D and 13G compete with Form 4 / Form 3 in dedup; Form 4 wins (`_PRIORITY_RANK`). Cohen-on-GME bug fix (audit example at `app/services/ownership_rollup.py:18-23`): without dedup, Form 4 + 13D/A double-counted same holder.
@@ -191,34 +202,44 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 - **Endpoint**: `/ownership-rollup.treasury_shares` + `treasury_as_of` (top-level fields, NOT inside `slices`); also balance sheet endpoint.
 - **Chart**: `OwnershipPanel.tsx` renders treasury wedge above the ring; legend has treasury swatch.
 - **Cadence**: companyfacts daily sync.
-- **Caveats**: excluded from numerator of `concentration.pct_outstanding_known` — issuer doesn't "invest" in itself (`:158-164`). Treasury IS allowed to push chart "oversubscribed" if `Σ pie_wedges + treasury > shares_outstanding` (stale-13F + fresh Form 4 mix); residual clamps to zero, banner flags it.
-- **Validation**: check `shares_authorized ≥ shares_issued ≥ treasury_shares` invariant.
+- **Caveats**: excluded from numerator of `concentration.pct_outstanding_known` — issuer doesn't "invest" in itself. ⚠ **Treasury is NOT in the residual either, since #2217.** It is neither added to nor subtracted from `shares_outstanding` anywhere: `shares issued = shares outstanding + treasury`, so the DEI/us-gaap outstanding figure already excludes it. Treasury is a purely additive TOP wedge drawn outside the ring (design: `docs/proposals/etl/ownership-tier0-cik-history.md` §OwnershipPanel).
+- ⚠ **This bullet previously read "treasury IS allowed to push the chart oversubscribed" — that was the caveat the bug hid behind.** It was written as a rare stale-13F artefact; measured, it was firing on 9 of 20 large caps because `_compute_residual` subtracted treasury from a base excluding it. **A documented caveat is a hypothesis about frequency — measure the rate before accepting it as the explanation.**
+- **Validation**: check `shares_authorized ≥ shares_issued ≥ treasury_shares` invariant. Note treasury can legitimately exceed *outstanding* (Goldman: 199.9%) — a serial repurchaser retires nothing; that is not a data error.
 
 ### Public float / residual
 - **Definition**: shares not attributable to any known SEC filing or treasury — by construction includes retail, undeclared institutional below 13F threshold, and any filer outside coverage cohort.
-- **Formula**: `residual = shares_outstanding − Σ (slices where denominator_basis="pie_wedge") − treasury_shares`. Clamped ≥ 0; `oversubscribed` flag fires when negative (`:128-140`).
-- **Storage**: not stored — computed at read time.
-- **Service**: [app/services/ownership_rollup.py:850-948](../../../app/services/ownership_rollup.py#L850-L948).
+- **Formula**: `residual = shares_outstanding − Σ (slices where denominator_basis="pie_wedge")`. **No treasury term** (#2217). Clamped ≥ 0; `oversubscribed` fires when the raw value is negative.
+- **Storage**: not stored — computed at read time. (So a fix here needs no backfill; it lands the moment the API process reloads.)
+- **Service**: [app/services/ownership_rollup.py:2814](../../../app/services/ownership_rollup.py#L2814) (`_compute_residual`); [`:2866`](../../../app/services/ownership_rollup.py#L2866) (`_compute_concentration`).
 - **Endpoint**: `/ownership-rollup.residual.{shares, pct_outstanding, oversubscribed}`.
-- **Chart**: `OwnershipPanel.tsx ResidualLine` (`:380`); always rendered as grey "Public / unattributed" wedge.
-- **Caveats**: residual is NOT a free signal — 90% residual on a small-cap usually means coverage is incomplete, not that retail owns 90%. Coverage banner is the right cue.
-- **Validation**: `Σ all wedges + residual + treasury ≈ shares_outstanding` exactly when `oversubscribed=false`.
+- **Chart**: `OwnershipPanel.tsx` `ResidualLine` (`:355`); always rendered as grey "Public / unattributed" wedge.
+- **Caveats**: residual is NOT a free signal — 90% residual on a small-cap usually means coverage is incomplete, not that retail owns 90%. Coverage banner is the right cue. ⚠ **`oversubscribed` is currently unusable as an exception signal: it fires on 47% of the 4,421 instruments with a denominator (#2226), because Σ pie wedges alone exceeds outstanding (OPCH 513%, PRVA 187%). #2217 removed the treasury term and took it from 52% → 47%; the rest is a separate defect.**
+- **Validation**: `Σ pie wedges + residual = shares_outstanding` exactly when `oversubscribed=false`. ⚠ **Treasury is NOT a term in that identity** — it was until #2217, which is precisely the arithmetic that made public float render zero for KO/GS/JPM/PG/XOM. If treasury belonged in it, no issuer could hold treasury above 100% of outstanding, and many do.
 
 ### denominator_basis explained per kind
 
-`DenominatorBasis = Literal["pie_wedge", "institution_subset"]` ([ownership_rollup.py:68](../../../app/services/ownership_rollup.py#L68)).
+`DenominatorBasis = Literal["pie_wedge", "institution_subset", "proxy_disclosure"]` ([ownership_rollup.py:89](../../../app/services/ownership_rollup.py#L89)).
 
 | Slice | denominator_basis | Why |
 |---|---|---|
 | insiders | pie_wedge | Beneficial ownership; sums into pie |
 | blockholders | pie_wedge | 13D/G; sums into pie |
 | institutions | pie_wedge | 13F-HR equity; sums into pie |
-| etfs | pie_wedge | 13F-HR by filer-type ETF; sums into pie |
+| etfs | pie_wedge | 13F-HR by filer-type ETF; sums into pie. ⚠ **EMPTY UNIVERSE-WIDE today (#2214)** — see below |
 | def14a_unmatched | proxy_disclosure (memo overlay, #1659) | DEF 14A holders unresolved to Form 4 / 13F. NON-ADDITIVE — a Rule 13d-3 deemed/overlapping disclosure (SEC Item 403), already counted via 13D/G + 13F + Form 4; excluded from pie/residual/concentration, rendered as a cross-check overlay (reverses #1627's additive wedge) |
 | funds | institution_subset | N-PORT positions are strict subset of parent advisor's 13F-HR aggregate; memo overlay only |
 | treasury | (special) | Top-level field; rendered above pie; excluded from concentration numerator |
 
 Future overlays (ESOP #843 / DRS / short-interest #961) will land as additional `institution_subset` rows.
+
+### ⚠ Two slices do not render what their name promises (measured 2026-08-03)
+
+Before quoting either of these to an operator, read the ticket — the API declares the category, the UI carries a wedge, and neither renders.
+
+- **`etfs` is empty for the entire universe (#2214).** `institutional_filers` has **1** filer typed `ETF` and 11,464 typed `INV`, because both inputs to `classify_filer_type` are starved: `etf_filer_cik_seeds` holds 1 row and `ncen_filer_classifications` holds **0** (`ncen_classifier_yearly` ran once on 2026-06-04, reported `success`, wrote nothing, and is on a YEARLY cadence). **Ownership totals are NOT wrong** — ETF-managed 13F holdings still land in `institutions`, so the pie sums correctly. What is lost is the index-vs-active decomposition.
+- **`blockholders` is structurally invisible on any name that also has a 13F/Form 4 filer (#2215).** The data exists (22,770 rows / 4,898 instruments; every golden-panel name has 2-3 rows) but `_PRIORITY_RANK` correctly gives Form 4 / 13F precedence, and Vanguard / BlackRock / State Street file both a 13G and a 13F. So an empty blockholder wedge means "deduped away", NOT "no >5% holder" — opposite conclusions, identical rendering.
+
+**General rule this pair teaches:** a declared-but-empty slice is worse than an absent one, because absence reads as a finding. When adding a category to the rollup, verify it renders non-empty on the golden panel before shipping the wedge.
 
 ### Share-class collapse (GOOGL+GOOG)
 - GOOGL and GOOG share CIK 1652044 (Alphabet) but separate CUSIPs and separate `instrument_id`. Each class has its own card.
@@ -250,12 +271,12 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - **Caveats**: depreciation/amort can be sparse on small issuers — falls back to operating income only.
 
 ### FCF (period) / FCF TTM / FCF yield
-- **FCF formula**: `operating_cf - capex` where capex = `PaymentsToAcquirePropertyPlantAndEquipment` (positive outflow in XBRL; subtracting is correct, see [fundamentalsMetrics.ts:246-251](../../../frontend/src/lib/fundamentalsMetrics.ts#L246-L251)).
+- **FCF formula**: `operating_cf − ABS(COALESCE(capex, 0))` where capex = `PaymentsToAcquirePropertyPlantAndEquipment`. **capex NULL → 0; `operating_cf` is the only strict input.** The settled rule is `app/services/fcf_yield.py:111` (quarterly TTM) / `:132` (annual); the frontend `buildFcf` matches it. `abs()` because the sign convention varies between filers (prevention-log #596), so a filer reporting capex negative must not have FCF inflated.
 - **TTM**: `instrument_valuation.fcf_ttm`.
 - **FCF yield**: `(operating_cf_ttm - |capex_ttm|) / (current_price × shares_outstanding)` (sql/080:83-87) → `instrument_valuation.fcf_yield`.
 - **Endpoint**: per-period FCF computed FE from `/instruments/{symbol}/financials?statement=cashflow`. TTM via `instrument_valuation` (scoring only). FCF yield NOT operator-visible today — **planned operator surface: #671** (needs price-join exposure on L2 fundamentals).
-- **Chart**: `fundamentalsCharts.tsx:507` (FCF line chart).
-- **Caveats**: `capex` null on issuers without explicit PPE filing → empty-state hint. Negative FCF returns 0 from `_value_score`. Quote-derived; stale quote = stale yield.
+- **Chart**: `fundamentalsCharts.tsx:620` (`FcfChart` — FCF line + the #671 TTM-yield line on its own right-hand axis; that dual axis is deliberate, see spec §3.9, do not "simplify" it away).
+- **Caveats**: a null `capex` is NOT an empty state — it COALESCEs to 0, so the chart blanks only when `operating_cf` is absent. (`buildFcf` gated on `capex IS NOT NULL` until #2185; that hid the series from 1,142 FY / 1,247 Q1 instruments which report OCF and never report capex, and broke the line at the exact periods where the TTM-yield overlay still plotted.) Negative FCF returns 0 from `_value_score`. Quote-derived; stale quote = stale yield.
 
 ### Margins
 - **Definitions**: each = `(line / revenue) × 100`.
@@ -272,18 +293,19 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Storage: `financial_periods.{long_term_debt, short_term_debt, cash}`; legacy `fundamentals_snapshot.{net_debt, debt}` for `key_stats`.
 - ⚠ `fundamentals_snapshot.as_of_date` = the FISCAL PERIOD END of the latest filed statement, NOT a fetch/ingest timestamp. Comparing it to `CURRENT_DATE` to judge pipeline freshness is meaningless (AAPL legitimately sits months "old" between quarters) — freshness of the PIPELINE is `job_runs` for `fundamentals_sync`; freshness of the DATA is as_of_date vs the company's expected filing cadence.
 - Endpoint: `/instruments/{symbol}/financials?statement=balance` + `/summary.key_stats.debt_to_equity`.
-- Chart: `FundamentalsPane.tsx` cell 4 (Total Debt); `fundamentalsCharts.tsx buildDebtStructure` (LTD + STD + interest coverage).
+- ⚠ Total debt is NULL **only when BOTH components are NULL**; otherwise the missing side COALESCEs to 0. `short_term_debt` is sparse (12%) because most filers have none to report — treating that as a gap blanks the metric for most instruments. A missing `cash`, by contrast, IS a real gap: net debt goes NULL rather than COALESCE-ing cash to 0, which would overstate it by the whole cash balance. Source rule: [app/services/fundamentals/__init__.py:152-154](../../../app/services/fundamentals/__init__.py#L152-L154) + [fair_value_band.py:1014-1021](../../../app/services/fair_value_band.py#L1014-L1021). Do not invent a degrade path.
+- Chart: `FundamentalsPane.tsx` cell 4 (Total Debt); `fundamentalsCharts.tsx buildDebtStructure` (LTD + STD + interest coverage); net-debt trend on the L2 pane via [`buildNetDebt` (fundamentalsMetrics.ts:373)](../../../frontend/src/lib/fundamentalsMetrics.ts#L373), which mirrors the same rule client-side (#2185).
 
 ### Total assets / liabilities / equity
 - Tags: `us-gaap:Assets`, `us-gaap:Liabilities`, `us-gaap:StockholdersEquity`.
 - Storage: `financial_periods.{total_assets, total_liabilities, shareholders_equity}`.
-- Chart: `latestBalanceStructure` ([fundamentalsMetrics.ts:326](../../../frontend/src/lib/fundamentalsMetrics.ts#L326)) — two horizontal stacked bars to verify `assets ≈ liab + equity`.
+- Chart: **none.** The former `latestBalanceStructure` two-bar snapshot was DELETED in #2185: assets and (liabilities + equity) are equal by the accounting identity, so the chart could not vary and carried no signal. Do not re-add it. The L2 pane is now a net-debt trend (`buildNetDebt`, below).
 
 ### ROE / ROA / ROIC
 - ROE = `net_income / shareholders_equity`. ROA = `net_income / total_assets`.
 - ROIC = `NOPAT / invested_capital` where NOPAT ≈ `operating_income × (1 − effective_tax_rate)`; invested capital = `LTD + STD + equity`.
-- ROE/ROA per period: [app/api/instruments.py:2863-2864](../../../app/api/instruments.py#L2863-L2864) for `key_stats`; TTM at `instrument_valuation.{roe,roa}`.
-- ROIC: [fundamentalsMetrics.ts:415-441](../../../frontend/src/lib/fundamentalsMetrics.ts#L415-L441) (FE derivation; uses 21% US-statutory placeholder when effective tax rate undefined; skips lease liabilities + minority interest — "good enough for trend-watching, not absolute valuation").
+- ROE/ROA per period: [app/api/instruments.py:3631-3632](../../../app/api/instruments.py#L3631-L3632) for `key_stats`; TTM at `instrument_valuation.{roe,roa}`.
+- ROIC: [fundamentalsMetrics.ts:440](../../../frontend/src/lib/fundamentalsMetrics.ts#L440) (`buildRoic` FE derivation; uses 21% US-statutory placeholder when effective tax rate undefined; skips lease liabilities + minority interest — "good enough for trend-watching, not absolute valuation").
 - Endpoint: `/summary.key_stats.{roe,roa}`. ROIC: not on API; FE-only on L2 fundamentals.
 - Chart: `KeyStatsPane.tsx` ROE/ROA cells; `fundamentalsCharts.tsx` ROIC + DuPont.
 - Caveats: when `current_price` unavailable but EPS/book_value present, source label flips `sec_xbrl_price_missing` so FE renders "price missing".
@@ -310,15 +332,61 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Chart: hero ticker every L2 page; `PriceChart.tsx`.
 - Cadence: live (WS); 60s candle-window backstop poll.
 
+### Day change (#1924, #1953)
+- **Live.** `/summary.price.{day_change, day_change_pct, day_change_as_of}` — close-to-close over an instrument's two most-recent **positive** closes.
+- Formula: `compute_day_change(last, prior) = (last − prior) / prior`, `None` when `prior_close <= 0` (a `price_daily` real-zero sentinel; guarded by the `WHERE close > 0` filter). `day_change_pct` is a FRACTION (`-0.015` = −1.5%); `day_change` is the absolute delta; `day_change_as_of` is the latest positive close's `price_date` (stamps staleness).
+- Service: `load_day_changes` / `compute_day_change` ([app/services/market_data.py:98-167](../../../app/services/market_data.py#L98-L167)); wired into `/summary` at [instruments.py:3806-3814](../../../app/api/instruments.py#L3806-L3814) and the `/instruments` list at `:680-701`.
+- Caveats: instruments with < 2 positive closes are omitted → FE renders "—".
+
 ### Day range / 52-week range
-- (Deferred.) Would derive from `price_daily.high / low`. `/summary.price.{week_52_high, week_52_low, day_change, day_change_pct}` returns NULL today; FE renders "—". Operator-visible follow-up exists in CLAUDE-md task list.
+- (Deferred.) Would derive from `price_daily.high / low`. `/summary.price.{week_52_high, week_52_low}` returns NULL today (`instruments.py:3813-3814`); FE renders "—". Operator-visible follow-up exists in CLAUDE-md task list.
 
 ### Daily candles (OHLCV)
 - Source: eToro candles refresh job → `price_daily`.
 - Storage: `price_daily` per-day per-instrument.
-- Endpoint: `/instruments/{symbol}/candles?range=1w|1m|3m|6m|ytd|1y|5y|max` ([app/api/instruments.py:700](../../../app/api/instruments.py#L700)).
-- Chart: `PriceChart.tsx`. Range mapping at `:672-680`.
+- Endpoint: `/instruments/{symbol}/candles?range=1w|1m|3m|6m|ytd|1y|5y|max` ([app/api/instruments.py:1075](../../../app/api/instruments.py#L1075)).
+- Chart: `PriceChart.tsx`. Range mapping at `_CANDLE_RANGE_DAYS` (instruments.py:1047).
 - Cadence: daily after market close.
+- ⚠⚠ **COVERAGE — always quote BOTH denominators (#2246 / #2254).**
+  `daily_candle_refresh` scope is held ∪ T1/T2 ∪ `BENCHMARK_SYMBOLS` ∪ T3 that is
+  unseeded-and-eligible OR behind the most recent trading day
+  (`app/workers/scheduler.py::_T3_CANDLE_SELECT`). Any number quoting "instruments
+  with price history" must say which of these it means:
+
+  ```
+  tradable                       12,684
+    with any price_daily row      5,221   (41.2%)   <- unchanged by #2254
+    with a bar in the LAST 7 DAYS 5,140   (40.5%)   <- the usable set
+  ```
+
+  - **Existence ≠ freshness — the gap was 3.7x until 2026-08-04.** The T3 branch
+    used to carry `NOT EXISTS (price_daily)`, i.e. it selected on the absence of the
+    rows it writes, so a Tier-3 instrument left refresh scope on its FIRST bar and
+    nothing picked it back up unless it promoted (needs `total_score >= 0.55`,
+    `app/services/coverage.py:90`) or was held/benchmark. At its worst: fresh 1,406
+    (11.1%), 3,523 of 3,838 priced T3 with no bar in 30 days, and **every crypto, FX
+    and commodity series ~2 months stale**. Fixed in #2254 (freshness-based
+    maintenance arm) — the same run took fresh 1,406 → 5,140. **Keep measuring on
+    `max(price_date)` anyway**: a stale close is not a missing value, it renders,
+    scores and backtests as a live one, and the next scope regression will look
+    identical from the existence side.
+  - **~108 instruments are supply-less, not unrefreshed** (full-population measure,
+    2026-08-04, after the #2254 backfill): 81 priced ones fetched HTTP 200 with no
+    advance (78 `us_equity`, oldest 2021-05-21 — delisted/acquired names — plus 2
+    crypto, 1 fx) and 27 unpriced gate-passers that returned no bars at all. eToro
+    does **not** error on these; it returns 200 with nothing new, so they are
+    indistinguishable from "not yet refreshed" until a marker exists (TA design doc
+    §3 decision 9). Do not read them as a refresh failure.
+  - **Coverage tier is implicitly US-only**, because it is driven by
+    `fundamentals_snapshot`, which is SEC-fed. All 1,383 T1/T2 instruments are
+    `us_equity`; no non-US instrument has ever reached T1/T2. So "scoring-eligible"
+    silently means "US filer" — do NOT use it to scope a market-wide surface.
+  - eToro **does** serve daily candles for the international set (27/28 probed,
+    current). The 7,463 unpriced are our selection gate, not provider supply — except
+    an irreducible 27 for which eToro returns 0 bars.
+  - Daily REST candle volume is patchy on non-US equities (Tokyo 1/4, Sydney 1/4,
+    Xetra 1/4 in the probe) — a separate bound from price coverage. `OneMinute`
+    volume is equity-only (#2243).
 
 ### Volume (live volume V2 — planned: #608)
 - Today: `price_daily.volume` per day; live-tick volume not aggregated.
@@ -335,13 +403,13 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - **Storage (two-layer):** `instrument_risk_metrics_observations` (append-only, partitioned quarterly by `as_of_date`, PK incl `computed_at` — the audit log; `price_daily` is mutable via ON CONFLICT DO UPDATE so past metrics are NOT reconstructable, hence the immutable observation row) + `instrument_risk_metrics_current` (latest write-through, fast reads) — `sql/198`; sector-beta cols added by `sql/202` (additive nullable, no version bump).
 - **Service / job:** `risk_metrics_refresh` (DB-only) — orchestrator DAG layer `risk_metrics` (`dependencies=("candles",)`, weekly cadence, `is_blocking=False`); also manually triggerable (`risk_metrics` JobLock lane). NOT a standalone cron.
 - **Endpoint:** `GET /instruments/{symbol}/risk-metrics` — persisted scalars + per-metric statuses + on-read display series (drawdown curve, rolling-vol line, return histogram, beta scatter) cut at the persisted `as_of_date`.
-- **Chart:** `RiskPage.tsx` (PR-C, planned).
+- **Chart:** `RiskPage.tsx` (shipped; routed in `frontend/src/App.tsx:124` at `instrument/:symbol/risk`).
 - **Cadence:** weekly (annualized ≥1y-window stats move negligibly day-to-day; `as_of_date` surfaced so staleness is honest).
 - **Caveats:** v1 is **price return, not total return** (TR follow-up). **Calmar, NOT Sharpe** (no risk-free-rate series). Realized vol here is **distinct** from the scorer's TA "volatility-regime" term (Bollinger/ATR) — risk context, NOT a v1.1 score input. Sector-relative beta/excess shipped (#1674) but is **evidence-only** — NOT a scoring input (settled-decisions: market-beta-vs-SPY excluded from the penalty; sector beta would need its own full-pop r² justification). Full-pop signal is **modest-median / strong-tail**: median sector r²≈SPY r² (~0.08; most stocks idiosyncratic), but 13.6% of names clear sector r²≥0.30 vs 3.2% for SPY — read the per-row r² before trusting any single beta. Thesis/ranking consumption are filed follow-ups (#1632/#1633).
 - **Validation:** cross-source one beta or vol vs a public source (e.g. AAPL ~1y vol/beta); confirm `/instruments/AAPL/risk-metrics` renders sane scalars + statuses after a dev `risk_metrics_refresh`.
 
 ### Total return windows
-- 1d / 1w / 1m: dashboard via `/portfolio/rolling-pnl` ([app/api/portfolio.py:710](../../../app/api/portfolio.py#L710)). Anchor uses each position's `latest_close` `price_date` — never wall-clock — so stale candle doesn't collapse the bucket (Codex #387 phase 2 finding).
+- 1d / 1w / 1m: dashboard via `/portfolio/rolling-pnl` ([app/api/portfolio.py:650](../../../app/api/portfolio.py#L650)). Anchor uses each position's `latest_close` `price_date` — never wall-clock — so stale candle doesn't collapse the bucket (Codex #387 phase 2 finding).
 - 3m / 6m / 1y: consumed internally by scoring (`return_3m`, `return_6m`); not surfaced as own panel today.
 - 5y / since-IPO: not surfaced.
 
@@ -352,7 +420,7 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
   - `rsi_14`, `stoch_k`, `stoch_d`.
   - `bb_upper`, `bb_lower`, `atr_14`.
 - Formulas: sql/025:7-14. Implementations: `app/services/technical_analysis.py`.
-- Used by `_momentum_score` ([scoring.py:322](../../../app/services/scoring.py#L322)) for v1.1-balanced.
+- Used by `_momentum_score` ([scoring.py:611](../../../app/services/scoring.py#L611)) for v1.1-balanced.
 - Operator-visible: NOT in v1.
 
 ### Market cap (live)
@@ -383,7 +451,7 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 
 ### Payout ratio (Dividends/FCF)
 - Formula: `dividends_paid / FCF × 100`. Computed FE on **annual** data only (quarterly too noisy). FCF-negative years → NULL clamped.
-- Service: [dividendsMetrics.ts:174](../../../frontend/src/lib/dividendsMetrics.ts#L174) (`buildPayoutRatio`).
+- Service: [dividendsMetrics.ts:176](../../../frontend/src/lib/dividendsMetrics.ts#L176) (`buildPayoutRatio`).
 - Caveats: SEC XBRL `PaymentsOfDividends` is positive outflow; helper `Math.abs()` to normalise issuers under-reporting negative.
 
 ### Buyback authorisation outstanding
@@ -391,32 +459,32 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 
 ### Net buyback rate
 - Derives from `instrument_dilution_summary.{ttm_buyback_shares, ttm_shares_issued}`. Surfaces `dilution_posture` ∈ `{stable, dilutive, buyback_heavy}`.
-- Endpoint: `GET /instruments/{symbol}/dilution` ([app/api/instruments.py:1577](../../../app/api/instruments.py#L1577)).
+- Endpoint: `GET /instruments/{symbol}/dilution` ([app/api/instruments.py:2278](../../../app/api/instruments.py#L2278)).
 
 ### Yield-on-cost
 - An income investor's "what's the yield on what I originally paid?". Derived FE only.
-- Service: [dividendsMetrics.ts:200+](../../../frontend/src/lib/dividendsMetrics.ts#L200) (`buildYieldOnCost`); requires `/portfolio/instruments/{id}` for entry price.
+- Service: [dividendsMetrics.ts:216](../../../frontend/src/lib/dividendsMetrics.ts#L216) (`buildYieldOnCost`); requires `/portfolio/instruments/{id}` for entry price.
 - Chart: dividends drilldown.
 
 ## 5. Filings + events
 
 ### Last 10-K / 10-Q / 8-K date
-- Storage: `filing_events.filing_date` (per filing per provider), typed by `filing_events.form_type`.
-- Service: `app/services/filings.py`; api `app/api/filings.py:27`.
-- Endpoint: `GET /filings?instrument_id=...&form_types=...`.
+- Storage: `filing_events.filing_date` (per filing per provider), typed by `filing_events.filing_type` (sql/001; there is no `form_type` column on this table).
+- Service: `app/services/filings.py`; api route at [app/api/filings.py:249](../../../app/api/filings.py#L249) (router `prefix="/filings"`, filings.py:27).
+- Endpoint: `GET /filings/{instrument_id}` (path param, not a query filter); 10-K history at `/instruments/{symbol}/filings/10-k/history`.
 - Chart: `FilingsPane.tsx` on L1 instrument page.
 - Caveats: settled — `filing_events` stores metadata + summary + risk score + provider payload + canonical document link. Full raw filing text out of scope. Raw documents land in `filing_raw_documents`.
 
 ### 10-K Item 1 subsections
 - Source: SEC 10-K HTML body parser (`app/services/business_summary.py`, `app/services/filing_documents.py`).
 - Storage: `instrument_business_summary` + `instrument_business_summary_sections` (sql/059).
-- Endpoint: `/instruments/{symbol}/business_sections` ([app/api/instruments.py:1358](../../../app/api/instruments.py#L1358)).
+- Endpoint: `/instruments/{symbol}/business_sections` ([app/api/instruments.py:2015](../../../app/api/instruments.py#L2015)).
 - Parse states: `not_attempted` / `parse_failed` / `no_item_1` / `sections_pending`.
 
 ### 8-K filings (structured items + exhibits)
 - Source: SEC 8-K parser (`app/services/eight_k_events.py`).
 - Storage: `eight_k_structured_events` (sql/061), `filing_documents` (sql/062 exhibit pointers).
-- Endpoint: `/instruments/{symbol}/eight_k_filings?limit=...` ([app/api/instruments.py:1195](../../../app/api/instruments.py#L1195)).
+- Endpoint: `/instruments/{symbol}/eight_k_filings?limit=...` ([app/api/instruments.py:1732](../../../app/api/instruments.py#L1732)).
 - Per-item severity: `frontend/src/components/instrument/eightKSeverity.ts`.
 - Chart: `EightKEventsPanel.tsx`, `EightKDetailPanel.tsx`, `EightKListPage.tsx`.
 
@@ -442,6 +510,22 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 
 ### DEF 14A vote summary
 - **Planned.** DEF 14A parser exists for beneficial holdings (`def14a_ingest.py`, `def14a_drift.py`) and surfaces `def14a_unmatched` slice on rollup, but vote tabulation (board elections / shareholder proposals) is not parsed.
+
+### Executive compensation (DEF 14A Item 402(c) SCT, #1945)
+- **Definition**: per-NEO Summary Compensation Table from the latest proxy — up to three fiscal years per executive.
+- **Storage**: `def14a_exec_compensation` (sql/215), grain `(instrument_id, accession_number, executive_name, fiscal_year)`. Columns include `executive_name`, `principal_position` (raw free-text, no CHECK), `fiscal_year`, `salary`, … `total_comp`.
+- **Source / parser**: DEF 14A HTML body → `apply_exec_comp_best_effort` ([app/services/def14a_ingest.py:758](../../../app/services/def14a_ingest.py#L758); UPSERT at `:692`). Name/position split hardened in #1967.
+- **Endpoint**: `GET /instruments/{symbol}/exec-compensation` ([app/api/instruments.py:5321](../../../app/api/instruments.py#L5321)) — latest proxy's SCT, ordered `fiscal_year DESC, total_comp DESC`; empty `rows` (no SCT parsed yet) returns 200 with `accession_number` null.
+- **Chart**: `ExecCompensationPanel.tsx` on the instrument `DensityGrid`.
+- **Caveats**: identical FY figures across NEOs can be REAL (AAPL SVPs share an equal-pay package — not fanout). Backfill: `POST /jobs/sec_rebuild/run -d '{"source": "sec_def14a"}'`.
+
+### 424B prospectus offering (Rule 424(b) cover, #1816/#1978)
+- **Definition**: offering terms from the 424B prospectus cover (Reg S-K Item 501(b)(3)) — price per unit, aggregate offering amount, issuer-vs-selling-holder split, underwriting discount, net proceeds.
+- **Storage**: `prospectus_offerings` (sql/216; 424B2 volume-gate sql/217, #1975).
+- **Source / parser**: 424B `.htm` body → `app/services/manifest_parsers/sec_424b.py`; service `app/services/prospectus_offerings.py`.
+- **Endpoint**: LEFT-JOINed onto `GET /filings/{instrument_id}` as `items[].offering` (`OfferingSummary`, [app/api/filings.py:68](../../../app/api/filings.py#L68)). Populated for parsed B1/B3/B4/B5/B7 + volume-gated B2; `None` for every other form.
+- **Chart**: `OfferingBlock.tsx` on the Filings tab (`InstrumentPage.tsx`).
+- **Caveats**: every money field is nullable — NULL means the cover presentation was not resolvable (percent-of-principal notes, resale shelves, non-tabular covers), NEVER a guessed value. Older 424B rows show no block until the #1974 backfill runs.
 
 ## 6. News + sentiment
 
@@ -498,6 +582,8 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - **Storage:** `scores.analytics_json` (`iar_v1` block, `sql/210`). ⚠ SPARSE — guard on key presence, not just null (populates only when `compute_rankings` runs).
 - **Endpoint:** passed through VERBATIM on the per-instrument latest-score read (`app/api/scores.py` — typed as loose dict; absent block ⇒ `analytics_json = null`, headline still renders). Renders on the instrument **Verdict tab** (#1824).
 - **Caveats:** weight 0 in the composite until the #1822 backtest signs off (P5, operator-gated). Piotroski/Altman read FY facts — `_read_latest_two_fy_facts` MUST `ORDER BY period_end DESC` (a (concept, fiscal_year) bucket holds current FY + restated prior-year comparative; see prevention log).
+- **Denominator (insider net-90d + short interest):** `share_count_history.shares_outstanding`, newest POSITIVE period, read by `scoring._SHARE_COUNT_SQL` and carried into the block via `_analytics_inputs` (#2411). Same source as `instrument_share_count_latest` (the ownership-rollup denominator) and as `thesis_break_scan._short_interest_observations` — DEI cover-page count preferred, us-gaap balance-sheet count as fallback. ⚠ **NOT `fundamentals_snapshot.shares_outstanding`**, which this path read until #2411: that column is us-gaap-only (`sec_fundamentals.py:237`) and carries no filed date, and switching source moved **1,564** instruments from no-denominator to a denominator (dev 2026-08-08, full population) — `JPM`, `KO`, `PG`, `JNJ`, `IBM` and `DIS` among them.
+- **Freshness (short interest only):** BOTH inputs bounded, imported from `thesis_break.FRESHNESS_BOUNDS["short_interest_pct_shares_out"]` — `finra_settlement` 45d (#2336, reason `stale_settlement`) and `share_count_filed` 183d against `share_count_history.shares_outstanding_filed_date` (#2411, reason `stale_share_count`). ⚠ **Not `latest_filed_date`** — that is `MAX(filed_date)` over all five concepts the view groups, so a restated flow fact reports the count as fresher than it is; sql/273 added the count-specific column and both consumers read it. The settlement gate is checked first, so a row stale on both reports the numerator's age. `insider_net_90d` divides by the same count and is deliberately **unbounded** — the vocabulary assigns `share_count_filed` to the short-interest ratio and to no other metric.
 
 ### Completeness — C-score + tier (#1820)
 - **Definition:** per-score data-completeness fraction + tier `∈ {insufficient_data, thin_data, full}` (CHECK-constrained).
@@ -591,7 +677,7 @@ After backfill, hit the relevant rollup endpoint and confirm the figure renders 
 
 Fund-level + class-level metadata extracted from N-CSR / N-CSRS iXBRL companions for in-universe ETFs + mutual funds. Source-priority chain `period_end DESC, filed_at DESC, source_accession DESC` settled per [docs/settled-decisions.md](../../../docs/settled-decisions.md) §"Source priority for fund metadata".
 
-**Pipeline**: bootstrap S26 [`mf_directory_sync`](../../../app/services/bootstrap_orchestrator.py#L1181) populates `cik_refresh_mf_directory` + `external_identifiers (provider='sec', identifier_type='class_id')`. Bootstrap S27 [`sec_n_csr_bootstrap_drain`](../../../app/jobs/sec_first_install_drain.py#L744) walks distinct trust CIKs **filtered to universe-mapped trusts only** (#1176 cohort filter at `:582-593`) and enqueues last-2-years N-CSR + N-CSRS accessions to `sec_filing_manifest`. Manifest worker dispatches the [`sec_n_csr.py`](../../../app/services/manifest_parsers/sec_n_csr.py) parser which fans out per-(series, class) → [`fund_metadata_observations`](../../../sql/149_fund_metadata.sql) (partitioned by `period_end`) → [`refresh_fund_metadata_current`](../../../app/services/fund_metadata.py#L57) write-through to `fund_metadata_current`.
+**Pipeline**: bootstrap S26 [`mf_directory_sync`](../../../app/services/bootstrap_orchestrator.py#L1210) populates `cik_refresh_mf_directory` + `external_identifiers (provider='sec', identifier_type='class_id')`. Bootstrap S27 `sec_n_csr_bootstrap_drain` ([`bootstrap_n_csr_drain`](../../../app/jobs/sec_first_install_drain.py#L1040)) walks distinct trust CIKs **filtered to universe-mapped trusts only** (#1176 cohort filter at `:582-593`) and enqueues last-2-years N-CSR + N-CSRS accessions to `sec_filing_manifest`. Manifest worker dispatches the [`sec_n_csr.py`](../../../app/services/manifest_parsers/sec_n_csr.py) parser which fans out per-(series, class) → [`fund_metadata_observations`](../../../sql/149_fund_metadata.sql) (partitioned by `period_end`) → [`refresh_fund_metadata_current`](../../../app/services/fund_metadata.py#L39) write-through to `fund_metadata_current`.
 
 **Cohort scope**: 77 fund trusts on dev DB, 432 universe-mapped instruments (99% of `external_identifiers (class_id, is_primary=TRUE)` cohort). Coverage ceiling capped by symbols present in `instruments` AND `company_tickers_mf.json`. Expanding cohort = expanding `instruments` (out of scope).
 

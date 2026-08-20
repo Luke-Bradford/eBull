@@ -33,7 +33,12 @@ import pytest
 
 from app.services.openfigi_resolver import (
     OPENFIGI_BASE_URL,
+    OpenFigiInvalidIdentifier,
+    OpenFigiItemError,
+    OpenFigiMalformedEntry,
     OpenFigiMapping,
+    OpenFigiNoMatch,
+    OpenFigiOutcome,
     OpenFigiRateLimited,
     OpenFigiResolver,
     OpenFigiTransportError,
@@ -100,6 +105,27 @@ def _fixture_handler(
 # ---------------------------------------------------------------------------
 
 
+def _expect_mapping(outcome: OpenFigiOutcome) -> OpenFigiMapping:
+    """Assert an outcome is a resolution and narrow it.
+
+    #2304 made ``resolve_cusips`` return a discriminated union, so a test
+    that wants ``.ticker`` must first prove it did not get a no-match /
+    rejection / malformed entry. That proof is the point — pre-#2304 the
+    same assertion was a ``None`` check that could not tell those apart.
+    """
+    assert isinstance(outcome, OpenFigiMapping), f"expected a mapping, got {outcome!r}"
+    return outcome
+
+
+_US_COMMON_ROW: dict[str, str] = {
+    "ticker": "AAPL",
+    "name": "APPLE INC",
+    "exchCode": "US",
+    "securityType": "Common Stock",
+}
+"""A minimal ``data`` row that passes ``_pick_us_primary``."""
+
+
 def _sequenced_handler(
     responses: list[tuple[int, Any, dict[str, str]]],
 ) -> tuple[
@@ -138,7 +164,7 @@ class TestSingleCusip:
         with OpenFigiResolver(api_key=None, client=client) as resolver:
             result = resolver.resolve_cusips(["037833100"])
         assert set(result.keys()) == {"037833100"}
-        mapping = result["037833100"]
+        mapping = _expect_mapping(result["037833100"])
         assert mapping.ticker == "AAPL"
         assert mapping.name == "APPLE INC"
         assert mapping.exch_code == "US"
@@ -171,7 +197,7 @@ class TestBatchPositionalContract:
         # Every CUSIP positionally resolves to its expected ticker.
         assert set(result.keys()) == set(self._EXPECTED.keys())
         for cusip, expected_ticker in self._EXPECTED.items():
-            assert result[cusip].ticker == expected_ticker
+            assert _expect_mapping(result[cusip]).ticker == expected_ticker
         # One HTTP call for the whole batch.
         assert len(captured) == 1
 
@@ -182,15 +208,23 @@ class TestBatchPositionalContract:
 
 
 class TestInvalidCusipDropped:
-    def test_invalid_cusip_is_silently_omitted(self) -> None:
+    def test_unresolvable_cusip_gets_an_explicit_no_match(self) -> None:
+        """#2304 — the result dict is TOTAL.
+
+        Pre-#2304 an unresolvable CUSIP was OMITTED and the caller
+        inferred failure from absence, which merged "no such CUSIP",
+        "OpenFIGI rejected the identifier" and "shape we could not
+        parse". Every requested CUSIP now carries an explicit verdict.
+        """
         captured, client = _fixture_handler("batch_with_invalid.json")
         request_cusips = [entry["idValue"] for entry in _load_fixture("batch_with_invalid.json")["request"]["body"]]
         with OpenFigiResolver(api_key=None, client=client) as resolver:
             result = resolver.resolve_cusips(request_cusips)
-        # 9 valid + 1 invalid → 9 entries in the result dict.
-        assert "000000000" not in result
-        valid_cusips = {c for c in request_cusips if c != "000000000"}
-        assert set(result.keys()) == valid_cusips
+        assert set(result.keys()) == set(request_cusips)
+        assert result["000000000"] == OpenFigiNoMatch(reason="warning")
+        for cusip in request_cusips:
+            if cusip != "000000000":
+                assert isinstance(result[cusip], OpenFigiMapping)
         assert len(captured) == 1
 
 
@@ -346,9 +380,9 @@ class TestTierSelection:
 
 
 class TestUsPrimaryFilter:
-    def test_no_us_row_returns_no_mapping(self) -> None:
-        """A CUSIP whose data array has only non-US listings → no
-        mapping in result dict."""
+    def test_no_us_row_returns_no_match(self) -> None:
+        """A CUSIP whose data array has only non-US listings →
+        ``OpenFigiNoMatch(reason="no_us_primary")``."""
         captured, client = _sequenced_handler(
             [
                 (
@@ -371,7 +405,7 @@ class TestUsPrimaryFilter:
         )
         with OpenFigiResolver(api_key=None, client=client) as resolver:
             result = resolver.resolve_cusips(["037833100"])
-        assert result == {}
+        assert result == {"037833100": OpenFigiNoMatch(reason="no_us_primary")}
         assert len(captured) == 1
 
     def test_us_preferred_over_non_us(self) -> None:
@@ -408,7 +442,7 @@ class TestUsPrimaryFilter:
         )
         with OpenFigiResolver(api_key=None, client=client) as resolver:
             result = resolver.resolve_cusips(["037833100"])
-        assert result["037833100"].exch_code == "US"
+        assert _expect_mapping(result["037833100"]).exch_code == "US"
         del captured  # unused
 
     def test_us_but_not_common_stock_returns_no_mapping(self) -> None:
@@ -436,21 +470,154 @@ class TestUsPrimaryFilter:
         )
         with OpenFigiResolver(api_key=None, client=client) as resolver:
             result = resolver.resolve_cusips(["78462F103"])
-        assert result == {}
+        # #2304 — an accepted identifier with no US-primary common-stock
+        # row is a COVERAGE fact, and the reason distinguishes it from a
+        # never-heard-of-it warning without a second round-trip.
+        assert result == {"78462F103": OpenFigiNoMatch(reason="no_us_primary")}
         del captured
 
-    def test_warning_entry_returns_no_mapping(self) -> None:
-        """``{"warning": "No identifier found."}`` → no mapping."""
+    def test_warning_entry_returns_no_match(self) -> None:
+        """``{"warning": "No identifier found."}`` → OpenFigiNoMatch."""
         captured, client = _sequenced_handler([(200, [{"warning": "No identifier found."}], {"ratelimit-limit": "25"})])
         with OpenFigiResolver(api_key=None, client=client) as resolver:
             result = resolver.resolve_cusips(["000000000"])
-        assert result == {}
+        assert result == {"000000000": OpenFigiNoMatch(reason="warning")}
         del captured
 
 
 # ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------
+
+
+class TestPerItemErrorDiscrimination:
+    """#2304 — a per-item ``{"error": ...}`` is NOT a no-match.
+
+    Probed live 2026-08-06: OpenFIGI validates the CUSIP mod-10 check
+    digit and answers a failure with ``{"error": "Invalid idValue
+    format."}``. Pre-#2304 that collapsed into the same ``None`` as
+    ``{"warning": ...}`` and the sweep wrote a terminal "OpenFIGI has no
+    mapping" verdict from it.
+    """
+
+    def _one_entry(self, entry: object) -> OpenFigiOutcome:
+        _captured, client = _sequenced_handler([(200, [entry], {"ratelimit-limit": "25"})])
+        with OpenFigiResolver(api_key=None, client=client) as resolver:
+            return resolver.resolve_cusips(["ZZZZZZZZZ"])["ZZZZZZZZZ"]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            # BOTH spellings came back from the same endpoint in one
+            # probe, which is why the classifier normalises rather than
+            # matching an exact literal.
+            "Invalid idValue format.",
+            "Invalid idValue format",
+            "  invalid idvalue format.  ",
+            "INVALID IDVALUE FORMAT",
+        ],
+    )
+    def test_recognised_rejection_is_invalid_identifier(self, message: str) -> None:
+        outcome = self._one_entry({"error": message})
+        assert outcome == OpenFigiInvalidIdentifier(message=message)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Invalid value for idType.",
+            "Rate limit exceeded for this API key.",
+            "Internal error, please retry.",
+            "",
+            # Near-misses MUST NOT be terminalised — the classifier is
+            # deliberately narrow, and the safe direction is retryable.
+            "Invalid idValue format for ID_CUSIP",
+            "idValue format invalid",
+        ],
+    )
+    def test_unrecognised_error_stays_retryable(self, message: str) -> None:
+        outcome = self._one_entry({"error": message})
+        assert outcome == OpenFigiItemError(message=message)
+
+    def test_error_key_wins_over_data_key(self) -> None:
+        """An entry carrying BOTH must not be read as a resolution — we
+        have no evidence the data half is trustworthy."""
+        outcome = self._one_entry({"error": "Invalid idValue format.", "data": [_US_COMMON_ROW]})
+        assert isinstance(outcome, OpenFigiInvalidIdentifier)
+
+    def test_non_string_error_payload_is_still_an_error(self) -> None:
+        outcome = self._one_entry({"error": {"code": 42}})
+        assert isinstance(outcome, OpenFigiItemError)
+
+
+class TestMalformedEntryDiscrimination:
+    """#2304 — schema drift is OUR problem, not an API error, and
+    neither is a verdict. All of these must stay retryable."""
+
+    def _one_entry(self, entry: object) -> OpenFigiOutcome:
+        _captured, client = _sequenced_handler([(200, [entry], {"ratelimit-limit": "25"})])
+        with OpenFigiResolver(api_key=None, client=client) as resolver:
+            return resolver.resolve_cusips(["037833100"])["037833100"]
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "a bare string",
+            42,
+            None,
+            {"unexpected": "shape"},
+            {"data": "not-a-list"},
+            {"data": {"ticker": "AAPL"}},
+            # _pick_us_primary would raise AttributeError on this one and
+            # the sweep would collapse the WHOLE batch to api_errors.
+            {"data": ["not-a-dict"]},
+            {"data": [_US_COMMON_ROW, "not-a-dict"]},
+        ],
+    )
+    def test_undocumented_shapes_are_malformed(self, entry: object) -> None:
+        assert isinstance(self._one_entry(entry), OpenFigiMalformedEntry)
+
+    def test_empty_data_is_a_no_match_not_malformed(self) -> None:
+        """``{"data": []}`` is well-formed — OpenFIGI accepted the
+        identifier and returned nothing. That IS a coverage answer."""
+        assert self._one_entry({"data": []}) == OpenFigiNoMatch(reason="empty_data")
+
+
+class TestParallelArrayContract:
+    """#2304 — the length mismatch must surface as the exception type
+    the module contract advertises, not a bare ``ValueError``."""
+
+    @pytest.mark.parametrize("payload", [[], [{"data": []}, {"data": []}]])
+    def test_length_mismatch_raises_transport_error(self, payload: list[object]) -> None:
+        _captured, client = _sequenced_handler([(200, payload, {"ratelimit-limit": "25"})])
+        with OpenFigiResolver(api_key=None, client=client) as resolver:
+            with pytest.raises(OpenFigiTransportError, match="parallel-array contract violated"):
+                resolver.resolve_cusips(["037833100"])
+
+
+class TestResultDictIsTotalAndCallerKeyed:
+    def test_every_requested_cusip_gets_a_key(self) -> None:
+        entries: list[object] = [
+            {"data": [_US_COMMON_ROW]},
+            {"warning": "No identifier found."},
+            {"error": "Invalid idValue format."},
+        ]
+        _captured, client = _sequenced_handler([(200, entries, {"ratelimit-limit": "25"})])
+        with OpenFigiResolver(api_key=None, client=client) as resolver:
+            result = resolver.resolve_cusips(["037833100", "000000000", "ZZZZZZZZZ"])
+        assert set(result) == {"037833100", "000000000", "ZZZZZZZZZ"}
+        assert isinstance(result["037833100"], OpenFigiMapping)
+        assert result["000000000"] == OpenFigiNoMatch(reason="warning")
+        assert result["ZZZZZZZZZ"] == OpenFigiInvalidIdentifier(message="Invalid idValue format.")
+
+    def test_keys_are_the_callers_strings_not_the_normalised_form(self) -> None:
+        """A caller holding un-normalised CUSIPs must still find its own
+        results. Both spellings share ONE request slot."""
+        captured, client = _sequenced_handler([(200, [{"data": [_US_COMMON_ROW]}], {"ratelimit-limit": "25"})])
+        with OpenFigiResolver(api_key=None, client=client) as resolver:
+            result = resolver.resolve_cusips([" 037833100 ", "037833100"])
+        assert set(result) == {" 037833100 ", "037833100"}
+        assert result[" 037833100 "] == result["037833100"]
+        assert json.loads(captured[0].content) == [{"idType": "ID_CUSIP", "idValue": "037833100"}]
 
 
 class TestErrorPaths:

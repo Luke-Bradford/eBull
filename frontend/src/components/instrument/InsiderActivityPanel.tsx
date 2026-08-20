@@ -125,7 +125,7 @@ function formatDelta(raw: string): { label: string; colour: string } {
   }
   return {
     label: Math.round(num).toLocaleString("en-US"),
-    colour: "bg-rose-100 dark:bg-rose-900/40 text-rose-800 dark:text-rose-200",
+    colour: "bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200",
   };
 }
 
@@ -161,7 +161,7 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
             <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Acquired
             </span>
-            <span className="mt-1 font-mono text-base tabular-nums text-emerald-700">
+            <span className="mt-1 font-mono text-base tabular-nums text-emerald-700 dark:text-emerald-300">
               {totalAcquired > 0 ? "+" : ""}
               {Math.round(totalAcquired).toLocaleString("en-US")}
             </span>
@@ -176,7 +176,7 @@ function SummaryStrip({ summary }: { summary: InsiderSummary }) {
             <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Disposed
             </span>
-            <span className="mt-1 font-mono text-base tabular-nums text-rose-700">
+            <span className="mt-1 font-mono text-base tabular-nums text-red-700 dark:text-red-300">
               {totalDisposed > 0 ? "-" : ""}
               {Math.round(totalDisposed).toLocaleString("en-US")}
             </span>
@@ -238,11 +238,13 @@ function Row({ txn }: { txn: InsiderTransactionDetail }) {
   const code = txnCodeLabel(txn.txn_code, txn.acquired_disposed_code);
   const isBuy = txn.txn_code === "P";
   const isSell = txn.txn_code === "S";
+  // Every arm carries its dark partner (#2152 review) — a bare text colour has
+  // no lint gate, so a half-themed ternary washes out in dark and stays green.
   const codeColour = isBuy
-    ? "text-emerald-700"
+    ? "text-emerald-700 dark:text-emerald-300"
     : isSell
-      ? "text-rose-700"
-      : "text-slate-600";
+      ? "text-red-700 dark:text-red-300"
+      : "text-slate-600 dark:text-slate-400";
   const planned = txn.deemed_execution_date !== null;
   const late = txn.transaction_timeliness === "L";
   const footnoteEntries = Object.entries(txn.footnotes);

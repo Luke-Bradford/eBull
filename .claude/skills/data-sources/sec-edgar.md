@@ -29,11 +29,11 @@
 ```
 `cik_str` is **integer** in JSON, **not zero-padded**. Always pad to 10 digits with `f"CIK{cik:010d}"` before constructing API URLs.
 
-**Coverage** (corrected 2026-05-17 from empirical sample):
+**Coverage** (re-corrected 2026-07-22 from live fetch — #2108; supersedes the 2026-05-17 note):
 
-- `company_tickers.json` and `company_tickers_exchange.json` share the same CIK row cohort COUNT (10,353 entries each as of 2026-05-17).
-- `company_tickers.json` is **CIK-grain**: one row per CIK, ticker is the primary symbol. Includes pink-sheet/OTC tickers (e.g. `PTPIF`, `EMCGF`) — earlier framing that these were "excluded" was inaccurate.
-- `company_tickers_exchange.json` is **ticker-grain**: 10,353 rows / 7,996 unique CIKs / 1,446 multi-ticker CIKs. Captures share-class siblings (GOOG/GOOGL), preferred-series tickers (BAC=17 variants, JPM=9, MS=10), and ADR+OTC siblings (BABA/BABAF/BBAAY). Adds the `exchange` enum (Nasdaq / NYSE / OTC / CBOE / NULL).
+- **BOTH `company_tickers.json` and `company_tickers_exchange.json` are ticker-grain as of 2026-07-22**: each 10,419 rows / 8,014 unique CIKs / 1,463 multi-ticker CIKs (BAC=17, JPM=9). The 2026-05-17 claim that `company_tickers.json` was CIK-grain/one-row-per-CIK no longer holds — SEC converged the files; multi-ticker CIKs (GOOG/GOOGL, share-class siblings, preferred series, ADR+OTC siblings) appear in both. Re-verify grain empirically before relying on it — it has changed at least once.
+- Row ORDER within a CIK is NOT a primacy signal (no documented semantics; empirically TAP-A precedes TAP while AGM precedes AGM-A — #2108).
+- `company_tickers_exchange.json` additionally carries the `exchange` enum (Nasdaq / NYSE / OTC / CBOE / NULL) in `{fields, data}` array form.
 - `company_tickers_mf.json` covers the mutual-fund universe (~28k rows with `seriesId` + `classId`) — disjoint from the two above.
 
 eBull pattern lives in `daily_cik_refresh` (`app/workers/scheduler.py`):
@@ -69,7 +69,7 @@ def fetch_all_filings(cik_padded: str):
         yield from _rows(page)
 ```
 
-Pattern at [app/services/institutional_holdings.py:189-220](../../../app/services/institutional_holdings.py#L189-L220), rebuild at [app/jobs/sec_rebuild.py:335](../../../app/jobs/sec_rebuild.py#L335).
+Pattern in `parse_submissions_index` at [app/services/institutional_holdings.py:292-389](../../../app/services/institutional_holdings.py#L292-L389), rebuild at [app/jobs/sec_rebuild.py:335](../../../app/jobs/sec_rebuild.py#L335).
 
 `recent` columnar keys: `accessionNumber, filingDate, reportDate, acceptanceDateTime, act, form, fileNumber, filmNumber, items, core_type, size, isXBRL, isInlineXBRL, isXBRLNumeric, primaryDocument, primaryDocDescription`. **All arrays must be same length, aligned by index** — pull row `i` by reading `recent[k][i]` for every `k`.
 
@@ -145,7 +145,7 @@ Source: <https://www.sec.gov/files/form_13f.pdf> §5.7.
 | `OTHERMANAGER` | VARCHAR2(100) | comma-sep seq numbers |
 | `VOTING_AUTH_SOLE` / `_SHARED` / `_NONE` | NUMBER | voting authority |
 
-**SSHPRNAMTTYPE = PRN** rows hold bond principal **in dollars**, not share counts. Filter `WHERE SSHPRNAMTTYPE = 'SH'` before any share aggregation. PRN belongs to a separate fixed-income rollup if surfaced at all. Pattern at [app/services/sec_13f_dataset_ingest.py:307-315](../../../app/services/sec_13f_dataset_ingest.py#L307-L315).
+**SSHPRNAMTTYPE = PRN** rows hold bond principal **in dollars**, not share counts. Filter `WHERE SSHPRNAMTTYPE = 'SH'` before any share aggregation. PRN belongs to a separate fixed-income rollup if surfaced at all. Filter at [app/services/sec_13f_dataset_ingest.py:730-733](../../../app/services/sec_13f_dataset_ingest.py#L730-L733) (canonical PRN/SH + cutover logic lives in `normalise_13f_holdings`, [app/services/thirteen_f_normalise.py:81](../../../app/services/thirteen_f_normalise.py#L81)).
 
 13F filed within **45 days after each calendar quarter end**.
 
@@ -154,12 +154,16 @@ form.idx exposes both `13F-HR` (holdings) and `13F-NT` (notice; another manager
 files our holdings). NT entries contribute **zero** infotable rows, so iterating
 an NT-only filer in `sec_13f_quarterly_sweep` costs the submissions.json roundtrip
 and writes nothing. `institutional_filers.last_13f_hr_at` (#1010,
-[sec_13f_filer_directory.py:42](../../../app/services/sec_13f_filer_directory.py#L42))
+[sec_13f_filer_directory.py:48](../../../app/services/sec_13f_filer_directory.py#L48))
 is the HR-only recency signal — distinct from `last_filing_at` which mixes both.
 Bootstrap stage 21 filters cohort on this column (cohort drops 11k → ~3-5k);
 the manual / sweep-adapter / Admin "Run now" path keeps the full cohort as a
 safety-net so a previously-inactive filer can re-enter when they resume HR
 filing.
+
+⚠ NT is not only a cohort/efficiency signal — it is **why an ETF-adviser entity has no
+holdings of its own**. The adviser files NT and the multi-mandate parent files the HR, so
+the ETF book is consolidated away at source. See §2.2.1.
 
 ### 2.2 N-PORT-P XML schema
 
@@ -197,6 +201,70 @@ Critical fields: `cusip` (9 char), `lei` (20 char), `valUSD` (USD-converted rega
 **Fund hierarchy**: filings are at the **trust** CIK level; each holding belongs to a **series** (`S000123456`); each series has multiple **share classes** (`C000234567`). For ownership rollup at operating-issuer level, aggregate `valUSD` across funds without double-counting fund-of-funds. Aggregate by `(seriesId, issuerCusip)`, NOT by classId — share classes share the same portfolio.
 
 `<invstOrSec>` repeatability raised from 1000 → 500,000 — long lists are valid. eBull's parser is at [app/services/n_port_ingest.py](../../../app/services/n_port_ingest.py) (stdlib `xml.etree.ElementTree`, #917 closeout).
+
+### 2.2.1 Form N-CEN + the DERA N-CEN data sets — the ETF flag, and why it does not reach a 13F filer
+
+**Registrant is the TRUST, not the manager.** N-CEN is the annual census filing for
+registered investment companies, filed by the same registrant as N-PORT — the RIC trust
+(`VANGUARD INDEX FUNDS`), never the 13F manager (`VANGUARD GROUP INC`). Same disjointness
+#963 hit for N-PORT (see the `sec_nport_filer_directory` module docstring). Measured on
+dev, full population:
+
+```sql
+-- 11,465 / 2,036 / 8
+select (select count(*) from institutional_filers),
+       (select count(*) from sec_nport_filer_directory),
+       (select count(*) from institutional_filers f
+          join sec_nport_filer_directory n on lpad(f.cik,10,'0') = lpad(n.cik,10,'0'));
+```
+
+8 of 11,465 overlap, and those 8 are internally-managed closed-end funds (Adams
+Diversified Equity, Central Securities, General American Investors, Tocqueville Trust …)
+which file both because they *are* the fund. **Walking 13F-manager CIKs for N-CEN is
+therefore structurally empty** — that is what `ncen_classifier` does, and it is why
+`ncen_filer_classifications` has 0 rows.
+
+**Use the DERA data sets, not per-filing XML.** `https://www.sec.gov/files/dera/data/form-n-cen-data-sets/{YYYY}q{n}_ncen.zip`
+(6–17 MB/quarter) carries the whole quarter as TSVs — 50+ tables. One quarterly ZIP
+replaces ~2,000 `primary_doc.xml` fetches at ~1.1 MB each. N-CEN is annual, so **five
+consecutive quarters** covers every registrant's cycle with one quarter of overlap.
+Tables that matter here:
+
+| table | key | carries |
+| --- | --- | --- |
+| `FUND_REPORTED_INFO.tsv` | `FUND_ID` = `{accession}_{cik}_{seriesId}` | `IS_ETF` (Item C.3.a), `IS_INDEX`, `IS_ETMF`, `SERIES_ID` |
+| `ADVISER.tsv` | `FUND_ID` | Item C.7: `ADVISER_TYPE` (`Advisor` / `Subadvisor` / `Terminated …`), `ADVISER_NAME`, `FILE_NUM` (801-), `CRD_NUM`, `ADVISER_LEI` |
+| `ETF.tsv` | `FUND_ID` | creation-unit / AP mechanics for ETF series only |
+| `REGISTRANT.tsv` | `ACCESSION_NUMBER` | trust `CIK` **and** `LEI`, `INVESTMENT_COMPANY_TYPE` |
+
+⚠ **`IS_ETF` is the structured field — do not classify `INVESTMENT_COMPANY_TYPE`.** Every
+ETF is `N-1A` (open-end), the same code as an ordinary mutual fund, so the registrant-level
+type can never separate them. That is a source-level fact, not a parser limitation.
+
+⚠ **`ADVISER.tsv` identifies the adviser by name / 801-file-number / CRD / LEI and NEVER by
+CIK.** `REGISTRANT.tsv` carries a CIK, but that is the trust. So there is **no EDGAR-native
+join from an ETF to its adviser's 13F-manager CIK** — only a name match. Verified against
+the live XML too: the N-CEN tag set has `investmentAdviserName` / `investmentAdviserFileNo`
+/ `investmentAdviserCrdNo` / `investmentAdviserLei`, and `registrantCik` is the trust's.
+
+**The consequence for a filer-level ETF split (#2214).** Even given the name join, the
+adviser entities that N-CEN types precisely file **13F-NT**, not 13F-HR — their holdings
+are consolidated into a multi-mandate parent's report (§2.1). On dev:
+`BlackRock Fund Advisors` (0001006249), `SSGA Funds Management` (0001257442) and
+`Invesco Capital Management` (0001224696) each have 13F-NT notices and **0 rows** in
+`ownership_institutions_current`; the mass sits in `BlackRock, Inc.` / `STATE STREET CORP`
+/ `VANGUARD GROUP INC`, whose books mix ETF and non-ETF mandates. **13F reports per
+MANAGER with no fund breakdown, so a `filer_type` value cannot mean "shares held by
+ETFs" — only "managed by an adviser that also advises ETFs".** Fund-level attribution is
+N-PORT's job (§2.2). The precise scope of what is unavailable: an *exact* ETF/non-ETF
+partition of the 13F book. A caveated `ETF-affiliated manager` bucket is buildable from
+the name join and is a labelling decision, not a data one. Reproduce with
+`scripts/audit_ncen_etf_advisers.py`.
+
+⚠ Not exhaustively ruled out: `ADVISER_CRD_NUM` / `ADVISER_LEI` could in principle bridge
+to a 13F manager through Form ADV / IAPD, which is **not an EDGAR dataset** and was not
+attempted. That would improve the *identity* join; it does not touch the allocation
+problem above, which is the binding one.
 
 ### 2.3 Form 3/4/5 — Section 16 insider transactions
 
@@ -252,6 +320,54 @@ XML root: `<ownershipDocument>`. **Element-wrapping idiom**: every leaf value li
 | U | Disposition pursuant to tender offer |
 
 `directOrIndirectOwnership`: `D` = Direct, `I` = Indirect. **Both surface separately** — Section 16 ownership totals must aggregate D + I separately because the FILER label "owns" both. They are NOT double-counts. This is what made JPM insider rollup go 1.29% → 6.16% post-#905 (`project_905_rollup_cutover_done.md`).
+
+#### ⚠ `ownership_nature` is an OVERLOADED column — four writers, three meanings (#2385/#2386)
+
+`ownership_insiders_current.ownership_nature` is Table I column 5 **only** on rows from the
+three XML ingest paths. `sec_insider_dataset_ingest._map_relationship` writes the DERA bulk
+dataset's RELATIONSHIP flags into the same column (officer/director → `direct`,
+ten-percent-owner → `beneficial`) and never reads the D/I field at all.
+
+Provenance discriminator — a dataset row's `source_document_id` carries an `:NDT:`
+(Form 4 transaction) or `:NDH:` (Form 3 holding) marker:
+
+```sql
+SELECT (source_document_id !~ ':(NDT|NDH):') AS table_i, ownership_nature, count(*)
+  FROM ownership_insiders_current GROUP BY 1,2 ORDER BY 3 DESC;
+-- dev, 2026-08-08: direct/Table-I 69,657 · direct/role-derived 3,404
+--                  indirect/Table-I 16,532 · beneficial/role-derived 3,759
+```
+
+**Any read-path branch on `ownership_nature == 'direct'` must also check
+`Holder.nature_from_table_i`.** Reading the raw string moved 224 control-group folds of
+1,433 and **59 of them promoted a role-derived row** — an officer's name onto a fund's
+block.
+
+#### ⚠⚠ Table I rows are NOT attributed to a reporting owner (#2385/#2408)
+
+`<nonDerivativeTable>` is a **sibling** of `<reportingOwner>`, not a child. A joint Form 3/4
+therefore does not say which co-filer holds the `D` line, and
+`insider_transactions._extract_holdings` assigns every row to `filers[0]`
+(`app/services/insider_transactions.py:449`). **Within one accession, "Table I-attested"
+means "listed first in the XML" and discriminates nothing** — 6 of 931 same-accession
+control-group folds carry ≥2 attested members, against 378 of 503 cross-accession.
+
+The evidence that DOES name the holder of record on a joint filing is `natureOfOwnership`
+on the `I` lines ("Securities are held by BV IX"), plus the footnotes those lines
+reference. Stored at `insider_transactions.nature_of_ownership` (138,380/138,380 non-null
+on `direct_indirect='I'`), `insider_initial_holdings.nature_of_ownership` (30,149/30,149)
+and `insider_transaction_footnotes`, and consumed by
+`ownership_rollup._read_record_holder_evidence`. Three traps:
+
+- **It is per-ROW, not per-accession.** One filing's footnote set covers many holdings and
+  names a different record holder for each (`0001415889-25-017225` names five). Key it on
+  the row's own amount — `post_transaction_shares` for Form 4, `shares` for Form 3.
+- **`insider_initial_holdings` has no `footnote_refs`**, so a Form 3's `See footnote.`
+  cannot be resolved.
+- **Match names verbatim, never rotated to First-Last.** EDGAR conformed names are
+  `LAST FIRST`; adding the rotated form scores WORSE against ground truth because it makes
+  the deemed owner matchable beside the holder. Do not "improve" this without re-running
+  the arm (`scripts/audit_2408_nature_record_holder --validate`).
 
 ### 2.4 Schedule 13D / 13G — beneficial ownership
 
@@ -320,6 +436,188 @@ def _parse_sec_date(s: str) -> date:
     raise ValueError(f"unrecognised SEC date: {s!r}")
 ```
 
+### 2.6 Form 25 / 25-NSE — delisting notifications (Rule 12d2-2)
+
+**Source rule: 17 CFR 240.12d2-2.** These are the authoritative, dated record of a
+security being removed from listing and registration. Discoverable via full-index by form
+type; `primary_doc.xml` is structured XML (`<notificationOfRemoval>`), so no HTML scraping.
+Seven traps, all measured on the 2023 cohort — every one silently inflates or corrupts a
+delisting register.
+
+✅ **Built for real in #2282 stage 2c (2026-08-05): `sec_form25_register` (sql/252),
+parser `app/services/sec_form25_register.py`, harvester
+`scripts/build_2282_form25_register.py`.** Traps 1-5 below were reproduced exactly against
+the live 2023 corpus; traps 6 and 7 are NEW and were found by that build. Figures below
+are the ones the register actually produces — where they disagree with #2284's spike
+write-up, the register is the measurement and the spike was the estimate.
+
+**Trap 1 — index ROWS are not filings.** EDGAR indexes a 25-NSE under *both* the exchange
+CIK and the issuer CIK, so a naive row count roughly doubles. 2023 QTR1 is **622 rows /
+329 accessions**; full-year 2023 is **2,437 rows / 1,282 filings**. De-duplicate on
+accession, never on `(cik, form)`.
+
+**Trap 2 — a Form 25 is per-SECURITY, not per-issuer.** `<descriptionClassSecurity>` names
+the class struck from the tape, which is very often a bond, warrant, unit or preferred.
+Berkshire Hathaway filed two 25-NSEs in 2023 (*"0.625% Senior Notes due 2023"*). **"CIK
+appeared in a Form 25 ⇒ delisted" marks Berkshire delisted in January 2023.**
+
+**Trap 3 — filter on `<ruleProvision>`, and know what each paragraph means.** Roughly a
+third of filings are debt-lifecycle events, not delistings:
+
+| provision | condition | 2023 n | equity delisting? |
+|---|---|---|---|
+| `12d2-2(a)(1)` | class called for redemption/maturity/retirement; funds deposited | 250 | no |
+| `12d2-2(a)(2)` | class redeemed or paid at maturity | 190 | no |
+| `12d2-2(a)(3)` | instruments now evidence *other* securities by operation of law (merger / reorg) | 486 | **yes** |
+| `12d2-2(a)(4)` | all rights pertaining to the class extinguished | 9 | **yes** |
+| `12d2-2(b)` | exchange-initiated discretionary delisting (non-compliance) | 219 | **yes** |
+| *(absent)* | issuer-filed **Form 25** = `12d2-2(c)` voluntary withdrawal | 128 | **yes** |
+
+`(a)(1)+(a)(2)` = **440 of 1,282 (34.3%)** of 2023 filings. Note that issuer-filed Form 25
+(paragraph (c)) does **not** carry the `notificationOfRemoval` schema — it is a separate
+document shape with no `<ruleProvision>`, so branch on `form in ("25", "25/A")` rather than
+treating a missing provision as unparseable.
+
+⚠ **(b) and (a)(3) are not the same event for a backtest.** (b) is a failure; (a)(3) is an
+acquisition or holdco reorganisation where shareholders received something. A vendor's
+flat "delisted" flag cannot distinguish them; this rule provision can, which is why the
+EDGAR register is worth keeping even alongside a paid survivorship-free feed.
+
+**Trap 6 — the provision is only HALF the filter. Security class is a second, orthogonal
+axis, and skipping it roughly doubles the cohort.** This is the one that made #2284's spike
+figure ("578 delisting-meaning equity filings / 443 issuers") unreproducible: the six
+provision counts above are exactly right, but they classify the **event**, not what came
+off the tape. Provision-filtering 2023 gives **842** filings, which decompose as:
+
+| security class | filings | in our universe? |
+|---|---:|---|
+| **common equity** | **317** | yes — `instrument_type_id = 5` (Stocks) |
+| warrant | 155 | **no such eToro type** |
+| unknown (issuer-filed, no description element) | 128 | unverifiable |
+| fund — ETF / closed-end | 111 | type 6 (ETF), excluded by #2289 |
+| unit | 62 | **no such eToro type** |
+| preferred / depositary | 56 | **no such eToro type** |
+| debt (a delisting provision on NOTES) | 10 | type 7 (Bonds), not equity |
+| right | 3 | **no such eToro type** |
+
+Grounded, not a taste call: `etoro_instrument_types` is {1 Forex, 2 Commodity, 3 CFD,
+4 Indices, 5 Stocks, 6 ETF, 7 Bonds, 8 TrustFunds, 9 Options, 10 Crypto} — there is **no
+warrant, unit, preferred or right type at all**, so those securities can never be
+instruments in our universe and their delistings cannot contribute survivorship bias to a
+backtest run on it. Funds are excluded by #2289's ex-ETF rule.
+
+⚠ **There is NO structured security-type field.** The SGML header carries only submission
+type, conformed name, SIC and file number; the X0203 schema exposes the security solely as
+free-text `<descriptionClassSecurity>`. Classifying that text is therefore the only
+available route, not a heuristic chosen over a documented rule. Order matters — test
+`unit` before `common` ("Units, each consisting of one share of Class A common stock"),
+and test `fund` LAST, because ETFs name the **product** ("Invesco DB Gold Fund", "The
+Cannabis ETF") and carry none of the security-class words.
+
+**Trap 7 — two identity potholes in the same fields.**
+
+- **CIK is not reliably zero-padded.** Medtronic's issuer CIK in accession
+  `0000876661-23-000234` is `000064670` — **nine** digits, where every CIK column in our
+  schema is ten. Normalise (`lstrip("0").zfill(10)`); do not relax the constraint.
+- **Issuer-filed Form 25 has no `<issuer>` block**, so reading only the XML leaves all 128
+  of 2023's with a NULL issuer — an entire delisting category that joins to nothing. For
+  `form in ("25", "25/A")` the **filer is the issuer**, so the index CIK is correct. The
+  same substitution is WRONG for a 25-NSE, where the index CIK is as often the exchange.
+
+**Trap 4 — the register carries no ticker, and SEC will not give you one.** `submissions`
+JSON drops `tickers` to `[]` once a company delists (verified: Umpqua CIK 1077771,
+Quotient CIK 1115128), and `companyconcept/CIK…/dei/TradingSymbol.json` **404s** — the XBRL
+company APIs serve numeric facts only (`dei/EntityCommonStockSharesOutstanding` returns 200
+for the same CIK). The symbol must be read from the **cover-page inline XBRL** of the last
+periodic/current report filed *before* the delisting:
+
+```python
+TS_RE = re.compile(r'name=["\']dei:TradingSymbol["\'][^>]*>([^<]{1,20})<', re.I)
+# walk submissions.recent for 10-K/10-Q/8-K/20-F/40-F with filingDate <= delisting date,
+# newest first, fetch primaryDocument, take the first match
+```
+
+Measured on the **common-equity** cohort (both filters, per trap 6): **259 of 308 issuers
+(84.1%)**. The residue is closed-end funds (they file N-CSR, not a cover-page-XBRL 10-K)
+and foreign private issuers whose cover XBRL differs.
+
+⚠ The spike's "382 of 443 (86.2%)" was measured **before** the security-class filter
+existed, so its denominator included warrants, units, preferred and funds. Both numbers
+are internally consistent; only the 260/315 pair describes a cohort of companies.
+
+**Trap 5 — a Form 25 carries three different dates; pick the one your consumer needs.**
+The `EX-99` rule-provision exhibit distinguishes them explicitly. Berkshire's 2023-01-17
+filing reads: *"intention to remove … at the opening of business on **January 30, 2023**"*,
+*"redeemed or paid at maturity … on **January 17, 2023**"*, and *"this security was
+suspended from trading on **January 17, 2023**"*. The `filed` date in `master.idx` is a
+**fourth** thing again. For truncating a price series, the last tradable date is the
+**suspension** date, not the filing date and not the removal-effective date.
+
+⚠ **How often is the suspension date actually stated? Measured: rarely.** Only **37 of the
+259** resolved common-equity cohort filings (14.3%) carry one, because the sentence lives
+in the EX-99 rule-provision exhibit and most exchanges attach a stub (1Life's entire
+EX-99.25 is the string `Onem-form25`). Across all 1,282 filings the rate is higher — 395,
+concentrated in the debt-lifecycle provisions, which state redemption dates precisely.
+
+Consequence for the vendor acceptance test: item 2 ("does the series terminate at the
+suspension date?") is only checkable on those 38. For the rest, `filed_date` is the only
+date available and it is a **different event** — store NULL rather than substituting, which
+is why `research_price_series.delisting_date` is CHECK-paired to `delisting_source`.
+
+⚠⚠ **The scarcity is not uniform across provisions, and the direction is the worst
+possible one.** Measured 2026-08-05 (#2297) on the common-equity cohort:
+
+```sql
+select coalesce(rule_provision,'(c)/absent'), count(*), count(suspension_date)
+  from sec_form25_common_equity_delistings group by 1;
+--   (a)(3)  212  62
+--   (b)     105   0
+```
+
+**`(b)` — the exchange-initiated failure, the one provision where truncating a price series
+is unambiguously right — states a suspension date on ZERO of 105.** Every date the cohort
+supplies is on `(a)(3)`, where the same ticker very often keeps trading (holdco reorg,
+redomiciliation) and truncation is likely WRONG. Linde is the worked case: its `(a)(3)`
+EX-99 states all three dates cleanly, and `LIN` is `is_tradable = true` today.
+
+So "truncate at the suspension date" is not a guard that needs better coverage — it is a
+rule that can only ever fire where it does the damage. Store the date WITH its provision
+(sql/253 `delisting_provision`) and let the reader stratify; do not truncate on the date
+alone. Full write-up in `research-price-corpus.md`.
+
+**Coverage limit, stated once:** Form 25 is **US-only**. There is no free authoritative
+equivalent for EU / UK / Asia / MENA listings.
+
+**The cohort this builds is a reusable vendor acceptance test.** Any candidate price
+vendor claiming survivorship-bias-free coverage should be run against it before purchase:
+does it serve each name, does the series terminate at the suspension date, and does it
+avoid handing back the *successor* entity's or a later occupant's history under the same
+symbol.
+
+**The cohort is committed at `tests/fixtures/form25_2023_cohort.csv`** (259 rows, one per
+issuer, amendments collapsed) so it never has to be rebuilt from scratch again — the #2284
+spike built it, left it in a session scratchpad and lost it, and #2282 2c paid for it a
+second time.
+
+⚠ **Known cohort bias — do NOT restate the earlier "unbiased" claim.** Measured on the
+common-equity cohort, the failure-vs-acquisition split differs between the resolved and
+unresolved sides:
+
+| | (a)(3) acquisitions | (b) failures | pct acquisitions |
+|---|---:|---:|---:|
+| resolved (n=259) | 168 | 91 | 65% |
+| unresolved (n=49) | 35 | 14 | **71%** |
+
+A **+6.6-point** skew toward losing acquisitions, **z = 0.92** — so it is **neither
+established as biased nor demonstrated to be unbiased**; the cohort simply cannot rule it
+out. Say that, rather than the earlier write-up's "unbiased on the
+failure-vs-acquisition axis", which was measured on the pre-security-filter denominator.
+It matters because that is precisely the axis survivorship turns on.
+
+`--census` recomputes this from the register rather than quoting it, so a re-harvest
+cannot leave the number stale — which it already did once on this branch, when adding the
+`fund` class moved the skew from +10 points to +6.6.
+
 ## 3. Identifiers
 
 ### 3.1 CIK (Central Index Key)
@@ -337,6 +635,8 @@ def _parse_sec_date(s: str) -> date:
 - **Class disambiguation**: GOOGL = `02079K305` (Class A), GOOG = `02079K107` (Class C). Both CIK 1652044 (Alphabet). Aggregating without share-class CUSIP collapses two distinct holdings.
 - Source of authoritative CUSIP→CIK mapping: 13F Official List (per-quarter): `https://www.sec.gov/files/investment/13flist{year}q{quarter}.txt`. Format: fixed-width, columns `CUSIP NO.` (9 char) | `ISSUER NAME` | `ISSUER DESCRIPTION` (`SHS`, `CALL`, `PUT`, `UNIT`, `*W EXP`) | `STATUS`. Each issuer has multiple rows (common, warrant, unit, options-call, options-put). Filter for shares means matching description like `SHS`, `COMMON`, `COM`.
 
+  ⚠ **The `CALL` / `PUT` rows carry their OWN CUSIP-shaped identifier, and a 13F must NOT report it.** Form 13F Special Instruction 10 puts Columns 1 through 5 — Column 3 is the CUSIP, per 11.b.iii — "in terms of the securities underlying the options, not the options themselves", with PUT/CALL designated in Column 5. So the option classes on this list are legitimate SEC-published identifiers that are never a valid Column 3 value; filers that report one anyway strand the holding. `PUTCALL` is NOT the discriminator for finding them (a deviating row sets it correctly while Column 3 is wrong) and neither is the check digit. See `.claude/skills/data-sources/openfigi.md` §4.5 for the exact-match rule, the seven non-option securities a containment test swallows, and the `option_pseudo_cusip` terminal verdict (#2353).
+
 ### 3.3 Accession number
 
 Two interchangeable shapes:
@@ -347,7 +647,9 @@ Conversion: `str.replace("-", "")`. **The first 10 digits of an accession number
 
 Archive-URL CIK varies by form type:
 - **Form 4 / Form 3 / Form 5** — `/Archives/edgar/data/{ISSUER_CIK}/{acc_no_dashes}/...`. Insider Form 4 filings for AAPL are submitted by various filer-agent CIKs but stored under Apple's CIK 0000320193.
-- **13F-HR / 13G/D / N-PORT-P** — `/Archives/edgar/data/{FILER_CIK}/{acc_no_dashes}/...`. The filing-manager / blockholder / fund-trust IS the filer; there is no separate "issuer" in those forms. eBull's 13F builder uses the filer CIK at [app/services/sec_13f_dataset_ingest.py:334](../../../app/services/sec_13f_dataset_ingest.py#L334).
+- **13F-HR / 13G/D / N-PORT-P** — `/Archives/edgar/data/{FILER_CIK}/{acc_no_dashes}/...`. The filing-manager / blockholder / fund-trust IS the filer; there is no separate "issuer" in those forms. eBull's 13F builder uses the filer CIK at [app/services/sec_13f_dataset_ingest.py:670](../../../app/services/sec_13f_dataset_ingest.py#L670).
+
+**`.txt` full-submission vs primary doc (#2110).** Every filing is ALSO served at `/Archives/edgar/data/{cik}/{accession-dashed}.txt` — the SGML container (`<SEC-DOCUMENT>` wrapper) embedding every document of the submission verbatim. Master/daily-index `filename` fields point at THIS shape, so index-derived discovery stores it. Consumers of a primary document must tolerate it: `insider_transactions._unwrap_sgml_submission` slices the embedded `<ownershipDocument>` at the parser chokepoint (first-close, not rindex). 2026-07-22 full-pop: 14,279 form3/4/5 raws stored SGML; 11,331 were wrongly tombstoned pre-unwrap; the #1591 stored-body reuse pins whatever shape was fetched first, so the parser is the only self-heal path. HTML-kind parsers (def14a/pre14a) tolerate the prefix natively.
 
 ### 3.4 LEI (Legal Entity Identifier) + FIGI
 
@@ -397,7 +699,7 @@ A subset of SEC CIKs belong to **registered filing agents** — third-party subm
 - `https://www.sec.gov/Archives/edgar/data/{issuer_or_filer_cik_int}/{accession_no_dashes}/...` is the correct URL.
 - SEC's web archive ALSO serves the directory index under any CIK in the filing's `ciks[]` list (empirically verified — GET on `/index.json` returns 200 under issuer + filer CIKs, 404 under agent), but the file-level GET (`primary_doc.xml`, `infotable.xml`) only succeeds under non-agent CIKs.
 
-The canonical eBull defense lives at [app/providers/implementations/sec_edgar.py:97-104](../../../app/providers/implementations/sec_edgar.py#L97-L104) as `KNOWN_FILING_AGENT_CIKS`:
+The canonical eBull defense lives at [app/providers/implementations/sec_edgar.py:142](../../../app/providers/implementations/sec_edgar.py#L142) as `KNOWN_FILING_AGENT_CIKS`:
 
 ```python
 KNOWN_FILING_AGENT_CIKS: frozenset[str] = frozenset({
@@ -417,7 +719,7 @@ This list is intentionally **maintained as a code constant rather than a DB-conf
 
 **Two enforcement points** every SEC ingest path must satisfy:
 
-1. **`fetch_filing_index` legacy-fallback short-circuit** (sec_edgar.py:397-417). When a caller invokes `fetch_filing_index(accession)` without passing `issuer_cik`, the provider derives `cik_for_url` from the accession-number prefix; if that prefix is in `KNOWN_FILING_AGENT_CIKS`, it returns `None` immediately rather than generating a guaranteed-404 GET. Operator action on the warning: pass `issuer_cik` from `external_identifiers`.
+1. **`fetch_filing_index` legacy-fallback short-circuit** (`fetch_filing_index` at sec_edgar.py:403; agent-CIK guard at sec_edgar.py:478-492). When a caller invokes `fetch_filing_index(accession)` without passing `issuer_cik`, the provider derives `cik_for_url` from the accession-number prefix; if that prefix is in `KNOWN_FILING_AGENT_CIKS`, it returns `None` immediately rather than generating a guaranteed-404 GET. Operator action on the warning: pass `issuer_cik` from `external_identifiers`.
 
 2. **Manifest-worker parser guard** (post-#1249/#1250 cleanup). Every parser under `app/services/manifest_parsers/sec_*.py` that calls `_archive_file_url(row.cik, ...)` MUST check `row.cik` against `KNOWN_FILING_AGENT_CIKS` BEFORE the URL construction. The guard tombstones loudly so an upstream discovery bug (which mistakenly enqueued an agent CIK as the manifest's `cik` field) surfaces instead of generating thousands of silent 404s. Pinned by `scripts/check_archive_url_agent_guard.sh` lint with an issuer-CIK ALLOW_LIST for parsers whose `subject_type='issuer'` contract excludes agent collisions by construction.
 
@@ -431,11 +733,11 @@ This list is intentionally **maintained as a code constant rather than a DB-conf
 >
 > Current guidelines limit each user to a total of **no more than 10 requests per second, regardless of the number of machines used to submit requests**.
 
-The "regardless of the number of machines" phrasing means horizontal scaling does not buy headroom — the budget is per-User-Agent identity. eBull enforces 10 r/s **per-IP across processes** via the `sec_rate_gate` GCRA gate (#1484 — a single Postgres-row virtual floor that the API + jobs processes both reserve against). The in-process `_PROCESS_RATE_LIMIT_CLOCK` (below) bounds only ONE process and is now the test/fallback path, NOT the cross-process authority — pre-#1484 each process throttled to ≤9 r/s independently and the sum could breach the per-IP ceiling. Empirical sustained ceiling is **5–7 r/s** to avoid transient 429/503; pattern at [app/services/sec_pipelined_fetcher.py:43](../../../app/services/sec_pipelined_fetcher.py#L43). See `docs/specs/ops/2026-06-09-sec-cross-process-rate-limiter.md`.
+The "regardless of the number of machines" phrasing means horizontal scaling does not buy headroom — the budget is per-User-Agent identity. eBull enforces 10 r/s **per-IP across processes** via the `sec_rate_gate` GCRA gate (#1484 — a single Postgres-row virtual floor that the API + jobs processes both reserve against). The in-process `_PROCESS_RATE_LIMIT_CLOCK` (below) bounds only ONE process and is now the test/fallback path, NOT the cross-process authority — pre-#1484 each process throttled to ≤9 r/s independently and the sum could breach the per-IP ceiling. Empirical sustained ceiling is **5–7 r/s** to avoid transient 429/503; `DEFAULT_TARGET_RPS = 7.0` at [app/services/sec_pipelined_fetcher.py:49](../../../app/services/sec_pipelined_fetcher.py#L49). See `docs/specs/ops/2026-06-09-sec-cross-process-rate-limiter.md`.
 
 ### Multi-host shared clock
 
-The 10 req/s budget is **per-IP, not per-host**. All four SEC hosts — `data.sec.gov`, `www.sec.gov`, `efts.sec.gov`, and the `Archives/...` paths under `www.sec.gov` — share **one** rolling counter at our IP. eBull enforces this **across processes** via the `sec_rate_gate` GCRA gate (#1484): a single Postgres-row virtual floor injected as a process-global `RateGate` (`app/providers/sec_rate_gate_holder.py::get_sec_rate_gate`) into every SEC consumer — sync `ResilientClient`, async `_AsyncRateLimiter`/`PipelinedSecFetcher`, and the bulk refresh/download paths. The in-process `_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK` in [app/providers/implementations/sec_edgar.py:72](../../../app/providers/implementations/sec_edgar.py#L72) is now the **per-process test/fallback** path only (used when no gate is installed, e.g. unit tests, or when the gate's DB is unreachable) — it is NOT the cross-process authority.
+The 10 req/s budget is **per-IP, not per-host**. All four SEC hosts — `data.sec.gov`, `www.sec.gov`, `efts.sec.gov`, and the `Archives/...` paths under `www.sec.gov` — share **one** rolling counter at our IP. eBull enforces this **across processes** via the `sec_rate_gate` GCRA gate (#1484): a single Postgres-row virtual floor injected as a process-global `RateGate` (`app/providers/sec_rate_gate_holder.py::get_sec_rate_gate`) into every SEC consumer — sync `ResilientClient`, async `_AsyncRateLimiter`/`PipelinedSecFetcher`, and the bulk refresh/download paths. The in-process `_PROCESS_RATE_LIMIT_CLOCK` + `_PROCESS_RATE_LIMIT_LOCK` in [app/providers/implementations/sec_edgar.py:77](../../../app/providers/implementations/sec_edgar.py#L77) is now the **per-process test/fallback** path only (used when no gate is installed, e.g. unit tests, or when the gate's DB is unreachable) — it is NOT the cross-process authority.
 
 | Host | Serves | Conditional-GET support |
 | --- | --- | --- |
@@ -450,7 +752,7 @@ The 10 req/s budget is **per-IP, not per-host**. All four SEC hosts — `data.se
 
 ### User-Agent header
 
-Required format: `<Name> <email>`. Email must be syntactically valid and routable. eBull config at [app/config.py:29](../../../app/config.py#L29) (`sec_user_agent`). **Default `eBull dev@example.com` is unacceptable for production** — every operator install must override.
+Required format: `<Name> <email>`. Email must be syntactically valid and routable. eBull config at [app/config.py:51](../../../app/config.py#L51) (`sec_user_agent`). **Default `eBull dev@example.com` is unacceptable for production** — every operator install must override.
 
 ### What gets you blocked
 
@@ -463,13 +765,13 @@ Required format: `<Name> <email>`. Email must be syntactically valid and routabl
 ### Strategies
 
 1. **Bulk archives over per-filing scrapes.** `submissions.zip` + `companyfacts.zip` replace ~10k requests with 1.
-2. **`If-Modified-Since` against `Last-Modified`** for any per-CIK or per-filing endpoint. Server returns 304 (no body) for unchanged. Pattern at [app/providers/implementations/sec_edgar.py:497-529](../../../app/providers/implementations/sec_edgar.py#L497-L529).
-3. **`If-None-Match` against `ETag`** — works for some non-SEC archives (Frankfurter pattern at [app/providers/implementations/frankfurter.py:98-144](../../../app/providers/implementations/frankfurter.py#L98-L144) is the cleanest in-repo template). **Does NOT work for SEC bulk archives** — empirical probe 2026-05-22 returned `200 + full body` even with the exact ETag echoed back. For SEC bulk files use the client-side HEAD-compare reuse contract in the "Bulk-archive reuse contract" subsection below.
+2. **`If-Modified-Since` against `Last-Modified`** for any per-CIK or per-filing endpoint. Server returns 304 (no body) for unchanged. Pattern in `fetch_submissions_page_conditional` at [app/providers/implementations/sec_edgar.py:830-868](../../../app/providers/implementations/sec_edgar.py#L830-L868).
+3. **`If-None-Match` against `ETag`** — works for some non-SEC archives (Frankfurter pattern in `fetch_latest_rates_conditional` at [app/providers/implementations/frankfurter.py:156-210](../../../app/providers/implementations/frankfurter.py#L156-L210) is the cleanest in-repo template). **Does NOT work for SEC bulk archives** — empirical probe 2026-05-22 returned `200 + full body` even with the exact ETag echoed back. For SEC bulk files use the client-side HEAD-compare reuse contract in the "Bulk-archive reuse contract" subsection below.
 4. **Three-tier polling**:
    - **Hot**: Atom `getcurrent` for 8-K. Poll every 5–10 min during business hours.
    - **Warm**: `daily-index/master.{YYYYMMDD}.idx` early-morning batch.
    - **Cold**: per-CIK submissions JSON re-pull weekly or per-event.
-5. **Cache fetched bytes** in `raw_filings` table so re-wash is local. [app/services/raw_filings.py:11](../../../app/services/raw_filings.py#L11).
+5. **Cache fetched bytes** in the `filing_raw_documents` table (migration 107) so re-wash is local — via [app/services/raw_filings.py](../../../app/services/raw_filings.py).
 6. **Backoff on 429 / 503**. Exponential, max 8 attempts. Many transient blocks clear within 60s.
 
 ### Bulk-archive reuse contract (PR-5b, #1233)
@@ -566,7 +868,7 @@ else:
     value_dollars = value_raw * 1000
 ```
 
-Pattern at [app/services/sec_13f_dataset_ingest.py:316-326](../../../app/services/sec_13f_dataset_ingest.py#L316-L326). SUMMARYPAGE.TABLEVALUETOTAL **also** flips on this date.
+Pattern at [app/services/sec_13f_dataset_ingest.py:748-755](../../../app/services/sec_13f_dataset_ingest.py#L748-L755) (shared logic in `normalise_13f_holdings`, [app/services/thirteen_f_normalise.py:81-98](../../../app/services/thirteen_f_normalise.py#L81-L98)). SUMMARYPAGE.TABLEVALUETOTAL **also** flips on this date.
 
 ### 7.2 13F PRN rows are bond principals
 
@@ -668,6 +970,36 @@ So `financial_facts_raw` (sourced from companyfacts JSON, NO dimension/member co
 
 **Rule:** when a task assumes a per-class / per-segment / per-dimension XBRL fact "exists but isn't selected", verify it is actually reachable via our companyfacts ingest BEFORE designing — for multi-class share counts and any other dimensional fact, it is NOT. The combined-vs-per-class detection that ships meanwhile (#1646 `_detect_dual_class_denominator`) keys on the multi-class fingerprint: **the denominator falling back to us-gaap** `CommonStockSharesOutstanding` (taxonomy `us-gaap`, not `dei`) because every per-class DEI cover value was stripped. See data-engineer §Q15 + invariant I18.
 
+### 7.18 Note-level XBRL facts: plain FSDS is FACE-STATEMENTS-ONLY — the notes live in FSNDS (#844)
+
+DERA ships TWO products with near-identical names. The plain **Financial
+Statement Data Sets** (`/files/dera/data/financial-statement-data-sets/{y}q{n}.zip`,
+what #1590/#1623 consume) carries face financials + cover/parenthetical only —
+a note-level fact (RSU rollforward, ASC 718 tables) appears in ~10 filings a
+quarter (odd face-presenters), NOT the population. The full note tagging is in
+**Financial Statement and Notes Data Sets** (FSNDS,
+`/files/dera/data/financial-statement-notes-data-sets/…`). Empirically pinned
+2026-07-23 (nonvested-RSU tag): plain FSDS 2026q1 → 12 filings; FSNDS 2026_03
+→ 1,388.
+
+FSNDS specifics (vs FSDS):
+
+- **Monthly** `{YYYY}_{MM}_notes.zip` for ~the last 12 months, then DERA
+  **consolidates into quarterly** `{y}q{n}_notes.zip` — a rolling-12-monthlies
+  fetch alone leaves months 13-24 unreachable on a fresh install.
+- `num.tsv` keys dimensions by **`dimh`** (hash) → resolve via `dim.tsv`
+  (`dimhash` → `segments`); the null dimension is `dimh='0x00000000'` /
+  `dimn=0` / `segments=''`. An UNRESOLVED dimh is NOT the default — never
+  conflate.
+- `iprx` disambiguates otherwise-identical facts (primary presentation =
+  `iprx=0`); `version` is taxonomy-versioned per row (`us-gaap/2025`) —
+  prefix-match, never equality.
+- Consumer: `app/services/fsnds_notes_facts.py` (award_type axis,
+  spec docs/specs/etl/2026-07-23-drs-rsu-issuer-disclosures.md). The award
+  axis (`AwardTypeAndPlanNameAxis`) is NON-additive — members mix award types
+  with plan names (full-pop 2026_03: 58/91 default-vs-Σmembers disagreements);
+  never sum its members.
+
 ## 8. Operator checklist for new SEC integrations
 
 Before writing code that hits SEC EDGAR:
@@ -681,7 +1013,7 @@ Before writing code that hits SEC EDGAR:
 7. ✅ Implement branch-on-type (INFOTABLE SH vs PRN, NPORT NS vs PA, Form 4 D vs I).
 8. ✅ Implement VALUE unit cutover (date(2023,1,3) by filing date) for any 13F-derived figure.
 9. ✅ Use explicit identifier bridges (`company_tickers.json`, 13F Official List, GLEIF). Never fuzzy-name match without bound + coverage gate.
-10. ✅ Cache fetched bytes in `raw_filings` so re-wash is local.
+10. ✅ Cache fetched bytes via `raw_filings.py` into `filing_raw_documents` so re-wash is local.
 11. ✅ Smoke-test against canonical 5-instrument panel: AAPL, GME, MSFT, JPM, HD. Verify operator-visible figure on live endpoint after backfill (CLAUDE.md ETL clauses 8-12).
 
 ## 9. eBull-internal entry points
@@ -693,12 +1025,12 @@ Where this knowledge already lives in code:
 | CIK / ticker discovery | `daily_cik_refresh` scheduled job in [app/workers/scheduler.py](../../../app/workers/scheduler.py) + [app/services/filings.py](../../../app/services/filings.py)::`upsert_cik_mapping` |
 | 13F XML per-filing parse | [app/providers/implementations/sec_13f.py](../../../app/providers/implementations/sec_13f.py) (EdgarTools, #925) |
 | 13F dataset bulk TSV | [app/services/sec_13f_dataset_ingest.py](../../../app/services/sec_13f_dataset_ingest.py) |
-| 13F filer directory walk | [app/services/sec_13f_quarterly_sweep.py](../../../app/services/sec_13f_quarterly_sweep.py) |
+| 13F filer directory walk | `sec_13f_quarterly_sweep` in [app/workers/scheduler.py:5470](../../../app/workers/scheduler.py#L5470) |
 | 13F Official List | [app/services/sec_13f_securities_list.py](../../../app/services/sec_13f_securities_list.py) |
 | Submissions JSON walker | [app/providers/implementations/sec_submissions.py](../../../app/providers/implementations/sec_submissions.py) |
 | Submissions overflow paging | [app/jobs/sec_rebuild.py:335](../../../app/jobs/sec_rebuild.py#L335) |
-| Companyfacts ingest | [app/providers/implementations/sec_fundamentals.py](../../../app/providers/implementations/sec_fundamentals.py), [app/services/fundamentals.py](../../../app/services/fundamentals.py) |
-| Conditional fetch | [app/providers/implementations/sec_edgar.py:497-529](../../../app/providers/implementations/sec_edgar.py#L497-L529) |
+| Companyfacts ingest | [app/providers/implementations/sec_fundamentals.py](../../../app/providers/implementations/sec_fundamentals.py), [app/services/fundamentals/](../../../app/services/fundamentals) (package) |
+| Conditional fetch | `fetch_submissions_page_conditional` at [app/providers/implementations/sec_edgar.py:830-868](../../../app/providers/implementations/sec_edgar.py#L830-L868) |
 | Daily-index walker | [app/providers/implementations/sec_daily_index.py](../../../app/providers/implementations/sec_daily_index.py) |
 | Atom getcurrent | [app/providers/implementations/sec_getcurrent.py](../../../app/providers/implementations/sec_getcurrent.py) |
 | N-PORT XML parse + ingest | [app/services/n_port_ingest.py](../../../app/services/n_port_ingest.py) (stdlib `xml.etree.ElementTree`, #917) |
@@ -709,7 +1041,7 @@ Where this knowledge already lives in code:
 | Filing-folder manifest | [app/services/filing_documents.py](../../../app/services/filing_documents.py) |
 | Bulk download orchestrator | [app/services/sec_bulk_download.py](../../../app/services/sec_bulk_download.py) |
 | Raw-filing cache | [app/services/raw_filings.py](../../../app/services/raw_filings.py) |
-| Schedulers (conditional fetch) | [app/workers/scheduler.py:1460-1574](../../../app/workers/scheduler.py#L1460-L1574) |
+| Schedulers (conditional fetch) | `daily_cik_refresh` at [app/workers/scheduler.py:2512](../../../app/workers/scheduler.py#L2512) |
 
 ## 11. Manifest-worker parser onboarding
 
@@ -772,7 +1104,7 @@ Every manifest parser MUST follow this contract on its upsert except: block. The
 | Form 5 (`app/services/manifest_parsers/insider_345.py`, `_parse_form5`) | `_write_tombstone(document_type='5')` row in `insider_filings`; observations land as `source='form4'` (enum lacks `form5`) — provenance preserved via `insider_filings.document_type='5'` JOIN |
 | 13D/G (`app/services/manifest_parsers/sec_13dg.py`) | `_record_ingest_attempt(status='failed')` in `blockholder_filings_ingest_log` |
 | DEF 14A (`app/services/manifest_parsers/def14a.py`) | `_record_ingest_attempt(status='failed')` in `def14a_ingest_log` |
-| 13F-HR (`app/services/manifest_parsers/sec_13f_hr.py`) | `_record_ingest_attempt(status='failed')` in `institutional_holdings_ingest_log`; PRN drop at `sec_13f_hr.py:415-417`; 2023-01-03 VALUE cutover applied service-side at `sec_13f_hr.py:103, 397, 419-421` (manifest adapter) — the parser at `app/providers/implementations/sec_13f.py` is a pure EdgarTools wrapper that preserves raw values per the #931 contract |
+| 13F-HR (`app/services/manifest_parsers/sec_13f_hr.py`) | `_record_ingest_attempt(status='failed')` in `institutional_holdings_ingest_log`; PRN drop + 2023-01-03 VALUE cutover both delegated to the shared `normalise_13f_holdings` (`thirteen_f_normalise.py:81`) called at `sec_13f_hr.py:487`; the PRN-drop count for the ingest-log line is computed at `sec_13f_hr.py:471` — the parser at `app/providers/implementations/sec_13f.py` is a pure EdgarTools wrapper that preserves raw values per the #931 contract |
 | NPORT-P (`app/services/manifest_parsers/sec_n_port.py`) | `_record_ingest_attempt(status='failed')` in `n_port_ingest_log` |
 | 10-K (`app/services/manifest_parsers/sec_10k.py`) | Returns `ParseOutcome(status='tombstoned')` only; manifest path does NOT call `record_parse_attempt` (the legacy helper mutates `source_accession` on UPDATE and would corrupt incumbent provenance). Manifest row's `tombstoned` state owns retry semantics. |
 
@@ -810,7 +1142,7 @@ Adopted in #1152 (`instrument_business_summary` + `filed_at` column added by sql
 
 ### 11.5 ManifestSource entries with no real parser (synth no-op or out-of-band path)
 
-`ManifestSource` enum (sql/118 CHECK + `app/services/sec_manifest.py:106`) lists 14 values. As of 2026-05-14, every SEC source EITHER has a real parser registered (drains via the manifest worker) OR adopts the §11.5.1 synth no-op shape (drains as `parsed` without DB or fetch work because another path covers the SQL surface) OR is intentionally out-of-band (bulk API path, not manifest-dispatched). Catalogue:
+`ManifestSource` enum (`app/services/sec_manifest.py:107`; sql/118 CHECK, widened by later migrations) lists 18 values (incl. `sec_nt`, `sec_pre14a`, `sec_424b`, `finra_regsho_daily` added since). As of 2026-05-14, every SEC source EITHER has a real parser registered (drains via the manifest worker) OR adopts the §11.5.1 synth no-op shape (drains as `parsed` without DB or fetch work because another path covers the SQL surface) OR is intentionally out-of-band (bulk API path, not manifest-dispatched). Catalogue:
 
 | Source | Status | Why no real parser |
 |---|---|---|
@@ -850,9 +1182,9 @@ Eligible adoptions for the same shape: `sec_xbrl_facts` (companyfacts API is the
 
 The #863-#873 freshness redesign's three steady-state discovery layers shipped wiring via **#1155 / PR #1157 (2026-05-13)**:
 
-- `run_atom_fast_lane` at `app/jobs/sec_atom_fast_lane.py:104` — Layer 1 (5-min Atom). Wiring: `_INVOKERS[JOB_SEC_ATOM_FAST_LANE]` at `app/jobs/runtime.py:333` + `ScheduledJob` at `app/workers/scheduler.py:1051`.
-- `run_daily_index_reconcile` at `app/jobs/sec_daily_index_reconcile.py:46` — Layer 2 (daily-index 04:00 UTC; exempt from universal-bootstrap gate per #1181). Wiring: `_INVOKERS[JOB_SEC_DAILY_INDEX_RECONCILE]` at `app/jobs/runtime.py:334` + `ScheduledJob` at `app/workers/scheduler.py:1072`.
-- `run_per_cik_poll` at `app/jobs/sec_per_cik_poll.py:39` — Layer 3 (per-CIK cadence). Wiring: `_INVOKERS[JOB_SEC_PER_CIK_POLL]` at `app/jobs/runtime.py:335` + `ScheduledJob` at `app/workers/scheduler.py:1103`.
+- `run_atom_fast_lane` at `app/jobs/sec_atom_fast_lane.py:104` — Layer 1 (5-min Atom). Wiring: `_INVOKERS[JOB_SEC_ATOM_FAST_LANE]` at `app/jobs/runtime.py:441` + `ScheduledJob` at `app/workers/scheduler.py:1533`.
+- `run_daily_index_reconcile` at `app/jobs/sec_daily_index_reconcile.py:46` — Layer 2 (daily-index 04:00 UTC; exempt from universal-bootstrap gate per #1181). Wiring: `_INVOKERS[JOB_SEC_DAILY_INDEX_RECONCILE]` at `app/jobs/runtime.py:442` + `ScheduledJob` at `app/workers/scheduler.py:1554`.
+- `run_per_cik_poll` at `app/jobs/sec_per_cik_poll.py:302` — Layer 3 (per-CIK cadence). Wiring: `_INVOKERS[JOB_SEC_PER_CIK_POLL]` at `app/jobs/runtime.py:443` + `ScheduledJob` at `app/workers/scheduler.py:1608`.
 
 Tickets #867 / #868 / #870 CLOSED 2026-05-13; umbrella #1155 CLOSED in same PR. Operator-facing runbooks live under `app/runbooks/` (NOT `app/cli/runbooks/` — Stream A PR-D / #1311).
 

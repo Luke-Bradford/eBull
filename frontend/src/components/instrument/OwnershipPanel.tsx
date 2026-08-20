@@ -38,6 +38,9 @@ import { useNavigate } from "react-router-dom";
 
 import { fetchOwnershipRollup } from "@/api/ownership";
 import type {
+  OwnershipDef14ADrift,
+  OwnershipNonvestedAwards,
+  OwnershipDrs,
   OwnershipRollupResponse,
   OwnershipSlice,
   OwnershipSliceCategory,
@@ -57,7 +60,7 @@ import { Pane } from "@/components/instrument/Pane";
 import {
   formatPct,
   formatShares,
-  ownershipStaleDenominatorCopy,
+  ownershipSuppressedDenominatorCopy,
   parseShareCount,
   topHoldersByShares,
 } from "@/components/instrument/ownershipMetrics";
@@ -230,6 +233,9 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
     return (
       <div className="flex flex-col gap-3">
         <OwnershipCoverageBanner banner={rollup.banner} />
+        {/* Drift is denominator-independent (#966) — keep the chip
+            visible even when the rollup itself is degraded. */}
+        <Def14ADriftChip drift={rollup.def14a_drift ?? null} />
         <HistoricalSymbolCallout
           currentSymbol={rollup.symbol}
           historicalSymbols={rollup.historical_symbols}
@@ -237,8 +243,9 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
         <EmptyState
           title="No ownership data"
           description={
-            ownershipStaleDenominatorCopy(
+            ownershipSuppressedDenominatorCopy(
               rollup.banner.state,
+              rollup.no_data_reason ?? null,
               rollup.shares_outstanding_as_of,
             ) ??
             "XBRL shares-outstanding not yet on file for this instrument. Trigger a fundamentals sync, or wait for the next scheduled run."
@@ -252,6 +259,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
     return (
       <div className="flex flex-col gap-3">
         <OwnershipCoverageBanner banner={rollup.banner} />
+        <Def14ADriftChip drift={rollup.def14a_drift ?? null} />
         <HistoricalSymbolCallout
           currentSymbol={rollup.symbol}
           historicalSymbols={rollup.historical_symbols}
@@ -272,6 +280,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
         historicalSymbols={rollup.historical_symbols}
       />
       <ConcentrationChip rollup={rollup} />
+      <Def14ADriftChip drift={rollup.def14a_drift ?? null} />
       {rollup.dual_class_denominator !== null && (
         <DualClassDenominatorCallout note={rollup.dual_class_denominator.note} />
       )}
@@ -315,6 +324,8 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
           </p>
           <SliceTable rollup={rollup} />
           <ResidualLine rollup={rollup} />
+          <NonvestedAwardsMemo memo={rollup.nonvested_awards ?? null} />
+          <DrsMemo drs={rollup.drs ?? null} />
           <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
             Click any colored wedge for the per-filer drilldown.
           </p>
@@ -332,6 +343,91 @@ function ConcentrationChip({ rollup }: ConcentrationChipProps): JSX.Element {
   return (
     <p className="text-xs text-slate-500 dark:text-slate-400" data-test="concentration-chip">
       {rollup.concentration.info_chip}
+    </p>
+  );
+}
+
+function Def14ADriftChip({
+  drift,
+}: {
+  readonly drift: OwnershipDef14ADrift | null;
+}): JSX.Element | null {
+  // #966 — DEF 14A vs Form 4 drift. Server-owned copy; no client-side
+  // threshold logic (operator-ui convention). Amber = warning, red =
+  // critical (color semantics table).
+  if (drift === null) {
+    return null;
+  }
+  const palette =
+    drift.worst_severity === "critical"
+      ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-200"
+      : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-200";
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 text-xs ${palette}`}
+      role="status"
+      data-test="def14a-drift-chip"
+    >
+      {drift.chip}
+      {drift.holders.length > 0 && (
+        <span className="opacity-80"> Worst: {drift.holders.join(", ")}.</span>
+      )}
+    </div>
+  );
+}
+
+function NonvestedAwardsMemo({
+  memo,
+}: {
+  readonly memo: OwnershipNonvestedAwards | null;
+}): JSX.Element | null {
+  // #844 — unvested RSU/PSU memo. Absolute count only (RSUs are not
+  // outstanding until vested — never a wedge); server-owned label.
+  if (memo === null) {
+    return null;
+  }
+  const shares = parseShareCount(memo.shares);
+  if (shares === null || shares <= 0) {
+    return null;
+  }
+  return (
+    <p
+      className="mt-1 text-xs text-slate-500 dark:text-slate-400"
+      data-test="nonvested-awards-memo"
+    >
+      +{formatShares(shares)} {memo.label} (not outstanding until vested; as of{" "}
+      {memo.period_end}).
+    </p>
+  );
+}
+
+function DrsMemo({ drs }: { readonly drs: OwnershipDrs | null }): JSX.Element | null {
+  // #844 PR-2 — issuer-disclosed registered/street split. Server owns
+  // cohort + staleness; absence renders nothing (no fake "0 DRS" state).
+  if (drs === null) {
+    return null;
+  }
+  const registered = parseShareCount(drs.registered_shares);
+  if (registered === null || registered <= 0) {
+    return null;
+  }
+  // #2124 — the server sends a raw NUMERIC(8,4) string ("14.0000"); parse
+  // to trim trailing zeros ("14", "99.6", "0.4"). formatPct is not reused:
+  // it expects a fraction and force-fixes 2 decimals ("14.00%").
+  const pctNum =
+    drs.registered_pct !== null ? Number.parseFloat(drs.registered_pct) : NaN;
+  const pct = Number.isFinite(pctNum) ? ` (${pctNum}%)` : "";
+  const holders =
+    drs.holders_of_record !== null
+      ? `; ${drs.holders_of_record.toLocaleString()} holders of record`
+      : "";
+  return (
+    <p
+      className="mt-1 text-xs text-slate-500 dark:text-slate-400"
+      data-test="drs-memo"
+    >
+      {formatShares(registered)}{pct} registered with transfer agent (DRS/book
+      form){holders} · as of {drs.as_of_date}.
     </p>
   );
 }
@@ -474,6 +570,39 @@ const _OVERLAY_TOP_N = 8;
  * ``institution_subset`` slice surfaces here automatically; only the
  * funds-specific double-count copy is keyed on the category.
  */
+/**
+ * A minority of stored DEF 14A rows have a numeric ``holder_name`` (a share
+ * count leaked into the name column — a parser bug tracked separately, ~13% of
+ * proxy rows full-pop). Don't stamp a confident role badge onto a row whose
+ * identity failed to parse: require at least one letter in the name. This
+ * declines to decorate a known-broken row; it does not re-derive the role.
+ */
+export function hasParsedHolderName(name: string): boolean {
+  return /[A-Za-z]/.test(name);
+}
+
+/**
+ * Human label for a DEF 14A proxy role tag (#2121). Purely descriptive — the
+ * SEC Item 403 sub-table each holder appeared in. ``group`` is the 403(b) "all
+ * directors & officers as a group" AGGREGATE row (its shares already contain the
+ * individual officer/director rows), so it is labelled distinctly and never
+ * added to the pie. Unknown values fall through to a title-cased raw string.
+ */
+export function proxyRoleLabel(role: string): string {
+  switch (role) {
+    case "officer":
+      return "Officer";
+    case "director":
+      return "Director";
+    case "principal":
+      return "5% holder";
+    case "group":
+      return "Group total";
+    default:
+      return role.charAt(0).toUpperCase() + role.slice(1);
+  }
+}
+
 function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
   const total = parseShareCount(slice.total_shares) ?? 0;
   const totalPct = parseShareCount(slice.pct_outstanding) ?? 0;
@@ -533,6 +662,14 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
                   ) : (
                     h.filer_name
                   )}
+                  {isProxy && h.holder_role && hasParsedHolderName(h.filer_name) ? (
+                    <span
+                      className="ml-1.5 rounded bg-slate-200 px-1 py-0.5 text-[0.5rem] font-medium uppercase tracking-wide text-slate-600 dark:bg-slate-700 dark:text-slate-300"
+                      title="SEC Item 403 proxy role — descriptive only, not added to the pie"
+                    >
+                      {proxyRoleLabel(h.holder_role)}
+                    </span>
+                  ) : null}
                 </td>
                 <td className="py-1 text-right font-mono text-slate-600 dark:text-slate-300">
                   {formatShares(hShares)}

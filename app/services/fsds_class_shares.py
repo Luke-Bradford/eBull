@@ -141,9 +141,11 @@ def parse_class_member(segments: str) -> str | None:
     return member
 
 
-def read_fsds_sub(zf: zipfile.ZipFile) -> dict[str, FsdsSub]:
-    """``sub.txt`` -> ``{adsh: FsdsSub}``. sub.txt is small (~2 MB)."""
-    name = "sub.txt"
+def read_fsds_sub(zf: zipfile.ZipFile, *, name: str = "sub.txt") -> dict[str, FsdsSub]:
+    """``sub.txt`` -> ``{adsh: FsdsSub}``. sub.txt is small (~2 MB).
+
+    FSNDS monthly archives (#844) carry the same columns as ``sub.tsv`` —
+    pass ``name="sub.tsv"``."""
     if name not in zf.namelist():
         candidates = [n for n in zf.namelist() if n.endswith("/" + name) or n == name]
         if not candidates:
@@ -172,11 +174,13 @@ def read_fsds_sub(zf: zipfile.ZipFile) -> dict[str, FsdsSub]:
     return out
 
 
-def iter_fsds_num(zf: zipfile.ZipFile) -> Iterator[dict[str, str]]:
+def iter_fsds_num(zf: zipfile.ZipFile, *, name: str = "num.txt") -> Iterator[dict[str, str]]:
     """Stream ``num.txt`` rows as dicts (header-keyed). 530 MB/quarter — never
     materialised. Manual tab-split (DERA num.txt is a flat TSV with NO quoting;
-    csv.reader's quote handling could misfire on a stray ``"`` in a footnote)."""
-    name = "num.txt"
+    csv.reader's quote handling could misfire on a stray ``"`` in a footnote).
+
+    FSNDS monthly archives (#844) share the row shape — pass ``name="num.tsv"``
+    (or ``"dim.tsv"``, same flat-TSV encoding)."""
     if name not in zf.namelist():
         candidates = [n for n in zf.namelist() if n.endswith("/" + name) or n == name]
         if not candidates:

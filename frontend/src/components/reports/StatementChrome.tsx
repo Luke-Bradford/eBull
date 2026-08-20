@@ -8,6 +8,7 @@ import type { ReactNode } from "react";
 
 import { formatDate, formatDateTime } from "@/lib/format";
 import { formatPeriodRange } from "@/components/reports/snapshotMath";
+import { Badge } from "@/components/ui/Badge";
 
 export function Masthead({
   currency,
@@ -64,9 +65,7 @@ export function ScopeCaveat({ children }: { children: ReactNode }) {
 /** Tier-2: genuine degraded state (fx_unavailable) — amber badge. */
 export function DegradedBadge({ children }: { children: ReactNode }) {
   return (
-    <span className="inline-block rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
-      {children}
-    </span>
+    <Badge tone="warn">{children}</Badge>
   );
 }
 

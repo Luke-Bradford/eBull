@@ -101,6 +101,30 @@ class TestValueScoreEnriched:
         assert score == pytest.approx(0.5)
         assert any("fundamentals fallback" in n for n in notes)
 
+    def test_value_score_fallback_note_no_thesis(self) -> None:
+        """No thesis at all → note says 'no thesis' (#2005)."""
+        _, notes = _value_score(
+            base_value=None,
+            bear_value=None,
+            current_price=100.0,
+            pe_ratio=15.0,
+            thesis_stance=None,
+        )
+        assert "fundamentals fallback (no thesis)" in notes
+
+    def test_value_score_fallback_note_thesis_declined_targets(self) -> None:
+        """Thesis exists but declined targets (avoid, null base) → note names the
+        stance instead of misreporting the thesis as absent (#2005, BKTI class)."""
+        _, notes = _value_score(
+            base_value=None,
+            bear_value=None,
+            current_price=100.0,
+            pe_ratio=15.0,
+            thesis_stance="avoid",
+        )
+        assert "fundamentals fallback (thesis without targets, stance: avoid)" in notes
+        assert not any(n == "fundamentals fallback (no thesis)" for n in notes)
+
     def test_value_score_no_price(self) -> None:
         """current_price=None → neutral 0.5 regardless of other params."""
         score, notes = _value_score(

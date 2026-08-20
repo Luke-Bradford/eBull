@@ -25,6 +25,7 @@ from app.services.portfolio_eod import (
     _read_positions,
     _resolve_snapshot_date,
     _write_snapshot,
+    summarise_marks,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401  (fixture)
 
@@ -81,8 +82,15 @@ def test_read_positions_carries_close_forward(ebull_test_conn: psycopg.Connectio
     rows = _read_positions(conn, date(2025, 6, 11))
     assert len(rows) == 1
     assert rows[0].close == Decimal("20")
+    # ⚠ #2602 item 4 — the mark's own date, which is the whole point of the
+    # LATERAL: the close is the 9th's, not the 11th's, and the snapshot would
+    # otherwise be stamped the 11th with no record that its input was two days
+    # old. Asserted from the SAME row as `close`, because "same bar" is the
+    # property two independent scalar subqueries would not guarantee.
+    assert rows[0].mark_price_date == date(2025, 6, 9)
     assert rows[0].native_ccy == "USD"
     assert rows[0].units == Decimal("3")
+    assert rows[0].open_conversion_rate == Decimal("1")
 
 
 def test_read_positions_excludes_synthetic_ids(ebull_test_conn: psycopg.Connection[Any]) -> None:  # noqa: F811
@@ -210,7 +218,7 @@ def test_write_snapshot_is_idempotent(ebull_test_conn: psycopg.Connection[Any]) 
     _seed_position(conn, 5004, 9004, "2")
     d = date(2025, 6, 12)
 
-    def _equity(total: str) -> EodEquity:
+    def _equity(total: str, mark: date | None) -> EodEquity:
         return EodEquity(
             positions_value=Decimal(total),
             cash_value=Decimal("0"),
@@ -220,22 +228,53 @@ def test_write_snapshot_is_idempotent(ebull_test_conn: psycopg.Connection[Any]) 
             positions_no_price=0,
             positions_no_fx=0,
             cash_no_fx_currencies=0,
-            position_results=[PositionResult(5004, 9004, Decimal("2"), "USD", Decimal("10"), Decimal(total), "priced")],
+            position_results=[
+                PositionResult(
+                    5004,
+                    9004,
+                    Decimal("2"),
+                    "USD",
+                    Decimal("10"),
+                    Decimal(total),
+                    "priced",
+                    mark_price_date=mark,
+                )
+            ],
         )
 
+    stale = date(2025, 6, 9)
     with conn.transaction():
-        _write_snapshot(conn, d, "GBP", date(2025, 6, 12), _equity("16.00"))
+        _write_snapshot(
+            conn, d, "GBP", d, _equity("16.00", stale), summarise_marks(_equity("16.00", stale).position_results, d)
+        )
     # Re-run for the same date with a different value → overwrite, not duplicate.
+    # ⚠ The re-run's marks are CURRENT where the first run's were carried
+    # forward. The mark columns must move with the total: leaving a stale bound
+    # beside a freshly recomputed number is worse than never recording one, and
+    # an `ON CONFLICT` update set that forgets them does exactly that silently.
     with conn.transaction():
-        _write_snapshot(conn, d, "GBP", date(2025, 6, 12), _equity("18.00"))
+        _write_snapshot(
+            conn, d, "GBP", d, _equity("18.00", d), summarise_marks(_equity("18.00", d).position_results, d)
+        )
 
     snap_row = conn.execute(
-        "SELECT COUNT(*), MAX(total_value) FROM portfolio_eod_snapshots WHERE snapshot_date = %s", (d,)
+        """
+        SELECT COUNT(*), MAX(total_value), MAX(oldest_mark_date), MAX(stale_mark_positions)
+        FROM portfolio_eod_snapshots WHERE snapshot_date = %s
+        """,
+        (d,),
     ).fetchone()
     pos_row = conn.execute(
-        "SELECT COUNT(*) FROM portfolio_eod_position_snapshots WHERE snapshot_date = %s", (d,)
+        """
+        SELECT COUNT(*), MAX(unrealised_pnl_usd), MAX(mark_price_date)
+        FROM portfolio_eod_position_snapshots WHERE snapshot_date = %s
+        """,
+        (d,),
     ).fetchone()
     assert snap_row is not None and pos_row is not None
     assert snap_row[0] == 1
     assert pos_row[0] == 1
+    assert pos_row[1] is None
     assert snap_row[1] == Decimal("18.00")
+    assert (snap_row[2], snap_row[3]) == (d, 0)
+    assert pos_row[2] == d

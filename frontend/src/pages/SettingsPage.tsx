@@ -32,9 +32,11 @@ import { runJob } from "@/api/jobs";
 import { ValidationResultDisplay } from "@/components/broker/ValidationResultDisplay";
 import { BudgetConfigSection } from "@/components/settings/BudgetConfigSection";
 import { DisplayCurrencySection } from "@/components/settings/DisplayCurrencySection";
+import { LlmProviderSection } from "@/components/settings/LlmProviderSection";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { useSession } from "@/lib/session";
+import { Badge } from "@/components/ui/Badge";
 
 const MIN_SECRET_LEN = 4;
 
@@ -50,6 +52,7 @@ export function SettingsPage(): JSX.Element {
         currentCurrency={displayCurrency}
         onChanged={() => window.location.reload()}
       />
+      <LlmProviderSection />
       <BudgetConfigSection />
       <BrokerCredentialsSection />
     </div>
@@ -400,7 +403,7 @@ function BrokerCredentialsSection(): JSX.Element {
       </div>
 
       {loadError !== null && (
-        <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+        <div role="alert" className="rounded bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
           {loadError}
         </div>
       )}
@@ -438,9 +441,9 @@ function BrokerCredentialsSection(): JSX.Element {
                     {row.provider} · {row.environment} · ••••{row.last_four}
                   </span>
                   {revoked && (
-                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                    <Badge uppercase className="ml-2">
                       revoked
-                    </span>
+                    </Badge>
                   )}
                 </div>
                 <div className="flex gap-2">
@@ -459,7 +462,7 @@ function BrokerCredentialsSection(): JSX.Element {
                       type="button"
                       onClick={() => void handleRevoke(row)}
                       disabled={busyId === row.id}
-                      className="rounded border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                      className="rounded border border-red-300 dark:border-red-700 px-2 py-1 text-xs text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
                     >
                       {busyId === row.id ? "Revoking…" : "Revoke"}
                     </button>
@@ -471,7 +474,7 @@ function BrokerCredentialsSection(): JSX.Element {
         </ul>
       )}
       {actionError !== null && (
-        <p role="alert" className="text-xs text-rose-700">
+        <p role="alert" className="text-xs text-red-700 dark:text-red-300">
           {actionError}
         </p>
       )}
@@ -531,7 +534,7 @@ function BrokerCredentialsSection(): JSX.Element {
             />
           </label>
           {editError !== null && (
-            <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
+            <div role="alert" className="rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300">
               {editError}
             </div>
           )}
@@ -614,7 +617,7 @@ function BrokerCredentialsSection(): JSX.Element {
           />
 
           {editError !== null && (
-            <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
+            <div role="alert" className="rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300">
               {editError}
             </div>
           )}
@@ -715,7 +718,7 @@ function BrokerCredentialsSection(): JSX.Element {
           {createError !== null && (
             <div
               role="alert"
-              className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300"
+              className="rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300"
             >
               {createError}
             </div>

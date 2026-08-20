@@ -41,6 +41,7 @@ from app.services.transaction_cost import (
     estimate_cost,
     get_transaction_cost_config,
     load_instrument_cost,
+    missing_cost_components,
     record_estimated_cost,
     spread_pct_to_bps,
 )
@@ -770,6 +771,10 @@ class SafetyLayerDisabledError(RuntimeError):
     layer (fx_rates or portfolio_sync) disabled by the operator."""
 
 
+class TransactionCostUnavailableError(RuntimeError):
+    """BUY/ADD cannot execute while a cost component is unestablished."""
+
+
 def _assert_safety_layers_enabled_for_buy_add(
     conn: psycopg.Connection[Any],
     action: str,
@@ -788,6 +793,19 @@ def _assert_safety_layers_enabled_for_buy_add(
     if disabled:
         raise SafetyLayerDisabledError(
             f"{' + '.join(disabled)} disabled — BUY/ADD execution aborted; re-enable the layer to proceed.",
+        )
+
+
+def _assert_transaction_cost_complete_for_buy_add(
+    conn: psycopg.Connection[Any], action: str, instrument_id: int
+) -> None:
+    """Re-check cost provenance immediately before a possible broker call."""
+    if action not in ("BUY", "ADD"):
+        return
+    missing = missing_cost_components(load_instrument_cost(conn, instrument_id))
+    if missing:
+        raise TransactionCostUnavailableError(
+            f"BUY/ADD execution aborted: costs not established for {', '.join(missing)}"
         )
 
 
@@ -839,6 +857,7 @@ def execute_order(
     instrument_id: int = int(rec["instrument_id"])
     action: str = str(rec["action"])
     _assert_safety_layers_enabled_for_buy_add(conn, action)
+    _assert_transaction_cost_complete_for_buy_add(conn, action, instrument_id)
 
     # --- Step 2: determine order parameters ---
     # requested_amount is the dollar amount to invest.

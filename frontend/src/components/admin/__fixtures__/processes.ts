@@ -71,6 +71,12 @@ export function deriveVerdict(
       return { health_verdict: "self_healing", self_healing: true, verdict_reason: "retry scheduled" };
     case "failed":
       return { health_verdict: "attention", self_healing: false, verdict_reason: "last run failed" };
+    case "degraded":
+      return {
+        health_verdict: "attention",
+        self_healing: false,
+        verdict_reason: "completed with no progress",
+      };
     case "cancelled":
       return { health_verdict: "attention", self_healing: false, verdict_reason: "last run cancelled" };
     case "pending_first_run":

@@ -8,7 +8,9 @@ import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/S
 import { EmptyState } from "@/components/states/EmptyState";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
+import { Avatar } from "@/lib/avatar";
 import type { MirrorSummary, MirrorPositionItem, MirrorClosedPositionItem } from "@/api/types";
+import { Badge } from "@/components/ui/Badge";
 
 /**
  * Mirror detail page (#221 — mirrors as positions).
@@ -46,7 +48,7 @@ export function CopyTradingPage() {
         </Link>
         {username ? (
           <h1 className="flex items-center gap-2 text-xl font-semibold text-slate-800 dark:text-slate-100">
-            <TraderAvatar username={username} />
+            <Avatar username={username} size="lg" />
             {username}
           </h1>
         ) : (
@@ -81,35 +83,6 @@ export function CopyTradingPage() {
         </>
       )}
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Trader avatar — eToro-style initials circle
-// ---------------------------------------------------------------------------
-
-const AVATAR_TONES = [
-  "bg-blue-600",
-  "bg-emerald-600",
-  "bg-amber-600",
-  "bg-rose-600",
-  "bg-violet-600",
-  "bg-cyan-600",
-] as const;
-
-function avatarTone(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
-  return AVATAR_TONES[Math.abs(hash) % AVATAR_TONES.length] ?? "bg-blue-600";
-}
-
-function TraderAvatar({ username }: { username: string }) {
-  return (
-    <span
-      className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white ${avatarTone(username)}`}
-    >
-      {username.charAt(0).toUpperCase()}
-    </span>
   );
 }
 
@@ -283,7 +256,7 @@ function ClosedExitsTable({
                 ) : null}
               </td>
               <td className="px-2 py-2 text-left">
-                <span className={e.is_buy ? "text-emerald-600" : "text-rose-600"}>
+                <span className={e.is_buy ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}>
                   {e.is_buy ? "Buy" : "Sell"}
                 </span>
               </td>
@@ -385,13 +358,9 @@ function SubPositionRow({
   return (
     <tr className="border-t border-slate-50 bg-slate-50/60 text-xs text-slate-600">
       <td className="py-1.5 pl-6 pr-2 text-left">
-        <span
-          className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
-            position.is_buy ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300"
-          }`}
-        >
+        <Badge tone={position.is_buy ? "ok" : "risk"}>
           {position.is_buy ? "LONG" : "SHORT"}
-        </span>
+        </Badge>
         <span className="ml-2 text-slate-400">
           entry {formatNumber(position.open_rate, 2)}
         </span>

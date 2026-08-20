@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import threading
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -26,17 +27,23 @@ import pytest
 from app.services import etoro_websocket
 from app.services.etoro_websocket import (
     EtoroWebSocketSubscriber,
+    OpAck,
     QuoteUpdate,
+    RateStateStore,
     _await_auth_envelope,
     _compute_spread_pct,
     _is_auth_success,
     _looks_like_json_envelope,
     build_auth_message,
     build_private_subscribe_message,
+    build_subscribe_frames,
     build_subscribe_message,
+    build_unsubscribe_frames,
     build_unsubscribe_message,
     fetch_watched_instrument_ids,
     is_private_event,
+    parse_op_acks,
+    parse_rate_deltas,
     parse_rate_message,
     parse_rate_messages,
     upsert_quote,
@@ -169,6 +176,385 @@ class TestParseRateMessage:
             {"type": "Trading.Instrument.Rate", "data": {"Bid": "1", "Ask": "2", "Date": "2026-04-24T14:30:00Z"}}
         )
         assert parse_rate_message(raw) is None
+
+
+class TestFrameChunking:
+    """#2249 — a single Subscribe frame over the ref set is fatal above
+    ~25 KiB, and the failure is SILENT: eToro drops the socket with 1006
+    and an empty reason, so `ws.send()` succeeds and nothing surfaces."""
+
+    def test_five_thousand_wide_ids_all_fit_under_the_limit(self) -> None:
+        # Widest ids in the real universe are 6 digits (100236 etc.).
+        ids = list(range(100_000, 105_000))
+        frames = build_subscribe_frames(ids)
+
+        assert len(frames) > 1, "5,000 wide ids must not fit in one frame"
+        for f in frames:
+            assert len(f.payload.encode("utf-8")) <= etoro_websocket._WS_FRAME_LIMIT_BYTES
+
+        # Nothing dropped and nothing duplicated across the split.
+        sent = [t for f in frames for t in json.loads(f.payload)["data"]["topics"]]
+        assert sent == [f"instrument:{i}" for i in ids]
+
+    def test_chunking_is_by_bytes_not_topic_count(self) -> None:
+        """Same COUNT, different id widths → different frame counts.
+        A count-based cap would give the same answer for both."""
+        narrow = build_subscribe_frames(list(range(10, 3_010)))
+        wide = build_subscribe_frames(list(range(100_000_000, 100_003_000)))
+        assert len(wide) > len(narrow)
+
+    def test_subscribe_frames_carry_snapshot_and_unsubscribe_does_not(self) -> None:
+        sub = build_subscribe_frames([1, 2, 3])
+        assert json.loads(sub[0].payload)["data"]["snapshot"] is True
+        assert json.loads(sub[0].payload)["operation"] == "Subscribe"
+
+        unsub = build_unsubscribe_frames([1, 2, 3])
+        assert "snapshot" not in json.loads(unsub[0].payload)["data"]
+        assert json.loads(unsub[0].payload)["operation"] == "Unsubscribe"
+
+    def test_empty_input_produces_no_frames(self) -> None:
+        assert build_subscribe_frames([]) == []
+        assert build_unsubscribe_frames([]) == []
+
+    def test_every_frame_has_a_distinct_id(self) -> None:
+        frames = build_subscribe_frames(list(range(100_000, 105_000)))
+        ids = [f.frame_id for f in frames]
+        assert len(set(ids)) == len(ids)
+
+
+class TestParseOpAcks:
+    """#2249 — a missing ack is the ONLY signal that a frame was dropped."""
+
+    def test_parses_success_ack(self) -> None:
+        raw = json.dumps({"id": "abc", "success": True, "operation": "Subscribe"})
+        assert parse_op_acks(raw) == [OpAck(frame_id="abc", operation="Subscribe", success=True, error_code=None)]
+
+    def test_parses_rejection_with_error_code(self) -> None:
+        raw = json.dumps(
+            {
+                "id": "abc",
+                "success": False,
+                "operation": "Subscribe",
+                "errorCode": "SubscribeFailed",
+            }
+        )
+        (ack,) = parse_op_acks(raw)
+        assert ack.success is False
+        assert ack.error_code == "SubscribeFailed"
+
+    def test_parses_acks_inside_the_messages_envelope(self) -> None:
+        raw = json.dumps(
+            {
+                "messages": [
+                    {"id": "a", "success": True, "operation": "Subscribe"},
+                    {"id": "b", "success": True, "operation": "Unsubscribe"},
+                ]
+            }
+        )
+        assert [a.frame_id for a in parse_op_acks(raw)] == ["a", "b"]
+
+    def test_rate_frames_and_junk_are_not_acks(self) -> None:
+        assert parse_op_acks(_rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1", Ask="2")) == []
+        assert parse_op_acks("not json") == []
+        assert parse_op_acks(json.dumps({"id": "x", "operation": "Authenticate"})) == []
+
+
+class TestAckCorrelation:
+    """#2249 — the log used to read 'subscribed to N topics' immediately
+    before every death, because the send succeeds locally."""
+
+    def _sub(self) -> EtoroWebSocketSubscriber:
+        sentinel: Any = object()
+        return EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+
+    def test_ack_clears_the_pending_entry(self) -> None:
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        assert frame.frame_id in sub._pending_acks
+
+        sub._resolve_acks(json.dumps({"id": frame.frame_id, "success": True, "operation": "Subscribe"}))
+        assert sub._pending_acks == {}
+
+    def test_unacked_frame_is_reported_and_then_forgotten(self, caplog: pytest.LogCaptureFixture) -> None:
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        # Backdate past the timeout rather than sleeping.
+        operation, count, sent_at = sub._pending_acks[frame.frame_id]
+        sub._pending_acks[frame.frame_id] = (operation, count, sent_at - etoro_websocket._ACK_TIMEOUT_S - 1)
+
+        with caplog.at_level(logging.WARNING):
+            sub._reap_unacked()
+        assert "NEVER ACKED" in caplog.text
+        assert sub._pending_acks == {}, "reported once, then dropped so it does not repeat"
+
+    async def test_reaper_fires_with_no_inbound_traffic(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Codex checkpoint-2 catch: the failure this detects is an
+        oversize frame that gets the SOCKET DROPPED, so no further
+        inbound message ever arrives. A reaper riding the receive loop
+        would miss exactly the case it exists for — it must be timed."""
+        monkeypatch.setattr(etoro_websocket, "_ACK_TIMEOUT_S", 0.02)
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+
+        reaper = asyncio.create_task(sub._ack_reaper_loop())
+        try:
+            with caplog.at_level(logging.WARNING):
+                # No frames are fed to _listen at all — the reaper is
+                # the only thing running.
+                for _ in range(100):
+                    await asyncio.sleep(0.01)
+                    if not sub._pending_acks:
+                        break
+            assert sub._pending_acks == {}
+            assert "NEVER ACKED" in caplog.text
+        finally:
+            sub._stop_event.set()
+            reaper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reaper
+
+    def test_reconnect_reports_pending_rather_than_clearing_silently(self, caplog: pytest.LogCaptureFixture) -> None:
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        with caplog.at_level(logging.WARNING):
+            sub._reap_unacked(reason="connection was re-established before the ack arrived")
+        assert "NEVER ACKED" in caplog.text
+        assert sub._pending_acks == {}
+
+    async def test_ack_arriving_during_send_still_clears_the_entry(self) -> None:
+        """Review round 3 — `ws.send` awaits, so the receive loop can
+        resolve this very frame's ack before control returns. If the
+        entry were registered AFTER the send, nothing would ever clear
+        it and the reaper would report an acked frame as NEVER ACKED."""
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+
+        class AckingWs:
+            """Acks from inside `send` — the tightest possible race."""
+
+            async def send(self, payload: str) -> None:
+                await asyncio.sleep(0)  # yield, as a real send does
+                sub._resolve_acks(json.dumps({"id": frame.frame_id, "success": True, "operation": "Subscribe"}))
+
+        await sub._send_frames(AckingWs(), [frame])  # type: ignore[arg-type]
+        assert sub._pending_acks == {}, "ack raced the registration and was lost"
+
+    async def test_failed_send_is_deregistered(self) -> None:
+        """Nothing will ack a frame that never reached the wire."""
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+
+        class BrokenWs:
+            async def send(self, payload: str) -> None:
+                raise ConnectionError("socket gone")
+
+        with pytest.raises(ConnectionError):
+            await sub._send_frames(BrokenWs(), [frame])  # type: ignore[arg-type]
+        assert sub._pending_acks == {}
+
+    def test_fresh_frame_is_not_reported(self) -> None:
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        sub._reap_unacked()
+        assert frame.frame_id in sub._pending_acks
+
+    def test_rejection_is_logged_without_tearing_down(self, caplog: pytest.LogCaptureFixture) -> None:
+        """#2241: an over-cap rejection does NOT poison the session —
+        already-subscribed topics keep serving. Log, do not reconnect."""
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        with caplog.at_level(logging.WARNING):
+            sub._resolve_acks(
+                json.dumps(
+                    {
+                        "id": frame.frame_id,
+                        "success": False,
+                        "operation": "Subscribe",
+                        "errorCode": "SubscribeFailed",
+                    }
+                )
+            )
+        assert "REJECTED" in caplog.text
+        assert sub._pending_acks == {}
+
+
+def _rate_frame(instrument_id: int, date: str, **fields: str) -> str:
+    """One official-envelope rate frame carrying exactly ``fields``.
+
+    Mirrors the live shape: the instrument is on the envelope
+    ``topic``, never in the payload (#2243).
+    """
+    payload: dict[str, str] = {"Date": date, "PriceRateID": "x", **fields}
+    return json.dumps(
+        {
+            "messages": [
+                {
+                    "topic": f"instrument:{instrument_id}",
+                    "type": "Trading.Instrument.Rate",
+                    "content": json.dumps(payload),
+                }
+            ]
+        }
+    )
+
+
+class TestRateStateStore:
+    """#2252 — eToro's rate push is a field-level sparse delta.
+
+    Shapes below are the ones actually observed on the wire over
+    180,666 messages (#2243): only 16.8% carry Bid+Ask together, and
+    requiring both discarded 58.1% of price-CHANGING pushes.
+    """
+
+    def _apply(self, store: RateStateStore, raw: str) -> list[QuoteUpdate]:
+        return [u for d in parse_rate_deltas(raw) if (u := store.apply(d)) is not None]
+
+    def test_snapshot_then_partials_each_produce_a_tick(self) -> None:
+        """The core defect: after a complete snapshot seeds state, a
+        bid-only and an ask-only push must each emit a merged tick."""
+        store = RateStateStore()
+
+        seeded = self._apply(
+            store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="186.50", Ask="186.70", LastExecution="186.60")
+        )
+        assert [(u.bid, u.ask, u.last) for u in seeded] == [(Decimal("186.50"), Decimal("186.70"), Decimal("186.60"))]
+
+        # Bid-only — pre-#2252 this was dropped entirely.
+        bid_only = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Bid="187.00"))
+        assert len(bid_only) == 1
+        assert bid_only[0].bid == Decimal("187.00")
+        assert bid_only[0].ask == Decimal("186.70")  # standing ask retained
+        assert bid_only[0].last == Decimal("186.60")  # absent field unchanged
+        assert bid_only[0].quoted_at == datetime(2026, 8, 4, 10, 0, 1, tzinfo=UTC)
+
+        # Ask-only.
+        ask_only = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:02Z", Ask="187.40"))
+        assert len(ask_only) == 1
+        assert ask_only[0].bid == Decimal("187.00")
+        assert ask_only[0].ask == Decimal("187.40")
+
+        # LastExecution alone (1.6% of the wire).
+        last_only = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:03Z", LastExecution="187.20"))
+        assert len(last_only) == 1
+        assert last_only[0].last == Decimal("187.20")
+        assert last_only[0].bid == Decimal("187.00")
+
+    def test_heartbeat_emits_nothing(self) -> None:
+        """59.8% of messages carry no price field. Emitting on one
+        would advance quoted_at with no price behind it."""
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:05Z")) == []
+
+    def test_heartbeat_does_not_advance_the_ordering_watermark(self) -> None:
+        """Codex checkpoint-2 catch: heartbeats are the majority of the
+        wire, so if one set `quoted_at` the guard would reject the next
+        genuine price delta stamped behind it."""
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="10.00", Ask="10.02"))
+        # Heartbeat well ahead of the price stream.
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:09Z")) == []
+        # A real price delta stamped BEHIND the heartbeat but AHEAD of
+        # the last price must still be merged.
+        after = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:04Z", Bid="10.50"))
+        assert [(u.bid, u.ask) for u in after] == [(Decimal("10.50"), Decimal("10.02"))]
+
+    def test_partial_before_any_snapshot_emits_nothing(self) -> None:
+        """One side alone is not a quote — no fabricated counter-side."""
+        store = RateStateStore()
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="186.50")) == []
+        # ...and the ask completing it does emit.
+        done = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Ask="186.70"))
+        assert [(u.bid, u.ask) for u in done] == [(Decimal("186.50"), Decimal("186.70"))]
+
+    def test_present_zero_last_clears_to_none_but_absent_last_retains(self) -> None:
+        """#1429 regression guard, plus the presence-vs-value distinction:
+        a present LastExecution<=0 clears to NULL; an absent one keeps
+        the prior value."""
+        store = RateStateStore()
+        self._apply(
+            store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="697.16", Ask="697.22", LastExecution="697.20")
+        )
+
+        absent = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Bid="697.18"))
+        assert absent[0].last == Decimal("697.20")  # retained, not nulled
+
+        present_zero = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:02Z", LastExecution="0.00"))
+        assert present_zero[0].last is None  # NOT Decimal("0.00")
+
+        present_negative = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:03Z", LastExecution="-1.0"))
+        assert present_negative[0].last is None
+
+    def test_out_of_order_delta_is_ignored(self) -> None:
+        """Against merged state an out-of-order push would corrupt every
+        subsequent tick, not just lose one row."""
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:05Z", Bid="10.00", Ask="10.02"))
+
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Bid="9.00")) == []
+
+        after = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:06Z", Ask="10.04"))
+        assert after[0].bid == Decimal("10.00")  # stale 9.00 never merged
+
+    def test_state_is_per_instrument(self) -> None:
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))
+        # A bid-only push for a DIFFERENT instrument must not borrow
+        # 1001's ask.
+        assert self._apply(store, _rate_frame(2002, "2026-08-04T10:00:01Z", Bid="50.00")) == []
+
+    def test_forget_drops_state(self) -> None:
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))
+        store.forget([1001])
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Bid="1.01")) == []
+
+    def test_stateless_api_still_sees_only_complete_pushes(self) -> None:
+        """parse_rate_messages keeps its pre-#2252 contract."""
+        assert parse_rate_messages(_rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00")) == []
+        assert len(parse_rate_messages(_rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))) == 1
+
+    def test_batched_frame_merges_deltas_in_order(self) -> None:
+        """A single frame can carry several partials for one instrument;
+        each must merge onto the result of the previous."""
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))
+        raw = json.dumps(
+            {
+                "messages": [
+                    {
+                        "topic": "instrument:1001",
+                        "type": "Trading.Instrument.Rate",
+                        "content": json.dumps({"Date": "2026-08-04T10:00:01Z", "Bid": "1.10"}),
+                    },
+                    {
+                        "topic": "instrument:1001",
+                        "type": "Trading.Instrument.Rate",
+                        "content": json.dumps({"Date": "2026-08-04T10:00:02Z", "Ask": "1.15"}),
+                    },
+                ]
+            }
+        )
+        updates = self._apply(store, raw)
+        assert [(u.bid, u.ask) for u in updates] == [
+            (Decimal("1.10"), Decimal("1.02")),
+            (Decimal("1.10"), Decimal("1.15")),
+        ]
 
 
 class TestParseRateMessageOfficialEnvelope:
@@ -964,6 +1350,10 @@ class TestListenResilience:
             upsert_calls.append(update)
 
         sub._sync_upsert = fake_upsert  # type: ignore[method-assign]
+        # Post-#2252 ``_listen`` admits only subscribed ids, so the
+        # frame under test needs a ref. Unchanged in intent: this test
+        # asserts a rate frame still lands AFTER a private event.
+        sub._topic_refs[1001] = 1
 
         worker = asyncio.create_task(sub._reconcile_worker())
         await asyncio.sleep(0)
@@ -1001,6 +1391,52 @@ class TestListenResilience:
             worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await worker
+
+    async def test_listen_ignores_frames_for_unsubscribed_instruments(self) -> None:
+        """#2252 review round 2 — ``_rate_state`` must not be repopulated
+        by a frame for an id we no longer hold a ref for.
+
+        ``remove_instruments`` forgets BEFORE the wire Unsubscribe
+        lands, so a dropped / rejected / cancelled Unsubscribe would
+        otherwise let already-buffered frames refill the store
+        indefinitely. This is what bounds it, not ``forget``.
+        """
+        upsert_calls: list[QuoteUpdate] = []
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+        sub._sync_upsert = upsert_calls.append  # type: ignore[method-assign]
+        sub._topic_refs[1001] = 1  # 2002 deliberately absent
+
+        class FakeWs:
+            def __init__(self, frames: list[str]) -> None:
+                self._frames = frames
+
+            def __aiter__(self) -> FakeWs:
+                return self
+
+            async def __anext__(self) -> str:
+                if not self._frames:
+                    raise StopAsyncIteration
+                return self._frames.pop(0)
+
+        ws = FakeWs(
+            [
+                _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="100", Ask="101"),
+                _rate_frame(2002, "2026-08-04T10:00:00Z", Bid="200", Ask="201"),
+            ]
+        )
+        await sub._listen(ws)  # type: ignore[arg-type]
+
+        assert [u.instrument_id for u in upsert_calls] == [1001]
+        assert 2002 not in sub._rate_state._state
+        assert set(sub._rate_state._state) <= set(sub._topic_refs)
 
 
 # ---------------------------------------------------------------------------

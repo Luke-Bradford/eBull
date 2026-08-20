@@ -8,9 +8,12 @@ chokepoint-lint guards (`scripts/check_*.sh`).
 ## The gate
 
 `scripts/check_shellcheck.sh` runs `shellcheck -S warning` over every
-`scripts/*.sh`. Wired into BOTH `.githooks/pre-push` and
-`.github/workflows/ci.yml` (#1257); the parity guard
-`check_ci_mirrors_prepush.sh` enforces the dual-location mirror.
+shell script under `scripts/`, **recursively** (`find scripts -name
+'*.sh'` — a top-level `scripts/*.sh` glob silently skipped subdir
+scripts and let a bug ship in `scripts/autonomy/supervisor.sh`, #1801).
+Wired into BOTH `.githooks/pre-push` and `.github/workflows/ci.yml`
+(#1257); the parity guard `check_ci_mirrors_prepush.sh` enforces the
+dual-location mirror.
 
 Run before pushing any shell change:
 

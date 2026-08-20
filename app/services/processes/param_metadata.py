@@ -235,7 +235,121 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # service). Empty tuple completes the manual-only triangle (source +
     # metadata + invoker) so the manual API validator accepts a zero-param
     # trigger.
+    # price_quarantine_refresh — #2261 full-corpus quarantine recompute. No
+    # operator params: scope is the whole priced universe.
+    "price_quarantine_refresh": (),
+    # strategy_backtest_run — #2394 §3.2. Five params. ``evidence_window`` is
+    # an enum over code-pinned dates, not an operator-tunable date range. The
+    # hold-out pair controls audited access; the enum selects a reproducible
+    # identity already declared in code. A sizing rule or raw window remains
+    # forbidden because it would mint an identity no code path owns.
+    #
+    # ⚠⚠ ``holdout_purpose`` AND ``holdout_accessed_by`` ARE REQUIRED TOGETHER,
+    # AND THAT IS NOT EXPRESSIBLE HERE. ParamMetadata declares per-key type and
+    # requiredness and has no conditional model, so the pairing is checked in
+    # the job body before any corpus work (backtest_run._check_holdout_pairing).
+    # Declaring either "required" would make an in-sample run impossible;
+    # declaring neither and leaving it at that would let a hold-out run start
+    # with a blank purpose, which is the #2286 present-but-empty shape.
+    #
+    # ⚠ ``strategy_id`` is ``string`` and not ``enum``: enum_values would have
+    # to come from STRATEGY_MANIFEST, and importing it here would drag
+    # position_builder + every strategy module into a leaf the API imports on
+    # every request. The service validates it against the RUNNABLE set and names
+    # the members in the error, which is the check that actually matters —
+    # a manifest entry can be present and still be unrunnable (S-4).
+    "strategy_backtest_run": (
+        ParamMetadata(
+            name="strategy_id",
+            label="Strategy id",
+            help_text=(
+                "Narrow the run to one runnable strategy, for debugging. ⚠ The Deflated Sharpe "
+                "needs at least 2 measured trials, so a single-strategy run stores rows with no "
+                "DSR and the report says why. Leave blank for the full set."
+            ),
+            field_type="string",
+        ),
+        ParamMetadata(
+            name="holdout_purpose",
+            label="Hold-out purpose",
+            help_text=(
+                "Why the withheld side is being evaluated. REQUIRED together with 'Accessed by' "
+                "and stored as the criterion-5 audit record's only content. Leave BOTH blank and "
+                "the hold-out partition is counted and discarded, never measured."
+            ),
+            field_type="string",
+        ),
+        ParamMetadata(
+            name="holdout_accessed_by",
+            label="Hold-out accessed by",
+            help_text=(
+                "Who is evaluating the withheld side. REQUIRED together with 'Purpose'. It cannot "
+                "be derived from the request: the queue listener dispatches invoker(params) and "
+                "pending_job_requests.requested_by never reaches the job body."
+            ),
+            field_type="string",
+        ),
+        ParamMetadata(
+            name="trial_register_version",
+            label="Trial register version",
+            help_text=(
+                "Optional assertion. The run refuses if this is not the live trial register's "
+                "version, so it cannot silently deflate against a register that has moved."
+            ),
+            field_type="string",
+        ),
+        ParamMetadata(
+            name="evidence_window",
+            label="Recent evidence window",
+            help_text=(
+                "Optional code-pinned recent-regime window. Selecting one evaluates only audited hold-out "
+                "evidence and therefore requires both hold-out fields. Raw dates are never accepted."
+            ),
+            field_type="enum",
+            enum_values=(
+                "primary-2022-plus",
+                "rolling-36m",
+                "rolling-24m",
+                "year-2022",
+                "year-2023",
+                "year-2024",
+            ),
+        ),
+        ParamMetadata(
+            name="refresh_recent",
+            label="Complete all recent evidence",
+            help_text=(
+                "Run every missing code-pinned recent window, committing one window at a time so a restart "
+                "can resume safely. Completed evidence is never overwritten and arbitrary dates remain forbidden."
+            ),
+            field_type="bool",
+            default=False,
+        ),
+        # ⚠⚠ A BOOL AND NOT A COHORT SIZE (#2601). ``SPEC_COHORT_SIZE`` is §9's
+        # own literal — the 95th percentile of a 1,000-member sample IS its
+        # 950th order statistic — so an operator may choose whether the control
+        # runs and may not choose how big it is. An operator-set size would put
+        # a differently-estimated threshold on the row under the same model id.
+        ParamMetadata(
+            name="synthetic_control",
+            label="Run the random-entry synthetic control",
+            help_text=(
+                "Compute §9's 1,000-member random-entry cohort per arm and store it, closing "
+                "'synthetic_control_not_run'. ⚠ It is the run's dominant cost — a full equity curve per "
+                "member per arm on top of the corpus pass. Hold-out rows never carry one: a cohort over "
+                "the withheld side would be 1,000 looks at it."
+            ),
+            field_type="bool",
+            default=False,
+        ),
+    ),
     "risk_metrics_refresh": (),
+    # fair_value_band_refresh — #2009 deterministic fair-value band recompute.
+    # No operator-tunable params (multiples set + calibration constants are
+    # fixed by the service). Empty tuple completes the manual-only triangle
+    # (source + metadata + invoker) so the manual API validator accepts a
+    # zero-param trigger.
+    "fair_value_band_refresh": (),
     # filing_events_skip_tier_cleanup — one-shot retroactive delete
     # (#1013). No operator-tunable params: ``batch_size`` is an
     # implementation knob (§6.5.7 item 2), kept internal. The explicit
@@ -272,6 +386,10 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # the manual-only triangle (source + metadata + invoker) and documents
     # zero-param-by-design (vs the bootstrap-only fallback, also empty).
     "sec_manifest_tombstone_stale": (),
+    # sec_fsnds_notes_ingest — #844 unvested RSU/PSU counts from the cached
+    # FSNDS monthlies. No operator-tunable params (archives on disk are the
+    # input; re-run is idempotent via the axis-scoped convergence guard).
+    "sec_fsnds_notes_ingest": (),
     # raw_payload_retention_sweep — #1014 payload-null sweep.
     # ``batch_size`` stays internal (implementation knob, same call as
     # #1013); ``dry_run`` is operator-facing and DEFAULTS TRUE so a
@@ -376,6 +494,11 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
                 "sec_xbrl_facts",
                 "finra_short_interest",
                 "sec_nt",
+                # sec_pre14a was missed when #1892 landed (drift fix, #1816
+                # PR); sec_424b added with its source (#1816).
+                "sec_pre14a",
+                "sec_424b",
+                "sec_tender",
             ),
             default=None,
             advanced_group=False,

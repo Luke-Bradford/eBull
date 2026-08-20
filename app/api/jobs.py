@@ -80,7 +80,7 @@ class JobRunResponse(BaseModel):
     job_name: str
     started_at: datetime
     finished_at: datetime | None
-    status: Literal["running", "success", "failure", "skipped"]
+    status: Literal["running", "success", "failure", "skipped", "cancelled", "degraded"]
     row_count: int | None
     error_msg: str | None
     linked_request_id: int | None = None

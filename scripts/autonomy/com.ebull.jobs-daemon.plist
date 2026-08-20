@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd LaunchAgent for the JOBS DAEMON (the ETL / ingest + scheduler runner,
-  `python -m app.jobs`). Independent of the autonomy loop supervisor — this keeps
+  launchd LaunchAgent for the JOBS DAEMON (the ETL / ingest + scheduler runner).
+  Launches via the `app.jobs.dev_reload` wrapper (#2144), which watches `app/**`
+  and restarts the daemon on source change in a dev-like `app_env`, and is an
+  exact in-process pass-through to `python -m app.jobs` anywhere else — so this
+  plist is unchanged in behaviour outside dev.
+  Independent of the autonomy loop supervisor — this keeps
   DATA fresh unattended (SEC manifest worker, per-CIK poll, orchestrator sync,
   fundamentals, portfolio sync) with the AI loop OFF.
 
@@ -11,8 +15,18 @@
   (for `uv`) + HOME (uv cache) are injected. The daemon's own PG advisory lock
   prevents a duplicate if a manual daemon is still running — stop that first.
 
+  THERE MUST BE EXACTLY ONE LAUNCHER, AND IT IS THIS AGENT (#2187). The VS Code
+  `stack: jobs` task used to start its own supervisor after `kill -9`-ing both
+  process patterns; KeepAlive then respawned this agent inside ThrottleInterval
+  and won the advisory-lock race, so the task's `dev_reload` child FATAL-exited
+  and its supervisor parked forever (it only respawns on a `*.py` change, never
+  on a tick). Net effect: #2144's auto-reload-on-merge was dead in practice
+  while both processes looked healthy. That task now runs
+  `launchctl kickstart -k gui/$UID/com.ebull.jobs-daemon` instead — use the same
+  command by hand to restart the daemon.
+
   Install: substitute __REPO__ with the repo root, copy to
-  ~/Library/LaunchAgents/, `launchctl load` it. See scripts/autonomy/setup.md.
+  ~/Library/LaunchAgents/, `launchctl load` it. See scripts/autonomy/README.md.
 -->
 <plist version="1.0">
 <dict>
@@ -25,7 +39,7 @@
     <string>run</string>
     <string>python</string>
     <string>-m</string>
-    <string>app.jobs</string>
+    <string>app.jobs.dev_reload</string>
   </array>
 
   <key>WorkingDirectory</key>

@@ -11,7 +11,7 @@ sweep stops the legacy retry loop that hammered SEC every hour for
 deterministic constraint violations on Form 4 / 8-K / 13D/G / DEF 14A
 ingest before the manifest parsers learned to discriminate transient
 errors from deterministic ones (see
-``app/services/manifest_parsers/_classify.py``).
+``app/services/upsert_classify.py``).
 
 The manifest replaces the per-source bespoke joins against
 ``def14a_ingest_log`` / ``institutional_holdings_ingest_log`` /
@@ -122,6 +122,8 @@ ManifestSource = Literal[
     "finra_regsho_daily",
     "sec_nt",
     "sec_pre14a",
+    "sec_424b",
+    "sec_tender",
 ]
 
 # Sources intentionally absent from ``_FORM_TO_SOURCE``:
@@ -1074,13 +1076,42 @@ _FORM_TO_SOURCE: dict[str, ManifestSource] = {
     # NT 20-F (foreign deadline regime) stay metadata-only, out of scope.
     "NT 10-K": "sec_nt",
     "NT 10-Q": "sec_nt",
+    # 424B prospectuses (#1816). The subtype is a Rule 424(b) filing-trigger
+    # bucket, not a taxonomy — economic facts come from the parsed Item
+    # 501(b)(3) cover. 424B2 is volume-gated (#1975): mapped here, but the
+    # parser's pre-fetch gate tombstones B2 rows for filers with >100 lifetime
+    # B2 filings (bank/ETN structured-note factories — a fetch-cost bound, not
+    # a classification). 424B8 stays unmapped: it duplicates the underlying
+    # 424(b) paragraph's filing.
+    "424B1": "sec_424b",
+    "424B2": "sec_424b",
+    "424B3": "sec_424b",
+    "424B4": "sec_424b",
+    "424B5": "sec_424b",
+    "424B7": "sec_424b",
+    # Tender / going-private schedules (#1982, #1015 item 4). Roles
+    # (subject vs offeror) come from the accession's SGML header CIK blocks
+    # at parse time — the manifest row's instrument_id is arbitrary between
+    # the parties of a dual-attributed accession (accession is the PK;
+    # record_manifest_entry is last-discovery-wins). SC TO-C stays unmapped
+    # (Rule 14d-2(b)(1) pre-commencement communications — no Item 1004 terms
+    # attach); PREM14C / DEFM14C stay unmapped (Schedule 14A Item 14 prose,
+    # the #1659 free-text trap — the companion SC 13E3 carries the signal).
+    "SC TO-T": "sec_tender",
+    "SC TO-T/A": "sec_tender",
+    "SC TO-I": "sec_tender",
+    "SC TO-I/A": "sec_tender",
+    "SC 14D9": "sec_tender",
+    "SC 14D9/A": "sec_tender",
+    "SC 13E3": "sec_tender",
+    "SC 13E3/A": "sec_tender",
 }
 
 
 def map_form_to_source(form: str) -> ManifestSource | None:
     """Map an SEC form code to the manifest's ``source`` enum value.
 
-    Returns ``None`` for unsupported forms (e.g. ``S-1``, ``424B5``,
+    Returns ``None`` for unsupported forms (e.g. ``S-1``, ``424B8``,
     ``CORRESP``) — the discovery paths skip these. Matching is exact;
     callers must canonicalise spacing first (SEC sometimes emits
     ``13F-HR`` and sometimes ``13F-HR  `` with trailing whitespace).

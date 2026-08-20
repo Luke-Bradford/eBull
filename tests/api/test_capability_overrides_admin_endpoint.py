@@ -30,6 +30,11 @@ def _build_app(conn: MagicMock) -> FastAPI:
     return app
 
 
+# Row keys must mirror the endpoint's SELECT list
+# (``exchange_id, description, asset_class, capabilities`` —
+# app/api/capability_overrides_admin.py:176). The human label column is
+# ``exchanges.description``, not ``name`` (#1904); a row missing it raises
+# KeyError inside the endpoint rather than failing an assertion (#2212).
 def _make_cur(rows: list[dict[str, object]]) -> MagicMock:
     cur = MagicMock()
     cur.__enter__ = MagicMock(return_value=cur)
@@ -60,7 +65,7 @@ def test_seed_match_returns_empty_overrides() -> None:
         [
             {
                 "exchange_id": "4",
-                "name": "Nasdaq",
+                "description": "Nasdaq",
                 "asset_class": "us_equity",
                 "capabilities": dict(_US_EQUITY_SEED),
             },
@@ -87,7 +92,7 @@ def test_diverged_row_lists_only_changed_capabilities() -> None:
         [
             {
                 "exchange_id": "4",
-                "name": "Nasdaq",
+                "description": "Nasdaq",
                 "asset_class": "us_equity",
                 "capabilities": overridden,
             },
@@ -122,7 +127,7 @@ def test_reordered_providers_are_not_drift() -> None:
         [
             {
                 "exchange_id": "4",
-                "name": "Nasdaq",
+                "description": "Nasdaq",
                 "asset_class": "us_equity",
                 "capabilities": reordered,
             },
@@ -148,7 +153,7 @@ def test_non_us_equity_seed_is_empty() -> None:
         [
             {
                 "exchange_id": "100",
-                "name": "Crypto Exchange",
+                "description": "Crypto Exchange",
                 "asset_class": "crypto",
                 "capabilities": crypto_with_data,
             },

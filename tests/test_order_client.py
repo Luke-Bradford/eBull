@@ -86,6 +86,10 @@ _RUNTIME_DEMO = RuntimeConfig(
     enable_auto_trading=True,
     enable_live_trading=False,
     display_currency="USD",
+    llm_provider="openai_compatible",
+    llm_base_url="http://localhost:11434/v1",
+    llm_model_writer="qwen3:14b",
+    llm_model_critic="qwen3:14b",
     updated_at=_NOW,
     updated_by="test",
     reason="test",
@@ -95,6 +99,10 @@ _RUNTIME_LIVE = RuntimeConfig(
     enable_auto_trading=True,
     enable_live_trading=True,
     display_currency="USD",
+    llm_provider="openai_compatible",
+    llm_base_url="http://localhost:11434/v1",
+    llm_model_writer="qwen3:14b",
+    llm_model_critic="qwen3:14b",
     updated_at=_NOW,
     updated_by="test",
     reason="test",
@@ -111,6 +119,10 @@ def _patch_runtime_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.services.order_client.get_runtime_config",
         lambda _conn: _RUNTIME_DEMO,
+    )
+    monkeypatch.setattr(
+        "app.services.order_client._assert_transaction_cost_complete_for_buy_add",
+        lambda _conn, _action, _instrument_id: None,
     )
 
 

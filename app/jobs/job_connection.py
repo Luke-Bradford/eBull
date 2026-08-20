@@ -48,6 +48,7 @@ from app.config import settings
 job_statement_timeout_ms: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "job_statement_timeout_ms", default=None
 )
+job_application_name: contextvars.ContextVar[str | None] = contextvars.ContextVar("job_application_name", default=None)
 
 
 def connect_job(*, autocommit: bool = False, **kwargs: Any) -> psycopg.Connection[Any]:
@@ -68,4 +69,7 @@ def connect_job(*, autocommit: bool = False, **kwargs: Any) -> psycopg.Connectio
         opt = f"-c statement_timeout={ms}"
         existing = kwargs.get("options")
         kwargs["options"] = f"{existing} {opt}" if existing else opt
+    job_name = job_application_name.get()
+    if job_name is not None and "application_name" not in kwargs:
+        kwargs["application_name"] = f"ebull-job-body:{job_name}"
     return psycopg.connect(settings.database_url, autocommit=autocommit, **kwargs)

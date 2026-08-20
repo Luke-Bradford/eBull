@@ -449,7 +449,18 @@ def bootstrap(conn: psycopg.Connection[object]) -> BootResult:
     # install the key when state == "normal" (i.e. matching ciphertext
     # exists) — clean_install with no env override returns None so the
     # first credential save runs the lazy-gen path.
-    install_key = settings.secrets_key is not None or state == "normal"
+    # ``bool(...)`` and NOT ``is not None`` — deliberately, and it must match
+    # the ``if settings.secrets_key:`` test above that decides ``derived``.
+    # ``is not None`` reads "the operator set the env override", which is only
+    # true when the variable is ABSENT vs SET. A blank ``EBULL_SECRETS_KEY=``
+    # line — the state you get by copying .env.example and not filling it in,
+    # and the state the working .env was actually in — made the field ``""``,
+    # so this took the env-override branch with no override set while
+    # ``derived`` came from the file path. #2286 fixed the root cause with
+    # ``env_ignore_empty=True``; this keeps the two tests consistent even if
+    # the field is ever ``""`` again, rather than relying on a config flag two
+    # modules away.
+    install_key = bool(settings.secrets_key) or state == "normal"
     return BootResult(
         state=state,
         broker_encryption_key=derived if install_key else None,

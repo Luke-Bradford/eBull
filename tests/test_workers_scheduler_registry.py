@@ -52,13 +52,10 @@ class TestRegistryShape:
         INTERNAL_ONLY = {
             "daily_cik_refresh",
             "daily_financial_facts",
-            # Phase 1.2: news + thesis are on-demand; both functions
-            # remain as internal helpers (news is a no-op stub pending
-            # a concrete NewsProvider; thesis body is called from the
-            # POST /instruments/{symbol}/thesis endpoint via
-            # generate_thesis).
+            # Phase 1.2: news stays on-demand (no-op stub pending a
+            # concrete NewsProvider). Thesis left this set in #1919
+            # PR-B — ``thesis_refresh`` is a registered scheduled job.
             "daily_news_refresh",
-            "daily_thesis_refresh",
         }
 
         constants = {
@@ -68,6 +65,74 @@ class TestRegistryShape:
         invoker_names = set(_INVOKERS.keys())
         unaccounted = constants - registry_names - invoker_names - INTERNAL_ONLY
         assert not unaccounted, f"JOB_* constants not in SCHEDULED_JOBS or _INVOKERS: {sorted(unaccounted)}"
+
+
+class TestThesisRefreshRegistration:
+    """#1919 PR-B — thesis_refresh scheduled hourly on its own lane."""
+
+    def _job(self) -> scheduler.ScheduledJob:
+        return next(job for job in SCHEDULED_JOBS if job.name == scheduler.JOB_THESIS_REFRESH)
+
+    def test_registered_hourly_own_lane(self) -> None:
+        job = self._job()
+        assert job.cadence.kind == "hourly"
+        assert job.source == "llm_thesis"
+        # A boot catch-up would fire a multi-minute LLM batch on every
+        # dev-stack restart.
+        assert job.catch_up_on_boot is False
+        assert job.prerequisite is scheduler._llm_provider_resolvable
+
+    def test_manual_trigger_registered(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+
+        assert scheduler.JOB_THESIS_REFRESH in _INVOKERS
+
+
+class TestStrategyIntradayHarvestRegistration:
+    """#2477 automatic calls are bounded to completed US-session bars."""
+
+    def _job(self) -> scheduler.ScheduledJob:
+        return next(job for job in SCHEDULED_JOBS if job.name == scheduler.JOB_STRATEGY_INTRADAY_HARVEST)
+
+    @pytest.mark.parametrize(
+        ("instant", "expected"),
+        [
+            ("2026-08-10T13:34:00+00:00", False),  # 09:34 ET, first 5m bar incomplete
+            ("2026-08-10T13:35:00+00:00", True),
+            ("2026-08-10T20:10:00+00:00", True),  # ten-minute provider-lag allowance
+            ("2026-08-10T20:11:00+00:00", False),
+            ("2026-08-09T15:00:00+00:00", False),  # Sunday
+            ("2026-12-25T15:00:00+00:00", False),  # Christmas closure
+            ("2026-11-27T18:10:00+00:00", True),  # early close + ten minutes
+            ("2026-11-27T18:11:00+00:00", False),
+        ],
+    )
+    def test_automatic_collection_window(self, instant: str, expected: bool) -> None:
+        assert scheduler._strategy_intraday_collection_window_open(datetime.fromisoformat(instant)) is expected
+
+    def test_naive_datetime_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="aware datetime"):
+            scheduler._strategy_intraday_collection_window_open(datetime(2026, 8, 10, 13, 35))
+
+    def test_registered_without_boot_catchup(self) -> None:
+        job = self._job()
+        assert job.cadence == Cadence.every_n_minutes(interval=5)
+        assert job.catch_up_on_boot is False
+        assert job.prerequisite is scheduler._strategy_intraday_collection_due
+
+
+class TestCboeVixRegistration:
+    def test_daily_bounded_refresh_is_registered_before_strategy_scan(self) -> None:
+        job = next(item for item in SCHEDULED_JOBS if item.name == scheduler.JOB_CBOE_VIX_REFRESH)
+        assert job.source == "cboe"
+        assert job.cadence == Cadence.daily(hour=2, minute=12)
+        assert job.catch_up_on_boot is True
+        assert job.prerequisite is scheduler._bootstrap_complete
+
+    def test_manual_invoker_is_registered(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+
+        assert scheduler.JOB_CBOE_VIX_REFRESH in _INVOKERS
 
 
 # ---------------------------------------------------------------------------

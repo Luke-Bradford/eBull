@@ -43,7 +43,6 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import Any, Literal
 
 import psycopg
@@ -58,7 +57,7 @@ from app.services.transaction_cost import (
     estimate_cost,
     get_transaction_cost_config,
     load_instrument_cost,
-    spread_pct_to_bps,
+    missing_cost_components,
 )
 
 logger = logging.getLogger(__name__)
@@ -465,18 +464,22 @@ def _check_transaction_cost(
 ) -> RuleResult:
     """Check whether the estimated transaction cost is prohibitive."""
     if cost_model_row is not None:
+        unknown = missing_cost_components(cost_model_row)
+        if unknown:
+            return RuleResult(
+                rule="transaction_cost_prohibitive",
+                passed=False,
+                detail=f"cost unavailable: costs not established for {', '.join(unknown)}",
+            )
         spread_bps = cost_model_row["spread_bps"]
         overnight_rate = cost_model_row["overnight_rate"]
         fx_markup_bps = cost_model_row["fx_markup_bps"]
     elif quote is not None and quote.get("spread_pct") is not None:
-        converted = spread_pct_to_bps(quote["spread_pct"])
-        # spread_pct_to_bps returns None only when input is None, which the
-        # guard above already excluded.
-        if converted is None:  # pragma: no cover
-            raise RuntimeError("spread_pct_to_bps returned None for non-None input")
-        spread_bps = converted
-        overnight_rate = Decimal("0")
-        fx_markup_bps = Decimal("0")
+        return RuleResult(
+            rule="transaction_cost_prohibitive",
+            passed=False,
+            detail="cost unavailable: quote supplies spread only; carry and FX cost not established",
+        )
     else:
         return RuleResult(
             rule="transaction_cost_prohibitive",

@@ -1,0 +1,23 @@
+-- #2051 — thesis-break alert feed cursor (PR-B of #2012).
+--
+-- A sixth dashboard alert feed (AlertsStrip): a machine-checked break
+-- predicate fired on a genuine false→true transition (thesis_break_events,
+-- migration 230). Every event is material by construction — the scan's
+-- arm/baseline state machine only fires from 'armed' — so this feed is a
+-- pure SQL event log with no Python materiality pass (contrast #2013's
+-- thesis-changes feed).
+--
+-- `thesis_break_events.break_event_id` (BIGSERIAL PK, monotonic, unique)
+-- is the cursor — same rationale as migration 044's decision_id / 047's
+-- event_id / 213's score_id / 227's thesis_id: strict `>` comparison over
+-- a monotonic PK, immune to timestamp skew.
+--
+-- NULL = never acknowledged (all in-window events unseen), matching the
+-- other five cursor columns on `operators`.
+--
+-- No supporting index: the feed scans a 14-day fired_at window and
+-- idx_thesis_break_events_instrument_fired (migration 230) plus the tiny
+-- table (0 rows on dev at rollout; fires are rare by design) make any
+-- dedicated cursor index premature.
+ALTER TABLE operators
+    ADD COLUMN IF NOT EXISTS alerts_last_seen_break_event_id BIGINT;

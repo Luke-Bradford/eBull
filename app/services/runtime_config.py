@@ -25,21 +25,89 @@ covers all config-style changes.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 import psycopg
 import psycopg.rows
 
 logger = logging.getLogger(__name__)
 
-AuditField = Literal["enable_auto_trading", "enable_live_trading", "kill_switch", "display_currency"]
+AuditField = Literal[
+    "enable_auto_trading",
+    "enable_live_trading",
+    "kill_switch",
+    "display_currency",
+    "llm_provider",
+    "llm_base_url",
+    "llm_model_writer",
+    "llm_model_critic",
+]
 
 # Validated currency codes for display_currency. Must match the frontend
 # SUPPORTED_CURRENCIES list in DisplayCurrencySection.tsx.
 SUPPORTED_CURRENCIES: frozenset[str] = frozenset({"GBP", "USD", "EUR"})
+
+# Valid llm_provider values (#1919). Must match the table CHECK in
+# sql/218_llm_provider_config.sql and the frontend LlmProviderSection.tsx.
+# Keys are env-only (Settings.anthropic_api_key / Settings.llm_api_key) —
+# NEVER stored here: runtime_config_audit records old/new values in
+# plaintext.
+VALID_LLM_PROVIDERS: frozenset[str] = frozenset({"openai_compatible", "anthropic"})
+
+# Local-first defaults (operator mandate 2026-07-09, spec §2). Single
+# source for the migration seed, the boot-recovery guard, and tests.
+# Writer/critic split (#1995): both default to the same model — any
+# divergence (e.g. deepseek writer) is an operator PATCH, audited, never
+# a code default until content-judged.
+DEFAULT_LLM_PROVIDER = "openai_compatible"
+DEFAULT_LLM_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_LLM_MODEL_WRITER = "qwen3:14b"
+DEFAULT_LLM_MODEL_CRITIC = "qwen3:14b"
+
+# Hostnames that mean "the inference server runs on THIS machine". IP
+# LITERALS are not listed here — they are classified numerically below,
+# because a string set silently misses valid loopback spellings
+# (`127.1`, `2130706433`, anything else in 127.0.0.0/8) and each miss is
+# a silent bypass of the allow-list (Codex ckpt-2).
+_LOCAL_LLM_HOSTNAMES: frozenset[str] = frozenset({"localhost"})
+
+# Models the thesis job may load into LOCAL memory (#2187).
+#
+# Why a cap exists: `thesis_refresh` is hourly and runs ≤5 generations at
+# ≈260s each (app/workers/scheduler.py JOB_THESIS_REFRESH), so the chosen
+# model is resident ~27 of every 60 minutes — as WIRED unified memory on
+# Apple silicon, which cannot be paged out. On the 24 GB dev box that is
+# already the OOM budget; a bigger model turns thrash into a hard OOM.
+# `mistral-small:latest` (14.33 GB pulled locally) is the concrete blob
+# this excludes. The ceiling here is qwen3:14b at 9.28 GB.
+#
+# This is a code constant, not config, deliberately: it is the guard
+# AGAINST config drift, so it must not itself be settable through the
+# surface it protects. Widening it is a reviewed one-line edit — measure
+# the model's resident size (`ollama list`) against the box first.
+#
+# Match is EXACT, tag included, and must stay that way: an Ollama tag
+# carries the quantization, and quantization dominates resident size.
+# `qwen3:14b` is Q4_K_M at 9.28 GB; a `qwen3:14b-q8_0` sibling is ~15 GB.
+# A family-or-prefix match would therefore admit the exact class of blob
+# this list exists to exclude.
+LOCAL_LLM_MODEL_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "qwen3:14b",
+        "qwen3:8b",
+        "deepseek-r1:14b",
+        "deepseek-r1:8b",
+        "phi4:14b",
+        "gemma3:12b",
+        "llama3.1:8b",
+    }
+)
 
 # Boot-recovery audit attribution. Operators investigating the audit log can
 # search for this exact reason to find re-seed events caused by a vanished
@@ -70,6 +138,10 @@ class RuntimeConfig:
     enable_auto_trading: bool
     enable_live_trading: bool
     display_currency: str
+    llm_provider: str
+    llm_base_url: str
+    llm_model_writer: str
+    llm_model_critic: str
     updated_at: datetime
     updated_by: str
     reason: str
@@ -77,6 +149,67 @@ class RuntimeConfig:
 
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
+
+
+def is_local_llm_endpoint(base_url: str) -> bool:
+    """True when ``base_url`` points at an inference server on this machine.
+
+    Gates both #2187 controls (the model allow-list and the post-batch
+    model release) — a remote endpoint holds its weights in someone
+    else's RAM and exposes no unload route we own.
+
+    IP hosts are classified numerically (``is_loopback`` / unspecified),
+    not by string match, so every spelling of loopback resolves the same
+    way. ``socket.inet_aton`` is used for the IPv4 pass because it
+    accepts the shorthand and integer forms ``ipaddress`` rejects
+    (``127.1``, ``2130706433``); it parses numerically and never performs
+    a DNS lookup.
+
+    Known limit: a NAMED host other than ``localhost`` that happens to
+    resolve to this machine (``mymac.local``) reads as remote. Resolving
+    it would put DNS in a config-validation path. The rule targets drift
+    on the local-first default, not a determined operator — a deliberate
+    remote-looking pointer at your own box opts out of both controls.
+    """
+    try:
+        host = urlsplit(base_url).hostname  # lowercased; IPv6 brackets stripped
+    except ValueError:
+        # Malformed URL: not provably local, so no local-only rule applies.
+        return False
+    if host is None:
+        return False
+    if host in _LOCAL_LLM_HOSTNAMES:
+        return True
+    try:
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv4Address(socket.inet_aton(host))
+    except OSError:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False  # a hostname we cannot classify without DNS
+    return address.is_loopback or address.is_unspecified
+
+
+def local_llm_model_violation(*, provider: str, base_url: str, model: str, field: str) -> str | None:
+    """Return an error message if ``model`` may not be loaded locally, else None.
+
+    Single source of truth for the #2187 allow-list rule. Callers pick
+    their own failure mode from it: the /config PATCH path raises
+    ``ValueError`` (→ HTTP 400), while ``make_llm_clients`` raises
+    ``LLMProviderNotConfigured`` so ``thesis_refresh`` records a
+    PREREQ_SKIP instead of crash-looping on a bad config row.
+    """
+    if provider != "openai_compatible" or not is_local_llm_endpoint(base_url):
+        return None
+    if model in LOCAL_LLM_MODEL_ALLOWLIST:
+        return None
+    return (
+        f"{field}={model!r} is not in the local-model allow-list "
+        f"{sorted(LOCAL_LLM_MODEL_ALLOWLIST)} (#2187: a locally-hosted model is "
+        f"resident ~27 min/hour as wired memory; oversized models OOM the box). "
+        f"Widen LOCAL_LLM_MODEL_ALLOWLIST in app/services/runtime_config.py after "
+        f"checking the model's size against available RAM."
+    )
 
 
 def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
@@ -144,7 +277,8 @@ def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
     logger.warning(
         "runtime_config singleton vanished — re-seeding with safe defaults "
         "(enable_auto_trading=FALSE, enable_live_trading=FALSE, "
-        "display_currency='GBP'). See docs/review-prevention-log.md "
+        "display_currency='GBP', llm_provider/base_url/model local-first). "
+        "See docs/review-prevention-log.md "
         "section 'Singleton-row migrations need a boot-time presence guard'."
     )
     now = _utcnow()
@@ -154,14 +288,25 @@ def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
                 """
                 INSERT INTO runtime_config
                     (id, enable_auto_trading, enable_live_trading,
-                     updated_at, updated_by, reason, display_currency)
+                     updated_at, updated_by, reason, display_currency,
+                     llm_provider, llm_base_url, llm_model_writer, llm_model_critic)
                 VALUES
                     (TRUE, FALSE, FALSE,
-                     %(at)s, %(by)s, %(reason)s, 'GBP')
+                     %(at)s, %(by)s, %(reason)s, 'GBP',
+                     %(llm_provider)s, %(llm_base_url)s,
+                     %(llm_model_writer)s, %(llm_model_critic)s)
                 ON CONFLICT (id) DO NOTHING
                 RETURNING id
                 """,
-                {"at": now, "by": BOOT_RECOVERY_CHANGED_BY, "reason": BOOT_RECOVERY_REASON},
+                {
+                    "at": now,
+                    "by": BOOT_RECOVERY_CHANGED_BY,
+                    "reason": BOOT_RECOVERY_REASON,
+                    "llm_provider": DEFAULT_LLM_PROVIDER,
+                    "llm_base_url": DEFAULT_LLM_BASE_URL,
+                    "llm_model_writer": DEFAULT_LLM_MODEL_WRITER,
+                    "llm_model_critic": DEFAULT_LLM_MODEL_CRITIC,
+                },
             )
             inserted = cur.fetchone()
 
@@ -175,6 +320,10 @@ def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
             ("enable_auto_trading", "false"),
             ("enable_live_trading", "false"),
             ("display_currency", "GBP"),
+            ("llm_provider", DEFAULT_LLM_PROVIDER),
+            ("llm_base_url", DEFAULT_LLM_BASE_URL),
+            ("llm_model_writer", DEFAULT_LLM_MODEL_WRITER),
+            ("llm_model_critic", DEFAULT_LLM_MODEL_CRITIC),
         ):
             insert_runtime_config_audit_row(
                 conn,
@@ -199,6 +348,10 @@ def get_runtime_config(conn: psycopg.Connection[Any]) -> RuntimeConfig:
             SELECT enable_auto_trading,
                    enable_live_trading,
                    display_currency,
+                   llm_provider,
+                   llm_base_url,
+                   llm_model_writer,
+                   llm_model_critic,
                    updated_at,
                    updated_by,
                    reason
@@ -215,6 +368,10 @@ def get_runtime_config(conn: psycopg.Connection[Any]) -> RuntimeConfig:
         enable_auto_trading=bool(row["enable_auto_trading"]),
         enable_live_trading=bool(row["enable_live_trading"]),
         display_currency=str(row["display_currency"]),
+        llm_provider=str(row["llm_provider"]),
+        llm_base_url=str(row["llm_base_url"]),
+        llm_model_writer=str(row["llm_model_writer"]),
+        llm_model_critic=str(row["llm_model_critic"]),
         updated_at=row["updated_at"],
         updated_by=str(row["updated_by"]),
         reason=str(row["reason"]),
@@ -229,6 +386,10 @@ def update_runtime_config(
     enable_auto_trading: bool | None = None,
     enable_live_trading: bool | None = None,
     display_currency: str | None = None,
+    llm_provider: str | None = None,
+    llm_base_url: str | None = None,
+    llm_model_writer: str | None = None,
+    llm_model_critic: str | None = None,
     now: datetime | None = None,
 ) -> RuntimeConfig:
     """Atomically update the runtime_config singleton.
@@ -247,11 +408,32 @@ def update_runtime_config(
     Raises ValueError if all field arguments are None (caller passed an
     empty patch).
     """
-    if enable_auto_trading is None and enable_live_trading is None and display_currency is None:
+    provided = (
+        enable_auto_trading,
+        enable_live_trading,
+        display_currency,
+        llm_provider,
+        llm_base_url,
+        llm_model_writer,
+        llm_model_critic,
+    )
+    if all(v is None for v in provided):
         raise ValueError("update_runtime_config: at least one field must be provided")
 
     if display_currency is not None and display_currency not in SUPPORTED_CURRENCIES:
         raise ValueError(f"display_currency must be one of {sorted(SUPPORTED_CURRENCIES)}, got {display_currency!r}")
+
+    if llm_provider is not None and llm_provider not in VALID_LLM_PROVIDERS:
+        raise ValueError(f"llm_provider must be one of {sorted(VALID_LLM_PROVIDERS)}, got {llm_provider!r}")
+
+    if llm_base_url is not None and not llm_base_url.startswith(("http://", "https://")):
+        raise ValueError(f"llm_base_url must start with http:// or https://, got {llm_base_url!r}")
+
+    if llm_model_writer is not None and not llm_model_writer.strip():
+        raise ValueError("llm_model_writer must be a non-empty string")
+
+    if llm_model_critic is not None and not llm_model_critic.strip():
+        raise ValueError("llm_model_critic must be a non-empty string")
 
     now = now or _utcnow()
 
@@ -259,7 +441,8 @@ def update_runtime_config(
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
-                SELECT enable_auto_trading, enable_live_trading, display_currency
+                SELECT enable_auto_trading, enable_live_trading, display_currency,
+                       llm_provider, llm_base_url, llm_model_writer, llm_model_critic
                 FROM runtime_config
                 WHERE id = TRUE
                 FOR UPDATE
@@ -274,6 +457,27 @@ def update_runtime_config(
         new_auto = enable_auto_trading if enable_auto_trading is not None else bool(current["enable_auto_trading"])
         new_live = enable_live_trading if enable_live_trading is not None else bool(current["enable_live_trading"])
         new_currency = display_currency if display_currency is not None else str(current["display_currency"])
+        new_llm_provider = llm_provider if llm_provider is not None else str(current["llm_provider"])
+        new_llm_base_url = llm_base_url if llm_base_url is not None else str(current["llm_base_url"])
+        new_llm_model_writer = llm_model_writer if llm_model_writer is not None else str(current["llm_model_writer"])
+        new_llm_model_critic = llm_model_critic if llm_model_critic is not None else str(current["llm_model_critic"])
+
+        # #2187 allow-list, evaluated on the RESULTING triple, not on the
+        # provided fields: a PATCH that only moves llm_base_url from a
+        # remote endpoint to localhost newly subjects the (unchanged)
+        # model columns to the local-memory rule.
+        for field_name, new_model in (
+            ("llm_model_writer", new_llm_model_writer),
+            ("llm_model_critic", new_llm_model_critic),
+        ):
+            violation = local_llm_model_violation(
+                provider=new_llm_provider,
+                base_url=new_llm_base_url,
+                model=new_model,
+                field=field_name,
+            )
+            if violation is not None:
+                raise ValueError(violation)
 
         # No-op patch detection: if every provided field already matches the
         # current row, refuse the patch.  Otherwise the UPDATE would silently
@@ -283,7 +487,24 @@ def update_runtime_config(
         auto_changed = enable_auto_trading is not None and bool(current["enable_auto_trading"]) != new_auto
         live_changed = enable_live_trading is not None and bool(current["enable_live_trading"]) != new_live
         currency_changed = display_currency is not None and str(current["display_currency"]) != new_currency
-        if not auto_changed and not live_changed and not currency_changed:
+        llm_provider_changed = llm_provider is not None and str(current["llm_provider"]) != new_llm_provider
+        llm_base_url_changed = llm_base_url is not None and str(current["llm_base_url"]) != new_llm_base_url
+        llm_model_writer_changed = (
+            llm_model_writer is not None and str(current["llm_model_writer"]) != new_llm_model_writer
+        )
+        llm_model_critic_changed = (
+            llm_model_critic is not None and str(current["llm_model_critic"]) != new_llm_model_critic
+        )
+        any_changed = (
+            auto_changed
+            or live_changed
+            or currency_changed
+            or llm_provider_changed
+            or llm_base_url_changed
+            or llm_model_writer_changed
+            or llm_model_critic_changed
+        )
+        if not any_changed:
             raise RuntimeConfigNoOp("patch would not change any field value")
 
         # RETURNING updated_at so the caller carries the DB-committed value
@@ -296,6 +517,10 @@ def update_runtime_config(
                 SET enable_auto_trading = %(auto)s,
                     enable_live_trading = %(live)s,
                     display_currency    = %(currency)s,
+                    llm_provider        = %(llm_provider)s,
+                    llm_base_url        = %(llm_base_url)s,
+                    llm_model_writer    = %(llm_model_writer)s,
+                    llm_model_critic    = %(llm_model_critic)s,
                     updated_at          = %(at)s,
                     updated_by          = %(by)s,
                     reason              = %(reason)s
@@ -306,6 +531,10 @@ def update_runtime_config(
                     "auto": new_auto,
                     "live": new_live,
                     "currency": new_currency,
+                    "llm_provider": new_llm_provider,
+                    "llm_base_url": new_llm_base_url,
+                    "llm_model_writer": new_llm_model_writer,
+                    "llm_model_critic": new_llm_model_critic,
                     "at": now,
                     "by": updated_by,
                     "reason": reason,
@@ -350,20 +579,68 @@ def update_runtime_config(
                 old_value=str(current["display_currency"]),
                 new_value=new_currency,
             )
+        if llm_provider_changed:
+            insert_runtime_config_audit_row(
+                conn,
+                changed_at=now,
+                changed_by=updated_by,
+                reason=reason,
+                field="llm_provider",
+                old_value=str(current["llm_provider"]),
+                new_value=new_llm_provider,
+            )
+        if llm_base_url_changed:
+            insert_runtime_config_audit_row(
+                conn,
+                changed_at=now,
+                changed_by=updated_by,
+                reason=reason,
+                field="llm_base_url",
+                old_value=str(current["llm_base_url"]),
+                new_value=new_llm_base_url,
+            )
+        if llm_model_writer_changed:
+            insert_runtime_config_audit_row(
+                conn,
+                changed_at=now,
+                changed_by=updated_by,
+                reason=reason,
+                field="llm_model_writer",
+                old_value=str(current["llm_model_writer"]),
+                new_value=new_llm_model_writer,
+            )
+        if llm_model_critic_changed:
+            insert_runtime_config_audit_row(
+                conn,
+                changed_at=now,
+                changed_by=updated_by,
+                reason=reason,
+                field="llm_model_critic",
+                old_value=str(current["llm_model_critic"]),
+                new_value=new_llm_model_critic,
+            )
 
     logger.info(
-        "runtime_config updated by=%s reason=%s auto=%s live=%s currency=%s",
+        "runtime_config updated by=%s reason=%s auto=%s live=%s currency=%s llm=%s writer=%s critic=%s @%s",
         updated_by,
         reason,
         new_auto,
         new_live,
         new_currency,
+        new_llm_provider,
+        new_llm_model_writer,
+        new_llm_model_critic,
+        new_llm_base_url,
     )
 
     return RuntimeConfig(
         enable_auto_trading=new_auto,
         enable_live_trading=new_live,
         display_currency=new_currency,
+        llm_provider=new_llm_provider,
+        llm_base_url=new_llm_base_url,
+        llm_model_writer=new_llm_model_writer,
+        llm_model_critic=new_llm_model_critic,
         updated_at=committed_updated_at,
         updated_by=updated_by,
         reason=reason,

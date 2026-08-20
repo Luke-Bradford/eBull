@@ -46,11 +46,13 @@ closed day shown as open).
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 from pandas import Series, Timestamp
 from pandas.tseries.holiday import (
@@ -64,6 +66,15 @@ from pandas.tseries.holiday import (
     USThanksgivingDay,
     nearest_workday,
 )
+
+RULE_SET_ID: Final = "nyse-market-calendar-v1"
+
+
+def _code_hash() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+
+
+RULE_SET_VERSION: Final = f"{RULE_SET_ID}+{_code_hash()}"
 
 
 class _NyseHolidayCalendar(AbstractHolidayCalendar):
@@ -209,6 +220,30 @@ def us_market_status(d: date) -> UsMarketStatus:
     if d in specials.half_days:
         return "half_day"
     return "open"
+
+
+def latest_completed_us_session(now: datetime) -> date:
+    """Return the latest NYSE session whose official close has passed.
+
+    ``now`` must be timezone-aware. The result is a New York civil date and
+    observes both full closures and 13:00 ET half-day closes. This is distinct
+    from "latest weekday": at 03:00 UTC on a Tuesday, Monday is the latest
+    completed session while Tuesday has not opened.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+
+    from zoneinfo import ZoneInfo
+
+    local = now.astimezone(ZoneInfo("America/New_York"))
+    candidate = local.date()
+    status = us_market_status(candidate)
+    close_time = time(13, 0) if status == "half_day" else time(16, 0)
+    if status == "closed" or local.time().replace(tzinfo=None) < close_time:
+        candidate -= timedelta(days=1)
+    while us_market_status(candidate) == "closed":
+        candidate -= timedelta(days=1)
+    return candidate
 
 
 def us_market_reason(d: date) -> str | None:

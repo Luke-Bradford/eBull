@@ -1,0 +1,259 @@
+{
+  "symbol": "HD",
+  "instrument_id": 1018,
+  "context": {
+    "instrument": {
+      "symbol": "HD",
+      "company_name": "Home Depot Inc",
+      "sector": "7",
+      "industry": null,
+      "country": "US",
+      "currency": "USD"
+    },
+    "fundamentals": [
+      {
+        "as_of_date": "2026-05-03",
+        "revenue_ttm": 166592000000.0,
+        "gross_margin": 0.3313,
+        "operating_margin": 0.1245,
+        "fcf": 18032000000.0,
+        "cash": 1601000000.0,
+        "debt": 3503000000.0,
+        "net_debt": 1902000000.0,
+        "eps": 14.08,
+        "book_value": 13.9157
+      },
+      {
+        "as_of_date": "2026-02-01",
+        "revenue_ttm": 164683000000.0,
+        "gross_margin": 0.3332,
+        "operating_margin": 0.1268,
+        "fcf": 16325000000.0,
+        "cash": 1389000000.0,
+        "debt": 53861000000.0,
+        "net_debt": 52472000000.0,
+        "eps": 14.23,
+        "book_value": 12.8645
+      },
+      {
+        "as_of_date": "2025-11-02",
+        "revenue_ttm": 166189000000.0,
+        "gross_margin": 0.3336,
+        "operating_margin": 0.1296,
+        "fcf": 17649000000.0,
+        "cash": 1684000000.0,
+        "debt": 3200000000.0,
+        "net_debt": 1516000000.0,
+        "eps": 14.66,
+        "book_value": 12.1769
+      },
+      {
+        "as_of_date": "2025-08-03",
+        "revenue_ttm": 165054000000.0,
+        "gross_margin": 0.3335,
+        "operating_margin": 0.1309,
+        "fcf": 17872000000.0,
+        "cash": 2804000000.0,
+        "debt": 0.0,
+        "net_debt": -2804000000.0,
+        "eps": 14.71,
+        "book_value": 10.7186
+      },
+      {
+        "as_of_date": "2025-05-04",
+        "revenue_ttm": 162952000000.0,
+        "gross_margin": 0.3334,
+        "operating_margin": 0.1324,
+        "fcf": 18638000000.0,
+        "cash": 1369000000.0,
+        "debt": 38000000.0,
+        "net_debt": -1331000000.0,
+        "eps": 14.73,
+        "book_value": 7.995
+      }
+    ],
+    "filings": [],
+    "news": [],
+    "prior_thesis": null,
+    "risk_metrics": {
+      "metric_version": "risk_v1",
+      "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
+      "windows": [
+        {
+          "window_key": "1y",
+          "as_of_date": "2026-06-09",
+          "benchmark_symbol": "SPY",
+          "cagr": -0.12917136052300188,
+          "excess_cagr_vs_spy": -0.3598954596444884,
+          "vol_annualized": 0.2338787766064057,
+          "beta": 0.6604808091368554,
+          "beta_r2": 0.12846312141311686,
+          "calmar": -0.4370623924078255,
+          "max_drawdown": -0.29554444117550915,
+          "current_drawdown": -0.24795537571673776,
+          "var_5": -0.02229095,
+          "worst_day": -0.05844735526178898,
+          "cagr_status": "partial_window",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "partial_window",
+          "calmar_status": "partial_window"
+        },
+        {
+          "window_key": "3y",
+          "as_of_date": "2026-06-09",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.01876443997184751,
+          "excess_cagr_vs_spy": -0.17532923017420582,
+          "vol_annualized": 0.22098294458018697,
+          "beta": 0.7497327975566291,
+          "beta_r2": 0.2392361968719255,
+          "calmar": 0.06061411328199549,
+          "max_drawdown": -0.3095721269492068,
+          "current_drawdown": -0.2629306932440034,
+          "var_5": -0.02205912,
+          "worst_day": -0.05844735526178898,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        },
+        {
+          "window_key": "full",
+          "as_of_date": "2026-06-09",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.01893171732419339,
+          "excess_cagr_vs_spy": -0.14062210119102275,
+          "vol_annualized": 0.2387681998153244,
+          "beta": 0.8490812457929523,
+          "beta_r2": 0.34425117553936596,
+          "calmar": 0.06115446345497255,
+          "max_drawdown": -0.3095721269492068,
+          "current_drawdown": -0.2629306932440034,
+          "var_5": -0.02320607,
+          "worst_day": -0.07089362804433208,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        }
+      ]
+    },
+    "price_anchor": {
+      "close": 317.48,
+      "price_date": "2026-06-09",
+      "currency": "USD",
+      "high_52w": 425.8402,
+      "low_52w": 289.0,
+      "window_days_52w": 248,
+      "return_1w": 0.021296,
+      "return_1m": -0.00022,
+      "return_3m": -0.108202,
+      "return_6m": -0.078466,
+      "return_1y": -0.129171
+    },
+    "valuation": {
+      "available": false,
+      "reason": "no_live_quote"
+    },
+    "fair_value_band": {
+      "available": false,
+      "reason": "stale_price"
+    },
+    "analytics_evidence": {
+      "schema": "iar_v1",
+      "as_of": "2026-07-15T12:43:49.910179+00:00",
+      "model_version": "v1.3-balanced",
+      "piotroski": {
+        "score": 4,
+        "band": "neutral",
+        "components_available": 9,
+        "suppressed": false,
+        "reason": null
+      },
+      "altman_z": {
+        "z": 4.5368,
+        "band": "safe",
+        "reason": null,
+        "suppressed": false
+      },
+      "positioning": {
+        "inst_13f_qoq": {
+          "asof": "2026-06-30",
+          "caveat": "<=135d stale",
+          "signal": 0.0,
+          "source": "ownership_institutions_observations",
+          "delta_shares_pct": -0.9871
+        },
+        "short_interest": {
+          "asof": "2026-06-30",
+          "caveat": "% shares outstanding (public float not ingested); bi-monthly",
+          "signal": 1.0,
+          "source": "finra_short_interest_current",
+          "falling": true,
+          "short_pct": 0.0133,
+          "days_to_cover": 2.11
+        },
+        "insider_net_90d": {
+          "asof": "2026-05-21",
+          "caveat": null,
+          "signal": 0.5,
+          "source": "insider_transactions",
+          "net_shares": 0.0,
+          "shares_outstanding": 997000000.0
+        }
+      },
+      "peer_grade": {
+        "peer_key": "7",
+        "peer_n": 313,
+        "basis": "run_eligible_sector",
+        "families": {
+          "value": {
+            "hybrid": 0.501,
+            "percentile": 0.5032
+          },
+          "quality": {
+            "hybrid": 0.5671,
+            "percentile": 0.762
+          },
+          "momentum": {
+            "hybrid": 0.4162,
+            "percentile": 0.3626
+          },
+          "sentiment": {
+            "hybrid": 0.4751,
+            "percentile": 0.4169
+          },
+          "confidence": {
+            "hybrid": 0.5029,
+            "percentile": 0.5096
+          },
+          "turnaround": {
+            "hybrid": 0.4065,
+            "percentile": 0.3051
+          }
+        }
+      }
+    },
+    "ta_state": {
+      "sma_50": 321.9824,
+      "sma_200": 360.491066,
+      "rsi_14": 52.4555,
+      "macd_histogram": 1.222096,
+      "atr_14": 8.762203,
+      "volatility_30d": 0.263767,
+      "price_vs_sma200": "below",
+      "sma_50_200_regime": "death"
+    },
+    "earnings_history": [],
+    "analyst_estimates": null
+  }
+}

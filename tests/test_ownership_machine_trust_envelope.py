@@ -278,7 +278,7 @@ def test_proxy_disclosure_excluded_from_concentration() -> None:
 def test_proxy_disclosure_excluded_from_residual() -> None:
     inst = _slice("institutions", [_h("400", as_of=date(2025, 3, 31))], outstanding="1000")
     proxy = _proxy(_h("300", as_of=date(2025, 3, 31), source="def14a", name="Sponsor group"))
-    r = _compute_residual(Decimal("1000"), [inst, proxy], None)
+    r = _compute_residual(Decimal("1000"), [inst, proxy])
     # Residual = 1000 - 400 (only the additive institutions); proxy not subtracted.
     assert r.shares == Decimal("600")
     assert r.oversubscribed is False

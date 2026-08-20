@@ -60,6 +60,88 @@ _SYSTEMIC_FAILURE_CATEGORIES = frozenset(
     }
 )
 
+# #2262 — consecutive attempted-but-unmoved fetches after which an instrument
+# reads as SUPPLY-LESS. The refresh is nightly, so 5 is roughly a week: long
+# enough to absorb a market holiday, a mid-week halt, or a run that fired before
+# the venue's close, and short enough that a delisted name stops consuming a
+# capped T3 slot within days rather than forever.
+_SUPPLY_LESS_CONSECUTIVE_MISSES = 5
+
+
+def series_advanced(last_bar_before: date | None, last_bar_after: date | None) -> bool:
+    """Did an attempted fetch actually move the series forward? (#2262)
+
+    PUBLIC + pure so it is table-testable: this single predicate is the whole
+    supply signal, because eToro answers HTTP 200 with nothing new for a
+    supply-less instrument and there is no other observable.
+
+    A series that went from "no bars" to "some bars" ADVANCED. A series whose
+    last bar is unchanged did not — and neither did one that somehow went
+    backwards, which is why this is ``>`` and not ``!=``.
+    """
+    if last_bar_after is None:
+        return False
+    return last_bar_before is None or last_bar_after > last_bar_before
+
+
+def _record_supply_outcome(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    *,
+    last_bar_before: date | None,
+    last_bar_after: date | None,
+) -> None:
+    """Record whether an ATTEMPTED candle fetch actually moved the series (#2262).
+
+    ⚠⚠ eToro returns HTTP 200 with nothing new for a supply-less instrument — no
+    error, no 404, no exception. So this is keyed on the only observable there
+    is: did ``MAX(price_date)`` move. A marker keyed on status or on an
+    exception would never fire for any of the ~108 affected instruments.
+
+    Called ONLY on an attempted fetch. A freshness skip is not an attempt (we
+    never asked), and a FAILED fetch is neutral (the provider was unreachable,
+    which is a different signal from the provider having nothing) — neither
+    touches the counter, so neither can manufacture a supply-less verdict.
+    """
+    advanced = series_advanced(last_bar_before, last_bar_after)
+    conn.execute(
+        """
+        INSERT INTO instrument_price_supply
+            (instrument_id, consecutive_no_advance, last_attempt_at, last_advance_at, last_known_bar, updated_at)
+        VALUES (%(iid)s, %(miss)s, now(), CASE WHEN %(advanced)s THEN now() END, %(last_bar)s, now())
+        ON CONFLICT (instrument_id) DO UPDATE
+           SET consecutive_no_advance = CASE
+                   WHEN %(advanced)s THEN 0
+                   ELSE instrument_price_supply.consecutive_no_advance + 1
+               END,
+               last_attempt_at = now(),
+               last_advance_at = CASE
+                   WHEN %(advanced)s THEN now()
+                   ELSE instrument_price_supply.last_advance_at
+               END,
+               last_known_bar = %(last_bar)s,
+               updated_at = now()
+        """,
+        {
+            "iid": instrument_id,
+            "miss": 0 if advanced else 1,
+            "advanced": advanced,
+            "last_bar": last_bar_after,
+        },
+    )
+
+
+def _last_bar(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+) -> date | None:
+    row = conn.execute(
+        "SELECT MAX(price_date) FROM price_daily WHERE instrument_id = %(iid)s",
+        {"iid": instrument_id},
+    ).fetchone()
+    return None if row is None else row[0]
+
+
 # Default spread threshold from trading-policy.md.
 # An instrument is flagged if (ask - bid) / mid > this value.
 DEFAULT_MAX_SPREAD_PCT = Decimal("1.0")  # 1%
@@ -186,6 +268,113 @@ class MarketRefreshSummary:
     # both report 0 candles written.
     candles_skipped: int = 0
     candles_failed: int = 0
+    # #2066 — instruments whose incremental overlap showed a ratio-scale
+    # close mismatch (split/adjustment event) and were healed with an
+    # in-run full-history re-fetch.
+    adjustment_refetches: int = 0
+
+
+@dataclass(frozen=True)
+class QuoteRefreshSummary:
+    """Outcome of a quotes-only refresh (#2271)."""
+
+    instruments_requested: int
+    quotes_updated: int
+    quotes_skipped: int
+    # Count of FETCHED quotes whose spread exceeded the threshold — NOT a
+    # count of rows now flagged in the table. The two diverge when
+    # ``_upsert_quote``'s monotonicity guard rejects a stale snapshot: the
+    # fetched quote is still counted here, while the stored row keeps the
+    # fresher tick's flag. Named for the fetch because that is what this
+    # function observes; the table is the authority on stored state.
+    spread_flags_set: int
+    # True when the provider's batch fetch itself failed, so every
+    # instrument counts as skipped for a reason that is NOT "the provider
+    # had no quote for it". Without this the caller cannot tell a total
+    # upstream outage from a universe of untraded instruments — both
+    # report quotes_updated=0 (#1293 / #2218 shape).
+    batch_failed: bool = False
+    # The exception that caused ``batch_failed``, retained so a caller that
+    # owns a job_runs row can re-raise it and have ``classify_exception`` key
+    # off the original httpx type (AUTH_EXPIRED / RATE_LIMITED / SOURCE_DOWN).
+    # Swallowing it into a bare bool would force the job to either report
+    # success or invent a category (#2271, Codex round 2).
+    batch_error: Exception | None = None
+
+
+def refresh_quotes(
+    provider: MarketDataProvider,
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instruments: list[tuple[int, str]],
+    *,
+    max_spread_pct: Decimal = DEFAULT_MAX_SPREAD_PCT,
+) -> QuoteRefreshSummary:
+    """Batch-fetch quotes for *instruments* and upsert each one.
+
+    Extracted from ``refresh_market_data``'s quote phase (#2271) so the
+    scheduled ``quotes_refresh`` job can reach it without also pulling
+    candles. ``refresh_market_data`` still calls it, so there is one
+    implementation, not two.
+
+    Why this needed extracting: both of the callers that pass through
+    ``refresh_market_data`` set ``skip_quotes=True``, so the quote phase was
+    unreachable in production. Combined with the WS subscriber only writing
+    for instruments an SSE stream has on screen, nothing wrote the ``quotes``
+    table unless an operator had the page open — while scoring, the portfolio
+    manager and the execution guard all read it headless.
+
+    Per-instrument upsert failures are logged and skipped; a failure of the
+    batch fetch itself aborts the whole set and is reported as
+    ``batch_failed`` rather than silently reading as "no quotes available".
+    """
+    if not instruments:
+        return QuoteRefreshSummary(0, 0, 0, 0)
+
+    quotes_updated = 0
+    quotes_skipped = 0
+    spread_flags_set = 0
+
+    all_ids = [iid for iid, _ in instruments]
+    try:
+        quotes = provider.get_quotes(all_ids)
+    except Exception as exc:
+        logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
+        return QuoteRefreshSummary(
+            instruments_requested=len(instruments),
+            quotes_updated=0,
+            quotes_skipped=len(instruments),
+            spread_flags_set=0,
+            batch_failed=True,
+            batch_error=exc,
+        )
+
+    quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
+    for instrument_id, symbol in instruments:
+        quote = quote_map.get(instrument_id)
+        if quote is None:
+            logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
+            quotes_skipped += 1
+            continue
+        try:
+            with conn.transaction():
+                flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
+                quotes_updated += 1
+                if flagged:
+                    spread_flags_set += 1
+        except Exception:
+            logger.warning(
+                "Failed to upsert quote for %s (id=%d), skipping",
+                symbol,
+                instrument_id,
+                exc_info=True,
+            )
+
+    return QuoteRefreshSummary(
+        instruments_requested=len(instruments),
+        quotes_updated=quotes_updated,
+        quotes_skipped=quotes_skipped,
+        spread_flags_set=spread_flags_set,
+    )
 
 
 def refresh_market_data(
@@ -198,6 +387,7 @@ def refresh_market_data(
     skip_quotes: bool = False,
     force_backfill: bool = False,
     consecutive_failure_limit: int = _CANDLE_BATCH_ABORT_LIMIT,
+    fresh_through: date | None = None,
 ) -> MarketRefreshSummary:
     """
     For each instrument: fetch candles, upsert to price_daily, compute
@@ -226,8 +416,33 @@ def refresh_market_data(
     reachable response (clean fetch or a 404) resets the counter. Pass
     ``<= 0`` to disable the breaker (walk every instrument regardless).
 
+    ``fresh_through`` is the caller's completed provider-session boundary.
+    When omitted, the legacy weekday/date boundary remains in force. Long
+    scheduled sweeps must pass it explicitly so a pre-open retry does not
+    fetch and retain a forming same-day candle merely because UTC advanced.
+
     Raw provider responses are persisted by the provider before being returned.
+
+    CONNECTION CONTRACT (#2269) — ``conn`` MUST be autocommit, or the
+    per-instrument atomicity this function advertises does not exist. Each
+    instrument's work is scoped by ``with conn.transaction()``, which psycopg3
+    turns into a real ``BEGIN``/``COMMIT`` only when no transaction is already
+    open. On a non-autocommit connection the caller's first ``execute`` has
+    already opened one, so every block degrades to ``SAVEPOINT``/``RELEASE``
+    and nothing is durable until the CALLER commits — for a 12k-instrument
+    sweep that is hours of work riding on one transaction, lost whole on any
+    restart. This function must not commit it away itself: it does not own the
+    connection (prevention log, "Mid-transaction ``conn.commit()`` in service
+    functions"). The caller supplies the boundary; we only check and warn.
     """
+    if not conn.autocommit:
+        logger.warning(
+            "refresh_market_data called on a NON-AUTOCOMMIT connection (%d instruments) — "
+            "per-instrument transactions degrade to savepoints and NOTHING is durable until "
+            "the caller commits. A restart mid-sweep loses the entire run (#2269).",
+            len(instruments),
+        )
+
     candle_rows_upserted = 0
     features_computed = 0
     quotes_updated = 0
@@ -235,6 +450,7 @@ def refresh_market_data(
     spread_flags_set = 0
 
     today = date.today()
+    freshness_target = fresh_through or most_recent_trading_day(today)
     candles_skipped = 0
     candles_failed = 0
 
@@ -258,20 +474,63 @@ def refresh_market_data(
     total = len(instruments)
     # #1833 batch circuit-breaker — consecutive systemic failures.
     consecutive_systemic_failures = 0
+    adjustment_refetches = 0
     for idx, (instrument_id, symbol) in enumerate(instruments, start=1):
-        if not force_backfill and _candles_are_fresh(conn, instrument_id, today):
+        if not force_backfill and _candles_are_fresh(conn, instrument_id, today, fresh_through=freshness_target):
             candles_skipped += 1
             report_progress(idx, total)
             continue
         if force_backfill:
             fetch_count = lookback_days
         else:
-            fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=today)
+            fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=freshness_target)
         upserted = 0
         computed = 0
+        adjustment_detected = False
         try:
+            # #2262 — snapshot BEFORE the fetch so the supply marker can tell
+            # "the provider had nothing" from "we never asked". INSIDE the
+            # per-instrument try (and outside the transaction below, so a
+            # rolled-back write cannot corrupt the baseline): a transient DB
+            # error reading it is a per-instrument fault like any other, and
+            # raising it here would abort the whole batch loop, which is the
+            # one thing this loop's error handling exists to prevent.
+            last_bar_before = _last_bar(conn, instrument_id)
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
+                if fresh_through is not None:
+                    # A pre-open/manual retry can receive a forming candle for
+                    # a civil date beyond the declared completed-session
+                    # boundary. Keep the provider response in its bounded raw
+                    # audit store, but never publish that forming value as a
+                    # daily close in price_daily (#2572).
+                    bars = [bar for bar in bars if bar.price_date <= fresh_through]
+                # #2066 split-cliff guard: provider history is back-adjusted
+                # at fetch time, so a future split re-bases every bar — but an
+                # incremental fetch only rewrites the overlap window, leaving
+                # all older rows on the old basis (a permanent cliff at the
+                # buffer edge). The overlap re-fetch is the one place the two
+                # bases meet: a ratio-scale close mismatch on an already-stored
+                # date = adjustment event → heal same-day with an in-run
+                # full-history re-fetch (idempotent upsert rewrites the series).
+                if bars and not force_backfill and fetch_count == _INCREMENTAL_FETCH_BARS:
+                    stored = _stored_overlap_closes(conn, instrument_id, [b.price_date for b in bars])
+                    ratio = detect_adjustment_event(stored, bars)
+                    if ratio is not None:
+                        logger.warning(
+                            "Adjustment event detected for %s (id=%d): overlap close ratio %s — "
+                            "re-fetching full %d-bar history to heal the series",
+                            symbol,
+                            instrument_id,
+                            ratio,
+                            lookback_days,
+                        )
+                        bars = provider.get_daily_candles(instrument_id, lookback_days)
+                        if fresh_through is not None:
+                            bars = [bar for bar in bars if bar.price_date <= fresh_through]
+                        # An empty heal re-fetch wrote nothing — a heal is
+                        # only a heal if the series was actually rewritten.
+                        adjustment_detected = bool(bars)
                 if bars:
                     upserted = _upsert_candles(conn, instrument_id, bars)
                     computed = _compute_and_store_features(conn, instrument_id)
@@ -282,8 +541,41 @@ def refresh_market_data(
             # — and that same instrument is also counted in ``candles_failed``.
             candle_rows_upserted += upserted
             features_computed += computed
+            # Counted only after a clean commit (same #1293 rule as the row
+            # totals) — a heal whose re-fetch or write failed did NOT happen.
+            if adjustment_detected:
+                adjustment_refetches += 1
             # A clean fetch proves the provider + DB are reachable → reset.
             consecutive_systemic_failures = 0
+            # #2262 — the fetch was attempted and returned cleanly. Whether it
+            # returned anything NEW is the supply signal, and it is the only
+            # one there is: a 200-with-nothing looks identical to a 200-with-a-
+            # bar at every layer above this one.
+            try:
+                with conn.transaction():
+                    _record_supply_outcome(
+                        conn,
+                        instrument_id,
+                        last_bar_before=last_bar_before,
+                        last_bar_after=_last_bar(conn, instrument_id),
+                    )
+            except Exception:
+                # DELIBERATELY BROAD, against the usual rule. The candle write
+                # has already COMMITTED at this point. Any exception escaping
+                # here reaches the outer handler, which increments
+                # ``candles_failed`` and logs the instrument as a failed refresh
+                # — mislabelling a successful fetch, and corrupting the job's own
+                # health signal in the direction #2218 documents (a run whose
+                # reported outcome does not match what it actually did).
+                #
+                # The usual objection to a broad except is that it hides a
+                # genuine TypeError/AttributeError bug. That is answered by
+                # scope and by ``exc_info``: this guards two bookkeeping calls,
+                # not a work path, and the full traceback is logged at WARNING
+                # every time. A bug here is loud; it just is not fatal.
+                logger.warning(
+                    "Failed to record price-supply outcome for %s (id=%d)", symbol, instrument_id, exc_info=True
+                )
         except Exception as exc:
             candles_failed += 1
             logger.warning("Failed to refresh candles for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
@@ -322,38 +614,10 @@ def refresh_market_data(
     # fx_rates_refresh job — the daily candle job must not shadow those
     # fresher values with stale end-of-day data.
     if not skip_quotes:
-        all_ids = [iid for iid, _ in instruments]
-        batch_failed = False
-        try:
-            quotes = provider.get_quotes(all_ids)
-        except Exception:
-            logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
-            quotes = []
-            quotes_skipped = len(instruments)
-            batch_failed = True
-
-        if not batch_failed:
-            quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
-
-            for instrument_id, symbol in instruments:
-                quote = quote_map.get(instrument_id)
-                if quote is None:
-                    logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
-                    quotes_skipped += 1
-                    continue
-                try:
-                    with conn.transaction():
-                        flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
-                        quotes_updated += 1
-                        if flagged:
-                            spread_flags_set += 1
-                except Exception:
-                    logger.warning(
-                        "Failed to upsert quote for %s (id=%d), skipping",
-                        symbol,
-                        instrument_id,
-                        exc_info=True,
-                    )
+        quote_result = refresh_quotes(provider, conn, instruments, max_spread_pct=max_spread_pct)
+        quotes_updated = quote_result.quotes_updated
+        quotes_skipped = quote_result.quotes_skipped
+        spread_flags_set = quote_result.spread_flags_set
 
     return MarketRefreshSummary(
         instruments_refreshed=len(instruments),
@@ -364,15 +628,36 @@ def refresh_market_data(
         spread_flags_set=spread_flags_set,
         candles_skipped=candles_skipped,
         candles_failed=candles_failed,
+        adjustment_refetches=adjustment_refetches,
     )
 
 
-def _most_recent_trading_day(today: date) -> date:
+def most_recent_trading_day(today: date) -> date:
     """Return the most recent weekday (Mon-Fri) on or before today.
 
-    On weekdays (Mon-Fri), today's candle is available after market
-    close — the daily candle job runs at 22:00 UTC, well after the
-    US close (~21:00 UTC). So the freshness target is today itself.
+    PUBLIC because it is the single definition of "a price series is
+    current" and four modules depend on it agreeing: the per-instrument
+    fetch skip (``_candles_are_fresh`` below), the T3 refresh scope
+    (``scheduler._T3_CANDLE_SELECT``, #2254 — a scope boundary that
+    drifts from the skip boundary either burns requests or strands
+    series), and the orchestrator's candle freshness/content predicates.
+
+    On weekdays (Mon-Fri) the freshness target is today itself.
+
+    ⚠ The original rationale for that ("the job runs at 22:00 UTC, well
+    after the ~21:00 UTC US close") is STALE: ``daily_candle_refresh``
+    has no ``ScheduledJob`` entry — it is the ``candles`` DataLayer in
+    the orchestrator registry, fired by the full sync at **03:00 UTC**,
+    which is before the US session it names. Two consequences, both
+    benign and neither worth "fixing" without a reason:
+      * no US equity is ever skipped as fresh on a weekday run, so the
+        T1/T2 set is re-fetched nightly (~1.1 s each);
+      * a partially-formed bar dated today can be stored for an
+        instrument quoting outside US hours. It self-heals — the next
+        run's ``_INCREMENTAL_FETCH_BARS`` window (yesterday + today +
+        one correction day) rewrites it, which is what that buffer is
+        for. Do NOT treat a same-day bar from an off-close run as a
+        final close.
 
     Weekends roll back to Friday (no candles for Sat/Sun).
 
@@ -393,6 +678,8 @@ def _candles_are_fresh(
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instrument_id: int,
     today: date,
+    *,
+    fresh_through: date | None = None,
 ) -> bool:
     """Return True if price_daily already has the most recent trading day's candle."""
     row = conn.execute(
@@ -406,7 +693,7 @@ def _candles_are_fresh(
     if row is None or row[0] is None:
         return False
     latest_date: date = row[0]
-    return latest_date >= _most_recent_trading_day(today)
+    return latest_date >= (fresh_through or most_recent_trading_day(today))
 
 
 # Incremental fetch window in bars — yesterday + today + one
@@ -459,6 +746,62 @@ def _candles_fetch_count(
         # Gap wider than the incremental window — backfill to close it.
         return default
     return _INCREMENTAL_FETCH_BARS
+
+
+# #2066 — smallest overlap close ratio that reads as an adjustment event
+# rather than a late correction. Splits re-base by the split ratio (2x,
+# 3x, 10x; smallest common uneven split 5:4 = 1.25x); exchange corrections
+# to a finalized close are single-digit percent. 1.2 sits between the two
+# with margin, and a false positive only costs one idempotent full-history
+# re-fetch, so the threshold errs low.
+_ADJUSTMENT_RATIO_THRESHOLD = Decimal("1.2")
+
+
+def detect_adjustment_event(
+    stored_closes: dict[date, Decimal],
+    bars: list[OHLCVBar],
+) -> Decimal | None:
+    """Ratio-scale mismatch between stored and re-fetched overlap closes (#2066).
+
+    Provider candles are back-adjusted at fetch time, so after a split every
+    re-fetched bar is on the new basis while stored rows outside the fetch
+    window keep the old one. Comparing the re-fetched bars against what is
+    already stored for the SAME dates exposes the re-basing: returns the
+    largest direction-normalised close ratio (max(r, 1/r)) at or above
+    ``_ADJUSTMENT_RATIO_THRESHOLD``, or None when the overlap is consistent.
+
+    Non-positive closes on either side are skipped — ``price_daily`` holds
+    zero-close sentinels and a garbage quote must not fake a split. Dates
+    absent from ``stored_closes`` (new rows) carry no signal.
+    """
+    worst: Decimal | None = None
+    for bar in bars:
+        stored = stored_closes.get(bar.price_date)
+        if stored is None or stored <= 0 or bar.close <= 0:
+            continue
+        ratio = bar.close / stored
+        normalised = max(ratio, Decimal(1) / ratio)
+        if normalised >= _ADJUSTMENT_RATIO_THRESHOLD and (worst is None or normalised > worst):
+            worst = normalised
+    return worst
+
+
+def _stored_overlap_closes(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    dates: list[date],
+) -> dict[date, Decimal]:
+    """Stored ``price_daily`` closes for the given dates (#2066 overlap read)."""
+    if not dates:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT price_date, close FROM price_daily
+        WHERE instrument_id = %(instrument_id)s AND price_date = ANY(%(dates)s)
+        """,
+        {"instrument_id": instrument_id, "dates": dates},
+    ).fetchall()
+    return {row[0]: row[1] for row in rows}
 
 
 def _upsert_candles(
@@ -718,6 +1061,20 @@ def _upsert_quote(
     Upsert the current quote into the quotes table.
     Computes spread_pct and sets spread_flag if spread exceeds the threshold.
     Returns True if spread_flag was set (i.e. spread is wide).
+
+    The ``WHERE`` clause makes the write MONOTONIC in ``quoted_at`` (#2271),
+    matching ``etoro_websocket.upsert_quote``'s guard. The two writers share
+    one row per instrument and race: the WS streams live ticks for whatever is
+    on the operator's screen while this REST path runs on a schedule, so
+    without the guard a periodic snapshot would clobber a fresher live tick.
+    That is the hazard the old ``skip_quotes=True`` call sites were working
+    around by never writing quotes at all — which is what left the table with
+    no scheduled writer in the first place.
+
+    Note this makes the return value mean "the fetched quote is wide", not
+    "the stored row is now flagged" — on a rejected (stale) write the stored
+    row keeps the fresher tick's flag. The caller counts spread flags for
+    reporting only.
     """
     spread_pct = compute_spread_pct(quote.bid, quote.ask)
     spread_flag = spread_pct is not None and spread_pct > max_spread_pct
@@ -738,6 +1095,7 @@ def _upsert_quote(
             last        = EXCLUDED.last,
             spread_pct  = EXCLUDED.spread_pct,
             spread_flag = EXCLUDED.spread_flag
+        WHERE quotes.quoted_at IS NULL OR EXCLUDED.quoted_at >= quotes.quoted_at
         """,
         {
             "instrument_id": instrument_id,

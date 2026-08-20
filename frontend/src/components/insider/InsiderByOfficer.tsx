@@ -22,7 +22,6 @@ import {
 
 import type { InsiderTransactionDetail } from "@/api/instruments";
 import { ChartTooltip } from "@/components/charts/ChartTooltip";
-import { lightTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import {
   directionOf,
@@ -215,9 +214,9 @@ export function InsiderByOfficer({
                   key={b.key}
                   fill={
                     b.net > 0
-                      ? lightTheme.up
+                      ? theme.up
                       : b.net < 0
-                        ? lightTheme.down
+                        ? theme.down
                         : theme.borderColor
                   }
                 />

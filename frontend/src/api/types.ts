@@ -11,6 +11,7 @@
  *   - /recommendations     -> app/api/recommendations.py
  *   - /audit              -> app/api/audit.py
  *   - /rankings            -> app/api/scores.py
+ *   - /strategies/*        -> app/api/strategies.py
  *
  * Rule: when a backend response_model changes, update this file in the same
  * PR. Drift here breaks every page silently. There is no codegen yet (#59
@@ -25,9 +26,28 @@ export interface RuntimeFlagsResponse {
   enable_auto_trading: boolean;
   enable_live_trading: boolean;
   display_currency: string;
+  llm_provider: string;
+  llm_base_url: string;
+  llm_model_writer: string;
+  llm_model_critic: string;
   updated_at: string;
   updated_by: string;
   reason: string;
+}
+
+// Request body for PATCH /config (ConfigPatchRequest in app/api/config.py).
+// Partial: omit any field to leave it unchanged. `updated_by` and `reason`
+// are required on every mutation so runtime_config_audit always carries
+// attribution. (Trading flags are intentionally NOT exposed here — the
+// kill-switch/trading surfaces own those flows.)
+export interface ConfigPatchRequest {
+  updated_by: string;
+  reason: string;
+  display_currency?: string;
+  llm_provider?: string;
+  llm_base_url?: string;
+  llm_model_writer?: string;
+  llm_model_critic?: string;
 }
 
 export interface KillSwitchResponse {
@@ -61,7 +81,7 @@ export interface ConfigResponse {
 export type LayerStatus = "ok" | "stale" | "empty" | "error";
 export type OverallStatus = "ok" | "degraded" | "down";
 export type JobLastStatus =
-  "running" | "success" | "failure" | "skipped" | null;
+  JobRunStatus | null;
 export type CadenceKind =
   "hourly" | "daily" | "weekly" | "monthly" | "yearly" | "every_n_minutes";
 
@@ -192,7 +212,15 @@ export interface ParamMetadata {
 // /jobs/runs (app/api/jobs.py — issue #13 PR B)
 // ---------------------------------------------------------------------------
 
-export type JobRunStatus = "running" | "success" | "failure" | "skipped";
+// #2218 — "degraded": the run completed and made no progress. "cancelled"
+// was already reachable server-side (sql/137) and missing here.
+export type JobRunStatus =
+  | "running"
+  | "success"
+  | "failure"
+  | "skipped"
+  | "cancelled"
+  | "degraded";
 
 export interface JobRunResponse {
   run_id: number;
@@ -463,20 +491,20 @@ export interface InstrumentCandles {
 // /instruments/{symbol}/peer-comparison (app/api/instruments.py:277-305, #1751)
 // ---------------------------------------------------------------------------
 
-/** One radar factor: the instrument's value vs its sector median. */
+/** One radar factor: the instrument's value vs its SIC-cohort median. */
 export interface PeerFactor {
   key: string;
   label: string;
   instrument_value: number | null;
-  sector_median: number | null;
-  /** # sector members with a non-null value (low n → noisy median). */
-  sector_n: number;
-  /** True when thin (greyed + ⚠): price-gated (P/E) OR sector coverage <20% (#1836). */
+  cohort_median: number | null;
+  /** # cohort members with a non-null value (low n → noisy median). */
+  cohort_n: number;
+  /** True when thin (greyed + ⚠): price-gated (P/E) OR cohort coverage <20% (#1836). */
   dev_limited: boolean;
   better_when: "higher" | "lower";
 }
 
-/** A sector peer with its factor row (for the heatmap). */
+/** A cohort peer with its factor row (for the heatmap). */
 export interface PeerInstrument {
   instrument_id: number;
   symbol: string;
@@ -488,9 +516,14 @@ export interface PeerInstrument {
 export interface PeerComparison {
   symbol: string;
   instrument_id: number;
-  /** Raw SIC division code "1".."9" — no name lookup table. */
-  sector: string;
-  sector_member_count: number;
+  /** The instrument's own 4-digit SEC SIC (#2023). */
+  cohort_sic: string;
+  /** Human-readable sic_description of that SIC (null if unmapped). */
+  cohort_sic_label: string | null;
+  /** SIC granularity the cohort walk resolved to: 4/3/2 cleared MIN_COHORT; 0 = SIC-2 fallback (thin). */
+  cohort_sic_level: number;
+  /** Complete-TTM peers in the cohort (median base). */
+  cohort_member_count: number;
   factors: PeerFactor[];
   peers: PeerInstrument[];
 }
@@ -708,6 +741,9 @@ export interface BrokerPositionItem {
   is_tsl_enabled: boolean;
   leverage: number;
   total_fees: number;
+  /** Currency the money fields above are actually in (#2129): the display
+   *  currency normally, or the native currency on an FX-rate-missing degrade. */
+  currency: string;
 }
 
 export interface PositionItem {
@@ -724,6 +760,11 @@ export interface PositionItem {
   valuation_source: "quote" | "daily_close" | "cost_basis";
   source: string;
   updated_at: string;
+  /** Currency the money fields above are actually in (#2129): the display
+   *  currency normally, or the native currency on an FX-rate-missing degrade.
+   *  Label each money cell with this; a row where it !== response.display_currency
+   *  was left unconverted. */
+  currency: string;
   trades: BrokerPositionItem[];
 }
 
@@ -751,7 +792,15 @@ export interface PortfolioResponse {
   cash_balance: number | null;
   mirror_equity: number;
   display_currency: string;
+  /** Currency of cash_balance AND mirror money (both USD-base, one conversion):
+   *  display_currency normally, "USD" on an FX-degrade (#2129). Label the cash tile
+   *  and mirror rows with this; positions carry their own per-row `currency`. */
+  cash_currency: string;
   fx_rates_used: Record<string, FxRateUsed>;
+  /** True when a position, cash, or mirror value was left in a non-display
+   *  currency on an FX-degrade (#2129): totals mix currencies under one symbol.
+   *  Drives the "mixed currencies" warning on the summary totals. */
+  fx_incomplete: boolean;
   /** Held position ids ∪ active-mirror underlying ids. Drives the
    *  page-level LiveQuoteProvider so mirror equity recomputes as
    *  underlyings tick. */
@@ -1019,6 +1068,27 @@ export interface AuditListResponse {
   limit: number;
 }
 
+/**
+ * One entry of `scores.penalties_json`. Written by
+ * `app/services/scoring.py::_insert_score` — the column carries BOTH penalties
+ * and rewards, disambiguated by `kind` (#1635).
+ *
+ * `kind` is OPTIONAL because rows written before #1635 carry only
+ * `{name, deduction, reason}`. Read the discriminator through
+ * `lib/scoreExplanation.ts::isReward`, never by testing `kind` directly.
+ *
+ * Both magnitudes are POSITIVE: `deduction` is subtracted from the score,
+ * `addition` is added. Keeping rewards out of `deduction` is deliberate — a
+ * negative penalty would corrupt `total_penalty` and the explanation string.
+ */
+export interface ScorePenaltyItem {
+  name: string;
+  reason: string;
+  kind?: string;
+  deduction?: number;
+  addition?: number;
+}
+
 // ---------------------------------------------------------------------------
 // /rankings (app/api/scores.py)
 // ---------------------------------------------------------------------------
@@ -1046,7 +1116,7 @@ export interface RankingItem {
   // visibly flagged (on `scores` since #1820).
   data_completeness: number | null;
   completeness_tier: string | null;
-  penalties_json: Record<string, unknown>[] | null;
+  penalties_json: ScorePenaltyItem[] | null;
   explanation: string | null;
   model_version: string;
   scored_at: string;
@@ -1096,7 +1166,7 @@ export interface ScoreHistoryItem {
   momentum_score: number | null;
   sentiment_score: number | null;
   confidence_score: number | null;
-  penalties_json: Record<string, unknown>[] | null;
+  penalties_json: ScorePenaltyItem[] | null;
   explanation: string | null;
   rank: number | null;
   rank_delta: number | null;
@@ -1194,7 +1264,7 @@ export interface VerdictScore {
   confidence_score: number | null;
   data_completeness: number | null;
   completeness_tier: string | null;
-  penalties_json: Record<string, unknown>[] | null;
+  penalties_json: ScorePenaltyItem[] | null;
   explanation: string | null;
   analytics_json: IarAnalytics | null;
 }
@@ -1207,6 +1277,63 @@ export interface VerdictResponse {
 // ---------------------------------------------------------------------------
 // /theses/{instrument_id} (app/api/theses.py)
 // ---------------------------------------------------------------------------
+
+// #2013 — structured what-changed vs the prior thesis version. Mirrors
+// app/services/thesis_diff.ThesisDiff via ThesisDiffModel (app/api/theses.py);
+// computed on read from the two append-only rows, never stored.
+export interface ThesisFieldChange {
+  from_value: string | null;
+  to_value: string | null;
+}
+
+export interface ThesisConfidenceChange {
+  from_value: number | null;
+  to_value: number | null;
+  delta: number | null;
+}
+
+export interface ThesisTargetChange {
+  field: string;
+  from_value: number | null;
+  to_value: number | null;
+  kind: "added" | "removed" | "moved";
+  rel_move: number | null;
+}
+
+export interface ThesisDiff {
+  prev_version: number;
+  curr_version: number;
+  stance: ThesisFieldChange | null;
+  thesis_type: ThesisFieldChange | null;
+  confidence: ThesisConfidenceChange | null;
+  targets: ThesisTargetChange[];
+  break_conditions_added: string[];
+  break_conditions_removed: string[];
+  memo_sections_added: string[];
+  memo_sections_removed: string[];
+  memo_sections_changed: string[];
+  prompt_version: ThesisFieldChange | null;
+  model: ThesisFieldChange | null;
+  material: boolean;
+  summary: string;
+}
+
+/** #2051 — machine-checkable break predicate (#2012). `predicate_index`
+ *  aligns with `break_conditions_json`; conditions without a predicate row
+ *  are prose (unmonitored). `fired_at`/`observed_value` non-null iff the
+ *  predicate's at-most-one break event exists. */
+export interface ThesisBreakPredicate {
+  predicate_index: number;
+  metric: string;
+  op: string; // '<' | '>'
+  threshold: number | null; // null for the two regime metrics
+  unit: string;
+  /** 'pending' | 'armed' | 'already_true' | 'already_true_after_gap' */
+  baseline_state: string;
+  baselined_at: string | null;
+  fired_at: string | null;
+  observed_value: number | null;
+}
 
 export interface ThesisDetail {
   thesis_id: number;
@@ -1224,11 +1351,68 @@ export interface ThesisDetail {
   memo_markdown: string;
   critic_json: Record<string, unknown> | null;
   created_at: string;
+  /** Provenance (#2000): stamped at insert since #1919 PR-A; null on
+   *  pre-#1919 rows. prompt_version "v1" memos priced targets with NO
+   *  current price in context (#1987) — the pane surfaces this. */
+  prompt_version?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  /** Server-computed staleness (#1902 single source: find_stale_instruments).
+   *  Populated only on the latest-thesis GET; null on history/POST payloads. */
+  is_stale?: boolean | null;
+  stale_reason?: string | null;
+  /** #2071 — magnitude for data-driven reasons (price_move/band_exit/news_spike). */
+  stale_detail?: string | null;
+  /** #2013 — diff vs the version-1 predecessor; null on v1 rows. */
+  diff?: ThesisDiff | null;
+  /** #2051 — index-aligned machine-checkable predicates; empty when the
+   *  thesis is unscanned or all conditions are prose. */
+  break_predicates?: ThesisBreakPredicate[];
 }
 
 export interface ThesisHistoryResponse {
   instrument_id: number;
   items: ThesisDetail[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// #1902 — GET /theses (library: latest thesis per instrument + context).
+// Thesis fields are null on the "held but no thesis yet" rows the library
+// prepends so the dashboard staleness alert always lands on visible rows.
+export interface ThesisLibraryItem {
+  instrument_id: number;
+  symbol: string;
+  company_name: string;
+  thesis_id: number | null;
+  thesis_version: number | null;
+  thesis_type: string | null;
+  stance: string | null;
+  confidence_score: number | null;
+  buy_zone_low: number | null;
+  buy_zone_high: number | null;
+  created_at: string | null;
+  critic_verdict: string | null;
+  /** null = fresh, or outside refresh scope (not tradable / not analysable). */
+  stale_reason: string | null;
+  /** #2071 — magnitude for data-driven reasons; null otherwise. */
+  stale_detail: string | null;
+  is_held: boolean;
+  latest_score: number | null;
+  latest_rank: number | null;
+  run_status: string | null; // 'running' | 'ok' | 'failed' (DB CHECK) | null pre-#1919
+  run_error: string | null;
+  run_trigger: string | null;
+  run_started_at: string | null;
+  /** #2013 — compact field-level what-changed vs the predecessor version;
+   *  null/false on v1 rows, gap rows, or an unchanged regen. */
+  last_change_summary: string | null;
+  last_change_material: boolean;
+}
+
+export interface ThesisLibraryResponse {
+  items: ThesisLibraryItem[];
   total: number;
   offset: number;
   limit: number;
@@ -1243,6 +1427,68 @@ export interface GenerateThesisResponse {
 // ---------------------------------------------------------------------------
 // /filings/{instrument_id} (app/api/filings.py)
 // ---------------------------------------------------------------------------
+
+/** Parsed Form 12b-25 fields for an NT 10-K / NT 10-Q row (#1015).
+ *  Mirrors app/api/filings.py NtNoticeSummary. */
+export interface NtNoticeSummary {
+  late_form: string; // '10-K' | '10-Q'
+  period_of_report: string | null;
+  grace_period_days: number; // 15 for 10-K, 5 for 10-Q (Rule 12b-25(b))
+  reason_excerpt: string | null;
+  results_change_anticipated: boolean | null;
+}
+
+/** Parsed PRE 14A / PRER14A meeting-agenda proposal signal (#1892).
+ *  Mirrors app/api/filings.py Pre14aSignalSummary. */
+export interface Pre14aSignalSummary {
+  proposal_count: number;
+  reverse_stock_split_proposal: boolean;
+  authorized_share_increase_proposal: boolean;
+  say_on_pay_advisory_vote: boolean;
+  agenda_items: string[];
+}
+
+/** Parsed 424B cover offering (Reg S-K Item 501(b)(3)) — #1816.
+ *  Mirrors app/api/filings.py OfferingSummary. Every money field is
+ *  nullable: NULL means the cover presentation was not resolvable
+ *  (percent-of-principal notes, resale shelves, non-tabular covers) —
+ *  never a guessed value. */
+export interface OfferingSummary {
+  subtype: string;
+  is_issuer_offering: boolean | null;
+  price_per_unit: number | null;
+  unit_label: string | null;
+  aggregate_offering_amount: number | null;
+  underwriting_discount: number | null;
+  net_proceeds_to_issuer: number | null;
+  proceeds_to_selling_holders: number | null;
+  currency: string;
+  security_type: string | null;
+}
+
+/** Parsed tender-offer / going-private event (Reg M-A: Schedule TO / 14D-9 / 13E-3) — #1982.
+ *  Mirrors app/api/filings.py TenderEventSummary. One row per (accession, instrument); only
+ *  `role` + `subject_company_name` are non-null. The four transaction-type checkboxes are
+ *  orthogonal tri-state flags (true/false/null) stored uncollapsed by design — null means the
+ *  cover box was unresolvable, never a guessed value. `board_recommendation` is the SEC Item
+ *  1012(a) position (accept/reject/neutral/unable); kept `string | null` to mirror the Pydantic
+ *  `str | None` exactly. */
+export interface TenderEventSummary {
+  role: "subject" | "offeror";
+  subject_company_name: string;
+  offeror_names: string[] | null;
+  is_third_party_tender: boolean | null;
+  is_issuer_tender: boolean | null;
+  is_going_private: boolean | null;
+  amends_13d: boolean | null;
+  is_final_amendment: boolean | null;
+  amendment_no: number | null;
+  offer_price_per_unit: number | null;
+  unit_label: string | null;
+  currency: string | null;
+  expiration_date: string | null;
+  board_recommendation: string | null;
+}
 
 export interface FilingItem {
   filing_event_id: number;
@@ -1262,6 +1508,16 @@ export interface FilingItem {
   extracted_summary: string | null;
   red_flag_score: number | null;
   created_at: string;
+  /** Form 12b-25 detail for NT 10-K / NT 10-Q rows (#1015); null otherwise. */
+  nt_notice: NtNoticeSummary | null;
+  /** Meeting-agenda proposal signal for PRE 14A / PRER14A rows (#1892);
+   *  null otherwise. */
+  pre14a_signal: Pre14aSignalSummary | null;
+  /** Parsed 424B cover offering for tier-1 424B rows (#1816); null otherwise. */
+  offering: OfferingSummary | null;
+  /** Parsed tender-offer / going-private event for Schedule TO / 14D-9 / 13E-3 rows (#1982);
+   *  null otherwise. */
+  tender: TenderEventSummary | null;
 }
 
 export interface FilingsListResponse {
@@ -1713,6 +1969,70 @@ export interface RankMovesResponse {
 }
 
 // ---------------------------------------------------------------------------
+// #2013 thesis-change alert feed (app/api/alerts.py)
+// ---------------------------------------------------------------------------
+
+export interface ThesisChange {
+  thesis_id: number;
+  instrument_id: number;
+  symbol: string;
+  thesis_version: number;
+  created_at: string;
+  summary: string; // deterministic one-liner from thesis_diff (stance/type/targets)
+  stance_from: string | null;
+  stance_to: string | null;
+}
+
+export interface ThesisChangesResponse {
+  alerts_last_seen_thesis_change_id: number | null;
+  unseen_count: number;
+  changes: ThesisChange[];
+}
+
+// ---------------------------------------------------------------------------
+// #2051 thesis-break alert feed (app/api/alerts.py, PR-B of #2012)
+// ---------------------------------------------------------------------------
+
+export interface ThesisBreakEventAlert {
+  break_event_id: number;
+  thesis_id: number;
+  instrument_id: number;
+  symbol: string;
+  predicate_index: number;
+  metric: string;
+  op: string; // '<' | '>'
+  threshold: number | null; // null for the two regime metrics
+  observed_value: number;
+  observed_as_of: string | null;
+  source_text: string; // the writer's verbatim break condition
+  fired_at: string;
+}
+
+export interface ThesisBreaksResponse {
+  alerts_last_seen_break_event_id: number | null;
+  unseen_count: number;
+  breaks: ThesisBreakEventAlert[];
+}
+
+// ---------------------------------------------------------------------------
+// #1902 thesis-staleness snapshot (app/api/alerts.py)
+// ---------------------------------------------------------------------------
+
+/** Standing-condition snapshot — no cursor/seen semantics. The card clears
+ *  when the thesis regenerates, not when the operator acknowledges it. */
+export interface ThesisStalenessItem {
+  instrument_id: number;
+  symbol: string;
+  reason: string; // find_stale_instruments StaleReason (open string)
+  detail: string | null; // #2071 — magnitude for data-driven reasons
+  latest_thesis_at: string | null; // null = held instrument has no thesis at all
+}
+
+export interface ThesisStalenessResponse {
+  items: ThesisStalenessItem[];
+}
+
+// ---------------------------------------------------------------------------
 // #1076 / #1064 admin control hub (app/api/processes.py)
 // ---------------------------------------------------------------------------
 //
@@ -1746,6 +2066,10 @@ export type ProcessStatus =
   | "pending_first_run"
   | "running"
   | "ok"
+  // #2218 — the run COMPLETED and made no progress. Not `ok` (that is what
+  // OpenFIGI resolution reported for seven weeks while it was dark) and not
+  // `failed` (nothing raised, so there is no error to show).
+  | "degraded"
   | "failed"
   | "pending_retry"
   | "cancelled"
@@ -1772,7 +2096,7 @@ export type HealthVerdict =
   | "paused";
 
 export type ProcessRunStatus =
-  "success" | "failure" | "partial" | "cancelled" | "skipped";
+  "success" | "failure" | "partial" | "cancelled" | "skipped" | "degraded";
 
 export type CursorKind =
   | "filed_at"
@@ -2069,4 +2393,473 @@ export interface BootstrapTimelineRunResponse {
 export interface BootstrapTimelineResponse {
   run: BootstrapTimelineRunResponse | null;
   stages: BootstrapTimelineStageResponse[];
+}
+
+// ---------------------------------------------------------------------------
+// /strategies (app/api/strategies.py, #2447)
+// ---------------------------------------------------------------------------
+
+export interface StrategyResultArm {
+  result_version: string;
+  purpose: "harness_validation" | "capital_candidate";
+  ambiguity_arm: string;
+  quarantine_arm: string;
+  universe_basis: string;
+  corpus_version: string;
+  cost_model_id: string;
+  sizing_rule: string;
+  benchmark_rule: string;
+  return_basis: string;
+  ambiguity_rule_version: string;
+  position_rule_set_version: string;
+  outcome_rule_set_version: string;
+  input_rule_set_version: string;
+  evaluated_instrument_count: number;
+  trade_count: number;
+  losing_trade_count: number;
+  open_trade_count: number;
+  unpriced_trade_count: number;
+  expectancy_per_trade_pct: string;
+  expectancy_ci_low_pct: string | null;
+  expectancy_ci_high_pct: string | null;
+  total_return_pct: string;
+  cagr_pct: string;
+  sharpe: string;
+  sortino: string | null;
+  max_drawdown_pct: string;
+  profit_factor: string | null;
+  exposure_time_pct: string;
+  turnover_annualised: string;
+  return_vs_buy_and_hold_pct: string;
+  deflated_sharpe: string | null;
+  /** Which metric set produced this row (#2623 gap 1). `criterion7-v1` predates
+   *  the holding-period measurement, so its null hold figures mean "not measured
+   *  for this result version" — NOT zero and NOT a defect. Every stored row reads
+   *  `criterion7-v1` today; the columns populate forward only, as backtests run. */
+  metric_set_id: string;
+  /** ⚠ Never render alone. Right-censored, and the bias direction is not
+   *  determinable a priori, so `open_trade_count` AND `unpriced_trade_count`
+   *  belong beside it — separate exclusions, neither implying the other. */
+  median_hold_days: string | null;
+  hold_days_p25: string | null;
+  hold_days_p75: string | null;
+  promotion_refusals: string[];
+}
+
+export interface StrategyEvidenceWindow {
+  window_id: string;
+  label: string;
+  window_start: string;
+  window_end: string;
+  status: "missing" | "partial" | "complete";
+  arms: StrategyResultArm[];
+}
+
+/** The scan belonging to the version this one replaced (#2624 scope 2). */
+export interface StrategyScanRotation {
+  previous_version: string;
+  previous_frontier_date: string | null;
+  previous_scanned_at: string | null;
+}
+
+/** A version this strategy used to run under, and why its numbers are absent.
+ *
+ * ⚠ Deliberately carries no result arms. Measured across every stored result
+ * row: each version replaced before today differs from the current measurement
+ * basis on at least `cost_model_id` and `return_basis`, and those pins ARE the
+ * result identity — so showing an old expectancy beside a new one would be a
+ * cross-basis splice. `promotion_refusals` is also computed from TODAY's gate
+ * and was never stored, so it cannot be reconstructed for a historical row.
+ * This names the refusal instead, per #2602 item 5's posture. */
+export interface StrategyPriorVersion {
+  strategy_version: string;
+  result_count: number;
+  last_scan_frontier_date: string | null;
+  last_scan_at: string | null;
+  comparable: boolean;
+  incomparable_reasons: string[];
+}
+
+export interface StrategyOverview {
+  strategy_id: string;
+  strategy_version: string;
+  purpose: "harness_validation" | "capital_candidate";
+  title: string;
+  description: string;
+  exit_timing: string;
+  runnable: boolean;
+  forward_outcome_supported: boolean;
+  exclusion_reason: string | null;
+  scan: {
+    frontier_date: string | null;
+    updated_at: string | null;
+    /** `rotated` (#2624): the CURRENT version has never scanned but a previous
+     *  one did — the strategy HAS run and its track record started over. Used
+     *  to be reported as `never_run`, which is the operator-facing lie. */
+    status: "never_run" | "rotated" | "current" | "stale";
+    /** Non-null iff `status === "rotated"`. */
+    rotation: StrategyScanRotation | null;
+    fired_entries: number;
+    fired_exits: number;
+    not_fired: number;
+    not_evaluable: number;
+    exclusions_by_reason: Record<string, number>;
+  };
+  evidence_windows: StrategyEvidenceWindow[];
+  prior_versions: StrategyPriorVersion[];
+  /** ⚠ NOT a prior-version summary despite the name — counts rows under the
+   *  CURRENT version matching no declared window. Use `prior_versions`. */
+  legacy_result_count: number;
+  all_recent_evidence_complete: boolean;
+  stage: string | null;
+  attribution: StrategyAttribution;
+  fire_rate: StrategyFireRate;
+  pnl: StrategyPnl;
+  allocation: StrategyAllocation;
+  allocation_ready: boolean;
+  allocation_refusals: string[];
+}
+
+/** How often the entry rule fires, from the durable census (#2623 gap 2).
+ *
+ * ⚠ `fired_share_of_evaluable` is the COMPARABLE number — dimensionless, so a
+ * growing universe does not move it. `entries_per_calendar_week` is throughput
+ * and is universe-size-dependent by design, so it must not be the headline.
+ *
+ * ⚠ The two nulls are INDEPENDENT and carry their own reasons: a version scanned
+ * across several days on which every bar was `not_evaluable` has a real 0.00/week
+ * rate and no share at all. Render each reason; never collapse them to a blank. */
+export interface StrategyFireRate {
+  universe: string;
+  scanned_days: number;
+  fired_days: number;
+  fired_entry_signals: number;
+  evaluable_entry_decisions: number;
+  not_evaluable_entry_decisions: number;
+  fired_share_of_evaluable: string | null;
+  entries_per_calendar_week: string | null;
+  first_scanned_bar: string | null;
+  last_scanned_bar: string | null;
+  share_unavailable_reason: "never_scanned" | "no_evaluable_decisions" | null;
+  weekly_rate_unavailable_reason: "never_scanned" | "single_scan_day" | null;
+}
+
+export interface StrategyAttribution {
+  fired_entries: number;
+  funded_entries: number;
+  rejected_entries: number;
+  resolved_entries: number;
+  winning_entries: number;
+  win_rate: string | null;
+  median_days_to_outcome: string | null;
+  signals_last_30_days: number;
+  shadow_average_return_pct: string | null;
+  funded_shadow_average_return_pct: string | null;
+  rejected_shadow_average_return_pct: string | null;
+  opportunity_gap_pct: string | null;
+  funded_capture_rate: string | null;
+  filled_entries: number;
+  broker_rejected_entries: number;
+  fill_rate: string | null;
+  broker_rejection_rate: string | null;
+  average_slippage_pct: string | null;
+  average_stressed_cost_usd: string | null;
+  max_observed_account_drawdown_pct: string | null;
+}
+
+export interface StrategyPnl {
+  currency: "USD";
+  strategy_trade_count: number;
+  owned_position_count: number;
+  active_position_count: number;
+  close_event_count: number;
+  invested_capital: string | null;
+  realised_pnl: string | null;
+  unrealised_pnl: string | null;
+  total_pnl: string | null;
+  observed_fees: string | null;
+  complete: boolean;
+  incomplete_reasons: string[];
+}
+
+export interface StrategyAllocation {
+  deployment_id: number | null;
+  capital_limit: string;
+  currency: string;
+  enabled: boolean;
+  revision: number | null;
+  reserved_capital: string;
+  invested_capital: string | null;
+  remaining_capital: string;
+  policy_configured: boolean;
+  max_drawdown_limit_pct: string | null;
+  ticket_sizing_mode: "percent" | "fixed" | null;
+  ticket_value: string | null;
+  max_ticket_amount: string | null;
+}
+
+export interface StrategyEntryBlock {
+  new_entries_blocked: boolean;
+  global_kill_active: boolean;
+  global_kill_reason: string | null;
+  global_kill_activated_at: string | null;
+  global_kill_activated_by: string | null;
+  execution_block_reasons: string[];
+}
+
+export interface StrategyOverviewResponse {
+  as_of: string;
+  demo_connection: boolean;
+  execution_enabled: boolean;
+  live_execution_enabled: boolean;
+  live_strategy_activation_available: false;
+  live_strategy_activation_blocker: "live_strategy_broker_contract_not_validated";
+  storage_policy: "fired_signals_and_material_mutations_only";
+  entry_block: StrategyEntryBlock;
+  paper_pool: StrategyPaperPool;
+  automation_readiness: {
+    ready: boolean;
+    state:
+      | "no_capital_candidates"
+      | "historical_validation_incomplete"
+      | "assessment_policy_missing"
+      | "prospective_evidence_missing"
+      | "prospective_evidence_failed"
+      | "prospective_evidence_stale"
+      | "candidate_evidence_incomplete"
+      | "ready";
+    capital_candidate_count: number;
+    historically_ready_candidate_count: number;
+    prospectively_ready_candidate_count: number;
+    assessment_policy_id: string | null;
+    assessed_scope_count: number;
+    passed_scope_count: number;
+    fresh_passed_scope_count: number;
+    resolved_forecasts: number;
+    target_first_count: number;
+    stop_first_count: number;
+    timeout_count: number;
+    latest_checked_at: string | null;
+    worst_normalized_brier_score: string | null;
+    weakest_brier_skill_score: string | null;
+    worst_classwise_calibration_error: string | null;
+    blockers: string[];
+  };
+  account_equity_evidence: {
+    status: "unavailable" | "collecting";
+    days_collected: number;
+    snapshot_date: string | null;
+    observed_at: string | null;
+    account_currency_id: number | null;
+    currency: string | null;
+    official_equity: string | null;
+    official_available_cash: string | null;
+    official_total_invested: string | null;
+    official_unrealised_pnl: string | null;
+    local_eod_currency: string | null;
+    local_eod_value: string | null;
+    local_eod_positions_priced: number | null;
+    local_eod_stale_mark_positions: number | null;
+    difference: string | null;
+    comparable: false;
+    incomplete_reasons: string[];
+  };
+  evidence_refresh: {
+    frozen_through: string;
+    completed_windows: number;
+    partial_windows: number;
+    total_windows: number;
+    status: "idle" | "queued" | "running" | "failed" | "complete";
+    request_id: number | null;
+    requested_at: string | null;
+    finished_at: string | null;
+    last_error: string | null;
+    progress: Record<string, unknown> | null;
+  };
+  strategies: StrategyOverview[];
+}
+
+export interface StrategyEvidenceRefreshResponse {
+  request_id: number;
+  status: "queued" | "running";
+  already_active: boolean;
+}
+
+export interface StrategyPaperPool {
+  configured: boolean;
+  enabled: boolean;
+  capital_limit: string;
+  capital_mode: "fixed" | "compound";
+  effective_capital: string | null;
+  currency: "USD";
+  reserved_capital: string;
+  invested_capital: string | null;
+  remaining_capital: string | null;
+  mandate: StrategyPortfolioMandate;
+  available_mandates: StrategyPortfolioMandate[];
+}
+
+export interface StrategyPortfolioMandate {
+  configured: boolean;
+  policy_version: string;
+  risk_profile: "unconfigured" | "cautious" | "balanced" | "growth";
+  target_volatility_pct: string | null;
+  max_portfolio_drawdown_pct: string | null;
+  max_loss_per_position_pct: string | null;
+  max_daily_loss_pct: string | null;
+  active_risk_budget_pct: string | null;
+  cash_reserve_pct: string | null;
+  max_concurrent_positions: number | null;
+  shorts_allowed: boolean;
+  leverage_allowed: boolean;
+}
+
+export interface StrategySizingUpdateResponse {
+  strategy_id: string;
+  strategy_version: string;
+  deployment_id: number;
+  revision: number;
+  ticket_sizing_mode: "percent" | "fixed";
+  ticket_value: string;
+  max_ticket_amount: string;
+}
+
+export interface StrategyPnlHistoryPoint {
+  date: string;
+  principal: string;
+  external_flow: string;
+  realised_pnl: string | null;
+  unrealised_pnl: string | null;
+  total_pnl: string | null;
+  pot_value: string | null;
+  complete: boolean;
+  incomplete_reasons: string[];
+}
+
+export interface StrategyPnlHistoryResponse {
+  basis: "exact_owned_mark_to_market_nav";
+  total_return_available: false;
+  benchmark_comparison_available: false;
+  points: StrategyPnlHistoryPoint[];
+}
+
+export interface StrategyOwnedPosition {
+  strategy_trade_id: number;
+  broker_position_id: number;
+  /**
+   * Null on the core/cash arm (#2603): a mandate holding is authorised by a
+   * rebalance intent, not a signal, so it has no strategy identity. Use
+   * `strategy_title`, which is never null and carries the mandate label.
+   */
+  strategy_id: string | null;
+  strategy_version: string | null;
+  strategy_title: string;
+  instrument_id: number;
+  symbol: string;
+  company_name: string | null;
+  direction: "long" | "short" | null;
+  units: string | null;
+  assigned_value: string | null;
+  current_value: string | null;
+  unrealised_pnl: string | null;
+  unrealised_return_pct: string | null;
+  open_rate: string | null;
+  current_price: string | null;
+  stop_loss_rate: string | null;
+  take_profit_rate: string | null;
+  opened_at: string | null;
+  currency: string;
+  trade_status: "open" | "closing" | "reconcile_required";
+  valuation_available: boolean;
+}
+
+export interface StrategyOwnedPositionsResponse {
+  positions: StrategyOwnedPosition[];
+  live_quote_instrument_ids: number[];
+}
+
+export interface StrategyPositionCloseResponse {
+  strategy_trade_id: number;
+  broker_position_id: number;
+  state: "submitted" | "pending" | "applied";
+  reason_code: string;
+  operation_id: number | null;
+}
+
+export interface StrategyTradeLifecycle {
+  trade_status: "planned" | "submitted" | "open" | "closing" | "closed" | "failed" | "reconcile_required" | null;
+  ownership_count: number;
+  broker_position_id: number | null;
+  ownership_status: "active" | "released" | null;
+  position_claimed_at: string | null;
+  position_released_at: string | null;
+  position_release_reason: string | null;
+  latest_operation_type: "fixed_exit_repair" | "stop_ratchet" | "close" | null;
+  latest_operation_id: number | null;
+  latest_operation_order_id: number | null;
+  latest_operation_trigger: string | null;
+  latest_operation_status: "intent_persisted" | "submitted" | "applied" | "rejected" | "reconcile_required" | null;
+  latest_operation_created_at: string | null;
+  latest_operation_submitted_at: string | null;
+  latest_operation_resolved_at: string | null;
+  latest_operation_error: string | null;
+  latest_reconciliation_state: "unresolved" | "pending" | "resolved" | "rejected" | "not_found" | "ambiguous" | "error" | null;
+  latest_reconciliation_broker_status: string | null;
+  latest_reconciliation_attempt_count: number | null;
+  latest_reconciliation_updated_at: string | null;
+  latest_reconciliation_error: string | null;
+  close_event_count: number | null;
+  realised_pnl_usd: string | null;
+  observed_fees_usd: string | null;
+  close_history_status: "not_applicable" | "not_closed" | "complete" | "incomplete" | "unavailable";
+  incomplete_reasons: string[];
+}
+
+export interface FiredSignal {
+  signal_id: number;
+  strategy_id: string;
+  strategy_version: string;
+  instrument_id: number;
+  symbol: string;
+  company_name: string | null;
+  signal_bar_date: string;
+  signal_kind: string;
+  fill_bar_date: string;
+  fill_price: string;
+  universe: string;
+  outcome: string | null;
+  exit_bar_date: string | null;
+  exit_price: string | null;
+  gross_return_pct: string | null;
+  outcome_reason: string | null;
+  funding_status: "funded" | "rejected" | "not_applicable";
+  funding_reason: string;
+  funded_amount: string | null;
+  strategy_trade_id: number | null;
+  execution_status: string | null;
+  actual_fill_price: string | null;
+  slippage_pct: string | null;
+  trade_lifecycle: StrategyTradeLifecycle | null;
+}
+
+export interface FiredSignalsResponse {
+  items: FiredSignal[];
+  next_cursor: number | null;
+}
+
+export interface AllocationUpdateRequest {
+  strategy_version: string;
+  capital_limit: string;
+  enabled: boolean;
+  reason: string;
+}
+
+export interface AllocationUpdateResponse {
+  strategy_id: string;
+  strategy_version: string;
+  deployment_id: number;
+  capital_limit: string;
+  currency: string;
+  enabled: boolean;
+  revision: number;
 }

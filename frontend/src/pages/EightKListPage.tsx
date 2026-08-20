@@ -18,7 +18,8 @@ import {
   EightKFilterStrip,
   type EightKFilters,
 } from "@/components/instrument/EightKFilterStrip";
-import { SEVERITY_TONE } from "@/components/instrument/eightKSeverity";
+import { severityTone } from "@/components/instrument/eightKSeverity";
+import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { useCallback, useEffect, useMemo } from "react";
@@ -231,13 +232,7 @@ export function EightKListPage(): JSX.Element {
                           ))}
                         </td>
                         <td className="px-2 py-1">
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                              SEVERITY_TONE[sev] ?? SEVERITY_TONE.low
-                            }`}
-                          >
-                            {sev}
-                          </span>
+                          <Badge tone={severityTone(sev)}>{sev}</Badge>
                         </td>
                         <td className="px-2 py-1 text-slate-700">
                           {f.items.map((i) => i.item_label).join(" · ")}

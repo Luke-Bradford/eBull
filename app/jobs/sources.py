@@ -83,10 +83,22 @@ Lane = Literal[
     "db_cusip",
     "db_ownership_obs",
     "db_raw_sweep",
+    "db_fsnds_notes",
     "db_size_sample",
+    "db_thesis_dq",
+    "db_thesis_break",
+    "db_thesis_outcomes",
+    "llm_thesis",
     "risk_metrics",
+    "fair_value_band",
+    "price_quarantine",
+    "strategy_scan",
+    "strategy_execution",
+    "strategy_backtest",
     "bootstrap",
     "finra",
+    "nasdaq",
+    "cboe",
     "openfigi",
 ]
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
@@ -102,8 +114,13 @@ the rate — it does not.
 
 * ``init`` — universe-sync only. Pre-everything fence; one job total.
 * ``etoro`` — eToro REST budget. ``execute_approved_orders`` +
-  ``daily_candle_refresh`` + ``etoro_lookups_refresh`` +
-  ``exchanges_metadata_refresh`` serialise.
+  ``daily_candle_refresh`` + ``strategy_intraday_harvest`` +
+  ``etoro_lookups_refresh`` + ``exchanges_metadata_refresh`` serialise.
+* ``nasdaq`` — Nasdaq Trader public safety feeds. The strategy halt poll has
+  its own lane so a delayed public-feed request cannot starve either broker
+  execution or unrelated SEC/FINRA collection.
+* ``cboe`` — one official daily VIX history request. It is separate from the
+  broker and Nasdaq lanes because those vendors share no overlap budget.
 * ``sec_rate`` — the SEC discovery/producer jobs (per-accession fetchers +
   per-issuer ingest). They serialise under one ``JobLock`` to bound job
   overlap, NOT request rate (the HTTP floor above bounds rate). #1478
@@ -243,6 +260,10 @@ when one overruns). Scheduled-only, so NOT added to the
   bounded batches and holds its lane for minutes; on the catch-all
   ``db`` lane it would starve ``orchestrator_high_frequency_sync``
   (every-5-min, same lane) — the #1526/#1527 starvation class.
+* ``db_fsnds_notes`` — ``sec_fsnds_notes_ingest`` (#844, manual-only)
+  only. Streams up to 12 FSNDS monthly TSV archives (minutes) — same
+  starvation rationale as ``db_raw_sweep``; no SEC HTTP (archives
+  pre-fetched by ``sec_bulk_download``).
   Write-safety: sole writer of ``payload_sha256``/``payload_swept_at``;
   the raw-row UPDATE re-checks ``payload IS NOT NULL`` under its row
   lock, so concurrent ``store_raw`` upserts (sec_rate / sec_manifest
@@ -272,6 +293,36 @@ when one overruns). Scheduled-only, so NOT added to the
   other job touches it. Scheduled-only, so NOT added to the
   ``bootstrap_stages.lane`` CHECK (matches ``db_liveness`` / ``db_raw_sweep``).
 
+* ``db_thesis_dq`` / ``db_thesis_break`` — ``thesis_dq_audit`` (daily 05:12,
+  #2014) and ``thesis_break_scan`` (daily 05:22, #2012), one single-job lane
+  each (#2052). Both sat on the catch-all ``db`` lane, whose 02:30
+  ``fundamentals_sync`` held the lock 6-11h+ FOUR consecutive nights
+  (07-13→07-16, released only by the next daemon restart) — the #1526/#1527
+  starvation class with an unbounded holder: ``thesis_dq_audit`` had ZERO
+  scheduled fires ever. SEPARATE lanes, not one shared audit lane (the
+  ``db_liveness``/``db_retry`` lesson above): boot catch-up and manual
+  triggers co-fire them despite the 05:12/05:22 stagger. Write-disjointness:
+  ``thesis_dq_audit`` is read-only (writes only ``job_runs``);
+  ``thesis_break_scan`` is the SOLE writer of ``thesis_break_predicates`` +
+  ``thesis_break_events`` (full-census 2026-07-16 — 3 write sites, all in
+  ``app/services/thesis_break_scan.py``; the ``break_fired`` stale-mark is a
+  read-side EXISTS in ``app/services/thesis.py``, not a write). Scheduled-only,
+  so NOT added to the ``bootstrap_stages.lane`` CHECK (matches
+  ``db_liveness`` / ``db_retry`` / ``db_size_sample``).
+
+* ``llm_thesis`` — ``thesis_refresh`` (#1919 PR-B) only. Hourly LLM
+  thesis generation: a batch of ≤5 local-LLM generations holds the lane
+  ~20+ min (≈260s/thesis on a local 14B) — on any shared lane that hold
+  is the #1526/#1527 starvation class. Write set (``theses`` /
+  ``thesis_runs`` / ``coverage.last_reviewed_at`` / the rankings
+  retry-queue demote) is shared only with the filing cascade (``db``
+  lane, inside ``fundamentals_sync``) and the manual
+  ``POST /instruments/{symbol}/thesis`` path — all three serialise
+  per-instrument via the K.3 ``instrument_lock`` session advisory lock
+  (the lane is not the guard), and the LLM endpoint itself serialises
+  cross-process at the Ollama server-side queue (spec §1). Scheduled-only,
+  so NOT added to the ``bootstrap_stages.lane`` CHECK.
+
 * ``risk_metrics`` — ``risk_metrics_refresh`` (#591 PR-B) only. The
   orchestrator-driven weekly risk-metric recompute. DB-only producer (no
   external host), so the lane is purely a write-overlap bucket, not a
@@ -282,6 +333,46 @@ when one overruns). Scheduled-only, so NOT added to the
   SCHEDULED_JOBS (the DAG layer's cadence/freshness gate the run; a
   scheduled row would double-fire), so NOT added to the
   ``bootstrap_stages.lane`` CHECK.
+
+* ``fair_value_band`` — ``fair_value_band_refresh`` (#2009) only. The
+  orchestrator-driven 24h deterministic fair-value band recompute. DB-only
+  producer (no external host), so the lane is purely a write-overlap bucket.
+  Own lane keeps it write-disjoint (sole writer of
+  ``fair_value_band_observations`` / ``fair_value_band_current`` /
+  ``fair_value_cohort_members``; reads ``financial_periods_ttm`` +
+  ``price_daily`` MVCC-safe) AND stops the minutes-long full-universe pass
+  from starving the catch-all ``db`` lane's every-5-min orchestrator sync
+  (#1526/#1527 class) — same rationale as ``risk_metrics``. Reachable via the
+  orchestrator adapter inner-JobLock AND the operator manual-trigger path. NOT
+  in SCHEDULED_JOBS (the DAG layer's cadence/freshness gate the run), so NOT
+  added to the ``bootstrap_stages.lane`` CHECK.
+* ``strategy_scan`` — ``strategy_signal_scan`` (#2394 §3.1), bounded forward
+  ``strategy_outcome_resolution`` (#2474), plus
+  ``strategy_observation_retention`` (#2448). The DB-only producers are sole
+  writer of the signal/count/observation relations and scan watermark; the
+  outcome resolver stores one terminal row per fired signal/version and never
+  stores immature polling state; the retention sibling drops only expired leaf
+  partitions after both producers. Intraday harvesting uses the ``etoro`` lane,
+  and both its writer and this retention job take the same per-tier transaction
+  advisory locks before touching intraday partitions;
+  reads ``price_daily`` / ``price_bar_quarantine`` MVCC-safe. ⚠ The lane is
+  load-bearing for CORRECTNESS here, unlike the two above where it is a
+  starvation fix: ``store_signals`` has no ``ON CONFLICT``, so two overlapping
+  scans do not produce a duplicate row — they produce a ``UniqueViolation`` that
+  aborts a batch after the work is done. Own lane rather than the catch-all
+  ``db`` for the ``risk_metrics`` reason as well: the pass is minutes long over
+  the whole validated universe. Scheduled-only (daily 06:45 UTC) → not in the
+  ``bootstrap_stages.lane`` CHECK.
+* ``strategy_backtest`` — ``strategy_backtest_run`` (#2394 §3.2) only. DB-only
+  producer, sole writer of ``strategy_results`` / ``strategy_results_store`` /
+  ``strategy_holdout_accesses``; reads the FROZEN research corpus
+  (``research_price_daily`` + ``research_bar_quarantine``) MVCC-safe. ⚠ It must
+  NOT share ``strategy_scan``'s lane, and that is the reason §3 of the runner
+  spec split the two jobs at all: the scan reads live ``price_daily`` and is
+  cheap and daily, this reads the research corpus and takes ~30-50 minutes, and
+  blocking the daily shadow track record behind a backtest is the exact
+  coupling the split avoided. Manual-trigger-only → registered in
+  MANUAL_TRIGGER_JOB_SOURCES, not in the ``bootstrap_stages.lane`` CHECK.
 
 The final lane is bootstrap-only:
 
@@ -385,6 +476,13 @@ class JobSourceRegistryError(RuntimeError):
 #    ``docs/superpowers/specs/2026-05-17-orchestrator-inner-lock-removal.md``).
 
 MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
+    # sec_fsnds_notes_ingest — #844 unvested RSU/PSU counts from the cached
+    # FSNDS monthly archives. Streaming TSV parse + per-accession commits
+    # over ~12 monthlies (minutes) → own lane, NOT the catch-all ``db``
+    # (long-running; the raw_payload_retention_sweep precedent). No SEC
+    # HTTP (archives pre-fetched by sec_bulk_download). Invoker in
+    # app/jobs/runtime.py::_INVOKERS; not a bootstrap stage in v1.
+    "sec_fsnds_notes_ingest": "db_fsnds_notes",
     # filing_events_skip_tier_cleanup — one-shot retroactive delete
     # (#1013). Pure DB operation (no SEC HTTP) → ``db`` lane, matching
     # the other retention sweeps (financial_facts / raw_data). Companion
@@ -437,9 +535,39 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # params in MANUAL_TRIGGER_JOB_METADATA; invoker in
     # app/jobs/runtime.py::_INVOKERS.
     "risk_metrics_refresh": "risk_metrics",
+    # fair_value_band_refresh — #2009 deterministic fair-value band recompute.
+    # Own write-disjoint lane (sole writer of fair_value_band_observations /
+    # _current + fair_value_cohort_members; reads financial_periods_ttm +
+    # price_daily MVCC-safe). Orchestrator-driven (DAG layer "fair_value_band")
+    # + manual-trigger-only; NOT in SCHEDULED_JOBS (the layer's 24h
+    # cadence/freshness gate the DAG walk — a scheduled row would double-fire).
+    # Own lane (NOT catch-all "db") so the minutes-long full-universe recompute
+    # cannot starve the db-lane orchestrator sync (#1526/#1527 class), matching
+    # the risk_metrics_refresh rationale. Companion empty params in
+    # MANUAL_TRIGGER_JOB_METADATA; invoker in app/jobs/runtime.py::_INVOKERS.
+    "fair_value_band_refresh": "fair_value_band",
+    # price_quarantine_refresh — #2261 impossible-bar quarantine recompute
+    # (phase 0a of #2240). Own write-disjoint lane (sole writer of
+    # price_bar_quarantine / price_transition_quarantine /
+    # price_quarantine_coverage / price_series_break; reads price_daily
+    # MVCC-safe). Orchestrator-driven (DAG layer "price_quarantine") +
+    # manual-trigger-only; NOT in SCHEDULED_JOBS. Own lane rather than the
+    # catch-all "db" for the risk_metrics_refresh reason: a full-corpus pass
+    # over 3.2M bars must not starve the db-lane orchestrator sync
+    # (#1526/#1527 class). Companion empty params in
+    # MANUAL_TRIGGER_JOB_METADATA; invoker in app/jobs/runtime.py::_INVOKERS.
+    "price_quarantine_refresh": "price_quarantine",
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.
+    # strategy_backtest_run — #2394 §3.2 backtest persistence. Own lane, NOT
+    # the catch-all ``db`` and NOT ``strategy_scan``: a 30-50 minute
+    # full-corpus pass would starve the db-lane orchestrator sync (#1526/#1527
+    # class) and would block the daily signal scan behind it. Manual-trigger
+    # only — criterion 5 requires a hold-out purpose no cron fire can supply,
+    # so it is deliberately absent from SCHEDULED_JOBS. Params in
+    # MANUAL_TRIGGER_JOB_METADATA; invoker in app/jobs/runtime.py::_INVOKERS.
+    "strategy_backtest_run": "strategy_backtest",
     "sec_rebuild": "sec_rate",
     # institutional_13f_notice_backfill — one-shot 13F-NT backfill (#1639).
     # Per-day daily-index reads + per-Notice primary_doc fetches against SEC;

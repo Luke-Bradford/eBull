@@ -7,7 +7,7 @@ import {
   computeOwnership,
   formatPct,
   formatShares,
-  ownershipStaleDenominatorCopy,
+  ownershipSuppressedDenominatorCopy,
   parseShareCount,
   topHoldersByShares,
 } from "./ownershipMetrics";
@@ -355,9 +355,13 @@ describe("formatPct + formatShares", () => {
   });
 });
 
-describe("ownershipStaleDenominatorCopy (#1581)", () => {
-  it("returns the stale-denominator copy when no_data carries an as_of", () => {
-    const copy = ownershipStaleDenominatorCopy("no_data", "2011-04-29");
+describe("ownershipSuppressedDenominatorCopy (#1581, #2232)", () => {
+  it("returns the stale-denominator copy for reason=stale_denominator", () => {
+    const copy = ownershipSuppressedDenominatorCopy(
+      "no_data",
+      "stale_denominator",
+      "2011-04-29",
+    );
     expect(copy).not.toBeNull();
     expect(copy).toContain("too stale");
     // Cause-agnostic: must not claim multi-class, must not push a sync (futile
@@ -366,13 +370,40 @@ describe("ownershipStaleDenominatorCopy (#1581)", () => {
     expect(copy!.toLowerCase()).not.toContain("trigger a fundamentals sync");
   });
 
-  it("returns null (use the surface's own absent copy) when as_of is null", () => {
-    expect(ownershipStaleDenominatorCopy("no_data", null)).toBeNull();
+  it("returns null (use the surface's own absent copy) for reason=absent", () => {
+    expect(ownershipSuppressedDenominatorCopy("no_data", "absent", null)).toBeNull();
   });
 
-  it("returns null outside no_data even when an as_of is present", () => {
+  it("returns null outside no_data even when a reason is present", () => {
     // The empty branch also fires when inputs/rings are null on a non-no_data
-    // payload; the as_of must not be mistaken for a staleness signal then.
-    expect(ownershipStaleDenominatorCopy("green", "2011-04-29")).toBeNull();
+    // payload; neither the reason nor the as_of is a suppression signal then.
+    expect(
+      ownershipSuppressedDenominatorCopy("green", "stale_denominator", "2011-04-29"),
+    ).toBeNull();
+  });
+
+  it("#2232: partial_class_denominator gets its OWN copy, not the stale one", () => {
+    // The whole point of the explicit reason. This payload carries a FRESH as_of
+    // (2026-03-31), so the pre-#2232 as_of inference would have called it stale.
+    const copy = ownershipSuppressedDenominatorCopy(
+      "no_data",
+      "partial_class_denominator",
+      "2026-03-31",
+    );
+    expect(copy).not.toBeNull();
+    expect(copy!.toLowerCase()).not.toContain("too stale");
+    expect(copy).toContain("does not cover the whole company");
+    // Same prohibition as #1581 — a sync re-fetches the same dimension-stripped
+    // companyfacts payload, so telling the operator to run one is a dead end.
+    expect(copy!.toLowerCase()).not.toContain("trigger a fundamentals sync");
+  });
+
+  it("falls back to the as_of inference when the payload predates no_data_reason", () => {
+    // Back-compat: an undefined/null reason on a no_data payload that still
+    // carries an as_of is the pre-#2232 stale case.
+    expect(
+      ownershipSuppressedDenominatorCopy("no_data", undefined, "2011-04-29"),
+    ).toContain("too stale");
+    expect(ownershipSuppressedDenominatorCopy("no_data", null, null)).toBeNull();
   });
 });

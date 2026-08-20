@@ -33,11 +33,18 @@ import { Sparkline } from "@/components/instrument/Sparkline";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
+import { completenessTone } from "@/lib/badgeTone";
+import { toScoreChips } from "@/lib/scoreExplanation";
 
 export interface VerdictTabProps {
   readonly instrumentId: number;
   readonly thesis: ThesisDetail | null;
   readonly thesisErrored?: boolean;
+  /** Native header price + currency, forwarded to the ThesisPane value
+   *  band (#2000). Optional — older callers degrade to "—". */
+  readonly currentPrice?: string | null;
+  readonly currency?: string | null;
 }
 
 const FAMILIES: { key: string; label: string; scoreKey: keyof FamilyScores }[] = [
@@ -70,17 +77,6 @@ function ErrorBox({ message }: { message: string }): JSX.Element {
   );
 }
 
-function stanceClass(stance: string): string {
-  const s = stance.toLowerCase();
-  if (s === "buy")
-    return "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300";
-  if (s === "avoid")
-    return "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300";
-  if (s === "watch")
-    return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
-  return "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
-}
-
 /** Evidence-only tag — peer percentile is weight 0 in the live score. */
 function EvidenceTag(): JSX.Element {
   return (
@@ -97,6 +93,8 @@ export function VerdictTab({
   instrumentId,
   thesis,
   thesisErrored = false,
+  currentPrice = null,
+  currency = null,
 }: VerdictTabProps): JSX.Element {
   const verdict = useAsync<VerdictResponse>(
     () => fetchScoreVerdict(instrumentId),
@@ -121,18 +119,29 @@ export function VerdictTab({
 
   const score = verdict.data?.score ?? null;
   if (score === null) {
+    // Thesis still leads even when unscored (#2003) — a generated memo
+    // must not vanish behind the "Not yet scored" empty state.
     return (
-      <Section title="Verdict">
-        <EmptyState
-          title="Not yet scored"
-          description="This instrument has no scoring run yet. The verdict appears once the deterministic engine has scored it."
+      <div className="space-y-4">
+        <ThesisPane
+          thesis={thesis}
+          errored={thesisErrored}
+          currentPrice={currentPrice}
+          currency={currency}
         />
-      </Section>
+        <Section title="Verdict">
+          <EmptyState
+            title="Not yet scored"
+            description="This instrument has no scoring run yet. The verdict appears once the deterministic engine has scored it."
+          />
+        </Section>
+      </div>
     );
   }
 
   const iar = score.analytics_json;
   const peer = iar?.peer_grade;
+  const chips = toScoreChips(score.penalties_json);
 
   // Score-history sparkline values, oldest→newest (the API returns newest first).
   const historyValues = (history.data?.items ?? [])
@@ -141,17 +150,24 @@ export function VerdictTab({
     .reverse();
 
   return (
-    <div className="space-y-5">
-      {/* 1. Headline */}
+    <div className="space-y-4">
+      {/* 1. Thesis narrative + valuation leads the tab (#2003) — the memo
+          is the page's payoff; the deterministic score block reads as
+          supporting evidence below it. Renders nothing when no thesis
+          exists (and no fetch error), so unthesised names degrade to the
+          score-first layout. */}
+      <ThesisPane
+        thesis={thesis}
+        errored={thesisErrored}
+        currentPrice={currentPrice}
+        currency={currency}
+      />
+
+      {/* 2. Score headline. The stance chip that used to sit here is
+          gone (#2003 dedupe) — the ThesisPane directly above already
+          leads with the StanceBadge. */}
       <Section title="Verdict">
         <div className="flex flex-wrap items-center gap-3">
-          {thesis !== null && (
-            <span
-              className={`rounded px-2 py-0.5 text-sm font-semibold uppercase tracking-wide ${stanceClass(thesis.stance)}`}
-            >
-              {thesis.stance}
-            </span>
-          )}
           <div className="flex items-baseline gap-1">
             <span className="text-2xl font-semibold tabular-nums text-slate-800 dark:text-slate-100">
               {fmt2(score.total_score)}
@@ -176,24 +192,51 @@ export function VerdictTab({
             </span>
           )}
           {score.completeness_tier !== null && (
-            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-400">
+            <Badge tone={completenessTone(score.completeness_tier)}>
               completeness: {score.completeness_tier}
               {score.data_completeness !== null &&
                 ` (${(score.data_completeness * 100).toFixed(0)}%)`}
-            </span>
+            </Badge>
           )}
           <span className="ml-auto text-[10px] text-slate-400">
             as of {score.scored_at.slice(0, 10)} · {score.model_version}
           </span>
         </div>
+        {/* Penalties + rewards as chips, from the STRUCTURED `penalties_json`
+            (#1908 PR-4) — not parsed out of the explanation text. The raw
+            explanation is the audit trail, so it stays available verbatim
+            behind the expander below rather than being reworded or dropped. */}
+        {chips.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {chips.map((chip) => (
+              <Badge key={chip.key} tone={chip.tone} title={chip.title}>
+                {chip.label}
+                {chip.delta !== "" && (
+                  <span className="tabular-nums font-semibold">{chip.delta}</span>
+                )}
+              </Badge>
+            ))}
+          </div>
+        )}
         {score.explanation !== null && (
-          <p className="mt-2 max-w-prose text-xs text-slate-600 dark:text-slate-400">
-            {score.explanation}
+          <details className="group mt-2">
+            <summary className="cursor-pointer text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+              Scorer detail
+            </summary>
+            <p className="mt-1 max-w-prose text-xs text-slate-600 dark:text-slate-400">
+              {score.explanation}
+            </p>
+          </details>
+        )}
+        {thesis !== null && new Date(thesis.created_at) > new Date(score.scored_at) && (
+          <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+            The latest thesis (v{thesis.thesis_version}) postdates this score — thesis-fed
+            families (value, confidence) refresh on the next ranking run.
           </p>
         )}
       </Section>
 
-      {/* 2. Six graded families */}
+      {/* 3. Six graded families */}
       <Section title="Graded families">
         <table className="min-w-full text-sm">
           <thead>
@@ -248,7 +291,7 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 3. Quality signals */}
+      {/* 4. Quality signals */}
       <Section title="Quality signals">
         {iar === null ? (
           <EvidencePending />
@@ -260,7 +303,7 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 4. Positioning */}
+      {/* 5. Positioning */}
       <Section title="Positioning">
         {iar === null ? (
           <EvidencePending />
@@ -282,7 +325,7 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 5. Score history */}
+      {/* 6. Score history */}
       <Section title="Score history">
         {history.loading ? (
           <SectionSkeleton rows={1} />
@@ -298,6 +341,7 @@ export function VerdictTab({
               values={historyValues}
               width={240}
               height={48}
+              showLastValue
               className="text-blue-600 dark:text-blue-400"
             />
             <span className="text-[10px] text-slate-400">
@@ -307,8 +351,6 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 6. Thesis narrative + valuation (reuses the existing pane) */}
-      <ThesisPane thesis={thesis} errored={thesisErrored} />
     </div>
   );
 }
@@ -405,17 +447,13 @@ function AltmanCard({ z }: { z: IarAltmanZ | undefined }): JSX.Element {
 }
 
 function Band({ band }: { band: string }): JSX.Element {
-  const cls =
+  const tone: BadgeTone =
     band === "strong" || band === "safe"
-      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+      ? "ok"
       : band === "weak" || band === "distress"
-        ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
-        : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300";
-  return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
-      {band}
-    </span>
-  );
+        ? "risk"
+        : "warn";
+  return <Badge tone={tone}>{band}</Badge>;
 }
 
 function PositioningCard({

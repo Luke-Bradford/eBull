@@ -20,7 +20,25 @@ router = APIRouter(prefix="/_debug", tags=["debug"])
 
 class EtoroWsStatus(BaseModel):
     subscriber_present: bool
+    # #2271 — real liveness, not "the attribute is set". This was
+    # ``ws is not None``, which cannot distinguish OPEN from CLOSING/CLOSED:
+    # ``_ws`` is only reset to None on the reconnect loop's own clean path, so
+    # a connection torn down any other way would still read as connected.
     ws_connected: bool
+    # The raw protocol state (CONNECTING/OPEN/CLOSING/CLOSED), or None when no
+    # connection object exists at all — the distinction ``ws_connected`` alone
+    # cannot carry.
+    #
+    # Worth having because the alternative check is a trap: the WS socket does
+    # NOT live in either process that ``pgrep -f uvicorn`` matches. Under
+    # ``--reload`` the app runs in a multiprocessing-spawned worker, so an
+    # ``lsof`` against the uvicorn pids shows zero outbound sockets on a
+    # perfectly healthy subscriber. Both #2271's original report and the first
+    # pass at diagnosing it drew "the WS is not connected" from exactly that
+    # measurement; it was wrong, and this field is the cheap way to not repeat
+    # it. (Verified 2026-08-04: ws.etoro.com resolves to 172.64.153.200, and
+    # the established socket to that address was held by the spawned worker.)
+    ws_state: str | None
     topic_refs: dict[int, int]
     task_done: bool | None
     last_quote_max: str | None
@@ -155,11 +173,14 @@ def etoro_ws_status(request: Request) -> EtoroWsStatus:
         return EtoroWsStatus(
             subscriber_present=False,
             ws_connected=False,
+            ws_state=None,
             topic_refs={},
             task_done=None,
             last_quote_max=None,
         )
     ws = getattr(sub, "_ws", None)
+    ws_state_obj = getattr(ws, "state", None) if ws is not None else None
+    ws_state = getattr(ws_state_obj, "name", None) if ws_state_obj is not None else None
     refs: dict[int, int] = dict(getattr(sub, "_topic_refs", {}))
     task = getattr(sub, "_task", None)
     task_done = task.done() if task is not None else None
@@ -174,7 +195,8 @@ def etoro_ws_status(request: Request) -> EtoroWsStatus:
 
     return EtoroWsStatus(
         subscriber_present=True,
-        ws_connected=ws is not None,
+        ws_connected=ws_state == "OPEN",
+        ws_state=ws_state,
         topic_refs=refs,
         task_done=task_done,
         last_quote_max=last_quote_max,

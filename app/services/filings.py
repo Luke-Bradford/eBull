@@ -49,6 +49,7 @@ from app.services.bootstrap_state import (
     set_stage_processed,
 )
 from app.services.filings_risk import score_filing_red_flag
+from app.services.sec_identity import siblings_for_issuer_cik
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,131 @@ def filing_within_retention(filing_date: date, now: datetime | None = None) -> b
     retained (no off-by-one drop on the rolling boundary).
     """
     return filing_date >= filing_events_retention_cutoff(now)
+
+
+# ---------------------------------------------------------------------------
+# #828 PR-1 — ownership-form (Form 3/4/5) filing_events routing guard.
+#
+# EDGAR indexes each ownership document under BOTH the issuer's CIK stream
+# and every reporting owner's CIK stream (sec-edgar skill §"issuer-scoped
+# fan-out"). A Form 4 for BAC filed by Berkshire surfaces in Berkshire's
+# submissions feed; a discovery walk keyed on the OWNER's feed would bind
+# the accession to the owner's instrument — the filing_events bridge row IS
+# the L2/tombstone-count pollution (spec
+# docs/proposals/etl/2026-07-22-828-insider-cik-routing.md).
+#
+# The parser-time reroute (insider_transactions.upsert_filing /
+# insider_form3_ingest.upsert_form_3_filing) only covers the
+# owner-discovered-FIRST ordering. When the ISSUER stream parses first and
+# the owner's stream is walked later (or re-walked in a full submissions
+# walk), the fe writers below would re-create the owner binding with no
+# re-parse ever running — this guard closes that ordering. It consults the
+# already-parsed ``insider_filings.issuer_cik`` and blocks the write only
+# when the issuer has a non-empty in-universe sibling set that EXCLUDES the
+# target instrument. Fail-open by construction: unparsed accession,
+# tombstone, NULL/garbage issuer_cik, or empty sibling set → allow (the
+# unroutable cohort keeps its discovery linkage).
+# ---------------------------------------------------------------------------
+OWNERSHIP_FILING_TYPES: frozenset[str] = frozenset({"3", "3/A", "4", "4/A", "5", "5/A"})
+
+
+def _ownership_filing_event_write_allowed(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    *,
+    instrument_id: str | int,
+    provider_filing_id: str,
+    filing_type: str | None,
+) -> bool:
+    if filing_type not in OWNERSHIP_FILING_TYPES:
+        return True
+    row = conn.execute(
+        """
+        SELECT issuer_cik
+        FROM insider_filings
+        WHERE accession_number = %(acc)s
+          AND is_tombstone = FALSE
+          AND issuer_cik IS NOT NULL
+        """,
+        {"acc": provider_filing_id},
+    ).fetchone()
+    if row is None:
+        return True
+    # Membership check goes through the SAME production resolver routing
+    # uses (siblings_for_issuer_cik) so the guard and the router can never
+    # disagree on what counts as a sibling (PR #2109 review WARNING).
+    try:
+        siblings = siblings_for_issuer_cik(conn, str(row[0]))
+    except ValueError:
+        return True
+    if not siblings:
+        return True
+    return int(instrument_id) in siblings
+
+
+def reconcile_mislinked_ownership_filing_events(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    *,
+    accession_number: str,
+    sibling_instrument_ids: list[int],
+    filing_type: str,
+    filed_at: datetime | None,
+    period_of_report: date | None,
+    primary_document_url: str | None,
+    symbol: str | None,
+) -> int:
+    """#828 PR-1 — point the filing_events bridge at the issuer siblings.
+
+    Called from the insider apply chokepoints ONLY when routing detected a
+    mislink (discovery instrument outside a non-empty issuer sibling set):
+    deletes every non-sibling binding for the accession (the owner-stream
+    pollution) and upserts one row per issuer sibling so the per-instrument
+    read bridges see the filing immediately (idempotent — same
+    ``(provider, provider_filing_id, instrument_id)`` conflict key as every
+    other filing_events writer). Returns the number of deleted rows.
+
+    When ``filed_at`` is unknown the sibling upserts are skipped (the
+    ``filing_date`` column is NOT NULL); the delete still runs — a missing
+    bridge row is honest-invisible, a wrong-instrument one is pollution.
+    """
+    if not sibling_instrument_ids:
+        # Defensive: routing never calls this with an empty set (a mislink
+        # requires a non-empty sibling set); an empty array here would make
+        # NOT ANY() delete EVERY binding for the accession.
+        logger.warning(
+            "filing_events reconcile (#828): accession=%s called with empty sibling set; refusing to delete",
+            accession_number,
+        )
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM filing_events
+            WHERE provider = 'sec'
+              AND provider_filing_id = %(acc)s
+              AND NOT (instrument_id = ANY(%(sibs)s::bigint[]))
+            """,
+            {"acc": accession_number, "sibs": sibling_instrument_ids},
+        )
+        deleted = cur.rowcount
+    if filed_at is None:
+        logger.warning(
+            "filing_events reconcile (#828): accession=%s has no filed_at; "
+            "deleted %d non-sibling rows but skipped sibling upserts",
+            accession_number,
+            deleted,
+        )
+        return deleted
+    result = FilingSearchResult(
+        provider_filing_id=accession_number,
+        symbol=symbol or "",
+        filed_at=filed_at,
+        filing_type=filing_type,
+        period_of_report=period_of_report,
+        primary_document_url=primary_document_url,
+    )
+    for sibling_iid in sibling_instrument_ids:
+        _upsert_filing(conn, str(sibling_iid), "sec", result)
+    return deleted
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +332,36 @@ SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
         # the ownership pipeline (#1320).
         "PRE 14A",
         "PRER14A",
+        # 424B prospectuses. #1816 — sec_424b parser extracts the Reg S-K
+        # Item 501(b)(3) cover offering disclosure. 424B2 volume-gated (#1975):
+        # in the parse tier here, but the parser tombstones without fetch for
+        # filers with >100 lifetime B2s (bank/ETN structured-note factories —
+        # a fetch-cost bound, not a classification). 424B8 stays metadata-only
+        # below (late-filing duplicate of another 424(b) paragraph).
+        "424B1",
+        "424B2",
+        "424B3",
+        "424B4",
+        "424B5",
+        "424B7",
+        # Tender offers + going-private. #1982 (#1015 item 4) — sec_tender
+        # parser extracts the Reg M-A cover disclosures (parties from the
+        # SGML header, Item 1004(a) price/expiration, Item 1012(a) board
+        # recommendation). SC TO-I(/A) / SC 13E3(/A) were previously in
+        # NEITHER tier despite existing in filing_events via the
+        # master-index path — a live cleanup-delete hazard
+        # (filing_events_cleanup deletes SEC rows off the keep-list union);
+        # they enter the union here for the first time. The dead
+        # ``DEF 13E-3`` string (0 rows ever; EDGAR emits SC 13E3) was
+        # removed from SEC_METADATA_ONLY in the same change.
+        "SC TO-T",
+        "SC TO-T/A",
+        "SC TO-I",
+        "SC TO-I/A",
+        "SC 14D9",
+        "SC 14D9/A",
+        "SC 13E3",
+        "SC 13E3/A",
     }
 )
 
@@ -250,18 +406,23 @@ SEC_METADATA_ONLY: frozenset[str] = frozenset(
         "F-3/A",
         "F-4",
         "F-4/A",
-        "424B2",
-        "424B3",
-        "424B4",
-        "424B5",
-        "424B7",
+        # 424B1/B3/B4/B5/B7 PROMOTED to PARSE+RAW (#1816 — sec_424b parser,
+        # Item 501(b)(3) cover offering extraction); 424B2 PROMOTED with a
+        # volume gate (#1975 — parser tombstones without fetch above 100
+        # lifetime B2s per filer). See SEC_PARSE_AND_RAW above. B8 stays
+        # metadata-only: a late filing of a prospectus otherwise required
+        # under another 424(b) paragraph duplicates the underlying
+        # paragraph's filing.
         "424B8",
-        # Tender offers + going-private — M&A / take-out signal.
-        "SC TO-T",
-        "SC TO-T/A",
-        "SC 14D9",
-        "SC 14D9/A",
-        "DEF 13E-3",
+        # SC TO-T(/A) / SC 14D9(/A) PROMOTED to PARSE+RAW (#1982 — sec_tender
+        # parser), alongside SC TO-I(/A) / SC 13E3(/A) which previously sat in
+        # neither tier (cleanup-delete hazard — see SEC_PARSE_AND_RAW above).
+        # The dead ``DEF 13E-3`` string was removed (0 rows ever; EDGAR emits
+        # ``SC 13E3``). PREM14C / DEFM14C stay metadata-only: Schedule 14C
+        # incorporates the Schedule 14A items and the merger consideration
+        # lives in Item 14 prose (no cover-page terms presentation — the
+        # #1659 free-text trap); the going-private signal for those
+        # transactions is carried by the companion SC 13E3, which IS parsed.
         "PREM14C",
         "DEFM14C",
         # Delisting / deregistration — terminal-state signal.
@@ -654,6 +815,19 @@ def _upsert_filing_event(
             FILING_EVENTS_RETENTION_YEARS,
         )
         return
+    if not _ownership_filing_event_write_allowed(
+        conn,
+        instrument_id=instrument_id,
+        provider_filing_id=event.provider_filing_id,
+        filing_type=event.filing_type,
+    ):
+        logger.debug(
+            "filing_events: skipping %s/%s for instrument %s — ownership filing routed to issuer siblings (#828)",
+            provider_name,
+            event.provider_filing_id,
+            instrument_id,
+        )
+        return
     conn.execute(
         """
         INSERT INTO filing_events (
@@ -735,6 +909,19 @@ def _upsert_filing(
             result.provider_filing_id,
             filing_date.isoformat(),
             FILING_EVENTS_RETENTION_YEARS,
+        )
+        return False
+    if not _ownership_filing_event_write_allowed(
+        conn,
+        instrument_id=instrument_id,
+        provider_filing_id=result.provider_filing_id,
+        filing_type=result.filing_type,
+    ):
+        logger.debug(
+            "filing_events: skipping %s/%s for instrument %s — ownership filing routed to issuer siblings (#828)",
+            provider_name,
+            result.provider_filing_id,
+            instrument_id,
         )
         return False
     conn.execute(

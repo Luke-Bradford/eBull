@@ -1,12 +1,24 @@
 # Pre-PR fresh-agent review skill
 
-**Purpose:** before pushing any non-trivial PR, run a fresh-agent Codex review with the perspectives a real fund / data team would apply. The review-bot keeps catching edges the generic pre-push prompt misses; this skill loads the right lenses up front so issues land before the bot finds them, not after.
+**Purpose:** a set of domain LENSES to brief a reviewer with, for diffs where a generic
+review prompt reliably misses the edges — SEC filing semantics, dedup/denominator
+correctness, partition and idempotency behaviour.
 
-## When to use
+> ⚠ **This is a lens library, not a verification gate (revised 2026-08-03).** It used to
+> be mandatory before every push on the surfaces below. Separate verification steps — *"include a final verification
+> step", "use a subagent to verify"* — cause **over-verification** on this model and that
+> removing them "reduces wasted tokens with no loss in quality". A blanket pre-push
+> second-agent pass is exactly that pattern, and it contradicted this repo's own
+> "delegate gathering, never concluding" rule in `CLAUDE.md`.
+>
+> So: do NOT run this as a routine gate, and never to double-check work you can review
+> yourself in a few tool calls. Reach for it when the diff is genuinely large or
+> unfamiliar on one of the surfaces below and a second pass is cheaper than a bot round.
+> The review bot still runs on every push regardless.
 
-Mandatory before push for any PR touching:
+## Surfaces where these lenses are worth loading
 
-- Filings ETL (Form 4 / Form 3 / 13D/G / 13F-HR / DEF 14A / N-PORT / N-CSR / 10-K / 10-Q / 8-K / SBR / S-1).
+- Filings ETL — any form parser: Form 3/4/5, 13D/G, 13F-HR, DEF 14A / PRE 14A, N-PORT, N-CSR, 10-K / 10-Q / 8-K, NT notices, 424B, or any newly added form (authoritative map: `_FORM_TO_SOURCE` in `app/services/sec_manifest.py`).
 - Ownership rollup or any per-category observations / current table.
 - Schema migrations on any ownership / fundamentals / share-count surface.
 - Identity resolution (filer_cik, holder_name, CUSIP, ISIN).
@@ -43,8 +55,10 @@ Codex generic review is too neutral. Brief it with explicit role lenses so it ap
 
 ## Standard prompt template
 
+Run from the repo root:
+
 ```bash
-codex.cmd exec --output-last-message /tmp/<branch>-codex.txt "Review <branch> in d:/Repos/eBull. Diff: <list files + one-line each>.
+codex exec --output-last-message /tmp/<branch>-codex.txt "Review <branch> in this repo. Diff: <list files + one-line each>.
 
 Acceptance: <issue criterion 1>; <criterion 2>; ...
 
@@ -55,7 +69,7 @@ Apply these review lenses:
 3. Data scientist — dedup correctness, double-counting, denominator basis, cross-source priority chain integrity.
 4. Adversarial — what edge case would the bot catch? Be specific about: truthy-check-drops-zero, non-idempotent fallbacks, aggregate counts hiding partial-state bugs, cross-column invariants from legacy tables, stale comments.
 
-Reply terse. Real correctness bugs only. Skip style nits." < /dev/null
+Report EVERY plausible correctness, regression, schema, data-loss, corpus and test gap you can see. Do not be conservative and do not pre-filter by severity — I will classify severity myself afterwards. Reply terse." < /dev/null
 ```
 
 ## Apply findings before push
@@ -72,6 +86,8 @@ Push only after every finding reaches a terminal state. The bot will then have l
 
 For ownership-related PRs, cross-reference what `dgunning/edgartools` (MIT, the canonical open-source SEC parser) extracts per form. If our schema captures fewer fields than EdgarTools exposes for the same form, surface the gap — operator wants every available field digested even when the rollup doesn't render it yet, so future expansions don't need re-wash.
 
+Authoritative EdgarTools coverage matrix + API cheat-sheet + gotchas: `.claude/skills/data-sources/edgartools.md` — prefer it over the quick-reference below if the two disagree.
+
 Quick-reference of what EdgarTools provides per form (cross-check before extending observations tables):
 
 - **Form 4:** every transaction row + footnote; D/I tag; transaction_type; is_derivative; security_title; conversion_or_exercise_price; expiration_date; underlying_security_title; underlying_shares.
@@ -85,4 +101,4 @@ If our observations table doesn't carry a field EdgarTools exposes for the same 
 
 ## Perf-claim diffs
 
-If the diff also asserts a performance improvement (latency, throughput, wall-clock) against any ETL hot path, the [`etl-perf-claims`](etl-perf-claims.md) skill is mandatory in this fresh-agent review pass — load it alongside the financial-plumbing / data-engineer / data-scientist / adversarial lenses so the §4 artifact contract + §5 process rules are part of the lens stack before push.
+If the diff asserts a performance improvement (latency, throughput, wall-clock) against any ETL hot path, [`etl-perf-claims`](etl-perf-claims.md) applies **whether or not you run this lens pass** — its §4 artifact contract is enforced by the `perf-claim-lint` CI gate, so it is a deterministic requirement on the change, not a step in a review. Load it as a lens too if you are running this pass anyway.

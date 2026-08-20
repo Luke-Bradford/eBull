@@ -226,6 +226,89 @@ describe("normalized regression — compare mode invariants", () => {
   });
 });
 
+describe("normalized indicators — compare mode invariants (#2209)", () => {
+  // A year of AAPL-shaped closes: absolute price in the low hundreds, total
+  // move about +65%. The two units are far enough apart that mixing them on
+  // one axis is unmistakable, which is the whole defect.
+  function priceSeries(): number[] {
+    return Array.from({ length: 60 }, (_, i) => 200 + i * 2.2);
+  }
+
+  function finite(values: Array<number | null>): number[] {
+    return values.filter((v): v is number => v !== null && Number.isFinite(v));
+  }
+
+  it("indicators computed on normalized closes stay inside the normalized range", () => {
+    const normalized = normalizeToPercent(priceSeries()).filter(
+      (v): v is number => v !== null,
+    );
+    const { high, low } = rangeChannel(normalized);
+
+    // This is the acceptance criterion: enabling an indicator must not widen
+    // the value range the price scale has to span. A rolling mean of a series
+    // is bounded by that series, so every indicator sits inside [low, high].
+    for (const id of ["sma20", "sma50", "ema20", "ema50"] as const) {
+      const values =
+        id === "sma20"
+          ? computeSMA(normalized, 20)
+          : id === "sma50"
+            ? computeSMA(normalized, 50)
+            : id === "ema20"
+              ? computeEMA(normalized, 20)
+              : computeEMA(normalized, 50);
+      for (const v of finite(values)) {
+        expect(v).toBeGreaterThanOrEqual(low as number);
+        expect(v).toBeLessThanOrEqual(high as number);
+      }
+    }
+  });
+
+  it("computing them on RAW closes instead escapes that range — the bug being fixed", () => {
+    const closes = priceSeries();
+    const normalized = normalizeToPercent(closes).filter((v): v is number => v !== null);
+    const { high } = rangeChannel(normalized);
+
+    // Pre-fix behaviour: absolute-price SMA over a percent-scaled axis. Every
+    // plotted point sits far above the top of the compare series, which is
+    // what stretched the axis from -80..80 to -200..350 on the ticket.
+    const rawSma = finite(computeSMA(closes, 20));
+    expect(rawSma.length).toBeGreaterThan(0);
+    for (const v of rawSma) {
+      expect(v).toBeGreaterThan(high as number);
+    }
+  });
+
+  it("indicator and trend overlays agree about the compare-mode unit", () => {
+    // Both families take the same branch, so a regression line and an SMA over
+    // the same normalized closes land in the same neighbourhood. Pins that the
+    // two effects cannot silently drift apart again.
+    const normalized = normalizeToPercent(priceSeries()).filter(
+      (v): v is number => v !== null,
+    );
+    const regression = finite(linearRegressionLine(normalized));
+    const sma = finite(computeSMA(normalized, 20));
+    const { high, low } = rangeChannel(normalized);
+    const span = (high as number) - (low as number);
+
+    const lastReg = regression[regression.length - 1] as number;
+    const lastSma = sma[sma.length - 1] as number;
+    // Within one span of each other — same unit. Under the old behaviour the
+    // SMA was ~250 against a regression of ~65, i.e. several spans apart.
+    expect(Math.abs(lastReg - lastSma)).toBeLessThan(span);
+  });
+
+  it("degenerate base (0) in compare mode: indicators get [] and draw nothing", () => {
+    const closes = [0, 10, 20, 30];
+    const normalized = normalizeToPercent(closes).filter((v): v is number => v !== null);
+    expect(normalized).toHaveLength(0);
+    // Guards the index-alignment assumption in the indicator effect: the
+    // filter is all-or-nothing, so it can never desynchronise values[i] from
+    // cleanRows[i] — it either keeps every index or none.
+    expect(computeSMA(normalized, 20)).toHaveLength(0);
+    expect(computeEMA(normalized, 20)).toHaveLength(0);
+  });
+});
+
 describe("rangeChannel", () => {
   it("returns {high: null, low: null} for empty array", () => {
     expect(rangeChannel([])).toEqual({ high: null, low: null });

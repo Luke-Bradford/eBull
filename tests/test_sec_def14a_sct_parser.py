@@ -25,8 +25,10 @@ import pytest
 
 from app.providers.implementations.sec_def14a import (
     _parse_dollar,
+    _position_only_cell,
     _resolve_sct_fields,
     _split_name_position,
+    parse_pvp_neo_names,
     parse_summary_compensation_table,
 )
 
@@ -102,6 +104,231 @@ def test_aapl_rowspan_continuation_shift() -> None:
     assert cook_2024.fiscal_year == 2024
     assert cook_2024.total_comp == Decimal("74609802")
     assert cook_2024.salary == Decimal("3000000")
+
+
+def test_gme_stacked_name_position_rows() -> None:
+    """Stacked name/position layout (#2088 — GME): the title renders on its
+    OWN physical row (the second year-row per NEO) and the third year-row's
+    name cell is empty. The title row must not clobber the carried name, the
+    title attaches to the carried NEO, and the already-emitted name row gets
+    the position backfilled. A following NEO resets the carry."""
+    header = _row(
+        "Name and Principal Position",
+        "Year",
+        "Salary ($)",
+        "Bonus ($)",
+        "Stock Awards ($)",
+        "Total ($)",
+    )
+    r1_2025 = _row("Ryan Cohen", "2025", "—", "—", "1,760,467", "1,760,467")
+    r1_2024 = _row("Chief Executive Officer", "2024", "—", "—", "268,553", "268,553")
+    r1_2023 = _row("", "2023", "—", "—", "100", "100")
+    r2_2025 = _row("Dan Moore", "2025", "200,000", "—", "2,166,562", "2,366,562")
+    r2_2024 = _row("Principal Financial and Accounting Officer", "2024", "192,615", "—", "636,600", "829,215")
+    table = f"<table>{header}{r1_2025}{r1_2024}{r1_2023}{r2_2025}{r2_2024}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Ryan Cohen", "Chief Executive Officer", 2025),
+        ("Ryan Cohen", "Chief Executive Officer", 2024),
+        ("Ryan Cohen", "Chief Executive Officer", 2023),
+        ("Dan Moore", "Principal Financial and Accounting Officer", 2025),
+        ("Dan Moore", "Principal Financial and Accounting Officer", 2024),
+    ]
+    assert result.rows[0].total_comp == Decimal("1760467")
+    assert result.rows[0].salary is None  # Cohen draws no salary — explicit dash
+    assert result.rows[3].salary == Decimal("200000")
+
+
+def test_prdo_wrapped_title_fragments() -> None:
+    """Wrapped first-column layout (#2094 — PRDO): the logical name+title cell
+    wraps across the NEO block's three physical year rows. Row-2 fragments may
+    match the role lexicon at offset 0, but row-3 tails start with arbitrary
+    words ('Officer', 'Technical University') no lexicon can enumerate. The
+    fiscal-year descent (2024 → 2023 → 2022 inside a block; a new NEO restarts
+    at a newer year) must keep the fragments attached to the carried NEO and
+    concatenate the full title, backfilled onto every emitted row."""
+    header = _row(
+        "Name and Principal Position",
+        "Year",
+        "Salary ($)",
+        "Stock Awards ($)",
+        "Total ($)",
+    )
+    nelson_2024 = _row("Todd S. Nelson", "2024", "1,057,491", "3,323,796", "6,725,760")
+    nelson_2023 = _row("President and Chief Executive", "2023", "1,036,756", "2,138,972", "4,504,386")
+    nelson_2022 = _row("Officer", "2022", "1,011,469", "2,148,140", "4,512,179")
+    baskel_2024 = _row("Elise L. Baskel", "2024", "494,846", "515,919", "1,495,528")
+    baskel_2023 = _row("Senior Vice President – Colorado", "2023", "480,433", "434,439", "1,534,471")
+    baskel_2022 = _row("Technical University", "2022", "465,000", "381,145", "1,229,324")
+    table = f"<table>{header}{nelson_2024}{nelson_2023}{nelson_2022}{baskel_2024}{baskel_2023}{baskel_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2024),
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2023),
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2022),
+        ("Elise L. Baskel", "Senior Vice President – Colorado Technical University", 2024),
+        ("Elise L. Baskel", "Senior Vice President – Colorado Technical University", 2023),
+        ("Elise L. Baskel", "Senior Vice President – Colorado Technical University", 2022),
+    ]
+    assert result.rows[2].total_comp == Decimal("4512179")
+    assert result.rows[5].total_comp == Decimal("1229324")
+
+
+def test_hbnc_non_lexicon_second_row_fragment() -> None:
+    """Wrapped-title variant (#2094 — HBNC): even the SECOND row's fragment
+    starts with a non-lexicon word ('EVP,'), so no position has been captured
+    yet when it arrives. Year descent must still classify it as a title
+    continuation, and a later lexicon-matching tail appends to it."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    secor_2024 = _row("Mark E. Secor", "2024", "430,000", "672,269")
+    secor_2023 = _row("EVP,", "2023", "415,000", "630,000")
+    secor_2022 = _row("Chief Financial Officer", "2022", "400,000", "610,000")
+    table = f"<table>{header}{secor_2024}{secor_2023}{secor_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Mark E. Secor", "EVP, Chief Financial Officer", 2024),
+        ("Mark E. Secor", "EVP, Chief Financial Officer", 2023),
+        ("Mark E. Secor", "EVP, Chief Financial Officer", 2022),
+    ]
+
+
+def test_intracell_name_wrap_before_title() -> None:
+    """#2097 — the whole name+title rides ONE first cell but the NEO's NAME
+    itself wraps (render break) before the title onset (Alphabet template):
+    'Sundar<br>Pichai<br>Chief Executive Officer, …'. A newline-first split
+    truncated the name to its first token ('Sundar'); the role-boundary split
+    keeps the full name. The wrap delimiter is incidental (``<br>`` collapses to
+    a space here, a block element yields ``\\n`` on other filers) — both flatten
+    to the same role-keyword split."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    pichai = _row("Sundar<br>Pichai<br>Chief Executive Officer, Alphabet", "2024", "2,000,000", "10,725,043")
+    porat = _row("Ruth M.<br>Porat<br>President and Chief Investment Officer", "2024", "1,000,000", "30,166,427")
+    table = f"<table>{header}{pichai}{porat}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Sundar Pichai", "Chief Executive Officer, Alphabet", 2024),
+        ("Ruth M. Porat", "President and Chief Investment Officer", 2024),
+    ]
+
+
+def test_wrapped_title_fragment_with_embedded_newline() -> None:
+    """#2094 + #2097 — a year-descending wrapped-TITLE fragment that itself
+    carries an embedded render wrap ('President and<br>Chief Executive') must
+    still attach to the carried NEO, not escape as a new one. Flattening the
+    newline (role-boundary split) does not change the #2094 continuation
+    classification (Codex ckpt-1 regression guard)."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    nelson_2024 = _row("Todd S. Nelson", "2024", "1,057,491", "6,725,760")
+    nelson_2023 = _row("President and<br>Chief Executive", "2023", "1,036,756", "4,504,386")
+    nelson_2022 = _row("Officer", "2022", "1,011,469", "4,512,179")
+    table = f"<table>{header}{nelson_2024}{nelson_2023}{nelson_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2024),
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2023),
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2022),
+    ]
+
+
+def test_former_exec_block_starts_below_table_max_year() -> None:
+    """A departed NEO's block may start BELOW the table's newest year (no
+    FY2024 row). The block boundary is a year INCREASE relative to the
+    previous physical row — not equality with the table max — so the new
+    name must open a fresh block, not be absorbed as a title fragment."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    ceo_2024 = _row("Ann Incumbent\nChief Executive Officer", "2024", "900,000", "3,000,000")
+    ceo_2023 = _row("", "2023", "850,000", "2,800,000")
+    ceo_2022 = _row("", "2022", "800,000", "2,600,000")
+    former_2023 = _row("Jane Q. Departed\nFormer Chief Financial Officer", "2023", "600,000", "1,900,000")
+    former_2022 = _row("", "2022", "580,000", "1,700,000")
+    table = f"<table>{header}{ceo_2024}{ceo_2023}{ceo_2022}{former_2023}{former_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.fiscal_year) for r in result.rows] == [
+        ("Ann Incumbent", 2024),
+        ("Ann Incumbent", 2023),
+        ("Ann Incumbent", 2022),
+        ("Jane Q. Departed", 2023),
+        ("Jane Q. Departed", 2022),
+    ]
+    assert result.rows[3].principal_position == "Former Chief Financial Officer"
+
+
+def test_new_neo_opens_below_previous_rows_year() -> None:
+    """Codex ckpt-2 (#2094): a departed NEO's block can start BELOW the
+    previous physical row's year (current-year-only NEO first). A cell that
+    splits into a plausible person name + title must open a new block even
+    on a year-descending row; a title fragment ('Financial Officer &
+    Treasurer') must not."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    alice_2024 = _row("Alice A. Alpha\nChief Executive Officer", "2024", "500,000", "2,000,000")
+    bob_2023 = _row("Bob B. Beta\nFormer Chief Financial Officer", "2023", "400,000", "1,500,000")
+    bob_2022 = _row("", "2022", "380,000", "1,400,000")
+    table = f"<table>{header}{alice_2024}{bob_2023}{bob_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Alice A. Alpha", "Chief Executive Officer", 2024),
+        ("Bob B. Beta", "Former Chief Financial Officer", 2023),
+        ("Bob B. Beta", "Former Chief Financial Officer", 2022),
+    ]
+
+
+def test_fragment_with_interior_role_keyword_still_continues() -> None:
+    """A wrapped-title tail containing a role keyword at offset > 0
+    ('Financial Officer & Treasurer' — PRDO/Ghia) splits into a title-vocab
+    prefix, NOT a person name, so it must append to the carried NEO rather
+    than open a bogus block."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    ghia_2024 = _row("Ashish R. Ghia", "2024", "530,000", "3,405,287")
+    ghia_2023 = _row("Senior Vice President, Chief", "2023", "515,000", "2,290,706")
+    ghia_2022 = _row("Financial Officer & Treasurer", "2022", "500,000", "1,842,560")
+    table = f"<table>{header}{ghia_2024}{ghia_2023}{ghia_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Ashish R. Ghia", "Senior Vice President, Chief Financial Officer & Treasurer", 2024),
+        ("Ashish R. Ghia", "Senior Vice President, Chief Financial Officer & Treasurer", 2023),
+        ("Ashish R. Ghia", "Senior Vice President, Chief Financial Officer & Treasurer", 2022),
+    ]
+
+
+def test_single_year_table_new_neo_on_equal_year() -> None:
+    """One row per NEO, all the same fiscal year: equal years are NOT a
+    descent, so every name-like cell opens a new block."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    r1 = _row("Alice A. Alpha\nChief Executive Officer", "2024", "500,000", "2,000,000")
+    r2 = _row("Bob B. Beta\nChief Financial Officer", "2024", "400,000", "1,500,000")
+    table = f"<table>{header}{r1}{r2}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.fiscal_year) for r in result.rows] == [
+        ("Alice A. Alpha", 2024),
+        ("Bob B. Beta", 2024),
+    ]
+
+
+def test_name_repeated_on_each_year_row() -> None:
+    """Some filers repeat the NEO's name (or full name+title) on every year
+    row instead of using rowspan. A repeated first cell inside a descending
+    block must neither clobber the position nor be appended to it."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    r_2024 = _row("Carol C. Gamma\nChief Executive Officer", "2024", "700,000", "2,500,000")
+    r_2023 = _row("Carol C. Gamma", "2023", "650,000", "2,200,000")
+    r_2022 = _row("Carol C. Gamma\nChief Executive Officer", "2022", "600,000", "2,000,000")
+    table = f"<table>{header}{r_2024}{r_2023}{r_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Carol C. Gamma", "Chief Executive Officer", 2024),
+        ("Carol C. Gamma", "Chief Executive Officer", 2023),
+        ("Carol C. Gamma", "Chief Executive Officer", 2022),
+    ]
 
 
 def test_hd_folded_year_and_dash_null() -> None:
@@ -428,6 +655,24 @@ def test_parse_dollar_variants() -> None:
     assert _parse_dollar("   ") is None
 
 
+def test_position_only_cell_detection() -> None:
+    """Position-only = first role keyword at offset 0 (#2088). A cell leading
+    with a person's name is NOT position-only, even with a title after."""
+    assert _position_only_cell("Chief Executive Officer") == "Chief Executive Officer"
+    assert _position_only_cell("Principal Financial and Accounting Officer") == (
+        "Principal Financial and Accounting Officer"
+    )
+    assert _position_only_cell("General Counsel and Secretary") == "General Counsel and Secretary"
+    assert _position_only_cell("James Dimon Chairman and CEO") is None
+    assert _position_only_cell("Tim Cook\nChief Executive Officer") is None
+    assert _position_only_cell("") is None
+    # #2097 — "executive" is a leading title modifier, so a bare "Executive
+    # Chairman" title row is now recognised as position-only (previously it
+    # matched only at "Chairman", minting a bogus "Executive" NEO).
+    assert _position_only_cell("Executive Chairman") == "Executive Chairman"
+    assert _position_only_cell("Executive Vice- Chairman") == "Executive Vice- Chairman"
+
+
 def test_split_name_position_newline() -> None:
     name, pos = _split_name_position("Tim Cook \nChief Executive Officer")
     assert name == "Tim Cook"
@@ -498,3 +743,306 @@ def test_split_name_position_preserves_clean_names() -> None:
         "Chairman and Chief Executive Officer",
     )
     assert _split_name_position("Jane Doe") == ("Jane Doe", None)
+
+
+def test_split_name_position_intracell_newline_2097() -> None:
+    """#2097 — a newline inside the cell is a render wrap, not a name/title
+    delimiter. It falls mid-name or mid-title; the role-boundary split recovers
+    the correct name in both faces, and a title-free wrapped name stays whole."""
+    # Bare-first-name wrap (Alphabet): '\n' falls mid-name.
+    assert _split_name_position("Sundar\n Pichai \n Chief Executive Officer, Alphabet") == (
+        "Sundar Pichai",
+        "Chief Executive Officer, Alphabet",
+    )
+    # Mid-title wrap: '\n' falls inside the title — name must not absorb it.
+    assert _split_name_position("T. Wilson Eglin Chief Executive Officer\nand President") == (
+        "T. Wilson Eglin",
+        "Chief Executive Officer and President",
+    )
+    # Wrapped NAME with no title in the cell (Cato) — whole cell is the name.
+    assert _split_name_position("John\n P. D. Cato") == ("John P. D. Cato", None)
+    # Compound "Executive [Vice-] Chairman" title splits at "Executive" (#2097
+    # exec modifier + hyphen-tolerant vice-chair), not one word late.
+    assert _split_name_position("Raymond\nR. Quirk Executive Vice- Chairman") == (
+        "Raymond R. Quirk",
+        "Executive Vice- Chairman",
+    )
+    assert _split_name_position("Morgan E. O'Brien \n Executive Chairman") == (
+        "Morgan E. O'Brien",
+        "Executive Chairman",
+    )
+
+
+def test_split_name_position_surname_is_title_vocab_word() -> None:
+    """Codex ckpt-1 — the fix never mutates the name, so a real surname that
+    happens to be a title-vocabulary word ('Bank') survives intact. (No
+    trailing-title trim was adopted; the role-boundary split alone handles the
+    compound-title leaks it was meant to catch.)"""
+    assert _split_name_position("Robert A. Bank") == ("Robert A. Bank", None)
+    assert _split_name_position("Mary Global") == ("Mary Global", None)
+
+
+# ---------------------------------------------------------------------------
+# def14a-v6 (#2100 + #2099) — group/managing modifiers + same-document
+# truncated-name repair (sibling / camel-verbatim / PvP iXBRL oracle)
+# ---------------------------------------------------------------------------
+
+
+def _pvp_context(cid: str, start: str, end: str, member: str | None = None) -> str:
+    dim = f'<xbrldi:explicitMember dimension="ecd:IndividualAxis">{member}</xbrldi:explicitMember>' if member else ""
+    return (
+        f'<xbrli:context id="{cid}"><xbrli:entity>{dim}</xbrli:entity>'
+        f"<xbrli:period><xbrli:startDate>{start}</xbrli:startDate>"
+        f"<xbrli:endDate>{end}</xbrli:endDate></xbrli:period></xbrli:context>"
+    )
+
+
+def _pvp_doc(body_html: str, *, contexts: str = "", facts: str = "", ecd_prefix: str = "ecd") -> str:
+    """Minimal iXBRL proxy shell: xmlns declarations + hidden contexts/facts."""
+    return (
+        f'<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL" '
+        f'xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+        f'xmlns:{ecd_prefix}="http://xbrl.sec.gov/ecd/2025">'
+        f"<body><div style='display:none'><ix:header><ix:resources>{contexts}"
+        f"</ix:resources></ix:header>{facts}</div>{body_html}</body></html>"
+    )
+
+
+def _simple_sct(*name_year_total: tuple[str, str, str]) -> str:
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    rows = "".join(_row(n, y, "100,000", t) for n, y, t in name_year_total)
+    return f"<h2>Summary Compensation Table</h2><table>{header}{rows}</table>"
+
+
+def test_group_modifier_splits_title() -> None:
+    """#2100 Class 3 — 'Group President…' / 'Senior Managing Director' are
+    titles; the split lands before the modifier."""
+    assert _split_name_position("David E. Govrin Group President, Americas") == (
+        "David E. Govrin",
+        "Group President, Americas",
+    )
+    assert _split_name_position("Susan D. Nickey Senior Managing Director") == (
+        "Susan D. Nickey",
+        "Senior Managing Director",
+    )
+    # A bare stacked title row classifies position-only (no bogus NEO).
+    assert _position_only_cell("Managing Director, Finance") == "Managing Director, Finance"
+    assert _position_only_cell("Group President") == "Group President"
+
+
+def test_new_modifiers_fuzz_stays_bounded() -> None:
+    """L2121 — the {0,3} modifier bound holds for the new group/managing
+    alternatives (no quadratic blowup on adversarial runs)."""
+    import time
+
+    for run in ("Group " * 5000, "Managing " * 5000):
+        start = time.monotonic()
+        _split_name_position(run + "X")
+        assert time.monotonic() - start < 0.5
+
+
+def test_pvp_neo_names_extraction() -> None:
+    """PeoName facts grouped per person; entity-decode; whitespace-flattened
+    fact values; covered end-years unioned across per-FY contexts."""
+    contexts = (
+        _pvp_context("c1", "2024-01-01", "2024-12-31", "aapl:CookMember")
+        + _pvp_context("c2", "2025-01-01", "2025-12-31", "aapl:CookMember")
+        + _pvp_context("c3", "2025-01-01", "2025-12-31", "aapl:OBrienMember")
+    )
+    facts = (
+        '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Mr. Cook</ix:nonNumeric>'
+        '<ix:nonNumeric contextRef="c2" name="ecd:PeoName">Mr. Cook</ix:nonNumeric>'
+        '<ix:nonNumeric contextRef="c3" name="ecd:PeoName">Deirdre O&#8217;Brien</ix:nonNumeric>'
+    )
+    result = parse_pvp_neo_names(_pvp_doc("", contexts=contexts, facts=facts))
+    by_member = {p.individual_member: p for p in result}
+    assert by_member["aapl:CookMember"].name_text == "Mr. Cook"
+    assert by_member["aapl:CookMember"].covered_end_years == frozenset({2024, 2025})
+    assert by_member["aapl:OBrienMember"].name_text == "Deirdre O’Brien"
+
+
+def test_pvp_neo_names_uri_resolved_prefix() -> None:
+    """ECD matching is namespace-URI-resolved — a non-'ecd' declared prefix
+    still extracts; and no facts → ()."""
+    contexts = _pvp_context("c1", "2025-01-01", "2025-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="pvp:PeoName">Jane Roe</ix:nonNumeric>'
+    doc = _pvp_doc("", contexts=contexts, facts=facts, ecd_prefix="pvp")
+    assert [p.name_text for p in parse_pvp_neo_names(doc)] == ["Jane Roe"]
+    assert parse_pvp_neo_names("<html><body>no ixbrl here</body></html>") == ()
+
+
+def test_surname_only_repaired_from_pvp_oracle() -> None:
+    """CXW shape — surname-only SCT rows + a PvP PeoName covering every row
+    FY → repaired to the oracle's full form."""
+    sct = _simple_sct(("Hininger", "2025", "7,203,173"), ("", "2024", "7,471,923"))
+    contexts = "".join(
+        _pvp_context(f"c{i}", f"{y}-01-01", f"{y}-12-31") for i, y in enumerate((2021, 2022, 2023, 2024, 2025))
+    )
+    facts = "".join(
+        f'<ix:nonNumeric contextRef="c{i}" name="ecd:PeoName">Damon T. Hininger</ix:nonNumeric>' for i in range(5)
+    )
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Damon T. Hininger"]
+    assert {r.fiscal_year for r in result.rows} == {2024, 2025}
+
+
+def test_oracle_fy_gate_blocks_partial_coverage() -> None:
+    """Per-name atomic FY gate — an oracle fact covering only FY2025 must not
+    rename rows spanning 2023-25 (no partial renames)."""
+    sct = _simple_sct(("Charles", "2025", "1,000,000"), ("", "2024", "900,000"), ("", "2023", "800,000"))
+    contexts = _pvp_context("c1", "2025-01-01", "2025-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Dirkson Charles</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Charles"]
+
+
+def test_oracle_honorific_never_shortens() -> None:
+    """'Mr. Cook' (honorific-only oracle form) can never repair 'Cook' — the
+    replacement must be strictly more token-complete after honorific strip."""
+    sct = _simple_sct(("Cook", "2025", "74,294,811"))
+    contexts = _pvp_context("c1", "2025-01-01", "2025-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Mr. Cook</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Cook"]
+
+
+def test_sibling_superset_repairs_wrapped_name() -> None:
+    """A single-token name with EXACTLY ONE intra-SCT token-superset sibling
+    on non-overlapping FYs adopts the sibling's spelling. (The single-token
+    block opens FIRST at a lower year so the full-name block is a genuine
+    new-NEO open, not a #2094 carry.)"""
+    sct = _simple_sct(
+        ("Pferdehirt", "2022", "14,774,294"),
+        ("Douglas J. Pferdehirt\nChief Executive Officer", "2023", "17,062,495"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert {r.executive_name for r in result.rows} == {"Douglas J. Pferdehirt"}
+    assert {r.fiscal_year for r in result.rows} == {2022, 2023}
+
+
+def test_sibling_collision_blocks_repair() -> None:
+    """FTI shape — the suspicious row's FY collides with the sibling's own
+    row for the same FY (conflicting totals) → NO repair, both stay visible."""
+    sct = _simple_sct(
+        ("Pferdehirt", "2023", "393,737"),
+        ("Douglas J. Pferdehirt\nChief Executive Officer", "2023", "17,062,495"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    names = sorted({r.executive_name for r in result.rows})
+    assert names == ["Douglas J. Pferdehirt", "Pferdehirt"]
+
+
+def test_camel_glued_split_validated_by_document() -> None:
+    """CJK glued romanisation splits ONLY when the spaced form occurs verbatim
+    in the same document; Mc-style surnames and unvalidated camels survive."""
+    sct = _simple_sct(("HechunWei", "2024", "7,025"))
+    result = parse_summary_compensation_table(f"<html><body>{sct}<p>Hechun Wei is our CEO.</p></body></html>")
+    assert sorted({r.executive_name for r in result.rows}) == ["Hechun Wei"]
+    # No spaced form in document → unchanged.
+    sct2 = _simple_sct(("LushaNiu", "2024", "5,000"))
+    result2 = parse_summary_compensation_table(f"<html><body>{sct2}</body></html>")
+    assert sorted({r.executive_name for r in result2.rows}) == ["LushaNiu"]
+    # 2-char first capital run (real camel surname) is never split.
+    sct3 = _simple_sct(("McDonald", "2024", "5,000"))
+    result3 = parse_summary_compensation_table(f"<html><body>{sct3}<p>Mc Donald</p></body></html>")
+    assert sorted({r.executive_name for r in result3.rows}) == ["McDonald"]
+
+
+def test_cross_source_disagreement_blocks_repair() -> None:
+    """Conflicting initials across sources ('Douglas J.' sibling vs
+    'Douglas P.' oracle) are a disagreement → no repair even without an FY
+    collision."""
+    sct = _simple_sct(
+        ("Pferdehirt", "2022", "14,774,294"),
+        ("Douglas J. Pferdehirt\nChief Executive Officer", "2023", "17,062,495"),
+    )
+    contexts = _pvp_context("c1", "2022-01-01", "2022-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Douglas P. Pferdehirt</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Douglas J. Pferdehirt", "Pferdehirt"]
+
+
+def test_fragment_rows_never_repaired() -> None:
+    """Bogus fragment names ('Executive') with no unanimous evidence stay
+    untouched — repairing them would be wrong, deleting them is forbidden."""
+    sct = _simple_sct(("Executive", "2024", "1,000"), ("Jane Doe\nChief Executive Officer", "2024", "2,000"))
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert "Executive" in {r.executive_name for r in result.rows}
+
+
+def test_candidates_agree_order_and_initials() -> None:
+    """Direct unit pins on the agreement predicate (fresh-agent review):
+    permutation of the same token set = two different people = disagreement;
+    conflicting initials = disagreement; subset (incl. one-side initials,
+    honorifics) = agreement."""
+    from app.providers.implementations.sec_def14a import _candidates_agree
+
+    assert _candidates_agree("Cook", "Tim Cook")
+    assert _candidates_agree("Damon Hininger", "Damon T. Hininger")
+    assert _candidates_agree("Mr. Cook", "Tim Cook")
+    assert not _candidates_agree("Hechun Wei", "Wei Hechun")
+    assert not _candidates_agree("Douglas J. Pferdehirt", "Douglas P. Pferdehirt")
+    assert _candidates_agree("Hechun Wei", "Hechun Wei")
+
+
+def test_permuted_sibling_names_block_repair() -> None:
+    """Two real people whose names are token-permutations ('Hechun Wei' /
+    'Wei Hechun') must never let a shared-token single-token row repair onto
+    either — the set-equal-order-differs pair disagrees."""
+    sct = _simple_sct(
+        ("Wei", "2022", "1,000"),
+        ("Hechun Wei\nChief Executive Officer", "2023", "2,000"),
+        ("Wei Hechun\nChief Financial Officer", "2023", "3,000"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert "Wei" in {r.executive_name for r in result.rows}
+
+
+def test_camel_split_needs_word_boundary() -> None:
+    """The camel-verbatim check is word-bounded — 'Jon Smithson' in prose must
+    not validate a 'JonSmith' split."""
+    sct = _simple_sct(("JonSmith", "2024", "1,000"))
+    doc = f"<html><body>{sct}<p>Our counsel Jon Smithson advised.</p></body></html>"
+    result = parse_summary_compensation_table(doc)
+    assert sorted({r.executive_name for r in result.rows}) == ["JonSmith"]
+
+
+def test_collision_guard_checks_all_candidates() -> None:
+    """Codex ckpt-2 P2 — a same-FY row under a SHORTER agreeing sibling
+    spelling blocks the repair even when the chosen replacement would be a
+    longer oracle spelling (no same-person split across two spellings)."""
+    sct = _simple_sct(
+        ("Hininger", "2024", "393,737"),
+        ("Damon Hininger\nChief Executive Officer", "2024", "7,471,923"),
+    )
+    contexts = _pvp_context("c1", "2024-01-01", "2024-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Damon T. Hininger</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Damon Hininger", "Hininger"]
+
+
+def test_hyphenated_names_in_agreement_and_repair() -> None:
+    """Review NITPICK — hyphen-splitting in _name_token_seq must not block
+    valid agreement/repair: 'Ann-Marie' subsets 'Ann-Marie Campbell'
+    (predicate-level), and a single-token 'Campbell' repairs onto a
+    hyphenated-first-name sibling. (A leading 'Ann-Marie' short row is
+    absorbed by the pre-existing restated-name carry before repair is
+    consulted, so the predicate is pinned directly.)"""
+    from app.providers.implementations.sec_def14a import _candidates_agree
+
+    assert _candidates_agree("Ann-Marie", "Ann-Marie Campbell")
+    sct = _simple_sct(
+        ("Campbell", "2022", "1,000"),
+        ("Ann-Marie Campbell\nChief Executive Officer", "2023", "2,000"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert {r.executive_name for r in result.rows} == {"Ann-Marie Campbell"}
+
+
+def test_camel_split_ignores_script_and_style_text() -> None:
+    """Review NITPICK — a spaced form appearing only inside <script>/<style>
+    contents must not validate a camel-glued split."""
+    sct = _simple_sct(("JonSmith", "2024", "1,000"))
+    doc = f"<html><body>{sct}<script>var x = 'Jon Smith';</script><style>/* Jon Smith */</style></body></html>"
+    result = parse_summary_compensation_table(doc)
+    assert sorted({r.executive_name for r in result.rows}) == ["JonSmith"]

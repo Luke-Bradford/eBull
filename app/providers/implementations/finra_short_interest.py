@@ -20,8 +20,17 @@ Endpoint shape (empirically verified 2026-05-18 in spike §4):
   URL: https://cdn.finra.org/equity/otcmarket/biweekly/shrt{YYYYMMDD}.csv
   Format: pipe-delimited TEXT (despite ``.csv`` extension).
   Auth: none.
-  Cadence: bimonthly — 15th + last business day of each month.
-  Archive: 2014-→; post-June-2021 covers exchange-listed cohort.
+  Cadence: bimonthly — the settlement dates FINRA DESIGNATES (Rule
+    4560(a)); in practice the 15th + last calendar day walked back to
+    the preceding BUSINESS day. Holidays shift it, so the date is
+    resolved by probing — see ``_fetch_designated_file`` in
+    ``app/jobs/finra_short_interest_refresh``.
+  Archive floor: measured 2026-08-06, the oldest file still served is
+    ``shrt20171229.csv``; ``shrt20171215``, ``shrt20171130`` and
+    ``shrt20171115`` all 403. (The prior "2014-→" claim here was never
+    measured.) Practical floor for us is 2021-07 anyway — that is the
+    ``finra_short_interest_observations`` partition floor AND the
+    post-June-2021 exchange-listed cohort cliff.
 
 Provider surface is intentionally minimal: URL builder + GET with
 ``FinraNotFound`` on 404 + ``raise_for_status()`` on 5xx. Symbol

@@ -2,7 +2,8 @@
 
 Per the 2026-04-19 research-tool refocus §1.1 (Chunk 4), this module merges:
 
-- fundamentals.py — fundamentals_snapshot upserts (kept as Section 1)
+- fundamentals.py — fundamentals_snapshot (Section 1; since #2008 a
+  write-through derived from ``financial_periods``, not a provider fetch)
 - financial_facts.py — XBRL fact storage + ingestion run tracking (Section 2)
 - financial_normalization.py — period derivation + canonical merge (Section 3)
 - sec_incremental.py — SEC change-driven planner/executor (Section 4)
@@ -27,8 +28,6 @@ import psycopg
 from psycopg import sql as pgsql
 
 from app.providers.fundamentals import (
-    FundamentalsProvider,
-    FundamentalsSnapshot,
     XbrlConceptCatalogEntry,
     XbrlFact,
 )
@@ -37,7 +36,7 @@ from app.providers.implementations.sec_edgar import (
     SecFilingsProvider,
     parse_master_index,
 )
-from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
+from app.providers.implementations.sec_fundamentals import RAW_ONLY_CONCEPTS, TRACKED_CONCEPTS
 from app.services.bootstrap_state import (
     resolve_progress_context,
     set_stage_processed,
@@ -67,218 +66,138 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Section 1: Fundamentals snapshot (was fundamentals.py)
+# Section 1: Fundamentals snapshot — write-through from financial_periods
 # ============================================================================
+#
+# #2008: fundamentals_snapshot is DERIVED from the normalized
+# financial_periods rows, one row per quarter anchor with
+# as_of_date = period_end_date (settled-decisions §Fundamentals snapshot
+# semantics). The previous implementation re-selected periods from the raw
+# companyfacts JSON with first-tag-wins / no-dedup / annual-over-quarters
+# rules and rotted across issuer tag migrations (NVDA snapshot = FY2022
+# annual presented as current TTM). Spec:
+# docs/specs/fundamentals/2026-07-12-2008-ttm-reconciliation.md.
+#
+# TTM rules mirror financial_periods_ttm (sql/220) exactly and MUST stay
+# in sync with it and with fcf_yield.py::_QUARTERLY_SQL:
+#   - window = 4 trailing quarter rows, adjacency span <= 330 days;
+#   - statement-core flows (revenue, gross_profit, operating_income,
+#     operating_cf, eps_diluted) are strict: present in all 4 rows or NULL;
+#   - capex is sporadic (absence means "did not occur"): summed over
+#     present members, NULL->0 at FCF composition (settled treatment).
+
+_SNAPSHOT_WRITE_THROUGH_SQL = """
+WITH quarters AS (
+    -- Collapse fiscal-year-rekey duplicates (two period_type rows sharing
+    -- one period_end_date, #1914 class — 133 instruments on dev) to ONE
+    -- row per period_end BEFORE the trailing-4 window. Without this the
+    -- window double-counts that quarter and under-spans the true 4 distinct
+    -- quarters, producing a WRONG TTM instead of the strict NULL intended.
+    -- Latest-filed wins — same tiebreak as the canonical merge + the view.
+    SELECT DISTINCT ON (period_end_date) *
+    FROM financial_periods
+    WHERE instrument_id = %(instrument_id)s
+      AND period_type IN ('Q1','Q2','Q3','Q4')
+      AND superseded_at IS NULL
+      AND normalization_status = 'normalized'
+    ORDER BY period_end_date, filed_date DESC NULLS LAST
+),
+q AS (
+    SELECT
+        period_end_date,
+        filed_date,
+        COUNT(*)                 OVER w AS n_q,
+        MIN(period_end_date)     OVER w AS win_start,
+        SUM(revenue)             OVER w AS revenue_sum,
+        COUNT(revenue)           OVER w AS revenue_cnt,
+        SUM(gross_profit)        OVER w AS gross_profit_sum,
+        COUNT(gross_profit)      OVER w AS gross_profit_cnt,
+        SUM(operating_income)    OVER w AS operating_income_sum,
+        COUNT(operating_income)  OVER w AS operating_income_cnt,
+        SUM(operating_cf)        OVER w AS operating_cf_sum,
+        COUNT(operating_cf)      OVER w AS operating_cf_cnt,
+        SUM(capex)               OVER w AS capex_sum,
+        SUM(eps_diluted)         OVER w AS eps_sum,
+        COUNT(eps_diluted)       OVER w AS eps_cnt,
+        cash,
+        long_term_debt,
+        short_term_debt,
+        shares_outstanding,
+        shareholders_equity
+    FROM quarters
+    WINDOW w AS (ORDER BY period_end_date ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)
+),
+derived AS (
+    SELECT
+        period_end_date,
+        filed_date,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND revenue_cnt = 4
+             THEN revenue_sum END AS revenue_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND gross_profit_cnt = 4
+             THEN gross_profit_sum END AS gross_profit_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND operating_income_cnt = 4
+             THEN operating_income_sum END AS operating_income_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND operating_cf_cnt = 4
+             THEN operating_cf_sum END AS operating_cf_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+             THEN capex_sum END AS capex_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND eps_cnt = 4
+             THEN eps_sum END AS eps_ttm,
+        cash,
+        CASE WHEN long_term_debt IS NOT NULL OR short_term_debt IS NOT NULL
+             THEN COALESCE(long_term_debt, 0) + COALESCE(short_term_debt, 0)
+        END AS debt,
+        shares_outstanding,
+        shareholders_equity
+    FROM q
+)
+INSERT INTO fundamentals_snapshot (
+    instrument_id, as_of_date,
+    revenue_ttm, gross_margin, operating_margin,
+    fcf, cash, debt, net_debt,
+    shares_outstanding, book_value, eps
+)
+-- One row per period_end already (deduped in the ``quarters`` CTE), so
+-- the PK (instrument_id, as_of_date) never collides.
+SELECT
+    %(instrument_id)s,
+    period_end_date,
+    revenue_ttm,
+    CASE WHEN revenue_ttm <> 0 THEN gross_profit_ttm / revenue_ttm END,
+    CASE WHEN revenue_ttm <> 0 THEN operating_income_ttm / revenue_ttm END,
+    CASE WHEN operating_cf_ttm IS NOT NULL
+         THEN operating_cf_ttm - ABS(COALESCE(capex_ttm, 0)) END,
+    cash,
+    debt,
+    CASE WHEN debt IS NOT NULL AND cash IS NOT NULL THEN debt - cash END,
+    shares_outstanding,
+    CASE WHEN shares_outstanding > 0
+         THEN shareholders_equity / shares_outstanding END,
+    eps_ttm
+FROM derived
+"""
 
 
-@dataclass(frozen=True)
-class FundamentalsRefreshSummary:
-    symbols_attempted: int
-    snapshots_upserted: int
-    symbols_skipped: int  # no provider coverage or identifier missing
-
-
-def refresh_fundamentals(
-    provider: FundamentalsProvider,
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    symbols: list[tuple[str, str]],  # [(symbol, instrument_id), ...]
-) -> FundamentalsRefreshSummary:
-    """
-    For each symbol, fetch the latest fundamentals snapshot and upsert it.
-
-    symbols is a list of (symbol, instrument_id) tuples. Providers may
-    use the ticker symbol as their primary identifier or look up the
-    instrument's ``external_identifiers`` row themselves. If the
-    provider returns None for a symbol, that symbol is skipped and
-    counted.
-    """
-    upserted = 0
-    skipped_no_data = 0
-    skipped_provider_error = 0
-    fresh_skipped = 0
-    today = date.today()
-
-    for symbol, instrument_id in symbols:
-        if _fundamentals_are_fresh(conn, instrument_id, today):
-            fresh_skipped += 1
-            continue
-        try:
-            snap = provider.get_latest_snapshot(symbol)
-            if snap is None:
-                # Per-symbol "no data" is a known property of the
-                # universe (non-US issuers, deisted, IPO-recent), not
-                # a transient miss worth one log line per symbol per
-                # refresh tick. Aggregate at the end (#669).
-                skipped_no_data += 1
-                continue
-            _upsert_snapshot(conn, instrument_id, snap)
-            upserted += 1
-        except Exception:
-            logger.warning("Fundamentals: failed to refresh %s, skipping", symbol, exc_info=True)
-            skipped_provider_error += 1
-
-    if fresh_skipped:
-        logger.info(
-            "Fundamentals freshness skip: %d/%d instruments already current-quarter",
-            fresh_skipped,
-            len(symbols),
-        )
-    if skipped_no_data:
-        logger.info(
-            "Fundamentals: %d/%d instruments returned no data from provider",
-            skipped_no_data,
-            len(symbols),
-        )
-
-    return FundamentalsRefreshSummary(
-        symbols_attempted=len(symbols),
-        snapshots_upserted=upserted,
-        symbols_skipped=skipped_no_data + skipped_provider_error,
-    )
-
-
-def refresh_fundamentals_history(
-    provider: FundamentalsProvider,
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    symbols: list[tuple[str, str]],
-    from_date: date,
-    to_date: date,
-    limit: int = 40,
-) -> FundamentalsRefreshSummary:
-    """
-    Backfill historical fundamentals snapshots for each symbol.
-
-    Each snapshot is upserted idempotently. Useful for initial population
-    and for catching up after provider outages.
-    """
-    upserted = 0
-    skipped_no_data = 0
-    skipped_provider_error = 0
-
-    for symbol, instrument_id in symbols:
-        try:
-            snaps = provider.get_snapshot_history(symbol, from_date, to_date, limit=limit)
-            if not snaps:
-                skipped_no_data += 1
-                continue
-            with conn.transaction():
-                for snap in snaps:
-                    _upsert_snapshot(conn, instrument_id, snap)
-            # Count only after the transaction commits successfully
-            upserted += len(snaps)
-        except Exception:
-            logger.warning(
-                "Fundamentals history: failed to refresh %s, skipping",
-                symbol,
-                exc_info=True,
-            )
-            skipped_provider_error += 1
-
-    if skipped_no_data:
-        logger.info(
-            "Fundamentals history: %d/%d instruments returned no data in range",
-            skipped_no_data,
-            len(symbols),
-        )
-
-    return FundamentalsRefreshSummary(
-        symbols_attempted=len(symbols),
-        snapshots_upserted=upserted,
-        symbols_skipped=skipped_no_data + skipped_provider_error,
-    )
-
-
-def _current_quarter_start(today: date) -> date:
-    """Return the first day of the current calendar quarter."""
-    quarter_month = ((today.month - 1) // 3) * 3 + 1
-    return date(today.year, quarter_month, 1)
-
-
-def _fundamentals_are_fresh(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_id: str,
-    today: date,
-) -> bool:
-    """Return True if fundamentals_snapshot has a row with as_of_date in the
-    current calendar quarter.  Fundamentals update quarterly — daily re-fetch
-    for an instrument that already has current-quarter data is pure waste.
-    """
-    quarter_start = _current_quarter_start(today)
-    row = conn.execute(
-        """
-        SELECT 1
-        FROM fundamentals_snapshot
-        WHERE instrument_id = %(instrument_id)s
-          AND as_of_date >= %(quarter_start)s
-        LIMIT 1
-        """,
-        {"instrument_id": instrument_id, "quarter_start": quarter_start},
-    ).fetchone()
-    return row is not None
-
-
-def _upsert_snapshot(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_id: str,
-    snap: FundamentalsSnapshot,
-) -> None:
-    """
-    Upsert a single fundamentals snapshot into fundamentals_snapshot.
-    Idempotent — keyed on (instrument_id, as_of_date).
+def _write_snapshots_from_periods(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+) -> int:
+    """Rewash fundamentals_snapshot for one instrument from its
+    normalized quarter rows (DELETE-then-INSERT, same idempotent
+    pattern as the periods_raw rewash above). Returns rows written.
     """
     conn.execute(
-        """
-        INSERT INTO fundamentals_snapshot (
-            instrument_id, as_of_date,
-            revenue_ttm, gross_margin, operating_margin,
-            fcf, cash, debt, net_debt,
-            shares_outstanding, book_value, eps
-        )
-        VALUES (
-            %(instrument_id)s, %(as_of_date)s,
-            %(revenue_ttm)s, %(gross_margin)s, %(operating_margin)s,
-            %(fcf)s, %(cash)s, %(debt)s, %(net_debt)s,
-            %(shares_outstanding)s, %(book_value)s, %(eps)s
-        )
-        ON CONFLICT (instrument_id, as_of_date) DO UPDATE SET
-            revenue_ttm       = EXCLUDED.revenue_ttm,
-            gross_margin      = EXCLUDED.gross_margin,
-            operating_margin  = EXCLUDED.operating_margin,
-            fcf               = EXCLUDED.fcf,
-            cash              = EXCLUDED.cash,
-            debt              = EXCLUDED.debt,
-            net_debt          = EXCLUDED.net_debt,
-            shares_outstanding = EXCLUDED.shares_outstanding,
-            book_value        = EXCLUDED.book_value,
-            eps               = EXCLUDED.eps
-        WHERE (
-            fundamentals_snapshot.revenue_ttm      IS DISTINCT FROM EXCLUDED.revenue_ttm      OR
-            fundamentals_snapshot.gross_margin     IS DISTINCT FROM EXCLUDED.gross_margin     OR
-            fundamentals_snapshot.operating_margin IS DISTINCT FROM EXCLUDED.operating_margin OR
-            fundamentals_snapshot.fcf              IS DISTINCT FROM EXCLUDED.fcf              OR
-            fundamentals_snapshot.cash             IS DISTINCT FROM EXCLUDED.cash             OR
-            fundamentals_snapshot.debt             IS DISTINCT FROM EXCLUDED.debt             OR
-            fundamentals_snapshot.net_debt         IS DISTINCT FROM EXCLUDED.net_debt         OR
-            fundamentals_snapshot.shares_outstanding IS DISTINCT FROM EXCLUDED.shares_outstanding OR
-            fundamentals_snapshot.book_value       IS DISTINCT FROM EXCLUDED.book_value       OR
-            fundamentals_snapshot.eps              IS DISTINCT FROM EXCLUDED.eps
-        )
-        """,
-        {
-            "instrument_id": instrument_id,
-            "as_of_date": snap.as_of_date,
-            "revenue_ttm": snap.revenue_ttm,
-            "gross_margin": snap.gross_margin,
-            "operating_margin": snap.operating_margin,
-            "fcf": snap.fcf,
-            "cash": snap.cash,
-            "debt": snap.debt,
-            "net_debt": snap.net_debt,
-            "shares_outstanding": snap.shares_outstanding,
-            "book_value": snap.book_value,
-            "eps": snap.eps,
-        },
+        "DELETE FROM fundamentals_snapshot WHERE instrument_id = %(instrument_id)s",
+        {"instrument_id": instrument_id},
     )
+    cur = conn.execute(_SNAPSHOT_WRITE_THROUGH_SQL, {"instrument_id": instrument_id})
+    return cur.rowcount
 
 
 # ============================================================================
@@ -974,6 +893,221 @@ def _months_between(start: date | None, end: date) -> int | None:
     return round(delta_days / 30.44)
 
 
+# #2036 — the D&A component concept captured raw-only (see
+# RAW_ONLY_CONCEPTS in sec_fundamentals.py). Resolved at derive time and
+# summed with ``intangible_amortization``; never a PeriodRow column.
+_DA_COMPONENT_CONCEPT = "Depreciation"
+
+# Sanity bounds for cumulative candidates in the YTD pool: one quarter
+# (60d) up to a mislabeled-annual (400d) span.
+_YTD_POOL_DAYS = (60, 400)
+
+
+def _build_ytd_pools(
+    facts: Sequence[FactRow],
+) -> dict[str, list[FactRow]]:
+    """Collect duration facts usable as YTD cumulatives, keyed by canonical
+    column name (for ``_TAG_TO_COLUMN`` flow concepts) or by the raw-only
+    concept name itself.
+
+    Source rule (#2036): interim cash-flow statements are YTD-only
+    (17 CFR 210.10-01(c)(3)), so a 10-Q's cash-flow duration facts span
+    FY-start → quarter-end (Q2 ≈ 182d, Q3 ≈ 273d) and are rejected by the
+    #1835 per-period duration guard. They are not junk — they are the
+    cumulatives ``_fill_from_ytd`` subtracts. Keyed purely by concept →
+    pool; (fy, fp) labels are ignored here because comparative re-stamps
+    (#682) make them unreliable — date arithmetic below is the truth.
+    """
+    pools: dict[str, list[FactRow]] = defaultdict(list)
+    lo, hi = _YTD_POOL_DAYS
+    for fact in facts:
+        if fact.period_start is None:
+            continue
+        days = (fact.period_end - fact.period_start).days
+        if not (lo <= days <= hi):
+            continue
+        if fact.concept in RAW_ONLY_CONCEPTS:
+            pools[fact.concept].append(fact)
+            continue
+        mapping = _TAG_TO_COLUMN.get(fact.concept)
+        if mapping is not None and mapping[0] in _FLOW_COLUMNS:
+            pools[mapping[0]].append(fact)
+    return pools
+
+
+def _resolve_flow_value(
+    candidates: list[FactRow] | None,
+    *,
+    period_type: str,
+    period_end: date,
+) -> Decimal | None:
+    """Resolve a flow value for one period from a cumulative pool.
+
+    Two branches, both anchored on facts whose ``period_end`` equals the
+    row's canonical end:
+
+    1. direct — a fact whose span matches the period's own
+       ``_FLOW_DURATION_DAYS`` window (used by the component fallback,
+       where no column pick ran);
+    2. de-cumulated — ``cur − prev`` where prev shares concept, unit and
+       ``period_start`` (the FY anchor) with cur and ends one quarter
+       (60–120d) before it. Same-concept + same-unit is load-bearing:
+       mixing alias concepts or units across the subtraction fabricates
+       values (Codex ckpt-1 Medium).
+
+    Candidate preference mirrors the canonical-facts rule: concept
+    priority (``_TAG_TO_COLUMN`` index, raw-only concepts rank equal),
+    then ``filed_date DESC`` so amendments win.
+    """
+    if not candidates:
+        return None
+
+    def _prio(fact: FactRow) -> int:
+        mapping = _TAG_TO_COLUMN.get(fact.concept)
+        return mapping[1] if mapping is not None else 0
+
+    ending_here = sorted(
+        (f for f in candidates if f.period_end == period_end),
+        key=lambda f: (_prio(f), -f.filed_date.toordinal(), f.accession_number),
+    )
+    lo, hi = _FLOW_DURATION_DAYS[period_type]
+    for cur in ending_here:
+        days = (cur.period_end - cur.period_start).days  # type: ignore[operator]
+        if lo <= days <= hi:
+            return cur.val
+    if period_type == "FY":
+        return None
+    for cur in ending_here:
+        prevs = sorted(
+            (
+                p
+                for p in candidates
+                if p.concept == cur.concept
+                and p.unit == cur.unit
+                and p.period_start == cur.period_start
+                and 60 <= (cur.period_end - p.period_end).days <= 120
+            ),
+            key=lambda p: (p.filed_date, p.accession_number),
+            reverse=True,
+        )
+        if prevs:
+            return cur.val - prevs[0].val
+    return None
+
+
+# Plausible range for a DERIVED fiscal-year label (#2192). Must match the
+# CHECK added in sql/243_fiscal_year_range_check.sql — a label outside it
+# now fails the insert, so the normalizer has to refuse the stamp BEFORE it
+# becomes a label or an anchor.
+#
+# Source rule: SEC companyfacts `fy` is the filing's DEI
+# DocumentFiscalYearFocus (#682) and SEC republishes whatever the filer
+# tagged, errors included — verified against data.sec.gov, which itself
+# serves PRTH fy=43830 (the Excel serial for its own 2019-12-31 period end),
+# WTBA fy=2107, and `fy: 0` for facts from filings with no fiscal-period
+# focus. The stamp is therefore untrusted INPUT, not a given.
+_FISCAL_YEAR_MIN = 1995
+_FISCAL_YEAR_MAX = 2100
+
+
+def _is_plausible_fiscal_year(fy: int | None) -> bool:
+    """True when a SEC ``fy`` stamp can be used as a fiscal-year label (#2192)."""
+    return fy is not None and _FISCAL_YEAR_MIN <= fy <= _FISCAL_YEAR_MAX
+
+
+def _resolve_period_fiscal_year(
+    anchor_fy: dict[tuple[str, date], int],
+    period_type: str,
+    period_end: date,
+    stamped_fy: int,
+) -> int:
+    """Re-derive a fiscal period's fiscal_year from its own ``period_end`` (#1914).
+
+    SEC XBRL re-stamps every prior-year comparative in a 10-K with the FILING's
+    ``fy``, so the stamp is only reliable for the filing's OWN primary period.
+    ``anchor_fy`` maps ``(period_type, primary_period_end) -> fy`` for every
+    period_end that was some retained filing's primary (max) period — where the
+    stamp is authoritative.
+
+    - Exact hit: the ``period_end`` was itself a filing's primary → use that fy.
+    - Comparative-only ``period_end`` (its own filing aged out of the raw store):
+      carry the issuer's fiscal-year convention by calendar-year delta from the
+      nearest same-``period_type`` anchor. This is correct for off-December
+      (e.g. Feb) fiscal-year-enders because consecutive fiscal years' primary
+      period_ends are ~one calendar year apart.
+    - No anchor at all (degenerate — no primary of this period_type in store):
+      fall back to the SEC stamp.
+
+    Source rule: SEC companyfacts ``fy`` is the filing's context, not the fact's
+    period (#682); DocumentFiscalYearFocus for a filing's own primary period is
+    authoritative; Reg S-X 210.3-02 makes the comparatives real, consecutive
+    annual periods.
+
+    #2192: "authoritative" still means "as tagged by the filer", so both
+    stamp-returning paths are guarded. ``anchor_fy`` is pre-filtered by the
+    caller, so a direct hit is already plausible; the final fallback is not,
+    and an implausible stamp with no anchor to fall back on degrades to the
+    period_end's own calendar year rather than poisoning the label.
+    """
+    direct = anchor_fy.get((period_type, period_end))
+    if direct is not None:
+        return direct
+    same_type = [(pe, fy) for (pt, pe), fy in anchor_fy.items() if pt == period_type]
+    if same_type:
+        pe, fy = min(same_type, key=lambda c: (abs(c[0].year - period_end.year), c[0]))
+        return fy - (pe.year - period_end.year)
+    return stamped_fy if _is_plausible_fiscal_year(stamped_fy) else period_end.year
+
+
+def _build_period_row(
+    *,
+    period_type: str,
+    fiscal_quarter: int | None,
+    fiscal_year: int,
+    period_end: date,
+    canonical_facts: list[FactRow],
+    reported_currency: str,
+) -> PeriodRow:
+    """Build one ``PeriodRow`` from the facts at a single (period_type, period_end).
+
+    ``canonical_facts`` must be pre-sorted ``filed_date`` DESC so the tag-priority
+    "first write wins" pulls each concept's value from the latest filing that
+    reports it (#682 restatement priority). Provenance (source_ref / filed_date /
+    form_type) reflects the contributing accessions.
+    """
+    starts = [f.period_start for f in canonical_facts if f.period_start is not None]
+    period_start = min(starts) if starts else None
+    months = _months_between(period_start, period_end)
+    accession_numbers = sorted({f.accession_number for f in canonical_facts})
+    source_ref = accession_numbers[0] if len(accession_numbers) == 1 else ",".join(accession_numbers)
+    latest_filing = max(canonical_facts, key=lambda f: f.filed_date)
+    row = PeriodRow(
+        period_end_date=period_end,
+        period_type=period_type,
+        fiscal_year=fiscal_year,
+        fiscal_quarter=fiscal_quarter,
+        period_start_date=period_start,
+        months_covered=months,
+        source="sec_edgar",
+        source_ref=source_ref,
+        reported_currency=reported_currency,
+        form_type=latest_filing.form_type,
+        filed_date=latest_filing.filed_date,
+    )
+    col_priority: dict[str, int] = {}
+    for fact in canonical_facts:
+        mapping = _TAG_TO_COLUMN.get(fact.concept)
+        if mapping is None:
+            continue
+        col_name, priority = mapping
+        current_priority = col_priority.get(col_name)
+        if current_priority is not None and priority >= current_priority:
+            continue  # existing value has higher or equal priority
+        setattr(row, col_name, fact.val)
+        col_priority[col_name] = priority
+    return row
+
+
 def _derive_periods_from_facts(
     facts: Sequence[FactRow],
     reported_currency: str = "USD",
@@ -1013,124 +1147,240 @@ def _derive_periods_from_facts(
 
         grouped[(fact.fiscal_year, fp)].append(fact)
 
-    # Build period rows
+    # #1914 — primary-period fiscal_year anchor. SEC re-stamps every prior-year
+    # comparative in a 10-K with the FILING's fy, so bucketing by the stamp (above)
+    # drops the comparatives. Build a map of each period_end that was some retained
+    # filing's PRIMARY (max) period to that filing's stamp (authoritative there), so
+    # the per-period loop can re-derive fiscal_year from period_end. Built from the
+    # SAME _TAG_TO_COLUMN-mapped facts the boundary derivation uses (#558: DEI as-of
+    # contexts must not lift the anchor to the filing date).
+    _acc_fp_facts: dict[tuple[str, str], list[FactRow]] = defaultdict(list)
+    for (_stamped_fy, fp), period_facts in grouped.items():
+        for f in period_facts:
+            if f.concept in _TAG_TO_COLUMN:
+                _acc_fp_facts[(f.accession_number, fp)].append(f)
+    # When two accessions each treat the same period_end as their primary but stamp
+    # it with different ``fy`` (a fiscal-year re-label / source error), the
+    # latest-filed accession's stamp wins — deterministic + restatement-priority
+    # aligned, not DB read-order dependent (Codex ckpt-2). Tie-break key is
+    # (filed_date, accession_number): on an identical filed_date the
+    # lexicographically-larger accession wins — the same "lex-larger accession =
+    # later in the filer-year sequence" rule the #682 canonical merge uses, so a
+    # same-day 10-K/A amendment beats the original it corrects.
+    _anchor_best: dict[tuple[str, date], tuple[date, str, int]] = {}
+    for (_acc, fp), fs in _acc_fp_facts.items():
+        primary = max(fs, key=lambda f: f.period_end)
+        # #2192 — an implausible stamp must never BECOME an anchor. Anchors
+        # are what the calendar-delta path extrapolates from, so one
+        # mis-tagged DocumentFiscalYearFocus would otherwise poison the
+        # neighbouring periods it anchors, not just its own.
+        if not _is_plausible_fiscal_year(primary.fiscal_year):
+            continue
+        key = (_FP_MAP[fp][0], primary.period_end)
+        cand = (primary.filed_date, primary.accession_number, primary.fiscal_year)
+        current = _anchor_best.get(key)
+        if current is None or (cand[0], cand[1]) > (current[0], current[1]):
+            _anchor_best[key] = cand
+    anchor_fy: dict[tuple[str, date], int] = {k: v[2] for k, v in _anchor_best.items()}
+
+    # Build period rows.
+    #
+    # Quarterly periods keep the original per-(stamped_fy, fp) single-row
+    # (max period_end) behavior — the blank-prior-year bug is an FY phenomenon, and
+    # TTM (sql/220) + the Q4 = FY − ΣQ derivation depend on the quarter SET staying
+    # byte-identical. FY periods are #1914-recovered: gathered GLOBALLY by
+    # period_end (loop below) so a prior year that one filing reports only as a
+    # comparative merges — per-concept, latest-filed wins — with facts other
+    # filings carry for the same period. That cross-filing union is essential: an
+    # aged/partial primary 10-K may lack revenue that a later 10-K's comparative
+    # column carries, and vice-versa; picking a single whole row would blank one.
     periods: list[PeriodRow] = []
-    for (fy, fp), period_facts in grouped.items():
+    fy_facts_by_end: dict[date, list[FactRow]] = defaultdict(list)
+    fy_float_facts: list[FactRow] = []
+    _, _fy_fiscal_quarter = _FP_MAP["FY"]
+
+    for (stamped_fy, fp), period_facts in grouped.items():
         period_type, fiscal_quarter = _FP_MAP[fp]
 
-        # Determine period dates from financial-line-item facts only.
-        # DEI facts (e.g. dei:EntityCommonStockSharesOutstanding) carry
-        # an "as-of" context endDate equal to the filing date, ~6 weeks
-        # after the real fiscal period end. Including them in the
-        # max(period_end) lifted period_end to the filing date and
-        # produced duplicate rows in financial_periods on subsequent
-        # runs (issue #558). Restrict boundary derivation to facts
-        # whose concept maps to a canonical column — those are the
-        # fiscal-period-bearing line items.
+        # Boundary derivation uses financial-line-item facts only. DEI facts carry
+        # an "as-of" context endDate = the filing date (~6 weeks after the real
+        # fiscal period end); including them would lift max(period_end) to the
+        # filing date and duplicate rows (#558). Restrict to _TAG_TO_COLUMN facts.
         mapped_facts = [f for f in period_facts if f.concept in _TAG_TO_COLUMN]
-        if not mapped_facts:
-            # Group has only DEI / unmapped concepts. Without a mapped
-            # fact we cannot anchor a real fiscal period; skip rather
-            # than fabricate one from filing-date metadata.
-            continue
-        period_end = max(f.period_end for f in mapped_facts)
 
-        # #682: SEC re-stamps every prior-year comparative row in a
-        # 10-K/10-Q with the FILING's ``fy`` / ``fp`` context, not the
-        # comparative's own fiscal period. So a 2026-filed 10-K
-        # reporting comparatives for 2023 / 2024 / 2025 emits THREE
-        # facts under ``fy=2025, fp=FY`` for the same concept — one
-        # per ``period_end`` (2023-12-31 / 2024-12-31 / 2025-12-31).
-        # Pre-fix the iteration order picked the EARLIEST period_end's
-        # value (the comparative-year row, e.g. IEP's $6.00 from 2023)
-        # as the canonical FY 2025 value; ``_canonical_merge`` then
-        # derived Q4 as FY − YTD = $4.50, both wrong values flowed to
-        # the operator-visible dividend chart. Filter the value-bearing
-        # set to facts whose ``period_end`` matches the canonical
-        # max(period_end) for this fiscal period — only the actual
-        # fiscal-period-end row contributes values.
-        canonical_facts = [f for f in mapped_facts if f.period_end == period_end]
-        # Within the canonical-end set, prefer the most recently filed
-        # fact when the same concept appears under multiple accessions
-        # (10-K/A amendments, restatements). Sorting by filed_date DESC
-        # makes "first write wins" pull from the latest filing — same
-        # priority discriminator the issue calls out.
-        canonical_facts = sorted(
-            canonical_facts,
-            key=lambda f: (f.filed_date, f.accession_number),
-            reverse=True,
-        )
-
-        starts = [f.period_start for f in canonical_facts if f.period_start is not None]
-        period_start = min(starts) if starts else None
-        months = _months_between(period_start, period_end)
-
-        # Collect accession numbers for source_ref (only canonical
-        # facts — comparative-year accessions don't contribute values
-        # to this row, so they shouldn't appear in provenance).
-        accession_numbers = sorted({f.accession_number for f in canonical_facts})
-        source_ref = accession_numbers[0] if len(accession_numbers) == 1 else ",".join(accession_numbers)
-
-        # Find the most recent filed_date and form_type from the
-        # canonical-end set (matches the value provenance).
-        latest_filing = max(canonical_facts, key=lambda f: f.filed_date)
-
-        row = PeriodRow(
-            period_end_date=period_end,
-            period_type=period_type,
-            fiscal_year=fy,
-            fiscal_quarter=fiscal_quarter,
-            period_start_date=period_start,
-            months_covered=months,
-            source="sec_edgar",
-            source_ref=source_ref,
-            reported_currency=reported_currency,
-            form_type=latest_filing.form_type,
-            filed_date=latest_filing.filed_date,
-        )
-
-        # Apply values with tag priority. Iterating ``canonical_facts``
-        # in ``filed_date DESC`` order means "first-write-wins" pulls
-        # from the latest filing for any given (concept, period_end).
-        col_priority: dict[str, int] = {}
-        for fact in canonical_facts:
-            mapping = _TAG_TO_COLUMN.get(fact.concept)
-            if mapping is None:
-                continue
-            col_name, priority = mapping
-            current_priority = col_priority.get(col_name)
-            if current_priority is not None and priority >= current_priority:
-                continue  # existing value has higher or equal priority
-            setattr(row, col_name, fact.val)
-            col_priority[col_name] = priority
-
-        # #735 — DEI public-float overlay (FY only). EntityPublicFloat is a
-        # 10-K cover-page fact stamped (fiscal_year, 'FY') but with
-        # period_end = issuer Q2-end, so it is NOT in ``mapped_facts``
-        # (kept out of _TAG_TO_COLUMN to avoid lifting the FY anchor, #558)
-        # and would be dropped by the ``canonical_facts`` period_end filter.
-        # Pull it from the full ``period_facts`` set instead: current float =
-        # max(period_end) then latest filed_date (guards comparative
-        # re-stamps, #682). Value-only overlay — provenance columns
-        # (source_ref / filed_date / form_type) intentionally stay tied to
-        # the canonical fiscal-period facts; the float fact's accession is
-        # NOT appended to source_ref (that is the raw-upsert key). USD-only
-        # guard so a malformed/future non-USD float never lands in a USD
-        # column.
         if period_type == "FY":
-            float_facts = [
+            # Defer FY rows to the global-by-period_end merge below; also stash the
+            # cover-page float facts (kept out of _TAG_TO_COLUMN per #558/#735).
+            for f in mapped_facts:
+                fy_facts_by_end[f.period_end].append(f)
+            fy_float_facts.extend(
                 f
                 for f in period_facts
                 if f.concept == _DEI_PUBLIC_FLOAT_CONCEPT and f.unit == "USD" and f.val is not None
-            ]
-            if float_facts:
-                chosen = max(float_facts, key=lambda f: (f.period_end, f.filed_date, f.accession_number))
-                row.public_float_usd = chosen.val
+            )
+            continue
 
-        periods.append(row)
+        if not mapped_facts:
+            # Group has only DEI / unmapped concepts — no real fiscal period to
+            # anchor; skip rather than fabricate one from filing-date metadata.
+            continue
+        # #682: the filing re-stamps its comparatives with its own fp, so keep only
+        # the max period_end (the filing's own quarter); latest-filed wins per
+        # concept on restatement (10-K/A amendments).
+        period_end = max(f.period_end for f in mapped_facts)
+        canonical_facts = sorted(
+            [f for f in mapped_facts if f.period_end == period_end],
+            key=lambda f: (f.filed_date, f.accession_number),
+            reverse=True,
+        )
+        # #1914 confined fiscal_year re-derivation to FY rows so the quarter
+        # SET stays byte-identical (TTM in sql/220 and the Q4 = FY − ΣQ
+        # derivation depend on it). #2192 keeps that invariant exactly: a
+        # PLAUSIBLE stamp is still passed through untouched, and only an
+        # out-of-range one — which sql/243's CHECK would now reject outright —
+        # falls through to the same anchor derivation the FY path uses. The
+        # set of rows whose value changes is precisely the set that could not
+        # be stored at all.
+        quarter_fy = (
+            stamped_fy
+            if _is_plausible_fiscal_year(stamped_fy)
+            else _resolve_period_fiscal_year(anchor_fy, period_type, period_end, stamped_fy)
+        )
+        periods.append(
+            _build_period_row(
+                period_type=period_type,
+                fiscal_quarter=fiscal_quarter,
+                fiscal_year=quarter_fy,
+                period_end=period_end,
+                canonical_facts=canonical_facts,
+                reported_currency=reported_currency,
+            )
+        )
 
-    # Q4 derivation: if FY exists but Q4 does not, derive Q4 = FY - Q1 - Q2 - Q3
-    fy_periods = {p.fiscal_year: p for p in periods if p.period_type == "FY"}
+    # #1914 — one FY row per distinct period_end, merged across EVERY filing that
+    # reports it (as its own primary or a later filing's comparative column), with
+    # per-concept latest-filed priority. fiscal_year is re-derived from the
+    # period_end itself (the SEC stamp is only reliable for a filing's own primary
+    # period; comparatives inherit the filing's stamp — #682).
+    for period_end, mapped_facts in fy_facts_by_end.items():
+        canonical_facts = sorted(mapped_facts, key=lambda f: (f.filed_date, f.accession_number), reverse=True)
+        fiscal_year = _resolve_period_fiscal_year(anchor_fy, "FY", period_end, canonical_facts[0].fiscal_year)
+        periods.append(
+            _build_period_row(
+                period_type="FY",
+                fiscal_quarter=_fy_fiscal_quarter,
+                fiscal_year=fiscal_year,
+                period_end=period_end,
+                canonical_facts=canonical_facts,
+                reported_currency=reported_currency,
+            )
+        )
+
+    # #735 — DEI public-float overlay. EntityPublicFloat is a 10-K cover-page fact
+    # (period_end = issuer Q2-end, kept out of _TAG_TO_COLUMN per #558). It is a
+    # current-snapshot metric with no per-historical-year meaning, so attach the
+    # current float (max period_end, latest filed) to the most recent FY row only.
+    # Value-only overlay — the float fact's accession is NOT added to source_ref;
+    # USD-only guard so a non-USD float never lands in a USD column.
+    if fy_float_facts:
+        fy_rows = [p for p in periods if p.period_type == "FY"]
+        if fy_rows:
+            latest_fy = max(fy_rows, key=lambda p: p.period_end_date)
+            chosen = max(fy_float_facts, key=lambda f: (f.period_end, f.filed_date, f.accession_number))
+            latest_fy.public_float_usd = chosen.val
+
+    # #1914 collision log — two DISTINCT period_ends re-deriving to the same
+    # (fiscal_year, fiscal_quarter, period_type) are collapsed by the SQL
+    # best-source merge (DISTINCT ON). These are the ~137 genuine fiscal-year-change
+    # / stub-year collisions deferred to #541 (integer fiscal_year cannot key two
+    # real periods). Surface the dropped period so nothing collapses silently;
+    # winner selection itself stays in the SQL layer, this only mirrors its order
+    # to name the loser. The SQL winner order is: source priority → filed_date DESC
+    # → period_end DESC → source_ref ASC. Source priority is CONSTANT here (this
+    # derivation emits only source='sec_edgar'), so it drops out; mirror the
+    # remaining three keys exactly via negated ordinals (DESC) + source_ref (ASC).
+    _collision_groups: dict[tuple[int, int | None, str], list[PeriodRow]] = defaultdict(list)
+    for p in periods:
+        _collision_groups[(p.fiscal_year, p.fiscal_quarter, p.period_type)].append(p)
+    for (c_fy, _c_fq, c_type), group in _collision_groups.items():
+        ends = {p.period_end_date for p in group}
+        if len(ends) > 1:
+            winner = min(
+                group,
+                key=lambda p: (
+                    -(p.filed_date or date.min).toordinal(),
+                    -p.period_end_date.toordinal(),
+                    p.source_ref,
+                ),
+            )
+            dropped = sorted(e for e in ends if e != winner.period_end_date)
+            logger.warning(
+                "financial_periods fiscal_year collision (#1914/#541): fy=%s %s maps "
+                "%d distinct period_ends %s; SQL merge keeps %s, drops %s "
+                "(distinct real periods sharing one integer fiscal_year label).",
+                c_fy,
+                c_type,
+                len(ends),
+                sorted(ends),
+                winner.period_end_date,
+                dropped,
+            )
+
+    # #2036 — YTD de-cumulation fill. Interim cash-flow statements are
+    # YTD-only (17 CFR 210.10-01(c)(3)); their Q2/Q3 duration facts were
+    # dropped by the #1835 guard above, so cash-flow columns (D&A,
+    # operating_cf, capex, …) are None on Q2/Q3 rows for issuers that
+    # report them nowhere else. Recover the discrete quarter as
+    # YTD_n − YTD_{n−1} (same identity as the settled Q4 = FY − ΣQ
+    # treatment, #682). Fill-only: a column with a reported discrete
+    # fact is never touched. The component-sum fallback then covers
+    # issuers that tag no total-semantics D&A concept at all:
+    # D&A = Depreciation (raw-only concept) + intangible_amortization,
+    # rule calibrated full-pop in the #2036 spec §2.3 (FLROU excluded —
+    # degrades fit; Depreciation required — AmI-only would omit all
+    # depreciation).
+    ytd_pools = _build_ytd_pools(facts)
+    if ytd_pools:
+        for row in periods:
+            if row.period_type in ("Q1", "Q2", "Q3", "Q4"):
+                for col in _FLOW_COLUMNS:
+                    if getattr(row, col) is not None:
+                        continue
+                    filled = _resolve_flow_value(
+                        ytd_pools.get(col),
+                        period_type=row.period_type,
+                        period_end=row.period_end_date,
+                    )
+                    if filled is not None:
+                        setattr(row, col, filled)
+            # Deliberately ALL period types incl. FY: the Q4 = FY − ΣQ
+            # derivation below needs the FY row's depreciation_amort, so a
+            # component-sum name whose FY D&A stayed None would never get a
+            # derived Q4 and strict TTM (sql/220) would keep failing.
+            if row.depreciation_amort is None:
+                dep = _resolve_flow_value(
+                    ytd_pools.get(_DA_COMPONENT_CONCEPT),
+                    period_type=row.period_type,
+                    period_end=row.period_end_date,
+                )
+                if dep is not None:
+                    row.depreciation_amort = dep + (row.intangible_amortization or Decimal(0))
+
+    # Q4 derivation: if FY exists but Q4 does not, derive Q4 = FY - Q1 - Q2 - Q3.
+    # On a #1914/#541 fiscal_year collision (two FY period_ends → one label), pick
+    # the SAME row the SQL best-source merge will keep (filed_date DESC, then
+    # period_end DESC) so the derived Q4 is computed from the surviving FY row, not
+    # a to-be-dropped loser (Codex ckpt-2).
+    fy_periods: dict[int, PeriodRow] = {}
+    for p in periods:
+        if p.period_type != "FY":
+            continue
+        cur = fy_periods.get(p.fiscal_year)
+        if cur is None or (p.filed_date or date.min, p.period_end_date) > (
+            cur.filed_date or date.min,
+            cur.period_end_date,
+        ):
+            fy_periods[p.fiscal_year] = p
     existing_quarters: dict[int, dict[str, PeriodRow]] = defaultdict(dict)
     for p in periods:
         if p.period_type in ("Q1", "Q2", "Q3", "Q4"):
@@ -1849,11 +2099,17 @@ def normalize_financial_periods(
                 # then refreshes ownership_treasury_current once.
                 _record_treasury_observations_for_instrument(conn, instrument_id=iid)
 
+                # Step 6: fundamentals_snapshot write-through (#2008).
+                # Same rewash discipline as steps 3-4: the snapshot is
+                # derived state; re-normalization replaces it wholesale.
+                snapshot_count = _write_snapshots_from_periods(conn, instrument_id=iid)
+
                 logger.info(
-                    "Normalized instrument %d: %d raw periods, %d canonical",
+                    "Normalized instrument %d: %d raw periods, %d canonical, %d snapshots",
                     iid,
                     raw_count,
                     canonical_count,
+                    snapshot_count,
                 )
         except Exception:
             logger.exception("Failed to normalize instrument %d", iid)

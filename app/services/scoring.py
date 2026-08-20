@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -34,9 +34,11 @@ from psycopg.types.json import Jsonb
 
 from app.services.instrument_analytics import (
     assemble_instrument_analytics,
+    assemble_instrument_analytics_bulk,
     compute_peer_grades,
 )
 from app.services.sector_classification import resolve_sector_spdr
+from app.services.thesis_subject_identity import QUARANTINE_REASON, is_thesis_usable
 from app.services.xbrl_derived_stats import (
     MarketCapResolution,
     resolve_market_cap_basis,
@@ -44,15 +46,53 @@ from app.services.xbrl_derived_stats import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL_VERSION = "v1.3-balanced"
+_DEFAULT_MODEL_VERSION = "v1.5-balanced"
+
+# The IAR analytics denominator (#2411). Newest POSITIVE point-in-time share count
+# per instrument, with the filing date the freshness bound is measured against.
+#
+# This is the app's settled share-count source, not a new one: `share_count_history`
+# (sql/259) prefers the cover-page `dei:EntityCommonStockSharesOutstanding` and falls
+# back to the balance-sheet `us-gaap:CommonStockSharesOutstanding`, it is what
+# `instrument_share_count_latest` — the ownership rollup's denominator — is built on
+# (data-engineer skill "Views" + I19), and it is what the OTHER consumer of
+# `short_interest_pct_shares_out` already divides by
+# (`thesis_break_scan._short_interest_observations`, whose docstring names it "the
+# settled short_interest_signal denominator"). `fundamentals_snapshot.shares_outstanding`
+# — what this path read until #2411 — carries only the us-gaap balance-sheet concept
+# (`sec_fundamentals.py:237`), has no filed date to bound, and is NULL or zero for
+# 1,427 of 4,529 instruments.
+#
+# `shares_outstanding > 0` is load-bearing twice over: it skips a filer's zero-valued
+# undimensioned tag (#2232), and a NULL/zero in the newest period must not shadow an
+# older usable one — the same contract the price read below carries in its own WHERE.
+#
+# ⚠ `shares_outstanding_filed_date`, NOT `latest_filed_date`. The latter is `MAX(filed_date)`
+# over all FIVE concepts the view groups, so a restated flow fact in the same period makes
+# the count look newer than it is — always forward, i.e. always fail-open for a freshness
+# gate (sql/273: 16 of 4,665 newest-positive rows, up to 1,456 days, 7 of them across the
+# 183-day bound). The column added by sql/273 mirrors the value's own COALESCE.
+_SHARE_COUNT_SQL = """
+    SELECT shares_outstanding, shares_outstanding_filed_date
+    FROM share_count_history
+    WHERE instrument_id = %(id)s AND shares_outstanding > 0
+    ORDER BY period_end DESC
+    LIMIT 1
+"""
 
 # Model-version prefix gates (single source — the next version is a one-line add,
 # not a scattered string edit). TA-enhanced momentum applies from v1.1; the
 # realized-risk penalty from v1.2; both carry forward to v1.3 (which only ADDS the
 # Calmar reward on top — Codex ckpt-1 HIGH: v1.3 must inherit v1.2 behavior).
-_TA_MOMENTUM_PREFIXES: tuple[str, ...] = ("v1.1", "v1.2", "v1.3")
-_RISK_PENALTY_PREFIXES: tuple[str, ...] = ("v1.2", "v1.3")
-_CALMAR_REWARD_PREFIXES: tuple[str, ...] = ("v1.3",)
+# v1.4 inherits ALL v1.3 behavior — the bump marks the #1857 value-input change
+# (instrument_valuation priced off price_daily fallback, sql/236), not a
+# scoring-code change. v1.5 likewise inherits v1.4 — it marks the #1939 FPI
+# ADR/ADS basis suppression (sql/237: price-bearing ratios NULLed for Rule
+# 3b-4 fingerprinted instruments, whose ordinary-shares × per-ADS-price
+# inputs v1.4 had un-masked as garbage).
+_TA_MOMENTUM_PREFIXES: tuple[str, ...] = ("v1.1", "v1.2", "v1.3", "v1.4", "v1.5")
+_RISK_PENALTY_PREFIXES: tuple[str, ...] = ("v1.2", "v1.3", "v1.4", "v1.5")
+_CALMAR_REWARD_PREFIXES: tuple[str, ...] = ("v1.3", "v1.4", "v1.5")
 
 # ---------------------------------------------------------------------------
 # Weight modes  (must sum to 1.0)
@@ -159,6 +199,66 @@ _WEIGHT_MODES: dict[str, dict[str, float]] = {
         "turnaround": 0.05,
     },
     "v1.3-speculative": {
+        "turnaround": 0.30,
+        "value": 0.25,
+        "momentum": 0.15,
+        "confidence": 0.15,
+        "sentiment": 0.10,
+        "quality": 0.05,
+    },
+    # v1.4 — identical family weights to v1.3. The bump marks the #1857
+    # value-INPUT change (sql/236: instrument_valuation prices off the
+    # latest price_daily close when no live quote exists, so pe_ratio /
+    # fcf_yield populate for ~3,900 names instead of ~60 and the value
+    # family stops returning the 0.5 empty-components default for 97% of
+    # the universe). rank_delta only ever compares within a model_version,
+    # so v1.3 history stays internally consistent.
+    "v1.4-balanced": {
+        "quality": 0.25,
+        "value": 0.25,
+        "turnaround": 0.20,
+        "confidence": 0.15,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+    },
+    "v1.4-conservative": {
+        "quality": 0.35,
+        "value": 0.25,
+        "confidence": 0.20,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+        "turnaround": 0.05,
+    },
+    "v1.4-speculative": {
+        "turnaround": 0.30,
+        "value": 0.25,
+        "momentum": 0.15,
+        "confidence": 0.15,
+        "sentiment": 0.10,
+        "quality": 0.05,
+    },
+    # v1.5 — identical family weights to v1.4. The bump marks the #1939 FPI
+    # ADR/ADS suppression (sql/237): fingerprinted instruments lose their
+    # (structurally wrong) price-bearing value inputs, so their value
+    # sub-score honestly degrades to the empty-components default instead
+    # of an ADS-ratio-inflated garbage figure.
+    "v1.5-balanced": {
+        "quality": 0.25,
+        "value": 0.25,
+        "turnaround": 0.20,
+        "confidence": 0.15,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+    },
+    "v1.5-conservative": {
+        "quality": 0.35,
+        "value": 0.25,
+        "confidence": 0.20,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+        "turnaround": 0.05,
+    },
+    "v1.5-speculative": {
         "turnaround": 0.30,
         "value": 0.25,
         "momentum": 0.15,
@@ -531,6 +631,7 @@ def _value_score(
     pe_ratio: float | None = None,
     fcf_yield: float | None = None,
     price_target_mean: float | None = None,
+    thesis_stance: str | None = None,
 ) -> tuple[float, list[str]]:
     """
     Thesis valuation upside as the primary value proxy.
@@ -542,6 +643,11 @@ def _value_score(
     Fallback path (fundamentals-derived): when base_value is None.
       Blends up to three signals — P/E attractiveness (35%), FCF yield (35%),
       and price-target upside (30%) — re-normalised across available components.
+
+    ``thesis_stance`` is the latest thesis' stance when one exists (None = no
+    thesis row). A thesis may legitimately decline per-share targets (e.g. an
+    ``avoid`` stance), so the fallback note must not report it as absent
+    (#2005).
 
     Returns (score, missing_components).
     """
@@ -574,8 +680,16 @@ def _value_score(
         return _clip(score), notes
 
     # ----------------------------------------------------------------------
-    # Fallback path: fundamentals-derived (no thesis)
+    # Fallback path: fundamentals-derived (no thesis, or thesis without
+    # per-share targets)
     # ----------------------------------------------------------------------
+    fallback_note = (
+        "fundamentals fallback (no thesis)"
+        if thesis_stance is None
+        # "without targets", not "declined": legacy/DQ rows also carry null
+        # targets — absence of targets is the fact, intent is not observable.
+        else f"fundamentals fallback (thesis without targets, stance: {thesis_stance})"
+    )
     notes.append("base_value missing")
     if bear_value is None:
         notes.append("bear_value missing")
@@ -599,12 +713,12 @@ def _value_score(
         components.append((pt_score, 0.30))
 
     if not components:
-        notes.append("fundamentals fallback (no thesis)")
+        notes.append(fallback_note)
         return 0.5, notes
 
     total_weight = sum(w for _, w in components)
     score = sum(s * w / total_weight for s, w in components)
-    notes.append("fundamentals fallback (no thesis)")
+    notes.append(fallback_note)
     return _clip(score), notes
 
 
@@ -1132,6 +1246,11 @@ def _load_instrument_data(
         )
         fund_rows: list[dict[str, Any]] = cur.fetchall()
 
+        # Analytics denominator — the SETTLED share count, not the fundamentals one.
+        # See :func:`_analytics_inputs` for why these are different sources.
+        cur.execute(_SHARE_COUNT_SQL, {"id": instrument_id})
+        share_count_row: dict[str, Any] | None = cur.fetchone()
+
         # Latest price features
         cur.execute(
             """
@@ -1165,10 +1284,11 @@ def _load_instrument_data(
         )
         quote_row: dict[str, Any] | None = cur.fetchone()
 
-        # Latest thesis (confidence + valuation bands + created_at)
+        # Latest thesis (confidence + valuation bands + stance + created_at)
         cur.execute(
             """
-            SELECT confidence_score, base_value, bear_value, created_at
+            SELECT confidence_score, base_value, bear_value, stance, created_at,
+                   subject_identity_ok
             FROM theses
             WHERE instrument_id = %(id)s
             ORDER BY thesis_version DESC
@@ -1177,6 +1297,14 @@ def _load_instrument_data(
             {"id": instrument_id},
         )
         thesis_row: dict[str, Any] | None = cur.fetchone()
+        # #2436 — the value family reads base_value/bear_value and the stance;
+        # a memo about a different company supplies all three. Drop the row
+        # entirely rather than null the bands: the confidence and the stance
+        # are that same memo's, and a half-kept thesis is a mixed record that
+        # reads as partly authoritative.
+        thesis_quarantined = thesis_row is not None and not is_thesis_usable(thesis_row)
+        if thesis_quarantined:
+            thesis_row = None
 
         # Recent news sentiment (last 30 days).
         # Cutoff is a full TIMESTAMPTZ to match the event_time column type.
@@ -1293,7 +1421,7 @@ def _load_instrument_data(
 
         # Realized-risk metrics (#1633, risk_v1 3y window). Read-only enrichment;
         # consumed only by v1.2+ models. RISK_METRICS_VERSION is imported lazily
-        # to avoid the risk_metrics → scheduler → refresh_cascade module-scope
+        # to avoid the risk_metrics → scheduler → thesis module-scope
         # import chain (mirrors #1632 thesis ingestion). Own savepoint: the table
         # may be absent in a partial test DB → degrade to None (no penalty).
         risk_row: dict[str, Any] | None = None
@@ -1372,6 +1500,7 @@ def _load_instrument_data(
         "price_row": price_row,
         "quote_row": quote_row,
         "thesis_row": thesis_row,
+        "thesis_quarantined": thesis_quarantined,
         "news_rows": news_rows,
         # AVG() always returns one row, even when no matching rows exist (returns NULL).
         # rf_row is therefore never None; avg_red_flag may be None if no filings matched.
@@ -1383,7 +1512,332 @@ def _load_instrument_data(
         "last_10kq_date": filing_recency_row["last_10kq"] if filing_recency_row is not None else None,
         "price_td_count": int(price_count_row["price_td"]) if price_count_row is not None else 0,
         "news_90d_count": int(news_count_row["news_90d"]) if news_count_row is not None else 0,
+        "share_count_row": share_count_row,
     }
+
+
+def _empty_instrument_data() -> dict[str, Any]:
+    """Defaults matching what `_load_instrument_data` yields for an instrument with
+    no rows in any source. Seeded per id so a bulk-query miss degrades identically
+    to the per-instrument path (#2127)."""
+    return {
+        "sector_code": None,
+        "sic": None,
+        "fund_rows": [],
+        "price_row": None,
+        "quote_row": None,
+        "thesis_row": None,
+        "thesis_quarantined": False,
+        "news_rows": [],
+        "avg_red_flag_score": None,
+        "valuation_row": None,
+        "risk_row": None,
+        "fund_present": False,
+        "last_10kq_date": None,
+        "price_td_count": 0,
+        "news_90d_count": 0,
+        "share_count_row": None,
+    }
+
+
+def _bulk_load_instrument_data(
+    conn: psycopg.Connection[Any],
+    instrument_ids: Sequence[int],
+    now: datetime,
+) -> dict[int, dict[str, Any]]:
+    """
+    Set-based equivalent of :func:`_load_instrument_data` over many instruments (#2127).
+
+    Returns ``{instrument_id: data_dict}``, each dict the SAME shape as
+    ``_load_instrument_data`` at the SAME ``now``. One query per source
+    (``WHERE instrument_id = ANY(...)``), assembled in Python — turning the
+    ~78k per-instrument round-trips of ``compute_rankings`` into ~12 set-based
+    reads. All access read-only. A requested id absent from a query's result keeps
+    the seeded default, so a miss degrades exactly as the per-instrument path.
+    """
+    ids = list(instrument_ids)
+    out: dict[int, dict[str, Any]] = {iid: _empty_instrument_data() for iid in ids}
+    if not ids:
+        return out
+
+    p: dict[str, Any] = {"ids": ids}
+    cutoff_news_30 = now - timedelta(days=_NEWS_LOOKBACK_DAYS)
+    cutoff_90 = now - timedelta(days=90)
+    rf_cutoff_date = (now - timedelta(days=90)).date()
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # Fundamentals — latest 5 per id, newest-first (matches LIMIT 5 ORDER BY
+        # as_of_date DESC). Outer ORDER BY instrument_id, rn so the appended lists
+        # preserve newest-first: fund_rows[0]=latest, fund_rows[-1]=oldest-of-5.
+        cur.execute(
+            """
+            SELECT instrument_id, operating_margin, gross_margin, fcf, net_debt, debt,
+                   revenue_ttm, shares_outstanding
+            FROM (
+                SELECT instrument_id, operating_margin, gross_margin, fcf, net_debt, debt,
+                       revenue_ttm, shares_outstanding,
+                       ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY as_of_date DESC) AS rn
+                FROM fundamentals_snapshot
+                WHERE instrument_id = ANY(%(ids)s::bigint[])
+            ) s
+            WHERE rn <= 5
+            ORDER BY instrument_id, rn
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            out[int(r.pop("instrument_id"))]["fund_rows"].append(r)
+
+        # Analytics denominator — set-based twin of `_SHARE_COUNT_SQL`.
+        #
+        # ⚠ Measured cost, dev corpus 2026-08-08, 12,696 ids: this ONE query takes ~6s
+        # and takes `_bulk_load_instrument_data` from 20.7s to 42.5s. It is already
+        # index-scanning (`financial_facts_raw_<part>_instrument_id_concept_period_end_idx`
+        # on every partition) — the time is partition fan-out across 126 partitions plus
+        # ~1.7s of planning for the ANY array, so an index does not fix it. Accepted
+        # rather than optimised because the only production caller is `compute_rankings`,
+        # a nightly job; the per-instrument path (`_SHARE_COUNT_SQL`, one id) measures
+        # 0.7-3.7ms. If this ever moves onto a request path, that is the number to re-take.
+        cur.execute(
+            """
+            SELECT DISTINCT ON (instrument_id)
+                   instrument_id, shares_outstanding, shares_outstanding_filed_date
+            FROM share_count_history
+            WHERE instrument_id = ANY(%(ids)s::bigint[]) AND shares_outstanding > 0
+            ORDER BY instrument_id, period_end DESC
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            out[int(r.pop("instrument_id"))]["share_count_row"] = r
+
+        # Latest price row — close IS NOT NULL is load-bearing (a latest NULL close
+        # must not shadow an older usable row).
+        cur.execute(
+            """
+            SELECT DISTINCT ON (instrument_id)
+                   instrument_id, return_1m, return_3m, return_6m, close,
+                   sma_200, macd_histogram, rsi_14, stoch_k, stoch_d,
+                   bb_upper, bb_lower, atr_14
+            FROM price_daily
+            WHERE instrument_id = ANY(%(ids)s::bigint[]) AND close IS NOT NULL
+            ORDER BY instrument_id, price_date DESC
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            out[int(r.pop("instrument_id"))]["price_row"] = r
+
+        # Current quote.
+        cur.execute(
+            """
+            SELECT DISTINCT ON (instrument_id) instrument_id, spread_flag, last, bid, ask
+            FROM quotes
+            WHERE instrument_id = ANY(%(ids)s::bigint[])
+            ORDER BY instrument_id, quoted_at DESC
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            out[int(r.pop("instrument_id"))]["quote_row"] = r
+
+        # Latest thesis.
+        cur.execute(
+            """
+            SELECT DISTINCT ON (instrument_id)
+                   instrument_id, confidence_score, base_value, bear_value, stance, created_at,
+                   subject_identity_ok
+            FROM theses
+            WHERE instrument_id = ANY(%(ids)s::bigint[])
+            ORDER BY instrument_id, thesis_version DESC
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            # #2436 — same rule as the single-instrument path above. Batch and
+            # single MUST agree: a score that depends on which entry point
+            # computed it is not a score.
+            iid = int(r.pop("instrument_id"))
+            if not is_thesis_usable(r):
+                out[iid]["thesis_quarantined"] = True
+                continue
+            out[iid]["thesis_row"] = r
+
+        # News sentiment rows (last 30d). Deterministic tie-break on news_event_id
+        # so list order is reproducible (the sentiment aggregate is an
+        # importance-weighted sum, order-insensitive at stored precision).
+        cur.execute(
+            """
+            SELECT instrument_id, sentiment_score, importance_score
+            FROM news_events
+            WHERE instrument_id = ANY(%(ids)s::bigint[])
+              AND event_time >= %(cutoff)s
+              AND sentiment_score IS NOT NULL
+            ORDER BY instrument_id, event_time DESC, news_event_id DESC
+            """,
+            {"ids": ids, "cutoff": cutoff_news_30},
+        )
+        for r in cur.fetchall():
+            out[int(r.pop("instrument_id"))]["news_rows"].append(r)
+
+        # Avg red-flag score over the last 90d.
+        cur.execute(
+            """
+            SELECT instrument_id, AVG(red_flag_score) AS avg_red_flag
+            FROM filing_events
+            WHERE instrument_id = ANY(%(ids)s::bigint[])
+              AND filing_date >= %(cutoff)s
+              AND red_flag_score IS NOT NULL
+            GROUP BY instrument_id
+            """,
+            {"ids": ids, "cutoff": rf_cutoff_date},
+        )
+        for r in cur.fetchall():
+            out[int(r["instrument_id"])]["avg_red_flag_score"] = _to_float(r["avg_red_flag"])
+
+        # fund_present (#1820 §4) — bool_or of the same predicate the per-instrument
+        # EXISTS uses.
+        cur.execute(
+            """
+            SELECT instrument_id,
+                   bool_or(revenue_ttm IS NOT NULL
+                           AND (operating_margin IS NOT NULL OR gross_margin IS NOT NULL))
+                       AS fund_present
+            FROM fundamentals_snapshot
+            WHERE instrument_id = ANY(%(ids)s::bigint[])
+            GROUP BY instrument_id
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            out[int(r["instrument_id"])]["fund_present"] = bool(r["fund_present"])
+
+        # Latest 10-K/Q filed date (Reg S-K annual / Exchange Act §13 quarterly, incl. /A).
+        cur.execute(
+            """
+            SELECT instrument_id, MAX(filing_date) AS last_10kq
+            FROM filing_events
+            WHERE instrument_id = ANY(%(ids)s::bigint[])
+              AND filing_type IN ('10-K', '10-Q', '10-K/A', '10-Q/A')
+            GROUP BY instrument_id
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            out[int(r["instrument_id"])]["last_10kq_date"] = r["last_10kq"]
+
+        # Price-history depth.
+        cur.execute(
+            """
+            SELECT instrument_id, COUNT(*) FILTER (WHERE close IS NOT NULL) AS price_td
+            FROM price_daily
+            WHERE instrument_id = ANY(%(ids)s::bigint[])
+            GROUP BY instrument_id
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            out[int(r["instrument_id"])]["price_td_count"] = int(r["price_td"])
+
+        # News coverage last 90d (count of all events, no sentiment filter).
+        cur.execute(
+            """
+            SELECT instrument_id, COUNT(*) AS news_90d
+            FROM news_events
+            WHERE instrument_id = ANY(%(ids)s::bigint[])
+              AND event_time >= %(cutoff)s
+            GROUP BY instrument_id
+            """,
+            {"ids": ids, "cutoff": cutoff_90},
+        )
+        for r in cur.fetchall():
+            out[int(r["instrument_id"])]["news_90d_count"] = int(r["news_90d"])
+
+        # Sector (eToro) + SIC — LEFT JOIN so i.sector survives with no SEC profile.
+        # Savepoint: instrument_sec_profile may be absent in a partial test DB.
+        try:
+            with conn.transaction():
+                cur.execute(
+                    """
+                    SELECT i.instrument_id, i.sector, p.sic
+                    FROM instruments i
+                    LEFT JOIN instrument_sec_profile p ON p.instrument_id = i.instrument_id
+                    WHERE i.instrument_id = ANY(%(ids)s::bigint[])
+                    """,
+                    p,
+                )
+                for r in cur.fetchall():
+                    d = out[int(r["instrument_id"])]
+                    d["sector_code"] = r["sector"]
+                    d["sic"] = r["sic"]
+        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+            pass  # savepoint rolled back; ids keep default sector/sic = None
+
+        # Valuation view (savepoint — view/table may be absent pre-migration).
+        valuation_hits: dict[int, dict[str, Any]] = {}
+        try:
+            with conn.transaction():
+                cur.execute(
+                    """
+                    SELECT instrument_id, pe_ratio, pb_ratio, p_fcf_ratio, fcf_yield,
+                           debt_equity_ratio, market_cap_live, current_price, fcf_ttm
+                    FROM instrument_valuation
+                    WHERE instrument_id = ANY(%(ids)s::bigint[])
+                    """,
+                    p,
+                )
+                for r in cur.fetchall():
+                    valuation_hits[int(r.pop("instrument_id"))] = r
+        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+            valuation_hits = {}
+
+        # Risk metrics (risk_v1 3y). Savepoint — table may be absent in a partial DB.
+        try:
+            from app.services.risk_metrics import RISK_METRICS_VERSION
+
+            with conn.transaction():
+                cur.execute(
+                    """
+                    SELECT instrument_id, vol_annualized, vol_status,
+                           max_drawdown, drawdown_status, calmar, tr_calmar, tr_status
+                    FROM instrument_risk_metrics_current
+                    WHERE instrument_id = ANY(%(ids)s::bigint[])
+                      AND metric_version = %(mv)s
+                      AND window_key = %(win)s
+                    """,
+                    {"ids": ids, "mv": RISK_METRICS_VERSION, "win": _RISK_PENALTY_WINDOW},
+                )
+                for r in cur.fetchall():
+                    out[int(r.pop("instrument_id"))]["risk_row"] = r
+        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+            pass
+
+    # Market-cap basis overlay on the valuation row — per instrument (0.8ms each;
+    # matches _load_instrument_data). Only for ids that actually have a valuation row.
+    for iid, vrow in valuation_hits.items():
+        try:
+            try:
+                with conn.transaction():
+                    resolution = resolve_market_cap_basis(conn, instrument_id=iid)
+            except psycopg.errors.UndefinedTable:
+                resolution = MarketCapResolution(basis="not_multiclass")
+            out[iid]["valuation_row"] = _apply_market_cap_basis(vrow, resolution)
+        except Exception:
+            # Per-instrument skip-on-error parity (#2127): in the pre-refactor path
+            # a resolve/overlay failure raised inside compute_score and was caught by
+            # compute_rankings' per-instrument try (that one instrument was skipped,
+            # the run continued). Bulk-load runs outside that try, so a non-
+            # UndefinedTable failure here would abort the WHOLE run. Drop the id so
+            # the scoring loop's bulk[iid] lookup raises KeyError → skipped there,
+            # exactly as before. The savepoint already rolled back the failed tx.
+            logger.warning(
+                "compute_rankings: market-cap overlay failed for instrument_id=%d, skipping",
+                iid,
+                exc_info=True,
+            )
+            out.pop(iid, None)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1391,24 +1845,55 @@ def _load_instrument_data(
 # ---------------------------------------------------------------------------
 
 
-def compute_score(
+def _analytics_inputs(data: dict[str, Any]) -> tuple[str | None, float | None, date | None]:
+    """Derive ``(gics_sector, shares_outstanding, shares_outstanding_filed)`` for the
+    analytics block from a loaded ``data`` dict. Pure — hoisted out of the scoring core
+    (#2127) so ``_score_from_data`` stays DB-free and the analytics call can be issued by
+    the caller (per-instrument in Phase 1, bulk in Phase 2).
+
+    The share count comes from ``share_count_row`` (see ``_SHARE_COUNT_SQL``), NOT from
+    ``fund_rows[0]``. Until #2411 it was ``fund_rows[0]["shares_outstanding"]``, which is
+    wrong three ways at once and only the third was ticketed:
+
+    1. **Wrong source.** ``fundamentals_snapshot.shares_outstanding`` carries only the
+       us-gaap balance-sheet ``CommonStockSharesOutstanding``. The rest of the app —
+       ownership rollup, market cap, and the sibling consumer of this very ratio in
+       ``thesis_break_scan`` — divides by the DEI-cover-page-preferred count.
+    2. **No as-of.** The snapshot's ``as_of_date`` is a period end, so there is no filed
+       date to measure ``FRESHNESS_BOUNDS['…']['share_count_filed']`` against; the bound
+       the other consumer already applies was not expressible here.
+    3. **NULL/zero shadowing.** ``fund_rows`` is ordered by ``as_of_date DESC`` with no
+       ``IS NOT NULL`` filter, so an empty newest snapshot hid a usable older one.
+
+    ``shares_outstanding_filed`` is ``None`` only when the count itself is absent — the
+    column is computed from the same facts under the same ``val > 0`` filter, and 0 of the
+    4,665 newest-positive rows in the dev corpus have it NULL. Consumers must still fail
+    closed on ``None``.
+    """
+    row = data["share_count_row"]
+    shares_out = _to_float(row["shares_outstanding"]) if row is not None else None
+    shares_filed: date | None = row["shares_outstanding_filed_date"] if row is not None else None
+    sic_cls = resolve_sector_spdr(data.get("sic"))  # type: ignore[arg-type]
+    gics_sector = sic_cls.gics_sector if sic_cls is not None else None
+    return gics_sector, shares_out, shares_filed
+
+
+def _score_from_data(
     instrument_id: int,
-    conn: psycopg.Connection[Any],
-    model_version: str = _DEFAULT_MODEL_VERSION,
+    data: dict[str, Any],
+    weights: Mapping[str, float],
+    model_version: str,
+    now: datetime,
+    analytics: dict[str, Any] | None,
 ) -> ScoreResult:
     """
-    Compute a scored result for a single instrument.
+    Pure scoring core — NO DB access (#2127).
 
-    Does not persist — callers are responsible for writing to the DB.
-    Raises KeyError if model_version is not recognised.
+    Operates on a preloaded ``data`` dict (from :func:`_load_instrument_data` or
+    :func:`_bulk_load_instrument_data`), a precomputed ``analytics`` block, a
+    resolved ``weights`` mode, and a single ``now``. Callers own DB I/O and the
+    analytics assembly. Does not persist.
     """
-    weights = _WEIGHT_MODES.get(model_version)
-    if weights is None:
-        raise KeyError(f"Unknown model_version: {model_version!r}. Known: {list(_WEIGHT_MODES)}")
-
-    now = _utcnow()
-    data = _load_instrument_data(conn, instrument_id, now)
-
     fund_rows = data["fund_rows"]
     price_row = data["price_row"]
     quote_row = data["quote_row"]
@@ -1510,7 +1995,15 @@ def compute_score(
         # value-score branch falls back to thesis base/bear and
         # multiples when this is None.
         price_target_mean=None,
+        thesis_stance=str(thesis_row["stance"]) if thesis_row and thesis_row["stance"] is not None else None,
     )
+    if data.get("thesis_quarantined"):
+        # #2436 — without this the explanation reads "value: base_value
+        # missing", which is true of the arithmetic and false about the world:
+        # a base_value exists, and we refused it. The fundamentals fallback
+        # that produced this score is a legitimate independent computation,
+        # but the operator has to be able to tell which path ran and why.
+        v_notes = [f"thesis {QUARANTINE_REASON}", *v_notes]
     if v_notes:
         explanation_parts.append("value: " + "; ".join(v_notes))
 
@@ -1651,18 +2144,11 @@ def compute_score(
 
     # ------------------------------------------------------------------
     # IAR evidence signals (#1823 §P2). Additive — never enters the
-    # total_score math above. Piotroski/Altman + positioning are per-
-    # instrument; the cross-sectional peer_grade is injected by
-    # compute_rankings from the run population.
+    # total_score math above. The ``analytics`` block (Piotroski/Altman +
+    # positioning) is precomputed by the caller and passed in (#2127); the
+    # cross-sectional peer_grade is injected by compute_rankings from the run
+    # population.
     # ------------------------------------------------------------------
-    fund_rows_for_shares = data["fund_rows"]
-    shares_out = _to_float(fund_rows_for_shares[0]["shares_outstanding"]) if fund_rows_for_shares else None
-    sic_cls = resolve_sector_spdr(data.get("sic"))  # type: ignore[arg-type]
-    gics_sector = sic_cls.gics_sector if sic_cls is not None else None
-    analytics = assemble_instrument_analytics(
-        instrument_id, conn, gics_sector=gics_sector, shares_outstanding=shares_out
-    )
-
     return ScoreResult(
         instrument_id=instrument_id,
         model_version=model_version,
@@ -1679,6 +2165,37 @@ def compute_score(
         analytics=analytics,
         sector=data.get("sector_code"),  # type: ignore[arg-type]
     )
+
+
+def compute_score(
+    instrument_id: int,
+    conn: psycopg.Connection[Any],
+    model_version: str = _DEFAULT_MODEL_VERSION,
+) -> ScoreResult:
+    """
+    Compute a scored result for a single instrument.
+
+    Back-compat single-instrument wrapper (#2127): loads this instrument's data +
+    analytics from ``conn`` then delegates to the pure :func:`_score_from_data`.
+    ``compute_rankings`` uses :func:`_bulk_load_instrument_data` instead of calling
+    this per instrument. Does not persist. Raises KeyError on unknown model_version.
+    """
+    weights = _WEIGHT_MODES.get(model_version)
+    if weights is None:
+        raise KeyError(f"Unknown model_version: {model_version!r}. Known: {list(_WEIGHT_MODES)}")
+
+    now = _utcnow()
+    data = _load_instrument_data(conn, instrument_id, now)
+    gics_sector, shares_out, shares_filed = _analytics_inputs(data)
+    analytics = assemble_instrument_analytics(
+        instrument_id,
+        conn,
+        gics_sector=gics_sector,
+        shares_outstanding=shares_out,
+        shares_outstanding_filed=shares_filed,
+        today=now.date(),
+    )
+    return _score_from_data(instrument_id, data, weights, model_version, now, analytics)
 
 
 # ---------------------------------------------------------------------------
@@ -1771,12 +2288,49 @@ def compute_rankings(
 
     logger.info("compute_rankings: scoring %d eligible instrument(s) [model=%s]", len(instrument_ids), model_version)
 
-    # Score each instrument, skipping failures
+    # Bulk-load every instrument's inputs up front (#2127) — one set-based query per
+    # source instead of ~20 per-instrument round-trips × N. One batch `now` so all
+    # instruments are scored "as of run start" (replaces the prior per-instrument
+    # _utcnow() drift; strictly more consistent, no model_version bump — `now` is an
+    # execution input, not a metric computation). Phase 2 bulks the IAR analytics
+    # block too. Individual failures are skipped exactly as before.
+    weights = _WEIGHT_MODES[model_version]  # validated above
+    now = _utcnow()
+    bulk = _bulk_load_instrument_data(conn, instrument_ids, now)
+
+    # Analytics inputs (gics_sector, shares_outstanding, its filed date) come from the
+    # already-loaded `bulk` data — no new I/O. _analytics_inputs is pure; the per-id guard
+    # preserves the "one bad id never fails the run" invariant. Then one bulk analytics
+    # pass (#2127 Phase 2) replaces the ~4 per-instrument analytics round-trips × N.
+    gics_by_id: dict[int, str | None] = {}
+    shares_by_id: dict[int, float | None] = {}
+    shares_filed_by_id: dict[int, date | None] = {}
+    for iid in instrument_ids:
+        try:
+            g, s, f = _analytics_inputs(bulk[iid])
+        except Exception:
+            logger.warning(
+                "compute_rankings: analytics-input derivation failed for instrument_id=%d; degrading to (None, None)",
+                iid,
+                exc_info=True,
+            )
+            g, s, f = None, None, None
+        gics_by_id[iid] = g
+        shares_by_id[iid] = s
+        shares_filed_by_id[iid] = f
+    analytics_by_id = assemble_instrument_analytics_bulk(
+        conn,
+        instrument_ids,
+        gics_sector_by_id=gics_by_id,
+        shares_outstanding_by_id=shares_by_id,
+        shares_outstanding_filed_by_id=shares_filed_by_id,
+        today=now.date(),
+    )
+
     results: list[ScoreResult] = []
     for iid in instrument_ids:
         try:
-            result = compute_score(iid, conn, model_version)
-            results.append(result)
+            results.append(_score_from_data(iid, bulk[iid], weights, model_version, now, analytics_by_id[iid]))
         except Exception:
             logger.warning("compute_rankings: scoring failed for instrument_id=%d, skipping", iid, exc_info=True)
 

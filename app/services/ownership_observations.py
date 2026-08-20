@@ -401,6 +401,43 @@ def refresh_insiders_current(
         return int(row[0]) if row else 0
 
 
+def tombstone_non_sibling_insider_observations(
+    conn: psycopg.Connection[Any],
+    *,
+    source_accession: str,
+    sibling_instrument_ids: list[int],
+) -> list[int]:
+    """#828 PR-1 — soft-delete an accession's insider observations on
+    instruments OUTSIDE the issuer's sibling set.
+
+    Called from the insider apply chokepoints when writer routing detects an
+    owner-stream mislink and the accession already carries live observation
+    rows on the wrong (owner) instrument — legacy pre-#1117 fan-out rows, or
+    a rewash of a historically-mislinked accession. Tombstone via
+    ``known_to`` (I6 — never hard-delete observations); the caller must run
+    ``refresh_insiders_current`` for every returned instrument so the owner's
+    ``_current`` snapshot drops the rows too.
+
+    Returns the DISTINCT affected instrument_ids (empty when nothing was
+    live on a non-sibling instrument — the common case for new filings).
+    """
+    if not sibling_instrument_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ownership_insiders_observations
+            SET known_to = NOW()
+            WHERE source_accession = %(acc)s
+              AND known_to IS NULL
+              AND NOT (instrument_id = ANY(%(sibs)s::bigint[]))
+            RETURNING instrument_id
+            """,
+            {"acc": source_accession, "sibs": sibling_instrument_ids},
+        )
+        return sorted({int(r[0]) for r in cur.fetchall()})
+
+
 # ---------------------------------------------------------------------------
 # Institutions — record + refresh (#840.B)
 # ---------------------------------------------------------------------------
@@ -1108,7 +1145,17 @@ def record_def14a_observation(
                 shares = EXCLUDED.shares,
                 percent_of_class = EXCLUDED.percent_of_class,
                 ingest_run_id = EXCLUDED.ingest_run_id,
-                ingested_at = clock_timestamp()
+                ingested_at = clock_timestamp(),
+                -- Revive a superseded row when the parser re-asserts it
+                -- (#2140). ``_record_def14a_observations_for_filing``
+                -- tombstones the filing's prior rows and then re-inserts what
+                -- the current parse produces, so a holder the new parse still
+                -- reports must come back live; only the rows it no longer
+                -- reports stay superseded. Without this clause the tombstone
+                -- would be permanent and the re-asserted row invisible to
+                -- ``refresh_def14a_current`` (which filters known_to IS NULL)
+                -- forever — the exact trap that made #953 use a hard DELETE.
+                known_to = NULL
             """,
             {
                 "iid": instrument_id,
@@ -1593,7 +1640,15 @@ def record_esop_observation(
                 shares = EXCLUDED.shares,
                 percent_of_class = EXCLUDED.percent_of_class,
                 ingest_run_id = EXCLUDED.ingest_run_id,
-                ingested_at = clock_timestamp()
+                ingested_at = clock_timestamp(),
+                -- Revive: the caller supersedes this filing's prior ESOP rows
+                -- before re-asserting, so a plan the new parse STILL emits must
+                -- come back live in the same transaction and only the plans it
+                -- no longer emits stay tombstoned (#2157, mirrors the def14a
+                -- clause added by #2140 D6). Without this the conflict key —
+                -- which contains the PARSED plan_name — leaves a renamed plan
+                -- live beside its correction forever.
+                known_to = NULL
             """,
             {
                 "iid": instrument_id,

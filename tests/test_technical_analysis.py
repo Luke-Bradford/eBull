@@ -12,6 +12,7 @@ from app.services.technical_analysis import (
     atr,
     bollinger_bands,
     compute_indicators,
+    derive_trend_signals,
     ema,
     macd,
     rsi,
@@ -315,23 +316,183 @@ class TestComputeIndicators:
     def test_empty_bars_returns_none(self) -> None:
         assert compute_indicators([]) is None
 
-    def test_price_above_sma200(self) -> None:
-        # Ascending bars — latest close well above SMA(200)
+    def test_no_derived_string_signals_emitted(self) -> None:
+        # #1989: trend signals moved to derive_trend_signals — the
+        # orchestrator emits price_daily column floats only.
         bars = self._make_ascending_bars(250)
         result = compute_indicators(bars)
         assert result is not None
-        assert result["price_vs_sma200"] == "above"
+        assert "price_vs_sma200" not in result
+        assert "trend_sma_cross" not in result
 
-    def test_trend_sma_cross_golden(self) -> None:
-        # Ascending data: SMA(50) > SMA(200) → golden cross
-        bars = self._make_ascending_bars(250)
-        result = compute_indicators(bars)
-        assert result is not None
-        assert result["trend_sma_cross"] == "golden"
 
-    def test_trend_sma_cross_none_when_insufficient(self) -> None:
-        # Not enough data for SMA(200) → cross signal should be "none"
-        bars = self._make_ascending_bars(100)
-        result = compute_indicators(bars)
-        assert result is not None
-        assert result["trend_sma_cross"] == "none"
+class TestDeriveTrendSignals:
+    """derive_trend_signals (#1989) — single source for read-time trend signals."""
+
+    @pytest.mark.parametrize(
+        ("close", "sma_50", "sma_200", "expected_pvs", "expected_regime"),
+        [
+            (24.5, 23.0, 21.0, "above", "golden"),
+            (18.0, 20.0, 22.0, "below", "death"),
+            # Tie close == sma_200 is "below" by design (strict >).
+            (21.0, 22.0, 21.0, "below", "golden"),
+            # Equal SMAs = missing evidence, not a third regime.
+            (25.0, 21.0, 21.0, "above", None),
+            # Missing inputs suppress only the signals they feed.
+            (None, 23.0, 21.0, None, "golden"),
+            (24.5, None, 21.0, "above", None),
+            (24.5, 23.0, None, None, None),
+            (None, None, None, None, None),
+        ],
+    )
+    def test_table(
+        self,
+        close: float | None,
+        sma_50: float | None,
+        sma_200: float | None,
+        expected_pvs: str | None,
+        expected_regime: str | None,
+    ) -> None:
+        out = derive_trend_signals(close, sma_50, sma_200)
+        assert out == {
+            "price_vs_sma200": expected_pvs,
+            "sma_50_200_regime": expected_regime,
+        }
+
+
+class TestIndicatorCausality:
+    """#2260 — a value at bar k must not depend on bars after k.
+
+    This is the invariant phase 2 (historical indicator recomputation) rests
+    on, and the repo did not previously assert it. `rsi()` returns ONE value
+    for the latest bar, so a historical series is built by calling it on
+    expanding prefixes — and nothing stopped a future refactor to a vectorised
+    or pandas form that seeds or normalises from the FULL series. That is
+    look-ahead, and it is invisible in every existing test because they all
+    call the function once on a complete series.
+
+    ⚠ Asserting "rsi(closes[:k]) is unchanged when bars are appended" would be
+    VACUOUS — it is the same input either way. The real check cross-validates
+    the shipped batch function against an independent streaming
+    implementation, which is what would diverge under such a refactor.
+
+    Context: the TA design doc recorded RSI<30 → 76.8% 20-day hit rate.
+    A causal full-population recompute measured 51.8% on `price_daily`
+    (n=311,332) and 50.4% on the research corpus (n=1,255,230), so the figure
+    is most likely an artefact of a non-causal recompute in a throwaway
+    script. The shipped function is causal; this test is what makes that a
+    property rather than an observation.
+    """
+
+    @staticmethod
+    def _streaming_rsi(closes: Sequence[Decimal], period: int = 14) -> list[float | None]:
+        """Reference Wilder RSI, computed forward one bar at a time.
+
+        ⚠ This is a second implementation, NOT an independent oracle: it shares
+        the shipped function's seed convention (simple average of the first
+        `period` deltas, then Wilder smoothing). A convention error common to
+        both would not be caught here.
+
+        That is acceptable because this class pins CAUSALITY — that a value at
+        bar k is independent of bars after k — which is a structural property
+        of when information enters the calculation, not of which average is
+        used. Formula correctness is a separate concern and is not this
+        class's job.
+
+        A third-party cross-check was attempted and is not currently available:
+        no TA library is installed (adding one for a test is not justified —
+        `.claude/CLAUDE.md`, "do not add libraries casually"), and two
+        published worked examples are network-blocked from this environment.
+        If one becomes reachable, pin one absolute value against it.
+        """
+        values = [float(c) for c in closes]
+        out: list[float | None] = [None] * len(values)
+        if len(values) <= period:
+            return out
+        gain = sum(max(values[i] - values[i - 1], 0.0) for i in range(1, period + 1)) / period
+        loss = sum(max(values[i - 1] - values[i], 0.0) for i in range(1, period + 1)) / period
+        out[period] = 100.0 if loss == 0 else 100.0 - 100.0 / (1 + gain / loss)
+        for i in range(period + 1, len(values)):
+            delta = values[i] - values[i - 1]
+            gain = (gain * (period - 1) + max(delta, 0.0)) / period
+            loss = (loss * (period - 1) + max(-delta, 0.0)) / period
+            out[i] = 100.0 if loss == 0 else 100.0 - 100.0 / (1 + gain / loss)
+        return out
+
+    def test_prefix_rsi_matches_a_streaming_recompute(self) -> None:
+        # A deliberately mixed series: a downtrend into an oversold reading,
+        # then a sharp reversal. If the batch form leaked future information,
+        # the reversal would pull the pre-reversal values upward.
+        closes = [
+            Decimal(str(v))
+            for v in (
+                100,
+                99,
+                97,
+                98,
+                95,
+                93,
+                94,
+                91,
+                89,
+                90,
+                87,
+                85,
+                86,
+                83,
+                81,
+                80,
+                78,
+                79,
+                76,
+                74,
+                75,
+                72,
+                70,
+                71,
+                95,
+                98,
+                101,
+                104,
+                107,
+                110,
+            )
+        ]
+        reference = self._streaming_rsi(closes)
+        for k in range(15, len(closes) + 1):
+            expected = reference[k - 1]
+            assert expected is not None
+            actual = rsi(closes[:k])
+            assert actual is not None
+            assert abs(actual - expected) < 1e-9, f"prefix length {k}: {actual} != {expected}"
+
+    def test_a_later_spike_cannot_move_an_earlier_value(self) -> None:
+        """The look-ahead this guards against, stated as its symptom.
+
+        ⚠ The obvious spelling — ``rsi(base) == rsi(with_future[:len(base)])``
+        — is VACUOUS: both sides are the same input, so it passes even against
+        a full-series seed. It was written that way first and SURVIVED the
+        revert-probe while its sibling failed, which is how it was caught.
+        The real comparison is against a streaming recompute over the LONGER
+        series: bar 20's value must be identical whether or not a +50% spike
+        follows it.
+        """
+        # ⚠ The series must contain BOTH gains and losses, with a different
+        # composition before and after bar 14. Two earlier fixtures failed to
+        # discriminate and were caught by the revert-probe, not by review:
+        #   * monotonic -1 per bar — a full-series seed and a first-14 seed
+        #     average to the same number, so the defect is invisible;
+        #   * all-negative with varying magnitude — avg_gain is 0 either way,
+        #     so RSI is 0 under both.
+        # Verified against the injected seed bug: correct 21.6205 vs buggy
+        # 19.5111 on this series.
+        base = [
+            Decimal(str(v)) for v in (100, 99, 100, 98, 97, 98, 96, 95, 96, 94, 93, 94, 92, 91, 92, 85, 84, 86, 83, 82)
+        ]
+        with_future = base + [Decimal(str(v)) for v in (95, 97, 99, 101, 103)]
+
+        at_bar_20 = self._streaming_rsi(with_future)[len(base) - 1]
+        assert at_bar_20 is not None
+        computed = rsi(base)
+        assert computed is not None
+        assert abs(computed - at_bar_20) < 1e-9

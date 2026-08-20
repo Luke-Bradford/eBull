@@ -93,7 +93,7 @@ export function LoginPage(): JSX.Element {
           />
         </label>
         {error !== null && (
-          <div role="alert" className="mb-3 rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
+          <div role="alert" className="mb-3 rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300">
             {error}
           </div>
         )}

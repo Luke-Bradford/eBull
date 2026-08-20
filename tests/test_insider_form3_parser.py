@@ -108,6 +108,29 @@ class TestGatingReturns:
         assert parse_form_3_xml(xml) is None
 
 
+class TestSgmlSubmissionUnwrap:
+    """#2110 — the ``.txt`` full-submission SGML wrapper (master/daily
+    index discovery + legacy owner-stream fetches) embeds the ownership
+    XML verbatim; the parser must unwrap instead of rejecting (12,428
+    form3_xml raws on dev, 10,370 tombstoned by the pre-#2110 reject)."""
+
+    def test_sgml_wrapped_form3_parses(self) -> None:
+        sgml = (
+            "<SEC-DOCUMENT>0001234567-26-000001.txt : 20260115\n"
+            "<SEC-HEADER>...\nACCESSION NUMBER: 0001234567-26-000001\n</SEC-HEADER>\n"
+            "<DOCUMENT>\n<TYPE>3\n<SEQUENCE>1\n<FILENAME>form3.xml\n<TEXT>\n"
+            + _wrap(_NON_DERIVATIVE_HOLDING)
+            + "\n</TEXT>\n</DOCUMENT>\n</SEC-DOCUMENT>\n"
+        )
+        result = parse_form_3_xml(sgml)
+        assert result is not None
+        assert result.issuer_cik == "0000320193"
+        assert len(result.holdings) == 1
+
+    def test_sgml_wrapper_without_ownership_doc_returns_none(self) -> None:
+        assert parse_form_3_xml("<SEC-DOCUMENT>\n<SEC-HEADER>x</SEC-HEADER>\n</SEC-DOCUMENT>") is None
+
+
 class TestHeader:
     def test_period_of_report_and_issuer_extracted(self) -> None:
         result = parse_form_3_xml(_wrap(_NON_DERIVATIVE_HOLDING))

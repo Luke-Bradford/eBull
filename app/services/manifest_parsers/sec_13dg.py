@@ -66,10 +66,6 @@ from app.services.blockholders import (
     _upsert_filing_row,
     blockholders_within_retention,
 )
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
 from app.services.manifest_parsers._schedule13_adapter import (
     build_filing_from_edgartools_dict,
 )
@@ -78,6 +74,10 @@ from app.services.raw_filings import (
     acquire_filing_accession_write_lock,
     store_raw,
     stored_body,
+)
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
 )
 
 logger = logging.getLogger(__name__)

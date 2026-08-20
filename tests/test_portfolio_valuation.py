@@ -119,3 +119,54 @@ class TestValuationHierarchy:
 
         assert pos.valuation_source == "quote"
         assert pos.market_value == pytest.approx(6971.9)  # 10 * 697.19 mid
+
+
+class TestCurrencyLabel:
+    """`currency` records the currency the money fields are ACTUALLY in (#2129):
+    display when converted or no-op, native on an FX-rate-missing degrade."""
+
+    def test_currency_is_display_when_converted(self) -> None:
+        row = _row(currency="USD", daily_close=155.0)
+        rates = {("USD", "GBP"): Decimal("0.78")}
+        pos = _holding_from_row(row, "GBP", rates)
+        assert pos.native_currency == "USD"
+        assert pos.currency == "GBP"  # converted
+
+    def test_currency_is_native_when_no_conversion_needed(self) -> None:
+        row = _row(currency="GBP", daily_close=155.0)
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _holding_from_row(row, "GBP", rates)
+        assert pos.currency == "GBP"  # native == display, no-op
+
+    def test_currency_is_native_on_fx_degrade(self) -> None:
+        # native != display but no rate available → values left native, currency=native.
+        row = _row(currency="USD", current_units=10.0, cost_basis=1500.0, daily_close=155.0)
+        rates: dict[tuple[str, str], Decimal] = {}  # no USD→GBP
+        pos = _holding_from_row(row, "GBP", rates)
+        assert pos.native_currency == "USD"
+        assert pos.currency == "USD"  # degrade: money stayed native
+        assert pos.market_value == 10.0 * 155.0  # unconverted magnitude
+
+
+class TestFxPairAvailable:
+    """`_fx_pair_available` mirrors `fx.convert`'s reachability (equal / direct /
+    inverse; no triangulation) — drives the cash/mirror totals-mixed flag (#2129)."""
+
+    def test_equal_currency(self) -> None:
+        from app.services.valuation import _fx_pair_available
+
+        assert _fx_pair_available("USD", "USD", {}) is True
+
+    def test_direct_and_inverse(self) -> None:
+        from app.services.valuation import _fx_pair_available
+
+        rates = {("USD", "GBP"): Decimal("0.78")}
+        assert _fx_pair_available("USD", "GBP", rates) is True  # direct
+        assert _fx_pair_available("GBP", "USD", rates) is True  # inverse
+
+    def test_missing_and_no_triangulation(self) -> None:
+        from app.services.valuation import _fx_pair_available
+
+        rates = {("USD", "EUR"): Decimal("0.9")}  # USD→EUR only
+        assert _fx_pair_available("USD", "GBP", rates) is False
+        assert _fx_pair_available("EUR", "GBP", rates) is False  # no USD triangulation

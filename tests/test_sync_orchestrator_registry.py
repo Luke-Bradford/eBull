@@ -22,6 +22,12 @@ class TestLayerRegistry:
             "fx_rates",
             "cost_models",
             "risk_metrics",
+            # fair_value_band added #2009 (deterministic fair-value band DAG
+            # layer, tier 3, depends on candles + fundamentals).
+            "fair_value_band",
+            # price_quarantine added #2261 (impossible-bar quarantine DAG
+            # layer, tier 2, depends on candles).
+            "price_quarantine",
             "weekly_reports",
             "monthly_reports",
         }
@@ -34,6 +40,11 @@ class TestLayerRegistry:
             "portfolio_sync",
             "fx_rates",
             "risk_metrics",
+            # #2261 — a failed quarantine recompute leaves the PREVIOUS
+            # verdicts standing, and stale verdicts are visible (the read path
+            # is keyed on rule_set_version). Nothing downstream is unsafe
+            # because of it, so it must not block the sync walk.
+            "price_quarantine",
             "weekly_reports",
             "monthly_reports",
         }

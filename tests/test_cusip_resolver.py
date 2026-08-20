@@ -521,13 +521,17 @@ def _seed_extid_cusip(
     instrument_id: int,
     cusip: str,
     is_primary: bool = False,
+    provider: str = "sec",
 ) -> None:
+    """Seed one CUSIP mapping. ``provider`` defaults to ``'sec'`` (the
+    #740 13F-Official-List backfill); pass ``'openfigi'`` for the
+    approved fallback that ``cusip_resolver`` PR-1b writes."""
     conn.execute(
         """
         INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary)
-        VALUES (%s, 'sec', 'cusip', %s, %s)
+        VALUES (%s, %s, 'cusip', %s, %s)
         """,
-        (instrument_id, cusip, is_primary),
+        (instrument_id, provider, cusip, is_primary),
     )
 
 
@@ -1102,3 +1106,94 @@ class TestSweepResolvableUnresolvedCusips:
         assert report.candidates_seen == 0
         assert report.promoted == 0
         assert report.rewashed == 0
+
+
+# ---------------------------------------------------------------------------
+# #2213 — the extid sweep must read BOTH resolution providers
+# ---------------------------------------------------------------------------
+
+
+class TestExtidSweepReadsOpenFigiProvider:
+    """``_select_resolvable_via_extid`` said ``provider = 'sec'`` from
+    #836 (2026-05-03), written before OpenFIGI existed as a provider,
+    and was never widened when #1233 PR-1b started writing
+    ``provider='openfigi'`` CUSIP rows. Measured cost on dev
+    (2026-08-06): 1,503 legacy rows pending against an OpenFIGI
+    mapping this sweep could not see, so ``cusip_extid_sweep``
+    reported ``promoted=0`` truthfully while the backlog never moved.
+    """
+
+    def test_openfigi_only_mapping_is_selectable(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The regression guard. Pre-#2213 this returned zero rows."""
+        from app.services.cusip_resolver import _select_resolvable_via_extid
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_213_001, symbol="GOOGL", company_name="Alphabet Inc Class A")
+        _seed_extid_cusip(conn, instrument_id=2_213_001, cusip="02079K305", provider="openfigi")
+        _seed_unresolved(conn, cusip="02079K305", name_of_issuer="ALPHABET INC")
+        conn.commit()
+
+        candidates = _select_resolvable_via_extid(conn, limit=10)
+
+        assert [c["cusip"] for c in candidates] == ["02079K305"]
+        assert candidates[0]["instrument_id"] == 2_213_001
+
+    def test_dual_provider_cusip_yields_exactly_one_candidate_preferring_sec(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Widening the provider set makes a plain JOIN 1:N — 75 CUSIPs
+        on dev carry both a ``sec`` and an ``openfigi`` row, and a bare
+        ``JOIN ... IN ('sec','openfigi')`` emits each twice, which
+        double-counts ``promoted`` and rewashes the same accession
+        twice. The LATERAL's ``LIMIT 1`` makes it 1:1 by construction
+        and the CASE tiebreak keeps the SEC curated mapping
+        authoritative.
+
+        Production data does not currently contain a dual-provider
+        CUSIP that is ALSO pending on the legacy partition, so this
+        state is unreachable through a dev query — it has to be
+        constructed here.
+        """
+        from app.services.cusip_resolver import _select_resolvable_via_extid
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_213_010, symbol="SECX", company_name="Sec Curated Inc")
+        _seed_instrument(conn, iid=2_213_011, symbol="FIGX", company_name="Figi Fallback Inc")
+        # Insert OpenFIGI FIRST so a naive query that fell back to
+        # external_identifier_id ordering would pick the wrong one.
+        _seed_extid_cusip(conn, instrument_id=2_213_011, cusip="00191U102", provider="openfigi")
+        _seed_extid_cusip(conn, instrument_id=2_213_010, cusip="00191U102", provider="sec")
+        _seed_unresolved(conn, cusip="00191U102", name_of_issuer="DUAL PROVIDER CORP")
+        conn.commit()
+
+        candidates = _select_resolvable_via_extid(conn, limit=10)
+
+        assert len(candidates) == 1, f"expected 1:1, got {len(candidates)} rows"
+        assert candidates[0]["instrument_id"] == 2_213_010, "SEC mapping must win the tiebreak"
+
+    def test_sweep_promotes_an_openfigi_only_cusip(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """End-to-end through the public sweep: the row transitions to
+        ``resolved_via_extid`` instead of sitting pending forever."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_213_020, symbol="XOM", company_name="ExxonMobil Holdings Corp")
+        _seed_extid_cusip(conn, instrument_id=2_213_020, cusip="30231G102", provider="openfigi")
+        _seed_unresolved(conn, cusip="30231G102", name_of_issuer="EXXON MOBIL CORP")
+        conn.commit()
+
+        report = sweep_resolvable_unresolved_cusips(conn)
+        conn.commit()
+
+        assert report.candidates_seen == 1
+        assert report.promoted == 1
+        row = conn.execute(
+            "SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = '30231G102'",
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "resolved_via_extid"

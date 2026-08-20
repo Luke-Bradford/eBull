@@ -34,7 +34,7 @@ Minimum content for §0 (or inline equivalent):
 
 ### Cap vocabulary (cited in §13)
 $ grep -n "Capability = Literal\[" app/services/bootstrap_orchestrator.py
-286:Capability = Literal[
+261:Capability = Literal[
 ...
 $ grep -n '"<cap_name>"' app/services/bootstrap_orchestrator.py
 <paste lines>
@@ -122,7 +122,7 @@ Skipping §8 is how `filing_events` ends up with 4 writers and 4 different confl
 
 ### §12 Partition extension deadline alarm
 
-Specs that introduce range-partitioned tables (`ownership_*_observations` quarterly through 2030, `finra_regsho_daily_observations` quarterly through 2030-Q1, etc.) MUST specify when the static window expires + which operator-visible signal fires before then. The skill `data-engineer/SKILL.md` §13.E mentions `GET /system/postgres-health` as the canonical surface — your spec wires into it OR justifies why not.
+Specs that introduce range-partitioned tables (`ownership_*_observations` quarterly through 2040 per sql/177, `finra_regsho_daily_observations` quarterly through 2035-Q1 per sql/174, etc.) MUST specify when the static window expires + which operator-visible signal fires before then. The skill `data-engineer/SKILL.md` §13.E mentions `GET /system/postgres-health` as the canonical surface — your spec wires into it OR justifies why not.
 
 Concrete shape:
 
@@ -143,7 +143,7 @@ If the source has bootstrap + steady-state forms:
 
 **Path is `app/runbooks/` NOT `app/cli/runbooks/`** — Stream A PR-D / #1311 chose the flat layout because `app/cli.py` already exists as the operator break-glass credential CLI (single-file module); adding a sibling `app/cli/` package would shadow it. The exemplars to copy: `app/runbooks/stream_a_run_8_verify.py` (destructive `--apply`), `app/runbooks/stream_a_t13_sidecar_repair.py` (per-CIK repair without re-fetch), `app/runbooks/stream_a_stream_c_gate.py` (read-only acceptance gate with pinned JSON envelope). Shared safety primitives in `app/runbooks/safety.py`: `assert_dev_env`, `assert_dev_db`, `assert_jobs_process_stopped`, `wait_for_jobs_process_started`.
 
-Every runbook with a destructive action (`DELETE`, `UPDATE`, `TRUNCATE`, schema migration) has `--dry-run` as the default and `--apply` to commit. The §6 prevention-log entry on "always provide --dry-run" applies universally.
+Every runbook with a destructive action (`DELETE`, `UPDATE`, `TRUNCATE`, schema migration) has `--dry-run` as the default and `--apply` to commit. The prevention-log rule that destructive scripts default to `--dry-run` (with `--apply` to commit) applies universally.
 
 ### §18 Smoke matrix
 

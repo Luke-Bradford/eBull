@@ -9,10 +9,10 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import { fetchPortfolio } from "@/api/portfolio";
 import { useAsync } from "@/lib/useAsync";
-import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, pnlPct } from "@/lib/format";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { UnconvertedBadge } from "@/components/portfolio/UnconvertedBadge";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { ActivitySection } from "@/components/portfolio/ActivitySection";
@@ -23,11 +23,16 @@ import type {
   BrokerPositionItem,
   PositionItem,
   PortfolioMirrorItem,
+  PortfolioResponse,
 } from "@/api/types";
-
-type RowItem =
-  | { kind: "position"; data: PositionItem }
-  | { kind: "mirror"; data: PortfolioMirrorItem };
+import { portfolioTotals } from "@/lib/portfolioTotals";
+import { Avatar } from "@/lib/avatar";
+import {
+  buildSortedRows,
+  matchesRowSearch,
+  type RowItem,
+} from "@/lib/portfolioRows";
+import { Badge } from "@/components/ui/Badge";
 
 interface CloseTarget {
   instrumentId: number;
@@ -57,7 +62,6 @@ const PAGE_SIZE = 50;
  */
 export function PortfolioPage() {
   const portfolio = useAsync(fetchPortfolio, []);
-  const currency = useDisplayCurrency();
   const navigate = useNavigate();
 
   const [tab, setTab] = useState<"positions" | "activity">("positions");
@@ -94,27 +98,11 @@ export function PortfolioPage() {
   // so they share the same sorted list.
   const allRows: RowItem[] = useMemo(() => {
     if (portfolio.data === null) return [];
-    const positions = portfolio.data.positions.map<RowItem>((p) => ({
-      kind: "position",
-      data: p,
-    }));
-    const mirrors = portfolio.data.mirrors.map<RowItem>((m) => ({
-      kind: "mirror",
-      data: m,
-    }));
-    const combined = [...positions, ...mirrors];
-    combined.sort((a, b) => {
-      const mvA =
-        a.kind === "position" ? a.data.market_value : a.data.mirror_equity;
-      const mvB =
-        b.kind === "position" ? b.data.market_value : b.data.mirror_equity;
-      return mvB - mvA;
-    });
-    return combined;
+    return buildSortedRows(portfolio.data.positions, portfolio.data.mirrors);
   }, [portfolio.data]);
 
   const visible = useMemo(
-    () => allRows.filter((r) => matchesSearch(r, search)),
+    () => allRows.filter((r) => matchesRowSearch(r, search)),
     [allRows, search],
   );
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
@@ -274,14 +262,14 @@ export function PortfolioPage() {
       ) : (
         <LiveQuoteProvider instrumentIds={liveQuoteIds}>
         <div className="space-y-3">
-          <SummaryBar data={portfolio.data} currency={currency} />
+          <SummaryBar data={portfolio.data} />
           {allRows.length === 0 ? (
             <EmptyState
               title="No positions yet"
               description="Open a position from the rankings page to see it here."
             >
               <Link
-                to="/rankings"
+                to="/research?view=ranked"
                 className="text-sm font-medium text-blue-600 hover:underline"
               >
                 Go to rankings →
@@ -291,7 +279,8 @@ export function PortfolioPage() {
             <>
               <PortfolioTable
                 pageRows={pageRows}
-                currency={currency}
+                displayCurrency={portfolio.data.display_currency}
+                cashCurrency={portfolio.data.cash_currency}
                 search={search}
                 onSearchChange={(v) => {
                   setSearch(v);
@@ -360,44 +349,34 @@ export function PortfolioPage() {
 // Summary bar
 // ---------------------------------------------------------------------------
 
-function SummaryBar({
-  data,
-  currency,
-}: {
-  data: {
-    total_aum: number;
-    cash_balance: number | null;
-    positions: PositionItem[];
-    mirrors?: PortfolioMirrorItem[];
-  };
-  currency: string;
-}) {
-  const mirrors = data.mirrors ?? [];
-  const totalPnl =
-    data.positions.reduce((s, p) => s + p.unrealized_pnl, 0) +
-    mirrors.reduce((s, m) => s + m.unrealized_pnl, 0);
-  const totalInvested =
-    data.positions.reduce((s, p) => s + p.cost_basis, 0) +
-    mirrors.reduce((s, m) => s + m.funded, 0);
-  const pct = totalInvested !== 0 ? totalPnl / totalInvested : null;
-  const posCount = data.positions.length + mirrors.length;
-  const mirrorCount = mirrors.length;
+function SummaryBar({ data }: { data: PortfolioResponse }) {
+  // #1901: shared totals + #2129 display-currency labeling (single source, also
+  // used by the Dashboard cockpit's SummaryCards).
+  const { totalPnl, pnlFraction, displayCurrency, hasUnconverted } = portfolioTotals(data);
+  const mirrorCount = (data.mirrors ?? []).length;
+  const posCount = data.positions.length + mirrorCount;
 
   return (
     <div className="flex flex-wrap gap-x-8 gap-y-2 border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-2 text-sm">
-      <Stat label="AUM" value={formatMoney(data.total_aum, currency)} />
-      <Stat label="Cash" value={formatMoney(data.cash_balance, currency)} />
+      <Stat label="AUM" value={formatMoney(data.total_aum, displayCurrency)} />
+      <Stat label="Cash" value={formatMoney(data.cash_balance, data.cash_currency)} />
       <Stat
         label="P&L"
-        value={formatMoney(totalPnl, currency)}
-        hint={pct === null ? undefined : formatPct(pct)}
+        value={formatMoney(totalPnl, displayCurrency)}
+        hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
         tone={totalPnl >= 0 ? "positive" : "negative"}
       />
       <Stat label="Positions" value={String(posCount)} />
       <Stat label="Instruments" value={String(data.positions.length)} />
-      {mirrorCount > 0 ? (
-        <Stat label="Mirrors" value={String(mirrorCount)} />
-      ) : null}
+      {mirrorCount > 0 ? <Stat label="Mirrors" value={String(mirrorCount)} /> : null}
+      {hasUnconverted && (
+        <span
+          title={`Some positions couldn't be converted to ${displayCurrency}; totals may mix currencies.`}
+          className="self-center text-xs font-medium text-amber-700 dark:text-amber-300"
+        >
+          ⚠ mixed currencies
+        </span>
+      )}
     </div>
   );
 }
@@ -434,37 +413,10 @@ function Stat({
 // Table
 // ---------------------------------------------------------------------------
 
-function matchesSearch(row: RowItem, q: string): boolean {
-  if (!q) return true;
-  const lower = q.toLowerCase();
-  if (row.kind === "position") {
-    return (
-      row.data.symbol.toLowerCase().includes(lower) ||
-      row.data.company_name.toLowerCase().includes(lower)
-    );
-  }
-  return row.data.parent_username.toLowerCase().includes(lower);
-}
-
-const AVATAR_TONES = [
-  "bg-blue-600",
-  "bg-emerald-600",
-  "bg-amber-600",
-  "bg-rose-600",
-  "bg-violet-600",
-  "bg-cyan-600",
-] as const;
-
-function avatarTone(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++)
-    hash = (hash * 31 + name.charCodeAt(i)) | 0;
-  return AVATAR_TONES[Math.abs(hash) % AVATAR_TONES.length] ?? "bg-blue-600";
-}
-
 function PortfolioTable({
   pageRows,
-  currency,
+  displayCurrency,
+  cashCurrency,
   search,
   onSearchChange,
   searchRef,
@@ -474,7 +426,8 @@ function PortfolioTable({
   onClose,
 }: {
   pageRows: RowItem[];
-  currency: string;
+  displayCurrency: string;
+  cashCurrency: string;
   search: string;
   onSearchChange: (v: string) => void;
   searchRef: React.MutableRefObject<HTMLInputElement | null>;
@@ -522,7 +475,7 @@ function PortfolioTable({
                 <PositionRow
                   key={`pos-${row.data.instrument_id}`}
                   p={row.data}
-                  currency={currency}
+                  displayCurrency={displayCurrency}
                   focused={idx === focusedIdx}
                   onDrill={() => onDrill(row)}
                   onAdd={onAdd}
@@ -532,7 +485,8 @@ function PortfolioTable({
                 <MirrorRow
                   key={`mir-${row.data.mirror_id}`}
                   m={row.data}
-                  currency={currency}
+                  currency={cashCurrency}
+                  displayCurrency={displayCurrency}
                   focused={idx === focusedIdx}
                   onDrill={() => onDrill(row)}
                 />
@@ -587,14 +541,14 @@ function PaginationBar({
 
 function PositionRow({
   p,
-  currency,
+  displayCurrency,
   focused,
   onDrill,
   onAdd,
   onClose,
 }: {
   p: PositionItem;
-  currency: string;
+  displayCurrency: string;
   focused: boolean;
   onDrill: () => void;
   onAdd: (p: PositionItem) => void;
@@ -602,6 +556,10 @@ function PositionRow({
 }) {
   const pct = pnlPct(p.unrealized_pnl, p.cost_basis);
   const positive = p.unrealized_pnl >= 0;
+  // Money is in the position's own currency — display normally, or native on an
+  // FX-degrade (#2129). Label each cell with it; badge the row when it diverges.
+  const rowCurrency = p.currency;
+  const unconverted = rowCurrency !== displayCurrency;
   const trades = p.trades;
   const singleTrade: BrokerPositionItem | null =
     trades.length === 1 && trades[0] !== undefined ? trades[0] : null;
@@ -622,6 +580,7 @@ function PositionRow({
       <td className="px-4 py-2 text-left">
         <span className="font-medium text-slate-800 dark:text-slate-100">{p.symbol}</span>
         <span className="ml-1.5 text-xs text-slate-500">{p.company_name}</span>
+        {unconverted && <UnconvertedBadge currency={rowCurrency} displayCurrency={displayCurrency} />}
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-600">
         {trades.length || "—"}
@@ -630,24 +589,24 @@ function PositionRow({
         {formatNumber(p.current_units)}
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-500">
-        {p.avg_cost != null ? formatMoney(p.avg_cost, currency) : "—"}
+        {p.avg_cost != null ? formatMoney(p.avg_cost, rowCurrency) : "—"}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
         <LivePriceCell
           instrumentId={p.instrument_id}
           fallback={p.current_price}
-          currency={currency}
+          currency={rowCurrency}
         />
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-600">
-        {formatMoney(p.cost_basis, currency)}
+        {formatMoney(p.cost_basis, rowCurrency)}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
-        {formatMoney(p.market_value, currency)}
+        {formatMoney(p.market_value, rowCurrency)}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
         <span className={positive ? "text-emerald-600" : "text-red-600"}>
-          {formatMoney(p.unrealized_pnl, currency)}
+          {formatMoney(p.unrealized_pnl, rowCurrency)}
         </span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
@@ -692,16 +651,19 @@ function PositionRow({
 function MirrorRow({
   m,
   currency,
+  displayCurrency,
   focused,
   onDrill,
 }: {
   m: PortfolioMirrorItem;
   currency: string;
+  displayCurrency: string;
   focused: boolean;
   onDrill: () => void;
 }) {
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
+  const unconverted = currency !== displayCurrency;
 
   const rowClass = [
     "cursor-pointer border-t border-slate-100 transition-colors",
@@ -716,18 +678,13 @@ function MirrorRow({
     >
       <td className="px-4 py-2 text-left">
         <span className="inline-flex items-center gap-2">
-          <span
-            className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white ${avatarTone(m.parent_username)}`}
-          >
-            {m.parent_username.charAt(0).toUpperCase()}
-          </span>
+          <Avatar username={m.parent_username} size="sm" />
           <span className="font-medium text-slate-800 dark:text-slate-100">
             {m.parent_username}
           </span>
-          <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
-            COPY
-          </span>
+          <Badge>COPY</Badge>
           <span className="text-[10px] text-slate-400">→</span>
+          {unconverted && <UnconvertedBadge currency={currency} displayCurrency={displayCurrency} />}
         </span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-600">

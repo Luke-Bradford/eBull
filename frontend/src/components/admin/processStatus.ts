@@ -13,65 +13,46 @@ import type {
   StaleReason,
   TriggerConflictReason,
 } from "@/api/types";
+import type { BadgeTone } from "@/components/ui/Badge";
 
 export interface StatusVisual {
   /** Short human label rendered inside the pill. */
   readonly label: string;
-  /** Tailwind classes for the pill background / border / text. */
-  readonly toneClass: string;
-  /** True for statuses that should pulse. Pulse respects `motion-reduce`. */
-  readonly pulse: boolean;
+  /**
+   * SEMANTIC tone, rendered by `components/ui/Badge` (#2148). Never a colour
+   * class: a tone map holding raw Tailwind is how `eightKSeverity.ts` shipped
+   * light-only chips past the dark gate (prevention-log → "A lint gate's
+   * file-glob is part of its contract").
+   */
+  readonly tone: BadgeTone;
+  /**
+   * Non-colour decoration the tone cannot express — `line-through` on a
+   * cancelled status, `italic`, or a dimming `opacity-*`. MUST NOT contain a
+   * colour utility; colour belongs to the tone.
+   */
+  readonly extraClass?: string;
 }
 
 export const STATUS_VISUAL: Record<ProcessStatus, StatusVisual> = {
-  idle: {
-    label: "idle",
-    toneClass:
-      "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300",
-    pulse: false,
-  },
-  pending_first_run: {
-    label: "first run pending",
-    toneClass:
-      "border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200",
-    pulse: false,
-  },
-  running: {
-    label: "running",
-    toneClass:
-      "border-sky-300 bg-sky-50 text-sky-800 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200",
-    pulse: true,
-  },
-  ok: {
-    label: "ok",
-    toneClass:
-      "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300",
-    pulse: false,
-  },
-  failed: {
-    label: "failed",
-    toneClass:
-      "border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300",
-    pulse: false,
-  },
-  pending_retry: {
-    label: "pending retry",
-    toneClass:
-      "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
-    pulse: false,
-  },
-  cancelled: {
-    label: "cancelled",
-    toneClass:
-      "border-slate-300 bg-slate-50 text-slate-500 line-through dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-400",
-    pulse: false,
-  },
-  disabled: {
-    label: "disabled",
-    toneClass:
-      "border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-500",
-    pulse: false,
-  },
+  idle: { label: "idle", tone: "neutral" },
+  pending_first_run: { label: "first run pending", tone: "neutral" },
+  // #2148 — `running` was `sky`, a family outside the operator colour table.
+  // Folded onto `info` (blue), the table's "neutral interactive / in-progress"
+  // slot. A deliberate small colour change, not a no-op.
+  running: { label: "running", tone: "info" },
+  ok: { label: "ok", tone: "ok" },
+  // #2218 — `warn`, not `risk`: the job completed, so this is not an
+  // incident, but it made no progress and needs the operator. Sits between
+  // `ok` and `failed` visually because that is exactly where it sits
+  // semantically.
+  degraded: { label: "no progress", tone: "warn" },
+  failed: { label: "failed", tone: "risk" },
+  pending_retry: { label: "pending retry", tone: "warn" },
+  cancelled: { label: "cancelled", tone: "neutral", extraClass: "line-through" },
+  // Dimmed rather than given its own grey: `disabled` and `idle` are both
+  // neutral, and the operator distinguishes them by label. Opacity is
+  // theme-independent, so unlike the old dimmer slate it cannot drift in dark.
+  disabled: { label: "disabled", tone: "neutral", extraClass: "opacity-70" },
 };
 
 /**
@@ -200,48 +181,31 @@ export const STALE_REASON_LABEL: Record<StaleReason, string> = {
  *   - red    (`attention`)            — act: operator must intervene.
  *   - muted  (`stale_manual`)         — aged history: an exhausted one-shot
  *       (bootstrap/backfill) failure that is no longer a live alarm (#1689).
- * Each tone is hoisted to a single const so verdicts cannot drift apart on a
- * future dark-mode tweak (single-source-of-truth).
+ * Since #2148 each verdict names a semantic Badge tone rather than a hoisted
+ * class-string const, so the three-state semaphore is stated in meaning and
+ * cannot drift apart on a future dark-mode tweak — there is no colour here to
+ * tweak.
  */
-const CALM_TONE =
-  "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300";
-const AMBER_TONE =
-  "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300";
-const MUTED_TONE =
-  "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-400";
-
 export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
-  current: {
-    label: "current",
-    toneClass: CALM_TONE,
-    pulse: false,
-  },
+  current: { label: "current", tone: "ok" },
   working: {
     // Distinct label, but the calm-green tone of `current`: a live run is
     // the system working as designed — not something to alarm on.
     label: "working",
-    toneClass: CALM_TONE,
-    pulse: false,
+    tone: "ok",
   },
   self_healing: {
     // #1689 — amber: a scheduled retry is auto-recovery in progress. Distinct
     // from green (done) and red (broken) so the operator SEES it healing.
     label: "retrying",
-    toneClass: AMBER_TONE,
-    pulse: false,
+    tone: "warn",
   },
-  attention: {
-    label: "needs attention",
-    toneClass:
-      "border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/60 dark:text-red-300",
-    pulse: false,
-  },
+  attention: { label: "needs attention", tone: "risk" },
   stale_manual: {
     // #1689 — muted: an aged, exhausted one-shot (bootstrap/backfill) failure.
     // No longer a live alarm; sits in the collapsed Manual & backfill section.
     label: "stale",
-    toneClass: MUTED_TONE,
-    pulse: false,
+    tone: "neutral",
   },
   paused: {
     // #1831 — grey: disabled by the global kill switch. The halt is the normal
@@ -249,8 +213,7 @@ export const VERDICT_VISUAL: Record<HealthVerdict, StatusVisual> = {
     // The kill-switch banner conveys the halt; a genuinely-failed halted job
     // still reads `attention` (its verdict is computed server-side).
     label: "paused",
-    toneClass: MUTED_TONE,
-    pulse: false,
+    tone: "neutral",
   },
 };
 

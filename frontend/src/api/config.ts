@@ -1,12 +1,26 @@
 import { apiFetch } from "@/api/client";
 import type {
+  ConfigPatchRequest,
   ConfigResponse,
   KillSwitchRequest,
   KillSwitchResponse,
+  RuntimeFlagsResponse,
 } from "@/api/types";
 
 export function fetchConfig(): Promise<ConfigResponse> {
   return apiFetch<ConfigResponse>("/config");
+}
+
+/**
+ * Partial update of runtime config (PATCH /config). Send only changed
+ * fields — the backend rejects no-op patches with 422. Returns the
+ * post-update runtime flags (not the full ConfigResponse).
+ */
+export function patchConfig(body: ConfigPatchRequest): Promise<RuntimeFlagsResponse> {
+  return apiFetch<RuntimeFlagsResponse>("/config", {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
 }
 
 /**

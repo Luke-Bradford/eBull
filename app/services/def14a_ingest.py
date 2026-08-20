@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError; no untrusted input parsed here.
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -73,7 +73,102 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # SCT-bearing bodies rewash + backfill comp automatically (no separate
 # backfill script). ``rewash_filings`` imports THIS literal for its ParserSpec
 # current_version so the two can't drift.
-_PARSER_VERSION_DEF14A = "def14a-v2"
+# v3 (#2086): Item 402 exec comp now runs on the ownership-tombstone path
+# too — the tombstoned-with-stored-raw cohort must rewash to pick up SCTs
+# the 402↔403 coupling previously skipped (GME class).
+# v4 (#2094): SCT wrapped first-column cells no longer clobber executive_name.
+# v5 (#2097): SCT name/title split is role-boundary-first — flatten intra-cell
+# newlines (render wraps, not delimiters), split at the position-title onset,
+# else whole cell = name; fixes bare-first-name truncation ("Sundar"→"Sundar
+# Pichai") and the mid-title leak ("…Chief Executive Officer" absorbed).
+# v6 (#2100 + #2099): `group`/`managing` join the title-modifier prefix
+# ("Group President" / "Managing Director" split before the modifier), and
+# single-token executive names are repaired from same-document evidence only
+# (intra-SCT sibling superset, camel-verbatim spaced form, FY-gated Item
+# 402(v) PvP iXBRL PeoName facts) with unanimity + (name, fy)-collision
+# guards. Specs: docs/proposals/etl/2026-07-22-def14a-pvp-neo-name-oracle.md
+# + …-def14a-sct-residual-name-classes.md.
+# v7 (#2140): Item 403 column resolution + role classification. Percent is
+# resolved first, then shares (percent column excluded from the tiering), then
+# name — each excluding the already-claimed indices — and name discriminates on
+# Item 403's name-side captions only, never bare "beneficial" (which appears in
+# BOTH the name and amount captions, so a blank name caption made the SHARES
+# header win name_idx and the share count was persisted as holder_name on
+# 3,209 rows). Spanning-header promotion widened for the Name|Shares|Percent
+# label row. Structural guard: a holder name must carry name evidence. The
+# Item 403(b) "as a group" aggregate now overrides section context (it is
+# NON-ADDITIVE with its constituents). Holder names flatten interior render
+# wraps (holder_name_key is lower(trim(...)), so an interior newline split one
+# person into two identities across 704 rows). Spec:
+# docs/specs/etl/def14a-beneficial-ownership-column-and-role-resolution.md.
+# v8 (#2140, post-A/B): the shares recovery no longer reads a bare percent as a
+# share count (whole-number check + skip the cell percent actually came from),
+# the Item 403 sibling gate is an absolute score rather than proximity to the
+# best, address-only holder cells are dropped, and Item 402(d)/(f) award tables
+# are disqualified from selection. Bumped separately from v7 so the corpus
+# re-drives against the parser that actually shipped.
+# v9 (#2158): a promoted column-label row is now folded into ``score_headers``
+# in BOTH arms, so Item 403's prescribed captions score the table even when the
+# issuer puts a share-class row above them (181 accessions returned zero rows);
+# Item 402(g)'s "Option Exercises and Stock Vested" captions join the award
+# disqualifier; a Rule 13d-3(d)(1)(i) "within 60 days" caption counts as a label
+# rather than data; and a table with no data rows can no longer win selection.
+# Full-population A/B: +11,652 distinct holders, Item 402(c) SCT +997 rows with
+# zero losses.
+# v10 (#2157): no parser change — the Item 403 REWASH arm now fans out over
+# share-class siblings, so the corpus must re-drive to repair the 41
+# (accession, instrument) pairs / 457 live observation rows a per-instrument
+# rewash orphaned. A version bump is the only mechanism that re-drives
+# rewash_filings, so the constant moves even though parse output is identical.
+# v11 (#2164): Item 403 rows recovered from three defects on tables that were
+# already being selected correctly. (a) Zero-width spacers (U+200B et al) are
+# now stripped in ``_strip_inline_html`` — the Item 402(c) path has scrubbed
+# them since #1945, the Item 403 path never learned, and a '<ZWSP> 17,464' value
+# cell failed both value parsers so the whole table dropped. (b) 17 CFR
+# 229.403(a)'s single "Name and address of beneficial owner" column rendered as
+# two STACKED ROWS now merges — neither row survived alone. (c) A 5%-holder
+# section heading whose noun precedes the threshold ('Other Shareowners that
+# Beneficially Own More than 5%') now sets the 'principal' role instead of
+# letting the management block's role leak onto the holders below it.
+# v12 (#2163): 17 CFR 229.403 column 3 ("Amount and nature of beneficial
+# ownership") is a COUNT, column 4 ("Percent of class") is a PERCENT. A header
+# row carrying empty SPACER cells its data rows do not carry is wider than the
+# data, so shares_idx lands on the percent column; the value still parses, the
+# ragged-row recovery never fires, and the real count one cell to the left is
+# discarded (0001308179-24-000672 stored BlackRock at 17.4 shares and threw away
+# 6,236,345). A percent-signatured value at shares_idx is now held back so the
+# recovery runs, and is read as the percent when the signature is decisive.
+# Also: embedded Schedule 13D/G cover pages (17 CFR 240.13d-101/-102) are no
+# longer parsed as Item 403 tables — their numbered rows stored the cover-page
+# item labels as holder names and the ROW NUMBERS as share counts.
+# v13 (#2160): Item 403 table SELECTION no longer turns on header score. A score
+# is a sum of keyword weights and cannot separate a genuine Item 403 table from a
+# comp / prose / capitalisation table that hits the same keywords. A table may now
+# win its window, and join the sibling set, only if it passes BOTH limbs of the
+# 17 CFR 229.403 eligibility test: >=50% of its extracted rows name a beneficial
+# owner (Rule 13d-3), AND its headers carry Item 403's prescribed value columns —
+# a CLASS-denominated percent (column 4) or the amount-and-nature
+# voting/dispositive subdivision (column 3), never a comp-denominated percent.
+# Both limbs gate WINNER selection, not only sibling membership: Item 402 comp
+# tables' rows are people, so row identity alone scores them 1.00.
+# `_SIBLING_SCORE_FLOOR` is deleted; header score is retained for window RANKING
+# only.
+# v14 (#2376): Item 403 column 4 is recovered from the HTML TABLE MODEL when the
+# flat cell grid loses it. `_CELL_RE` reads a self-closing `<td/>` as an opening
+# tag, so a spacer contributes no cell and the `colspan` of the cell after it is
+# read off the wrong tag; header and data rows then sit in different index spaces
+# and the resolved percent index lands on a blank. Every prior rescue works
+# inside that grid and cannot accept a bare `14.33` — without knowing which
+# caption covers the cell it is indistinguishable from a 14-share holding.
+# `_layout_percent_by_row` rebuilds the table under the HTML Living Standard's
+# model (§4.9.12, the only source rule available — DEF 14A has no structured-data
+# mandate) and supplies exactly that missing fact. Strictly additive: it runs
+# after the row-drop guard, only when the percent is still None, and never during
+# the eligibility probe, so it cannot admit a row, move a share count, or change
+# which table wins. Fails closed on more than one distinct percent caption, on
+# two non-contiguous percent runs (dual-class), on an ambiguous name prefix, and
+# on a percent equal to the row's own share count.
+_PARSER_VERSION_DEF14A = "def14a-v14"
 
 logger = logging.getLogger(__name__)
 
@@ -623,6 +718,52 @@ def _record_ingest_attempt(
     )
 
 
+def _supersede_dropped_holdings(
+    conn: psycopg.Connection[Any],
+    *,
+    accession_number: str,
+    instrument_ids: Sequence[int],
+    holder_names: Sequence[str],
+) -> int:
+    """Remove this filing's typed rows that the CURRENT parse no longer emits.
+
+    ``_upsert_holding`` is keyed on ``(instrument_id, accession_number,
+    holder_name)``, so a parser bump that CHANGES a holder name writes the
+    corrected row under a new key and leaves the old one live — the same
+    additive-reparse defect #2140 fixes on the observations layer (D6), but on
+    the typed table that ``ownership_rollup`` / ``ownership_drillthrough`` /
+    ``def14a_drift`` / the instruments API read. ``rewash_filings`` already
+    deletes the accession's typed rows wholesale, but the MANIFEST re-drive
+    path (which the v6->v7 bump triggers, invariant I9) did not. Codex pre-push
+    review caught the gap.
+
+    Deletes only the DROPPED names rather than replacing the whole accession,
+    so re-ingesting unchanged content stays a pure UPSERT (no churn in the
+    inserted/updated counters, no row-version bump for identical data).
+    """
+    if not instrument_ids or not holder_names:
+        # ``holder_name <> ALL('{}')`` is VACUOUSLY TRUE in Postgres (verified:
+        # SELECT 'x' <> ALL(ARRAY[]::text[]) -> true), so an empty name list
+        # would delete EVERY row for the accession instead of preserving them —
+        # turning a zero-row re-parse into silent data loss. A parse that finds
+        # nothing must supersede nothing; the rewash guard
+        # (``RewashParseError``) and the manifest tombstone path own that case.
+        # Guarding HERE rather than at the call sites so every future caller
+        # inherits it. Review bot BLOCKING on PR #2159.
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM def14a_beneficial_holdings
+            WHERE accession_number = %(acc)s
+              AND instrument_id = ANY(%(ids)s::bigint[])
+              AND holder_name <> ALL(%(names)s::text[])
+            """,
+            {"acc": accession_number, "ids": list(instrument_ids), "names": list(holder_names)},
+        )
+        return cur.rowcount
+
+
 def _upsert_holding(
     conn: psycopg.Connection[tuple],
     *,
@@ -824,6 +965,38 @@ def apply_exec_comp_best_effort(
     return written
 
 
+def run_drift_detection_best_effort(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_ids: list[int],
+    accession_number: str,
+) -> None:
+    """Re-run the DEF 14A vs Form 4 drift detector for the instruments a
+    filing just wrote (#966). Mirrors ``apply_exec_comp_best_effort``:
+    SAVEPOINT-isolated + best-effort — a drift failure rolls back drift
+    ONLY and never poisons the caller's connection or aborts the
+    already-applied Item 403 holdings write (#1700 per-section failure
+    isolation). Drift is a coverage-integrity augment, never a gate on
+    the holdings outcome.
+    """
+    from app.services.def14a_drift import detect_drift
+
+    try:
+        with conn.transaction():
+            for instrument_id in instrument_ids:
+                report = detect_drift(conn, instrument_id=instrument_id)
+                if report.alerts_emitted:
+                    logger.info(
+                        "def14a drift: instrument_id=%d accession=%s alerts=%d by_severity=%s",
+                        instrument_id,
+                        accession_number,
+                        report.alerts_emitted,
+                        report.alerts_by_severity,
+                    )
+    except Exception:  # noqa: BLE001 — best-effort augment; never propagate
+        logger.exception("def14a drift: detector raised accession=%s", accession_number)
+
+
 # ---------------------------------------------------------------------------
 # Per-accession driver
 # ---------------------------------------------------------------------------
@@ -960,12 +1133,26 @@ def _ingest_single_accession(
             else:
                 updated += 1
 
+    # Drop typed rows this parse no longer emits (#2140) — see
+    # _supersede_dropped_holdings; without it a parser bump that RENAMES a
+    # holder leaves the old name live beside the corrected one.
+    _supersede_dropped_holdings(
+        conn,
+        accession_number=ref.accession_number,
+        instrument_ids=siblings,
+        holder_names=[h.holder_name for h in parsed.rows],
+    )
+
     # Write-through observations + refresh _current (#891 / spec
     # §"Eliminate periodic re-scan jobs"). Replaces nightly
     # ownership_observations_sync.sync_def14a read-from-typed-tables
-    # path. record_def14a_observation is itself UPSERT so re-ingest
-    # of the same accession (parser bump) refreshes existing rows
-    # in place. Fan out across share-class siblings post-#1117.
+    # path. _record_def14a_observations_for_filing replaces this
+    # (instrument, accession)'s prior observation rows before
+    # inserting, so a re-ingest under a bumped parser is corrective
+    # and not merely additive (#2140 D6 — the previous
+    # "UPSERT refreshes in place" claim held only while the parser
+    # kept producing the same holder NAME, which is the row key).
+    # Fan out across share-class siblings post-#1117.
     if parsed.rows:
         for sibling_iid in siblings:
             _record_def14a_observations_for_filing(
@@ -1001,6 +1188,15 @@ def _ingest_single_accession(
         body=body,
         instrument_ids=siblings,
     )
+
+    # DEF 14A vs Form 4 drift re-check (#966). Best-effort, same isolation
+    # contract as exec-comp above.
+    if parsed.rows:
+        run_drift_detection_best_effort(
+            conn,
+            instrument_ids=siblings,
+            accession_number=ref.accession_number,
+        )
 
     return _AccessionOutcome(
         status="success",
@@ -1053,6 +1249,43 @@ def _record_def14a_observations_for_filing(
     period_end: date = as_of_date or fetched_at.date()
     filed_at = fetched_at
     run_id = uuid4()
+
+    # Supersede-then-reassert (#2140 D6). ``record_def14a_observation`` is an
+    # UPSERT keyed on ``holder_name_key``, so it refreshes a row in place only
+    # while the parser keeps producing the SAME NAME. A parser fix that changes
+    # a name — which is exactly what #2140 does for 3,209 numeric-name rows and
+    # 704 newline-split rows — writes the corrected row under a NEW key and
+    # leaves the broken one live. ``refresh_def14a_current`` prunes via
+    # ``WHEN NOT MATCHED BY SOURCE THEN DELETE``, but its source set is these
+    # observations, so the stale rows keep their ``_current`` row alive
+    # forever. Without this step a re-wash is additive, not corrective.
+    #
+    # Tombstone rather than DELETE, per invariant I6 (never hard-delete
+    # observations). The #953 13F precedent chose DELETE for a purely
+    # MECHANICAL reason — its writer's ON CONFLICT DO UPDATE never cleared
+    # ``known_to``, so a re-asserted row would have stayed invisible forever.
+    # ``record_def14a_observation`` clears ``known_to`` on conflict, which
+    # removes that objection: every holder the new parse still emits is
+    # revived by the INSERT below (same transaction), and only the rows the
+    # new parse NO LONGER emits stay superseded — with their audit history
+    # intact. That is precisely the desired semantics.
+    #
+    # Scoped to (instrument_id, source_document_id) — NOT the accession alone.
+    # The caller fans this function out ONCE PER SHARE-CLASS SIBLING for the
+    # same accession, so an accession-wide sweep would make each sibling's
+    # write supersede the previous sibling's rows.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ownership_def14a_observations
+               SET known_to = NOW()
+             WHERE instrument_id = %(iid)s
+               AND source = 'def14a'
+               AND source_document_id = %(doc_id)s
+               AND known_to IS NULL
+            """,
+            {"iid": instrument_id, "doc_id": accession_number},
+        )
     for holder in holders:
         if holder.shares is None:
             continue
@@ -1098,10 +1331,13 @@ def _record_esop_observations_for_filing(
     """Record one ``ownership_esop_observations`` row per
     ``holder_role='esop'`` row from this DEF 14A accession (#843).
 
-    Returns the number of ESOP rows written so the caller can decide
-    whether to call ``refresh_esop_current`` (skip the refresh + its
-    advisory lock when the filing has zero ESOP rows — the common case
-    for large-cap issuers whose plans don't cross the 5% threshold).
+    Returns the number of ESOP rows AFFECTED — written plus superseded — so the
+    caller can decide whether to call ``refresh_esop_current`` (skipping the
+    refresh + its advisory lock when the filing has no ESOP rows and never had
+    any, the common case for large-cap issuers whose plans don't cross the 5%
+    threshold). "Affected", not "written": a re-parse that legitimately drops a
+    plan to zero rows still needs the refresh, or the superseded plan keeps its
+    ``ownership_esop_current`` row alive forever (#2157, Codex ckpt-2).
 
     ``plan_trustee_cik`` is left NULL — DEF 14A's trustee name (e.g.
     ``"Vanguard Fiduciary Trust Company"``) is a SEPARATE corporate
@@ -1119,6 +1355,31 @@ def _record_esop_observations_for_filing(
     period_end: date = as_of_date or fetched_at.date()
     filed_at = fetched_at
     run_id = uuid4()
+
+    # Supersede-then-reassert, same contract as
+    # ``_record_def14a_observations_for_filing`` (#2140 D6) and for the same
+    # reason: ``record_esop_observation`` conflicts on
+    # ``(instrument_id, plan_name, period_end, source_document_id)`` and
+    # ``plan_name`` is a PARSED value, so a parser fix that renames a plan
+    # writes the corrected row under a NEW key and leaves the broken one live —
+    # ``refresh_esop_current``'s source set is these observations, so its
+    # ``NOT MATCHED BY SOURCE`` prune never sees it. Scoped to
+    # ``(instrument_id, source_document_id)``, never the accession alone,
+    # because the caller fans out over share-class siblings (#2157).
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ownership_esop_observations
+               SET known_to = NOW()
+             WHERE instrument_id = %(iid)s
+               AND source = 'def14a'
+               AND source_document_id = %(doc_id)s
+               AND known_to IS NULL
+            """,
+            {"iid": instrument_id, "doc_id": accession_number},
+        )
+        superseded = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
     written = 0
     for holder in holders:
         if holder.holder_role != "esop":
@@ -1146,7 +1407,9 @@ def _record_esop_observations_for_filing(
             percent_of_class=Decimal(holder.percent_of_class) if holder.percent_of_class is not None else None,
         )
         written += 1
-    return written
+    # ``superseded`` keeps a zero-ESOP re-parse of a filing that previously HAD
+    # plans from silently skipping the refresh — see the docstring.
+    return written + superseded
 
 
 # ---------------------------------------------------------------------------

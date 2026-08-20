@@ -68,7 +68,7 @@ import psycopg.errors
 import psycopg.rows
 from psycopg import sql
 
-from app.config import settings
+from app.config import DEV_LIKE_ENVS, settings
 
 logger = logging.getLogger(__name__)
 
@@ -217,8 +217,8 @@ def _do_sweep(*, min_age: timedelta, now: datetime | None, admin_url: str | None
 # Dev-like environments where reaping leaked test DBs is appropriate. A
 # production jobs process (app_env="prod") must NEVER connect to the admin
 # DB to reap test databases — there are none there, and the intent must be
-# unambiguous to a reviewer.
-_DEV_LIKE_ENVS: frozenset[str] = frozenset({"dev", "test", "local"})
+# unambiguous to a reviewer. The set itself lives in app.config as the
+# single source shared with the debug-router gate and the jobs auto-reloader.
 
 
 @dataclass(frozen=True)
@@ -248,7 +248,7 @@ def run_orphan_test_db_reap(
     the next crash-recovery fsync pass (#1444). Best-effort — the
     underlying reapers swallow operational failures.
     """
-    if settings.app_env not in _DEV_LIKE_ENVS:
+    if settings.app_env not in DEV_LIKE_ENVS:
         logger.info("orphan test-DB reap skipped: app_env=%s", settings.app_env)
         return ReapResult(skipped=True)
     invalid = force_drop_invalid_test_dbs(admin_url=admin_url)

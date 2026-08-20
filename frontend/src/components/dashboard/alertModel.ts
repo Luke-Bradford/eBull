@@ -21,6 +21,9 @@ import type {
   GuardRejection,
   PositionAlert,
   RankMove,
+  ThesisBreakEventAlert,
+  ThesisChange,
+  ThesisStalenessItem,
 } from "@/api/types";
 
 export type Tier = "actionable" | "informational" | "housekeeping";
@@ -36,6 +39,8 @@ export type Cursors = {
   position: number | null;
   coverage: number | null;
   rank: number | null;
+  thesisChange: number | null;
+  thesisBreak: number | null;
 };
 
 export interface GuardReasonMeta {
@@ -45,13 +50,13 @@ export interface GuardReasonMeta {
 }
 
 const ADMIN = { label: "Manage in Admin", to: "/admin" };
-const TRIAGE = { label: "Triage", to: "/recommendations" };
+const TRIAGE = { label: "Triage", to: "/research?view=actioned" };
 
 /**
  * One entry per execution-guard RuleName (app/services/execution_guard.py:89-107).
  * Config / safety-layer rejections point at /admin (where the operator acts — e.g. the
  * kill switch is deactivated there, NOT from this strip). Data / per-instrument rejections
- * point at /recommendations for triage. Unknown codes fall back to a humanized label.
+ * point at /research?view=actioned for triage. Unknown codes fall back to a humanized label.
  */
 export const GUARD_REASON_META: Record<string, GuardReasonMeta> = {
   kill_switch: {
@@ -228,11 +233,78 @@ export interface RankMoveItem {
   unseen: boolean;
 }
 
+/**
+ * Thesis-staleness (#1902) — ONE grouped card for all held instruments whose
+ * thesis is stale. Standing condition, not an event: there is no cursor, no
+ * unseen highlight and no dismiss — the card clears when theses regenerate
+ * (thesis_refresh drains at ≤5/hour, or per-row force from /theses).
+ */
+export interface ThesisStaleItem {
+  kind: "thesisStale";
+  tier: Tier;
+  id: string;
+  symbols: string[];
+  count: number;
+  sortKey: number;
+  unseen: boolean; // always false — excluded from unseen/dismiss accounting
+}
+
+/**
+ * Thesis change (#2013) — one card per instrument whose thesis regenerated
+ * with a MATERIAL change (stance/type change, target added/removed, or a
+ * target move ≥5% — predicate: app/services/thesis_diff.py). Event feed
+ * cursored on theses.thesis_id; an instrument regenerated several times
+ * in-window shows the latest change and counts the rest, like rank moves.
+ */
+export interface ThesisChangeItem {
+  kind: "thesisChange";
+  tier: Tier;
+  id: string;
+  symbol: string;
+  instrumentId: number;
+  summary: string;
+  stanceFrom: string | null;
+  stanceTo: string | null;
+  count: number;
+  latestTs: string;
+  sortKey: number;
+  maxId: number;
+  unseen: boolean;
+}
+
+/**
+ * Thesis break (#2051, PR-B of #2012) — one card per instrument whose thesis
+ * had a machine-checked break predicate fire (a genuine false→true
+ * transition; the writer's own premises can never fire). Event feed cursored
+ * on thesis_break_events.break_event_id. A break is a TRIGGER, not a
+ * verdict: the stale rule queues a regeneration and the resulting #2013
+ * RE-THESIS card carries the outcome — this card says why it was queued.
+ */
+export interface ThesisBreakItem {
+  kind: "thesisBreak";
+  tier: Tier;
+  id: string;
+  symbol: string;
+  instrumentId: number;
+  sourceText: string; // latest event's verbatim break condition
+  observedValue: number;
+  threshold: number | null;
+  op: string;
+  count: number;
+  latestTs: string;
+  sortKey: number;
+  maxId: number;
+  unseen: boolean;
+}
+
 export type AlertItem =
   | GuardGroupItem
   | PositionItem
   | CoverageGroupItem
-  | RankMoveItem;
+  | RankMoveItem
+  | ThesisChangeItem
+  | ThesisBreakItem
+  | ThesisStaleItem;
 
 function uniqueSorted(values: (string | null)[]): string[] {
   return Array.from(new Set(values.filter((v): v is string => !!v))).sort();
@@ -248,6 +320,9 @@ export function buildAlertModel(
   drops: CoverageStatusDrop[],
   moves: RankMove[],
   cursors: Cursors,
+  staleTheses: ThesisStalenessItem[] = [],
+  thesisChanges: ThesisChange[] = [],
+  thesisBreaks: ThesisBreakEventAlert[] = [],
 ): AlertItem[] {
   const items: AlertItem[] = [];
 
@@ -348,6 +423,85 @@ export function buildAlertModel(
       sortKey: Date.parse(latest.scored_at),
       maxId,
       unseen: cursors.rank === null || maxId > cursors.rank,
+    });
+  }
+
+  // Thesis changes (#2013) → one card per instrument (informational tier).
+  // Multiple in-window material regens on one instrument show the latest
+  // (highest thesis_id) and count the rest — same shape as rank moves.
+  const thesisChangeGroups = new Map<number, ThesisChange[]>();
+  for (const c of thesisChanges) {
+    const arr = thesisChangeGroups.get(c.instrument_id);
+    if (arr) arr.push(c);
+    else thesisChangeGroups.set(c.instrument_id, [c]);
+  }
+  for (const [instrumentId, members] of thesisChangeGroups) {
+    const maxId = Math.max(...members.map((m) => m.thesis_id));
+    const latest = members.reduce((a, b) => (b.thesis_id > a.thesis_id ? b : a));
+    items.push({
+      kind: "thesisChange",
+      tier: "informational",
+      id: `thesisChange:${instrumentId}`,
+      symbol: latest.symbol,
+      instrumentId,
+      summary: latest.summary,
+      stanceFrom: latest.stance_from,
+      stanceTo: latest.stance_to,
+      count: members.length,
+      latestTs: latest.created_at,
+      sortKey: Date.parse(latest.created_at),
+      maxId,
+      unseen: cursors.thesisChange === null || maxId > cursors.thesisChange,
+    });
+  }
+
+  // Thesis breaks (#2051) → one card per instrument (informational tier —
+  // the break has already queued a regeneration via the break_fired stale
+  // rule; the operator reviews, the engine acts). Multiple in-window fires
+  // on one instrument (distinct predicates) show the latest (highest
+  // break_event_id) and count the rest — same shape as thesis changes.
+  const thesisBreakGroups = new Map<number, ThesisBreakEventAlert[]>();
+  for (const b of thesisBreaks) {
+    const arr = thesisBreakGroups.get(b.instrument_id);
+    if (arr) arr.push(b);
+    else thesisBreakGroups.set(b.instrument_id, [b]);
+  }
+  for (const [instrumentId, members] of thesisBreakGroups) {
+    const maxId = Math.max(...members.map((m) => m.break_event_id));
+    const latest = members.reduce((a, b) =>
+      b.break_event_id > a.break_event_id ? b : a,
+    );
+    items.push({
+      kind: "thesisBreak",
+      tier: "informational",
+      id: `thesisBreak:${instrumentId}`,
+      symbol: latest.symbol,
+      instrumentId,
+      sourceText: latest.source_text,
+      observedValue: latest.observed_value,
+      threshold: latest.threshold,
+      op: latest.op,
+      count: members.length,
+      latestTs: latest.fired_at,
+      sortKey: Date.parse(latest.fired_at),
+      maxId,
+      unseen: cursors.thesisBreak === null || maxId > cursors.thesisBreak,
+    });
+  }
+
+  // Thesis staleness (#1902) → ONE card for all stale held instruments
+  // (informational tier — research hygiene, not an immediate trade action).
+  // sortKey 0: with no event timestamp of its own, a standing condition
+  // sorts below fresh events within its tier rather than pinning to top.
+  if (staleTheses.length > 0) {
+    items.push({
+      kind: "thesisStale",
+      tier: "informational",
+      id: "thesisStale",
+      symbols: uniqueSorted(staleTheses.map((t) => t.symbol)),
+      count: staleTheses.length,
+      sortKey: 0,
+      unseen: false,
     });
   }
 

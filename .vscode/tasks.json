@@ -103,7 +103,7 @@
       "label": "stack: jobs",
       "type": "shell",
       "windows": {
-        "command": "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'app\\.jobs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; uv run python -m app.jobs",
+        "command": "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'app\\.jobs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; uv run python -m app.jobs.dev_reload",
         "options": {
           "shell": {
             "executable": "pwsh",
@@ -112,10 +112,10 @@
         }
       },
       "osx": {
-        "command": "pgrep -f '[p]ython3 -m app.jobs($|[[:space:]])' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"
+        "command": "mkdir -p var/autonomy-logs; if launchctl kickstart -k \"gui/$(id -u)/com.ebull.jobs-daemon\" 2>/dev/null; then echo '==> restarted launchd com.ebull.jobs-daemon; tailing its log (closing this panel does NOT stop the daemon)'; exec tail -n 50 -F var/autonomy-logs/launchd.jobs-daemon.err.log; else echo '==> launchd agent com.ebull.jobs-daemon not installed (see scripts/autonomy/README.md) — running a local supervisor instead'; exec uv run python -m app.jobs.dev_reload; fi"
       },
       "linux": {
-        "command": "pgrep -f '[p]ython3 -m app.jobs($|[[:space:]])' | xargs kill -9 2>/dev/null; uv run python -m app.jobs"
+        "command": "pgrep -f '[p]ython3 -m app\\.jobs(\\.dev_reload)?($|[[:space:]])' | xargs kill -9 2>/dev/null; uv run python -m app.jobs.dev_reload"
       },
       "isBackground": true,
       "presentation": {

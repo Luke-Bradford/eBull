@@ -279,7 +279,7 @@ function HistoryBody({
                 key={l.key}
                 dataKey={l.key}
                 name={l.label}
-                type="monotone"
+                type="linear"
                 stroke={accents[i % accents.length]}
                 dot={{ r: 2 }}
                 isAnimationActive={false}

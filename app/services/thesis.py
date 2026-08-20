@@ -4,21 +4,34 @@ Thesis engine service.
 Responsibilities:
   - Assemble a compact research context from filings, fundamentals, news,
     and the prior thesis for a given instrument.
-  - Call Claude Sonnet (writer) to produce a structured investment memo.
-  - Call Claude Sonnet (critic) to produce a counter-thesis / challenge.
+  - Call the configured LLM writer to produce a structured investment memo.
+  - Call the configured LLM critic to produce a counter-thesis / challenge.
   - Insert a new versioned row into the `theses` table.
+  - Record every generation attempt in `thesis_runs` (all trigger paths).
   - Update coverage.last_reviewed_at on success.
   - Identify stale instruments (no thesis, or thesis older than review_frequency).
 
-Context caps (v1 hard limits):
+Context caps (v2 — settled-decisions "Thesis prompt budget", amended #1987):
   - prior thesis:         latest 1
   - filing events:        latest 3
   - fundamentals:         latest snapshot + up to 4 prior snapshots
   - earnings events:      latest 4 quarters (confirmed only)
   - analyst estimates:    latest 1 snapshot
   - news events:          latest 10 from last 30 days, importance desc → recency desc
+  - risk metrics (#1632): instrument_risk_metrics_current scalars, statused
+  - price anchor (#1987): latest price_daily close (native ccy) + 52w range + returns
+  - valuation (#1987):    instrument_valuation row when present; statused absence
+  - fair_value_band (#2009): fair_value_band_current row (fvb_v2) when present;
+                          statused absence (passive evidence, not gating)
+  - analytics (#1987):    latest scores.analytics_json, shaped compact, scored_at-stamped
+  - ta_state (#1987):     latest price_daily indicators + derived regime signals
 
-Claude model: claude-sonnet-4-6 for both writer and critic calls.
+LLM provider: resolved from `runtime_config` via
+`app.services.llm_client.make_llm_clients` (#1919 — local-first default;
+Anthropic by configuration). Writer and critic may run DIFFERENT models
+(#1995 split knobs) but share provider/base URL; both get one retry on
+schema/parse failure, with `finish_reason` recorded so truncation is
+distinguishable from malformed output.
 
 Versioning contract:
   thesis_version is computed atomically inside the INSERT via a subquery:
@@ -32,17 +45,97 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+import math
+import re
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
-import anthropic
 import psycopg
+import psycopg.rows
 from psycopg import sql as psql
 from psycopg.types.json import Jsonb
 
+# Safe at module scope (#2009 B3): fair_value_band's only app-internal deps are
+# peer_comparison and xbrl_derived_stats, neither of which imports thesis (or
+# anything that transitively reaches back here via the scheduler) —
+# verified by grep, unlike risk_metrics below which genuinely cycles.
+from app.services.fair_value_band import (
+    DIVERGENCE_THRESHOLD,
+    METHOD_VERSION,
+    _shape_fair_value_band,
+    compute_divergence,
+)
+
+# Safe at module scope: instrument_analytics has no app-module imports at
+# top level (its insider_transactions read is function-lazy), so this does
+# NOT re-enter the risk_metrics -> scheduler -> thesis cycle that
+# forces the lazy import inside _assemble_context.
+from app.services.instrument_analytics import SCHEMA_VERSION as _IAR_SCHEMA_VERSION
+from app.services.llm_client import LLMClient, LLMClientPair, LLMCompletion
+from app.services.technical_analysis import derive_trend_signals
+
+# Safe at module scope: thesis_break is pure (stdlib only, no app imports) —
+# no cycle risk by construction (its module docstring pins that contract).
+from app.services.thesis_break import sanitize_writer_break_predicates
+from app.services.thesis_context_audit import hash_context, summarize_context
+
+# #2436 — the subject-identity rule moved out of this module so its
+# ``RULE_SET_VERSION`` can be a hash of the rule alone. Same pure-stdlib
+# contract as thesis_break above, so no cycle risk.
+from app.services.thesis_subject_identity import (
+    RULE_SET_VERSION as SUBJECT_IDENTITY_RULE_VERSION,
+)
+from app.services.thesis_subject_identity import (
+    memo_names_subject as _memo_names_subject,
+)
+from app.services.thesis_subject_identity import subject_is_checkable
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Advisory lock (K.3, moved from refresh_cascade in #2065) — session-level,
+# held across the LLM call
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def instrument_lock(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> Iterator[bool]:
+    """Session-level ``pg_try_advisory_lock`` keyed on instrument_id.
+
+    Yields True when acquired, False when a sibling session holds
+    the lock. Session-level (NOT xact-level) so the lock spans
+    ``generate_thesis``'s internal commit-before-Claude (#293).
+
+    Unlock in ``finally`` tolerates an INERROR connection by rolling
+    back and retrying once; if the retry still fails, the session
+    close will eventually release the advisory lock on Postgres'
+    side. The protected block's exception is never masked.
+    """
+    acquired_row = conn.execute("SELECT pg_try_advisory_lock(%s)", (instrument_id,)).fetchone()
+    acquired = bool(acquired_row[0]) if acquired_row else False
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                conn.execute("SELECT pg_advisory_unlock(%s)", (instrument_id,))
+            except psycopg.Error:
+                try:
+                    conn.rollback()
+                    conn.execute("SELECT pg_advisory_unlock(%s)", (instrument_id,))
+                except psycopg.Error:
+                    logger.exception(
+                        "instrument_lock: unlock failed for instrument_id=%d — session close will release",
+                        instrument_id,
+                    )
+
 
 # ---------------------------------------------------------------------------
 # Domain literals
@@ -57,6 +150,10 @@ StaleReason = Literal[
     "event_new_10k",
     "event_new_10q",
     "event_new_8k",
+    "break_fired",
+    "price_move",
+    "band_exit",
+    "news_spike",
 ]
 
 _VALID_THESIS_TYPES: frozenset[str] = frozenset({"compounder", "value", "turnaround", "speculative"})
@@ -70,12 +167,92 @@ _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
 }
 
 # ---------------------------------------------------------------------------
-# Claude model
+# Staleness v2 thresholds (#1988) — spec:
+# docs/specs/thesis/2026-07-16-thesis-staleness-v2.md
 # ---------------------------------------------------------------------------
 
-_MODEL = "claude-sonnet-4-6"
+# |move since mint| that marks a thesis stale. PROVISIONAL: derived from the
+# universe 30d distribution (~5.7% exceedance) because the 7-day-old corpus
+# has a degenerate own distribution — MUST be re-verified against the actual
+# fire rate ~30d post-ship (target ~2-8%/month; fvb R-retune precedent).
+_PRICE_MOVE_THRESHOLD = 0.30
+
+# Latest close older than this vs scan date → price rules NOT evaluated
+# (#2012 break-predicate freshness bound for price-derived inputs): a stale
+# close firing a regen would re-anchor the thesis on the same stale price.
+_PRICE_FRESHNESS_MAX_DAYS = 10
+
+# news_spike: 7d importance-mass rate >= ratio x prior-23d baseline rate,
+# with an absolute 7d-mass floor that kills tiny-baseline ratio explosions
+# (one story on a near-zero-news name is not a storm).
+_NEWS_SPIKE_RATIO = 3.0
+_NEWS_SPIKE_MASS_FLOOR = 2.0
+_NEWS_WINDOW_DAYS = 7
+_NEWS_BASELINE_DAYS = 23
+
+# ---------------------------------------------------------------------------
+# LLM call budgets + prompt version
+# ---------------------------------------------------------------------------
+
 _MAX_TOKENS_WRITER = 2048
-_MAX_TOKENS_CRITIC = 1024
+# 1024 length-failed live on IEP (2026-07-10, thesis stored without critic_json);
+# the #1987 context growth makes recurrence more likely. Local-first default
+# makes the cost delta negligible.
+_MAX_TOKENS_CRITIC = 2048
+
+# Stamped onto every stored thesis row (theses.prompt_version). Bump
+# whenever _WRITER_SYSTEM / _CRITIC_SYSTEM or the _assemble_context shape
+# changes — memos from different prompt versions are not comparable.
+# v3 (#2007): _WRITER_SYSTEM gains the availability-claim mirror rule
+# (never disclaim a block the context marks available, then cite its figures).
+# v4 (#2009 PR-B): _assemble_context gains the passive fair_value_band block
+# (deterministic bear/base/bull evidence); _WRITER_SYSTEM gains the matching
+# "You will be given" bullet + a passive grounding rule (band is the primary
+# valuation anchor when available+high quality; price_anchor/52w range remain
+# the fallback). Scoring and _validate_writer_output are untouched.
+# v5 (#2010): valuation scaffold — three-tier target procedure (band-primary /
+# derived-basis with shown arithmetic / justified abstention); buy stance
+# requires targets + zone when a price anchor exists (validator-enforced,
+# rides retry-once); break-condition authoring contract (single metric,
+# false-at-write-time, shares-outstanding denominator only); NEW optional
+# writer output field break_predicates — structured twins of prose conditions
+# in the #2012 closed vocabulary, soft-validated (never retry-fails), stored
+# in theses.break_predicates_json as a purely-additive recall channel for
+# the nightly break scan. Context shape unchanged. Re-gate round 2 (judge A
+# 0-4-7 loss vs v4 exposed three numeric-defect classes in round 1):
+# worked example abstracted to placeholders (the literal "12 x EPS 3.10 =
+# 37.20" leaked verbatim into a MSFT memo), derived arithmetic must END in a
+# per-share price + band sanity cross-check (a $52.8B P/S "target" shipped),
+# cited figures verbatim-or-show-inputs (fabricated 13.1% gross margin).
+# v6 (#2235): subject-identity anchor. v5's context expansion left the
+# instrument identity as one buried mid-payload field, and the writer
+# sporadically wrote the memo about a different company while citing the
+# subject's own figures (a GME memo about Yelp, quoting GME's 34.39% gross
+# margin verbatim) — 19 such memos on v5, zero on v1-v4. _build_writer_prompt
+# now states the subject ahead of the JSON, and _WRITER_SYSTEM opens its rule
+# list with a subject-identity rule. Second v5-only leak fixed here: v5
+# abstracted its worked example to placeholders to stop a literal
+# "12 x EPS 3.10 = 37.20" leaking, which traded example-leakage for
+# placeholder-leakage (46 memos containing "[Company] operates in the
+# [sector]") — an explicit no-placeholder rule now closes that. Context shape
+# and _validate_writer_output are unchanged.
+# v7 (#2431): the CONTEXT SHAPE changes and the delivery is fixed. v5 and v6
+# were never the whole story — the prompt had outgrown Ollama's default 4,096
+# window (measured 5,387/6,352/7,081 tokens min/median/max across 60
+# instruments) and was being truncated from the front, silently, on every
+# call. v6's subject anchor and no-placeholder rule were both placed in the
+# truncated region, which is why v6 scored 0 of 127 where v1-v4 scored 487 of
+# 487. ``llm_client.LOCAL_CONTEXT_WINDOW`` now sets num_ctx over the native
+# route (``/v1`` accepts the option and ignores it), with a pre-send refusal
+# and a post-send truncation check. Separately, ``prior_thesis`` no longer
+# carries ``memo_markdown``: it was the largest block AND the propagation
+# vector, feeding a wrong-company memo back in as the instrument's own prior
+# so the writer continued it. Bumped because the context shape changed —
+# memos from v6 and v7 are not comparable.
+_PROMPT_VERSION = "v7"
+
+# thesis_runs.trigger — matches the table CHECK in sql/218.
+RunTrigger = Literal["manual", "cascade", "scheduled"]
 
 # ---------------------------------------------------------------------------
 # Context caps
@@ -86,6 +263,10 @@ _MAX_FILING_EVENTS = 3
 _MAX_FUNDAMENTALS_SNAPSHOTS = 5  # latest + 4 prior
 _MAX_NEWS_EVENTS = 10
 _NEWS_LOOKBACK_DAYS = 30
+# 52w range window for the price anchor (#1987), measured back from the
+# LATEST close's price_date (not today) so a stale price series yields an
+# honest historical range rather than a shrunken one.
+_PRICE_ANCHOR_LOOKBACK_DAYS = 365
 
 # ---------------------------------------------------------------------------
 # Public result types
@@ -114,6 +295,11 @@ class StaleInstrument:
     instrument_id: int
     symbol: str
     reason: StaleReason
+    # #2071 — operator-facing magnitude for the data-driven v2 reasons
+    # (price_move / band_exit / news_spike; formats fixed in
+    # docs/specs/thesis/2026-07-16-thesis-staleness-v2.md). None for the
+    # cadence/event reasons, whose name is the whole story.
+    detail: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -134,18 +320,120 @@ def _to_float(val: object) -> float | None:
     output dict before persisting to the DB and returning in ThesisResult.
     Both sites must use the same conversion so the DB row and the returned
     struct are always consistent.
+
+    Non-finite floats (NaN / ±inf) map to None: an LLM can emit ``"nan"`` /
+    ``"inf"`` for a target field, and NaN silently defeats the #2007 ordering
+    guard (every ``>`` comparison against NaN is False) while persisting as a
+    non-numeric garbage target. Treat them as missing, consistently, at the one
+    coercion chokepoint both the guard and the INSERT share.
     """
     if val is None:
         return None
     try:
-        return float(val)  # type: ignore[arg-type]
+        result = float(val)  # type: ignore[arg-type]
     except TypeError, ValueError:
         return None
+    return result if math.isfinite(result) else None
 
 
 # ---------------------------------------------------------------------------
 # Stale detection
 # ---------------------------------------------------------------------------
+
+
+def _evaluable_prices(
+    close_now: float | None,
+    close_at_mint: float | None,
+    close_now_date: date | None,
+    today: date,
+) -> tuple[float, float] | None:
+    """Shared guard for the price-driven rules (#1988 price_move/band_exit):
+    returns the validated (close_now, close_at_mint) pair, or None.
+
+    Zero/negative closes are non-price sentinels (day-change spec) and a
+    latest close older than the freshness bound means the rules are NOT
+    EVALUATED — absent/stale inputs are absent triggers, never fires
+    (#1632 NULL-never-0). Returning the narrowed pair keeps the caller to
+    a single check (no duplicated None guards, no prod asserts).
+    """
+    if close_now is None or close_at_mint is None or close_now_date is None:
+        return None
+    if close_now <= 0 or close_at_mint <= 0:
+        return None
+    if (today - close_now_date).days > _PRICE_FRESHNESS_MAX_DAYS:
+        return None
+    return (close_now, close_at_mint)
+
+
+def _price_move_pct(close_now: float, close_at_mint: float) -> float | None:
+    """Signed move since mint when the price_move rule fires, else None.
+
+    Symmetric: a +30% melt-up invalidates a buy-zone as surely as a -30%
+    crash invalidates a bear floor. ``close_at_mint > 0`` is already
+    guaranteed by ``_evaluable_prices`` at the only call site, but the
+    guard is repeated here so the helper is safe standalone and the #2071
+    detail string consumes THIS return value (same single-source shape as
+    ``_news_spike_ratio``; PR #2082 review).
+    """
+    if close_at_mint <= 0:
+        return None
+    pct = (close_now - close_at_mint) / close_at_mint
+    return pct if abs(pct) >= _PRICE_MOVE_THRESHOLD else None
+
+
+def _price_move_fired(close_now: float, close_at_mint: float) -> bool:
+    """Boolean face of ``_price_move_pct`` (kept for the table tests)."""
+    return _price_move_pct(close_now, close_at_mint) is not None
+
+
+def _band_exit_fired(
+    close_now: float,
+    close_at_mint: float,
+    bear: float | None,
+    bull: float | None,
+) -> bool:
+    """Price crossed OUTSIDE [bear, bull] having minted INSIDE it.
+
+    Arm-at-mint is #2012 Design 5 verbatim: 15/60 banded theses were
+    already outside their band at mint (writers price bands around, not
+    on, the spot) — that class is premise and must never fire. No state
+    table: the mint-time close is deterministic history, so armed
+    (minted-inside) is re-derived on every scan.
+    """
+    if bear is None or bull is None:
+        return False
+    minted_inside = bear <= close_at_mint <= bull
+    now_outside = not (bear <= close_now <= bull)
+    return minted_inside and now_outside
+
+
+def _news_spike_ratio(m7: float, m30: float) -> float | None:
+    """The fired spike ratio (>= ``_NEWS_SPIKE_RATIO``), or None when the
+    predicate does not fire.
+
+    Trailing-7d importance-mass rate vs the prior-23d baseline rate, over
+    an absolute mass floor. Baseline-less names (baseline <= 0 — includes
+    a spike fully concentrated in the 7d window, m30 == m7) are not
+    evaluated, so the division is guarded by construction; the #2071
+    detail string consumes THIS return value, never re-derives it (PR
+    #2082 review — fire decision and reported ratio cannot desync).
+
+    Self-rearming without state: stored importance scores are static but
+    window membership rolls a spike's stories out of the 7d window and
+    into the baseline, so the ratio subsides ~a week after the storm.
+    """
+    baseline = (m30 - m7) / _NEWS_BASELINE_DAYS
+    if baseline <= 0:
+        return None
+    if m7 < _NEWS_SPIKE_MASS_FLOOR:
+        return None
+    ratio = (m7 / _NEWS_WINDOW_DAYS) / baseline
+    return ratio if ratio >= _NEWS_SPIKE_RATIO else None
+
+
+def _news_spike_fired(m7: float, m30: float) -> bool:
+    """Boolean face of ``_news_spike_ratio`` (kept for the table tests)."""
+    return _news_spike_ratio(m7, m30) is not None
 
 
 def find_stale_instruments(
@@ -165,7 +453,18 @@ def find_stale_instruments(
       3. filing_events row newer than latest thesis, filing_type in
          ('10-K', '10-K/A', '10-Q', '10-Q/A', '8-K', '8-K/A') → stale
          (reason: "event_new_{10k,10q,8k}")
-      4. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
+      4. a thesis_break_events row exists for the LATEST thesis (#2012,
+         thesis_id equality — never a timestamp filter) → stale
+         (reason: "break_fired")
+      5. |close_now − close_at_mint| / close_at_mint >= 0.30 (#1988,
+         both closes > 0, latest close <= 10d old) → stale
+         (reason: "price_move")
+      6. close crossed OUTSIDE [bear, bull] having minted INSIDE it
+         (#1988 arm-at-mint; the minted-outside class is premise and
+         never fires) → stale (reason: "band_exit")
+      7. trailing-7d importance mass rate >= 3x the prior-23d baseline
+         rate AND 7d mass >= 2.0 (#1988) → stale (reason: "news_spike")
+      8. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
 
     Every returned instrument must have ``coverage.filings_status =
     'analysable'`` (#268 Chunk J gate). Non-analysable instruments are
@@ -212,6 +511,14 @@ def find_stale_instruments(
     # newest row is an 8-K (audit-trail lie). LATERAL scope + explicit
     # ORDER BY created_at DESC, filing_event_id DESC resolves ties
     # deterministically.
+    #
+    # #1988: the latest thesis is itself a LATERAL row (API tiebreak
+    # order — same latest-by-created_at the old MAX aggregate selected)
+    # so the price rules can read ITS bear/bull and mint date, and the
+    # break-event EXISTS keys off lt.thesis_id directly. pm/pn are the
+    # #2014 at-or-before close reads; nm aggregates 30d importance mass
+    # with importance_score IS NULL rows excluded EXPLICITLY (a
+    # treatment decision, not an implicit SUM null-skip).
     query = (
         psql.SQL(
             """
@@ -219,12 +526,29 @@ def find_stale_instruments(
             i.instrument_id,
             i.symbol,
             c.review_frequency,
-            MAX(t.created_at)                        AS latest_thesis_at,
+            lt.created_at                            AS latest_thesis_at,
             le.created_at                            AS latest_event_created_at,
-            le.filing_type                           AS latest_event_filing_type
+            le.filing_type                           AS latest_event_filing_type,
+            EXISTS (
+                SELECT 1 FROM thesis_break_events e
+                WHERE e.thesis_id = lt.thesis_id
+            )                                        AS break_fired,
+            lt.bear_value,
+            lt.bull_value,
+            pn.close                                 AS close_now,
+            pn.price_date                            AS close_now_date,
+            pm.close                                 AS close_at_mint,
+            nm.m7,
+            nm.m30
         FROM instruments i
         JOIN coverage c ON c.instrument_id = i.instrument_id
-        LEFT JOIN theses t ON t.instrument_id = i.instrument_id
+        LEFT JOIN LATERAL (
+            SELECT t.thesis_id, t.created_at, t.bear_value, t.bull_value
+            FROM theses t
+            WHERE t.instrument_id = i.instrument_id
+            ORDER BY t.created_at DESC, t.thesis_version DESC, t.thesis_id DESC
+            LIMIT 1
+        ) lt ON TRUE
         LEFT JOIN LATERAL (
             SELECT fe.created_at, fe.filing_type
             FROM filing_events fe
@@ -235,29 +559,69 @@ def find_stale_instruments(
             ORDER BY fe.created_at DESC, fe.filing_event_id DESC
             LIMIT 1
         ) le ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT p.close, p.price_date
+            FROM price_daily p
+            WHERE p.instrument_id = i.instrument_id
+            ORDER BY p.price_date DESC
+            LIMIT 1
+        ) pn ON TRUE
+        LEFT JOIN LATERAL (
+            -- Mint-close read: SQL mirror of
+            -- thesis_dq_audit.close_row_at_or_before (#2070 — that helper
+            -- is the semantic source for close-at-or-before reads).
+            SELECT p.close
+            FROM price_daily p
+            WHERE p.instrument_id = i.instrument_id
+              AND p.price_date <= lt.created_at::date
+            ORDER BY p.price_date DESC
+            LIMIT 1
+        ) pm ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT
+                COALESCE(SUM(n.importance_score)
+                    FILTER (WHERE n.event_time >= NOW() - INTERVAL '7 days'), 0) AS m7,
+                COALESCE(SUM(n.importance_score), 0)                             AS m30
+            FROM news_events n
+            WHERE n.instrument_id = i.instrument_id
+              AND n.event_time >= NOW() - INTERVAL '30 days'
+              AND n.event_time <= NOW()
+              AND n.importance_score IS NOT NULL
+        ) nm ON TRUE
         WHERE """
         )
         + where_block
         + psql.SQL(
             """
-        GROUP BY i.instrument_id, i.symbol, c.review_frequency,
-                 le.created_at, le.filing_type
         ORDER BY i.symbol
         """
         )
     )
-    rows = conn.execute(query, params).fetchall()
+    # #2074 — dict_row: rows are keyed by the SELECT aliases, so a column
+    # addition can never silently shift positional reads (the #1988
+    # _V2_TAIL churn class) or break mocks that name their columns.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(query, params)
+        rows = cur.fetchall()
 
     now = _utcnow()
     stale: list[StaleInstrument] = []
 
     for row in rows:
-        instrument_id: int = row[0]
-        symbol: str = row[1]
-        review_frequency: str | None = row[2]
-        latest_thesis_at: datetime | None = row[3]
-        latest_event_created_at: datetime | None = row[4]
-        latest_event_filing_type: str | None = row[5]
+        instrument_id: int = row["instrument_id"]
+        symbol: str = row["symbol"]
+        review_frequency: str | None = row["review_frequency"]
+        latest_thesis_at: datetime | None = row["latest_thesis_at"]
+        latest_event_created_at: datetime | None = row["latest_event_created_at"]
+        latest_event_filing_type: str | None = row["latest_event_filing_type"]
+        break_fired: bool = bool(row["break_fired"])
+        bear_value = _to_float(row["bear_value"])
+        bull_value = _to_float(row["bull_value"])
+        close_now = _to_float(row["close_now"])
+        close_now_date: date | None = row["close_now_date"]
+        close_at_mint = _to_float(row["close_at_mint"])
+        m7 = _to_float(row["m7"]) or 0.0
+        m30 = _to_float(row["m30"]) or 0.0
 
         if latest_thesis_at is None:
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="no_thesis"))
@@ -282,6 +646,70 @@ def find_stale_instruments(
         ):
             reason = _event_reason_for_form(latest_event_filing_type)
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason=reason))
+            continue
+
+        # Rule 5 (#2012): a thesis_break_events row exists for the LATEST
+        # thesis — a machine-checkable break condition transitioned
+        # false→true after arming. Keyed by thesis_id EQUALITY in the
+        # SELECT above (never a fired_at timestamp filter: a delayed scan
+        # can stamp an OLD thesis's event after its replacement was
+        # created, which would re-stale the new thesis forever). Ordered
+        # after the filing-event rules (a break never masks a 10-K/10-Q
+        # trigger) but BEFORE the generic cadence rule — a fired break is
+        # the more specific reason and must not be shadowed by mere age
+        # (Codex ckpt-2); every path regenerates either way.
+        if break_fired:
+            stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="break_fired"))
+            continue
+
+        # Rules 5-6 (#1988): structural price triggers — data-driven regen
+        # between the sharper break_fired signal and the cadence catch-all.
+        # Both share the price-input guards (positive closes + freshness);
+        # a name that is 30%-moved AND outside its band reports price_move
+        # (first match wins, existing contract). Self-rearming: firing
+        # regenerates the thesis -> new created_at -> new mint baseline.
+        prices = _evaluable_prices(close_now, close_at_mint, close_now_date, now.date())
+        if prices is not None:
+            now_px, mint_px = prices
+            if (move_pct := _price_move_pct(now_px, mint_px)) is not None:
+                stale.append(
+                    StaleInstrument(
+                        instrument_id=instrument_id,
+                        symbol=symbol,
+                        reason="price_move",
+                        detail=f"close {now_px:g} vs {mint_px:g} at mint ({move_pct:+.0%})",
+                    )
+                )
+                continue
+            if (
+                bear_value is not None
+                and bull_value is not None
+                and _band_exit_fired(now_px, mint_px, bear_value, bull_value)
+            ):
+                stale.append(
+                    StaleInstrument(
+                        instrument_id=instrument_id,
+                        symbol=symbol,
+                        reason="band_exit",
+                        detail=(
+                            f"close {now_px:g} outside [{bear_value:g}, {bull_value:g}] (minted inside at {mint_px:g})"
+                        ),
+                    )
+                )
+                continue
+
+        # Rule 7 (#1988): news storm on a name with a real news baseline.
+        # Independent of price evaluability — a stale price series must not
+        # mask a news trigger.
+        if (spike_ratio := _news_spike_ratio(m7, m30)) is not None:
+            stale.append(
+                StaleInstrument(
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    reason="news_spike",
+                    detail=f"7d news mass {m7:.1f} at {spike_ratio:.1f}x 30d baseline",
+                )
+            )
             continue
 
         threshold = latest_thesis_at + timedelta(days=_REVIEW_FREQUENCY_DAYS[review_frequency])
@@ -362,6 +790,230 @@ def _shape_risk_metrics(
             }
             for r in rows
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# #1987 context blocks — pure row-shaping (spec:
+# docs/specs/thesis/2026-07-10-thesis-context-enrichment.md). All four follow
+# the #1632 evidence discipline: statuses verbatim, as-of stamps, missing data
+# stays missing (None, never a fabricated zero).
+# ---------------------------------------------------------------------------
+
+# Column order of the shared price_daily latest-row SELECT (13 cols), consumed
+# by _shape_price_anchor (0-6) and _shape_ta_state (0, 7-12):
+#   0 close, 1 price_date, 2 return_1w, 3 return_1m, 4 return_3m,
+#   5 return_6m, 6 return_1y, 7 sma_50, 8 sma_200, 9 rsi_14,
+#   10 macd_histogram, 11 atr_14, 12 volatility_30d
+
+
+def _shape_price_anchor(
+    price_row: tuple[object, ...] | None,
+    agg_row: tuple[object, ...] | None,
+    currency: object,
+) -> dict[str, object] | None:
+    """Block A: latest native-currency close + 52w range + persisted returns.
+
+    agg_row = (high_52w, low_52w, window_days) over the trailing
+    _PRICE_ANCHOR_LOOKBACK_DAYS from the latest price_date. No price history
+    -> None (never a fabricated anchor); NULL returns stay None.
+    """
+    if price_row is None:
+        return None
+    high_52w = low_52w = None
+    window_days = 0
+    if agg_row is not None:
+        high_52w = _to_float(agg_row[0])
+        low_52w = _to_float(agg_row[1])
+        window_count = _to_float(agg_row[2])
+        window_days = int(window_count) if window_count is not None else 0
+    return {
+        "close": _to_float(price_row[0]),
+        "price_date": str(price_row[1]) if price_row[1] is not None else None,
+        "currency": currency,
+        "high_52w": high_52w,
+        "low_52w": low_52w,
+        "window_days_52w": window_days,
+        "return_1w": _to_float(price_row[2]),
+        "return_1m": _to_float(price_row[3]),
+        "return_3m": _to_float(price_row[4]),
+        "return_6m": _to_float(price_row[5]),
+        "return_1y": _to_float(price_row[6]),
+    }
+
+
+# Column order of the instrument_valuation SELECT (18 cols):
+#   0 current_price, 1 price_as_of, 2 market_cap_live, 3 enterprise_value,
+#   4 pe_ratio, 5 pb_ratio, 6 p_fcf_ratio, 7 fcf_yield, 8 ev_revenue,
+#   9 ev_ebitda, 10 debt_equity_ratio, 11 net_margin, 12 gross_margin,
+#   13 operating_margin, 14 roa, 15 roe, 16 dividend_yield, 17 is_complete_ttm
+_VALUATION_FIELDS: tuple[str, ...] = (
+    "current_price",
+    "price_as_of",
+    "market_cap_live",
+    "enterprise_value",
+    "pe_ratio",
+    "pb_ratio",
+    "p_fcf_ratio",
+    "fcf_yield",
+    "ev_revenue",
+    "ev_ebitda",
+    "debt_equity_ratio",
+    "net_margin",
+    "gross_margin",
+    "operating_margin",
+    "roa",
+    "roe",
+    "dividend_yield",
+    "is_complete_ttm",
+)
+
+
+def _shape_valuation(row: tuple[object, ...] | None) -> dict[str, object]:
+    """Block B: instrument_valuation row, statused absence.
+
+    The view is quotes-gated (sql/201 `priced` CTE reads FROM quotes; #1857
+    class) so a missing row is STRUCTURAL for most of the universe — statused,
+    not an error. #1664 dual-class NULLs pass through as None (honest
+    suppression).
+    """
+    if row is None:
+        return {"available": False, "reason": "no_live_quote"}
+    shaped: dict[str, object] = {"available": True}
+    for idx, field_name in enumerate(_VALUATION_FIELDS):
+        val = row[idx]
+        if field_name == "price_as_of":
+            shaped[field_name] = val.isoformat() if isinstance(val, (datetime, date)) else None
+        elif field_name == "is_complete_ttm":
+            shaped[field_name] = bool(val) if val is not None else None
+        else:
+            shaped[field_name] = _to_float(val)
+    return shaped
+
+
+def _signal_entry_ok(entry: object) -> bool:
+    """A positioning entry is forwardable iff it is a dict whose `signal` is
+    None or a number in [0, 1] — grounded by the 2026-07-10 full-population
+    shape scan (3,906/3,906 conforming). Anything else fails closed."""
+    if not isinstance(entry, dict):
+        return False
+    sig = entry.get("signal")
+    if sig is None:
+        return True
+    # bool is an int subclass — {"signal": true} is malformed, not 1.0.
+    if isinstance(sig, bool):
+        return False
+    return isinstance(sig, (int, float)) and 0.0 <= float(sig) <= 1.0
+
+
+_MALFORMED: dict[str, object] = {"reason": "malformed"}
+
+
+def _shape_analytics_evidence(
+    analytics: object,
+    scored_at: datetime | None,
+    model_version: object,
+) -> dict[str, object] | None:
+    """Block C: latest scores.analytics_json (#1823 iar_v1) shaped compact.
+
+    None analytics (scores row exists, analytics_json NULL) -> None (absent
+    evidence). Present-but-non-dict -> {"reason": "malformed"} — the
+    absent-vs-malformed distinction is deliberate (spec §Block C). Fail-closed
+    per sub-block: unexpected types are dropped to {"reason": "malformed"},
+    never forwarded. Drops piotroski.components + peer families' `absolute`
+    (token noise); positioning passes verbatim (`asof` optional upstream —
+    818/3,906 undated insider signals on dev).
+    """
+    if analytics is None:
+        return None
+    if not isinstance(analytics, dict):
+        return dict(_MALFORMED)
+    schema = analytics.get("schema")
+    if schema != _IAR_SCHEMA_VERSION:
+        # A future iar_v2 must not be silently compacted under v1
+        # assumptions — surface it as unsupported (absent evidence to the
+        # writer) until this shaper is deliberately migrated (bot review
+        # NITPICK, PR #1999).
+        return {"reason": "unsupported_schema", "schema": schema}
+
+    out: dict[str, object] = {
+        "schema": analytics.get("schema"),
+        "as_of": scored_at.isoformat() if scored_at is not None else None,
+        "model_version": model_version,
+    }
+
+    piotroski = analytics.get("piotroski")
+    if isinstance(piotroski, dict):
+        out["piotroski"] = {
+            k: piotroski.get(k) for k in ("score", "band", "components_available", "suppressed", "reason")
+        }
+    else:
+        out["piotroski"] = dict(_MALFORMED)
+
+    altman = analytics.get("altman_z")
+    out["altman_z"] = dict(altman) if isinstance(altman, dict) else dict(_MALFORMED)
+
+    positioning = analytics.get("positioning")
+    if isinstance(positioning, dict):
+        out["positioning"] = {
+            key: (dict(entry) if _signal_entry_ok(entry) else dict(_MALFORMED)) for key, entry in positioning.items()
+        }
+    else:
+        out["positioning"] = dict(_MALFORMED)
+
+    peer = analytics.get("peer_grade")
+    if isinstance(peer, dict):
+        # `families` may be legitimately EMPTY ({} — absolute_only rows
+        # persisted outside a run cohort) but must be a dict; a non-dict
+        # families or family entry is corruption, not missing evidence —
+        # mark it malformed rather than silently degrading to {} (Codex
+        # ckpt-2, 2026-07-10).
+        families = peer.get("families")
+        if isinstance(families, dict):
+            shaped_families: dict[str, object] = {
+                fam: (
+                    {"hybrid": grades.get("hybrid"), "percentile": grades.get("percentile")}
+                    if isinstance(grades, dict)
+                    else dict(_MALFORMED)
+                )
+                for fam, grades in families.items()
+            }
+            out["peer_grade"] = {
+                "peer_key": peer.get("peer_key"),
+                "peer_n": peer.get("peer_n"),
+                "basis": peer.get("basis"),
+                "families": shaped_families,
+            }
+        else:
+            out["peer_grade"] = dict(_MALFORMED)
+    else:
+        out["peer_grade"] = dict(_MALFORMED)
+
+    return out
+
+
+def _shape_ta_state(price_row: tuple[object, ...] | None) -> dict[str, object] | None:
+    """Block D: latest persisted TA indicators + derived-at-read signals.
+
+    The trend signals (`price_vs_sma200`, `sma_50_200_regime`) come from
+    ``technical_analysis.derive_trend_signals`` — the single source (#1989:
+    read-derive from stored SMAs, no extra price_daily columns). The context
+    keys are stable — the thesis prompt and eval fixtures depend on them.
+    """
+    if price_row is None:
+        return None
+    close = _to_float(price_row[0])
+    sma_50 = _to_float(price_row[7])
+    sma_200 = _to_float(price_row[8])
+
+    return {
+        "sma_50": sma_50,
+        "sma_200": sma_200,
+        "rsi_14": _to_float(price_row[9]),
+        "macd_histogram": _to_float(price_row[10]),
+        "atr_14": _to_float(price_row[11]),
+        "volatility_30d": _to_float(price_row[12]),
+        **derive_trend_signals(close, sma_50, sma_200),
     }
 
 
@@ -449,11 +1101,23 @@ def _assemble_context(
     ]
 
     # Prior thesis: latest 1
+    #
+    # ⚠⚠ #2431 — ``memo_markdown`` IS DELIBERATELY NOT SELECTED. It was the
+    # single largest context block (~1,005 tokens measured) AND the propagation
+    # vector for the wrong-company defect: once one memo named the wrong
+    # company, that prose was fed back in as this instrument's own prior thesis
+    # and the writer continued it. GME v12-v17 are all about Tesla for exactly
+    # this reason — each generation inherited the last. Feeding a model its own
+    # unvalidated prose back as evidence makes any writer error self-sustaining,
+    # and the bigger prior then crowds the real evidence out of the window.
+    #
+    # The structured fields below carry the continuity this block exists for
+    # (what the last thesis CONCLUDED); the prose carried only how it said it.
     prior_row = conn.execute(
         """
         SELECT thesis_version, thesis_type, stance, confidence_score,
                buy_zone_low, buy_zone_high, base_value, bull_value, bear_value,
-               break_conditions_json, memo_markdown, created_at
+               break_conditions_json, created_at
         FROM theses
         WHERE instrument_id = %(id)s
         ORDER BY thesis_version DESC
@@ -474,8 +1138,7 @@ def _assemble_context(
             "bull_value": _to_float(prior_row[7]),
             "bear_value": _to_float(prior_row[8]),
             "break_conditions": prior_row[9],
-            "memo_markdown": prior_row[10],
-            "created_at": prior_row[11].isoformat() if prior_row[11] else None,
+            "created_at": prior_row[10].isoformat() if prior_row[10] else None,
         }
 
     # Instrument metadata
@@ -497,8 +1160,8 @@ def _assemble_context(
 
     # Realized-risk metrics (#1632): persisted, versioned, quality-flagged
     # risk_v1 scalars per window as structured evidence for the writer + critic.
-    # Lazy import — risk_metrics pulls in app.workers.scheduler, which transitively
-    # imports this module (refresh_cascade); a module-level import would be a cycle.
+    # Lazy import — risk_metrics pulls in app.workers.scheduler, which
+    # imports this module directly; a module-level import would be a cycle.
     # By call time thesis is fully initialized, so the function-level import is safe
     # and keeps the version/window constants single-sourced (no magic-string dup).
     from app.services.risk_metrics import RISK_METRICS_VERSION, WINDOW_KEYS
@@ -526,6 +1189,94 @@ def _assemble_context(
     ).fetchall()
     risk_metrics = _shape_risk_metrics(risk_rows, RISK_METRICS_VERSION)
 
+    # #1987 Block A + D: one price_daily latest-row read serves both the
+    # price anchor and the TA state. Native currency close — matches the
+    # writer's targets-in-instrument-currency contract (#1845/#1906).
+    # Quotes are deliberately NOT read here (85 rows on dev; a second
+    # price source/currency would undermine the anchor contract).
+    price_row = conn.execute(
+        """
+        SELECT close, price_date, return_1w, return_1m, return_3m,
+               return_6m, return_1y, sma_50, sma_200, rsi_14,
+               macd_histogram, atr_14, volatility_30d
+        FROM price_daily
+        WHERE instrument_id = %(id)s
+          AND close IS NOT NULL
+        ORDER BY price_date DESC
+        LIMIT 1
+        """,
+        {"id": instrument_id},
+    ).fetchone()
+    agg_row: tuple[object, ...] | None = None
+    if price_row is not None and price_row[1] is not None:
+        # 52w window measured back from the LATEST price_date (not today)
+        # so a stale series yields an honest historical range.
+        agg_row = conn.execute(
+            """
+            SELECT MAX(COALESCE(high, close)) AS high_52w,
+                   MIN(COALESCE(low, close)) AS low_52w,
+                   COUNT(*) AS window_days
+            FROM price_daily
+            WHERE instrument_id = %(id)s
+              AND close IS NOT NULL
+              AND price_date >= %(cutoff)s
+            """,
+            {
+                "id": instrument_id,
+                "cutoff": price_row[1] - timedelta(days=_PRICE_ANCHOR_LOOKBACK_DAYS),
+            },
+        ).fetchone()
+    price_anchor = _shape_price_anchor(price_row, agg_row, instrument.get("currency"))
+    ta_state = _shape_ta_state(price_row)
+
+    # #1987 Block B: quotes-gated view (#1857 class) — absence is
+    # structural for most of the universe, statused not errored.
+    val_row = conn.execute(
+        """
+        SELECT current_price, price_as_of, market_cap_live, enterprise_value,
+               pe_ratio, pb_ratio, p_fcf_ratio, fcf_yield, ev_revenue,
+               ev_ebitda, debt_equity_ratio, net_margin, gross_margin,
+               operating_margin, roa, roe, dividend_yield, is_complete_ttm
+        FROM instrument_valuation
+        WHERE instrument_id = %(id)s
+        """,
+        {"id": instrument_id},
+    ).fetchone()
+    valuation = _shape_valuation(val_row)
+
+    # #2009 PR-B: passive fair-value-band evidence (fvb_v2). PR-A write-through
+    # only; this block is READ-ONLY here — no scoring/gating touch. Absence is
+    # structural for most of the universe (thin cohort, no fundamentals, stale
+    # price) and is statused, not errored — same discipline as `valuation`.
+    # Column order MUST match _shape_fair_value_band's unpack order exactly.
+    band_row = conn.execute(
+        """
+        SELECT bear_value, base_value, bull_value, quality_status, reason,
+               as_of_date, ttm_end, price_as_of, basis_json
+        FROM fair_value_band_current
+        WHERE instrument_id = %(id)s AND method_version = %(mv)s
+        """,
+        {"id": instrument_id, "mv": METHOD_VERSION},
+    ).fetchone()
+    fair_value_band = _shape_fair_value_band(band_row)
+
+    # #1987 Block C: latest persisted IAR evidence (#1823). Refreshes only
+    # on compute_rankings — staleness is allowed and stamped (scored_at),
+    # mirroring risk_v1's as_of_date discipline.
+    score_row = conn.execute(
+        """
+        SELECT analytics_json, scored_at, model_version
+        FROM scores
+        WHERE instrument_id = %(id)s
+        ORDER BY scored_at DESC
+        LIMIT 1
+        """,
+        {"id": instrument_id},
+    ).fetchone()
+    analytics_evidence: dict[str, object] | None = None
+    if score_row is not None:
+        analytics_evidence = _shape_analytics_evidence(score_row[0], score_row[1], score_row[2])
+
     # #539: earnings_events + analyst_estimates retired with FMP. The
     # writer prompt's optional contextual fields fall back to None;
     # the writer system prompt already tolerates absent enrichment.
@@ -536,6 +1287,11 @@ def _assemble_context(
         "news": news,
         "prior_thesis": prior_thesis,
         "risk_metrics": risk_metrics,
+        "price_anchor": price_anchor,
+        "valuation": valuation,
+        "fair_value_band": fair_value_band,
+        "analytics_evidence": analytics_evidence,
+        "ta_state": ta_state,
         "earnings_history": [],
         "analyst_estimates": None,
     }
@@ -560,6 +1316,38 @@ You will be given a research context including:
   not percent); drawdown / var_5 / worst_day are SIGNED losses (negative). Basis
   is PRICE-RETURN (no dividends) — do not over-read CAGR for high-yield names.
   May be null when no metrics are computed.
+- `price_anchor`: latest persisted daily close in the instrument's NATIVE
+  currency (the same currency your per-share targets must use), its as-of
+  date (`price_date` — may lag; treat a stale anchor as approximate), the
+  trailing-52-week high/low with the observed window size
+  (`window_days_52w` — a small window means a short history; treat the
+  range as partial), and persisted simple returns (1w/1m/3m/6m/1y,
+  fractions). Null when no price history exists.
+- `valuation`: fundamentals-derived multiples (P/E, P/B, P/FCF, FCF yield,
+  EV/revenue, EV/EBITDA, margins, ROA/ROE, dividend yield) with their own
+  `price_as_of`. `available: false` with a reason means the surface is
+  structurally absent for this instrument — not a data error. Null fields
+  inside an available row are honest gaps (e.g. dual-class suppression) —
+  never invent multiples.
+- `analytics_evidence`: quality + positioning evidence — Piotroski F
+  (score/band), Altman Z (z/band), positioning signals (insider net 90d,
+  institutional 13F QoQ, short interest) and a sector peer grade — stamped
+  `as_of` (the scoring-run date; may lag — treat stale stamps as
+  approximate). `signal` fields are 0-1 normalized (higher = more
+  supportive of a long). A positioning entry without `asof` is undated —
+  cite it only as approximate. Any sub-block with `reason: "malformed"` is
+  absent evidence.
+- `ta_state`: latest persisted technical indicators (SMA 50/200, RSI-14,
+  MACD histogram, ATR-14, 30d volatility) plus `price_vs_sma200` and
+  `sma_50_200_regime`. The regime is the CURRENT 50d-vs-200d SMA relation
+  ("golden" = 50d above 200d), NOT a recent crossover event. Null
+  indicators mean insufficient history.
+- `fair_value_band`: deterministic valuation-band evidence — mechanically
+  synthesized bear/base/bull per-share values from peer + own-history
+  multiples, with a `quality_status` (high/medium/low) and `as_of_date`.
+  `available: false` with a `reason` (e.g. `thin_cohort`, `stale_price`,
+  `no_multiple`) means the surface is structurally absent for this
+  instrument — most of the universe — not a data error.
 
 Produce a JSON object with EXACTLY these fields:
 
@@ -573,16 +1361,40 @@ Produce a JSON object with EXACTLY these fields:
   "bull_value": <float or null>,
   "bear_value": <float or null>,
   "break_conditions": ["<condition 1>", "<condition 2>", ...],
+  "break_predicates": [
+    {"condition_index": <int>, "metric": "<metric>", "op": "<" or ">", "threshold": <float or null>}
+  ],
   "memo_markdown": "<full investment memo in markdown>"
 }
 
 Rules:
+- SUBJECT IDENTITY. The memo is about ONE company: the instrument named on the
+  SUBJECT line above the context, which is the same company as the `instrument`
+  block's `symbol` / `company_name`. Name that company explicitly in the memo's
+  first sentence. Never write the memo about a different company — every
+  figure in the context describes the SUBJECT, so a memo naming anyone else
+  misattributes real financial data. Peers, competitors and the benchmark may
+  be cited only as explicit comparisons ("versus <peer>"), never as the
+  subject.
+- NO PLACEHOLDERS in memo_markdown. Every slot carries an actual value from
+  THIS context. Never emit a bracketed stand-in — no "[Company]", "[sector]",
+  "[X]", "<multiple>", "<peer>". The angle-bracket forms in this prompt are
+  schema notation describing what to produce; they are not text to copy.
 - thesis_type must be one of: compounder, value, turnaround, speculative
 - stance must be one of: buy, hold, watch, avoid
 - confidence_score in [0.0, 1.0] — higher means more conviction
-- buy_zone_low/high: only populate when stance is "buy"; null otherwise
-- base/bull/bear_value: per-share price targets in the instrument currency; null if insufficient data
-- break_conditions: list of concrete, specific events that would invalidate the thesis
+- buy_zone_low/high: only populate when stance is "buy"; null otherwise.
+  A "buy" stance with `price_anchor` present MUST carry base_value AND both
+  buy-zone bounds — a buy with no entry band is not actionable and will be
+  rejected.
+- base/bull/bear_value: per-share price targets in the instrument currency.
+  Produce them by the valuation procedure below; null only under its
+  abstention rule.
+- break_conditions: list of concrete, specific events that would invalidate
+  the thesis, written under the authoring contract below.
+- break_predicates: structured twins of break_conditions entries that map
+  onto the machine-checkable vocabulary (rules below). Omit the field, or
+  emit [], when nothing maps.
 - memo_markdown: full structured memo covering: business quality, key financials, recent news
   impact, valuation, risks, stance rationale. Min 3 paragraphs.
 - Use `risk_metrics` to ground the risk section: deep max drawdown, high beta,
@@ -591,13 +1403,110 @@ Rules:
   number (a `benchmark_missing` beta is absent, not 0; a `partial_window` CAGR
   is provisional). When you cite a risk figure, name its {window_key,
   as_of_date, metric_version} so the claim stays reproducible.
+- Sanity-check buy_zone_low/high and base/bull/bear_value against
+  `price_anchor.close` and the 52-week range. State the implied
+  upside/downside from the current price to base_value explicitly in the
+  memo. A "buy" stance whose buy zone lies wholly above the current price,
+  or targets far outside the 52-week range, must be corrected or explicitly
+  justified in the memo.
+- Do NOT mechanically anchor targets to the current price — the anchor
+  grounds your numbers; valuation judgement produces them.
+- When `price_anchor` is null: leave buy_zone_low/high null regardless of
+  stance (an entry band is meaningless without a market price), and emit
+  base/bull/bear_value only if fundamentals give a defensible per-share
+  basis.
+- Valuation procedure — produce bear/base/bull in this priority order:
+  1. `fair_value_band` available AND `quality_status` `high`: it is your
+     PRIMARY valuation anchor — ground bear/base/bull against it and explain
+     any large gap in the memo; `price_anchor.close` and the 52-week range
+     are fallback grounding in that case, not a second "justify if outside"
+     test. (`medium`/`low` bands are weak evidence — fall to tier 2.)
+  2. Otherwise DERIVE the targets from ONE stated basis whose inputs the
+     context actually supplies:
+     - a multiple × `fundamentals` `eps` (per-share), or
+     - a multiple × `fundamentals` `book_value` (per-share), or
+     - re-rating arithmetic: `valuation.current_price` × (your target
+       multiple / the context's current multiple), using a non-null ratio
+       from `valuation` (pe_ratio, pb_ratio, p_fcf_ratio, ev_ebitda, ...).
+     Justify the multiple you chose (own history or peer judgement) and SHOW
+     THE ARITHMETIC in the memo's valuation section, in the form
+     "base = <your multiple> x EPS <the eps from THIS context> = <product>"
+     — computed from THIS context's numbers, never illustrative ones.
+     Derive bear/bull from the SAME basis
+     under stated downside/upside assumptions — never copy context landmarks
+     (52-week high/low, book value) into target slots. NEVER derive
+     per-share targets from absolute-dollar fields (`fcf`, `revenue_ttm`,
+     `cash`, `debt`): share count is not in the context, so any such
+     per-share figure would be fabricated. Your arithmetic must END in a
+     per-share price comparable to `price_anchor.close`; if it produces a
+     $B-scale figure (a market cap, a revenue) the basis is invalid —
+     discard it, do not write it into the memo. When a `fair_value_band` is
+     present at ANY quality, sanity-check your derived base against the
+     band's base/bull — an order-of-magnitude disagreement means your
+     arithmetic is wrong, not the band.
+  3. Only when NO basis has its inputs (no eps, no book_value, no usable
+     ratio+price): null targets are allowed, but the memo MUST then contain
+     an explicit abstention line naming the missing input, e.g.
+     "No per-share targets: eps and book_value absent". Silent null targets
+     are not valid output.
+- break_conditions authoring contract (each condition is machine-checked
+  nightly — write them to be checkable):
+  - ONE metric, ONE direction, ONE numeric threshold per condition. (Regime
+    conditions — price vs the 200-day SMA, 50-day vs 200-day SMA — carry no
+    threshold.) Each must be checkable on a single scan: NO composites
+    ("and"/"or"), NO duration or persistence qualifiers ("for 2+ weeks",
+    "sustained"), NO deadlines ("within 6 months", "fails to achieve").
+  - Every condition must be FALSE at write time. A break is a future
+    transition, not a restatement of the present — check the current values
+    in `analytics_evidence` (Altman Z, short interest) and `ta_state` (RSI,
+    SMA regime) first; if the condition already holds today it is your
+    premise, and belongs in the memo, not in break_conditions.
+  - Short interest conditions: denominate ONLY as a percent "of shares
+    outstanding". Float is not in the research context and cannot be
+    checked — never write "of float".
+  - When a condition maps onto the machine vocabulary, ALSO emit a
+    structured twin in `break_predicates`: metric one of [altman_z, rsi_14,
+    short_interest_pct_shares_out, short_interest_days_to_cover,
+    short_interest_change_pct, price_vs_sma200, sma_50_vs_sma_200]; op "<"
+    or ">"; threshold a number — null exactly for the two regime metrics
+    (price_vs_sma200, sma_50_vs_sma_200); condition_index = the 0-based
+    index of the prose condition it mirrors. At most one twin per prose
+    condition. Conditions outside the vocabulary (filing events, guidance
+    cuts, competitive losses) are still good break conditions — they simply
+    get no twin.
+- Every figure you cite must either be copied VERBATIM (digit-for-digit)
+  from the context, or be a derived number whose inputs are shown inline
+  (e.g. "price 390.10 vs 52w high 524.00 = 25.5% below"). Never state a
+  rounded or recalled approximation as if it were a context figure.
+- Data-availability language MUST mirror the block status fields verbatim
+  (#1632 evidence discipline). Never state a block is unavailable, missing, or
+  absent when its `available`/status field marks it present. When a block IS
+  unavailable or its status is non-`ok`, do not cite figures drawn from it —
+  omit the number or name the gap explicitly. Cited figures and availability
+  claims must both agree with the block statuses, never with each other.
 - Separate facts from judgement. Be explicit about what must go right.
 - Respond with ONLY valid JSON. No explanation outside the JSON object.
 """
 
 
 def _build_writer_prompt(context: dict[str, object]) -> str:
-    return json.dumps(context, indent=2, default=str)
+    """Name the subject instrument, then hand over the JSON context.
+
+    The instrument identity is one field in the middle of a large payload.
+    v5's context expansion (fair_value_band, analytics_evidence, ta_state,
+    valuation, risk_metrics, price_anchor) diluted it enough that the writer
+    sporadically confabulated a different company — #2235, a GME memo written
+    about Yelp while citing GME's own margins to 4dp. Stating the subject
+    ahead of the context gives identity a position the payload cannot bury.
+    """
+    subject_line = ""
+    instrument = context.get("instrument")
+    if isinstance(instrument, dict):
+        symbol = instrument.get("symbol")
+        if symbol:
+            name = instrument.get("company_name") or symbol
+            subject_line = f"SUBJECT: {name} ({symbol}) — write the memo about this company and no other.\n\n"
+    return subject_line + json.dumps(context, indent=2, default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +1540,14 @@ Rules:
   basis is price-return. Respect status flags (a non-`ok` metric is not precise;
   `benchmark_missing` beta is absent, not 0) and cite {window_key, as_of_date,
   metric_version}.
+- Attack target-vs-price inconsistency: a buy zone away from the current
+  `price_anchor.close`, an implied upside to base_value that is implausible
+  against the 52-week range, or targets that ignore the anchor entirely.
+- Flag adverse `analytics_evidence` (weak Piotroski or Altman band,
+  distressed positioning signals, poor peer grade) and adverse `ta_state`
+  (death regime, price below the 200d SMA) that the memo glossed over.
+  Respect the as-of stamps — stale evidence is approximate, and a
+  `reason: "malformed"` sub-block is absent, not adverse.
 - verdict must be exactly one of: "Strong challenge", "Moderate challenge", "Weak challenge"
 - Respond with ONLY valid JSON. No explanation outside the JSON object.
 """
@@ -645,36 +1562,124 @@ def _build_critic_prompt(memo_markdown: str, context: dict[str, object]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Claude calls
+# LLM calls
 # ---------------------------------------------------------------------------
 
 
-def _call_writer(client: anthropic.Anthropic, context: dict[str, object]) -> dict[str, object]:
+def _complete_json_validated(
+    client: LLMClient,
+    *,
+    label: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    validate: Callable[[dict[str, object]], None],
+) -> tuple[dict[str, object], LLMCompletion]:
+    """One LLM completion, JSON-parsed and schema-validated.
+
+    Every ValueError raised here carries the completion's finish_reason
+    so a truncated response (``length``) is distinguishable from a
+    malformed one (``stop``) in logs and thesis_runs.error.
     """
-    Call the Claude writer and parse the structured thesis JSON.
-    Raises ValueError on unparseable or schema-invalid response.
-    """
-    message = client.messages.create(
-        model=_MODEL,
-        max_tokens=_MAX_TOKENS_WRITER,
-        system=_WRITER_SYSTEM,
-        messages=[{"role": "user", "content": _build_writer_prompt(context)}],
-    )
-    block = message.content[0]
-    text: str | None = getattr(block, "text", None)
-    if text is None:
-        raise ValueError(f"Writer: unexpected content block type {type(block)!r}")
+    completion = client.complete(system=system, user=user, max_tokens=max_tokens)
+    try:
+        parsed: dict[str, object] = json.loads(completion.text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label}: unparseable JSON (finish_reason={completion.finish_reason}): {exc}") from exc
 
     try:
-        parsed: dict[str, object] = json.loads(text.strip())
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Writer: unparseable JSON: {exc}") from exc
-
-    _validate_writer_output(parsed)
-    return parsed
+        validate(parsed)
+    except ValueError as exc:
+        raise ValueError(f"{exc} (finish_reason={completion.finish_reason})") from exc
+    return parsed, completion
 
 
-def _validate_writer_output(data: dict[str, object]) -> None:
+def _call_with_one_retry(
+    client: LLMClient,
+    *,
+    label: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    validate: Callable[[dict[str, object]], None],
+) -> tuple[dict[str, object], LLMCompletion]:
+    """Retry ONCE on schema/parse ValueError (spec §1) — local models
+    intermittently emit near-miss JSON; a single re-roll recovers most
+    of them without masking a systematically broken model."""
+    try:
+        return _complete_json_validated(
+            client, label=label, system=system, user=user, max_tokens=max_tokens, validate=validate
+        )
+    except ValueError as exc:
+        logger.warning("%s attempt 1 failed (%s); retrying once", label, exc)
+        return _complete_json_validated(
+            client, label=label, system=system, user=user, max_tokens=max_tokens, validate=validate
+        )
+
+
+# #2235 — WHY THERE IS NO MISATTRIBUTION ASSERTION HERE.
+#
+# The defect is real and still live: 19 of 2,037 v5 memos (0.93%) declare their
+# subject as a different company — "Yelp (YELP)" heading a GME memo, "Apple
+# (AAPL)" heading AGCO's, measured 2026-08-05. It is NOT gated below, because
+# three candidate discriminators were each falsified against the full stored
+# corpus rather than a sample:
+#
+#   1. First `<Capitalised Name> (<TICKER>)` in the memo must be the subject.
+#      35 rejects, of which "Free Cash Flow (FCF)", "Price-to-Earnings (PE)",
+#      "Return on Assets (ROA)" are correct memos. A gate that retry-fails a
+#      correct memo takes `thesis_refresh` down at ~1.7% of generations.
+#   2. Same, restricted to the memo's opening (120/200/300/400 chars). The
+#      term expansions appear there too — 25 rejects at 120 chars, same shape.
+#   3. Drop matches where the ticker is an initialism of the preceding words.
+#      Removes 2 of 29. "Price-to-sales (PS)", "Equity (ROE)", "ETF Trust
+#      (SPY)" all survive it.
+#
+# Three failed keys is the signal to question the MODEL, not to try a fourth
+# (.claude/CLAUDE.md, "Source-rule before design"). A soft warning was also
+# rejected: at ~40% false positives it is noise that trains the operator to
+# ignore it, which is the same argument #2218 makes against a blanket
+# zero-rows alarm.
+#
+# ⚠ The prompt anchor above and the v6 bump remain UNVERIFIED — at 0.93% an
+# A/B powered to detect a halving needs thousands of local generations. Tracked
+# separately; the measurement query lives on that ticket.
+
+# Bracketed stand-ins the writer emitted instead of values. ``[text](url)`` is a
+# markdown link and must not match, hence the negative lookahead. The lowercase
+# angle form catches "<multiple>" / "<peer>" — the prompt's own schema notation
+# uses them, which is how they leaked into memo prose in the first place.
+_PLACEHOLDER_RE = re.compile(r"\[[A-Za-z][A-Za-z ]{0,24}\](?!\()|<[a-z][a-z ]{0,24}>")
+
+
+def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[str, object], LLMCompletion]:
+    """
+    Call the LLM writer and parse the structured thesis JSON.
+    Raises ValueError on unparseable or schema-invalid response
+    (after one retry).
+    """
+    # Buy-zone enforcement is anchor-gated (#2010): the validator stays
+    # output-only; the context decides whether the rule applies.
+    require_buy_zone = context.get("price_anchor") is not None
+    # #2431 — the subject travels into the validator the same way, because the
+    # check is about the memo AGAINST its context and neither half means
+    # anything alone.
+    subject = context.get("instrument")
+
+    def _validate(data: dict[str, object]) -> None:
+        _validate_writer_output(data, require_buy_zone=require_buy_zone, subject=subject)
+
+    return _call_with_one_retry(
+        client,
+        label="Writer",
+        system=_WRITER_SYSTEM,
+        user=_build_writer_prompt(context),
+        max_tokens=_MAX_TOKENS_WRITER,
+        validate=_validate,
+    )
+
+
+def _validate_writer_output(data: dict[str, object], *, require_buy_zone: bool = False, subject: object = None) -> None:
     required = {
         "thesis_type",
         "confidence_score",
@@ -713,28 +1718,92 @@ def _validate_writer_output(data: dict[str, object]) -> None:
     if not isinstance(memo, str) or not memo.strip():
         raise ValueError("Writer output memo_markdown must be a non-empty string")
 
+    # #2235 — the placeholder leak, enforced deterministically. Verified on the
+    # FULL stored corpus, not a sample: 74 of 2,037 v5 memos (3.6%) rejected,
+    # every one a genuine "[Company]" / "[sector]" / "[Name]" stand-in, and
+    # zero correct memos caught. Unlike the misattribution above, this has a
+    # clean discriminator, so it gets a real gate and rides retry-once.
+    placeholder = _PLACEHOLDER_RE.search(memo)
+    if placeholder is not None:
+        raise ValueError(f"Writer output contains an unfilled placeholder: {placeholder.group(0)!r}")
 
-def _call_critic(client: anthropic.Anthropic, memo_markdown: str, context: dict[str, object]) -> dict[str, object]:
+    # #2431 — SUBJECT IDENTITY, enforced rather than requested. The system
+    # prompt already forbids this in capitals ("Never write the memo about a
+    # different company") and the writer prompt names the subject on its FIRST
+    # line; on prompt v6 the compliance rate with both is 0 of 127. An
+    # instruction the model ignores is not a control.
+    #
+    # ⚠⚠ REFUSED, NOT REPAIRED. The memo misattributes real financial data — the
+    # figures in it are the SUBJECT's, rendered under another company's name —
+    # and the row's valuation band is anchored to whatever price the confabulated
+    # company had. `portfolio.py` reads `base_value` as an EXIT trigger, so a
+    # stored row is not inert. Storing nothing is the honest outcome; this rides
+    # the retry-once machinery first, so a one-off lapse still gets a second
+    # attempt.
+    if not _memo_names_subject(memo, subject):
+        named = subject.get("symbol") if isinstance(subject, dict) else None
+        raise ValueError(
+            f"Writer output never names its subject ({named or 'unknown'}) — the memo is about a different "
+            "company, and every figure in it belongs to the subject"
+        )
+
+    # Valuation-band coherence (#2007): the stored band must satisfy
+    # bear <= base <= bull, and the buy zone low <= high. Local writers
+    # intermittently emit mechanical copies (AMSC v1: bear=52w-low,
+    # bull=52w-high, base=book/share, so base < bear). Coerce through the
+    # SAME _to_float used at INSERT so we validate the values that actually
+    # persist; a null/garbage field coerces to None and drops out of its
+    # comparison. Raising ValueError rides the existing retry-once machinery.
+    bear = _to_float(data.get("bear_value"))
+    base = _to_float(data.get("base_value"))
+    bull = _to_float(data.get("bull_value"))
+    if bear is not None and base is not None and bear > base:
+        raise ValueError(f"Writer output incoherent targets: bear_value {bear} > base_value {base}")
+    if base is not None and bull is not None and base > bull:
+        raise ValueError(f"Writer output incoherent targets: base_value {base} > bull_value {bull}")
+    if bear is not None and bull is not None and bear > bull:
+        raise ValueError(f"Writer output incoherent targets: bear_value {bear} > bull_value {bull}")
+    zone_low = _to_float(data.get("buy_zone_low"))
+    zone_high = _to_float(data.get("buy_zone_high"))
+    if zone_low is not None and zone_high is not None and zone_low > zone_high:
+        raise ValueError(f"Writer output inverted buy zone: buy_zone_low {zone_low} > buy_zone_high {zone_high}")
+
+    # #2010: a buy with a live price anchor must be actionable — the full
+    # bear/base/bull target set plus both zone bounds (issue wording:
+    # "targets/zone REQUIRED for buy"; Codex ckpt-2 — base alone is not
+    # "targets"). Anchor-less contexts keep the v4 rule (zones are
+    # meaningless without a market price), so the call site gates this.
+    # Current pop at ship time: 13/13 v4 buys already carry all five.
+    if (
+        require_buy_zone
+        and stance == "buy"
+        and (bear is None or base is None or bull is None or zone_low is None or zone_high is None)
+    ):
+        raise ValueError(
+            "Writer output buy stance requires bear/base/bull values and buy_zone_low/high when price_anchor is present"
+        )
+
+
+def _call_critic(client: LLMClient, memo_markdown: str, context: dict[str, object]) -> dict[str, object]:
     """
-    Call the Claude critic and parse the structured counter-thesis JSON.
-    Returns an empty dict on any failure — critic is best-effort and must
-    never block the thesis insert.
+    Call the LLM critic and parse the structured counter-thesis JSON.
+    Returns an empty dict on any failure (after one schema/parse retry) —
+    critic is best-effort and must never block the thesis insert.
+
+    The as-reported critic model is stamped into the returned dict
+    (``model`` key) — with split knobs (#1995) the critic may differ from
+    the writer, and ``theses.model`` records the writer only.
     """
     try:
-        message = client.messages.create(
-            model=_MODEL,
-            max_tokens=_MAX_TOKENS_CRITIC,
+        parsed, completion = _call_with_one_retry(
+            client,
+            label="Critic",
             system=_CRITIC_SYSTEM,
-            messages=[{"role": "user", "content": _build_critic_prompt(memo_markdown, context)}],
+            user=_build_critic_prompt(memo_markdown, context),
+            max_tokens=_MAX_TOKENS_CRITIC,
+            validate=_validate_critic_output,
         )
-        block = message.content[0]
-        text: str | None = getattr(block, "text", None)
-        if text is None:
-            logger.warning("Critic: unexpected content block type %r, storing without critic_json", type(block))
-            return {}
-
-        parsed: dict[str, object] = json.loads(text.strip())
-        _validate_critic_output(parsed)
+        parsed["model"] = completion.model
         return parsed
     except Exception:
         logger.warning("Critic call failed; thesis will be stored without critic_json", exc_info=True)
@@ -762,18 +1831,67 @@ def _insert_thesis_atomic(
     instrument_id: int,
     writer: dict[str, object],
     critic: dict[str, object] | None,
-) -> int:
+    *,
+    model: str,
+    provider: str,
+    subject: object = None,
+) -> tuple[int, int]:
     """
-    Insert a new thesis row and return the assigned thesis_version.
+    Insert a new thesis row and return (thesis_id, thesis_version).
 
     thesis_version is computed atomically inside the INSERT via a subquery
     (COALESCE(MAX(thesis_version), 0) + 1) so two concurrent inserts for the
     same instrument cannot produce the same version number. The
     UNIQUE(instrument_id, thesis_version) constraint is the final guard.
 
+    ``model`` is the model string AS REPORTED by the provider response
+    (not the configured knob) and ``provider`` the resolved provider name —
+    stored with ``_PROMPT_VERSION`` so every memo is attributable (#1919).
+
+    ``subject`` is the context's instrument block — the same object
+    ``_validate_writer_output`` checked the memo against. #2436 stores the
+    subject-identity VERDICT on the row so consumers read a decision instead of
+    re-deriving one under whatever rule is current at read time.
+
+    ⚠⚠ THE VERDICT IS RECOMPUTED HERE, not assumed from "the validator let this
+    through". ``memo_names_subject`` returns True when the subject is not a dict
+    ("nothing to check against; the schema gates elsewhere") — that is
+    UNCHECKED, not PASSED, and stamping ``subject_identity_ok = true`` on it
+    would be a lie in the column a consumer trusts most. No usable subject
+    therefore stores the whole triple NULL, which the consumers fail closed on.
+
+    ⚠ Correspondence between ``subject`` and ``instrument_id`` holds by
+    construction, not by check: ``_build_context`` reads the instrument block
+    from the same ``instrument_id`` this function is passed, in the same call.
+
     Must be called inside an open transaction.
     """
-    break_conditions = writer.get("break_conditions") or []
+    break_conditions_raw = writer.get("break_conditions")
+    # Validator guarantees a list; the isinstance narrows for the type checker.
+    break_conditions: list[object] = break_conditions_raw if isinstance(break_conditions_raw, list) else []
+
+    # #2010: writer-native structured predicates — soft-validated, best-effort
+    # recall channel. Invalid entries (or a malformed top-level field) are
+    # dropped with a warning, NEVER a retry-fail; prose stays canonical.
+    break_predicates, dropped = sanitize_writer_break_predicates(writer.get("break_predicates"), break_conditions)
+    if dropped:
+        logger.warning(
+            "Writer break_predicates dropped %d invalid entr%s for instrument_id=%s: %s",
+            len(dropped),
+            "y" if len(dropped) == 1 else "ies",
+            instrument_id,
+            "; ".join(dropped),
+        )
+
+    # #2436 — the triple is all-set or all-NULL (sql/332 CHECK). No usable
+    # subject means nobody decided, which stores NULL.
+    # ⚠ An EMPTY instrument dict is not a checkable subject. _build_context
+    # yields ``{}`` when the instruments row is missing, and the rule would
+    # score that False — "checked and failed" — when the truth is that there
+    # was nothing to check against.
+    subject_ok: bool | None = None
+    if subject_is_checkable(subject):
+        subject_ok = _memo_names_subject(str(writer["memo_markdown"]), subject)
 
     row = conn.execute(
         """
@@ -782,7 +1900,9 @@ def _insert_thesis_atomic(
             thesis_type, confidence_score, stance,
             buy_zone_low, buy_zone_high,
             base_value, bull_value, bear_value,
-            break_conditions_json, memo_markdown, critic_json
+            break_conditions_json, break_predicates_json, memo_markdown, critic_json,
+            model, provider, prompt_version,
+            subject_identity_ok, subject_identity_rule_version, subject_identity_checked_at
         )
         VALUES (
             %(instrument_id)s,
@@ -791,9 +1911,22 @@ def _insert_thesis_atomic(
             %(thesis_type)s, %(confidence_score)s, %(stance)s,
             %(buy_zone_low)s, %(buy_zone_high)s,
             %(base_value)s, %(bull_value)s, %(bear_value)s,
-            %(break_conditions_json)s, %(memo_markdown)s, %(critic_json)s
+            %(break_conditions_json)s, %(break_predicates_json)s, %(memo_markdown)s, %(critic_json)s,
+            %(model)s, %(provider)s, %(prompt_version)s,
+            -- ⚠⚠ ::boolean AT EVERY OCCURRENCE, and the CASE arms are why (#2647).
+            -- psycopg3 dedups a repeated named parameter into one $n, and a
+            -- ``None`` is sent untyped (OID 0). ``CASE WHEN $n IS NULL`` is a
+            -- NullTest, which constrains no type — and Postgres transforms the
+            -- whole VALUES list BEFORE coercing it to the target columns, so
+            -- the bare bind into the boolean column below does NOT rescue it.
+            -- Measured: bare-only plans, CASE-only raises, and both together
+            -- raise. Untyped, the NULL triple — the deliberate fail-closed
+            -- state this function's docstring stores — aborted the insert.
+            %(subject_identity_ok)s::boolean,
+            CASE WHEN %(subject_identity_ok)s::boolean IS NULL THEN NULL ELSE %(subject_identity_rule_version)s END,
+            CASE WHEN %(subject_identity_ok)s::boolean IS NULL THEN NULL ELSE now() END
         )
-        RETURNING thesis_version
+        RETURNING thesis_id, thesis_version
         """,
         {
             "instrument_id": instrument_id,
@@ -806,14 +1939,64 @@ def _insert_thesis_atomic(
             "bull_value": _to_float(writer.get("bull_value")),
             "bear_value": _to_float(writer.get("bear_value")),
             "break_conditions_json": Jsonb(break_conditions),
+            "break_predicates_json": Jsonb(break_predicates) if break_predicates else None,
             "memo_markdown": writer["memo_markdown"],
             "critic_json": Jsonb(critic) if critic else None,
+            "model": model,
+            "provider": provider,
+            "prompt_version": _PROMPT_VERSION,
+            "subject_identity_ok": subject_ok,
+            "subject_identity_rule_version": SUBJECT_IDENTITY_RULE_VERSION,
         },
     ).fetchone()
 
     if row is None:
         raise RuntimeError(f"INSERT INTO theses did not RETURN a row for instrument_id={instrument_id}")
-    return int(row[0])
+    return int(row[0]), int(row[1])
+
+
+def _insert_thesis_valuation_audit(
+    conn: psycopg.Connection[Any],
+    thesis_id: int,
+    *,
+    band_base: float | None,
+    band_quality_status: str | None,
+    price_as_of: str | None,
+    llm_base: float | None,
+    divergence_pct: float | None,
+    divergence_flag: bool | None,
+) -> None:
+    """Insert-once band-vs-LLM divergence snapshot (#2009 PR-B, sql/222).
+
+    Best-effort-correct but runs INSIDE the atomic thesis-insert transaction
+    (must be called after the ``theses`` row exists, so the FK is valid).
+    ``band_base``/``divergence_pct``/``divergence_flag`` are all nullable —
+    the no-band path (and any ``available:false``) writes NULL, never
+    0/false (#1632). Never raises on the absent-band path: all params are
+    plain scalars or None, all target columns nullable.
+    """
+    conn.execute(
+        """
+        INSERT INTO thesis_valuation_audit (
+            thesis_id, band_method_version, band_base, band_quality_status,
+            price_as_of, llm_base, divergence_pct, divergence_flag
+        )
+        VALUES (
+            %(thesis_id)s, %(band_method_version)s, %(band_base)s, %(band_quality_status)s,
+            %(price_as_of)s, %(llm_base)s, %(divergence_pct)s, %(divergence_flag)s
+        )
+        """,
+        {
+            "thesis_id": thesis_id,
+            "band_method_version": METHOD_VERSION,
+            "band_base": band_base,
+            "band_quality_status": band_quality_status,
+            "price_as_of": price_as_of,
+            "llm_base": llm_base,
+            "divergence_pct": divergence_pct,
+            "divergence_flag": divergence_flag,
+        },
+    )
 
 
 def _update_last_reviewed(
@@ -827,6 +2010,111 @@ def _update_last_reviewed(
 
 
 # ---------------------------------------------------------------------------
+# thesis_runs — one row per generation attempt (#1919, all trigger paths)
+# ---------------------------------------------------------------------------
+
+
+def _insert_thesis_run(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    trigger: RunTrigger,
+    *,
+    provider: str,
+    model: str,
+    critic_model: str,
+    context_sha256: str | None = None,
+    context_summary: dict[str, object] | None = None,
+) -> int:
+    """Insert a 'running' thesis_runs row and return its run_id.
+
+    ``model`` (writer) and ``critic_model`` are the CONFIGURED models
+    (the run may fail before any provider response exists); the stored
+    thesis row carries the writer model as reported by the response, and
+    ``critic_json.model`` the critic's. Recording ``critic_model`` here
+    is what keeps critic provenance auditable when the best-effort critic
+    fails and no ``critic_json`` is stored (#1995).
+
+    ``context_sha256`` / ``context_summary`` (#2017) fingerprint + summarize
+    the assembled writer context. Written HERE — before the LLM call and the
+    pre-LLM commit — so failed/guard-rejected runs retain the audit. Both
+    nullable: a caller that omits them (or an audit-compute failure upstream)
+    leaves the columns NULL.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO thesis_runs (instrument_id, trigger, provider, model, critic_model,
+                                 context_sha256, context_summary)
+        VALUES (%(instrument_id)s, %(trigger)s, %(provider)s, %(model)s, %(critic_model)s,
+                %(context_sha256)s, %(context_summary)s)
+        RETURNING run_id
+        """,
+        {
+            "instrument_id": instrument_id,
+            "trigger": trigger,
+            "provider": provider,
+            "model": model,
+            "critic_model": critic_model,
+            "context_sha256": context_sha256,
+            "context_summary": Jsonb(context_summary) if context_summary is not None else None,
+        },
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"INSERT INTO thesis_runs did not RETURN a row for instrument_id={instrument_id}")
+    return int(row[0])
+
+
+def _finish_thesis_run_ok(
+    conn: psycopg.Connection[Any],
+    run_id: int,
+    thesis_id: int,
+) -> None:
+    """Mark a run ok, linking the inserted thesis row.
+
+    Must be called inside the same transaction as the thesis INSERT so
+    the run row can never claim success for a rolled-back thesis.
+    """
+    result = conn.execute(
+        """
+        UPDATE thesis_runs
+        SET status = 'ok', finished_at = NOW(), thesis_id = %(thesis_id)s
+        WHERE run_id = %(run_id)s
+        """,
+        {"thesis_id": thesis_id, "run_id": run_id},
+    )
+    # prevention-log: single-row UPDATE silent no-op on missing row.
+    if result.rowcount == 0:
+        raise RuntimeError(f"thesis_runs run_id={run_id} vanished before ok-finish")
+
+
+def _record_thesis_run_failure(
+    conn: psycopg.Connection[Any],
+    run_id: int,
+    exc: Exception,
+) -> None:
+    """Best-effort failure record — must never mask the original exception.
+
+    Called from the except path of generate_thesis, OUTSIDE any open
+    transaction (the pre-LLM commit closed it), so the UPDATE + commit
+    here open and close their own short implicit transaction.
+    """
+    error_text = f"{type(exc).__name__}: {exc}"[:2000]
+    try:
+        result = conn.execute(
+            """
+            UPDATE thesis_runs
+            SET status = 'failed', finished_at = NOW(), error = %(error)s
+            WHERE run_id = %(run_id)s
+            """,
+            {"error": error_text, "run_id": run_id},
+        )
+        if result.rowcount == 0:
+            logger.error("thesis_runs run_id=%d vanished while recording failure", run_id)
+        conn.commit()
+    except Exception:
+        logger.exception("failed to record thesis_runs failure for run_id=%d", run_id)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -834,28 +2122,37 @@ def _update_last_reviewed(
 def generate_thesis(
     instrument_id: int,
     conn: psycopg.Connection[Any],
-    client: anthropic.Anthropic,
+    clients: LLMClientPair,
+    *,
+    trigger: RunTrigger,
 ) -> ThesisResult:
     """
     Generate and persist a new versioned thesis for an instrument.
 
     Steps:
       1. Assemble context from DB (capped research inputs).
-      2. Call Claude writer → structured memo. Raises on failure.
-      3. Call Claude critic → counter-thesis (best-effort; failure is logged only).
-      4. Open a transaction, INSERT a new thesis row with an atomically-computed
-         thesis_version, update coverage.last_reviewed_at, commit.
+      2. Insert a 'running' thesis_runs row (in-flight indicator) and
+         commit — this same commit closes the context-read transaction.
+      3. Call the LLM writer → structured memo. Raises on failure (after
+         one retry), recording the failure on the run row first.
+      4. Call the LLM critic → counter-thesis (best-effort; failure is
+         logged only).
+      5. Open a transaction, INSERT a new thesis row with an
+         atomically-computed thesis_version (+ model/provider/
+         prompt_version), update coverage.last_reviewed_at, mark the run
+         row ok, commit.
 
-    Returns ThesisResult. Claude calls are made outside any DB transaction
+    Returns ThesisResult. LLM calls are made outside any DB transaction
     to avoid holding a connection open during network I/O.
 
     The explicit ``conn.commit()`` after ``_assemble_context`` is
-    load-bearing: on a non-autocommit connection the context SELECTs
-    open an implicit transaction that would otherwise stay open through
-    both Claude calls (2-5s each, sometimes 10s+). Holding a DB tx
-    across HTTP is the anti-pattern called out in CLAUDE.md Architecture
-    invariants; the commit closes the read tx so the connection is
-    ``idle`` (not ``idle in transaction``) while Claude runs.
+    load-bearing (#293): on a non-autocommit connection the context
+    SELECTs open an implicit transaction that would otherwise stay open
+    through both LLM calls (seconds on cloud, minutes on a local 14B).
+    Holding a DB tx across HTTP is the anti-pattern called out in
+    CLAUDE.md Architecture invariants; the commit closes the read tx so
+    the connection is ``idle`` (not ``idle in transaction``) while the
+    LLM runs. It also makes the 'running' run row visible to readers.
 
     **Caller contract:** do NOT wrap this call in ``with conn.transaction():``.
     psycopg3 forbids explicit ``commit()`` inside an outer transaction
@@ -864,22 +2161,97 @@ def generate_thesis(
     dedicated connection.
     """
     context = _assemble_context(conn, instrument_id)
+    # #2017: fingerprint + summarize what the writer saw, persisted on the run
+    # row. Best-effort — this is forensic AUDIT metadata, not thesis data, so a
+    # compute bug must degrade (NULL columns + a WARNING), never abort a valid
+    # generation (mirrors #2009 divergence "measure-only, never gate"). The
+    # broad except is deliberate HERE precisely because prevention-log 2127
+    # forbids it for its case: 2127 is a per-row BATCH loop where a bug must
+    # fail loud; this is a single pre-LLM call site whose only failure mode is
+    # losing audit metadata. The pure module is fully fast-tier tested, and the
+    # WARNING + NULL columns surface the bug without sinking the thesis.
+    try:
+        context_sha256: str | None = hash_context(context)
+        context_summary: dict[str, object] | None = summarize_context(context, _PROMPT_VERSION)
+    except Exception:
+        logger.warning("thesis context audit compute failed for instrument_id=%d", instrument_id, exc_info=True)
+        context_sha256, context_summary = None, None
+    run_id = _insert_thesis_run(
+        conn,
+        instrument_id,
+        trigger,
+        provider=clients.writer.provider_name,
+        model=clients.writer.model,
+        critic_model=clients.critic.model,
+        context_sha256=context_sha256,
+        context_summary=context_summary,
+    )
     # Close the implicit read tx opened by _assemble_context SELECTs
-    # BEFORE the Claude calls below. Without this, the connection stays
-    # ``idle in transaction`` for the duration of the Claude round-trips.
+    # (and publish the 'running' run row) BEFORE the LLM calls below.
+    # Without this, the connection stays ``idle in transaction`` for the
+    # duration of the LLM round-trips.
     conn.commit()
 
-    # Claude calls — outside any DB transaction; these can take seconds
-    writer_output = _call_writer(client, context)
-    critic_output = _call_critic(client, str(writer_output.get("memo_markdown", "")), context)
+    # LLM calls — outside any DB transaction; these can take seconds
+    # (cloud) to minutes (local 14B).
+    try:
+        writer_output, writer_completion = _call_writer(clients.writer, context)
+        critic_output = _call_critic(clients.critic, str(writer_output.get("memo_markdown", "")), context)
+    except Exception as exc:
+        _record_thesis_run_failure(conn, run_id, exc)
+        raise
 
     # Validated by _validate_writer_output; cast once and reuse.
     confidence = float(writer_output["confidence_score"])  # type: ignore[arg-type]
 
-    with conn.transaction():
-        # critic_output is {} on failure — treat empty dict as no critic data
-        version = _insert_thesis_atomic(conn, instrument_id, writer_output, critic_output if critic_output else None)
-        _update_last_reviewed(conn, instrument_id)
+    # Codex ckpt-2 HIGH: a failure INSIDE this write transaction (e.g. a
+    # UniqueViolation when a concurrent generation raced the versioning
+    # subquery — the UNIQUE(instrument_id, thesis_version) final guard)
+    # must not strand the run row at 'running' forever. The transaction
+    # CM rolls the writes back; record the failure in its own short tx,
+    # then re-raise.
+    try:
+        with conn.transaction():
+            # critic_output is {} on failure — treat empty dict as no critic data
+            thesis_id, version = _insert_thesis_atomic(
+                conn,
+                instrument_id,
+                writer_output,
+                critic_output if critic_output else None,
+                model=writer_completion.model,
+                provider=clients.writer.provider_name,
+                # #2436 — the same object _validate_writer_output checked the
+                # memo against, so the stored verdict and the write-time gate
+                # can never disagree about which subject was expected.
+                subject=context.get("instrument"),
+            )
+            # #2009 PR-B: snapshot band-vs-LLM divergence in the same atomic
+            # txn as the thesis insert (FK requires thesis_id to exist first).
+            # Snapshot from the passive context block only — never re-read
+            # the mutable band from the DB (Codex ckpt-1 PR-B LOW).
+            fvb_raw = context.get("fair_value_band")
+            fvb: dict[str, Any] = fvb_raw if isinstance(fvb_raw, dict) else {}
+            band_available = fvb.get("available") is True
+            band_base = fvb.get("base") if band_available else None
+            band_quality_status = fvb.get("quality_status") if band_available else None
+            price_as_of = fvb.get("price_as_of") if band_available else None
+            llm_base = _to_float(writer_output.get("base_value"))
+            divergence_pct, divergence_flag = compute_divergence(llm_base, band_base, DIVERGENCE_THRESHOLD)
+            _insert_thesis_valuation_audit(
+                conn,
+                thesis_id,
+                band_base=band_base,
+                band_quality_status=band_quality_status,
+                price_as_of=price_as_of,
+                llm_base=llm_base,
+                divergence_pct=divergence_pct,
+                divergence_flag=divergence_flag,
+            )
+            _update_last_reviewed(conn, instrument_id)
+            _finish_thesis_run_ok(conn, run_id, thesis_id)
+    except Exception as exc:
+        _record_thesis_run_failure(conn, run_id, exc)
+        raise
 
     logger.info(
         "Thesis generated: instrument_id=%d version=%d stance=%s confidence=%.2f",

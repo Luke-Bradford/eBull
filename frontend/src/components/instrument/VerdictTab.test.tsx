@@ -132,7 +132,10 @@ describe("VerdictTab", () => {
     );
     // headline
     expect(await screen.findByText("0.82")).toBeInTheDocument();
-    expect(screen.getByText(/buy/i)).toBeInTheDocument();
+    // Exact match: the ThesisPane also renders a "Buy zone" label (#1902)
+    // AND a stance badge with the literal stance (#2000) — assert presence,
+    // not uniqueness.
+    expect(screen.getAllByText("buy").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/rank #5/)).toBeInTheDocument();
     // Piotroski 7/9 strong + Altman safe
     expect(screen.getByText("7")).toBeInTheDocument();
@@ -143,6 +146,85 @@ describe("VerdictTab", () => {
     expect(screen.getByText("88%")).toBeInTheDocument();
     // thesis narrative reused
     expect(screen.getByText(/bull case rests on services/i)).toBeInTheDocument();
+    // thesis created_at == scored_at -> no lag hint
+    expect(screen.queryByText(/postdates this score/)).not.toBeInTheDocument();
+  });
+
+  it("flags a thesis newer than the score row (#2000 lag hint)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({}, FULL_IAR),
+    );
+    const fresher = { ...THESIS, created_at: "2026-07-10T12:00:00Z" };
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={fresher} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("0.82")).toBeInTheDocument();
+    expect(screen.getByText(/postdates this score/)).toBeInTheDocument();
+  });
+
+  it("renders penalties/rewards as humanized chips and hides the raw scorer string behind an expander (#1908 PR-4)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict(
+        {
+          penalties_json: [
+            {
+              name: "high_realized_volatility",
+              reason: "3y annualized vol=0.71 > 0.60",
+              kind: "penalty",
+              deduction: 0.04,
+            },
+            {
+              name: "strong_calmar",
+              reason: "3y total-return Calmar=1.85 > high threshold 0.75",
+              kind: "reward",
+              addition: 0.03,
+            },
+          ],
+          explanation:
+            "value: base_value missing; penalties fired: high_realized_volatility (total deduction: 0.04)",
+        },
+        FULL_IAR,
+      ),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={null} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("0.82")).toBeInTheDocument();
+
+    // Humanized, signed, with the scorer's own reason on hover.
+    expect(screen.getByText("High realized volatility")).toBeInTheDocument();
+    expect(screen.getByText("−0.04")).toBeInTheDocument();
+    expect(screen.getByText("Strong Calmar")).toBeInTheDocument();
+    expect(screen.getByText("+0.03")).toBeInTheDocument();
+    expect(
+      screen.getByTitle("3y annualized vol=0.71 > 0.60"),
+    ).toBeInTheDocument();
+
+    // The raw audit string is still present verbatim — inside a collapsed
+    // <details>, not deleted. Never drop the audit trail to tidy the UI.
+    const detail = screen.getByText(/base_value missing/);
+    expect(detail).toBeInTheDocument();
+    expect(detail.closest("details")).not.toBeNull();
+    expect(detail.closest("details")?.hasAttribute("open")).toBe(false);
+  });
+
+  it("renders no chips when the score row has no penalties (rewards/penalties are optional)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({ penalties_json: null }, FULL_IAR),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={null} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("0.82")).toBeInTheDocument();
+    expect(screen.queryByText(/^[−+]\d/)).not.toBeInTheDocument();
+    // The explanation expander still renders — it is independent of chips.
+    expect(screen.getByText("Scorer detail")).toBeInTheDocument();
   });
 
   it("renders scored-but-no-IAR honestly (pre-#1823 row)", async () => {
@@ -189,5 +271,61 @@ describe("VerdictTab", () => {
     expect(screen.getAllByText(/unavailable/i).length).toBeGreaterThanOrEqual(3);
     // peer cohort pending note (no peer_key)
     expect(screen.getByText(/peer percentile pending/i)).toBeInTheDocument();
+  });
+});
+
+describe("VerdictTab #2003 — thesis leads the tab", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockHistoryEmpty();
+  });
+
+  it("renders the thesis pane ABOVE the score headline", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({}, FULL_IAR),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={THESIS} />
+      </MemoryRouter>,
+    );
+    const memo = await screen.findByText(/bull case rests on services/i);
+    const totalScore = screen.getByText("0.82");
+    // DOM order pins the hierarchy: memo (thesis pane) precedes the score.
+    expect(
+      memo.compareDocumentPosition(totalScore) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("does not duplicate the stance in the score headline (dedupe)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({}, FULL_IAR),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={THESIS} />
+      </MemoryRouter>,
+    );
+    await screen.findByText("0.82");
+    // Exactly ONE stance element — the ThesisPane StanceBadge. The old
+    // headline chip is gone.
+    expect(screen.getAllByText("buy")).toHaveLength(1);
+  });
+
+  it("thesis pane still leads when the instrument is unscored", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue({
+      instrument_id: 1,
+      score: null,
+    });
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={THESIS} />
+      </MemoryRouter>,
+    );
+    const memo = await screen.findByText(/bull case rests on services/i);
+    const empty = screen.getByText(/not yet scored/i);
+    expect(
+      memo.compareDocumentPosition(empty) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

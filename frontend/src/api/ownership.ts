@@ -123,6 +123,14 @@ export interface OwnershipHolder {
    * Empty/absent for single-lot holders.
    */
   readonly lots?: readonly OwnershipLot[];
+  /**
+   * DEF 14A proxy role tag (#2121) — ``officer`` / ``director`` / ``principal``
+   * / ``group``, or null. Parser-derived from the SEC Item 403 sub-table the
+   * holder appeared in. DISPLAY LABEL ONLY: present solely on the non-additive
+   * ``def14a_unmatched`` memo overlay; the ``group`` row is the Item 403(b)
+   * "directors & officers as a group" aggregate, so it is never summed.
+   */
+  readonly holder_role?: string | null;
 }
 
 /** One additive Section-16 lot (direct / indirect) of a collapsed owner
@@ -222,6 +230,46 @@ export interface OwnershipBanner {
   readonly body: string;
 }
 
+/** DEF 14A vs Form 4 drift chip (#966). Present only when the
+ *  instrument has warning/critical drift alerts. ``chip`` is
+ *  server-owned copy rendered verbatim — no client-side threshold
+ *  logic. */
+export interface OwnershipDef14ADrift {
+  readonly worst_severity: 'warning' | 'critical';
+  readonly alert_count: number;
+  readonly chip: string;
+  readonly holders: readonly string[];
+}
+
+/** Unvested RSU/PSU memo line (#844) — absolute count from the latest
+ *  10-K ASC 718 note. Overlay only (never a pie wedge — RSUs are not
+ *  outstanding until vested). ``label`` is server-owned copy rendered
+ *  verbatim (e.g. "unvested RSUs"). */
+export interface OwnershipNonvestedAwards {
+  /** Decimal-as-string share count. */
+  readonly shares: string;
+  readonly label: string;
+  /** ISO ``YYYY-MM-DD`` — the note's balance date. */
+  readonly period_end: string;
+  readonly source_accession: string;
+}
+
+/** Issuer-disclosed DRS registered-vs-street split (#844 PR-2).
+ *  Present only for the curated cohort with a fresh disclosure; the
+ *  server owns cohort membership and staleness (400d). */
+export interface OwnershipDrs {
+  /** Decimal-as-string share count. */
+  readonly registered_shares: string;
+  /** Decimal-as-string percent (e.g. ``"15"``), or null. */
+  readonly registered_pct: string | null;
+  readonly street_shares: string | null;
+  readonly street_pct: string | null;
+  readonly holders_of_record: number | null;
+  /** ISO ``YYYY-MM-DD``. */
+  readonly as_of_date: string;
+  readonly source_accession: string;
+}
+
 /** One row of ``instrument_symbol_history``, oldest-first. Frontend
  *  renders a "Filed as X" callout when the chain includes any symbol
  *  other than the current one (Batch 7 of #788). */
@@ -251,14 +299,28 @@ export interface OwnershipSharesOutstandingSource {
 /** A figure-changing correction applied at read time (#1639 / #1647).
  *  First-class structured record so the UI / a machine consumer sees WHY the
  *  institutions total changed, not just the corrected number. ``kind`` is a
- *  closed vocabulary; today only ``suppressed_by_13f_nt`` (a filer's stale
- *  13F-HR removed because the filer filed a 13F-NT for a later quarter). */
+ *  closed vocabulary — keep it in step with the backend Literal in
+ *  ``app/api/instruments.py::_CorrectionAppliedModel``, which is the one that
+ *  500s the endpoint when a new kind is missing. */
 export type OwnershipCorrectionKind =
   | "suppressed_by_13f_nt"
   | "def14a_restates_institution"
   | "institutional_family_collapse"
   | "blockholder_group_collapse"
-  | "insider_control_group_collapse";
+  | "insider_control_group_collapse"
+  /** #2229 — a filer's stale 13F-HR removed because the filer filed a LATER
+   *  holdings report omitting this security (Form 13F Special Instruction 5b). */
+  | "superseded_by_later_13f_hr"
+  /** #2788 — a Form 4 row filed before the Form 4 ingest retention cutoff removed
+   *  from the insiders slice. ⚠ NOT an exit claim: Form 4 is transaction-triggered,
+   *  so silence is not evidence of a sale (unlike ``superseded_by_later_13f_hr``,
+   *  which rests on a 13F holdings report being a COMPLETE statement). It says only
+   *  that no in-retention evidence of the position remains, so any label shown for
+   *  it must read as coverage rather than as a disposal.
+   *  ⚠ Do not put a quoted string in this comment — the vocabulary contract test
+   *  (tests/test_correction_kind_vocab_contract.py) reads the union by scanning
+   *  quoted literals in this block and counts one as a declared kind. */
+  | "insider_beyond_form4_retention";
 
 export interface OwnershipCorrectionApplied {
   readonly kind: OwnershipCorrectionKind;
@@ -384,6 +446,27 @@ export interface OwnershipRollupResponse {
   readonly sanity?: OwnershipSanityChecks;
   /** Independent denominator tie-out (#1647 part 5). Optional for back-compat. */
   readonly denominator_cross_check?: OwnershipDenominatorCrossCheck;
+  /** DEF 14A vs Form 4 drift chip (#966). Null when no warning/critical
+   *  drift alerts; present on the no_data path too (denominator-
+   *  independent). Optional for back-compat. */
+  readonly def14a_drift?: OwnershipDef14ADrift | null;
+  /** Unvested RSU/PSU memo (#844). Null when no award facts, when the
+   *  server read-rule abstains, or when the note is stale. Optional for
+   *  back-compat. */
+  readonly nonvested_awards?: OwnershipNonvestedAwards | null;
+  /** DRS registered-vs-street overlay (#844 PR-2). Null off-cohort /
+   *  absent / stale. Optional for back-compat. */
+  readonly drs?: OwnershipDrs | null;
+  /** Why the denominator is unusable, on the ``no_data`` path only (#2232). Null
+   *  on every rendering payload. Branch on THIS, never on
+   *  ``shares_outstanding_as_of`` — ``partial_class_denominator`` also carries a
+   *  (fresh) as_of, so the old "no_data + as_of ⇒ stale" inference mis-labels it.
+   *  Optional for back-compat with pre-#2232 payloads. */
+  readonly no_data_reason?:
+    | "absent"
+    | "stale_denominator"
+    | "partial_class_denominator"
+    | null;
   readonly computed_at: string;
 }
 

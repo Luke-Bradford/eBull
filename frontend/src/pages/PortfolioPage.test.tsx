@@ -10,7 +10,7 @@
  *   - Search + pagination still work and clamp correctly.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
@@ -56,6 +56,10 @@ function demoConfig(): ConfigResponse {
       enable_auto_trading: false,
       enable_live_trading: false,
       display_currency: "GBP",
+      llm_provider: "openai_compatible",
+      llm_base_url: "http://localhost:11434/v1",
+      llm_model_writer: "qwen3:14b",
+      llm_model_critic: "qwen3:14b",
       updated_at: "2026-04-18T00:00:00Z",
       updated_by: "system",
       reason: "",
@@ -88,6 +92,7 @@ function trade(
     is_tsl_enabled: false,
     leverage: 1,
     total_fees: 0,
+    currency: "GBP",
     ...overrides,
   };
 }
@@ -111,6 +116,7 @@ function position(
     valuation_source: "quote",
     source: "broker",
     updated_at: "2026-04-18T00:00:00Z",
+    currency: "GBP",
     trades: [trade(100 + instrumentId)],
     ...overrides,
   };
@@ -148,7 +154,11 @@ function portfolioWith(
     cash_balance: 5000,
     mirror_equity: mirrors.reduce((s, m) => s + m.mirror_equity, 0),
     display_currency: "GBP",
+    cash_currency: "GBP",
     fx_rates_used: {},
+    // Mirrors the backend: any position left in a non-display currency marks the
+    // totals as mixed (this fixture has no USD cash/mirror degrade to model).
+    fx_incomplete: positions.some((p) => p.currency !== "GBP"),
     live_quote_instrument_ids: positions.map((p) => p.instrument_id),
   };
 }
@@ -245,6 +255,34 @@ describe("PortfolioPage — unified drill-in", () => {
         "?tab=positions",
       );
     });
+  });
+
+  it("FX-degraded position renders its native currency + badge + mixed-total warning (#2129)", async () => {
+    // display_currency is GBP; this position's FX rate was missing so the backend
+    // left it in native USD (currency=USD). The row must show $ (not £) and be
+    // badged, and the totals must warn about mixing currencies.
+    mockedFetchPortfolio.mockResolvedValue(
+      portfolioWith([
+        position(7, "AAPL", { currency: "USD", market_value: 280, cost_basis: 260 }),
+      ]),
+    );
+    renderPage();
+
+    const row = await screen.findByTestId("position-row-7");
+    // Native USD magnitude rendered with the $ symbol, never £.
+    expect(row.textContent).toContain("$280.00");
+    expect(row.textContent).not.toContain("£280");
+    // The unconverted badge shows the native code.
+    expect(within(row).getByTitle(/Not converted to GBP/i).textContent).toBe("USD");
+    // Totals warn they may mix currencies.
+    expect(screen.getByText(/mixed currencies/i)).toBeTruthy();
+  });
+
+  it("all-converted portfolio shows no mixed-currency warning (#2129)", async () => {
+    mockedFetchPortfolio.mockResolvedValue(portfolioWith([position(7, "AAPL")]));
+    renderPage();
+    await screen.findByTestId("position-row-7");
+    expect(screen.queryByText(/mixed currencies/i)).toBeNull();
   });
 
   it("mirror row click navigates to /copy-trading/:mirrorId", async () => {

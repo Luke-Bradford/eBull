@@ -1,8 +1,9 @@
 import type { BudgetStateResponse, PortfolioResponse } from "@/api/types";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
-import { formatMoney, formatPct, pnlPct } from "@/lib/format";
+import { formatMoney, formatPct } from "@/lib/format";
+import { portfolioTotals } from "@/lib/portfolioTotals";
 import { SectionSkeleton } from "@/components/dashboard/Section";
-import { StatTile } from "@/components/dashboard/StatTile";
+import { STAT_ROW_GRID, StatTile } from "@/components/dashboard/StatTile";
 
 /**
  * Four top-level cards: Total AUM, Cash, Unrealized P&L, Available for
@@ -34,7 +35,7 @@ export function SummaryCards({
   const currency = useDisplayCurrency();
   if (data === null) {
     return (
-      <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
+      <div className={STAT_ROW_GRID}>
         {[0, 1, 2, 3].map((i) => (
           <div key={i} className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
             <SectionSkeleton rows={2} />
@@ -44,36 +45,41 @@ export function SummaryCards({
     );
   }
 
-  let totalPnl = 0;
-  let totalCost = 0;
-  for (const p of data.positions) {
-    totalPnl += p.unrealized_pnl;
-    totalCost += p.cost_basis;
-  }
-  // Include mirror P&L in the total: mirrors contribute both to the
-  // unrealized total and to the cost basis denominator (via funded amount).
-  for (const m of data.mirrors ?? []) {
-    totalPnl += m.unrealized_pnl;
-    totalCost += m.funded;
-  }
-  const pnlFraction = pnlPct(totalPnl, totalCost);
+  // #1901: shared totals + #2129 display-currency labeling (single source, also
+  // used by the Portfolio workstation's SummaryBar). The budget card keeps the
+  // /config currency: its `available_for_deployment` is separate budget math with
+  // no per-response currency.
+  const { totalPnl, pnlFraction, displayCurrency, hasUnconverted } = portfolioTotals(data);
 
   return (
-    <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
-      <StatTile label="Total AUM" value={formatMoney(data.total_aum, currency)} />
-      <StatTile
-        label="Cash balance"
-        value={formatMoney(data.cash_balance, currency)}
-        hint={data.cash_balance === null ? "unknown" : undefined}
-      />
-      <StatTile
-        label="Unrealized P&L"
-        value={formatMoney(totalPnl, currency)}
-        hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
-        tone={totalPnl >= 0 ? "positive" : "negative"}
-      />
-      <DeploymentCard budget={budgetData} budgetError={budgetError} currency={currency} />
-    </div>
+    <>
+      <div className={STAT_ROW_GRID}>
+        <StatTile label="Total AUM" value={formatMoney(data.total_aum, displayCurrency)} />
+        <StatTile
+          label="Cash balance"
+          value={formatMoney(data.cash_balance, data.cash_currency)}
+          hint={data.cash_balance === null ? "unknown" : undefined}
+        />
+        <StatTile
+          label="Unrealized P&L"
+          value={formatMoney(totalPnl, displayCurrency)}
+          // The % RESTATES the money delta in another unit, so it carries the
+          // same signal and the same colour — matching the rolling-P&L row
+          // directly below, which is the point of sharing the tile at all.
+          // Contrast the Deployment tile's hint, a caveat that stays muted.
+          hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
+          tone={totalPnl >= 0 ? "positive" : "negative"}
+          toneHint
+        />
+        <DeploymentCard budget={budgetData} budgetError={budgetError} currency={currency} />
+      </div>
+      {hasUnconverted && (
+        <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+          ⚠ Some positions couldn&apos;t be converted to {displayCurrency}; totals may mix
+          currencies.
+        </p>
+      )}
+    </>
   );
 }
 

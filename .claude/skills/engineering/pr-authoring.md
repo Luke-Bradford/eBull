@@ -8,9 +8,24 @@ A reviewer should be able to understand the change, its invariants, and its trad
 
 If the PR description is weak, the review quality drops and the review rounds increase.
 
-## Required PR sections
+## Length calibration — read before the section list
 
-Every PR description must contain these headings.
+**Match the description's length to what the change needs.** Cover the substance; do not
+pad with filler sections, redundant summaries or boilerplate. A one-file fix does not
+need the full section set, and a section with nothing to say should be omitted rather
+than filled with a placeholder.
+
+Written deliverables run long by default, so a template that reads as "produce all of
+these" reliably yields a padded document. The sections below are the areas a reviewer needs covered **when they
+apply** — not a form to complete.
+
+The exception is the ETL/parser/schema evidence table (CLAUDE.md Definition of Done
+clauses 8-12). That is a CI-and-review contract, not prose, and it is never optional on
+those changes.
+
+## PR sections
+
+Cover these areas when they apply. Exact heading wording may vary (recent merged PRs use e.g. `## What` / `## Security model`). The repo template `.github/pull_request_template.md` additionally supplies the Issue-reference line (`Closes #N` — see the CI gate below) and the checklist.
 
 ### What changed
 Describe the code changes concretely.
@@ -26,7 +41,7 @@ List:
 - data backfill expectations
 - compatibility notes
 
-If none, say "None".
+If none, omit the section — do not write a placeholder.
 
 ### Invariants checked
 State the important correctness rules you preserved.
@@ -48,6 +63,9 @@ Examples:
 - stale recommendation
 - missing quote fallback
 
+### Security model
+State the security story: input surfaces touched, and whether any execution path is affected (if so, confirm the execution guard is called and `decision_audit` is written before any order is staged). **This is the ONE section that is never omitted** — the PR template always carries the heading, and silence about security reads as "not considered" rather than "not applicable". When nothing applies, one line is the whole section: "No execution path touched." Do not expand it into a paragraph to look thorough. (Template heading: "Security and audit model".)
+
 ### Tests added
 Summarise the behaviour covered by tests.
 Do not just say "added tests".
@@ -61,7 +79,9 @@ Examples:
 
 ### Tech debt opened
 List any explicitly deferred items with issue numbers.
-If none, say "None".
+If none, omit the section — do not write a placeholder.
+
+**Filings-ETL / parser / schema-migration PRs** must also record the dev-verify evidence per project CLAUDE.md "Definition of done" clauses 8-12: instruments smoked (default panel AAPL/GME/MSFT/JPM/HD) + figure observed, cross-source figure compared + source, `POST /jobs/sec_rebuild/run` invocation + outcome, rollup-endpoint check — each with the commit SHA it was verified at.
 
 ## PR description quality bar
 
@@ -76,9 +96,13 @@ A bad PR description is just a restatement of the ticket title.
 
 ## `verify-issue-link` CI gate — every `#N` in the TITLE needs a verb-link in the body
 
-The `verify-issue-link` job greps **every** `#N` out of the PR *title* and fails unless each appears in the body preceded by a recognised verb (`close[sd]`/`closing`/`fix(es|ed|ing)`/`resolve[sd]`/`resolving`/`refs?`/`references?`/`track[sd]`/`tracking`/`part of`/`umbrella`) + whitespace/colon + `#N`. Inline code and fenced/comment blocks are stripped first, so a `Closes #N` inside backticks or `<!-- -->` does **not** count.
+The `verify-issue-link` job (`.github/workflows/pr-issue-link.yml`) greps **every** `#N` out of the PR *title* and fails unless each appears in the body preceded by a recognised verb + whitespace/colon. Actual verb regex (matched case-insensitively): `(close[sd]?|closing|fix(e[sd]|ing)?|resolve[sd]?|resolving|refs?|references?|track[sd]?|tracking|part of|umbrella)[[:space:]:]+#N` — bare `Fix #N` / `Umbrella: #N` pass; a left non-word boundary blocks substrings like `unfixes #N`; a trailing digit boundary means `Closes #869` does **not** satisfy a title `#86`. Inline code, fenced code blocks, and HTML comments are stripped from the body first, so a `Closes #N` inside backticks or `<!-- -->` does **not** count.
 
 Trap: a title like `feat(#1384): … (#1343 PR-B)` references **two** issues. `Closes #1384` satisfies one; the other (`#1343`) must also be verb-linked — bare prose ("half of #1343") fails. Fix: add `Part of #1343.` (or `Refs #1343.`). Don't reference a closed/parent issue in the title unless you'll verb-link it. (PR #1385.)
+
+## `perf-claim-lint` CI gate — perf-claim PRs need artifacts + 3 body sections
+
+Triggered by PR label `perf` OR a `## Performance impact` header in the body. Requires committed baselines `var/perf_baselines/<ticket>-<sha>.{txt,json,manifest.yaml}` with row counts meeting `scripts/perf_bench/floors.yaml`, plus line-exact body sections `## Sibling-shape audit`, `## Rollback criteria`, `## Post-deploy SLO`. Full protocol: `.claude/skills/engineering/etl-perf-claims.md`.
 
 ## Pre-submit check
 

@@ -123,6 +123,25 @@ _UNMAPPED_MANIFEST_SOURCES: dict[ManifestSource, str] = {
         "coverage capability — absence between proxy seasons is the healthy "
         "default, so it has no per-instrument capability cell."
     ),
+    # 424B prospectus offerings (#1816) — episodic capital-action EVENTS,
+    # not a standing per-instrument coverage expectation: most instruments
+    # never file a 424B, so absence is the healthy default. Same scope as
+    # sec_nt above — no capability cell applies.
+    "sec_424b": (
+        "Prospectus offering events (424B tier-1 subtypes, #1816). Episodic "
+        "capital actions, not a coverage capability — absence is the healthy "
+        "default, so it has no per-instrument capability cell."
+    ),
+    # Tender / going-private events (#1982) — episodic M&A / capital-return
+    # EVENTS, not a standing per-instrument coverage expectation: most
+    # instruments are never a tender party, so absence is the healthy
+    # default. Same scope as sec_nt / sec_424b above.
+    "sec_tender": (
+        "Tender / going-private schedule events (SC TO-T / TO-I / 14D9 / "
+        "13E3, #1982). Episodic M&A events, not a coverage capability — "
+        "absence is the healthy default, so it has no per-instrument "
+        "capability cell."
+    ),
 }
 
 

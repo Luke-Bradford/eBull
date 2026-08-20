@@ -50,6 +50,8 @@ const displayed = live
 )}
 ```
 
+Canonical live implementation: `frontend/src/components/orders/DemoLivePill.tsx` — a boolean variant of this exact cache-and-OR pattern (`fresh ?? cached` + stale marker), reading `config.data.runtime.enable_live_trading`. Both `SystemStatusResponse.kill_switch` and `ConfigResponse.kill_switch` (`frontend/src/api/types.ts`) carry the `{active, reason, activated_at, activated_by}` shape, so the dual-source OR above is real, not hypothetical.
+
 ## Clear-on-positive rule
 
 A safety banner only clears when a fresh successful response **explicitly** says it should. Errors, retries, and loading states **never** clear it.
@@ -72,7 +74,7 @@ This is non-negotiable. A silent cache that looks live is worse than no cache at
 
 ## Read-only on display surfaces, mutate on admin surfaces only
 
-A safety-state indicator and its toggle never live in the same component. Display surfaces (dashboard, instrument detail) are strictly read-only. Mutation (the kill switch toggle) lives on the admin page only.
+A safety-state indicator and its toggle never live in the same component. Display surfaces (dashboard, instrument detail) are strictly read-only. Mutation (the kill switch toggle) lives on the admin page only — `frontend/src/components/admin/KillSwitchSection.tsx`.
 
 This mirrors the settled `kill switch separate from config flags` decision in `docs/settled-decisions.md`. If you find yourself adding an `onToggle` prop to a component on a dashboard, stop — you're on the wrong page.
 

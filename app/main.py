@@ -49,18 +49,20 @@ from app.api.operator_ingest import router as operator_ingest_router
 from app.api.operators import router as operators_router
 from app.api.orders import router as orders_router
 from app.api.portfolio import router as portfolio_router
+from app.api.price_quarantine import router as price_quarantine_router
 from app.api.processes import router as processes_router
 from app.api.recommendations import router as recommendations_router
 from app.api.reports import router as reports_router
 from app.api.scores import router as scores_router
 from app.api.sse_quotes import router as sse_quotes_router
+from app.api.strategies import router as strategies_router
 from app.api.sync import router as sync_router
 from app.api.system import router as system_router
 from app.api.tax import router as tax_router
 from app.api.theses import instrument_thesis_router
 from app.api.theses import router as theses_router
 from app.api.watchlist import router as watchlist_router
-from app.config import settings
+from app.config import DEV_LIKE_ENVS, settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
 from app.db.pg_settings import API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
@@ -251,8 +253,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await asyncio.to_thread(_ensure_exchanges_seeded_probe)
 
+    # #2436 — give every stored thesis a subject-identity verdict under the
+    # CURRENT rule. Same self-heal posture as the probes above, and load-bearing
+    # for the same reason: sql/332 can only add NULL columns, every consumer
+    # reads NULL as quarantined, so a migrate-and-deploy without this would
+    # silently strip the whole historical thesis corpus out of portfolio
+    # decisions, scoring, take-profit and reporting. Steady state writes zero
+    # rows; a rule-hash change re-verdicts the corpus on the next boot.
+    from app.services.thesis_subject_identity import ensure_subject_identity_verdicts
+
+    def _ensure_subject_identity_verdicts_probe() -> None:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            written = ensure_subject_identity_verdicts(guard_conn)
+        if written:
+            logger.warning("Thesis subject-identity verdicts (re)computed for %d row(s) (#2436).", written)
+
+    await asyncio.to_thread(_ensure_subject_identity_verdicts_probe)
+
     # Open the connection pool after migrations so the schema is up to date.
-    pool = open_pool("db_pool", min_size=1, max_size=DB_POOL_MAX_SIZE)
+    pool = open_pool(
+        "db_pool",
+        min_size=1,
+        max_size=DB_POOL_MAX_SIZE,
+        application_name="ebull-api-db-pool",
+    )
     logger.info("Connection pool opened (min=1, max=%d).", DB_POOL_MAX_SIZE)
     app.state.db_pool = pool
 
@@ -273,7 +297,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # (1 after #1472 PR2b) — audit writes are short-lived single-row
     # INSERTs that don't need parallelism. ADR 0001 requires audit-on-
     # every-decryption to be durable independent of caller outcome.
-    audit_pool = open_pool("audit_pool", min_size=1, max_size=AUDIT_POOL_MAX_SIZE)
+    audit_pool = open_pool(
+        "audit_pool",
+        min_size=1,
+        max_size=AUDIT_POOL_MAX_SIZE,
+        application_name="ebull-api-audit-pool",
+    )
     logger.info("Audit pool opened (min=1, max=%d).", AUDIT_POOL_MAX_SIZE)
     app.state.audit_pool = audit_pool
 
@@ -406,8 +435,9 @@ def _bootstrap_fx_rates(pool: ConnectionPool[Any]) -> None:
     """Populate ``live_fx_rates`` synchronously when the table is empty.
 
     Per the visibility-driven live-prices spec
-    (docs/superpowers/specs/2026-04-25-visibility-driven-live-prices-spec.md
-    PR C), the daily Frankfurter cron does not guarantee rates are
+    (docs/proposals/etl/visibility-driven-live-prices.md, PR C — moved from
+    docs/superpowers/specs/, see docs/_archive/path-migration-map.md), the
+    daily Frankfurter cron does not guarantee rates are
     in the table at boot — a fresh DB, a wiped table, or a process
     restart between ECB publishes would all leave readers seeing
     no rows. Non-SSE handlers (``/portfolio``, ``/portfolio/copy-trading``,
@@ -529,6 +559,7 @@ app.include_router(broker_credentials_router)
 app.include_router(config_router)
 app.include_router(copy_trading_router)
 app.include_router(coverage_router)
+app.include_router(price_quarantine_router)
 app.include_router(business_summary_admin_router)
 app.include_router(fund_metadata_router)  # #1171 fund-metadata endpoints
 app.include_router(fundamentals_admin_router)  # #677 fundamentals force-refresh
@@ -539,7 +570,7 @@ app.include_router(fundamentals_admin_router)  # #677 fundamentals force-refresh
 # environments like `staging`/`qa`/`uat` are denied by default and
 # never silently expose operator credentials. Add new envs here
 # explicitly when they need diagnostic access. PR #610 review.
-if settings.app_env in {"dev", "test", "local"}:
+if settings.app_env in DEV_LIKE_ENVS:
     app.include_router(debug_ws_router)
 app.include_router(capability_overrides_admin_router)
 app.include_router(filings_router)
@@ -555,6 +586,7 @@ app.include_router(recommendations_router)
 app.include_router(reports_router)
 app.include_router(scores_router)
 app.include_router(sse_quotes_router)
+app.include_router(strategies_router)
 app.include_router(sync_router)
 app.include_router(system_router)
 app.include_router(tax_router)

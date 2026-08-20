@@ -14,6 +14,7 @@ import { fetchRollingPnl } from "@/api/portfolio";
 import type { RollingPnlPeriod } from "@/api/types";
 import { formatMoney, formatPct } from "@/lib/format";
 import { SectionSkeleton } from "@/components/dashboard/Section";
+import { STAT_ROW_GRID, StatTile } from "@/components/dashboard/StatTile";
 import { useAsync } from "@/lib/useAsync";
 
 const LABELS: Record<string, string> = {
@@ -33,29 +34,33 @@ function Pill({
   // rendering (Codex #388 round-2 finding).
   const sign: "pos" | "neg" | "neutral" =
     period.pnl > 0 ? "pos" : period.pnl < 0 ? "neg" : "neutral";
-  const toneText =
-    sign === "pos"
-      ? "text-emerald-700"
-      : sign === "neg"
-        ? "text-red-700"
-        : "text-slate-600";
-  // Design-system v1: hairline-top chrome shared with Section/Pane.
-  // Tone is carried by text colour only — no border accent.
+  // #1908 PR-5: this was a near-copy of StatTile with its own padding and
+  // LIGHT-ONLY tone classes (`text-emerald-700` / `text-red-700` with no
+  // `dark:` partner — the dark gate's checks only cover bg/border/hover, so
+  // nothing caught it). Reusing StatTile fixes the dark-mode contrast and
+  // guarantees this row's hairlines keep aligning with the summary row.
+  //
+  // Three props carry behaviour the private tile had and must not lose:
+  //   - `size="md"`   — supporting row, must not shout as loud as the headline.
+  //   - `toneHint`    — the % RESTATES the money delta, so it carries the same
+  //                     signal and the same colour (review round 1 WARNING) —
+  //                     but ONLY when there IS a percentage. A null pnl_pct
+  //                     renders the em-dash no-data placeholder, and a dash
+  //                     painted emerald/rose reads as a signal that does not
+  //                     exist (review round 2 NITPICK).
+  //   - `tone="muted"` on a zero delta — an explicit "no direction here",
+  //                     not the full-strength default (review round 1 NITPICK).
   return (
-    <div
-      className="flex-1 border-t border-slate-200 dark:border-slate-800 px-3 pt-3 pb-1"
-      data-testid={`rolling-pnl-${period.period}`}
-    >
-      <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
-        {LABELS[period.period] ?? period.period}
-      </div>
-      <div className={`mt-1 text-lg font-semibold tabular-nums ${toneText}`}>
-        {`${sign === "pos" ? "+" : ""}${formatMoney(period.pnl, currency)}`}
-      </div>
-      <div className={`text-xs tabular-nums ${toneText}`}>
-        {/* formatPct already signs positives — don't double-prefix. */}
-        {period.pnl_pct === null ? "—" : formatPct(period.pnl_pct)}
-      </div>
+    <div data-testid={`rolling-pnl-${period.period}`}>
+      <StatTile
+        label={LABELS[period.period] ?? period.period}
+        value={`${sign === "pos" ? "+" : ""}${formatMoney(period.pnl, currency)}`}
+        // formatPct already signs positives — don't double-prefix.
+        hint={period.pnl_pct === null ? "—" : formatPct(period.pnl_pct)}
+        tone={sign === "pos" ? "positive" : sign === "neg" ? "negative" : "muted"}
+        size="md"
+        toneHint={period.pnl_pct !== null}
+      />
     </div>
   );
 }
@@ -65,9 +70,9 @@ export function RollingPnlStrip(): JSX.Element | null {
 
   if (loading) {
     return (
-      <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-3">
+      <div className={STAT_ROW_GRID}>
         {[0, 1, 2].map((i) => (
-          <div key={i} className="border-t border-slate-200 dark:border-slate-800 px-3 pt-3 pb-1">
+          <div key={i} className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
             <SectionSkeleton rows={1} />
           </div>
         ))}
@@ -83,7 +88,7 @@ export function RollingPnlStrip(): JSX.Element | null {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-3">
+    <div className={STAT_ROW_GRID}>
       {data.periods.map((period) => (
         <Pill
           key={period.period}

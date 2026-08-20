@@ -39,7 +39,9 @@ export async function fetchPortfolioMock(): Promise<PortfolioResponse> {
     cash_balance: null,
     mirror_equity: 0,
     display_currency: "USD",
+    cash_currency: "USD",
     fx_rates_used: {},
+    fx_incomplete: false,
     live_quote_instrument_ids: [],
   };
 }
@@ -52,6 +54,10 @@ export async function fetchConfigMock(): Promise<ConfigResponse> {
       enable_auto_trading: false,
       enable_live_trading: false,
       display_currency: "USD",
+      llm_provider: "openai_compatible",
+      llm_base_url: "http://localhost:11434/v1",
+      llm_model_writer: "qwen3:14b",
+      llm_model_critic: "qwen3:14b",
       updated_at: new Date(0).toISOString(),
       updated_by: "",
       reason: "",

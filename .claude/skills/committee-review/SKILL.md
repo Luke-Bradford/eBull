@@ -7,6 +7,18 @@ description: Multi-agent committee review of a plan, spec, or design document. D
 
 ## When to use
 
+> ⚠ **Default to 2-3 lenses, not 8 (revised 2026-08-03).** This skill dispatches 7 agents
+> plus a Codex pass and blocks on all 8. That collides with `CLAUDE.md`'s subagent rule
+> ("if one agent can do it, use one, not several") and with the standing rule to cap
+> delegation — 8 agents on a doc that needed two is the single most expensive mistake
+> available in this repo.
+>
+> Escalate to the full panel ONLY when the operator asks for it explicitly, or when a
+> 2-3 lens pass has already returned findings that genuinely span more boundaries than
+> those lenses covered. Pick the 2-3 by where the doc is most likely to be WRONG, not by
+> what would be nice to have. The full panel is the top rung of the review-intensity
+> ladder in `CLAUDE.md`; do not climb to it by default.
+
 Trigger this skill when:
 - A plan, spec, or design doc is about to gate code-writing work (high cost of being wrong).
 - The doc has already been through 1+ review rounds AND prior reviews produced unverified-claim findings (signal: prior plan cited APIs that don't exist).
@@ -76,7 +88,7 @@ Each lens MUST be briefed with: identity ("You are X"), target doc path, predece
    - Top N must-fix list.
    - File index linking raw reviews.
 
-6. **Write handoff prompt** for next session — self-contained, reads findings + revises the plan or splits into streams. See `references/handoff-template.md` (if needed).
+6. **Write handoff prompt** for next session — self-contained, reads findings + revises the plan or splits into streams.
 
 7. **Update MEMORY.md index** with links to all new memos.
 

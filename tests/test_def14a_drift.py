@@ -745,3 +745,258 @@ class TestIdempotency:
         assert row["min"] == first_id
         # detected_at was refreshed.
         assert row["max"] >= first_detected
+
+
+# ---------------------------------------------------------------------------
+# #966 — superseded-accession purge + rollup chip reader
+# ---------------------------------------------------------------------------
+
+
+class TestSupersededAccessionPurge:
+    """#966 Codex ckpt-1 HIGH: the detector evaluates only the latest
+    (instrument, holder) accession, so alert rows minted from superseded
+    accessions must be purged on every run or a severity-scoped read
+    surfaces them forever."""
+
+    def test_stale_accession_alert_purged_on_rerun(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=966_100, symbol="AAPL")
+        # Old proxy: 30% drift -> critical alert minted from OLD accession.
+        _seed_def14a_holder(
+            conn,
+            instrument_id=966_100,
+            accession="DEF-24-OLD",
+            holder_name="Alex Roe",
+            shares="1000000",
+            as_of=date(2025, 3, 1),
+        )
+        _seed_form4_txn(
+            conn,
+            accession="F4-24-001",
+            instrument_id=966_100,
+            filer_cik="0001100966",
+            filer_name="Alex Roe",
+            txn_date=date(2025, 2, 15),
+            post_transaction_shares="700000",
+        )
+        conn.commit()
+        detect_drift(conn, instrument_id=966_100)
+        conn.commit()
+        alerts = list(iter_alerts(conn, instrument_id=966_100))
+        assert [a["accession_number"] for a in alerts] == ["DEF-24-OLD"]
+
+        # New proxy supersedes: figures now reconcile cleanly.
+        _seed_def14a_holder(
+            conn,
+            instrument_id=966_100,
+            accession="DEF-25-NEW",
+            holder_name="Alex Roe",
+            shares="700000",
+            as_of=date(2026, 3, 1),
+        )
+        conn.commit()
+        detect_drift(conn, instrument_id=966_100)
+        conn.commit()
+
+        # The OLD accession's alert row is purged, and the clean NEW
+        # accession minted none — zero rows, not a lingering critical.
+        assert list(iter_alerts(conn, instrument_id=966_100)) == []
+
+
+class TestRollupDriftChipReader:
+    """#966 — ``ownership_rollup._read_def14a_drift`` summary contract."""
+
+    def test_warning_alert_yields_chip(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.ownership_rollup import _read_def14a_drift
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=966_200, symbol="MSFT")
+        _seed_def14a_holder(
+            conn,
+            instrument_id=966_200,
+            accession="DEF-25-010",
+            holder_name="Casey Lee",
+            shares="1000000",
+        )
+        _seed_form4_txn(
+            conn,
+            accession="F4-25-010",
+            instrument_id=966_200,
+            filer_cik="0001100967",
+            filer_name="Casey Lee",
+            txn_date=date(2026, 2, 15),
+            post_transaction_shares="900000",  # 10% -> warning
+        )
+        conn.commit()
+        detect_drift(conn, instrument_id=966_200)
+        conn.commit()
+
+        info = _read_def14a_drift(conn, 966_200)
+        assert info is not None
+        assert info.worst_severity == "warning"
+        assert info.alert_count == 1
+        assert info.holders == ("Casey Lee",)
+        assert "drift" in info.chip.lower()
+
+    def test_info_only_alerts_yield_none(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Unmatched proxy names mint info-severity alerts — the chip
+        must NOT fire on them (they already render as the
+        def14a_unmatched slice)."""
+        from app.services.ownership_rollup import _read_def14a_drift
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=966_300, symbol="JPM")
+        # No matching Form 4/3 rows -> unmatched -> info severity.
+        _seed_def14a_holder(
+            conn,
+            instrument_id=966_300,
+            accession="DEF-25-020",
+            holder_name="Morgan Chase Trust",
+            shares="5000000",
+        )
+        conn.commit()
+        report = detect_drift(conn, instrument_id=966_300)
+        conn.commit()
+        assert report.alerts_by_severity["info"] == 1
+
+        assert _read_def14a_drift(conn, 966_300) is None
+
+
+class TestDriftPctSaturation:
+    """#966 — a tiny DEF 14A figure vs a large Form 4 cumulative must
+    saturate at the 999 sentinel, not overflow NUMERIC(10,4) (found by
+    the full-population seed run on dev)."""
+
+    def test_extreme_ratio_saturates_not_overflows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=966_400, symbol="GME")
+        _seed_def14a_holder(
+            conn,
+            instrument_id=966_400,
+            accession="DEF-25-030",
+            holder_name="Pat Quinn",
+            shares="1",  # parser-garbage-scale tiny figure
+        )
+        _seed_form4_txn(
+            conn,
+            accession="F4-25-030",
+            instrument_id=966_400,
+            filer_cik="0001100968",
+            filer_name="Pat Quinn",
+            txn_date=date(2026, 2, 15),
+            post_transaction_shares="10000000",
+        )
+        conn.commit()
+
+        report = detect_drift(conn, instrument_id=966_400)
+        conn.commit()
+
+        assert report.alerts_by_severity["critical"] == 1
+        alerts = list(iter_alerts(conn, instrument_id=966_400))
+        assert alerts[0]["drift_pct"] == Decimal("999")
+
+
+class TestOrphanAlertPurge:
+    """#966 Codex ckpt-2 HIGH: a rewash DELETE+re-INSERT that renames or
+    drops a holder must not leave their alert row lingering forever."""
+
+    def test_vanished_holder_alert_purged(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=966_500, symbol="HD")
+        _seed_def14a_holder(
+            conn,
+            instrument_id=966_500,
+            accession="DEF-25-040",
+            holder_name="Riley Kim",
+            shares="1000000",
+        )
+        _seed_form4_txn(
+            conn,
+            accession="F4-25-040",
+            instrument_id=966_500,
+            filer_cik="0001100969",
+            filer_name="Riley Kim",
+            txn_date=date(2026, 2, 15),
+            post_transaction_shares="500000",  # 50% -> critical
+        )
+        conn.commit()
+        detect_drift(conn, instrument_id=966_500)
+        conn.commit()
+        assert len(list(iter_alerts(conn, instrument_id=966_500))) == 1
+
+        # Rewash-style replacement: the holder disappears from the
+        # typed table entirely (reparse renamed them).
+        conn.execute(
+            "DELETE FROM def14a_beneficial_holdings WHERE instrument_id = 966500",
+        )
+        conn.commit()
+        detect_drift(conn, instrument_id=966_500)
+        conn.commit()
+
+        assert list(iter_alerts(conn, instrument_id=966_500)) == []
+
+
+class TestStaleWriteGuard:
+    """#966 Codex ckpt-2 MED: an alert write whose accession is no longer
+    the holder's latest must be a no-op (cross-accession race)."""
+
+    def test_upsert_with_superseded_accession_is_noop(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.def14a_drift import DriftAlert, _upsert_alert
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=966_600, symbol="KO")
+        _seed_def14a_holder(
+            conn,
+            instrument_id=966_600,
+            accession="DEF-24-OLD",
+            holder_name="Sam Field",
+            shares="1000000",
+            as_of=date(2025, 3, 1),
+        )
+        _seed_def14a_holder(
+            conn,
+            instrument_id=966_600,
+            accession="DEF-25-NEW",
+            holder_name="Sam Field",
+            shares="1000000",
+            as_of=date(2026, 3, 1),
+        )
+        conn.commit()
+
+        # Simulates the loser of the race: writes an alert keyed on the
+        # OLD accession after the NEW accession has landed.
+        _upsert_alert(
+            conn,
+            DriftAlert(
+                instrument_id=966_600,
+                holder_name="Sam Field",
+                matched_filer_cik="0001100970",
+                def14a_shares=Decimal("1000000"),
+                form4_cumulative=Decimal("500000"),
+                drift_pct=Decimal("0.5"),
+                severity="critical",
+                accession_number="DEF-24-OLD",
+                as_of_date=date(2025, 3, 1),
+            ),
+        )
+        conn.commit()
+
+        assert list(iter_alerts(conn, instrument_id=966_600)) == []

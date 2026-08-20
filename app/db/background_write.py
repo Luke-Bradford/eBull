@@ -67,14 +67,16 @@ def get_background_pool() -> BackgroundConnectionPool | None:
 
 
 @contextmanager
-def background_write_connection() -> Iterator[psycopg.Connection[Any]]:
-    """Yield an autocommit connection for a short background WRITE.
+def background_write_connection(*, autocommit: bool = True) -> Iterator[psycopg.Connection[Any]]:
+    """Yield a bounded connection for a short background write.
 
     Borrows from the registered jobs-process ``BackgroundConnectionPool`` when
     set (bounded, self-healing), else opens a fresh raw ``autocommit=True``
-    connection (API / tests / CLI). BOTH paths are ``autocommit=True``, so a
-    writer's ``with conn.transaction()`` issues the same real BEGIN/COMMIT
-    either way — the pool and fallback are semantically identical.
+    connection (API / tests / CLI). The default remains ``autocommit=True``,
+    so a writer's ``with conn.transaction()`` issues a real BEGIN/COMMIT.
+    ``autocommit=False`` supports existing helpers that own their commit and
+    need several statements to stay atomic; pooled state is restored before
+    return.
 
     Shutdown robustness (Codex PR4c-ckpt-2): if the registered pool is CLOSED
     when the borrow is attempted — a sync still finalizing during jobs shutdown
@@ -89,8 +91,19 @@ def background_write_connection() -> Iterator[psycopg.Connection[Any]]:
         yielded = False
         try:
             with pool.connection() as conn:
-                yielded = True
-                yield conn
+                previous_autocommit = conn.autocommit
+                if previous_autocommit != autocommit:
+                    conn.autocommit = autocommit
+                try:
+                    yielded = True
+                    yield conn
+                finally:
+                    # A caller using the transactional mode may raise before
+                    # its own commit.  Return only an idle, autocommit-restored
+                    # connection to this shared pool.
+                    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+                        conn.rollback()
+                    conn.autocommit = previous_autocommit
             return
         except BackgroundPoolClosed, PoolClosed:
             # A closed pool raises at CHECKOUT (before yield) — fall through to
@@ -98,5 +111,9 @@ def background_write_connection() -> Iterator[psycopg.Connection[Any]]:
             # error came from the caller's WORK, not checkout, so re-raise it.
             if yielded:
                 raise
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+    with psycopg.connect(
+        settings.database_url,
+        autocommit=autocommit,
+        application_name="ebull-background-write-fallback",
+    ) as conn:
         yield conn

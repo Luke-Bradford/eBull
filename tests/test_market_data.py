@@ -22,6 +22,7 @@ from app.providers.implementations.etoro import (
     _normalise_instruments,
     _normalise_intraday_candle,
     _normalise_intraday_candles,
+    _normalise_market_snapshot_instrument,
     _normalise_rate,
     _normalise_rates,
 )
@@ -34,9 +35,9 @@ from app.services.market_data import (
     _compute_and_store_features,
     _compute_rolling_returns,
     _compute_volatility_30d,
-    _most_recent_trading_day,
     compute_day_change,
     compute_spread_pct,
+    most_recent_trading_day,
 )
 
 # ---------------------------------------------------------------------------
@@ -114,6 +115,24 @@ FIXTURE_RATE_2 = {
 
 FIXTURE_RATES_RESPONSE = {"rates": [FIXTURE_RATE, FIXTURE_RATE_2]}
 
+FIXTURE_MARKET_SNAPSHOT = {
+    "instrumentId": 1001,
+    "currentRate": 305.1,
+    "dailyPriceChange": 0.0623,
+    "weeklyPriceChange": 2.1,
+    "monthlyPriceChange": 4.2,
+    "isCurrentlyTradable": True,
+    "isExchangeOpen": True,
+    "isActiveInPlatform": True,
+    "isBuyEnabled": True,
+    "internalIndustryId": 42,
+    "sectorNameId": 7,
+    "popularityUniques7Day": 1234,
+    "traders7DayChange": -3,
+    "buyHoldingPct": 91.5,
+    "sellHoldingPct": 8.5,
+}
+
 
 # ---------------------------------------------------------------------------
 # Instrument normalisation
@@ -167,6 +186,36 @@ class TestNormaliseInstruments:
         raw = {"instrumentDisplayDatas": [FIXTURE_INSTRUMENT, "not a dict", {}]}
         records = _normalise_instruments(raw)
         assert len(records) == 1
+
+
+class TestNormaliseMarketSnapshotInstrument:
+    def test_projected_values_preserve_provider_units(self) -> None:
+        row = _normalise_market_snapshot_instrument(FIXTURE_MARKET_SNAPSHOT)
+        assert row is not None
+        assert row.instrument_id == 1001
+        assert row.current_rate == Decimal("305.1")
+        assert row.daily_price_change_pct == Decimal("0.0623")
+        assert row.is_exchange_open is True
+        assert row.industry_id == 42
+        assert row.buy_holding_pct == Decimal("91.5")
+
+    @pytest.mark.parametrize("instrument_id", [None, 0, -1, "bad"])
+    def test_invalid_provider_id_is_discarded(self, instrument_id: object) -> None:
+        assert _normalise_market_snapshot_instrument({**FIXTURE_MARKET_SNAPSHOT, "instrumentId": instrument_id}) is None
+
+    def test_missing_and_non_finite_optional_values_remain_unknown(self) -> None:
+        row = _normalise_market_snapshot_instrument(
+            {
+                "instrumentId": 1001,
+                "currentRate": 0,
+                "dailyPriceChange": "NaN",
+                "isCurrentlyTradable": 1,
+            }
+        )
+        assert row is not None
+        assert row.current_rate is None
+        assert row.daily_price_change_pct is None
+        assert row.is_currently_tradable is None
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +560,106 @@ class TestGetQuotesChunking:
             # exc_info instead.
 
 
+class TestGetBroadMarketSnapshot:
+    def test_one_page_uses_live_page_parameter_and_tracks_discarded_rows(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 2,
+            "items": [FIXTURE_MARKET_SNAPSHOT, {"instrumentId": -100000}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            snapshot = provider.get_broad_market_snapshot()
+            params = provider._http.get.call_args.kwargs["params"]
+
+        assert params["page"] == 1
+        assert "pageNumber" not in params
+        assert snapshot.reported_total_items == 2
+        assert snapshot.discarded_items == 1
+        assert [row.instrument_id for row in snapshot.instruments] == [1001]
+        assert snapshot.observed_from <= snapshot.observed_to
+
+    def test_fetches_every_reported_page(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        first = MagicMock()
+        first.raise_for_status = MagicMock()
+        first.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 10_001,
+            "items": [{"instrumentId": i} for i in range(1, 10_001)],
+        }
+        second = MagicMock()
+        second.raise_for_status = MagicMock()
+        second.json.return_value = {
+            "page": 2,
+            "pageSize": 10_000,
+            "totalItems": 10_001,
+            "items": [{"instrumentId": 10_001}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.side_effect = [first, second]
+            snapshot = provider.get_broad_market_snapshot()
+            requested_pages = [call.kwargs["params"]["page"] for call in provider._http.get.call_args_list]
+
+        assert len(snapshot.instruments) == 10_001
+        assert requested_pages == [1, 2]
+
+    def test_refuses_incomplete_pagination(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"page": 1, "pageSize": 10_000, "totalItems": 3, "items": []}
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="pagination incomplete"):
+                provider.get_broad_market_snapshot()
+
+    def test_refuses_duplicate_ids(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 2,
+            "items": [{"instrumentId": 1001}, {"instrumentId": 1001}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="repeated instrumentId"):
+                provider.get_broad_market_snapshot()
+
+    def test_refuses_unbounded_page_count(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 20_001,
+            "items": [],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="bounded adapter permits 2"):
+                provider.get_broad_market_snapshot()
+
+
 # ---------------------------------------------------------------------------
 # Rolling returns
 # ---------------------------------------------------------------------------
@@ -706,7 +855,7 @@ class TestCandlesAreFresh:
 
 
 def _candles_are_fresh_standalone(latest_date: date, today: date) -> bool:
-    return latest_date >= _most_recent_trading_day(today)
+    return latest_date >= most_recent_trading_day(today)
 
 
 class TestCandleFreshness:
@@ -937,8 +1086,9 @@ class TestComputeAndStoreFeaturesTA:
             assert params[col] is None, f"{col} should be None when dates misalign"
 
     def test_string_indicators_excluded_from_ta_params(self) -> None:
-        """compute_indicators returns price_vs_sma200 and trend_sma_cross as
-        strings — these must NOT appear in the numeric ta_params dict."""
+        """Regression guard: compute_indicators no longer emits the derived
+        trend-signal strings (#1989 — see derive_trend_signals); if they are
+        ever reintroduced they must still not reach the numeric UPDATE params."""
         n = 250
         price_rows = _generate_price_rows(n)
         close_rows = list(reversed(price_rows))
@@ -1072,6 +1222,44 @@ class TestRefreshMarketDataForceBackfill:
         assert summary.candles_skipped == 1
         assert summary.candles_failed == 0
         assert summary.candle_rows_upserted == 0
+
+    def test_completed_session_boundary_excludes_forming_future_candle(self) -> None:
+        """#2572: a retry may fetch today's forming bar; it is not a close."""
+        from unittest.mock import patch
+
+        from app.services.market_data import refresh_market_data
+
+        completed = date(2026, 8, 10)
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = [
+            OHLCVBar(completed, Decimal("10"), Decimal("11"), Decimal("9"), Decimal("10.5"), 1000),
+            OHLCVBar(date(2026, 8, 11), Decimal("10.5"), Decimal("12"), Decimal("10"), Decimal("11"), 500),
+        ]
+        conn = MagicMock(autocommit=True)
+        transaction = MagicMock()
+        transaction.__enter__ = MagicMock(return_value=transaction)
+        transaction.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = transaction
+
+        with (
+            patch("app.services.market_data._candles_are_fresh", return_value=False),
+            patch("app.services.market_data._candles_fetch_count", return_value=3),
+            patch("app.services.market_data._last_bar", return_value=None),
+            patch("app.services.market_data._upsert_candles", return_value=1) as upsert,
+            patch("app.services.market_data._compute_and_store_features", return_value=0),
+            patch("app.services.market_data._record_supply_outcome"),
+        ):
+            summary = refresh_market_data(
+                provider,
+                conn,
+                instruments=[(42, "AAPL")],
+                skip_quotes=True,
+                fresh_through=completed,
+            )
+
+        written_bars = upsert.call_args.args[2]
+        assert [bar.price_date for bar in written_bars] == [completed]
+        assert summary.candle_rows_upserted == 1
 
     def test_fetch_exception_counted_in_candles_failed(self) -> None:
         """#1293: a candle fetch that raises increments candles_failed (the
@@ -1284,3 +1472,67 @@ class TestRefreshMarketDataCircuitBreaker:
         )
         assert provider.get_daily_candles.call_count == 25
         assert summary.candles_failed == 25
+
+
+class TestDetectAdjustmentEvent:
+    """#2066 — ratio-scale overlap mismatch = split/adjustment event."""
+
+    @staticmethod
+    def _bar(price_date: date, close: str) -> OHLCVBar:
+        c = Decimal(close)
+        return OHLCVBar(price_date=price_date, open=c, high=c, low=c, close=c, volume=1000)
+
+    _D1 = date(2026, 7, 15)
+    _D2 = date(2026, 7, 16)
+
+    def test_forward_split_fires(self) -> None:
+        """2:1 split — stored old-basis 100, re-fetched back-adjusted 50."""
+        from app.services.market_data import detect_adjustment_event
+
+        ratio = detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "50")])
+        assert ratio == Decimal("2")
+
+    def test_reverse_split_fires(self) -> None:
+        """1:10 reverse split — stored 12, re-fetched 120; ratio is
+        direction-normalised so both directions read as the same event."""
+        from app.services.market_data import detect_adjustment_event
+
+        ratio = detect_adjustment_event({self._D1: Decimal("12")}, [self._bar(self._D1, "120")])
+        assert ratio == Decimal("10")
+
+    def test_small_correction_does_not_fire(self) -> None:
+        """A late exchange correction (single-digit %) is not an event."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "104")]) is None
+
+    def test_threshold_boundary_fires_inclusive(self) -> None:
+        """Exactly 1.2 fires (threshold is inclusive); just below does not."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "120")]) == Decimal("1.2")
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "119")]) is None
+
+    def test_zero_close_sentinel_skipped(self) -> None:
+        """price_daily zero-close sentinels must not fake a split."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("0")}, [self._bar(self._D1, "50")]) is None
+
+    def test_nonpositive_fetched_close_skipped(self) -> None:
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "0")]) is None
+
+    def test_no_overlap_no_signal(self) -> None:
+        """Dates absent from the store are new rows — no basis to compare."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({}, [self._bar(self._D1, "50")]) is None
+
+    def test_worst_ratio_of_multiple_overlaps_returned(self) -> None:
+        from app.services.market_data import detect_adjustment_event
+
+        stored = {self._D1: Decimal("100"), self._D2: Decimal("300")}
+        bars = [self._bar(self._D1, "50"), self._bar(self._D2, "100")]
+        assert detect_adjustment_event(stored, bars) == Decimal("3")

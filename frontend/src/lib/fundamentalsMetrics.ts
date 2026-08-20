@@ -256,6 +256,28 @@ function isYearApart(curEnd: string, priorEnd: string): boolean {
  *  branch on annual data. The first `lag` rows are still emitted with
  *  null values so the time axis stays aligned with the other charts.
  *  A non-adjacent prior (history gap) is also nulled — see the guard above. */
+/** The ONE free-cash-flow derivation. Every FCF series in this file goes
+ *  through here.
+ *
+ *  Settled rule, cited not re-derived: `app/services/fcf_yield.py:111`
+ *  (quarterly) and `:132` (annual) compute
+ *  `operating_cf - ABS(COALESCE(capex, 0))` — OCF is strict, **capex NULL
+ *  coalesces to 0**. Spec §3.4 forbids gating on `capex IS NOT NULL`
+ *  verbatim.
+ *
+ *  capex is XBRL `us-gaap:PaymentsToAcquirePropertyPlantAndEquipment`,
+ *  normally a positive outflow — but the sign convention varies between
+ *  filers (prevention-log #596), so abs() before subtracting.
+ *
+ *  Do not inline this rule at a call site. It existed in two copies until
+ *  Codex checkpoint 2 on #2185; they disagreed, and the disagreement was
+ *  operator-visible as an FCF line that rendered on one pane and vanished
+ *  on another for the same periods.
+ */
+function fcfOf(p: JoinedPeriod): number | null {
+  return p.operating_cf !== null ? p.operating_cf - Math.abs(p.capex ?? 0) : null;
+}
+
 export function buildYoyGrowth(
   periods: ReadonlyArray<JoinedPeriod>,
   period: "quarterly" | "annual" = "quarterly",
@@ -267,13 +289,12 @@ export function buildYoyGrowth(
       candidate !== undefined && isYearApart(p.period_end, candidate.period_end)
         ? candidate
         : undefined;
-    const fcf = (cur: JoinedPeriod): number | null => {
-      if (cur.operating_cf === null || cur.capex === null) return null;
-      // capex is XBRL `us-gaap:PaymentsToAcquirePropertyPlantAndEquipment`,
-      // normally a positive outflow — but the sign convention varies between
-      // filers (prevention-log #596), so abs() before subtracting.
-      return cur.operating_cf - Math.abs(cur.capex);
-    };
+    // Uses the SHARED derivation — see fcfOf. This site gated on
+    // `capex === null` until Codex ckpt-2 on #2185 caught it: buildFcf had
+    // been corrected to the settled COALESCE rule while this copy had not,
+    // so a capex-omitting filer rendered an FCF line on the FCF pane and a
+    // gap on the YoY pane for the same periods. One rule, one function.
+    const fcf = fcfOf;
     return {
       period_end: p.period_end,
       revenue_yoy_pct: prior
@@ -337,36 +358,54 @@ export function buildCashflowWaterfall(
   ];
 }
 
-export interface BalanceStructure {
+export interface NetDebtRow {
   readonly period_end: string;
-  readonly assets: number;
-  readonly liabilities: number;
-  readonly equity: number;
+  /** Gross debt. Null ONLY when both components are null. */
+  readonly debt: number | null;
+  readonly cash: number | null;
+  /** `debt - cash`. Null when either side is unavailable. */
+  readonly net_debt: number | null;
 }
 
-/** Most-recent balance-sheet snapshot — assets vs liabilities + equity.
- *  Returns null when the latest period lacks the three core fields.
- *  The recharts component renders this as two horizontal stacked bars
- *  so the operator visually checks `assets ≈ liab + equity`. */
-export function latestBalanceStructure(
+/**
+ * Net-debt trend — replaces the assets-vs-(liabilities+equity) chart, which
+ * was an accounting identity and therefore could not vary (#2185 / spec §1.6).
+ *
+ * Source rule — the repo's own settled treatment, NOT re-derived here:
+ *
+ *   CASE WHEN long_term_debt IS NOT NULL OR short_term_debt IS NOT NULL
+ *        THEN COALESCE(long_term_debt, 0) + COALESCE(short_term_debt, 0) END
+ *
+ * `app/services/fundamentals/__init__.py:152-154` (the `debt` column of the
+ * `fundamentals_snapshot` write) and `app/services/fair_value_band.py:1021`
+ * (which carries the full net-debt form, `… + COALESCE(long,0) +
+ * COALESCE(short,0) - cash`).
+ *
+ * Two consequences of that rule, both deliberate:
+ *   - Gross debt is null only when BOTH components are null. A filer that
+ *     reports long-term debt and omits short-term is NOT a data gap — the
+ *     COALESCE-0 is the settled treatment, not a guess. `short_term_debt` is
+ *     sparse (12% coverage) precisely because most filers have none to report.
+ *   - A missing `cash` IS a genuine data gap, so net debt goes null rather
+ *     than COALESCE-ing to zero, which would overstate net debt by the whole
+ *     cash balance (the same reasoning fair_value_band.py:1014-1016 records
+ *     for EV). There is no degrade path here; do not invent one.
+ */
+export function buildNetDebt(
   periods: ReadonlyArray<JoinedPeriod>,
-): BalanceStructure | null {
-  for (let i = periods.length - 1; i >= 0; i--) {
-    const p = periods[i]!;
-    if (
-      p.total_assets !== null &&
-      p.total_liabilities !== null &&
-      p.shareholders_equity !== null
-    ) {
-      return {
-        period_end: p.period_end,
-        assets: p.total_assets,
-        liabilities: p.total_liabilities,
-        equity: p.shareholders_equity,
-      };
-    }
-  }
-  return null;
+): NetDebtRow[] {
+  return periods.map((p) => {
+    const debt =
+      p.long_term_debt !== null || p.short_term_debt !== null
+        ? (p.long_term_debt ?? 0) + (p.short_term_debt ?? 0)
+        : null;
+    return {
+      period_end: p.period_end,
+      debt,
+      cash: p.cash,
+      net_debt: debt !== null && p.cash !== null ? debt - p.cash : null,
+    };
+  });
 }
 
 export interface DebtRow {
@@ -474,12 +513,29 @@ export interface FcfRow {
   readonly fcf: number | null;
 }
 
+/**
+ * Free cash flow per period.
+ *
+ * Source rule — the repo's settled treatment, NOT re-derived here:
+ * `operating_cf − ABS(COALESCE(capex, 0))`
+ * (`app/services/fcf_yield.py:111` quarterly TTM, `:132` annual). **capex
+ * NULL → 0; operating_cf is the only strict input.** Spec §3.4 states it
+ * verbatim: *"Any implementation that gates the FCF line on
+ * `capex IS NOT NULL` is wrong."*
+ *
+ * This gated on `capex !== null` until #2185. Full-population cost of that
+ * (dev `financial_periods`, `superseded_at IS NULL`, per instrument):
+ *
+ * | basis | ≥1 period with OCF | of which NEVER report capex | mixed |
+ * |---|---|---|---|
+ * | FY | 4,636 | 1,142 (25%) | 1,004 (22%) |
+ * | Q1 | 4,208 | 1,247 (30%) |   984 (23%) |
+ *
+ * The never-capex instruments rendered the empty state for a series that is
+ * computable for every one of them; the mixed ones broke the line at exactly
+ * the periods where the right-hand #671 TTM-yield line — which already
+ * COALESCEs capex to 0 — still plotted a value. One chart, two capex rules.
+ */
 export function buildFcf(periods: ReadonlyArray<JoinedPeriod>): FcfRow[] {
-  return periods.map((p) => ({
-    period_end: p.period_end,
-    fcf:
-      p.operating_cf !== null && p.capex !== null
-        ? p.operating_cf - Math.abs(p.capex)
-        : null,
-  }));
+  return periods.map((p) => ({ period_end: p.period_end, fcf: fcfOf(p) }));
 }

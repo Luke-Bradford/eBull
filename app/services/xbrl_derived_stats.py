@@ -188,7 +188,9 @@ class TotalCompanyMarketCap:
     legs: tuple[_ClassLeg, ...]
 
 
-MarketCapBasis = Literal["total_company", "multiclass_unavailable", "not_multiclass"]
+MarketCapBasis = Literal[
+    "total_company", "multiclass_unavailable", "not_multiclass", "fpi_adr_unavailable", "fpi_adr_ratio"
+]
 
 
 @dataclass(frozen=True)
@@ -201,10 +203,21 @@ class MarketCapResolution:
       breach). FAIL CLOSED: the caller must suppress market cap (null), never fall
       back to the structurally-wrong combined×price for a known dual-class issuer.
     - ``not_multiclass`` — single-class (or not a curated dual-class issuer): the
-      caller uses the legacy ``compute_market_cap`` (combined × price, exact)."""
+      caller uses the legacy ``compute_market_cap`` (combined × price, exact).
+    - ``fpi_adr_unavailable`` — a Rule 3b-4 foreign-private-issuer ADR/ADS
+      (#1939) with NO curated ADS ratio: the SEC share count is ordinary shares,
+      the price is per-ADS, and the ADS ratio is not ingested. FAIL CLOSED: no
+      cap basis exists; the caller must suppress every ordinary-shares × ADS-price
+      product.
+    - ``fpi_adr_ratio`` — an ADR/ADS with a curated ADS ratio (#2117): use
+      ``value`` = ordinary-shares × ADS-price ÷ ratio (the corrected cap).
+      Catches the domestic-form ADR filers the ``fpi`` fingerprint misses."""
 
     basis: MarketCapBasis
     total: TotalCompanyMarketCap | None = None
+    # #2117: ratio-corrected market cap for the ``fpi_adr_ratio`` basis (a scalar
+    # ordinary×ADS-price÷ratio), distinct from the multiclass ``total`` structure.
+    value: Decimal | None = None
     # Per-class FLOAT value of the VIEWED instrument's own share class — its leg's
     # ``shares × price`` (#1665). A SEPARATE stat from ``total.value`` (the whole
     # company): GOOGL Class A ≈ $2.15T vs Alphabet total ≈ $4.45T. Set only for
@@ -549,8 +562,24 @@ def resolve_market_cap_basis(
     detector filters with CUSIP gates). For a detected multi-class issuer we either
     return the total-company cap or fail closed; everything else uses the legacy
     single-class product. PURE READ-PATH; see
-    docs/specs/etl/2026-06-17-per-class-market-cap.md."""
+    docs/specs/etl/2026-06-17-per-class-market-cap.md.
+
+    #1939/#2117: a Rule 3b-4 FPI ADR/ADS is corrected when a curated ADS ratio
+    exists (``fpi_adr_ratio``) and otherwise fails closed (``fpi_adr_unavailable``)
+    — the ordinary-share count cannot meet the per-ADS price under ANY basis
+    without the ratio. Detection reuses ``coverage.filings_status = 'fpi'`` (the
+    coverage classifier's form fingerprint — single source of truth, do not
+    re-derive) ∪ the ADR/ADS name marker ∪ curated ``ads_ratio`` membership.
+
+    Resolution order (Codex ckpt-1 #1: curated multiclass DOMINATES the ADS-ratio
+    correction — a same-CIK dual-class sibling must never get its price divided):
+    multiclass → ads_ratio → fpi(no ratio) → legacy."""
     with conn.cursor() as cur:
+        # Resolve the primary SEC CIK + curated-multiclass membership FIRST.
+        # Normalize to the 10-digit zero-padded form the rest of the SEC pipeline
+        # (and instrument_class_shares_outstanding.source_cik, #1623) stores, so an
+        # unpadded external_identifiers row can't silently miss the curated oracle and
+        # route a known dual-class issuer back to the broken legacy product.
         cur.execute(
             """
             SELECT identifier_value
@@ -563,22 +592,66 @@ def resolve_market_cap_basis(
             (instrument_id,),
         )
         cik_row = cur.fetchone()
-        if cik_row is None:
-            return MarketCapResolution(basis="not_multiclass")
-        # Normalize to the 10-digit zero-padded form the rest of the SEC pipeline
-        # (and instrument_class_shares_outstanding.source_cik, #1623) stores, so an
-        # unpadded external_identifiers row can't silently miss the curated oracle and
-        # route a known dual-class issuer back to the broken legacy product.
-        cik = str(cik_row[0]).zfill(10)
+        cik = str(cik_row[0]).zfill(10) if cik_row is not None else None
 
-        cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM instrument_class_shares_outstanding WHERE source_cik = %s)",
-            (cik,),
-        )
-        exists_row = cur.fetchone()
-        if exists_row is None or not exists_row[0]:
+        is_multiclass = False
+        if cik is not None:
+            cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM instrument_class_shares_outstanding WHERE source_cik = %s)",
+                (cik,),
+            )
+            exists_row = cur.fetchone()
+            is_multiclass = bool(exists_row and exists_row[0])
+
+        if not is_multiclass:
+            # #2117: one round-trip for both the curated-ratio flag and the
+            # fail-closed fpi fingerprint (this runs on the scoring path — keep
+            # the query count flat). fpi = Rule 3b-4 fingerprint ∪ ADR/ADS name
+            # marker (the marker catches domestic-form ADR filers the form set
+            # cannot); mirrors the sql/241 fpi_adr CTE — keep in sync.
+            cur.execute(
+                """
+                SELECT
+                    EXISTS (SELECT 1 FROM ads_ratio WHERE instrument_id = %(iid)s) AS has_ratio,
+                    (EXISTS (
+                        SELECT 1 FROM coverage
+                        WHERE instrument_id = %(iid)s AND filings_status = 'fpi'
+                     ) OR EXISTS (
+                        SELECT 1 FROM instruments
+                        WHERE instrument_id = %(iid)s AND company_name ~* '\\y(ADR|ADS)\\y'
+                     )) AS is_fpi_adr
+                """,
+                {"iid": instrument_id},
+            )
+            flags = cur.fetchone()
+            has_ratio = bool(flags and flags[0])
+            is_fpi_adr = bool(flags and flags[1])
+
+            if has_ratio:
+                # #2117: a curated ADS ratio corrects the ordinary×ADS-price product
+                # (catches AKTX — not ``fpi`` — and un-suppresses CRTO/ONC/TEVA/ZLAB).
+                # The corrected cap is exactly ``instrument_valuation.market_cap_live``:
+                # the view applies metric_price = price/ratio AND the same
+                # quote-else-daily-close price the rest of the identity uses
+                # (``compute_market_cap`` is quotes-only and returns None for a
+                # daily-close-only ADR, e.g. AKTX). Read it back so endpoint == view.
+                cur.execute(
+                    "SELECT market_cap_live FROM instrument_valuation WHERE instrument_id = %s",
+                    (instrument_id,),
+                )
+                mc_row = cur.fetchone()
+                return MarketCapResolution(basis="fpi_adr_ratio", value=mc_row[0] if mc_row is not None else None)
+
+            if is_fpi_adr:
+                # #1939: Rule 3b-4 FPI ADR/ADS WITHOUT a ratio → fail closed.
+                return MarketCapResolution(basis="fpi_adr_unavailable")
+
+            # Not a curated multiclass issuer and no ADS ratio → legacy single-class.
             return MarketCapResolution(basis="not_multiclass")
 
+    # Curated multiclass issuer → total-company cap (``cik`` is non-None here:
+    # is_multiclass can only be True when the CIK lookup succeeded).
+    assert cik is not None
     total = _build_total_company_cap(conn, instrument_id, cik)
     if total is not None:
         # Also surface the viewed instrument's OWN per-class float value (#1665) —

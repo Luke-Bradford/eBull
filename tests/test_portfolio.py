@@ -100,7 +100,7 @@ class TestEvaluateExit:
         should_exit, _ = _evaluate_exit(pos, {}, current_price=150.0)
         assert should_exit is False
 
-    def test_break_conditions_with_high_red_flag_triggers_exit(self) -> None:
+    def test_high_red_flag_triggers_exit(self) -> None:
         pos = _pos()
         details: dict[str, Any] = {
             "thesis": _thesis(break_conditions_json=["Revenue declines >20%"]),
@@ -108,9 +108,24 @@ class TestEvaluateExit:
         }
         should_exit, reason = _evaluate_exit(pos, details, current_price=150.0)
         assert should_exit is True
-        assert "break" in reason.lower()
+        assert "risk" in reason.lower()
 
-    def test_break_conditions_below_threshold_no_exit(self) -> None:
+    def test_high_red_flag_triggers_exit_without_break_conditions(self) -> None:
+        """#2050 — the previously-dead edge: a severe red flag must EXIT even
+        when the thesis carries no break_conditions (the old tautologous
+        ``break_conditions and`` term silently HELD this case, gating the
+        severe-risk exit on memo formatting)."""
+        pos = _pos()
+        for bc in (None, []):
+            details: dict[str, Any] = {
+                "thesis": _thesis(break_conditions_json=bc),
+                "max_red_flag": EXIT_RED_FLAG_THRESHOLD,
+            }
+            should_exit, reason = _evaluate_exit(pos, details, current_price=150.0)
+            assert should_exit is True, f"break_conditions_json={bc!r} must not gate the severe-risk exit"
+            assert "risk" in reason.lower()
+
+    def test_red_flag_below_threshold_no_exit(self) -> None:
         pos = _pos()
         details: dict[str, Any] = {
             "thesis": _thesis(break_conditions_json=["Revenue declines >20%"]),
@@ -119,7 +134,7 @@ class TestEvaluateExit:
         should_exit, _ = _evaluate_exit(pos, details, current_price=150.0)
         assert should_exit is False
 
-    def test_break_conditions_no_red_flag_no_exit(self) -> None:
+    def test_no_red_flag_no_exit(self) -> None:
         pos = _pos()
         details: dict[str, Any] = {
             "thesis": _thesis(break_conditions_json=["Revenue declines >20%"]),
@@ -885,9 +900,11 @@ class TestRunPortfolioReview:
         recs = {r.instrument_id: r for r in result.recommendations}
         assert recs[1].action == "HOLD"
 
-    def test_exit_on_thesis_break(self) -> None:
+    def test_exit_on_severe_risk(self) -> None:
         """
-        Held position with break conditions and high red flag → EXIT.
+        Held position with a red flag at/above threshold → EXIT (#2050:
+        break_conditions no longer consulted; thesis breaks reach EXIT via
+        regeneration per #2012 Design 1).
         """
         cursors = [
             _make_cursor(
@@ -943,7 +960,7 @@ class TestRunPortfolioReview:
 
         recs = {r.instrument_id: r for r in result.recommendations}
         assert recs[1].action == "EXIT"
-        assert "break" in recs[1].rationale.lower()
+        assert "risk" in recs[1].rationale.lower()
 
     def test_hold_not_in_ranked_list(self) -> None:
         """

@@ -2,30 +2,36 @@
 eToro market data provider.
 
 Implements MarketDataProvider against the real eToro public API.
-Raw API response disk dumps were retired in #471 — every structured
-field lands in SQL (``instruments``, ``price_daily``, ``quotes``,
-``exchanges``), and those tables are the audit trail (see
+Raw API response disk dumps were retired in #471. Durable structured
+fields land in SQL (``instruments``, ``price_daily``, ``quotes``,
+``exchanges``), and those tables are the audit trail outside the two bounded
+ephemeral cases below (see
 ``docs/review-prevention-log.md`` §"Raw payload persistence" for
 the scope-narrowed rule).
 
-**Intraday candle carve-out (#600).** ``get_intraday_candles`` is
-the one method on this class whose result is NOT mirrored to a SQL
-table. Intraday bars are ephemeral chart-UI data — they do not
+**Bounded ephemeral carve-outs.** ``get_intraday_candles`` returns ephemeral
+chart-UI data — it does not
 drive scoring, thesis, recommendations, orders, dividends, or tax,
 so the SQL-as-audit-trail invariant does not apply. The pass-through
 is gated by a TTL cache (``app/services/intraday_candles.py``) and
 the API endpoint is auth-gated to keep external quota traceable.
 Persisting intraday rows would expand the audit / sync surface
 without analytical value; the no-persistence design is locked at
-epic #585 and reviewed by Codex pre-implementation. This is the
-**only** sanctioned exception to the structured-fields-land-in-SQL
-rule for this provider — adding more requires reopening the design.
+epic #585 and reviewed by Codex pre-implementation.
+
+``get_broad_market_snapshot`` is the second narrow exception (#2523). It is a
+two-page, collection-time screening cross-section with no per-row source
+timestamp or bid/ask. Routine rows are never evidence and are not persisted;
+only aggregate coverage and the existing compact fired/refused decision context
+may survive. A shortlisted instrument still requires a timestamped quote. Any
+additional exception requires reopening this design.
 
 Auth: three-header scheme (x-api-key, x-user-key, x-request-id).
 Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url).
 """
 
 import logging
+import math
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -36,12 +42,14 @@ import httpx
 
 from app.config import settings
 from app.providers.market_data import (
+    BroadMarketSnapshot,
     ExchangeRecord,
     InstrumentRecord,
     InstrumentTypeRecord,
     IntradayBar,
     IntradayInterval,
     MarketDataProvider,
+    MarketSnapshotInstrument,
     OHLCVBar,
     Quote,
     StocksIndustryRecord,
@@ -55,9 +63,19 @@ logger = logging.getLogger(__name__)
 # eToro returns 500 on a chunk containing a problematic ID.
 _RATES_BATCH_SIZE = 50
 
-# eToro rate limit: 60 GET requests per minute (rolling window).
-# 1.1s inter-request interval ≈ 55 req/min — ~8% headroom.
+# eToro's market-data endpoints share 120 requests per rolling minute.  Keep
+# the older conservative pacing here because other processes use the same user
+# key and ResilientClient's gate is process-local, not account-global.
 _ETORO_READ_INTERVAL_S = 1.1
+
+_SEARCH_PAGE_SIZE = 10_000
+_SEARCH_MAX_PAGES = 2
+_SEARCH_FIELDS = (
+    "instrumentId,currentRate,dailyPriceChange,weeklyPriceChange,"
+    "monthlyPriceChange,isCurrentlyTradable,isExchangeOpen,"
+    "isActiveInPlatform,isBuyEnabled,internalIndustryId,sectorNameId,"
+    "popularityUniques7Day,traders7DayChange,buyHoldingPct,sellHoldingPct"
+)
 
 
 class EtoroMarketDataProvider(MarketDataProvider):
@@ -125,6 +143,92 @@ class EtoroMarketDataProvider(MarketDataProvider):
         response.raise_for_status()
         raw = response.json()
         return _normalise_instruments(raw)
+
+    def get_broad_market_snapshot(self) -> BroadMarketSnapshot:
+        """Fetch eToro's projected search catalogue in complete pages.
+
+        Live verification on 2026-08-12 found that the documented
+        ``pageNumber`` parameter is ignored while ``page`` paginates.  The
+        response's reported page and total are therefore checked on every
+        request.  Search rows have no source timestamp or bid/ask and remain
+        screening-only; callers join exact local IDs and confirm shortlisted
+        candidates through ``get_quotes``.
+
+        The result is intentionally not persisted wholesale.  Strategy code
+        may retain aggregate coverage plus the compact context of a genuinely
+        fired/refused candidate, avoiding a second quote/indicator warehouse.
+        """
+        observed_from = datetime.now(UTC)
+        expected_total: int | None = None
+        raw_item_count = 0
+        discarded_items = 0
+        records: list[MarketSnapshotInstrument] = []
+        seen_ids: set[int] = set()
+        page = 1
+
+        while True:
+            response = self._http.get(
+                "/api/v1/market-data/search",
+                params={
+                    "fields": _SEARCH_FIELDS,
+                    "pageSize": _SEARCH_PAGE_SIZE,
+                    "page": page,
+                },
+                headers=self._request_headers(),
+            )
+            response.raise_for_status()
+            raw = response.json()
+            if not isinstance(raw, dict):
+                raise ValueError(f"Expected dict from eToro search endpoint, got {type(raw)}")
+
+            reported_page = raw.get("page")
+            total_items = raw.get("totalItems")
+            items = raw.get("items")
+            if reported_page != page:
+                raise ValueError(f"eToro search returned page {reported_page!r}, expected {page}")
+            if not isinstance(total_items, int) or total_items < 0:
+                raise ValueError(f"eToro search returned invalid totalItems {total_items!r}")
+            if not isinstance(items, list):
+                raise ValueError("eToro search response items must be a list")
+            if expected_total is None:
+                expected_total = total_items
+            elif total_items != expected_total:
+                raise ValueError(
+                    f"eToro search totalItems changed during pagination: {expected_total} -> {total_items}"
+                )
+
+            raw_item_count += len(items)
+            for item in items:
+                record = _normalise_market_snapshot_instrument(item)
+                if record is None:
+                    discarded_items += 1
+                    continue
+                if record.instrument_id in seen_ids:
+                    raise ValueError(f"eToro search repeated instrumentId {record.instrument_id}")
+                seen_ids.add(record.instrument_id)
+                records.append(record)
+
+            pages = max(1, math.ceil(total_items / _SEARCH_PAGE_SIZE))
+            if pages > _SEARCH_MAX_PAGES:
+                raise ValueError(
+                    f"eToro search reported {total_items} rows across {pages} pages; "
+                    f"bounded adapter permits {_SEARCH_MAX_PAGES}"
+                )
+            if page >= pages:
+                break
+            page += 1
+
+        if expected_total is None:  # pragma: no cover - first response always assigns
+            raise RuntimeError("eToro search pagination did not initialise")
+        if raw_item_count != expected_total:
+            raise ValueError(f"eToro search pagination incomplete: received {raw_item_count} of {expected_total} rows")
+        return BroadMarketSnapshot(
+            observed_from=observed_from,
+            observed_to=datetime.now(UTC),
+            reported_total_items=expected_total,
+            discarded_items=discarded_items,
+            instruments=tuple(records),
+        )
 
     def get_instrument_types(self) -> list[InstrumentTypeRecord]:
         """Fetch eToro's instrument-types lookup catalogue.
@@ -241,6 +345,9 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
         all_quotes: list[Quote] = []
         failed_chunks = 0
+        # Retained so an all-chunks-failed batch can re-raise the real cause
+        # (and keep its FailureCategory) instead of returning a silent [].
+        last_exc: Exception | None = None
         total_chunks = (len(instrument_ids) + _RATES_BATCH_SIZE - 1) // _RATES_BATCH_SIZE
 
         for batch_num, i in enumerate(range(0, len(instrument_ids), _RATES_BATCH_SIZE)):
@@ -269,8 +376,9 @@ class EtoroMarketDataProvider(MarketDataProvider):
                     exc_info=True,
                 )
                 failed_chunks += 1
+                last_exc = exc
                 continue
-            except httpx.RequestError:
+            except httpx.RequestError as exc:
                 # Network-level failure (timeout, connection reset) — no response to persist.
                 logger.warning(
                     "Rates chunk %d network error (%d IDs), skipping",
@@ -279,9 +387,31 @@ class EtoroMarketDataProvider(MarketDataProvider):
                     exc_info=True,
                 )
                 failed_chunks += 1
+                last_exc = exc
                 continue
             raw = response.json()
             all_quotes.extend(_normalise_rates(raw))
+
+        if last_exc is not None and failed_chunks == total_chunks:
+            # EVERY chunk failed — that is an outage, not "these instruments
+            # have no quotes", and downstream the two are indistinguishable
+            # because both produce an empty list (#2271, Codex). Partial
+            # failure still returns partial results, per the docstring above;
+            # only TOTAL failure raises, so a caller cannot report a clean
+            # no-op run while every headless reader sits on stale marks
+            # (the #2218 "job reports success having done nothing" shape).
+            #
+            # Re-raise the original exception rather than a bespoke provider
+            # error: ``classify_exception`` keys off the httpx type, so this
+            # preserves AUTH_EXPIRED (401/403) / RATE_LIMITED (429) /
+            # SOURCE_DOWN (5xx, transport) instead of flattening an
+            # operator-actionable outage to INTERNAL_ERROR.
+            logger.warning(
+                "Rates fetch: ALL %d chunk(s) failed (%d instrument IDs) — re-raising the last error",
+                total_chunks,
+                len(instrument_ids),
+            )
+            raise last_exc
 
         if failed_chunks:
             logger.warning(
@@ -352,6 +482,35 @@ def _normalise_instrument(item: Mapping[str, object]) -> InstrumentRecord | None
         country=None,  # not available in instruments endpoint
         is_tradable=True,  # only tradable instruments are returned by the API
         instrument_type_id=_int_or_none(item.get("instrumentTypeID")),
+    )
+
+
+def _normalise_market_snapshot_instrument(item: object) -> MarketSnapshotInstrument | None:
+    """Normalise one projected search row without inventing absent values."""
+    if not isinstance(item, Mapping):
+        return None
+    instrument_id = _positive_int_or_none(item.get("instrumentId"))
+    if instrument_id is None:
+        return None
+    current_rate = _decimal_or_none(item.get("currentRate"))
+    if current_rate is not None and current_rate <= 0:
+        current_rate = None
+    return MarketSnapshotInstrument(
+        instrument_id=instrument_id,
+        current_rate=current_rate,
+        daily_price_change_pct=_decimal_or_none(item.get("dailyPriceChange")),
+        weekly_price_change_pct=_decimal_or_none(item.get("weeklyPriceChange")),
+        monthly_price_change_pct=_decimal_or_none(item.get("monthlyPriceChange")),
+        is_currently_tradable=_bool_or_none(item.get("isCurrentlyTradable")),
+        is_exchange_open=_bool_or_none(item.get("isExchangeOpen")),
+        is_active_in_platform=_bool_or_none(item.get("isActiveInPlatform")),
+        is_buy_enabled=_bool_or_none(item.get("isBuyEnabled")),
+        industry_id=_positive_int_or_none(item.get("internalIndustryId")),
+        sector_id=_positive_int_or_none(item.get("sectorNameId")),
+        popularity_uniques_7d=_decimal_or_none(item.get("popularityUniques7Day")),
+        traders_7d_change=_decimal_or_none(item.get("traders7DayChange")),
+        buy_holding_pct=_decimal_or_none(item.get("buyHoldingPct")),
+        sell_holding_pct=_decimal_or_none(item.get("sellHoldingPct")),
     )
 
 
@@ -688,3 +847,22 @@ def _int_or_none(value: object) -> int | None:
         return result if result != 0 else None
     except ValueError, ArithmeticError:
         return None
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    result = _int_or_none(value)
+    return result if result is not None and result > 0 else None
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        result = Decimal(str(value))
+    except ValueError, ArithmeticError:
+        return None
+    return result if result.is_finite() else None
+
+
+def _bool_or_none(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None

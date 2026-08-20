@@ -72,6 +72,10 @@ class RuntimeFlagsResponse(BaseModel):
     enable_auto_trading: bool
     enable_live_trading: bool
     display_currency: str
+    llm_provider: str
+    llm_base_url: str
+    llm_model_writer: str
+    llm_model_critic: str
     updated_at: datetime
     updated_by: str
     reason: str
@@ -114,13 +118,27 @@ class ConfigPatchRequest(BaseModel):
     enable_auto_trading: bool | None = None
     enable_live_trading: bool | None = None
     display_currency: str | None = None
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_model_writer: str | None = None
+    llm_model_critic: str | None = None
     confirm_live_enable: bool = False
 
     @model_validator(mode="after")
     def _validate_patch(self) -> ConfigPatchRequest:
-        if self.enable_auto_trading is None and self.enable_live_trading is None and self.display_currency is None:
+        provided = (
+            self.enable_auto_trading,
+            self.enable_live_trading,
+            self.display_currency,
+            self.llm_provider,
+            self.llm_base_url,
+            self.llm_model_writer,
+            self.llm_model_critic,
+        )
+        if all(v is None for v in provided):
             raise ValueError(
-                "at least one of enable_auto_trading / enable_live_trading / display_currency must be provided"
+                "at least one of enable_auto_trading / enable_live_trading / display_currency / "
+                "llm_provider / llm_base_url / llm_model_writer / llm_model_critic must be provided"
             )
         if self.enable_live_trading is True and not self.confirm_live_enable:
             raise ValueError("enable_live_trading=true requires confirm_live_enable=true")
@@ -181,6 +199,10 @@ def get_config(
             enable_auto_trading=runtime.enable_auto_trading,
             enable_live_trading=runtime.enable_live_trading,
             display_currency=runtime.display_currency,
+            llm_provider=runtime.llm_provider,
+            llm_base_url=runtime.llm_base_url,
+            llm_model_writer=runtime.llm_model_writer,
+            llm_model_critic=runtime.llm_model_critic,
             updated_at=runtime.updated_at,
             updated_by=runtime.updated_by,
             reason=runtime.reason,
@@ -207,6 +229,10 @@ def patch_config(
             enable_auto_trading=body.enable_auto_trading,
             enable_live_trading=body.enable_live_trading,
             display_currency=body.display_currency,
+            llm_provider=body.llm_provider,
+            llm_base_url=body.llm_base_url,
+            llm_model_writer=body.llm_model_writer,
+            llm_model_critic=body.llm_model_critic,
         )
     except RuntimeConfigCorrupt as exc:
         # #87: fixed string instead of str(exc) — see GET handler note.
@@ -224,6 +250,10 @@ def patch_config(
         enable_auto_trading=updated.enable_auto_trading,
         enable_live_trading=updated.enable_live_trading,
         display_currency=updated.display_currency,
+        llm_provider=updated.llm_provider,
+        llm_base_url=updated.llm_base_url,
+        llm_model_writer=updated.llm_model_writer,
+        llm_model_critic=updated.llm_model_critic,
         updated_at=updated.updated_at,
         updated_by=updated.updated_by,
         reason=updated.reason,

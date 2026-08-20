@@ -1,0 +1,22 @@
+-- #2013 — thesis-change alert feed cursor.
+--
+-- A fifth dashboard alert feed (AlertsStrip): a thesis regenerated with a
+-- MATERIAL change vs its prior version (stance / thesis_type change, target
+-- null-transition, or a target/zone move >= 5% — predicate lives in
+-- app/services/thesis_diff.py, single source). The "event" is a `theses` row
+-- with thesis_version > 1 (append-only, one row per generation);
+-- `theses.thesis_id` (BIGSERIAL PK, monotonic, unique) is the cursor — same
+-- rationale as migration 044's decision_id / 047's event_id / 213's
+-- score_id: created_at is not guaranteed unique, thesis_id closes the
+-- tie-break race under strict `>` comparison.
+--
+-- NULL = never acknowledged (all in-window material changes unseen),
+-- matching the other four cursor columns on `operators`.
+--
+-- No supporting index: the feed scans a 14-day created_at window over
+-- `theses` (325 rows total on dev today, regen throughput <= 5/hour) and
+-- idx_theses_instrument_created already covers the per-instrument
+-- predecessor lookup. The thesis_id > cursor bound is a cheap residual
+-- filter over that already-tiny row set.
+ALTER TABLE operators
+    ADD COLUMN IF NOT EXISTS alerts_last_seen_thesis_change_id BIGINT;

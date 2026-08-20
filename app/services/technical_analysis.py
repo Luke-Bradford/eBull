@@ -231,12 +231,15 @@ def stochastic(
 
 def compute_indicators(
     bars: Sequence[OHLCVRow],
-) -> dict[str, float | str | None] | None:
+) -> dict[str, float | None] | None:
     """Compute all technical indicators from OHLCV bars.
 
-    Returns a dict keyed by price_daily column names, plus derived
-    cross-signals (price_vs_sma200, trend_sma_cross).
+    Returns a dict keyed by price_daily column names.
     Returns None for empty bars.
+
+    Trend cross-signals (price-vs-SMA200, 50/200 regime) are NOT computed
+    here — they are derived at read time from the stored SMAs via
+    ``derive_trend_signals`` (#1989: single source, no extra columns).
     """
     if not bars:
         return None
@@ -273,26 +276,6 @@ def compute_indicators(
 
     atr_14 = atr(bars, 14)
 
-    # Derived cross-signals (not stored in DB)
-    latest_close = float(closes[-1])
-
-    price_vs_sma200: str | None
-    if sma_200 is not None:
-        price_vs_sma200 = "above" if latest_close > sma_200 else "below"
-    else:
-        price_vs_sma200 = None
-
-    trend_sma_cross: str
-    if sma_50 is not None and sma_200 is not None:
-        if sma_50 > sma_200:
-            trend_sma_cross = "golden"
-        elif sma_50 < sma_200:
-            trend_sma_cross = "death"
-        else:
-            trend_sma_cross = "none"
-    else:
-        trend_sma_cross = "none"
-
     return {
         "sma_20": sma_20,
         "sma_50": sma_50,
@@ -308,6 +291,38 @@ def compute_indicators(
         "bb_upper": bb_upper,
         "bb_lower": bb_lower,
         "atr_14": atr_14,
-        "price_vs_sma200": price_vs_sma200,
-        "trend_sma_cross": trend_sma_cross,
     }
+
+
+# ---------------------------------------------------------------------------
+# Derived trend signals (read-time, from stored SMAs)
+# ---------------------------------------------------------------------------
+
+
+def derive_trend_signals(
+    close: float | None,
+    sma_50: float | None,
+    sma_200: float | None,
+) -> dict[str, str | None]:
+    """Derive the human-readable trend-regime signals from stored values.
+
+    Single source for both signals (#1989) — previously computed (and then
+    dropped by the float-only persistence filter) in ``compute_indicators``
+    AND re-derived inline in the thesis context assembler; the two
+    derivations could have drifted.
+
+    - ``price_vs_sma200``: "above" / "below"; tie (close == sma_200) is
+      "below" by design — strict ``>``. None when either input is missing.
+    - ``sma_50_200_regime``: the CURRENT 50-vs-200 relation ("golden" /
+      "death"), NOT a crossover event. Equal-or-missing SMAs yield None
+      (missing evidence, not a third regime).
+    """
+    price_vs_sma200: str | None = None
+    if close is not None and sma_200 is not None:
+        price_vs_sma200 = "above" if close > sma_200 else "below"
+
+    regime: str | None = None
+    if sma_50 is not None and sma_200 is not None and sma_50 != sma_200:
+        regime = "golden" if sma_50 > sma_200 else "death"
+
+    return {"price_vs_sma200": price_vs_sma200, "sma_50_200_regime": regime}

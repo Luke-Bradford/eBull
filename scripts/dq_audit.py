@@ -129,12 +129,72 @@ def _dual_pipeline_insider_collision(conn: psycopg.Connection[object]) -> dict[s
     }
 
 
+def _ttm_snapshot_view_mismatch(conn: psycopg.Connection[object]) -> dict[str, object]:
+    """#2008 standing invariant. Two counts, both expected 0 steady-state:
+
+    - ``mismatch``: instruments whose latest ``fundamentals_snapshot``
+      revenue_ttm and complete-TTM ``financial_periods_ttm`` revenue_ttm
+      (both present, snapshot > 0) differ by >25%. The snapshot is a
+      write-through FROM financial_periods, so any drift means a second
+      writer re-appeared or one side's TTM rules changed alone.
+    - ``rotten_windows``: complete-TTM windows whose revenue_ttm is NULL
+      while every member quarter row carries revenue — a NULLed sum that
+      the strict per-column CASE should make impossible (rot detector for
+      the pre-#1835 class).
+    """
+    sql = """
+        WITH snap AS (
+            SELECT DISTINCT ON (instrument_id) instrument_id, revenue_ttm
+            FROM fundamentals_snapshot ORDER BY instrument_id, as_of_date DESC
+        ),
+        mismatch AS (
+            SELECT count(*) AS n
+            FROM snap s
+            JOIN financial_periods_ttm t USING (instrument_id)
+            WHERE t.is_complete_ttm
+              AND s.revenue_ttm > 0 AND t.revenue_ttm IS NOT NULL
+              AND abs(t.revenue_ttm / s.revenue_ttm - 1) > 0.25
+        ),
+        rotten AS (
+            SELECT count(*) AS n
+            FROM financial_periods_ttm t
+            WHERE t.is_complete_ttm
+              AND t.revenue_ttm IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM (
+                      SELECT revenue
+                      FROM financial_periods fp
+                      WHERE fp.instrument_id = t.instrument_id
+                        AND fp.period_type IN ('Q1','Q2','Q3','Q4')
+                        AND fp.superseded_at IS NULL
+                        AND fp.normalization_status = 'normalized'
+                      ORDER BY fp.period_end_date DESC
+                      LIMIT 4
+                  ) w
+                  WHERE w.revenue IS NULL
+              )
+        )
+        SELECT mismatch.n AS mismatch, rotten.n AS rotten_windows
+        FROM mismatch, rotten
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql)
+        row = cur.fetchone() or {}
+    return {
+        "check": "ttm_snapshot_view_mismatch",
+        "mismatch": int(row.get("mismatch", 0)),
+        "rotten_windows": int(row.get("rotten_windows", 0)),
+    }
+
+
 def main() -> int:
     assert_dev_environment()  # read-only, but dev scripts never touch a remote DB (#1765)
     findings: list[dict[str, object]] = []
     # autocommit so one check's error (e.g. a missing column on a schema change)
     # doesn't poison the transaction for the remaining checks.
     dual_pipeline: dict[str, object] = {}
+    ttm_check: dict[str, object] = {}
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         for table, holder_col, share_col in _OWNERSHIP_CURRENT:
             try:
@@ -145,6 +205,10 @@ def main() -> int:
             dual_pipeline = _dual_pipeline_insider_collision(conn)
         except psycopg.Error as exc:
             dual_pipeline = {"check": "dual_pipeline_insider_collision", "error": str(exc)}
+        try:
+            ttm_check = _ttm_snapshot_view_mismatch(conn)
+        except psycopg.Error as exc:
+            ttm_check = {"check": "ttm_snapshot_view_mismatch", "error": str(exc)}
 
     print("=== DQ audit — control-group double-count in ownership rollups ===")
     print("(raw-table scan; the read-path rollup collapses same-accession dups — see note below)")
@@ -181,6 +245,19 @@ def main() -> int:
             f"  storage-sentinel  dual-pipeline insider collision (read-path collapsed by #788): "
             f"{dual_pipeline['groups']} groups / {dual_pipeline['instruments']} instruments "
             f"(raw redundancy; not operator-visible)"
+        )
+
+    print("\n=== DQ audit — TTM snapshot/view reconciliation (#2008) ===")
+    if "error" in ttm_check:
+        print(f"  ttm_snapshot_view_mismatch: ERROR {ttm_check['error']}")
+    else:
+        mism = int(ttm_check["mismatch"])  # type: ignore[call-overload]
+        rot = int(ttm_check["rotten_windows"])  # type: ignore[call-overload]
+        flag = "  ⚠ CANDIDATE" if (mism > 0 or rot > 0) else "  ok"
+        print(
+            f"{flag}  snapshot vs complete-TTM revenue >25% apart: {mism} instruments; "
+            f"complete windows with NULLed revenue sum: {rot} (both expected 0 — "
+            f"non-zero means a second snapshot writer or view/write-through rule drift)"
         )
 
     print(

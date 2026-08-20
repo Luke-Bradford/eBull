@@ -11,7 +11,7 @@ Every perf-claim PR fails `perf-claim-lint` (CI required check on `main`) unless
 
 1. **Artifacts committed** under `var/perf_baselines/<ticket>-<sha>.*`:
    - `.txt` — `EXPLAIN (ANALYZE, BUFFERS, COSTS, FORMAT TEXT)` output
-   - `.json` — 3-trial wall-clock medians + system fingerprint
+   - `.json` — 3-trial wall-clock timings + median + system fingerprint (`pg_version`, `host`, `shared_buffers`)
    - `.manifest.yaml` — fixture row counts (must meet floors)
 2. **PR description sections** (line-exact headers; lint enforces):
    - `## Sibling-shape audit` — every grep-matched same-shape callsite reviewed
@@ -46,14 +46,15 @@ Dev-fixture-passes-prod-fails. The §4 floors exist because the previous inciden
 ## Refusal posture
 
 If you cannot satisfy the protocol — bench DB unavailable, fixture cannot meet floor, invariant query disagrees with the claim — DO NOT push a claim. Either:
+
 - Land the seeder for the floor table first (per the runbook),
 - Down-scope the PR to remove the perf claim,
 - Or escalate to the operator with the obstacle.
 
-`perf-claim-lint` has a bypass path (`## Bypass justification` section with operator + reason) but bypasses generate a CI `::warning::` and require operator approval. Do not invoke bypass to ship faster — invoke it only when the obstacle is documented and out of scope.
+`perf-claim-lint` has a bypass path, but it is not self-serve: it fires only when all three operator-controlled gates are present — the `emergency` PR label, a `## Bypass justification` section carrying `Operator:` + `Reason:` lines, and `PERF_CLAIM_LINT_BYPASS=true` in CI — and it emits a `::warning::` annotation when engaged. Do not invoke bypass to ship faster — invoke it only when the obstacle is documented and out of scope.
 
 ## Cross-references
 
-- [.claude/skills/engineering/pre-flight-review.md](pre-flight-review.md) — links here when the diff touches a hot path
-- [.claude/skills/engineering/pre-pr-fresh-agent-review.md](pre-pr-fresh-agent-review.md) — links here for filings ETL / schema migrations
+- [.claude/skills/engineering/pre-flight-review.md](pre-flight-review.md) — links here when the diff asserts a perf improvement on an ETL hot path
+- [.claude/skills/engineering/pre-pr-fresh-agent-review.md](pre-pr-fresh-agent-review.md) — links here when a filings-ETL / schema-migration PR also asserts a perf improvement
 - Master plan §5 — process rules mirrored here, single source of truth for the rule list

@@ -11,37 +11,37 @@ Read this skill before adding a new bootstrap stage, before declaring or modifyi
 
 ## Current state — `StageSpec` is 5 fields
 
-`StageSpec` lives at [`app/services/bootstrap_state.py:137`](../../../app/services/bootstrap_state.py#L137) — `@dataclass(frozen=True)`:
+`StageSpec` lives at [`app/services/bootstrap_state.py:143`](../../../app/services/bootstrap_state.py#L143) — `@dataclass(frozen=True)`:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `stage_key` | `str` | Stable identifier (`sec_first_install_drain`, `cusip_universe_backfill`, etc.). Must be globally unique across `_BOOTSTRAP_STAGE_SPECS` |
 | `stage_order` | `int` | Display ordering only — does NOT gate execution. Dependencies live in `_STAGE_REQUIRES_CAPS` |
 | `lane` | `Lane` (Literal) | Concurrency bucket. See `app/jobs/sources.py::Lane` |
-| `job_name` | `str` | Registered job name in `_INVOKERS` (must round-trip through `runtime.dispatch_job`) |
+| `job_name` | `str` | Key in `_INVOKERS` ([`app/jobs/runtime.py`](../../../app/jobs/runtime.py)); the orchestrator dispatches it directly as `_INVOKERS[job_name](params)` |
 | `params` | `Mapping[str, Any]` | Frozen param overrides for the registered invoker; default `{}` = "use invoker's registry default" |
 
 That's it. NOT `fetch_strategy`, NOT `row_budget`, NOT `provides_cap` / `requires_cap`. Capabilities live in SEPARATE module-global dicts ([`bootstrap_orchestrator.py`](../../../app/services/bootstrap_orchestrator.py)):
 
 | Map | Line | Purpose |
 |---|---|---|
-| `_STAGE_PROVIDES` | 358 | `stage_key → tuple[Capability, ...]` advertised on **success only** |
-| `_STAGE_PROVIDES_ON_SKIP` | 409 | Subset re-advertised on `skip` for slow-connection-fallback parity |
-| `_CAPABILITY_MIN_ROWS` | 451 | Per-cap floor: `rows_processed < min_rows` ⇒ cap is NOT advertised (default 0) |
-| `_ORDERING_ONLY_CAPS` | 513 | Frozenset of caps that are "no concurrent writer remains" semantics — advertised on ANY terminal status (success/skip/blocked/error/cancelled) |
-| `_STAGE_REQUIRES_CAPS` | 526 | `stage_key → CapRequirement` (DNF: `all_of` + `any_of`) |
-| `_STAGE_LANE_OVERRIDES` | 966-987 | Optional override of `StageSpec.lane` per `stage_key`; wins on collision |
-| `_LANE_MAX_CONCURRENCY` | 237 | `lane → int` cap (post-#1141 family split has 12 lanes) |
+| `_STAGE_PROVIDES` | 339 | `stage_key → tuple[Capability, ...]` advertised on **success only** |
+| `_STAGE_PROVIDES_ON_SKIP` | 393 | Subset re-advertised on `skip` for slow-connection-fallback parity |
+| `_CAPABILITY_MIN_ROWS` | 428 | Per-cap floor: `rows_processed < min_rows` ⇒ cap is NOT advertised (default 0) |
+| `_ORDERING_ONLY_CAPS` | 495 | Frozenset of caps that are "no concurrent writer remains" semantics — advertised on ANY terminal status (success/skip/blocked/error/cancelled) |
+| `_STAGE_REQUIRES_CAPS` | 506 | `stage_key → CapRequirement` (DNF: `all_of` + `any_of`) |
+| `_STAGE_LANE_OVERRIDES` | 1018 | Optional override of `StageSpec.lane` per `stage_key`; wins on collision |
+| `_LANE_MAX_CONCURRENCY` | 168 | `lane → int` cap (12 lanes: db-family split #1141 + `openfigi` #1233) |
 
-The orchestrator's helper `_spec()` ([`bootstrap_orchestrator.py:212-227`](../../../app/services/bootstrap_orchestrator.py#L212-L227)) is the ONLY supported constructor — passing positional `lane` requires `# type: ignore[arg-type]` because the Literal narrowing is lost.
+The orchestrator's helper `_spec()` ([`bootstrap_orchestrator.py:143-158`](../../../app/services/bootstrap_orchestrator.py#L143-L158)) is the ONLY supported constructor — it accepts `lane` as a plain `str` and carries the `# type: ignore[arg-type]` internally on the `StageSpec` assignment (the `Lane` Literal narrowing is lost), so call sites never add the ignore.
 
 ```python
 _spec(
-    stage_key="sec_form3_ingest",
-    stage_order=19,
+    stage_key="sec_first_install_drain",
+    stage_order=16,
     lane="sec_rate",
-    job_name="sec_form3_ingest",
-    params={"limit": 500},
+    job_name=JOB_SEC_FIRST_INSTALL_DRAIN,
+    params={"max_subjects": None, "use_bulk_zip": True, "follow_pagination": False},
 )
 ```
 
@@ -49,12 +49,12 @@ _spec(
 
 | Pattern | Use |
 |---|---|
-| `<source>_<verb>` | Top-level: `sec_form3_ingest`, `cusip_universe_backfill`, `nport_filer_directory_sync` |
-| `<job_name>_bootstrap` suffix | When a steady-state job needs different param overrides during bootstrap (e.g. `sec_def14a_bootstrap` calls the same `sec_def14a_ingest` invoker with a wider window) |
+| `<source>_<verb>` | Top-level: `cusip_universe_backfill`, `sec_nport_filer_directory_sync`, `sec_8k_events_ingest` |
+| `<job_name>_bootstrap` suffix | Bootstrap dispatches a dedicated backfill body distinct from the steady-state job — e.g. stage `fundamentals_sync` → job_name `fundamentals_sync_bootstrap` (registered in `_INVOKERS`, run on the `db_fundamentals_raw` lane) |
 | `_first_install_drain` suffix | Reserved for stages that ONLY exist during first-install (no steady-state analogue): `sec_first_install_drain` |
-| `_recent_sweep` suffix | Bounded variant of a steady-state job for bootstrap (`sec_13f_recent_sweep` with `min_period_of_report=today-380d`) |
+| `_recent_sweep` suffix | Bounded variant of a steady-state job for bootstrap (historical: `sec_13f_recent_sweep` with `min_period_of_report=today-380d`, dropped by #1413's bulk-only bootstrap; the suffix convention stands) |
 
-Anti-pattern: `bootstrap_<x>` prefix. The orchestrator passes `params` to a NORMAL registered invoker — there are no bootstrap-only invokers post-PR1 of #1064.
+Anti-pattern: a `bootstrap_<x>` **prefix** dispatch-wrapper that re-implements dispatch just to override params — three such wrappers were removed in #1064 PR1 (see "Bootstrap-mode override patterns" below). The orchestrator passes `params` to a normally-registered invoker. A genuinely distinct backfill *body* (e.g. `fundamentals_sync_bootstrap`, added #1233 PR-C2) is fine — register it in `_INVOKERS` like any job and reference it by `job_name`.
 
 ## Registration checklist — when adding a stage
 
@@ -67,7 +67,7 @@ For a new stage `<NEW>` invoking job `<JOB>`:
 5. **Capability floor** — if a cap is only valid when N rows were actually processed, add `"cap_a": N` to `_CAPABILITY_MIN_ROWS`.
 6. **Capabilities required** — if `<NEW>` depends on upstream, add `"<NEW>": CapRequirement(all_of=("cap_b",), any_of=())` to `_STAGE_REQUIRES_CAPS`.
 7. **`bootstrap_stages` row** — auto-created by `start_run` from the spec; no schema migration unless adding a new column.
-8. **Catalogue-invariant test** — `tests/test_bootstrap_orchestrator_catalogue_invariants.py` re-runs on import. Every key in `_STAGE_PROVIDES` / `_STAGE_PROVIDES_ON_SKIP` / `_STAGE_REQUIRES_CAPS` MUST appear in `_BOOTSTRAP_STAGE_SPECS`. A stranded key fails the test loudly — do not bypass.
+8. **Catalogue-invariant test** — `tests/test_bootstrap_orchestrator.py::test_stage_keyed_dicts_reference_only_real_stages` asserts every key in the four stage-keyed dicts (`_STAGE_PROVIDES` / `_STAGE_PROVIDES_ON_SKIP` / `_STAGE_REQUIRES_CAPS` / `_STAGE_LANE_OVERRIDES`) appears in `_BOOTSTRAP_STAGE_SPECS`; a stranded key fails it loudly. Catalogue cardinality is separately pinned by a module-level `assert len(_BOOTSTRAP_STAGE_SPECS) == 23` in `bootstrap_orchestrator.py` that runs on import. Do not bypass either.
 
 ## Capability vocabulary (canonical at 2026-05-23)
 
@@ -96,11 +96,13 @@ A stage in `_BOOTSTRAP_STAGE_SPECS` runs ONLY during bootstrap. A `ScheduledJob`
 
 | Pattern | When | Example |
 |---|---|---|
-| **Same job, wider params** | Steady-state has a sliding window; bootstrap wants the full backfill | `sec_def14a_bootstrap`: same `JOB_SEC_DEF14A_INGEST` invoker with wider `since` window in `params` |
-| **Same job, bounded params** | Steady-state is unbounded; bootstrap wants a sane cap | `sec_13f_recent_sweep`: `JOB_SEC_13F_QUARTERLY_SWEEP` with `min_period_of_report=today-380d` |
+| **Same job, wider params** | Steady-state has a sliding window; bootstrap wants the full backfill | Historical: `sec_def14a_bootstrap` (dropped as a bootstrap stage by #1413) |
+| **Same job, bounded params** | Steady-state is unbounded; bootstrap wants a sane cap | Historical: `sec_13f_recent_sweep` — `JOB_SEC_13F_QUARTERLY_SWEEP` with `min_period_of_report=today-380d` (dropped by #1413) |
 | **Bootstrap-only stage** | No steady-state analogue (drains a one-time install state) | `sec_first_install_drain`, `cusip_universe_backfill` |
 
-NEVER duplicate the invoker. Pattern 4 ("write a separate bootstrap callable") was tried and removed in PR1 of #1064 — three bespoke wrappers (`bootstrap_filings_history_seed`, `sec_first_install_drain_job`, `bootstrap_sec_13f_recent_sweep_job`) collapsed back to data-only StageSpec.
+Note: #1413's bulk-only bootstrap redesign dropped the per-CIK "same job, wider/bounded params" stages; the live catalogue is bulk ingesters + bootstrap-only stages. Patterns 1-2 remain the convention if a future non-bulk source needs a bootstrap variant.
+
+Do NOT re-wrap dispatch in a `bootstrap_<x>`-prefix callable just to override params. Three such bespoke wrappers (`bootstrap_filings_history_seed`, `sec_first_install_drain_job`, `bootstrap_sec_13f_recent_sweep_job`) were removed in #1064 PR1 and collapsed back to data-only StageSpec. (A distinct backfill *body* like `fundamentals_sync_bootstrap` is a normal `_INVOKERS` entry, not this anti-pattern.)
 
 ## Forbidden patterns
 
@@ -108,7 +110,7 @@ These fail the catalogue-invariant test OR violate the cap-graph contract:
 
 - Adding a `stage_key` to `_STAGE_PROVIDES` / `_STAGE_REQUIRES_CAPS` without a matching `_spec()` entry → catalogue-invariant test fails.
 - Two `_BOOTSTRAP_STAGE_SPECS` entries with the same `stage_key` → duplicate-key assertion.
-- `_STAGE_LANE_OVERRIDES` pointing to a lane absent from `_LANE_MAX_CONCURRENCY` → KeyError at dispatch.
+- `_STAGE_LANE_OVERRIDES` pointing to an unregistered lane → the `bootstrap_stages.lane` CHECK constraint (latest: sql/165) rejects the row at `start_run` insert, and the `Lane` Literal ([`app/jobs/sources.py`](../../../app/jobs/sources.py)) fails typecheck. (A lane missing only from `_LANE_MAX_CONCURRENCY` does NOT crash — `.get(lane, 1)` silently defaults it to concurrency 1, a hidden single-file bottleneck.)
 - Declaring a `_STAGE_PROVIDES_ON_SKIP` cap without the same cap in `_STAGE_PROVIDES` → cap only fires on skip; success advertises nothing.
 - Hard-coding `with conn.transaction():` inside the invoker body — orchestrator owns the transaction boundary; see [data-engineer/SKILL.md §6.5.1](SKILL.md) "Caller-wraps-transaction discipline".
 - Calling `record_<cat>_observation` without paired `refresh_<cat>_current(instrument_id)` (legacy pre-#1162 hazard) — leaves `_current` empty.
@@ -120,7 +122,7 @@ The v3 ETL rollout plan (`docs/_archive/2026-05/superseded-etl-rollout-v3.md`, R
 The `fetch_strategy` enum is a particularly useful proposal (it gates `forbidden_http_in_bootstrap` linting per [data-engineer/SKILL.md §6.5.14](SKILL.md)) but it currently lives as a NAMING CONVENTION + per-stage documentation in code comments — not a StageSpec field. Adding it as a real field requires:
 
 1. Extending `StageSpec` dataclass (breaks `_spec()` signature without a default).
-2. Updating every `_spec(...)` call site (27 of them) to pass `fetch_strategy`.
+2. Updating every `_spec(...)` call site (23 of them) to pass `fetch_strategy`.
 3. Adding a catalogue-invariant test asserting every spec declares it.
 4. Updating the dispatcher's bootstrap-mode HTTP detector to read from the field.
 
@@ -131,6 +133,6 @@ That's a real PR, NOT a documentation edit. Stream-A of the post-v3 rollout (`do
 - [data-engineer/SKILL.md §6.5](SKILL.md) — pipeline orchestration invariants (lanes, transactions, sink registry, cap-ordering).
 - [data-engineer/SKILL.md §6.5.14-16](SKILL.md) — fetch_strategy / bootstrap-derivation / hallucinated-API class.
 - [data-engineer/etl-endpoint-coverage.md §5](etl-endpoint-coverage.md) — bootstrap stage reference + `_STAGE_LANE_OVERRIDES`.
-- [bootstrap_state.py:137](../../../app/services/bootstrap_state.py#L137) — `StageSpec` source.
-- [bootstrap_orchestrator.py:212](../../../app/services/bootstrap_orchestrator.py#L212) — `_spec()` constructor + cap maps.
-- `tests/test_bootstrap_orchestrator_catalogue_invariants.py` — catalogue-invariant test.
+- [bootstrap_state.py:143](../../../app/services/bootstrap_state.py#L143) — `StageSpec` source.
+- [bootstrap_orchestrator.py:143](../../../app/services/bootstrap_orchestrator.py#L143) — `_spec()` constructor + cap maps.
+- `tests/test_bootstrap_orchestrator.py` — catalogue-invariant tests (`test_stage_keyed_dicts_reference_only_real_stages`, `test_stage_catalogue_cardinality`).

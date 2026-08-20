@@ -1915,3 +1915,350 @@ def test_rank_moves_get_returns_503_when_no_operator(client: TestClient) -> None
         _install_conn()
         resp = client.get("/alerts/rank-moves")
     assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# #1902 — thesis-staleness snapshot feed (standing condition, no cursor)
+# ---------------------------------------------------------------------------
+
+
+def test_thesis_staleness_empty_when_nothing_held(client: TestClient) -> None:
+    _install_conn(fetchall_returns=[])
+    resp = client.get("/alerts/thesis-staleness")
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}
+
+
+def test_thesis_staleness_reports_stale_held_instrument(client: TestClient) -> None:
+    cur = _install_conn()
+    # Cursor fetchalls in call order: held ids, then the
+    # find_stale_instruments read (dict_row cursor since #2074 — a
+    # monthly cadence + past thesis timestamp is deterministically
+    # stale), then latest-thesis timestamps. This mock was broken on
+    # main since #1988 (7-tuple vs the 14-column row); the dict shape
+    # fixes it (#2074 fix-in-scope).
+    stale_at = datetime(2026, 4, 1, tzinfo=UTC)
+    cur.fetchall.side_effect = [
+        [{"instrument_id": 5}],
+        [
+            {
+                "instrument_id": 5,
+                "symbol": "GME",
+                "review_frequency": "monthly",
+                "latest_thesis_at": stale_at,
+                "latest_event_created_at": None,
+                "latest_event_filing_type": None,
+                "break_fired": False,
+                "bear_value": None,
+                "bull_value": None,
+                "close_now": None,
+                "close_now_date": None,
+                "close_at_mint": None,
+                "m7": 0,
+                "m30": 0,
+            }
+        ],
+        [{"instrument_id": 5, "latest_thesis_at": stale_at}],
+    ]
+    resp = client.get("/alerts/thesis-staleness")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["instrument_id"] == 5
+    assert items[0]["symbol"] == "GME"
+    assert items[0]["reason"] == "stale"
+    assert items[0]["latest_thesis_at"] is not None
+
+
+def test_thesis_staleness_empty_when_held_theses_fresh(client: TestClient) -> None:
+    cur = _install_conn()
+    # held ids, then an empty find_stale read (fresh).
+    cur.fetchall.side_effect = [[{"instrument_id": 5}], []]
+    resp = client.get("/alerts/thesis-staleness")
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}
+
+
+# ---------------------------------------------------------------------------
+# #2013 — thesis-change alert feed (cursor on theses.thesis_id, materiality
+# decided in Python by thesis_diff.compute_thesis_diff)
+# ---------------------------------------------------------------------------
+
+
+def _thesis_change_row(
+    thesis_id: int = 316,
+    instrument_id: int = 46,
+    symbol: str = "LGND",
+    thesis_version: int = 3,
+    stance: str = "avoid",
+    prev_stance: str = "hold",
+    base_value: float | None = 100.0,
+    prev_base_value: float | None = 100.0,
+    subject_identity_ok: bool | None = True,
+    prev_subject_identity_ok: bool | None = True,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "thesis_id": thesis_id,
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "thesis_version": thesis_version,
+        # #2436 — the handler reads BOTH sides before diffing, so the fixture
+        # has to carry both. Defaults are the trustworthy case; the quarantine
+        # test below overrides them.
+        "subject_identity_ok": subject_identity_ok,
+        "prev_subject_identity_ok": prev_subject_identity_ok,
+        "created_at": datetime(2026, 7, 15, 10, 0, 0, tzinfo=UTC),
+        "stance": stance,
+        "thesis_type": "value",
+        "confidence_score": 0.6,
+        "buy_zone_low": None,
+        "buy_zone_high": None,
+        "base_value": base_value,
+        "bull_value": None,
+        "bear_value": None,
+        "prev_stance": prev_stance,
+        "prev_thesis_type": "value",
+        "prev_confidence_score": 0.6,
+        "prev_buy_zone_low": None,
+        "prev_buy_zone_high": None,
+        "prev_base_value": prev_base_value,
+        "prev_bull_value": None,
+        "prev_bear_value": None,
+    }
+    return row
+
+
+def test_thesis_changes_get_filters_non_material_and_counts_unseen_above_cursor(
+    client: TestClient,
+) -> None:
+    rows = [
+        # Material (stance change), above the cursor → listed + unseen.
+        _thesis_change_row(thesis_id=320),
+        # Non-material (2% base move, no stance change) → dropped entirely.
+        _thesis_change_row(
+            thesis_id=318,
+            instrument_id=47,
+            symbol="AAPL",
+            stance="hold",
+            prev_stance="hold",
+            base_value=102.0,
+            prev_base_value=100.0,
+        ),
+        # Material but at/below the cursor → listed (in-window) yet NOT unseen.
+        _thesis_change_row(thesis_id=310, instrument_id=48, symbol="GME"),
+    ]
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[{"alerts_last_seen_thesis_change_id": 315}],
+            fetchall_returns=rows,
+        )
+        resp = client.get("/alerts/thesis-changes")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["alerts_last_seen_thesis_change_id"] == 315
+    assert body["unseen_count"] == 1
+    listed = {c["symbol"]: c for c in body["changes"]}
+    assert set(listed) == {"LGND", "GME"}  # AAPL's 2% move is non-material
+    assert listed["LGND"]["summary"] == "stance hold→avoid"
+    assert listed["LGND"]["stance_from"] == "hold"
+    assert listed["LGND"]["stance_to"] == "avoid"
+
+
+def test_thesis_changes_get_suppresses_when_either_side_is_not_identity_ok(
+    client: TestClient,
+) -> None:
+    """#2436 — the diff needs BOTH sides trustworthy, and ``is not True``.
+
+    A ``None`` verdict (never checked) suppresses exactly like ``False``:
+    diffing an unchecked row against a checked one still reports a target
+    "move" between numbers that may belong to a different company.
+    """
+    rows = [
+        _thesis_change_row(thesis_id=320),  # both sides OK → listed
+        _thesis_change_row(thesis_id=319, instrument_id=47, symbol="AAPL", subject_identity_ok=False),
+        _thesis_change_row(thesis_id=318, instrument_id=48, symbol="GME", prev_subject_identity_ok=False),
+        _thesis_change_row(thesis_id=317, instrument_id=49, symbol="MSFT", subject_identity_ok=None),
+        _thesis_change_row(thesis_id=316, instrument_id=50, symbol="JPM", prev_subject_identity_ok=None),
+    ]
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[{"alerts_last_seen_thesis_change_id": None}],
+            fetchall_returns=rows,
+        )
+        resp = client.get("/alerts/thesis-changes")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["suppressed_quarantined"] == 4
+    assert [c["symbol"] for c in body["changes"]] == ["LGND"]
+    # A suppressed row must not be counted as unseen either — it never
+    # reaches the cursor comparison.
+    assert body["unseen_count"] == 1
+
+
+def test_thesis_changes_get_null_cursor_counts_all_material(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[{"alerts_last_seen_thesis_change_id": None}],
+            fetchall_returns=[_thesis_change_row()],
+        )
+        resp = client.get("/alerts/thesis-changes")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["alerts_last_seen_thesis_change_id"] is None
+    assert body["unseen_count"] == 1
+    assert len(body["changes"]) == 1
+
+
+def test_thesis_changes_post_seen_writes_update(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn()
+        resp = client.post("/alerts/thesis-changes/seen", json={"seen_through_thesis_id": 320})
+    assert resp.status_code == 204
+    sql = cur.execute.call_args_list[-1].args[0]
+    assert "alerts_last_seen_thesis_change_id" in sql
+    assert "GREATEST" in sql
+    assert "m.max_id IS NOT NULL" in sql
+    cur._parent_conn.commit.assert_called_once()
+
+
+def test_thesis_changes_post_seen_rejects_non_positive(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn()
+        resp = client.post("/alerts/thesis-changes/seen", json={"seen_through_thesis_id": 0})
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# #2051 (PR-B of #2012) — thesis-break alert feed (cursor on
+# thesis_break_events.break_event_id; pure SQL event log, no Python
+# materiality pass — every event is material by construction)
+# ---------------------------------------------------------------------------
+
+
+def _break_event_row(
+    break_event_id: int = 7,
+    thesis_id: int = 316,
+    instrument_id: int = 46,
+    symbol: str = "LGND",
+    predicate_index: int = 2,
+    metric: str = "rsi_14",
+    op: str = ">",
+    threshold: float | None = 70.0,
+    observed_value: float = 74.2,
+) -> dict[str, object]:
+    return {
+        "break_event_id": break_event_id,
+        "thesis_id": thesis_id,
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "predicate_index": predicate_index,
+        "metric": metric,
+        "op": op,
+        "threshold": Decimal(str(threshold)) if threshold is not None else None,
+        "observed_value": Decimal(str(observed_value)),
+        "observed_as_of": datetime(2026, 7, 15, tzinfo=UTC).date(),
+        "source_text": "RSI-14 rises above 70",
+        "fired_at": datetime(2026, 7, 16, 5, 22, 0, tzinfo=UTC),
+    }
+
+
+def test_thesis_breaks_get_empty_state(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_break_event_id": None},
+                {"unseen_count": 0},
+            ],
+            fetchall_returns=[],
+        )
+        resp = client.get("/alerts/thesis-breaks")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "alerts_last_seen_break_event_id": None,
+        "unseen_count": 0,
+        "breaks": [],
+    }
+
+
+def test_thesis_breaks_get_lists_events_with_cursor(client: TestClient) -> None:
+    rows = [
+        _break_event_row(break_event_id=9),
+        _break_event_row(
+            break_event_id=8,
+            instrument_id=48,
+            symbol="GME",
+            metric="sma_50_vs_sma_200",
+            threshold=None,
+            observed_value=-1.0,
+        ),
+    ]
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_break_event_id": 8},
+                {"unseen_count": 1},
+            ],
+            fetchall_returns=rows,
+        )
+        resp = client.get("/alerts/thesis-breaks")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["alerts_last_seen_break_event_id"] == 8
+    assert body["unseen_count"] == 1
+    assert [b["break_event_id"] for b in body["breaks"]] == [9, 8]
+    lgnd = body["breaks"][0]
+    assert lgnd["symbol"] == "LGND"
+    assert lgnd["threshold"] == 70.0
+    assert lgnd["observed_value"] == 74.2
+    assert lgnd["source_text"] == "RSI-14 rises above 70"
+    # Regime metric: threshold is honestly null, never coerced.
+    assert body["breaks"][1]["threshold"] is None
+
+
+def test_thesis_breaks_get_unseen_query_uses_cursor_and_window(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_break_event_id": 8},
+                {"unseen_count": 0},
+            ],
+            fetchall_returns=[],
+        )
+        resp = client.get("/alerts/thesis-breaks")
+    assert resp.status_code == 200
+    count_sql = cur.execute.call_args_list[1].args[0]
+    list_sql = cur.execute.call_args_list[2].args[0]
+    # Shared canonical window fragment in BOTH queries (drift guard) + strict
+    # '>' cursor comparison in the count only.
+    assert "fired_at >= now() - INTERVAL '14 days'" in count_sql
+    assert "fired_at >= now() - INTERVAL '14 days'" in list_sql
+    assert "e.break_event_id > %(last_id)s::BIGINT" in count_sql
+    assert "ORDER BY e.break_event_id DESC" in list_sql
+
+
+def test_thesis_breaks_post_seen_writes_clamped_update(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn()
+        resp = client.post("/alerts/thesis-breaks/seen", json={"seen_through_break_event_id": 9})
+    assert resp.status_code == 204
+    sql = cur.execute.call_args_list[-1].args[0]
+    assert "alerts_last_seen_break_event_id" in sql
+    assert "GREATEST" in sql
+    assert "LEAST" in sql
+    assert "m.max_id IS NOT NULL" in sql
+    assert "fired_at >= now() - INTERVAL '14 days'" in sql
+    cur._parent_conn.commit.assert_called_once()
+
+
+def test_thesis_breaks_post_seen_rejects_non_positive(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn()
+        resp = client.post("/alerts/thesis-breaks/seen", json={"seen_through_break_event_id": 0})
+    assert resp.status_code == 422
+
+
+def test_thesis_breaks_get_503_when_no_operator(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", side_effect=NoOperatorError()):
+        _install_conn()
+        resp = client.get("/alerts/thesis-breaks")
+    assert resp.status_code == 503

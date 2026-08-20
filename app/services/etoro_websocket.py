@@ -44,11 +44,12 @@ import json
 import logging
 import ssl
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
@@ -86,6 +87,22 @@ _RECONCILE_DEBOUNCE_S = 3.0
 # Each poll batch-fetches every visible instrument in one rates call.
 _RATE_POLL_INTERVAL_S = 5.0
 
+# Hard per-frame ceiling on the eToro WS, MEASURED — the portal
+# documents no limit of any kind (#2241, bracketed 25,529 B accepted /
+# 25,719 B fatal). Over it the socket is DROPPED: close code 1006 with
+# an empty reason, i.e. no close frame at all, no ack, no error
+# envelope, subscription not applied.
+_WS_FRAME_LIMIT_BYTES = 25_600
+# What we actually pack to. The headroom absorbs any envelope drift on
+# eToro's side and keeps frames near the 500-topic/~9.4 KB shape proven
+# stable at full scale in #2241 — there is no benefit to sailing close
+# to a limit whose breach is silent and kills the connection.
+_WS_FRAME_BUDGET_BYTES = 20_480
+# How long an op frame may sit un-acked before it is reported. eToro
+# acks Subscribe/Unsubscribe within milliseconds; a missing ack is the
+# ONLY signal that a frame was dropped, so it must not pass unnoticed.
+_ACK_TIMEOUT_S = 10.0
+
 
 # ---------------------------------------------------------------------
 # Pure helpers — unit tested without WS mocks
@@ -104,6 +121,71 @@ class QuoteUpdate:
     quoted_at: datetime
 
 
+@dataclass(frozen=True)
+class RateDelta:
+    """One ``Trading.Instrument.Rate`` push, parsed but NOT yet merged.
+
+    eToro's rate push is a **field-level sparse delta**, not a
+    complete snapshot (#2243, measured over 180,666 messages; see
+    ``.claude/skills/data-sources/etoro-api.md`` §"WS rate semantics").
+    Any subset of ``Bid`` / ``Ask`` / ``LastExecution`` can arrive
+    alone — only 16.8% of messages carry ``Bid``+``Ask`` together,
+    and requiring both discarded 58.1% of *price-changing* messages
+    (#2252).
+
+    So the wire shape cannot be normalised to a :class:`QuoteUpdate`
+    in isolation: a bid-only push is meaningful, but only against the
+    last known ask. This type is the honest intermediate — what the
+    frame actually said — and :class:`RateStateStore` merges it onto
+    per-instrument state to produce a complete tick.
+
+    Presence is tracked separately from value because the two carry
+    different meanings for ``last``: an *absent* ``LastExecution``
+    means "unchanged, keep prior", whereas a *present* one that is
+    non-positive means "not a real trade → NULL" (#1429). A bare
+    ``Decimal | None`` cannot express both.
+    """
+
+    instrument_id: int
+    quoted_at: datetime
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    last: Decimal | None = None
+    # True iff the payload carried the field at all. ``has_last`` with
+    # ``last is None`` is the #1429 "non-positive → NULL" case.
+    has_bid: bool = False
+    has_ask: bool = False
+    has_last: bool = False
+
+    @property
+    def carries_price(self) -> bool:
+        """True if this push moves any price field.
+
+        59.8% of rate messages are pure heartbeats (``Date`` +
+        ``PriceRateID``, no price field). Merging one changes nothing,
+        and emitting on one would advance ``quoted_at`` without any
+        price behind it — reporting freshness we do not have.
+        """
+        return self.has_bid or self.has_ask or self.has_last
+
+    def to_quote_update(self) -> QuoteUpdate | None:
+        """Stateless promotion — only a delta already carrying BOTH
+        sides is a complete tick. Returns ``None`` otherwise.
+
+        This is the pre-#2252 behaviour, preserved for the
+        stateless :func:`parse_rate_messages` API.
+        """
+        if self.bid is None or self.ask is None:
+            return None
+        return QuoteUpdate(
+            instrument_id=self.instrument_id,
+            bid=self.bid,
+            ask=self.ask,
+            last=self.last,
+            quoted_at=self.quoted_at,
+        )
+
+
 def build_auth_message(api_key: str, user_key: str) -> str:
     """Compose the ``Authenticate`` op JSON sent on every (re)connect."""
     return json.dumps(
@@ -115,11 +197,101 @@ def build_auth_message(api_key: str, user_key: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class WsFrame:
+    """One op frame ready to send, with the id needed to match its ack."""
+
+    frame_id: str
+    operation: str
+    payload: str
+    topic_count: int
+
+
+def _topic_frames(
+    instrument_ids: list[int],
+    operation: str,
+    extra_data: dict[str, object] | None = None,
+) -> list[WsFrame]:
+    """Split ``instrument_ids`` into frames that fit the WS byte limit.
+
+    **Pack by BYTES, never by topic count** (#2241): instrument-id
+    width varies from 2 to 6 digits, so a count-based cap does not
+    bound frame size. Over the limit eToro does not reject — it drops
+    the socket with `1006` and an empty reason, no ack and no error
+    envelope, and the subscription is simply not applied (#2249).
+
+    Sizing is exact rather than iterative: the envelope is serialised
+    once with an empty topic list to get its overhead, and each topic
+    costs its own JSON encoding plus one separator byte. Both are pure
+    ASCII here, so byte length equals character length.
+    """
+    if not instrument_ids:
+        return []
+
+    data: dict[str, object] = {"topics": [], **(extra_data or {})}
+    # Overhead of everything except the topics themselves. The uuid is
+    # a fixed 36 chars, so any id stands in for the real one.
+    overhead = len(json.dumps({"id": str(uuid.uuid4()), "operation": operation, "data": data}))
+
+    frames: list[WsFrame] = []
+    batch: list[str] = []
+    size = overhead
+    for iid in instrument_ids:
+        topic = f"instrument:{iid}"
+        # +1 for the comma joining it to the previous topic. Charging
+        # it on the first topic too simply leaves one spare byte.
+        cost = len(json.dumps(topic)) + 1
+        if batch and size + cost > _WS_FRAME_BUDGET_BYTES:
+            frames.append(_seal_frame(batch, operation, extra_data))
+            batch = []
+            size = overhead
+        batch.append(topic)
+        size += cost
+    if batch:
+        frames.append(_seal_frame(batch, operation, extra_data))
+    return frames
+
+
+def _seal_frame(topics: list[str], operation: str, extra_data: dict[str, object] | None) -> WsFrame:
+    frame_id = str(uuid.uuid4())
+    payload = json.dumps(
+        {
+            "id": frame_id,
+            "operation": operation,
+            "data": {"topics": topics, **(extra_data or {})},
+        }
+    )
+    # Belt and braces: the accounting above is exact, but a silent
+    # over-limit frame costs the whole connection, so assert rather
+    # than trust the arithmetic.
+    encoded = len(payload.encode("utf-8"))
+    if encoded > _WS_FRAME_LIMIT_BYTES:
+        raise ValueError(f"{operation} frame is {encoded} bytes, over the {_WS_FRAME_LIMIT_BYTES}-byte WS limit")
+    return WsFrame(frame_id=frame_id, operation=operation, payload=payload, topic_count=len(topics))
+
+
+def build_subscribe_frames(instrument_ids: list[int]) -> list[WsFrame]:
+    """``Subscribe`` frames for ``instrument_ids``, chunked to fit the
+    WS byte limit. Empty list for empty input."""
+    return _topic_frames(instrument_ids, "Subscribe", {"snapshot": True})
+
+
+def build_unsubscribe_frames(instrument_ids: list[int]) -> list[WsFrame]:
+    """``Unsubscribe`` frames for ``instrument_ids``, chunked to fit the
+    WS byte limit. Empty list for empty input."""
+    return _topic_frames(instrument_ids, "Unsubscribe")
+
+
 def build_subscribe_message(instrument_ids: list[int]) -> str | None:
-    """Compose the ``Subscribe`` op JSON for a list of instrument IDs.
+    """Compose a SINGLE ``Subscribe`` op JSON for a list of instrument IDs.
 
     Returns ``None`` when the list is empty so callers don't send a
     no-op subscription that eToro might reject.
+
+    ⚠ **Not safe for an unbounded id set** — over 25 KiB the frame is
+    dropped silently and takes the connection with it (#2249). Callers
+    that cannot bound their input must use :func:`build_subscribe_frames`.
+    Retained for fixtures and for call sites with a known-small set.
     """
     if not instrument_ids:
         return None
@@ -223,16 +395,22 @@ def _iter_inner_messages(raw: str) -> list[dict[str, object]]:
     return []
 
 
-def _parse_rate_content(msg: dict[str, object]) -> QuoteUpdate | None:
+def _parse_rate_content(msg: dict[str, object]) -> RateDelta | None:
     """Parse one inner ``Trading.Instrument.Rate`` message into a
-    :class:`QuoteUpdate`.
+    :class:`RateDelta`.
 
     Handles both the documented envelope shape — where ``content``
     is a JSON-encoded string carrying the actual fields — and the
     legacy ``data`` shape (parsed object directly under ``data``)
-    used by older test fixtures. Returns ``None`` on any field-
-    shape failure so the listener loop drops the bad frame and
-    keeps reading.
+    used by older test fixtures.
+
+    ``None`` means **"not a rate message"** — wrong type, unparseable
+    content, or no usable identity/timestamp. It does NOT mean
+    "rate message with a partial payload": that is a
+    :class:`RateDelta` whose ``has_*`` flags say which fields
+    arrived, and collapsing the two is exactly the #2252 defect
+    (58.1% of price-changing pushes discarded as if they were
+    malformed).
     """
     if msg.get("type") != _RATE_MESSAGE_TYPE:
         return None
@@ -260,27 +438,98 @@ def _parse_rate_content(msg: dict[str, object]) -> QuoteUpdate | None:
             instrument_id_raw = topic.removeprefix("instrument:")
     try:
         instrument_id = int(str(instrument_id_raw))
-        bid = Decimal(str(payload["Bid"]))
-        ask = Decimal(str(payload["Ask"]))
+        # Identity + timestamp are the only REQUIRED fields. Every
+        # price field is optional (#2243): the heartbeat shape is
+        # ``{Date, PriceRateID}`` and carries no price at all.
+        date_str = str(payload["Date"])
+        if date_str.endswith("Z"):
+            date_str = date_str[:-1] + "+00:00"
+        quoted_at = datetime.fromisoformat(date_str)
+
+        has_bid = "Bid" in payload
+        bid = Decimal(str(payload["Bid"])) if has_bid else None
+        has_ask = "Ask" in payload
+        ask = Decimal(str(payload["Ask"])) if has_ask else None
+
+        has_last = "LastExecution" in payload
         last_raw = payload.get("LastExecution")
         last = Decimal(str(last_raw)) if last_raw is not None else None
         # #1429: a non-positive last is not a real trade (eToro pushes 0 for
         # un-freshly-traded instruments) — persist NULL, never a fake 0.
         if last is not None and last <= 0:
             last = None
-        date_str = str(payload["Date"])
-        if date_str.endswith("Z"):
-            date_str = date_str[:-1] + "+00:00"
-        quoted_at = datetime.fromisoformat(date_str)
-    except KeyError, TypeError, ValueError:
+    except KeyError, TypeError, ValueError, InvalidOperation:
         return None
-    return QuoteUpdate(
+    return RateDelta(
         instrument_id=instrument_id,
+        quoted_at=quoted_at,
         bid=bid,
         ask=ask,
         last=last,
-        quoted_at=quoted_at,
+        has_bid=has_bid,
+        has_ask=has_ask,
+        has_last=has_last,
     )
+
+
+@dataclass(frozen=True)
+class OpAck:
+    """eToro's acknowledgement of a Subscribe / Unsubscribe frame."""
+
+    frame_id: str
+    operation: str
+    success: bool
+    error_code: str | None = None
+
+
+def parse_op_acks(raw: str) -> list[OpAck]:
+    """Extract every Subscribe / Unsubscribe ack in a raw WS frame.
+
+    Shape: ``{"id": …, "success": true, "operation": "Subscribe"}``
+    (#2241). Parsed separately from :func:`_iter_inner_messages`
+    because an ack carries **no** ``type`` field, so that helper's
+    top-level branch does not return it.
+
+    Reading acks is not cosmetic: an oversize frame produces no error
+    envelope and no close frame, so the *absence* of an ack is the only
+    evidence it was dropped.
+    """
+    # Substring pre-filter before the decode. This runs on every
+    # inbound frame, alongside the decodes that `is_private_event` and
+    # `parse_rate_deltas` already do, and the overwhelming majority of
+    # frames are rate pushes carrying no `operation` key at all. No
+    # semantic shortcut: an ack cannot exist without the literal key.
+    if '"operation"' not in raw:
+        return []
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    candidates: list[object]
+    if isinstance(envelope, dict) and isinstance(envelope.get("messages"), list):
+        candidates = list(envelope["messages"])
+    else:
+        candidates = [envelope]
+
+    acks: list[OpAck] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        frame_id = item.get("id")
+        operation = item.get("operation")
+        if not isinstance(frame_id, str) or operation not in ("Subscribe", "Unsubscribe"):
+            continue
+        error_code = item.get("errorCode")
+        acks.append(
+            OpAck(
+                frame_id=frame_id,
+                operation=operation,
+                success=bool(item.get("success")),
+                error_code=error_code if isinstance(error_code, str) else None,
+            )
+        )
+    return acks
 
 
 def is_private_event(raw: str) -> bool:
@@ -302,26 +551,147 @@ def parse_rate_message(raw: str) -> QuoteUpdate | None:
     :func:`parse_rate_messages` to receive every update.
 
     Kept for backward-compat with existing single-tick test fixtures.
+    Stateless, so — like :func:`parse_rate_messages` — it sees only
+    pushes that are complete on their own (#2252).
     """
     for msg in _iter_inner_messages(raw):
-        update = _parse_rate_content(msg)
+        delta = _parse_rate_content(msg)
+        if delta is None:
+            continue
+        update = delta.to_quote_update()
         if update is not None:
             return update
     return None
 
 
-def parse_rate_messages(raw: str) -> list[QuoteUpdate]:
+def parse_rate_deltas(raw: str) -> list[RateDelta]:
     """Extract every ``Trading.Instrument.Rate`` push in a raw WS
-    frame. eToro's WS may batch multiple rates into one frame; the
-    listener loop must process all of them or the rate-stream will
-    silently drop ticks for high-frequency instruments.
+    frame as a :class:`RateDelta`, complete or partial.
+
+    eToro's WS may batch multiple rates into one frame; the listener
+    loop must process all of them or the rate-stream will silently
+    drop ticks for high-frequency instruments.
+
+    This is the parse the subscriber uses. Feed the results through
+    a :class:`RateStateStore` to merge them into complete ticks.
+    """
+    deltas: list[RateDelta] = []
+    for msg in _iter_inner_messages(raw):
+        delta = _parse_rate_content(msg)
+        if delta is not None:
+            deltas.append(delta)
+    return deltas
+
+
+def parse_rate_messages(raw: str) -> list[QuoteUpdate]:
+    """Extract every rate push that is complete **on its own**.
+
+    Stateless view over :func:`parse_rate_deltas`, kept for callers
+    and fixtures that predate #2252. Partial deltas are not visible
+    here — on the live wire that is 58.1% of price-changing pushes,
+    so anything ingesting the real feed must use
+    :func:`parse_rate_deltas` + :class:`RateStateStore` instead.
     """
     updates: list[QuoteUpdate] = []
-    for msg in _iter_inner_messages(raw):
-        update = _parse_rate_content(msg)
+    for delta in parse_rate_deltas(raw):
+        update = delta.to_quote_update()
         if update is not None:
             updates.append(update)
     return updates
+
+
+class RateStateStore:
+    """Per-instrument last-known rate state, merged across sparse deltas.
+
+    Exists because :data:`_UPSERT_SQL` writes ``bid``, ``ask``,
+    ``last`` and ``spread_pct`` in one statement, so a partial delta
+    cannot be applied without prior state — and eToro only sends
+    partials (#2252). Holding the last known value per field turns a
+    bid-only push into a complete tick against the standing ask.
+
+    State is seeded for free: :func:`build_subscribe_message` already
+    requests ``snapshot: True``, and the snapshot arrives as an
+    ordinary rate message carrying every field, so a fresh
+    subscription is complete from its first push.
+
+    Not thread-safe by design — the subscriber applies deltas on the
+    event loop in :meth:`EtoroWebSocketSubscriber._listen`, and only
+    the resulting :class:`QuoteUpdate` is handed to a worker thread.
+    """
+
+    __slots__ = ("_state",)
+
+    def __init__(self) -> None:
+        # instrument_id -> (bid, ask, last, quoted_at)
+        self._state: dict[int, tuple[Decimal | None, Decimal | None, Decimal | None, datetime]] = {}
+
+    def apply(self, delta: RateDelta) -> QuoteUpdate | None:
+        """Merge ``delta`` onto stored state; return a complete tick, or None.
+
+        Returns ``None`` — meaning "nothing to publish", not "error" — when:
+
+        * the delta carries no price field (a heartbeat; 59.8% of the
+          wire). Emitting would advance ``quoted_at`` with no price
+          behind it, overstating freshness;
+        * the merged state still lacks a bid or an ask, i.e. we have
+          never seen one side for this instrument. Only possible
+          before the snapshot lands or if it was missed;
+        * the delta is older than the state it would overwrite. The
+          in-memory guard mirrors the ``quoted_at`` guard already in
+          :data:`_UPSERT_SQL`, and matters more here: an out-of-order
+          push that merely lost a race used to affect one row, but
+          against merged state it would corrupt every subsequent tick
+          for that instrument.
+        """
+        # A heartbeat is inert: nothing to merge, and — critically —
+        # it must NOT advance the ordering watermark. Heartbeats are
+        # the majority of the wire and arrive continuously, so letting
+        # one set `quoted_at` would make the guard below reject the
+        # next genuine price delta stamped anywhere behind it. The
+        # watermark exists to order PRICE data against price data.
+        if not delta.carries_price:
+            return None
+
+        prev = self._state.get(delta.instrument_id)
+        if prev is not None and delta.quoted_at < prev[3]:
+            return None
+
+        bid, ask, last = (prev[0], prev[1], prev[2]) if prev is not None else (None, None, None)
+        if delta.has_bid:
+            bid = delta.bid
+        if delta.has_ask:
+            ask = delta.ask
+        if delta.has_last:
+            # Presence, not truthiness: a present-but-non-positive
+            # LastExecution clears `last` to NULL per #1429, which is
+            # a real state change and not the same as "unchanged".
+            last = delta.last
+        self._state[delta.instrument_id] = (bid, ask, last, delta.quoted_at)
+
+        if bid is None or ask is None:
+            return None
+        return QuoteUpdate(
+            instrument_id=delta.instrument_id,
+            bid=bid,
+            ask=ask,
+            last=last,
+            quoted_at=delta.quoted_at,
+        )
+
+    def forget(self, instrument_ids: list[int]) -> None:
+        """Drop state for instruments no longer subscribed.
+
+        Called on Unsubscribe so the store tracks live subscriptions
+        rather than growing for the lifetime of the process — which
+        matters once #2240's collector holds a universe-scale
+        subscription rather than the handful of ids on screen.
+
+        This is the tidy path, not the guarantee: ``_listen`` also
+        refuses to create state for an unsubscribed id, which is what
+        actually bounds the store when an Unsubscribe never lands.
+        """
+        for iid in instrument_ids:
+            self._state.pop(iid, None)
 
 
 def _compute_spread_pct(bid: Decimal, ask: Decimal) -> Decimal | None:
@@ -501,6 +871,9 @@ class EtoroWebSocketSubscriber:
         # ticks to the bus exactly the way the WS path does. Skipped
         # when no SSE stream has visible ids.
         self._rest_poll_task: asyncio.Task[None] | None = None
+        # Timer-driven un-acked-frame reporter (#2249). Separate from
+        # the receive loop on purpose — see ``_ack_reaper_loop``.
+        self._ack_reaper_task: asyncio.Task[None] | None = None
 
         # Visibility-driven topic registry. Every page-view SSE stream
         # bumps a ref on its visible instrument ids; the topic is sent
@@ -520,6 +893,27 @@ class EtoroWebSocketSubscriber:
         # calls that can arrive from multiple SSE clients on the
         # same event loop. Small lock, held briefly.
         self._topic_lock = asyncio.Lock()
+
+        # Per-instrument merged rate state (#2252). eToro's rate push
+        # is a field-level sparse delta, so a bid-only message is only
+        # a usable quote against the standing ask. Mutated solely on
+        # the event loop (``_listen`` / ``remove_instruments``), and
+        # ``_listen`` admits only ids present in ``_topic_refs``, so
+        # its key set is bounded by the live subscription set.
+        # Deliberately NOT cleared on reconnect: Subscribe replays
+        # with ``snapshot: True``, so a stale entry is overwritten by
+        # the snapshot before any partial can be merged onto it, and
+        # keeping it means the reconnect window does not regress to
+        # "no quote at all" for instruments whose snapshot is slow.
+        self._rate_state = RateStateStore()
+
+        # Op frames sent and not yet acked (#2249):
+        # frame_id -> (operation, topic_count, monotonic sent_at).
+        # An oversize frame yields no ack, no error envelope and no
+        # close frame, so a missing ack is the ONLY evidence it was
+        # dropped — without this the log reads "subscribed to N topics"
+        # immediately before every death.
+        self._pending_acks: dict[str, tuple[str, int, float]] = {}
 
     def _default_watched_ids(self) -> list[int]:
         with self._pool.connection() as conn:
@@ -639,6 +1033,7 @@ class EtoroWebSocketSubscriber:
         # not held / watchlist state (#498).
         self._task = asyncio.create_task(self._run(), name="etoro-ws-subscriber")
         self._rest_poll_task = asyncio.create_task(self._rest_poll_loop(), name="etoro-ws-rest-poll")
+        self._ack_reaper_task = asyncio.create_task(self._ack_reaper_loop(), name="etoro-ws-ack-reaper")
         logger.info("EtoroWebSocketSubscriber: started")
 
     async def stop(self) -> None:
@@ -654,6 +1049,11 @@ class EtoroWebSocketSubscriber:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._rest_poll_task
             self._rest_poll_task = None
+        if self._ack_reaper_task is not None:
+            self._ack_reaper_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._ack_reaper_task
+            self._ack_reaper_task = None
         # Cancel the reconcile worker. The worker coroutine may be
         # awaiting ``asyncio.to_thread`` — the cancel raises
         # CancelledError out of the await, but the OS thread running
@@ -878,12 +1278,24 @@ class EtoroWebSocketSubscriber:
                 async with self._topic_lock:
                     topics_to_send = sorted(self._topic_refs.keys())
                     self._ws = ws
-                    sub_msg = build_subscribe_message(topics_to_send)
-                    if sub_msg is not None:
-                        await ws.send(sub_msg)
+                    # Frames pending on the dead connection can never
+                    # be acked now. Report them rather than clearing
+                    # silently — a reconnect that happened BECAUSE an
+                    # oversize frame killed the socket is exactly when
+                    # this evidence matters.
+                    self._reap_unacked(reason="connection was re-established before the ack arrived")
+                    # #2249: chunk the replay. A single frame over the
+                    # ref set is what turns a large subscription into a
+                    # connect → oversize frame → 1006 → reconnect loop
+                    # that cannot self-heal, because the failure never
+                    # drains ``_topic_refs``.
+                    frames = build_subscribe_frames(topics_to_send)
+                    if frames:
+                        await self._send_frames(ws, frames)
                         logger.info(
-                            "EtoroWebSocketSubscriber: subscribed to %d instrument topics",
+                            "EtoroWebSocketSubscriber: subscribed to %d instrument topics in %d frame(s)",
                             len(topics_to_send),
+                            len(frames),
                         )
                     else:
                         logger.info(
@@ -952,20 +1364,25 @@ class EtoroWebSocketSubscriber:
             # send to flush; ws.send() is non-blocking on a healthy
             # socket so contention is small in practice.
             if newly_tracked and self._ws is not None:
-                msg = build_subscribe_message(newly_tracked)
-                if msg is not None:
-                    try:
-                        await self._ws.send(msg)
-                        logger.info(
-                            "EtoroWebSocketSubscriber: subscribe %d topics",
-                            len(newly_tracked),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "EtoroWebSocketSubscriber: Subscribe send failed; "
-                            "next reconnect will resubscribe from ref counts",
-                            exc_info=True,
-                        )
+                try:
+                    # Built INSIDE the try: `_seal_frame` raises on a
+                    # sizing bug, and this runs on the SSE request path
+                    # — an uncaught raise would 500 the operator's
+                    # stream, where the existing contract is "log and
+                    # let the next reconnect resubscribe from refs".
+                    frames = build_subscribe_frames(newly_tracked)
+                    await self._send_frames(self._ws, frames)
+                    logger.info(
+                        "EtoroWebSocketSubscriber: subscribe %d topics in %d frame(s)",
+                        len(newly_tracked),
+                        len(frames),
+                    )
+                except Exception:
+                    logger.warning(
+                        "EtoroWebSocketSubscriber: Subscribe send failed; "
+                        "next reconnect will resubscribe from ref counts",
+                        exc_info=True,
+                    )
 
     async def remove_instruments(self, instrument_ids: list[int]) -> None:
         """Decrement ref counts; send Unsubscribe for topics that
@@ -989,22 +1406,118 @@ class EtoroWebSocketSubscriber:
                 if self._topic_refs[iid] <= 0:
                     del self._topic_refs[iid]
                     to_unsubscribe.append(iid)
+            # Drop merged rate state alongside the topic (#2252) — the
+            # next Subscribe re-seeds it from the snapshot.
+            self._rate_state.forget(to_unsubscribe)
             # See ``add_instruments`` for the rationale on sending
             # under the lock — same wire-ordering invariant.
             if to_unsubscribe and self._ws is not None:
-                msg = build_unsubscribe_message(to_unsubscribe)
-                if msg is not None:
-                    try:
-                        await self._ws.send(msg)
-                        logger.info(
-                            "EtoroWebSocketSubscriber: unsubscribe %d topics",
-                            len(to_unsubscribe),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "EtoroWebSocketSubscriber: Unsubscribe send failed",
-                            exc_info=True,
-                        )
+                try:
+                    # Built inside the try — see `add_instruments`.
+                    frames = build_unsubscribe_frames(to_unsubscribe)
+                    await self._send_frames(self._ws, frames)
+                    logger.info(
+                        "EtoroWebSocketSubscriber: unsubscribe %d topics in %d frame(s)",
+                        len(to_unsubscribe),
+                        len(frames),
+                    )
+                except Exception:
+                    logger.warning(
+                        "EtoroWebSocketSubscriber: Unsubscribe send failed",
+                        exc_info=True,
+                    )
+
+    def _register_pending(self, frame: WsFrame) -> None:
+        """Record a sent op frame so its ack can be correlated (#2249)."""
+        self._pending_acks[frame.frame_id] = (frame.operation, frame.topic_count, time.monotonic())
+
+    async def _send_frames(self, ws: ClientConnection, frames: list[WsFrame]) -> None:
+        """Send op frames, registering each for ack correlation FIRST.
+
+        Order matters and is not cosmetic: ``ws.send`` awaits, which
+        yields to the event loop, so the receive loop can process this
+        very frame's ack before control returns here. Registering
+        afterwards would insert an entry that the ack has already been
+        and gone for — nothing would ever clear it, and the reaper
+        would later report a genuinely-acked frame as NEVER ACKED,
+        making the silent-drop detector cry wolf.
+
+        A frame that fails to send is de-registered: nothing will ack
+        what never reached the wire, and the caller already logs the
+        send failure. ``BaseException`` so a cancellation mid-send
+        cleans up too.
+        """
+        for frame in frames:
+            self._register_pending(frame)
+            try:
+                await ws.send(frame.payload)
+            except BaseException:
+                self._pending_acks.pop(frame.frame_id, None)
+                raise
+
+    def _resolve_acks(self, raw: str) -> None:
+        """Clear pending entries for acked frames and log rejections."""
+        for ack in parse_op_acks(raw):
+            pending = self._pending_acks.pop(ack.frame_id, None)
+            if ack.success:
+                continue
+            # An explicit rejection (e.g. the 4,999-topic session cap,
+            # #2241) does NOT poison the session — the connection keeps
+            # serving already-subscribed topics. Log and carry on; do
+            # not tear down.
+            logger.warning(
+                "EtoroWebSocketSubscriber: %s REJECTED for %s topics (errorCode=%s) — "
+                "connection still live, those topics are not subscribed",
+                ack.operation,
+                pending[1] if pending else "?",
+                ack.error_code,
+            )
+
+    def _reap_unacked(self, *, reason: str | None = None) -> None:
+        """Report op frames that were never acknowledged.
+
+        The silent-drop failure mode has no other detector: `ws.send()`
+        returns normally, no error envelope arrives, and the close (if
+        any) is a bare 1006. Reported once per frame, then forgotten so
+        the warning does not repeat.
+
+        ``reason`` set → drain EVERY pending frame regardless of age,
+        for the case where they can no longer possibly be acked (the
+        connection is gone).
+        """
+        now = time.monotonic()
+        expired = reason is not None
+        stale = [(fid, meta) for fid, meta in self._pending_acks.items() if expired or now - meta[2] > _ACK_TIMEOUT_S]
+        for fid, (operation, topic_count, _) in stale:
+            del self._pending_acks[fid]
+            logger.warning(
+                "EtoroWebSocketSubscriber: %s frame %s (%d topics) NEVER ACKED (%s) — those topics are NOT subscribed",
+                operation,
+                fid,
+                topic_count,
+                reason or f"no ack in {_ACK_TIMEOUT_S:.0f}s; eToro silently dropped it",
+            )
+
+    async def _ack_reaper_loop(self) -> None:
+        """Time-driven un-acked-frame reporter.
+
+        Deliberately NOT piggybacked on the receive loop: the failure
+        this detects is an oversize frame that gets the socket dropped,
+        which means **no further inbound message ever arrives** — so a
+        reaper riding inbound traffic would miss precisely the case it
+        exists for (Codex checkpoint 2). Ticks on a timer instead.
+        """
+        # Floor guards a pathologically small timeout only; in
+        # production _ACK_TIMEOUT_S is 10s so the interval is 5s.
+        interval = max(0.05, _ACK_TIMEOUT_S / 2)
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            if self._pending_acks:
+                self._reap_unacked()
 
     async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:
@@ -1018,9 +1531,39 @@ class EtoroWebSocketSubscriber:
             # every frame: schedule a reconcile if any inner message
             # is a private event, AND publish every rate tick the
             # frame carries.
+            # #2249: match acks to sent op frames, and report any that
+            # never arrive. Cheap on the hot path — the ack shape is
+            # rejected on the first key check for a rate frame.
+            self._resolve_acks(raw)
+
             if is_private_event(raw):
                 self._schedule_reconcile()
-            updates = parse_rate_messages(raw)
+            # #2252: parse to sparse deltas and merge onto per-instrument
+            # state. Requiring a complete Bid+Ask payload — as this loop
+            # did — discarded 58.1% of price-CHANGING pushes and left
+            # ``quotes`` 1.5-2.6x staler than the feed allows.
+            #
+            # Gate on ``_topic_refs`` so ``_rate_state`` can only ever
+            # hold instruments we are currently subscribed to. Without
+            # it the merge state is repopulated by any frame for an
+            # unsubscribed id — and ``remove_instruments`` forgets
+            # BEFORE the wire Unsubscribe lands, so a dropped, rejected,
+            # cancelled or simply ignored Unsubscribe would let
+            # already-buffered frames refill it indefinitely. The gate
+            # turns "bounded by the universe" from a claim about the
+            # data into an invariant the code enforces.
+            #
+            # Unlocked read: ``_topic_refs`` is only mutated by
+            # ``add_instruments`` / ``remove_instruments``, which run on
+            # this same event loop, and there is no await between the
+            # read and its use — so the lock buys nothing here and
+            # taking it would serialise every frame against every
+            # page-view change.
+            updates = [
+                update
+                for delta in parse_rate_deltas(raw)
+                if delta.instrument_id in self._topic_refs and (update := self._rate_state.apply(delta)) is not None
+            ]
             for update in updates:
                 # Publish first, on the event loop, before the DB
                 # offload. SSE subscribers see the tick within the

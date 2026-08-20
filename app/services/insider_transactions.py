@@ -51,15 +51,17 @@ from psycopg.types.json import Jsonb
 
 from app.providers.concurrent_fetch import FetchOutcome, fetch_document_texts_classified
 from app.services import raw_filings
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
+from app.services.filings import reconcile_mislinked_ownership_filing_events
 from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
+    tombstone_non_sibling_insider_observations,
 )
-from app.services.sec_identity import siblings_for_issuer_cik
+from app.services.sec_identity import resolve_insider_writer_routing
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 
 _PARSER_VERSION_FORM4 = "form4-v1"
 # Form 5 (annual statement of changes in beneficial ownership) reuses the
@@ -349,6 +351,40 @@ class ParsedFiling:
 _XMLNS_RE = re.compile(r'\sxmlns="[^"]*"')
 
 
+def _unwrap_sgml_submission(text: str) -> str:
+    """Slice the embedded ``<ownershipDocument>`` XML out of a full
+    SGML submission (``<SEC-DOCUMENT>`` wrapper).
+
+    EDGAR serves every filing at TWO URLs: the per-document primary
+    doc (clean XML) and the ``.txt`` full submission (SGML container
+    embedding every document verbatim). Master/daily-index discovery
+    only knows the ``.txt`` URL, so manifest rows and legacy
+    owner-stream fetches store the SGML shape — 14,279 form3/4/5 raw
+    rows on dev as of 2026-07-22 (#2110 full-pop scan; 11,331 of them
+    tombstoned because the parsers rejected the wrapper). Unwrapping
+    at the parser chokepoint fixes every consumer at once: live
+    ingest, the manifest parser's stored-body reuse (#1591), and
+    rewash — without mutating stored payloads (raw store keeps the
+    fetched bytes verbatim).
+
+    First-close slice, not rindex: a submission carrying two ownership
+    documents must not produce a multi-root slice (Codex ckpt-2 on
+    #828 PR-2, where this exact slice repaired the 758-cohort's 13
+    wrapped rows). Non-SGML input is returned unchanged; a wrapper
+    with no embedded ownership doc falls through to the normal
+    ``ET.fromstring`` failure → ``None``.
+    """
+    if not text.lstrip().startswith("<SEC-DOCUMENT>"):
+        return text
+    start = text.find("<ownershipDocument")
+    if start == -1:
+        return text
+    end = text.find("</ownershipDocument>", start)
+    if end == -1:
+        return text
+    return text[start : end + len("</ownershipDocument>")]
+
+
 def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
     """Extract everything structural from a Form 4 primary document.
 
@@ -378,7 +414,7 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
     """
     if not raw_xml:
         return None
-    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
+    cleaned_xml = _XMLNS_RE.sub("", _unwrap_sgml_submission(raw_xml))
     try:
         root = ET.fromstring(cleaned_xml)
     except ET.ParseError:
@@ -482,7 +518,7 @@ def parse_form_5_xml(raw_xml: str) -> ParsedFiling | None:
     """
     if not raw_xml:
         return None
-    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
+    cleaned_xml = _XMLNS_RE.sub("", _unwrap_sgml_submission(raw_xml))
     try:
         root = ET.fromstring(cleaned_xml)
     except ET.ParseError:
@@ -978,7 +1014,7 @@ def parse_form_3_xml(raw_xml: str) -> ParsedForm3 | None:
     """
     if not raw_xml:
         return None
-    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
+    cleaned_xml = _XMLNS_RE.sub("", _unwrap_sgml_submission(raw_xml))
     try:
         root = ET.fromstring(cleaned_xml)  # noqa: S314 — same trust posture as Form 4 parser.
     except ET.ParseError:
@@ -1231,6 +1267,25 @@ def upsert_filing(
         sanitised.append(txn)
     parsed = replace(parsed, transactions=tuple(sanitised))
 
+    # #828 PR-1 — route entity-level writes by the PARSED issuer CIK, not the
+    # discovery-time instrument. A filing discovered via the reporting OWNER's
+    # EDGAR stream (BAC Form 4 in Berkshire's feed) must bind to the issuer's
+    # siblings; the owner's filing_events binding is deleted below. Fail-open:
+    # unknown/unroutable issuer keeps the discovery linkage unchanged.
+    routing = resolve_insider_writer_routing(conn, discovery_instrument_id=instrument_id, issuer_cik=parsed.issuer_cik)
+    entity_instrument_id = routing.entity_instrument_id
+    if routing.is_mislink:
+        logger.warning(
+            "form4/5 writer routing (#828): accession=%s discovered under "
+            "instrument %s but issuer CIK %s maps to siblings %s — entity rows "
+            "routed to instrument %s",
+            accession_number,
+            instrument_id,
+            parsed.issuer_cik,
+            routing.sibling_instrument_ids,
+            entity_instrument_id,
+        )
+
     # #817 — the single once-per-accession chokepoint for Form 4/5 typed-table
     # writes (live manifest drain, rewash, legacy ingest all funnel here).
     # Serialise concurrent writers of this accession's rows before the first
@@ -1261,6 +1316,7 @@ def upsert_filing(
                 %s, %s, FALSE
             )
             ON CONFLICT (accession_number) DO UPDATE SET
+                instrument_id                = EXCLUDED.instrument_id,
                 document_type                = EXCLUDED.document_type,
                 period_of_report             = EXCLUDED.period_of_report,
                 date_of_original_submission  = EXCLUDED.date_of_original_submission,
@@ -1282,7 +1338,7 @@ def upsert_filing(
             """,
             (
                 accession_number,
-                instrument_id,
+                entity_instrument_id,
                 parsed.document_type,
                 parsed.period_of_report,
                 parsed.date_of_original_submission,
@@ -1401,6 +1457,7 @@ def upsert_filing(
                     %s, %s
                 )
                 ON CONFLICT (accession_number, txn_row_num) DO UPDATE SET
+                    instrument_id             = EXCLUDED.instrument_id,
                     filer_cik                 = EXCLUDED.filer_cik,
                     filer_name                = EXCLUDED.filer_name,
                     filer_role                = EXCLUDED.filer_role,
@@ -1427,7 +1484,7 @@ def upsert_filing(
                     txn_date_invalid          = EXCLUDED.txn_date_invalid
                 """,
                 (
-                    instrument_id,
+                    entity_instrument_id,
                     accession_number,
                     txn.txn_row_num,
                     txn.filer_cik,
@@ -1469,16 +1526,7 @@ def upsert_filing(
     # (insider_filings, insider_transactions, insider_filers,
     # insider_transaction_footnotes) stay PK=accession — siblings see
     # them via filing_events bridge in read paths.
-    issuer_cik = parsed.issuer_cik or ""
-    if issuer_cik:
-        try:
-            siblings = siblings_for_issuer_cik(conn, issuer_cik)
-        except ValueError:
-            siblings = [instrument_id]
-        if not siblings:
-            siblings = [instrument_id]
-    else:
-        siblings = [instrument_id]
+    siblings = routing.sibling_instrument_ids or [entity_instrument_id]
     for sibling_iid in siblings:
         _record_form4_observations_for_filing(
             conn,
@@ -1489,6 +1537,33 @@ def upsert_filing(
             filed_at=filed_at,
         )
         refresh_insiders_current(conn, instrument_id=sibling_iid)
+
+    # #828 PR-1 — a mislinked filing's owner-instrument filing_events rows ARE
+    # the L2/tombstone-count pollution (the per-instrument read bridges key on
+    # fe.instrument_id). Delete every non-sibling binding and upsert one row
+    # per issuer sibling so the bridge is correct immediately, without waiting
+    # for the issuer's own discovery stream to walk the accession. Stale
+    # non-sibling observations (legacy pre-#1117 fan-out, or a rewash of a
+    # historically-mislinked accession) are soft-deleted and the affected
+    # instruments' _current refreshed so the owner's rollup drops them too
+    # (Codex ckpt-2 finding 2).
+    if routing.is_mislink:
+        reconcile_mislinked_ownership_filing_events(
+            conn,
+            accession_number=accession_number,
+            sibling_instrument_ids=routing.sibling_instrument_ids,
+            filing_type=parsed.document_type or "",
+            filed_at=filed_at,
+            period_of_report=parsed.period_of_report,
+            primary_document_url=primary_document_url,
+            symbol=parsed.issuer_trading_symbol,
+        )
+        for stale_iid in tombstone_non_sibling_insider_observations(
+            conn,
+            source_accession=accession_number,
+            sibling_instrument_ids=routing.sibling_instrument_ids,
+        ):
+            refresh_insiders_current(conn, instrument_id=stale_iid)
 
 
 def _record_form4_observations_for_filing(

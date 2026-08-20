@@ -926,6 +926,252 @@ def test_def14a_apply_rescues_tombstoned_accession(
     assert [r[0] for r in rows] == ["Rescued Holder"]
 
 
+def test_def14a_rescue_with_no_ownership_table_still_rewashes_exec_comp(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """#2086 — the tombstoned-with-SCT cohort (GME class): rescue path
+    where the ownership parse still finds nothing, but the body carries
+    a Summary Compensation Table. The rewash must write comp rows AND
+    count as reparsed (parser_version bumps) instead of skipping
+    forever (Codex ckpt-2 P2)."""
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialOwnershipTable,
+        Def14AExecCompRow,
+        Def14ASummaryCompTable,
+    )
+
+    conn = ebull_test_conn
+    instrument_id = 950_070
+    accession = "0001234567-26-000003"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'D14C', 'DEF 14A Comp Rescue', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status)
+        VALUES (%s, '0000999001', 'partial')
+        """,
+        (accession,),
+    )
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type, source_url,
+            provider, provider_filing_id, primary_document_url
+        ) VALUES (%s, '2025-03-01', 'DEF 14A', 'https://example.com/y',
+                  'sec', %s, 'https://example.com/y')
+        """,
+        (instrument_id, accession),
+    )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    empty_ownership = Def14ABeneficialOwnershipTable(as_of_date=None, rows=[], raw_table_score=3)
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: empty_ownership,
+    )
+    sct = Def14ASummaryCompTable(
+        rows=(
+            Def14AExecCompRow(
+                executive_name="Jane Roe",
+                principal_position="Chief Executive Officer",
+                fiscal_year=2025,
+                salary=Decimal("1000000"),
+                bonus=None,
+                stock_awards=Decimal("5000000"),
+                option_awards=None,
+                non_equity_incentive=Decimal("2000000"),
+                pension_nqdc=None,
+                other_comp=Decimal("50000"),
+                total_comp=Decimal("8050000"),
+            ),
+        ),
+        raw_table_score=20,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_summary_compensation_table",
+        lambda _html: sct,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    assert result.rows_reparsed == 1  # comp written → bumped, not skipped
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT executive_name, total_comp FROM def14a_exec_compensation WHERE accession_number = %s",
+            (accession,),
+        )
+        comp_rows = cur.fetchall()
+        cur.execute(
+            "SELECT count(*) FROM def14a_beneficial_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        holdings_count = cur.fetchone()
+    assert comp_rows == [("Jane Roe", Decimal("8050000.00"))]
+    assert holdings_count is not None and holdings_count[0] == 0
+
+
+def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """#2105 — one DEF 14A accession owns exec-comp rows under EVERY
+    share-class sibling instrument (live ingest fans out via
+    ``_resolve_siblings``), but ``_apply_def14a`` resolves ONE
+    instrument (``LIMIT 1``). The comp rewash must refresh ALL
+    instruments holding comp rows for the accession, not just the
+    resolved one — GOOG kept stale truncated 'Sundar' rows while
+    GOOGL got the repaired 'Sundar Pichai' (89 accessions full-pop)."""
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialHolder,
+        Def14ABeneficialOwnershipTable,
+        Def14AExecCompRow,
+        Def14ASummaryCompTable,
+    )
+
+    conn = ebull_test_conn
+    resolved_id = 950_090
+    sibling_id = 950_091
+    resolver_only_id = 950_092  # in the CIK sibling set, NO existing comp rows
+    accession = "0001234567-26-000004"
+    for iid, sym in ((resolved_id, "D14SA"), (sibling_id, "D14SB"), (resolver_only_id, "D14SC")):
+        conn.execute(
+            """
+            INSERT INTO instruments (
+                instrument_id, symbol, company_name, exchange, currency, is_tradable
+            ) VALUES (%s, %s, 'DEF 14A Sibling', '4', 'USD', TRUE)
+            ON CONFLICT (instrument_id) DO NOTHING
+            """,
+            (iid, sym),
+        )
+    # The _resolve_siblings half of the union: resolver_only_id co-binds the
+    # issuer CIK in external_identifiers, proving a row-less current sibling
+    # gets comp written fresh (rewash converges to first-ingest fan-out).
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES (%s, 'sec', 'cik', '0000999002', FALSE)
+        """,
+        (resolver_only_id,),
+    )
+    # Happy-path resolution: holdings row under the RESOLVED instrument only.
+    conn.execute(
+        """
+        INSERT INTO def14a_beneficial_holdings (
+            instrument_id, accession_number, issuer_cik,
+            holder_name, holder_role, shares, percent_of_class, as_of_date
+        ) VALUES (%s, %s, '0000999002', 'Holder A', 'officer', 100, 5.0, '2025-01-01')
+        """,
+        (resolved_id, accession),
+    )
+    # Stale truncated-name comp rows under BOTH siblings (old-parser output),
+    # plus a NULL-instrument legacy row the per-instrument DELETE can never
+    # reach — the post-rewash sweep must clear it.
+    for iid in (resolved_id, sibling_id, None):
+        conn.execute(
+            """
+            INSERT INTO def14a_exec_compensation (
+                instrument_id, accession_number, issuer_cik,
+                executive_name, fiscal_year, total_comp
+            ) VALUES (%s, %s, '0000999002', 'Sundar', 2024, 1.00)
+            """,
+            (iid, accession),
+        )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    ownership = Def14ABeneficialOwnershipTable(
+        as_of_date=None,
+        rows=[
+            Def14ABeneficialHolder(
+                holder_name="Holder A",
+                holder_role="officer",
+                shares=Decimal("100"),
+                percent_of_class=Decimal("5.0"),
+            ),
+        ],
+        raw_table_score=10,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: ownership,
+    )
+    sct = Def14ASummaryCompTable(
+        rows=(
+            Def14AExecCompRow(
+                executive_name="Sundar Pichai",
+                principal_position="Chief Executive Officer",
+                fiscal_year=2024,
+                salary=Decimal("650000"),
+                bonus=None,
+                stock_awards=None,
+                option_awards=None,
+                non_equity_incentive=None,
+                pension_nqdc=None,
+                other_comp=None,
+                total_comp=Decimal("650000"),
+            ),
+        ),
+        raw_table_score=20,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_summary_compensation_table",
+        lambda _html: sct,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, executive_name
+            FROM def14a_exec_compensation
+            WHERE accession_number = %s
+            ORDER BY instrument_id
+            """,
+            (accession,),
+        )
+        rows = cur.fetchall()
+    # ALL siblings refreshed to the new parse — including the row-less
+    # resolver-only sibling — and neither the stale 'Sundar' rows nor the
+    # NULL-instrument legacy row survive.
+    assert rows == [
+        (resolved_id, "Sundar Pichai"),
+        (sibling_id, "Sundar Pichai"),
+        (resolver_only_id, "Sundar Pichai"),
+    ]
+
+
 def test_blockholders_apply_raises_on_parse_failure(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
@@ -2402,3 +2648,149 @@ def test_rewash_13f_accession_raises_when_spec_unregistered(
     rewash_filings._REGISTRY.clear()  # drop the eagerly-registered spec
     with pytest.raises(RuntimeError, match="13F-HR infotable parser not registered"):
         rewash_filings._rewash_13f_accession(conn, accession_number="0000000000-00-XXX")
+
+
+def test_def14a_rewash_fans_out_over_every_instrument_holding_the_accession(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """#2157 — the Item 403 arm resolves ONE instrument via ``LIMIT 1`` but the
+    DELETE it follows clears the accession for ALL of them, so every other
+    share-class sibling lost its typed rows and kept observations live under the
+    old parser's names.
+
+    Both siblings must end up with the new parse; the sibling whose only
+    surviving evidence is a live OBSERVATION (its typed rows were already
+    deleted by an earlier rewash — 41 such pairs full-pop) must be reached too.
+    """
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialHolder,
+        Def14ABeneficialOwnershipTable,
+    )
+    from app.services.ownership_observations import record_def14a_observation
+
+    conn = ebull_test_conn
+    typed_iid = 950_061  # class A — keeps its typed rows
+    orphan_iid = 950_062  # class B — typed rows already gone, observation live
+    # class C — typed rows ONLY: no live observation, and no sibling link for
+    # the resolver to find. The accession-wide DELETE would hard-delete it and
+    # never rewrite it if the instrument set were resolved AFTER the delete
+    # (Codex ckpt-2 HIGH). It is here purely to pin that ordering.
+    typed_only_iid = 950_063
+    accession = "0001234567-26-000061"
+    for iid, symbol in ((typed_iid, "D14SA"), (orphan_iid, "D14SB"), (typed_only_iid, "D14SC")):
+        conn.execute(
+            """
+            INSERT INTO instruments (
+                instrument_id, symbol, company_name, exchange, currency, is_tradable
+            ) VALUES (%s, %s, 'DEF 14A Sibling', '4', 'USD', TRUE)
+            ON CONFLICT (instrument_id) DO NOTHING
+            """,
+            (iid, symbol),
+        )
+    for iid in (typed_iid, typed_only_iid):
+        conn.execute(
+            """
+            INSERT INTO def14a_beneficial_holdings (
+                instrument_id, accession_number, issuer_cik,
+                holder_name, holder_role, shares, percent_of_class, as_of_date
+            ) VALUES (%s, %s, '0000999061', 'Stale Name', 'officer', 100, 5.0, '2025-01-01')
+            """,
+            (iid, accession),
+        )
+    # The orphaned sibling: no typed row, but a live observation under the old
+    # parser's name. A typed-table-only union would never find it.
+    record_def14a_observation(
+        conn,
+        instrument_id=orphan_iid,
+        holder_name="Stale Name",
+        holder_role="officer",
+        ownership_nature="beneficial",
+        source="def14a",
+        source_document_id=accession,
+        source_accession=accession,
+        source_field=None,
+        source_url=None,
+        filed_at=datetime(2025, 1, 1, tzinfo=UTC),
+        period_start=None,
+        period_end=date(2025, 1, 1),
+        ingest_run_id=uuid4(),
+        shares=Decimal("100"),
+        percent_of_class=Decimal("5.0"),
+    )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    fake_table = Def14ABeneficialOwnershipTable(
+        as_of_date=date(2026, 1, 1),
+        rows=[
+            Def14ABeneficialHolder(
+                holder_name="Corrected Name",
+                holder_role="officer",
+                shares=Decimal("100"),
+                percent_of_class=Decimal("5.0"),
+            ),
+        ],
+        raw_table_score=10,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: fake_table,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, holder_name FROM def14a_beneficial_holdings
+            WHERE accession_number = %s ORDER BY instrument_id
+            """,
+            (accession,),
+        )
+        typed = cur.fetchall()
+    assert typed == [
+        (typed_iid, "Corrected Name"),
+        (orphan_iid, "Corrected Name"),
+        (typed_only_iid, "Corrected Name"),
+    ]
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, holder_name FROM ownership_def14a_observations
+            WHERE source_document_id = %s AND known_to IS NULL ORDER BY instrument_id
+            """,
+            (accession,),
+        )
+        live = cur.fetchall()
+    # The orphan's stale observation is superseded, not left live beside the
+    # corrected one — that is what kept ownership_def14a_current dirty.
+    assert live == [
+        (typed_iid, "Corrected Name"),
+        (orphan_iid, "Corrected Name"),
+        (typed_only_iid, "Corrected Name"),
+    ]
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id, holder_name FROM ownership_def14a_current "
+            "WHERE source_document_id = %s ORDER BY instrument_id",
+            (accession,),
+        )
+        current = cur.fetchall()
+    assert current == [
+        (typed_iid, "Corrected Name"),
+        (orphan_iid, "Corrected Name"),
+        (typed_only_iid, "Corrected Name"),
+    ]

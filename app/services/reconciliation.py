@@ -383,9 +383,24 @@ def _fetch_latest_dei_shares_outstanding(
     conn: psycopg.Connection[Any],
     cik_padded: str,
 ) -> int | None:
-    """Walk the SEC companyfacts payload and return the latest DEI
-    ``EntityCommonStockSharesOutstanding`` value, or ``None`` when
-    the concept is absent.
+    """Walk the SEC companyfacts payload and return the latest POSITIVE
+    DEI ``EntityCommonStockSharesOutstanding`` value, or ``None`` when
+    the concept is absent or carries no usable value.
+
+    Positive-only to match the rule `instrument_share_count_latest`
+    applies to the stored side (sql/259, #2232) — both sides of this
+    comparison must select by the same rule or the check measures the
+    rule difference instead of drift. A filer whose classes are tagged
+    dimensionally publishes a literal ``0`` here (companyfacts strips
+    the dimensional facts), and empirically that zero IS the highest
+    ``end``: CIK 0002078416 has one row, ``2025-10-31 = 0``; CIK
+    0002019103 has three, newest ``2025-12-31 = 0``. Without the filter
+    those two return 0 while the stored side returns either an older
+    positive count or nothing — a spurious `critical` drift on the
+    first shape and a false "No stored shares_outstanding for
+    instrument with SEC CIK" warning on the second. With it, a
+    zero-only issuer reaches the both-sides-empty clean path, which is
+    the truthful verdict.
 
     Picks the row with the highest ``end`` date, tie-broken by
     ``filed`` desc so amended filings overwrite the original.
@@ -410,9 +425,11 @@ def _fetch_latest_dei_shares_outstanding(
     units = facts.get("units", {}).get("shares", [])
     if not isinstance(units, list) or not units:
         return None
-    latest = max(units, key=lambda u: (u.get("end") or "", u.get("filed") or ""))
-    val = latest.get("val")
-    return int(val) if val is not None else None
+    usable = [u for u in units if isinstance(u.get("val"), int | float) and u["val"] > 0]
+    if not usable:
+        return None
+    latest = max(usable, key=lambda u: (u.get("end") or "", u.get("filed") or ""))
+    return int(latest["val"])
 
 
 register_check("shares_outstanding_freshness", check_shares_outstanding_freshness)

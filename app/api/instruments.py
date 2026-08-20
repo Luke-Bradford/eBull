@@ -24,11 +24,12 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Literal, get_args
+from typing import Literal, LiteralString, get_args
 
 import httpx
 import psycopg
@@ -113,6 +114,119 @@ def _short_lived_conn(request: Request) -> Iterator[psycopg.Connection[object]]:
         yield conn
     finally:
         gen.close()
+
+
+# ---------------------------------------------------------------------------
+# Instrument reference resolution (#2184)
+# ---------------------------------------------------------------------------
+
+# Every `/instruments/{symbol}/...` route resolved by symbol only, so a
+# numeric-id drill URL — `/instrument/1001/fundamentals` — 404'd the
+# whole page (spec §1.1).
+#
+# Reachability, stated accurately because the first draft of this comment
+# got it wrong: NO frontend code path mints `/instrument/<id>/...`. Every
+# `/instrument/${…}` mint site in `frontend/src` passes a symbol — none
+# passes an `instrument_id` — and
+# `components/dashboard/AlertsStrip.tsx:204` mints the PLURAL legacy route
+# `/instruments/${row.instrument_id}` (`App.tsx:89`), which
+# `pages/InstrumentDetailRedirect.tsx` resolves by id and redirects to
+# `/instrument/:symbol`. The id form therefore reaches this module only via
+# a hand-typed or hand-edited URL, which is exactly what spec §1.1 claims —
+# a real defect, but not a machine-generated one. Do not size the remaining
+# 27-endpoint conversion off a "the FE mints this" premise.
+#
+# These two helpers are the one place that decision lives. 29 sites in this
+# module carried the by-symbol SQL verbatim; #2184 converts the two
+# fundamentals-drill endpoints, leaving 27 to adopt it.
+
+# `LiteralString`, not `str` — psycopg's `execute` takes `QueryNoTemplate`,
+# which is how the type checker enforces that no caller can route a
+# runtime-built string through here (house precedent:
+# `app/services/peer_comparison.py:200`).
+_RESOLVE_BY_ID_SQL: LiteralString = """
+    SELECT instrument_id, symbol FROM instruments
+    WHERE instrument_id = %(iid)s
+    LIMIT 1
+"""
+
+# `symbol` is not UNIQUE across exchanges (see migration 043), so order by
+# `is_primary_listing DESC, instrument_id ASC` to make the winner
+# deterministic on collisions. Preserved verbatim from the call sites.
+_RESOLVE_BY_SYMBOL_SQL: LiteralString = """
+    SELECT instrument_id, symbol FROM instruments
+    WHERE UPPER(symbol) = %(s)s
+    ORDER BY is_primary_listing DESC, instrument_id ASC
+    LIMIT 1
+"""
+
+# ASCII digits only — `str.isdigit()` is True for '²' and Arabic-Indic
+# digits, and `int('²')` raises. A ref can be an id only if it is entirely
+# ASCII digits.
+#
+# Bounded at 19 digits = BIGINT's own width, so no digit string this
+# pattern rejects could have been a valid `instrument_id`. The bound is
+# load-bearing, not cosmetic: `int()` raises `ValueError` past
+# `sys.get_int_max_str_digits()` (4300 by default), so an unbounded
+# pattern turns `/instruments/<5000 digits>/financials` into a 500
+# instead of a 404. Anything longer gets the symbol attempt only, misses,
+# and 404s cleanly.
+_NUMERIC_REF = re.compile(r"^[0-9]{1,19}$")
+
+
+def instrument_ref_queries(ref: str) -> list[tuple[LiteralString, dict[str, object]]]:
+    """Ordered lookup attempts for a symbol-or-id path param.
+
+    Attempt 1 is ALWAYS the by-symbol query. A ref of 1-19 ASCII digits
+    appends attempt 2, the by-id query. The caller runs them in order and
+    takes the first hit.
+
+    **Symbol first, id as fallback** — the ordering is the safety
+    property, not a preference. ``/instrument/:symbol`` is the route's
+    declared contract and every FE link site passes a ticker; the id form
+    is a compat shim for a hand-typed URL. Branching *exclusively* on
+    "looks numeric" would let an unrelated ``instrument_id`` shadow a real
+    ticker the day eToro admits a letterless one (a bare ``1810`` rather
+    than ``1810.HK``), rendering a DIFFERENT issuer's financials under that
+    ticker instead of 404ing. ``instrument_id`` spans 1..1,065,714, which
+    squarely covers 4-digit exchange codes, and nothing in the schema or in
+    ``sync_universe`` forbids it. Today the collision does not exist (0 of
+    12,691 ``instruments`` rows have a purely-numeric ``symbol``; dev DB,
+    2026-07-31) — but that is a property of the current universe, not an
+    enforced invariant, so this order is what makes the resolution safe
+    rather than merely lucky.
+
+    Cost: one extra index seek, on the id path only. ``UPPER(symbol)`` is
+    covered by ``idx_instruments_symbol_primary`` (``sql/043``).
+
+    A 19-digit value past BIGINT's range does not raise — Postgres compares
+    it as numeric and returns no rows, i.e. a clean 404.
+
+    Pure — no DB access — so the ordering is table-testable without a
+    fixture. Callers must pass a non-empty ref.
+    """
+    cleaned = ref.strip()
+    attempts: list[tuple[LiteralString, dict[str, object]]] = [
+        (_RESOLVE_BY_SYMBOL_SQL, {"s": cleaned.upper()}),
+    ]
+    if _NUMERIC_REF.match(cleaned):
+        attempts.append((_RESOLVE_BY_ID_SQL, {"iid": int(cleaned)}))
+    return attempts
+
+
+def resolve_instrument_ref(conn: psycopg.Connection[object], ref: str) -> tuple[int, str] | None:
+    """Resolve a symbol-or-id path param to ``(instrument_id, symbol)``.
+
+    Returns ``None`` when no attempt matches — the caller owns the 404 so
+    it can keep its own message.
+    """
+    for sql, params in instrument_ref_queries(ref):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+        if row is not None:
+            return int(row["instrument_id"]), str(row["symbol"])
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -320,19 +434,19 @@ class FcfYieldSeries(BaseModel):
 
 
 class PeerFactor(BaseModel):
-    """One radar factor: the instrument's value vs its sector median (#1751)."""
+    """One radar factor: the instrument's value vs its SIC-cohort median (#1751; #2023)."""
 
     key: str
     label: str
     instrument_value: float | None
-    sector_median: float | None
-    sector_n: int  # # sector members with a non-null value for this factor
-    dev_limited: bool  # True when thin: price-gated (P/E) OR sector coverage <20% (#1836)
+    cohort_median: float | None
+    cohort_n: int  # # cohort members with a non-null value for this factor
+    dev_limited: bool  # True when thin: cohort coverage <20% (#1836; P/E price gate lifted by sql/236)
     better_when: Literal["higher", "lower"]
 
 
 class PeerInstrument(BaseModel):
-    """A sector peer with its factor row (for the #594 heatmap)."""
+    """A cohort peer with its factor row (for the #594 heatmap)."""
 
     instrument_id: int
     symbol: str
@@ -344,8 +458,10 @@ class PeerInstrument(BaseModel):
 class PeerComparison(BaseModel):
     symbol: str
     instrument_id: int
-    sector: str  # raw code "1".."9" (instruments.sector is TEXT; no lookup table)
-    sector_member_count: int  # complete-TTM members in the sector (median base)
+    cohort_sic: str  # the instrument's own 4-digit SEC SIC (#2023)
+    cohort_sic_label: str | None  # sic_description of that SIC (human-readable)
+    cohort_sic_level: int  # 4/3/2 = cleared MIN_COHORT at that granularity; 0 = SIC-2 fallback (thin)
+    cohort_member_count: int  # complete-TTM peers in the cohort (median base)
     factors: list[PeerFactor]
     peers: list[PeerInstrument]
 
@@ -863,41 +979,31 @@ def get_instrument_financials(
 
     Returns an empty row list (not 500, not 404) when no SEC data
     exists — the UI shows "no statement data available".
+
+    ``symbol`` accepts a ticker OR a numeric ``instrument_id`` (#2184) —
+    the FE links instruments by id in places, and the drill page inherits
+    whichever form the URL carries.
     """
-    symbol_clean = symbol.strip().upper()
+    symbol_clean = symbol.strip()
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
 
     columns = _STATEMENT_COLUMNS[statement]
 
-    # Resolve symbol -> instrument_id for the local read. `symbol` is
-    # not UNIQUE across exchanges (see migration 043), so order by
-    # `is_primary_listing DESC, instrument_id ASC` to make the winner
-    # deterministic on collisions.
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT instrument_id, symbol FROM instruments
-            WHERE UPPER(symbol) = %(s)s
-            ORDER BY is_primary_listing DESC, instrument_id ASC
-            LIMIT 1
-            """,
-            {"s": symbol_clean},
-        )
-        inst_row = cur.fetchone()
-
-    if inst_row is None:
+    resolved = resolve_instrument_ref(conn, symbol_clean)
+    if resolved is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id, resolved_symbol = resolved
 
     local_rows, local_currency = _fetch_local_financials(
         conn,
-        int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        instrument_id,
         columns,
         period,
     )
     if local_rows:
         return InstrumentFinancials(
-            symbol=str(inst_row["symbol"]),  # type: ignore[index]
+            symbol=resolved_symbol,
             statement=statement,
             period=period,
             currency=local_currency,
@@ -908,7 +1014,7 @@ def get_instrument_financials(
     # No SEC coverage → empty payload. Frontend renders the empty-
     # state hint; no fallback to a non-canonical source.
     return InstrumentFinancials(
-        symbol=str(inst_row["symbol"]),  # type: ignore[index]
+        symbol=resolved_symbol,
         statement=statement,
         period=period,
         currency=None,
@@ -930,33 +1036,25 @@ def get_instrument_fcf_yield(
     cross-currency issuers (no FX normaliser) are fail-closed SUPPRESSED
     (``suppressed_reason`` set, ``points`` empty); the FE keeps the absolute
     FCF line + a caveat. Policy lives in app/services/fcf_yield.py.
+
+    ``symbol`` accepts a ticker OR a numeric ``instrument_id`` (#2184).
     """
-    symbol_clean = symbol.strip().upper()
+    symbol_clean = symbol.strip()
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT instrument_id, symbol FROM instruments
-            WHERE UPPER(symbol) = %(s)s
-            ORDER BY is_primary_listing DESC, instrument_id ASC
-            LIMIT 1
-            """,
-            {"s": symbol_clean},
-        )
-        inst_row = cur.fetchone()
-
-    if inst_row is None:
+    resolved = resolve_instrument_ref(conn, symbol_clean)
+    if resolved is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id, resolved_symbol = resolved
 
     result = fcf_yield_series(
         conn,
-        instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        instrument_id=instrument_id,
         period=period,
     )
     return FcfYieldSeries(
-        symbol=str(inst_row["symbol"]),  # type: ignore[index]
+        symbol=resolved_symbol,
         suppressed_reason=result.suppressed_reason,
         points=[
             FcfYieldPoint(
@@ -978,15 +1076,18 @@ def get_instrument_peer_comparison(
     symbol: str,
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> PeerComparison:
-    """Peer-comparison data for the #594 radar + sector heatmap (#1751).
+    """Peer-comparison data for the #594 radar + cohort heatmap (#1751; SIC #2023).
 
     Per instrument: the radar factors (P/E, ROE, revenue growth YoY, operating
-    margin, debt/equity, net margin), their sector medians, and a size-proximity
-    peer set — all derived server-side from existing fundamentals (no new
-    ingest). A factor is ``dev_limited`` (thin: greyed + ⚠) when price-gated
-    (P/E) OR its sector coverage is <20% (#1836). 404 when the instrument has no
-    sector classification or no complete-TTM fundamentals. Policy lives in
-    app/services/peer_comparison.py (``is_factor_thin``).
+    margin, debt/equity, net margin), their SIC-cohort medians, and a
+    size-proximity peer set — all derived server-side from existing fundamentals
+    (no new ingest). Cohort = SEC SIC walked 4→3→2 to the narrowest level with
+    ``MIN_COHORT`` peers (``cohort_sic_level``; 0 = SIC-2 fallback, thin). A
+    factor is ``dev_limited`` (thin: greyed + ⚠) when its cohort coverage is
+    <20% (#1836; the P/E structural price gate was lifted by sql/236, #1857).
+    404 when the instrument has no SIC
+    classification or no complete-TTM fundamentals. Policy lives in
+    app/services/peer_comparison.py (``resolve_sic_level``, ``is_factor_thin``).
     """
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -1011,22 +1112,29 @@ def get_instrument_peer_comparison(
     if result is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No peer-comparison data for {symbol} (no sector classification or no complete-TTM fundamentals)",
+            detail=f"No peer-comparison data for {symbol} (no SIC classification or no complete-TTM fundamentals)",
         )
 
     return PeerComparison(
         symbol=result.symbol,
         instrument_id=result.instrument_id,
-        sector=result.sector,
-        sector_member_count=result.sector_member_count,
+        cohort_sic=result.cohort_sic,
+        cohort_sic_label=result.cohort_sic_label,
+        cohort_sic_level=result.cohort_sic_level,
+        cohort_member_count=result.cohort_member_count,
         factors=[
             PeerFactor(
                 key=key,
                 label=FACTOR_LABELS[key],
                 instrument_value=result.self_factors.get(key),
-                sector_median=result.medians[key].median,
-                sector_n=result.medians[key].n,
-                dev_limited=is_factor_thin(key, result.medians[key].n, result.sector_member_count),
+                cohort_median=result.medians[key].median,
+                cohort_n=result.medians[key].n,
+                dev_limited=is_factor_thin(
+                    key,
+                    result.medians[key].n,
+                    result.cohort_member_count,
+                    cohort_is_fallback=result.cohort_sic_level == 0,
+                ),
                 better_when=FACTOR_BETTER_WHEN[key],  # type: ignore[arg-type]
             )
             for key in FACTOR_KEYS
@@ -3836,14 +3944,23 @@ def get_instrument_summary(
     #     when only one class of a multi-class issuer is in our universe)
     # Returns None for instruments without SEC coverage; market cap then stays null
     # on the identity rather than reaching for a non-canonical source.
+    cap_basis: str = "not_multiclass"
     try:
         from app.services.xbrl_derived_stats import compute_market_cap, resolve_market_cap_basis
 
         cap_resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id_int)
+        cap_basis = cap_resolution.basis
         if cap_resolution.basis == "total_company" and cap_resolution.total is not None:
             computed_cap_value: Decimal | None = cap_resolution.total.value
-        elif cap_resolution.basis == "multiclass_unavailable":
-            computed_cap_value = None  # fail closed: known dual-class, no clean total
+        elif cap_resolution.basis == "fpi_adr_ratio":
+            # #2117: ADR/ADS with a curated ADS ratio — ordinary×ADS-price÷ratio
+            # is the corrected cap (None if a price/share input is missing).
+            computed_cap_value = cap_resolution.value
+        elif cap_resolution.basis in ("multiclass_unavailable", "fpi_adr_unavailable"):
+            # fail closed: known dual-class with no clean total, or an FPI
+            # ADR/ADS with NO curated ratio, whose ordinary-shares × per-ADS-price
+            # product is wrong by the un-ingested ADS ratio (#1939).
+            computed_cap_value = None
         else:
             single_cap = compute_market_cap(conn, instrument_id=instrument_id_int)
             computed_cap_value = single_cap.value if single_cap is not None else None
@@ -3901,6 +4018,24 @@ def get_instrument_summary(
     else:
         stats_block = None
         key_stats_source = "unavailable"
+
+    # #1939: FPI ADR/ADS — the locally derived P/E and P/B (per-ADS price ÷
+    # per-ordinary-share EPS/book) and the dividend yield (per-ordinary-share
+    # DPS ÷ per-ADS price) are wrong by the un-ingested ADS ratio. Null them
+    # here too — this path computes its own ratios and does NOT read the
+    # (already-suppressed) instrument_valuation view (Codex ckpt-2 #1939).
+    if stats_block is not None and cap_basis == "fpi_adr_unavailable":
+        fpi_sources: dict[str, KeyStatsFieldSource] = dict(stats_block.field_source or {})
+        for f in ("pe_ratio", "pb_ratio", "dividend_yield"):
+            fpi_sources[f] = "unavailable"
+        stats_block = stats_block.model_copy(
+            update={
+                "pe_ratio": None,
+                "pb_ratio": None,
+                "dividend_yield": None,
+                "field_source": fpi_sources,
+            }
+        )
 
     source = {
         "identity": "local_db",
@@ -4606,6 +4741,20 @@ class _CorrectionAppliedModel(BaseModel):
         blockholders wedge.
       * ``insider_control_group_collapse`` (#1652) — a sponsor's GP/LP chain deemed block
         counted once across Form 4 / Form 3 / 13D / 13G (insiders slice).
+      * ``superseded_by_later_13f_hr`` (#2229) — a filer's stale 13F-HR removed because
+        the filer filed a LATER holdings report that omits this security (Form 13F
+        Special Instruction 5b: a holdings report is a COMPLETE statement of the
+        Manager's Section 13(f) holdings, so the omission proves the exit).
+        ``superseded_period`` + ``winning_accession`` set, NT fields null.
+
+    ⚠ This Literal is a CLOSED vocabulary and the service layer's ``kind`` strings are
+    NOT validated against it until serialization — so a new kind added to
+    ``ownership_rollup.CorrectionApplied`` without being added HERE makes the endpoint
+    500 on exactly the instruments the new correction fires for, while every
+    service-layer test still passes. That is what happened when #2229 landed; the
+    sibling to keep in step is ``frontend/src/api/ownership.ts``
+    (``OwnershipCorrectionKind``). See prevention-log "contract-field wired into one
+    model not its sibling".
 
     The NT-specific fields are null for the #1644/#1649 kinds; ``family_id`` /
     ``source_channel`` / ``winning_source`` / ``winning_accession`` / ``detail``
@@ -4618,6 +4767,8 @@ class _CorrectionAppliedModel(BaseModel):
         "institutional_family_collapse",
         "blockholder_group_collapse",
         "insider_control_group_collapse",
+        "superseded_by_later_13f_hr",
+        "insider_beyond_form4_retention",
     ]
     filer_cik: str | None
     filer_name: str
@@ -4675,6 +4826,9 @@ class _HolderModel(BaseModel):
     # Per-lot breakdown when an owner's additive direct/indirect lots were
     # collapsed to one line (#1942). Empty for single-lot holders.
     lots: list[_HolderLotModel] = []
+    # DEF 14A proxy role tag (#2121) — display label only, present solely on the
+    # non-additive ``def14a_unmatched`` memo overlay; ``None`` everywhere else.
+    holder_role: str | None = None
 
 
 class _SliceModel(BaseModel):
@@ -4735,6 +4889,41 @@ class _BannerModel(BaseModel):
     variant: Literal["error", "warning", "info", "success"]
     headline: str
     body: str
+
+
+class _Def14ADriftModel(BaseModel):
+    """DEF 14A vs Form 4 drift chip (#966). Present only when the
+    instrument has warning/critical drift alerts. ``chip`` is
+    server-owned copy the FE renders verbatim."""
+
+    worst_severity: Literal["warning", "critical"]
+    alert_count: int
+    chip: str
+    holders: list[str]
+
+
+class _NonvestedAwardsModel(BaseModel):
+    """Unvested RSU/PSU memo line (#844) — absolute count from the latest
+    10-K ASC 718 note (FSNDS ``award_type`` facts). Overlay only, never a
+    pie wedge. ``label`` is server-owned copy the FE renders verbatim."""
+
+    shares: Decimal
+    label: str
+    period_end: date
+    source_accession: str
+
+
+class _DrsModel(BaseModel):
+    """Issuer-disclosed DRS registered-vs-street split (#844 PR-2).
+    Present only for the curated cohort with a fresh (≤400d) disclosure."""
+
+    registered_shares: Decimal
+    registered_pct: Decimal | None
+    street_shares: Decimal | None
+    street_pct: Decimal | None
+    holders_of_record: int | None
+    as_of_date: date
+    source_accession: str
 
 
 class _HistoricalSymbolModel(BaseModel):
@@ -4869,6 +5058,21 @@ class OwnershipRollupResponse(BaseModel):
     # on the no_data path / when no comparison figure is on file. Default so older
     # callers/tests need no change.
     denominator_cross_check: _DenominatorCrossCheckModel = Field(default_factory=_DenominatorCrossCheckModel)
+    # DEF 14A vs Form 4 drift chip (#966). Null when the instrument has no
+    # warning/critical drift alerts. Present on the no_data path too — the
+    # coverage-integrity signal is denominator-independent.
+    def14a_drift: _Def14ADriftModel | None = None
+    # Unvested RSU/PSU memo (#844). Null when no award facts, when the
+    # read rule abstains, or when the note is stale (548d bound).
+    nonvested_awards: _NonvestedAwardsModel | None = None
+    # DRS registered-vs-street overlay (#844 PR-2). Null off-cohort /
+    # absent / stale (400d bound).
+    drs: _DrsModel | None = None
+    # Why the denominator is unusable, on the ``no_data`` path only (#2232). Null on
+    # every rendering payload. The FE branches on THIS, not on
+    # ``shares_outstanding_as_of`` — ``partial_class_denominator`` also carries a
+    # (fresh) as_of, so the old "no_data + as_of ⇒ stale" inference would mis-label it.
+    no_data_reason: Literal["absent", "stale_denominator", "partial_class_denominator"] | None = None
     computed_at: datetime
 
 
@@ -4945,6 +5149,7 @@ def _rollup_to_response(
                             )
                             for lot in h.lots
                         ],
+                        holder_role=h.holder_role,
                     )
                     for h in s.holders
                 ],
@@ -4980,6 +5185,39 @@ def _rollup_to_response(
             variant=rollup.banner.variant,
             headline=rollup.banner.headline,
             body=rollup.banner.body,
+        ),
+        def14a_drift=(
+            _Def14ADriftModel(
+                worst_severity=rollup.def14a_drift.worst_severity,
+                alert_count=rollup.def14a_drift.alert_count,
+                chip=rollup.def14a_drift.chip,
+                holders=list(rollup.def14a_drift.holders),
+            )
+            if rollup.def14a_drift is not None
+            else None
+        ),
+        nonvested_awards=(
+            _NonvestedAwardsModel(
+                shares=rollup.nonvested_awards.shares,
+                label=rollup.nonvested_awards.label,
+                period_end=rollup.nonvested_awards.period_end,
+                source_accession=rollup.nonvested_awards.source_accession,
+            )
+            if rollup.nonvested_awards is not None
+            else None
+        ),
+        drs=(
+            _DrsModel(
+                registered_shares=rollup.drs.registered_shares,
+                registered_pct=rollup.drs.registered_pct,
+                street_shares=rollup.drs.street_shares,
+                street_pct=rollup.drs.street_pct,
+                holders_of_record=rollup.drs.holders_of_record,
+                as_of_date=rollup.drs.as_of_date,
+                source_accession=rollup.drs.source_accession,
+            )
+            if rollup.drs is not None
+            else None
         ),
         historical_symbols=[
             _HistoricalSymbolModel(
@@ -5051,6 +5289,7 @@ def _rollup_to_response(
             status=rollup.denominator_cross_check.status,
             note=rollup.denominator_cross_check.note,
         ),
+        no_data_reason=rollup.no_data_reason,
         computed_at=rollup.computed_at,
     )
 
@@ -5404,9 +5643,10 @@ def get_instrument_exec_compensation(
 
 # Slice categories present on ``OwnershipSlice.category``. The
 # frontend's ``CATEGORY_LABELS`` set also includes ``treasury`` —
-# treasury is a memo row in the CSV (additive wedge on the chart),
-# not a holders slice. Treated as a valid filter value below: it
-# scopes the CSV to the treasury memo + residual rows only.
+# treasury is a memo row in the CSV (a wedge drawn on top of the chart,
+# never inside the denominator, and since #2217 not deducted from the
+# residual either), not a holders slice. Treated as a valid filter value
+# below: it scopes the CSV to the treasury memo + residual rows only.
 _ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
     {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"},
 )
@@ -5446,11 +5686,9 @@ def get_instrument_ownership_rollup_csv(
             "| etfs | def14a_unmatched | funds | esop | treasury. Slice "
             "categories scope the export to that slice's holders; ``treasury`` "
             "drops all slice holders and emits only the treasury + residual "
-            "memo rows. ``funds`` and ``esop`` are memo-overlay slices — their "
-            "rows render with the ``__memo:<category>__`` prefix in the output "
-            "CSV so they are outside the additive (treasury + residual + "
-            "Σ pie-wedge) reconciliation. Without ``category``, every slice "
-            "is exported."
+            "memo rows. Without ``category``, every slice is exported. See the "
+            "endpoint description for which rows are additive and for the "
+            "2026-08-03 ``__memo:treasury__`` rename (#2217)."
         ),
     ),
     conn: psycopg.Connection[object] = Depends(get_conn),
@@ -5471,7 +5709,29 @@ def get_instrument_ownership_rollup_csv(
     Reads run inside ``snapshot_read`` so the per-slice totals,
     treasury, and residual all reconcile against one REPEATABLE
     READ snapshot. Same isolation contract as the JSON rollup
-    endpoint."""
+    endpoint.
+
+    ⚠ **BREAKING for CSV consumers, 2026-08-03 (#2217).** The treasury
+    row's ``category`` cell changed from ``__treasury__`` to
+    ``__memo:treasury__``, and treasury is no longer a term in the
+    additive reconciliation. A consumer keying on the literal
+    ``__treasury__`` will stop matching that row; one summing
+    ``pie + treasury + residual`` will now overshoot
+    ``shares_outstanding`` by the treasury amount.
+
+    Migration: filter on the ``__memo:`` / ``__dropped:`` category
+    prefixes — the rule the export has always documented — rather than
+    on individual tokens. The reconciliation is::
+
+        Σ (rows whose category starts with neither __memo: nor __dropped:)
+            == shares_outstanding
+
+    Why it changed: ``shares_outstanding`` is the DEI/us-gaap OUTSTANDING
+    count, which already excludes treasury (shares issued = outstanding +
+    treasury). Treasury can and does exceed outstanding outright (Goldman:
+    199.9%), so it was never additive against this base — including it
+    drove the residual negative and rendered public float as zero for
+    every large repurchaser."""
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")

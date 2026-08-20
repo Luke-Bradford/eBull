@@ -34,9 +34,14 @@ for the empirical findings:
       promoting; ``data[0]`` is empirically the US-primary today but
       the contract gives no ordering guarantee, so blind indexing is
       a latent prod bug.
-    - ``{"warning": "<text>"}`` for an unresolved CUSIP.
-    - ``{"error": "<text>"}`` (theoretical — not in probe set; treated
-      identically to ``warning``).
+    - ``{"warning": "<text>"}`` for an unresolved CUSIP — OpenFIGI
+      accepted the identifier and has no mapping for it.
+    - ``{"error": "<text>"}`` — OpenFIGI REJECTED the identifier. Probed
+      live 2026-08-06 (#2304): OpenFIGI validates the CUSIP mod-10 check
+      digit, and a check-digit failure answers ``{"error": "Invalid
+      idValue format."}``, NOT ``warning``. This is a different fact from
+      "no mapping" and MUST NOT collapse into it — see
+      :func:`_entry_to_outcome`.
 * On 429: response body is plain text ``"Too many requests, …"`` —
   NOT JSON. We MUST branch on ``status_code == 429`` BEFORE attempting
   ``resp.json()``, honour the ``Retry-After`` header (in seconds), and
@@ -65,7 +70,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import httpx
 
@@ -126,6 +131,71 @@ class OpenFigiMapping:
     name: str | None
     exch_code: str | None
     share_class_figi: str | None
+
+
+@dataclass(frozen=True)
+class OpenFigiNoMatch:
+    """OpenFIGI ACCEPTED the identifier and has no US-primary mapping.
+
+    A coverage fact about the security, and the only outcome that earns a
+    terminal ``openfigi_unknown`` tombstone. ``reason`` records which of
+    the documented no-match shapes produced it so the sweep's logs can
+    tell "OpenFIGI never heard of this CUSIP" (``warning``) apart from
+    "OpenFIGI knows it but it is a bond / a fund / foreign-listed"
+    (``no_us_primary``) without another round-trip.
+    """
+
+    reason: Literal["warning", "empty_data", "no_us_primary", "no_ticker"]
+
+
+@dataclass(frozen=True)
+class OpenFigiInvalidIdentifier:
+    """OpenFIGI REJECTED the identifier we sent as malformed.
+
+    An input fact, not a coverage fact — the remedy is upstream filer
+    data, not a universe expansion. Deterministic for a fixed identifier
+    (the check-digit rule cannot change its answer between passes), so
+    the sweep may write a terminal tombstone from it (#2304,
+    ``sql/261_unresolved_13f_openfigi_invalid_identifier.sql``).
+    """
+
+    message: str
+
+
+@dataclass(frozen=True)
+class OpenFigiItemError:
+    """A per-item ``{"error": ...}`` we do NOT recognise as a rejection.
+
+    Provider bug, entitlement failure, throttling, or a shape OpenFIGI
+    added after 2026-08-06. NOT proven deterministic, therefore NEVER
+    terminal — the sweep leaves the row pending and counts it. Writing a
+    permanent verdict from an unrecognised error is the exact defect
+    #2304 exists to close; do not "simplify" this into
+    :class:`OpenFigiInvalidIdentifier`.
+    """
+
+    message: str
+
+
+@dataclass(frozen=True)
+class OpenFigiMalformedEntry:
+    """A 2xx entry matching no documented shape — schema drift.
+
+    Distinct from :class:`OpenFigiItemError` because the operator problem
+    is different: an API error is theirs, a shape we cannot parse is
+    ours. Conflating the two is what produced #2304. Never terminal.
+    """
+
+    reason: str
+
+
+OpenFigiOutcome = (
+    OpenFigiMapping | OpenFigiNoMatch | OpenFigiInvalidIdentifier | OpenFigiItemError | OpenFigiMalformedEntry
+)
+"""Exhaustive per-CUSIP verdict. Every ``resolve_cusips`` key maps to
+exactly one of these; there is no ``None`` and no "absent means
+unresolved" convention. The five-way split is load-bearing — the sweep
+tombstones on two of them and must not tombstone on the other three."""
 
 
 class OpenFigiError(Exception):
@@ -264,9 +334,9 @@ class OpenFigiResolver:
     Usage::
 
         resolver = OpenFigiResolver.from_env()  # reads settings.openfigi_api_key
-        mappings = resolver.resolve_cusips(["037833100", "594918104"])
+        outcomes = resolver.resolve_cusips(["037833100", "ZZZZZZZZZ"])
         # → {"037833100": OpenFigiMapping(ticker="AAPL", ...),
-        #    "594918104": OpenFigiMapping(ticker="MSFT", ...)}
+        #    "ZZZZZZZZZ": OpenFigiInvalidIdentifier(message="Invalid idValue format.")}
 
     Lifecycle: the resolver owns its own ``httpx.Client``. Use as
     context manager OR call :meth:`close` when done — the sweep stage
@@ -341,17 +411,29 @@ class OpenFigiResolver:
 
     # -------- Resolution --------------------------------------------------
 
-    def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiMapping]:
-        """Batch-resolve an iterable of CUSIPs → mapping dict.
+    def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiOutcome]:
+        """Batch-resolve an iterable of CUSIPs → TOTAL outcome dict.
 
-        Returns ONLY successful resolutions (warning / error / no-US-row
-        entries are omitted). Caller can compute the unresolved
-        complement via ``set(cusips) - mappings.keys()``.
+        Every input string that was actually sent gets a key, holding
+        exactly one :data:`OpenFigiOutcome`. The pre-#2304 shape returned
+        successes only, so callers inferred failure from absence — which
+        silently merged "no such CUSIP", "OpenFIGI rejected the
+        identifier" and "shape we could not parse". Callers must now
+        branch on the outcome type.
 
-        Idempotent for duplicate CUSIPs: a duplicate in the input is
-        de-duplicated before the request (avoids burning rate-limit
-        budget on duplicate CUSIPs and keeps the result dict shape
-        unambiguous).
+        Keys are the caller's ORIGINAL strings, not the normalised form
+        sent to OpenFIGI, so a caller holding un-normalised CUSIPs cannot
+        miss its own results. Two inputs that normalise to the same CUSIP
+        cost one request slot and both receive that outcome.
+
+        Blank / whitespace-only entries are dropped before the request (a
+        request with ``idValue=''`` is a wasted rate-limit slot) and are
+        therefore ABSENT from the result — the one case where a key can
+        be missing. Callers must treat a missing key as "never asked",
+        never as a verdict.
+
+        Idempotent for duplicate CUSIPs: duplicates are de-duplicated
+        before the request so rate-limit budget is not burned twice.
 
         Empty input is a no-op — returns ``{}`` without any HTTP call.
         """
@@ -363,18 +445,26 @@ class OpenFigiResolver:
         # like ``"   "`` collapses to ``""`` post-strip and MUST drop
         # before hitting OpenFIGI (a request with idValue='' would be
         # a 400 from the API and a wasted rate-limit slot).
-        normalised = [c for c in (_normalise_cusip(c) for c in cusips) if c]
-        normalised = list(dict.fromkeys(normalised))
-        if not normalised:
+        # ``originals_by_normalised`` keeps every caller-supplied spelling
+        # that maps onto a given request CUSIP, so the returned dict can
+        # be keyed by the caller's own strings (see docstring).
+        originals_by_normalised: dict[str, list[str]] = {}
+        for original in cusips:
+            key = _normalise_cusip(original)
+            if not key:
+                continue
+            originals_by_normalised.setdefault(key, []).append(original)
+        if not originals_by_normalised:
             return {}
 
-        results: dict[str, OpenFigiMapping] = {}
-        for chunk in _batched(normalised, self._jobs_per_post):
-            chunk_results = self._post_and_parse(chunk)
-            results.update(chunk_results)
+        results: dict[str, OpenFigiOutcome] = {}
+        for chunk in _batched(list(originals_by_normalised), self._jobs_per_post):
+            for normalised, outcome in self._post_and_parse(chunk).items():
+                for original in originals_by_normalised[normalised]:
+                    results[original] = outcome
         return results
 
-    def _post_and_parse(self, cusips: list[str]) -> dict[str, OpenFigiMapping]:
+    def _post_and_parse(self, cusips: list[str]) -> dict[str, OpenFigiOutcome]:
         """Issue one POST + parse the parallel-array response.
 
         Each HTTP attempt (including the post-429 retry) acquires its
@@ -469,13 +559,22 @@ class OpenFigiResolver:
         self,
         cusips: list[str],
         resp: httpx.Response,
-    ) -> dict[str, OpenFigiMapping]:
-        """Parse the parallel-array JSON response into a dict.
+    ) -> dict[str, OpenFigiOutcome]:
+        """Parse the parallel-array JSON response into a TOTAL outcome dict.
+
+        Every CUSIP in ``cusips`` gets exactly one key. The old shape
+        returned successes only, so "absent" carried the same four-way
+        ambiguity ``_entry_to_outcome`` used to hide in ``None`` (#2304).
 
         Positional contract enforced via ``zip(..., strict=True)``: a
         future API change that injects null placeholders or drops an
-        entry will raise ``ValueError`` rather than silently mis-aligning
-        CUSIP → mapping pairs.
+        entry must fail loudly rather than silently mis-align
+        CUSIP → outcome pairs. The length mismatch is re-raised as
+        :class:`OpenFigiTransportError` — the module contract says this
+        function raises ``OpenFigiTransportError`` / ``OpenFigiRateLimited``,
+        and a bare ``ValueError`` escaping it made that contract a lie
+        (it only ever looked harmless because the sweep catches
+        ``Exception``).
         """
         try:
             payload = resp.json()
@@ -485,41 +584,98 @@ class OpenFigiResolver:
         if not isinstance(payload, list):
             raise OpenFigiTransportError(f"OpenFIGI 2xx body was not a JSON array: type={type(payload).__name__}")
 
-        out: dict[str, OpenFigiMapping] = {}
-        # ``strict=True`` non-negotiable — see module docstring.
+        if len(payload) != len(cusips):
+            # Pre-check so the contract violation surfaces as the
+            # documented exception type instead of a bare ValueError out
+            # of zip(strict=True) below.
+            raise OpenFigiTransportError(
+                f"OpenFIGI parallel-array contract violated: sent {len(cusips)} items, got {len(payload)}"
+            )
+
+        out: dict[str, OpenFigiOutcome] = {}
+        # ``strict=True`` non-negotiable — see module docstring. Retained
+        # as a belt-and-brace assertion behind the length pre-check.
         for cusip, entry in zip(cusips, payload, strict=True):
-            mapping = _entry_to_mapping(entry)
-            if mapping is not None:
-                out[cusip] = mapping
+            out[cusip] = _entry_to_outcome(entry)
         return out
 
 
-def _entry_to_mapping(entry: object) -> OpenFigiMapping | None:
-    """Convert one parallel-array response entry to a mapping.
+_INVALID_IDVALUE_MESSAGE: Final[str] = "invalid idvalue format"
+"""Normalised text of the ONLY per-item error proven deterministic.
 
-    Returns ``None`` for:
-      * ``{"warning": ...}`` — OpenFIGI says "no such CUSIP".
-      * ``{"error": ...}`` — defensive; not in PR-0 probe set but
-        documented as a possible shape.
-      * Any other shape (missing ``data``, empty ``data``, no US-row).
+Observed live 2026-08-06 in two spellings — ``"Invalid idValue format"``
+and ``"Invalid idValue format."`` — from the same endpoint in a single
+probe, so an exact-literal match is not safe. The entry carries no
+structured error code (its key set is exactly ``{"error"}``; checked
+before writing this classifier, per the "check for a structured field
+first" rule), so message text is the only available discriminant.
 
-    Returns an :class:`OpenFigiMapping` when the response contains a
-    US-primary common-stock row with a non-empty ``ticker``.
+Kept deliberately NARROW: anything this does not match stays retryable.
+Widening it converts an unproven error into a permanent verdict, which
+is the defect #2304 closes.
+"""
+
+
+def _classify_item_error(message: str) -> OpenFigiInvalidIdentifier | OpenFigiItemError:
+    """Split a per-item ``{"error": ...}`` into rejection vs unknown.
+
+    Normalises case and trailing punctuation/whitespace only — no
+    substring search, no prefix match. An error we do not recognise is
+    returned as :class:`OpenFigiItemError`, which the sweep treats as
+    retryable.
+    """
+    normalised = message.strip().rstrip(".").strip().casefold()
+    if normalised == _INVALID_IDVALUE_MESSAGE:
+        return OpenFigiInvalidIdentifier(message=message)
+    return OpenFigiItemError(message=message)
+
+
+def _entry_to_outcome(entry: object) -> OpenFigiOutcome:
+    """Convert one parallel-array response entry to a discriminated outcome.
+
+    This function is where #2304 lived: it previously returned a bare
+    ``None`` for "no such CUSIP", "OpenFIGI rejected the identifier" and
+    "shape we cannot parse" alike, and the sweep wrote the SAME terminal
+    tombstone for all three. The distinction exists in the source and was
+    discarded here, which made it unmeasurable downstream.
+
+    Shape → outcome:
+
+      * ``{"data": [...]}`` with a US-primary common-stock row carrying a
+        non-empty ``ticker`` → :class:`OpenFigiMapping`.
+      * ``{"data": [...]}`` with no such row → :class:`OpenFigiNoMatch`.
+      * ``{"warning": ...}`` → :class:`OpenFigiNoMatch`.
+      * ``{"error": ...}`` → :class:`OpenFigiInvalidIdentifier` when the
+        message is the recognised identifier rejection, else
+        :class:`OpenFigiItemError`.
+      * anything else → :class:`OpenFigiMalformedEntry`.
     """
     if not isinstance(entry, dict):
-        return None
+        return OpenFigiMalformedEntry(reason=f"entry is {type(entry).__name__}, expected dict")
+    if "error" in entry:
+        raw = entry["error"]
+        return _classify_item_error(raw if isinstance(raw, str) else repr(raw))
+    if "warning" in entry:
+        return OpenFigiNoMatch(reason="warning")
     if "data" not in entry:
-        # warning / error / unknown — all map to "no mapping".
-        return None
+        # Neither data, warning nor error — an undocumented shape. NOT a
+        # no-match: we have no evidence OpenFIGI answered "no mapping".
+        return OpenFigiMalformedEntry(reason=f"entry has no data/warning/error key: keys={sorted(entry)}")
     data = entry["data"]
-    if not isinstance(data, list) or not data:
-        return None
+    if not isinstance(data, list):
+        return OpenFigiMalformedEntry(reason=f"data is {type(data).__name__}, expected list")
+    if not data:
+        return OpenFigiNoMatch(reason="empty_data")
+    if not all(isinstance(row, dict) for row in data):
+        # _pick_us_primary would raise AttributeError here; classify
+        # rather than let the sweep collapse the whole batch to api_errors.
+        return OpenFigiMalformedEntry(reason="data contains a non-dict row")
     primary = _pick_us_primary(data)
     if primary is None:
-        return None
+        return OpenFigiNoMatch(reason="no_us_primary")
     ticker = primary.get("ticker")
     if not isinstance(ticker, str) or not ticker.strip():
-        return None
+        return OpenFigiNoMatch(reason="no_ticker")
     name = primary.get("name")
     exch_code = primary.get("exchCode")
     share_class_figi = primary.get("shareClassFIGI")
@@ -534,7 +690,12 @@ def _entry_to_mapping(entry: object) -> OpenFigiMapping | None:
 __all__ = [
     "OPENFIGI_BASE_URL",
     "OpenFigiError",
+    "OpenFigiInvalidIdentifier",
+    "OpenFigiItemError",
+    "OpenFigiMalformedEntry",
     "OpenFigiMapping",
+    "OpenFigiNoMatch",
+    "OpenFigiOutcome",
     "OpenFigiRateLimited",
     "OpenFigiResolver",
     "OpenFigiTransportError",

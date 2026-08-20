@@ -106,6 +106,7 @@ JOB_BOOTSTRAP_ORCHESTRATOR = "bootstrap_orchestrator"
 # Constants imported from the scheduler so the bootstrap-stage entries
 # below carry the canonical names and a future rename is single-site.
 from app.workers.scheduler import (  # noqa: E402  (after dataclass to avoid cycle)
+    JOB_FAIR_VALUE_BAND_REFRESH,
     JOB_SEC_FIRST_INSTALL_DRAIN,
     JOB_SEC_MASTER_IDX_GAP_CLOSE,
 )
@@ -198,6 +199,14 @@ _LANE_MAX_CONCURRENCY: Final[dict[str, int]] = {
     # canonical budget gate. Disjoint from every SEC lane by host —
     # see ``app/jobs/sources.py::Lane`` docstring for SD-1 cross-ref.
     "openfigi": 1,
+    # #2024 — terminal fair-value-band derivation (S28). Own single-stage
+    # lane matching the JobLock source lane ``fair_value_band``
+    # (``MANUAL_TRIGGER_JOB_SOURCES``, sources.py) so every registry path
+    # resolves the ``fair_value_band_refresh`` job to the SAME lane
+    # (test_job_registry::test_real_registry_has_no_conflicting_lane_duplicates).
+    # Write-disjoint (sole writer of the band tables) → cap=1, runs
+    # parallel to the ``db``-lane validation stage.
+    "fair_value_band": 1,
 }
 
 
@@ -644,6 +653,13 @@ _STAGE_REQUIRES_CAPS: Final[dict[str, CapRequirement]] = {
             "class_id_mapping_ready",
         ),
     ),
+    # #2024 — terminal fair-value-band first-load. Reads financial_periods_ttm
+    # (normalised by S25 ``fundamentals_sync`` → ``fundamentals_synced``) +
+    # price_daily (S2 ``candle_refresh``, long-terminalised by the time S25
+    # completes; provides no cap to gate on, and the batch is fail-soft on empty
+    # prices). Single ``fundamentals_synced`` gate is the minimal correct
+    # dependency — the band uses no ownership/filings data.
+    "fair_value_band": CapRequirement(all_of=("fundamentals_synced",)),
 }
 
 
@@ -1231,6 +1247,23 @@ _BOOTSTRAP_STAGE_SPECS: tuple[StageSpec, ...] = (
     # ``finalize_run`` → ``partial_error`` (gate stays closed). Soft warnings →
     # success + ``bootstrap_runs.validation_gate_status`` verdict (sql/180).
     _spec("bootstrap_validation", 27, "db", JOB_BOOTSTRAP_VALIDATION),
+    # #2024 — terminal fair-value-band first-load (#2009 A8). New-surface
+    # rule: a data surface ships bulk/bootstrap first-load, not per-filing
+    # drain only (feedback-backfills-belong-in-bootstrap). The steady-state
+    # ``fair_value_band`` DAG layer (24h cadence, depends candles+fundamentals)
+    # gives full-universe recompute on the FIRST morning sync — but a fresh
+    # install has no bands until then. This stage closes that gap: the
+    # existing ``fair_value_band_refresh`` job (full-universe bootstrap path,
+    # ``refresh_fair_value_band_batch(conn, instrument_ids=None)``) runs once
+    # at load time. Own lane ``fair_value_band`` matches the JobLock source
+    # so the registry resolves the job to one lane (no conflict). Gated on
+    # ``fundamentals_synced`` (S25): the band reads ``financial_periods_ttm``
+    # + ``price_daily``; candles (S2) are long-terminalised by S25, and the
+    # batch is fail-soft on empty prices (statuses absence, no crash). Terminal
+    # derivation → provides NO capability (like ``candle_refresh``); the
+    # validation gate does not wait on it (it validates core data, not the
+    # derived read layer).
+    _spec("fair_value_band", 28, "fair_value_band", JOB_FAIR_VALUE_BAND_REFRESH),
 )
 
 
@@ -3127,14 +3160,16 @@ __all__ = [
 # removes a spec deliberately surfaces in code review and doesn't
 # silently break the tests + frontend + runbook that hardcode the
 # current stage shape.
-assert len(_BOOTSTRAP_STAGE_SPECS) == 23, (
-    f"_BOOTSTRAP_STAGE_SPECS expected 23 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
-    "update the spec, frontend, runbook, and stage_count tests in lockstep. "
+assert len(_BOOTSTRAP_STAGE_SPECS) == 24, (
+    f"_BOOTSTRAP_STAGE_SPECS expected 24 stages, got {len(_BOOTSTRAP_STAGE_SPECS)}; "
+    "update the spec, runbook, and stage_count tests in lockstep (the frontend "
+    "renders stages dynamically from the API — no FE count to bump). "
     "#1233 PR-1b inserted S13 cusip_resolver_post_bulk_sweep; "
     "#1413 (bulk-only bootstrap) dropped 8 per-CIK HTTP stages "
     "(S14/S15/S17/S19/S20/S22/S23 + S27 sec_n_csr_bootstrap_drain): 27 - 8 = 19; "
     "#1415 (P3) added the S15-slot master.idx recent-window gap-close: 19 + 1 = 20; "
     "#1419 (P4) added the terminal bootstrap_validation stage: 20 + 1 = 21; "
     "#788 added S14 sec_fsds_class_shares_ingest (per-class denominator): 21 + 1 = 22; "
-    "#1590 added S17-slot sec_fsds_dimensional_ingest (bulk dimensional facts): 22 + 1 = 23."
+    "#1590 added S17-slot sec_fsds_dimensional_ingest (bulk dimensional facts): 22 + 1 = 23; "
+    "#2024 added S28 fair_value_band (terminal first-load derivation): 23 + 1 = 24."
 )

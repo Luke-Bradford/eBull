@@ -88,6 +88,12 @@ if some_required_value is None:
 ```
 `assert` is for developer assumptions and can be optimized away; production invariants must remain enforced.
 
+**Batch loops must catch every per-row raise (#2019).** A per-row loop that advertises "one bad row never aborts the batch" (per-row savepoint + `except`) must list EVERY exception type its per-row compute path can raise — not just DB error classes. A pure-layer invariant guard that `raise ValueError(...)` (or asserts) will otherwise escape the handler and abort the whole run. Grep the entire per-row call path for `raise`/`assert` and confirm each type is in the `except` tuple; include `ValueError`/domain exceptions alongside the DB classes. Do NOT broaden to bare `except Exception` — a genuine bug (TypeError/AttributeError) must still surface loud. Self-review prompt: "for every reachable `raise`/`assert`, is its type in my `except`?"
+
+**The one place a bare `except Exception` IS right: post-commit bookkeeping (#2262).** Work that runs AFTER the unit of work has committed — a marker, a counter, an audit stamp — must not be able to reclassify that committed work as failed. In `market_data.refresh_market_data` the supply-marker write sits after the candle transaction commits; a narrow `except psycopg.Error` there let any non-psycopg bug escape to the outer per-instrument handler, which increments `candles_failed` and logs a SUCCESSFUL refresh as a failure. That corrupts the job's own health signal in the #2218 direction — a run whose reported outcome does not match what it did — which is worse than the bug it was protecting against, because it is silent and self-consistent.
+
+The narrow-except rule above still holds for the WORK path. The test for whether you are in the exception to it: **has the thing you are protecting already committed?** If yes, catch broadly, log with `exc_info=True`, and keep the guard to the two or three bookkeeping calls so a real bug is loud without being fatal. If no, enumerate the types. Placement matters as much as breadth: a pre-work read that feeds the bookkeeping (`last_bar_before`) belongs INSIDE the per-item `try`, or a transient error reading it aborts the whole batch loop the handler exists to protect.
+
 ## Sequential evaluation loops with shared resource limits
 
 Any loop evaluating candidates against a shared constraint (position count, sector cap, cash) must maintain a mutable accumulator updated after each approval:
@@ -163,7 +169,7 @@ cur.executemany("INSERT ... ON CONFLICT DO NOTHING", [1 conflict, 1 new]) # cur.
 ```
 
 So using `cur.rowcount` as a batch insert/affected total after `executemany` is correct for this driver. Two caveats:
-- It is **driver/version-specific** (DB-API leaves it implementation-defined; some drivers/older psycopg return -1 or the last count). When the total matters across a version bump, **pin it with a regression test** that inserts N distinct rows and asserts the count == N (e.g. `tests/test_sec_13f_dataset_ingest.py::...test_multiple_distinct_figis_counted_cumulatively`), rather than trusting the doc.
+- It is **driver/version-specific** (DB-API leaves it implementation-defined; some drivers/older psycopg return -1 or the last count). When the total matters across a version bump, **pin it with a regression test** that inserts N distinct rows and asserts the count == N (e.g. `tests/test_sec_13f_dataset_ingest.py::TestPersistFigiExternalIdentifiers::test_multiple_distinct_figis_counted_cumulatively`), rather than trusting the doc.
 - It does NOT hold for `executemany(..., returning=True)` — that path iterates result sets differently.
 
 Origin: PR #1468 (#1302) review WARNING claimed the FIGI counter "will be at most 1"; rebutted by empirical probe + the pinned regression test.
@@ -229,3 +235,43 @@ None` — or `assert v is not None`. Grep self-review: `float\(` / `int\(` /
 `Decimal\(` directly wrapping an attribute access inside a guarded block.
 
 Origin: PR #1853 (#1823) review BLOCKING on the IAR insider assembler.
+
+## `decimal.InvalidOperation` is an `ArithmeticError`, NOT a `ValueError`
+
+`Decimal("abc")` does not raise `ValueError` — it raises
+`decimal.InvalidOperation`, which inherits `DecimalException` →
+`ArithmeticError`. So the very common guard
+
+```python
+except (KeyError, TypeError, ValueError):
+```
+
+around `Decimal(str(payload["x"]))` catches a missing key and a `None`, but
+**not a non-numeric string** — the exception escapes the parser and takes
+out whatever loop is above it.
+
+Rule: any `except` tuple guarding a `Decimal(...)` construction from external
+input must include `InvalidOperation`. Grep self-review: for every
+`Decimal(` inside a `try`, check the tuple.
+
+Origin: #2252 — the WS rate parser had guarded `Decimal(str(...))` on
+untrusted wire fields with `(KeyError, TypeError, ValueError)` since #274.
+Latent, because eToro sends well-formed numbers; surfaced when the parser
+started reading more optional fields.
+
+## `except A, B, C:` without parentheses is VALID on Python 3.14 (PEP 758)
+
+This stack is 3.14+, where `except`/`except*` accept an unparenthesised
+tuple as long as there is no `as` clause. It reads exactly like the Python 2
+syntax that has been a `SyntaxError` since 3.0, so it looks like a bug on
+sight and invites a false finding.
+
+Rule: **compile it before reporting it.**
+`uv run python -c "import py_compile; py_compile.compile('<path>', cfile='/tmp/x.pyc', doraise=True)"`
+— note `cfile` must be a real path, `/dev/null` errors out with "is a
+non-regular file". Applies to reading any surprising-but-modern syntax, not
+just this one.
+
+Origin: #2252 — `app/services/etoro_websocket.py` had
+`except KeyError, TypeError, ValueError:` on `main`; verified by compiling
+before touching it.

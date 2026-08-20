@@ -53,14 +53,13 @@ If the Pydantic field is `field: SomeType` (no `| None`), the TS field must **no
 
 ## Auth lives in the client, never in pages
 
-`setAuthToken` / `hasAuthToken` are the only auth-touching functions. Page components must not:
+Auth is cookie-based (issue #98): the backend sets an HttpOnly session cookie on `/auth/login`, and `apiFetch` sends `credentials: "include"` so it travels with every request. JS never reads or writes the token — there is no token in JS to touch. Session state lives in `SessionProvider` (`frontend/src/lib/session.tsx`), read via the `useSession` hook. On any 401, `apiFetch` invokes the handler registered through `setUnauthorizedHandler` (in `frontend/src/api/client.ts`); `SessionProvider` is the sole registrant and clears state + redirects to `/login`.
 
-- Read the token
-- Set the token
-- Pass the token as a prop
-- Branch on token presence
+Page components must not:
 
-If a page needs to know "am I authenticated?", that's a sign the auth flow needs to expose a reactive store — open a tech-debt issue rather than reading the in-memory slot ad hoc.
+- Read, set, or pass an auth token (there is none)
+- Call `setUnauthorizedHandler` — only `SessionProvider` registers the 401 handler
+- Re-derive "am I authenticated?" ad hoc — consume `useSession`, which already exposes it as a reactive store
 
 ## Fetcher file shape
 
@@ -86,4 +85,43 @@ If your diff touches `app/api/*.py` response models or `frontend/src/api/types.t
 - [ ] Nullability matches: every `| None` has a `| null`, every `| null` has a `| None`
 - [ ] New endpoint has its own fetcher file under `frontend/src/api/`
 - [ ] Page consumes via `useAsync`, not via raw `apiFetch`
-- [ ] No page component reads or sets the auth token
+- [ ] No page component touches auth outside `useSession` (no manual token handling; no `setUnauthorizedHandler` calls)
+
+## An array field's length is not bounded by the type (#2178)
+
+`Foo[]` says nothing about size. A field the backend "obviously" keeps small
+can be unbounded in production, and the stored history keeps whatever it had
+when it was written — a builder fix does not retro-shrink data already
+persisted.
+
+`score_changes` was typed `ScoreChangeV2[]` and carried **29,281 rows** for one
+month (4.38 MB of a 4.39 MB snapshot). The page mapped every row to a
+react-router `<Link>` — ~150k DOM nodes in one synchronous commit, which froze
+the tab.
+
+Rules:
+
+- **Cap what you render, in the component, independent of the payload.**
+  `rows.slice(0, CAP)` with the cap as a named const and a comment saying why.
+  Server-side capping is necessary but not sufficient: snapshots, caches, and
+  any immutable stored payload predate your fix.
+- **Set the FE cap above the backend's own limit** so a later server-side bump
+  is not silently truncated by the client.
+- **When you cap, say so in the UI** — "N of M shown" — and carry the pre-cap
+  total as its own field. Make that field optional and fall back to
+  `array.length` when absent, so records written before the field existed
+  report their real count instead of an invented one.
+- Self-review prompt: for every `.map()` over an API array, "what is the
+  largest this can be in production, and what does one row cost to render?"
+  A `<Link>`, a chart, or a nested component makes the answer much worse than
+  a `<span>`.
+
+## Disclosure elements do not defer render cost (#2178)
+
+`<details>`, `hidden`, and `display:none` are presentation-only. React still
+evaluates the JSX and commits the DOM. The reports appendix built ~9 MB of
+`JSON.stringify(snap, null, 2)` on every render while looking collapsed.
+
+Gate expensive children on **state** and render `null` until opened. Applies to
+`JSON.stringify`, large `.map()`s, and charts inside any collapsed region.
+See `ReportsPage.tsx::RawJsonAppendix`.

@@ -40,7 +40,7 @@ current spec.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -490,6 +490,53 @@ register_parser(
 # ---------------------------------------------------------------------------
 
 
+def _stored_rows_are_all_13d_cover_labels(conn: psycopg.Connection[Any], accession_number: str) -> bool:
+    """True when EVERY stored holder for ACCESSION_NUMBER is a 13D/G form field.
+
+    Source rule: 17 CFR 240.13d-101 (Schedule 13D) and 240.13d-102 (Schedule
+    13G) prescribe a numbered cover page whose rows 7-11 are the voting and
+    dispositive-power lines. Proxies embed those cover pages as exhibits, and
+    before #2163 the numbered layout parsed as a table whose "holder names"
+    were the item labels and whose "share counts" were the ROW NUMBERS.
+
+    17 CFR 229.403 column 2 is a *beneficial owner*, which Rule 13d-3 (17 CFR
+    240.13d-3) defines as a person or entity holding voting or investment
+    power. A cover-page item label is neither, so an accession whose every
+    stored row is one of them holds no Item 403 data at all and zero rows is
+    the reg-correct outcome.
+
+    ALL, not ANY: a mixed accession has at least one row that may be a genuine
+    holder, and superseding those is the data loss the guard exists to prevent.
+    Measured full-population — 2 of 7,141 accessions with stored holdings are
+    all-cover-label, and NONE is mixed.
+
+    Returns ``False`` for an accession with no stored rows, so it can never be
+    the reason an empty parse is accepted.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT holder_name FROM def14a_beneficial_holdings WHERE accession_number = %s",
+            (accession_number,),
+        )
+        names = [row[0] for row in cur.fetchall()]
+    return all_names_are_13d_cover_labels(names)
+
+
+def all_names_are_13d_cover_labels(names: Sequence[str | None]) -> bool:
+    """The DECISION behind :func:`_stored_rows_are_all_13d_cover_labels`, pure.
+
+    Split out so the release rule is table-testable without a database — the
+    SQL above is a plain read and carries none of the judgement.
+    """
+    from app.providers.implementations.sec_def14a import _SCHEDULE_13D_COVER_LABEL_RE
+
+    cleaned = [(name or "").strip() for name in names]
+    if not cleaned or any(not name for name in cleaned):
+        # An empty or blank-bearing set is never proof of a correct zero.
+        return False
+    return all(_SCHEDULE_13D_COVER_LABEL_RE.match(name) for name in cleaned)
+
+
 def _apply_def14a(
     conn: psycopg.Connection[Any],
     raw_doc: RawFilingDocument,
@@ -585,7 +632,37 @@ def _apply_def14a(
             f"parse_beneficial_ownership_table failed for accession={raw_doc.accession_number}: {exc}"
         ) from exc
 
-    if not parsed.rows:
+    # #2173 — the zero-holder guard cannot, on its own, tell "the parser broke"
+    # from "zero is the RIGHT answer", so it pins the latter forever with the
+    # junk still live. Release it on exactly one provable case: every stored row
+    # is a Schedule 13D/G COVER-PAGE item label (17 CFR 240.13d-101 / -102).
+    # 229.403 column 2 is a beneficial owner, which Rule 13d-3 defines as a
+    # person or entity holding voting or investment power; a cover-page item
+    # label is a FORM FIELD and is neither. Superseding those rows is the
+    # correction, not data loss.
+    #
+    # Keyed on what is STORED, deliberately, rather than on a reason threaded
+    # out of the parser: the test can then only ever release rows that are
+    # provably not Item 403 data, so a genuine table that the parser stops
+    # finding still raises. Full population: 2 of 7,141 accessions with stored
+    # holdings qualify — exactly the two #2163 created — and none is mixed.
+    supersede_correct_zero = (
+        not parsed.rows and had_existing_rows and _stored_rows_are_all_13d_cover_labels(conn, raw_doc.accession_number)
+    )
+    if supersede_correct_zero:
+        # Falls through to the replace-then-insert path below, which with zero
+        # rows deletes the typed rows, tombstones the accession's observations
+        # (``_record_def14a_observations_for_filing`` with an empty holder list
+        # runs its supersede UPDATE and then writes nothing) and lets
+        # ``refresh_def14a_current`` prune ``_current`` via WHEN NOT MATCHED BY
+        # SOURCE. No special-case SQL, and in particular no empty-array
+        # ``<> ALL('{}')`` path — ``_supersede_dropped_holdings`` is not on it.
+        logger.info(
+            "DEF 14A accession=%s re-parses to zero holders and every stored row is a "
+            "Schedule 13D/G cover-page label — superseding rather than failing the rewash",
+            raw_doc.accession_number,
+        )
+    if not parsed.rows and not supersede_correct_zero:
         if had_existing_rows:
             # Parser regression on a populated accession — raise
             # so the operator sees the gap in rows_failed rather
@@ -595,77 +672,333 @@ def _apply_def14a(
                 f"{raw_doc.accession_number} (best_score={parsed.raw_table_score}); "
                 f"previous parser found rows"
             )
-        # Rescue cohort with still-empty parse. Don't raise —
-        # parser hasn't improved enough yet. Skip without bumping
-        # parser_version so a future sweep with a better parser
-        # re-tries.
-        return False
+        # Rescue cohort with still-empty ownership parse. #2086: Item
+        # 402 is independent of Item 403 — attempt the exec-comp
+        # rewash BEFORE deciding the outcome (this is exactly the
+        # tombstoned-with-SCT cohort the v3 bump exists to backfill;
+        # Codex ckpt-2 P2). Comp written → the accession has been
+        # meaningfully rewashed at v3 → True (bumps parser_version).
+        # No comp either → keep the pre-existing rescue semantics:
+        # skip without bumping so a future improved parser re-tries.
+        comp_written = _rewash_exec_comp_all_instruments(
+            conn,
+            raw_doc=raw_doc,
+            issuer_cik=str(issuer_cik),
+            resolved_instrument_id=int(instrument_id),
+        )
+        return comp_written > 0
 
-    # Replace-then-insert: clear all existing holders for the
-    # accession so a holder dropped by the new parser cannot
-    # linger.
+    # #2157 — fan out over share-class siblings. Item 403(a) requires the
+    # REGISTRANT to disclose ownership of "any class" of its voting securities,
+    # so one accession legitimately owns rows under EVERY sibling instrument of
+    # the issuer, and the live path writes them that way
+    # (def14a_ingest.py:1061-1119). This arm wrote only the ONE instrument the
+    # LIMIT 1 resolution above happened to pick, while the DELETE it follows
+    # clears the accession's rows for ALL of them — so each rewash silently
+    # dropped every other sibling's typed rows and left their observations live
+    # under the OLD parser's names, which refresh_def14a_current then keeps
+    # alive forever. 41 (accession, instrument) pairs / 31 instruments / 457
+    # live observation rows full-pop.
+    instrument_ids = _def14a_holdings_instrument_ids(
+        conn,
+        raw_doc=raw_doc,
+        issuer_cik=str(issuer_cik),
+        resolved_instrument_id=int(instrument_id),
+    )
+
+    # Replace-then-insert: clear all existing holders for the accession so a
+    # holder dropped by the new parser cannot linger.
+    #
+    # MUST run AFTER the instrument-set resolution above, never before: the
+    # DELETE is accession-wide, so a resolution that reads
+    # ``def14a_beneficial_holdings`` sees an EMPTY table if it runs second, and
+    # any sibling known only from typed rows — not returned by
+    # ``_resolve_siblings`` and holding no live observations — would be
+    # hard-deleted and never rewritten (Codex ckpt-2 HIGH).
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM def14a_beneficial_holdings WHERE accession_number = %s",
             (raw_doc.accession_number,),
         )
 
-    for holder in parsed.rows:
-        _upsert_holding(
+    from app.services.def14a_ingest import (
+        _record_def14a_observations_for_filing,
+        _record_esop_observations_for_filing,
+    )
+    from app.services.ownership_observations import refresh_def14a_current, refresh_esop_current
+
+    for iid in instrument_ids:
+        for holder in parsed.rows:
+            _upsert_holding(
+                conn,
+                accession_number=raw_doc.accession_number,
+                issuer_cik=str(issuer_cik),
+                instrument_id=iid,
+                as_of_date=parsed.as_of_date,
+                holder=holder,
+            )
+
+        # Write-through to ownership_def14a_observations + refresh
+        # ownership_def14a_current. Mirrors the first-ingest path at
+        # app/services/def14a_ingest.py:463-471. Without this, the rewash
+        # writes typed rows but leaves the rollup (#905 read-path) stale
+        # against the new parser output (#945 same-pattern as 13F).
+        _record_def14a_observations_for_filing(
             conn,
+            instrument_id=iid,
             accession_number=raw_doc.accession_number,
-            issuer_cik=str(issuer_cik),
-            instrument_id=int(instrument_id),
             as_of_date=parsed.as_of_date,
-            holder=holder,
+            holders=parsed.rows,
+        )
+        refresh_def14a_current(conn, instrument_id=iid)
+
+        # ESOP write-through (#843). The live path runs this per sibling
+        # (def14a_ingest.py:1105); rewash carried NO esop call at all, so a
+        # plan renamed by a parser fix stayed stale under every instrument and
+        # a newly-detected plan was never recorded (#2157, Codex ckpt-1).
+        if _record_esop_observations_for_filing(
+            conn,
+            instrument_id=iid,
+            accession_number=raw_doc.accession_number,
+            as_of_date=parsed.as_of_date,
+            holders=parsed.rows,
+        ):
+            refresh_esop_current(conn, instrument_id=iid)
+
+    # Item 402(c) exec-comp rewash (#1945; helper shared with the
+    # rescue-cohort branch above since #2086).
+    _rewash_exec_comp_all_instruments(
+        conn,
+        raw_doc=raw_doc,
+        issuer_cik=str(issuer_cik),
+        resolved_instrument_id=int(instrument_id),
+    )
+
+    # DEF 14A vs Form 4 drift re-check (#966). Rewash is the third
+    # direct writer of def14a_beneficial_holdings (#817) — it does NOT
+    # go through the manifest parser, so hook here explicitly. Same
+    # best-effort contract; never changes the rewash outcome.
+    from app.services.def14a_ingest import run_drift_detection_best_effort
+
+    # Sibling-wide, matching the live paths (def14a_ingest.py:1134, manifest
+    # parser :528). Single-instrument here left def14a_drift_alerts holding the
+    # same sibling stale state #2157 removes everywhere else (Codex ckpt-1).
+    run_drift_detection_best_effort(
+        conn,
+        instrument_ids=instrument_ids,
+        accession_number=raw_doc.accession_number,
+    )
+    return True
+
+
+def _def14a_holdings_instrument_ids(
+    conn: psycopg.Connection[Any],
+    *,
+    raw_doc: RawFilingDocument,
+    issuer_cik: str,
+    resolved_instrument_id: int,
+) -> list[int]:
+    """#2157 — every instrument this accession's Item 403 rows belong under.
+
+    Same shape as :func:`_rewash_exec_comp_all_instruments`'s set, and for the
+    same reason: ``_apply_def14a`` resolves ONE instrument via ``LIMIT 1``, so a
+    per-instrument write freezes every share-class sibling on the old parser.
+
+    Set = ``_resolve_siblings`` (the SAME resolver the live manifest ingest fans
+    out with, so rewash output converges on what a fresh first-ingest under the
+    current parser would write) UNION every instrument that already holds rows
+    for this accession, UNION the resolved instrument.
+
+    The union is read from BOTH ``def14a_beneficial_holdings`` AND live
+    ``ownership_def14a_observations``. The observations half is what reaches the
+    already-damaged rows: the accession-wide DELETE in ``_rewash_def14a``
+    removed the orphaned siblings' typed rows, so a typed-table-only union
+    cannot see them and the repair rewash would not repair them. Their live
+    observations are the only surviving evidence the instrument was ever
+    written (41 such pairs full-pop).
+    """
+    from app.services.manifest_parsers.def14a import _resolve_siblings
+
+    try:
+        instrument_ids = set(_resolve_siblings(conn, instrument_id=resolved_instrument_id, issuer_cik=issuer_cik))
+    except ValueError:
+        # Garbage non-numeric CIK (siblings_for_issuer_cik fail-fast). Mirror
+        # the comp helper: surface the DQ issue but still refresh the rows we
+        # KNOW about — total failure would freeze them on the old parser, the
+        # exact bug this helper exists to fix.
+        #
+        # ValueError ONLY, deliberately (review round 1 NITPICK asked for a
+        # broader catch). A DB error here has already aborted the surrounding
+        # transaction, so "degrading gracefully" is not available: every later
+        # statement on this non-autocommit connection raises
+        # InFailedSqlTransaction anyway, and swallowing the original error would
+        # replace a clear failure with a confusing one three calls later
+        # (prevention log, #1700 prefetch isolation). Per-accession isolation is
+        # the rewash runner's job — it catches, records rows_failed, and moves
+        # on — not this helper's.
+        logger.warning(
+            "def14a rewash: non-numeric issuer_cik=%r for accession=%s; "
+            "sibling resolution skipped, refreshing known holdings instruments only",
+            issuer_cik,
+            raw_doc.accession_number,
+        )
+        instrument_ids = set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT instrument_id
+            FROM def14a_beneficial_holdings
+            WHERE accession_number = %(acc)s
+              AND instrument_id IS NOT NULL
+            UNION
+            SELECT DISTINCT instrument_id
+            FROM ownership_def14a_observations
+            WHERE source_document_id = %(acc)s
+              AND source = 'def14a'
+              AND known_to IS NULL
+              AND instrument_id IS NOT NULL
+            """,
+            {"acc": raw_doc.accession_number},
+        )
+        instrument_ids.update(int(row[0]) for row in cur.fetchall())
+    instrument_ids.add(resolved_instrument_id)
+    return sorted(instrument_ids)
+
+
+def _rewash_exec_comp_all_instruments(
+    conn: psycopg.Connection[Any],
+    *,
+    raw_doc: RawFilingDocument,
+    issuer_cik: str,
+    resolved_instrument_id: int,
+) -> int:
+    """#2105 — comp rewash must cover every sibling share-class instrument.
+
+    One DEF 14A accession legitimately owns exec-comp rows under EVERY
+    sibling instrument of the issuer (Reg S-K Item 402 SCT is
+    registrant-level disclosure; first ingest writes it once per sibling
+    as each sibling's manifest row ingests the accession independently).
+    ``_apply_def14a``'s accession resolution picks ONE sibling
+    (``LIMIT 1``), so a single-instrument comp rewash froze the other
+    siblings' rows on the old parser (#2105: GOOG 'Sundar' stale next to
+    GOOGL 'Sundar Pichai' clean, 89 accessions full-pop). Re-apply the
+    comp rewash for every instrument that already has comp rows for this
+    accession, plus the resolved one.
+
+    Sibling set = ``_resolve_siblings`` (the SAME resolver the live
+    manifest ingest fans out with, so rewash output converges to what a
+    fresh first-ingest under the current parser would write) UNION every
+    instrument that already has comp rows for the accession (so a
+    historical row under an instrument that has since left the sibling
+    set is refreshed rather than frozen on the old parser).
+
+    Per-sibling ``_rewash_exec_comp`` calls re-parse the same body
+    (2-5 siblings, offline rewash cadence — accepted over threading a
+    parsed table through the SAVEPOINT-per-instrument isolation).
+    ``RewashParseError`` from any sibling propagates → the whole
+    accession fails + retries, matching the single-instrument contract.
+
+    Returns total comp rows written across siblings.
+    """
+    # Function-local import per this file's def14a convention (and the
+    # #1731 manifest_parsers init-order trap).
+    from app.services.manifest_parsers.def14a import _resolve_siblings
+
+    try:
+        instrument_ids = set(_resolve_siblings(conn, instrument_id=resolved_instrument_id, issuer_cik=issuer_cik))
+    except ValueError:
+        # Garbage non-numeric CIK (siblings_for_issuer_cik fail-fast).
+        # Surface the DQ issue in the log but still refresh the rows we
+        # KNOW about — total failure would freeze them on the old parser,
+        # which is the exact bug this helper exists to fix (Codex ckpt-2).
+        logger.warning(
+            "def14a rewash: non-numeric issuer_cik=%r for accession=%s; "
+            "sibling resolution skipped, refreshing known comp instruments only",
+            issuer_cik,
+            raw_doc.accession_number,
+        )
+        instrument_ids = set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT instrument_id
+            FROM def14a_exec_compensation
+            WHERE accession_number = %s
+              AND instrument_id IS NOT NULL
+            """,
+            (raw_doc.accession_number,),
+        )
+        instrument_ids.update(int(row[0]) for row in cur.fetchall())
+    instrument_ids.add(resolved_instrument_id)
+
+    total = 0
+    for iid in sorted(instrument_ids):
+        total += _rewash_exec_comp(
+            conn,
+            raw_doc=raw_doc,
+            issuer_cik=issuer_cik,
+            instrument_id=iid,
         )
 
-    # Write-through to ownership_def14a_observations + refresh
-    # ownership_def14a_current. Mirrors the first-ingest path at
-    # app/services/def14a_ingest.py:463-471. Without this, the rewash
-    # writes typed rows but leaves the rollup (#905 read-path) stale
-    # against the new parser output (#945 same-pattern as 13F).
-    from app.services.def14a_ingest import _record_def14a_observations_for_filing
-    from app.services.ownership_observations import refresh_def14a_current
+    if total > 0:
+        # Belt-and-braces: comp.instrument_id is nullable by schema
+        # (CIK-resolved post-parse, mirror 097) and the per-instrument
+        # DELETE above can never reach a NULL-keyed row — it would
+        # survive every rewash and get version-pinned. Live population
+        # is 0 (dev full-pop check 2026-07-22), so this is a latent
+        # guard, not a data path (Codex ckpt-2).
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM def14a_exec_compensation
+                WHERE accession_number = %s AND instrument_id IS NULL
+                """,
+                (raw_doc.accession_number,),
+            )
+    return total
 
-    _record_def14a_observations_for_filing(
-        conn,
-        instrument_id=int(instrument_id),
-        accession_number=raw_doc.accession_number,
-        as_of_date=parsed.as_of_date,
-        holders=parsed.rows,
-    )
-    refresh_def14a_current(conn, instrument_id=int(instrument_id))
 
-    # Item 402(c) exec-comp rewash (#1945). Replace-then-insert for THIS
-    # instrument (scoped, unlike the holdings DELETE which clears by accession —
-    # comp is written per resolved instrument so we never nuke a sibling's comp
-    # rows). The whole comp block runs in its OWN SAVEPOINT so that an
-    # UNEXPECTED comp parse/upsert failure rolls back comp only and cannot
-    # collateral-damage the already-applied Item 403 holdings rewash (#1700
-    # per-section isolation). The INTENTIONAL regression signal — a re-parse
-    # that yields zero comp rows for an accession that PREVIOUSLY had them — is
-    # deliberately re-raised as RewashParseError, mirroring the holdings
-    # contract, so the accession fails + retries instead of silently zeroing
-    # typed rows. (Comp absence on an accession that never had comp is expected
-    # — many bodies carry no SCT — so the first-time v1→v2 backfill never
-    # raises.)
-    # Function-local imports match this file's convention for the def14a
-    # parser/upsert helpers (see the Item 403 holdings path at the
-    # parse_beneficial_ownership_table / _upsert_holding imports above): the
-    # heavy sec_def14a + def14a_ingest modules are pulled in only when a
-    # def14a_body actually reaches rewash, keeping this module's import graph
-    # light. _PARSER_VERSION_DEF14A stays module-level because register_parser
-    # consumes it at import time.
+def _rewash_exec_comp(
+    conn: psycopg.Connection[Any],
+    *,
+    raw_doc: RawFilingDocument,
+    issuer_cik: str,
+    instrument_id: int,
+) -> int:
+    """Item 402(c) exec-comp rewash (#1945, extracted for #2086).
+
+    Replace-then-insert for THIS instrument (scoped, unlike the holdings
+    DELETE which clears by accession — comp is written per resolved
+    instrument so we never nuke a sibling's comp rows). The whole comp
+    block runs in its OWN SAVEPOINT so that an UNEXPECTED comp
+    parse/upsert failure rolls back comp only and cannot
+    collateral-damage an already-applied Item 403 holdings rewash (#1700
+    per-section isolation). The INTENTIONAL regression signal — a
+    re-parse that yields zero comp rows for an accession that PREVIOUSLY
+    had them — is deliberately re-raised as RewashParseError, mirroring
+    the holdings contract, so the accession fails + retries instead of
+    silently zeroing typed rows. (Comp absence on an accession that
+    never had comp is expected — many bodies carry no SCT.)
+
+    Returns the number of comp rows written (0 on absence or on a
+    swallowed unexpected failure).
+
+    Function-local imports match this file's convention for the def14a
+    parser/upsert helpers: the heavy sec_def14a + def14a_ingest modules
+    are pulled in only when a def14a_body actually reaches rewash.
+    _PARSER_VERSION_DEF14A stays module-level because register_parser
+    consumes it at import time.
+    """
     from app.providers.implementations.sec_def14a import parse_summary_compensation_table
     from app.services.def14a_ingest import _upsert_comp
 
+    written = 0
     try:
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT 1 FROM def14a_exec_compensation WHERE accession_number = %s AND instrument_id = %s LIMIT 1",
-                    (raw_doc.accession_number, int(instrument_id)),
+                    (raw_doc.accession_number, instrument_id),
                 )
                 had_comp_rows = cur.fetchone() is not None
 
@@ -684,16 +1017,17 @@ def _apply_def14a(
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM def14a_exec_compensation WHERE accession_number = %s AND instrument_id = %s",
-                    (raw_doc.accession_number, int(instrument_id)),
+                    (raw_doc.accession_number, instrument_id),
                 )
             for comp_row in comp.rows:
                 _upsert_comp(
                     conn,
                     accession_number=raw_doc.accession_number,
-                    issuer_cik=str(issuer_cik),
-                    instrument_id=int(instrument_id),
+                    issuer_cik=issuer_cik,
+                    instrument_id=instrument_id,
                     row=comp_row,
                 )
+                written += 1
     except RewashParseError:
         # Intentional regression — propagate to fail + retry this accession
         # (the savepoint has already rolled comp back).
@@ -703,7 +1037,8 @@ def _apply_def14a(
             "def14a rewash: exec-comp augment failed accession=%s (holdings rewash preserved)",
             raw_doc.accession_number,
         )
-    return True
+        return 0
+    return written
 
 
 register_parser(

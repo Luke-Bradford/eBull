@@ -15,7 +15,11 @@ closes:
   * **Wrong denominator** — the prior frontend math used
     ``shares_outstanding + treasury_shares``; the canonical
     denominator is ``shares_outstanding`` only, with treasury
-    rendered as an additive top wedge.
+    rendered as a separate wedge stacked on top of the ring.
+    "On top" is a DRAWING instruction, not an arithmetic one:
+    treasury is outside the denominator, outside the residual
+    (#2217) and outside the CSV's additive reconciliation, where
+    it is a ``__memo:treasury__`` row.
   * **No cross-channel dedup** — the prior pipeline summed Form 4 +
     13D/A + 13F + DEF 14A as a partition (e.g. Cohen on GME read as
     ~75M shares because his Form 4 cumulative AND his 13D/A row
@@ -34,16 +38,18 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
 import psycopg
 import psycopg.rows
 
 from app.services.holder_name_resolver import resolve_holder_to_filer
+from app.services.insider_transactions import form4_retention_cutoff
 from app.services.institutional_families import (
     InstitutionalFamily,
     resolve_family,
@@ -93,7 +99,10 @@ DenominatorBasis = Literal["pie_wedge", "institution_subset", "proxy_disclosure"
 # ``stale_denominator`` — a row exists but its ``as_of`` is too old to use
 #   (the #1581 dual-class dimension-only trap, or an ingest-coverage gap);
 #   percentages would be nonsense against it, so we suppress them.
-NoDataReason = Literal["absent", "stale_denominator"]
+# ``partial_class_denominator`` — a FRESH row exists but it does not cover the
+#   whole entity (#2232): the issuer files no cover-page DEI count at all, and a
+#   single disclosed beneficial owner exceeds the figure we would divide by.
+NoDataReason = Literal["absent", "stale_denominator", "partial_class_denominator"]
 
 
 @dataclass(frozen=True)
@@ -147,6 +156,14 @@ class CorrectionApplied:
     Closed ``kind`` vocab:
       * ``suppressed_by_13f_nt`` (#1639) — a filer's stale 13F-HR removed because
         the filer filed a 13F-NT for a later quarter. NT-specific fields set.
+      * ``superseded_by_later_13f_hr`` (#2229) — a filer's stale 13F-HR removed
+        because the filer filed a LATER holdings report that omits this security.
+        Form 13F SI 5b makes a holdings report a complete statement of the Manager's
+        §13(f) holdings, so the omission is affirmative evidence of an exit. Distinct
+        from ``suppressed_by_13f_nt``: the Notice says the filer holds nothing
+        reportable at all, this says it no longer holds THIS security. A row matching
+        both is reported only under the NT kind. ``superseded_period`` set, NT fields
+        None; the winning period is in ``detail``.
       * ``def14a_restates_institution`` (#1644) — a proxy 5%-holder figure folded
         under a larger 13F family sum (the channel restated, did not add).
       * ``institutional_family_collapse`` (#1649) — a family's 13F shell figure
@@ -156,6 +173,15 @@ class CorrectionApplied:
         counted once at MAX and the other members are folded. ``source_channel`` ==
         ``winning_source`` (intra-blockholder-channel collapse); the per-member fold
         detail is in ``detail`` + the surviving holder's ``dropped_sources``.
+      * ``insider_beyond_form4_retention`` (#2788) — a Form 4 row whose SEC filing date
+        precedes ``form4_retention_cutoff()`` removed from the insiders slice. NOT a claim
+        that the holder sold: Form 4 is transaction-triggered, so silence is not evidence
+        of an exit (unlike ``superseded_by_later_13f_hr``, which rests on Form 13F SI 5b
+        making a holdings report a COMPLETE statement). It is the read side of the ingest
+        retention cap #1233 §4.3 already enforces on every Form 4 writer — we no longer
+        hold in-retention evidence of the position, so we stop asserting it, per the #790
+        posture that the truthful state beats a fabricated one. ``superseded_period`` is
+        the removed row's own period; NT fields None.
       * ``insider_control_group_collapse`` (#1652) — a sponsor's GP/LP chain reported the
         same deemed block under many related CIKs across Form 4 / Form 3 / 13D / 13G; the
         cross-channel group is counted once (insiders slice) and the other members folded.
@@ -225,10 +251,29 @@ class Holder:
     # additive-vs-overlapping regime (#905 / prevention-log 1835). ``None`` for
     # holders where nature is not meaningful (13F / family reps / treasury).
     ownership_nature: str | None = None
+    # Form 3/4 relationship box "10% Owner" checkbox, carried from the winning
+    # candidate so :func:`_reconcile_insider_control_groups` can gate the
+    # deemed-chain tier on it (#2230). ``False`` for every non-Section-16 holder.
+    is_ten_percent_owner: bool = False
+    # ``True`` when this holder's ``ownership_nature`` came from Form 4/3 Table I
+    # column 5 rather than from the DERA insider dataset's relationship flags
+    # (#2386). ``ownership_nature`` has four writers and only three agree on its
+    # meaning, so any read-path branch on the string must also check this flag —
+    # see :func:`_is_deemed_chain`. ``False`` for every non-Section-16 holder.
+    nature_from_table_i: bool = False
     # Per-lot breakdown when this owner's additive Section-16 lots (direct +
     # indirect) were collapsed to one display line (#1942). Display-only; the
     # lots SUM to ``shares`` (already counted once). Empty for single-lot owners.
     lots: tuple[HolderLot, ...] = ()
+    # DEF 14A proxy role tag (``officer`` / ``director`` / ``principal`` /
+    # ``group``), parser-derived from the SEC Item 403 sub-table the holder
+    # appeared in (#2121). DISPLAY-LABEL ONLY — populated solely on the
+    # non-additive ``def14a_unmatched`` memo overlay (never on matched holders
+    # that land in insiders/blockholders), and never used in additive math: the
+    # ``group`` row is the Item 403(b) "all directors & officers as a group"
+    # aggregate of the individual rows, so summing it double-counts (I21/#1659).
+    # ``None`` for every non-DEF-14A holder and for unlabelled proxy rows.
+    holder_role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -271,10 +316,11 @@ class OwnershipSlice:
 
 @dataclass(frozen=True)
 class ResidualBlock:
-    """``Public / unattributed`` wedge. ``oversubscribed=True`` when
-    deduped slices + treasury exceed shares_outstanding (stale
-    13F + fresh Form 4 / 13D mix); residual clamps to 0 in that
-    case and the frontend renders the warning bar."""
+    """``Public / unattributed`` wedge. ``oversubscribed=True`` when the
+    deduped pie-wedge slices exceed shares_outstanding (stale 13F + fresh
+    Form 4 / 13D mix); residual clamps to 0 in that case and the frontend
+    renders the warning bar. Treasury is NOT part of this comparison —
+    shares outstanding already excludes it (#2217)."""
 
     shares: Decimal
     pct_outstanding: Decimal
@@ -314,6 +360,61 @@ class ConcentrationInfo:
 
     pct_outstanding_known: Decimal
     info_chip: str
+
+
+@dataclass(frozen=True)
+class Def14ADriftInfo:
+    """DEF 14A vs Form 4 cumulative drift summary for the chip (#966).
+
+    Built from ``def14a_drift_alerts`` (written by
+    ``def14a_drift.detect_drift`` at the ingest/rewash/weekly loci) —
+    a read-only summary, never a detector invocation. ``info``-severity
+    alerts (unmatched proxy names) are EXCLUDED: that population is
+    already visible as the ``def14a_unmatched`` slice, and a chip
+    restating it would double-signal. Drift is a COVERAGE-INTEGRITY
+    signal (missed/late Form 4s, ingest gap) — never a holdings
+    correction (Item 403 vs Section 16(a) restate the same shares;
+    prevention-log #1851/#1852)."""
+
+    worst_severity: Literal["warning", "critical"]
+    alert_count: int
+    chip: str
+    holders: tuple[str, ...]  # top 3 holder names by |drift_pct| DESC
+
+
+@dataclass(frozen=True)
+class NonvestedAwardsInfo:
+    """Unvested RSU/PSU memo line (#844) — absolute count from the latest
+    10-K's ASC 718 note via the FSNDS loader (axis ``award_type``). Overlay
+    ONLY: RSUs are not outstanding until vested, so this never joins the
+    pie/residual/concentration. ``label`` is server-owned copy
+    ("unvested RSUs" / "unvested awards" / "unvested <member>") chosen by
+    ``select_nonvested_memo`` — the axis is non-additive (award types mix
+    with plan names) so the figure is a single row, never a Σ."""
+
+    shares: Decimal
+    label: str
+    period_end: date
+    source_accession: str
+
+
+@dataclass(frozen=True)
+class DrsInfo:
+    """Issuer-disclosed registered-vs-street (DRS) split (#844 PR-2) —
+    overlay chip for the curated cohort (drs_disclosure.DRS_DISCLOSURE_CIKS).
+    Voluntary narrative disclosure: absent for non-cohort instruments (no
+    fabricated "0 DRS" state) and suppressed once the latest disclosure is
+    older than 400 days (annual 10-K cadence + slack) — a parser miss on a
+    newer filing degrades to visible absence, never a silently-stale
+    "current" figure."""
+
+    registered_shares: Decimal
+    registered_pct: Decimal | None
+    street_shares: Decimal | None
+    street_pct: Decimal | None
+    holders_of_record: int | None
+    as_of_date: date
+    source_accession: str
 
 
 @dataclass(frozen=True)
@@ -546,6 +647,24 @@ class OwnershipRollup:
     # default_factory is only the safety net for CSV-test fixtures, mirroring how
     # ``sanity`` was added (Codex ckpt-1 LOW — no silent default masking a wiring miss).
     denominator_cross_check: DenominatorCrossCheck = field(default_factory=DenominatorCrossCheck.unavailable)
+    # DEF 14A vs Form 4 drift chip (#966). None when the instrument has no
+    # warning/critical drift alerts. Carried through BOTH the main assembly
+    # and ``no_data`` — a coverage-integrity signal must not vanish exactly
+    # when the rollup is otherwise degraded. Last field with a default so
+    # existing constructors need no change.
+    def14a_drift: Def14ADriftInfo | None = None
+    # Unvested RSU/PSU memo (#844). None when no award facts, when the read
+    # rule abstains, or when the latest note is staler than the 548-day
+    # bound. Main assembly only (a no_data page has no chart to memo).
+    nonvested_awards: NonvestedAwardsInfo | None = None
+    # DRS registered-vs-street overlay (#844 PR-2). None off-cohort, on
+    # extraction absence, or past the 400-day staleness bound.
+    drs: DrsInfo | None = None
+    # Why the denominator is unusable, on the ``no_data`` path only (#2232).
+    # ``None`` on every rendering payload. Explicit because the FE previously
+    # inferred the reason from ``shares_outstanding_as_of`` being non-null, which
+    # cannot distinguish a third reason that also carries an as_of.
+    no_data_reason: NoDataReason | None = None
 
     @classmethod
     def no_data(
@@ -556,6 +675,7 @@ class OwnershipRollup:
         *,
         reason: NoDataReason = "absent",
         stale_as_of: date | None = None,
+        def14a_drift: Def14ADriftInfo | None = None,
     ) -> OwnershipRollup:
         """Empty payload for the ``no_data`` state. 200 OK with the error
         banner, not 503 — the frontend renders a uniform empty state
@@ -573,6 +693,15 @@ class OwnershipRollup:
           discriminator (``absent`` keeps it null). ``stale_as_of`` is
           required for this reason — it is the only provenance that
           survives once the denominator is nulled.
+        * ``partial_class_denominator`` — a fresh row exists but does not
+          cover the whole entity (#2232). ``stale_as_of`` is optional here
+          and, when given, carries the (fresh) as_of of the partial figure.
+
+        ⚠ The reason is now carried EXPLICITLY in ``no_data_reason``. Until
+        #2232 the frontend inferred "stale" from ``shares_outstanding_as_of``
+        being non-null on a ``no_data`` payload, which a third reason with a
+        real as_of would silently mis-label (prevention log: two surfaces, one
+        copy source). Consumers branch on ``no_data_reason``, not on as_of.
 
         ``historical_symbols`` is threaded through so the BBBY-style
         callout still renders on instruments missing
@@ -594,6 +723,10 @@ class OwnershipRollup:
             banner = _stale_denominator_banner(stale_as_of)
             info_chip = "Shares-outstanding figure on file is too stale to use as a denominator."
             as_of_out: date | None = stale_as_of
+        elif reason == "partial_class_denominator":
+            banner = _partial_class_denominator_banner()
+            info_chip = "Shares-outstanding figure on file does not cover the whole company."
+            as_of_out = stale_as_of
         else:
             banner = _banner_for_state("no_data", coverage, Decimal(0))
             info_chip = "No shares-outstanding figure on file."
@@ -618,6 +751,8 @@ class OwnershipRollup:
             corrections_applied=(),
             denominator_cross_check=DenominatorCrossCheck.unavailable(),
             computed_at=datetime.now(tz=UTC),
+            def14a_drift=def14a_drift,
+            no_data_reason=reason,
         )
 
 
@@ -653,6 +788,23 @@ class _Candidate:
     accession_number: str
     source_row_id: int
     ownership_nature: str | None = None
+    # DEF 14A proxy role tag carried from ``ownership_def14a_current`` so the
+    # unmatched slice-build can surface it as a display label (#2121). Only the
+    # DEF 14A read path sets it; every other source leaves it ``None``.
+    holder_role: str | None = None
+    # Form 3/4 relationship box "10% Owner" checkbox (#2230), joined from
+    # ``insider_filers``. Only the Section 16 read path sets it; every other
+    # source leaves it ``False``. Fail-closed: a row whose accession/CIK does
+    # not join carries ``False`` and cannot admit a deemed-chain collapse.
+    is_ten_percent_owner: bool = False
+    # Provenance of ``ownership_nature`` (#2386). ``True`` only when the value was
+    # read off Form 4 Table I column 5 / Form 3 Table I ``directOrIndirectOwnership``
+    # by one of the three XML ingest paths. ``False`` for a ``:NDT:``/``:NDH:`` row
+    # from ``sec_insider_dataset_ingest``, whose ``_map_relationship`` writes the
+    # DERA RELATIONSHIP flags into the same column (officer/director → ``direct``,
+    # ten-percent-owner → ``beneficial``) and never reads the D/I field at all.
+    # ``False`` for every non-Section-16 source, whose nature is not Table I either.
+    nature_from_table_i: bool = False
 
 
 def edgar_archive_url(accession_number: str | None) -> str | None:
@@ -713,6 +865,48 @@ _RESIDUAL_TOOLTIP = (
 )
 
 
+# #2788 — a Form 4 row filed before the Form 4 ingest retention cutoff is not
+# evidence of a CURRENT holding, and every other Form 4 writer already refuses to
+# store one. Held as ONE fragment because the rollup's exclusion and
+# :func:`_read_beyond_retention_insiders` must select exact complements; #2229
+# shipped that pairing as two hand-kept-in-step predicates and said so in a comment,
+# which is a drift hazard the constant removes.
+#
+# ``source = 'form4'`` only. Form 3 is deliberately NOT gated: #1233 §4.3 exempts it
+# ("Form 3 rows are NOT gated here — Form 3 is read-side latest-per-pair") because
+# the initial statement is the only evidence for a holder who has never transacted.
+# Form 5 has no separate ``source`` value in this layer —
+# ``sec_insider_dataset_ingest._map_form_to_source`` folds 4/4-A/5/5-A into
+# ``form4`` — so a Form 5 row is bounded by the 3y Form 4 cutoff rather than its own
+# 18-month one. That is the conservative direction: the wider window removes fewer
+# rows.
+_INSIDER_BEYOND_RETENTION_SQL: Final = """
+    oc.source = 'form4' AND oc.filed_at::date < %(form4_cutoff)s
+"""
+
+# Dual-pipeline de-collision (#788), extracted so the insiders read and every producer
+# that must agree with it share ONE copy. A DERA-dataset row (``:NDT:`` / ``:NDH:``
+# marker) is dropped whenever an XML-manifest row exists for the same
+# ``(holder_cik, source_accession)`` — the manifest parse is the authoritative
+# full-Table-II view of that filing.
+#
+# ⚠ Any producer that reports rows the insiders read REMOVED must apply this too, or it
+# double-reports: a stale accession present in BOTH pipelines contributes one row to the
+# wedge but two to a naive complement, overstating ``shares_removed`` by the duplicate
+# (Codex checkpoint 2 on #2788 — the telemetry shipped without it and would have told an
+# operator that twice the actual shares had left).
+_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL: Final = """
+    oc.source_document_id ~ ':(NDT|NDH):'
+    AND EXISTS (
+        SELECT 1 FROM ownership_insiders_current x
+        WHERE x.instrument_id = oc.instrument_id
+          AND x.holder_cik IS NOT DISTINCT FROM oc.holder_cik
+          AND x.source_accession = oc.source_accession
+          AND x.source_document_id !~ ':(NDT|NDH):'
+    )
+"""
+
+
 def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
     """Build the canonical-holder candidate set from the per-source
     ``ownership_*_current`` snapshots populated by Phase 1 write-through
@@ -751,24 +945,29 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
         # full-Table-II view of that filing; the dataset only fills accessions the
         # manifest never parsed.
         cur.execute(
-            """
-            SELECT holder_cik, holder_name, ownership_nature,
-                   source, source_accession, shares, period_end
+            f"""
+            SELECT oc.holder_cik, oc.holder_name, oc.ownership_nature,
+                   oc.source, oc.source_accession, oc.shares, oc.period_end,
+                   COALESCE(f.is_ten_percent_owner, FALSE) AS is_ten_percent_owner,
+                   -- #2386: same marker the de-collision predicate below uses, kept as a
+                   -- COLUMN so the read path can tell a Table I nature from a DERA
+                   -- relationship-derived one. A dataset row only survives that predicate
+                   -- when no manifest parse of its accession exists, so the two are not
+                   -- redundant: this flags the survivors.
+                   (oc.source_document_id !~ ':(NDT|NDH):') AS nature_from_table_i
             FROM ownership_insiders_current oc
-            WHERE instrument_id = %s
-              AND shares IS NOT NULL
-              AND NOT (
-                oc.source_document_id ~ ':(NDT|NDH):'
-                AND EXISTS (
-                    SELECT 1 FROM ownership_insiders_current x
-                    WHERE x.instrument_id = oc.instrument_id
-                      AND x.holder_cik IS NOT DISTINCT FROM oc.holder_cik
-                      AND x.source_accession = oc.source_accession
-                      AND x.source_document_id !~ ':(NDT|NDH):'
-                )
-              )
+            LEFT JOIN insider_filers f
+              ON f.accession_number = oc.source_accession
+             AND f.filer_cik = oc.holder_cik
+            WHERE oc.instrument_id = %(iid)s
+              AND oc.shares IS NOT NULL
+              AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
+              -- #2788 — beyond-retention Form 4 rows excluded; see
+              -- _INSIDER_BEYOND_RETENTION_SQL and _read_beyond_retention_insiders,
+              -- which lists exactly the rows this removes.
+              AND NOT ({_INSIDER_BEYOND_RETENTION_SQL})
             """,
-            (instrument_id,),
+            {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
         )
         for row in cur.fetchall():
             source = str(row["source"])
@@ -786,6 +985,8 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                     accession_number=str(row.get("source_accession") or ""),
                     source_row_id=next(next_row_id),
                     ownership_nature=str(row["ownership_nature"]),
+                    is_ten_percent_owner=bool(row["is_ten_percent_owner"]),
+                    nature_from_table_i=bool(row["nature_from_table_i"]),
                 )
             )
 
@@ -833,22 +1034,94 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
     # ``_current``, so the strict ``>`` is always well-defined. The companion
     # :func:`_read_notice_suppressions` lists exactly the rows this excludes for
     # the ``corrections_applied`` telemetry.
+    #
+    # 13F-HR supersession (#2229) generalises that from the Notice case to the
+    # ordinary one. ``_current`` keeps the latest row per (instrument, filer,
+    # nature, exposure) and its MERGE deletes only ``NOT MATCHED BY SOURCE`` — but
+    # 13F reports an exit by OMISSION, never by a zero row, so a filer who sold out
+    # kept contributing its last reported position forever. 96.7% of filers whose
+    # row was stuck at 2025-12-31 had in fact filed later: they had stopped holding
+    # THIS instrument, not stopped filing.
+    #
+    # Form 13F Special Instruction 5b: a "13F HOLDINGS REPORT" reports ALL securities
+    # over which the Manager has investment discretion. A later report from the same
+    # filer that omits this security is therefore affirmative evidence the position
+    # is gone — no date threshold and no tuning constant, unlike the as-of bound this
+    # ticket originally proposed.
+    #
+    # The evidence is read from ``ownership_institutions_current`` ITSELF, not from
+    # the ``institutional_holdings`` landing table. Both were measured: they agree on
+    # 9,067 filers, ``_current`` is NEWER on 148 and behind on 0, because ``_current``
+    # is fed by the continuous manifest parser as well as the quarterly bulk dataset.
+    # Using one table also makes the predicate self-consistent — a later ``period_end``
+    # for this filer against some OTHER instrument means the filing existed and did
+    # not contain this one, or ``_current`` would carry the later period for it.
+    # (Needs ``idx_inst_current_filer_period``, sql/245: without it the MAX heap-fetches
+    # every row of a filer like Vanguard and the lookup costs 7,651ms instead of 25ms
+    # on AAPL. This runs at READ time on every rollup request.)
+    #
+    # ⚠ The guard matters as much as the predicate. Absence from a later filing can
+    # also mean OUR CUSIP resolution failed on it. ``unresolved_13f_cusips`` holds
+    # 109,683 rows, 1,650 of whose CUSIPs are resolvable via ``external_identifiers``
+    # — the instrument is known to us but some filing's row never bound. Without the
+    # guard this silently deletes real holders on exactly the instruments whose
+    # ingest is weakest, so an instrument with any unresolved sighting at or after
+    # the row's period is exempt from supersession entirely.
+    #
+    # The guard deliberately does NOT narrow by ``resolution_status``. Of the 3,227
+    # sighting rows whose CUSIP binds to a known instrument, 1,724 are marked
+    # ``resolved_via_openfigi`` / ``resolved_via_extid`` — but a resolution MARKING is
+    # not proof the holdings were re-ingested (#2213: OpenFIGI resolution ran dark for
+    # seven weeks behind success-reporting sweeps). Narrowing would fix more
+    # instruments at the cost of silently deleting real holders where that assumption
+    # is wrong, and the two errors are not symmetric: a false keep leaves an
+    # instrument visibly oversubscribed, a false delete is invisible. Broad it is;
+    # 1,648 instruments are exempted, which the A/B measures rather than assumes.
+    #
+    # Two Special Instructions checked and deliberately NOT guarded against:
+    #   * COMBINATION reports (SI 5c) are not complete, and we cannot tell them apart
+    #     (``sec_filing_manifest.form`` is only ``13F-HR``/``13F-HR/A``; the Report
+    #     Type checkbox lives in ``primary_doc.xml``, which we do not retain
+    #     queryably). Not a correctness risk: if manager B's holdings are reported by
+    #     manager A, A's filing INCLUDES those shares, so dropping B's stale row
+    #     removes a double count rather than a holder.
+    #   * De minimis omission (SI 9) lets a Manager omit a holding under 10,000 shares
+    #     AND under $200,000. Anything omitted on that basis is ≤10,000 shares, which
+    #     is negligible against any pie wedge.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
+            WITH guard AS (
+                SELECT MAX(u.last_period_end) AS max_unresolved
+                FROM unresolved_13f_cusips u
+                JOIN external_identifiers e
+                  ON e.identifier_type = 'cusip'
+                 AND e.identifier_value = u.cusip
+                WHERE e.instrument_id = %(iid)s
+            )
             SELECT c.filer_cik, c.filer_name, c.filer_type, c.ownership_nature,
                    c.source, c.source_accession, c.shares, c.period_end
             FROM ownership_institutions_current c
-            WHERE c.instrument_id = %s
+            CROSS JOIN guard g
+            LEFT JOIN LATERAL (
+                SELECT MAX(x.period_end) AS latest_filed_period
+                FROM ownership_institutions_current x
+                WHERE x.filer_cik = c.filer_cik
+            ) n ON TRUE
+            WHERE c.instrument_id = %(iid)s
               AND c.shares IS NOT NULL
               AND c.exposure_kind = 'EQUITY'
               AND NOT EXISTS (
-                    SELECT 1 FROM institutional_filer_13f_notices n
-                    WHERE n.filer_cik  = c.filer_cik
-                      AND n.period_end > c.period_end
+                    SELECT 1 FROM institutional_filer_13f_notices nt
+                    WHERE nt.filer_cik  = c.filer_cik
+                      AND nt.period_end > c.period_end
+              )
+              AND NOT (
+                    COALESCE(n.latest_filed_period > c.period_end, FALSE)
+                    AND NOT COALESCE(g.max_unresolved >= c.period_end, FALSE)
               )
             """,
-            (instrument_id,),
+            {"iid": instrument_id},
         )
         for row in cur.fetchall():
             rows.append(
@@ -914,6 +1187,164 @@ def _read_notice_suppressions(conn: psycopg.Connection[Any], instrument_id: int)
                     winning_nt_period=row["winning_nt_period"],
                     winning_nt_accession=str(row["winning_nt_accession"]),
                     source_channel="13f",  # the folded channel (#1647 generic provenance)
+                )
+            )
+    return tuple(rows)
+
+
+def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[CorrectionApplied, ...]:
+    """List the institution rows EXCLUDED by 13F-HR supersession (#2229), with the
+    later filing that proves the exit, for the ``corrections_applied`` telemetry.
+
+    The selection is the exact complement of the rollup institutions query's final
+    ``NOT (...)`` clause — these are the rows that filter removed, so the two must be
+    kept in step. Mirrors :func:`_read_notice_suppressions`: the lateral join picks
+    the filer's LATEST subsequent period (``ORDER BY ... DESC`` on both keys, never a
+    bare ``LIMIT 1``, per the deterministic-pick rule). Without this the operator
+    would see the institutions wedge shrink with no visible cause — the same reason
+    #1639 shipped its own producer.
+
+    ``winning_accession`` is the LATER filing's accession, not the removed row's:
+    Codex ckpt-2 caught it pointing at the superseded row while labelling it the
+    winning source, which would send an operator auditing the correction to the
+    losing filing.
+
+    The 13F-NT exclusion is repeated here so a row suppressed by BOTH mechanisms is
+    reported once, by :func:`_read_notice_suppressions` (the Notice is the stronger
+    evidence: the filer declared it holds nothing reportable at all)."""
+    rows: list[CorrectionApplied] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH guard AS (
+                SELECT MAX(u.last_period_end) AS max_unresolved
+                FROM unresolved_13f_cusips u
+                JOIN external_identifiers e
+                  ON e.identifier_type = 'cusip'
+                 AND e.identifier_value = u.cusip
+                WHERE e.instrument_id = %(iid)s
+            )
+            SELECT c.filer_cik, c.filer_name, c.shares,
+                   c.period_end AS superseded_period,
+                   n.period_of_report AS winning_period,
+                   n.accession_number AS winning_accession
+            FROM ownership_institutions_current c
+            CROSS JOIN guard g
+            JOIN LATERAL (
+                SELECT x.period_end AS period_of_report, x.source_accession AS accession_number
+                FROM ownership_institutions_current x
+                WHERE x.filer_cik = c.filer_cik
+                  AND x.period_end > c.period_end
+                ORDER BY x.period_end DESC, x.source_accession DESC
+                LIMIT 1
+            ) n ON TRUE
+            WHERE c.instrument_id = %(iid)s
+              AND c.shares IS NOT NULL
+              AND c.exposure_kind = 'EQUITY'
+              AND NOT EXISTS (
+                    SELECT 1 FROM institutional_filer_13f_notices nt
+                    WHERE nt.filer_cik  = c.filer_cik
+                      AND nt.period_end > c.period_end
+              )
+              AND NOT COALESCE(g.max_unresolved >= c.period_end, FALSE)
+            ORDER BY c.shares DESC, c.filer_cik
+            """,
+            {"iid": instrument_id},
+        )
+        for row in cur.fetchall():
+            rows.append(
+                CorrectionApplied(
+                    kind="superseded_by_later_13f_hr",
+                    filer_cik=str(row["filer_cik"]),
+                    filer_name=str(row["filer_name"]),
+                    shares_removed=Decimal(row["shares"]),
+                    superseded_period=row["superseded_period"],
+                    source_channel="13f",  # the folded channel (#1647 generic provenance)
+                    winning_source="13f",
+                    # The WINNER is the later filing that proves the exit, NOT the stale
+                    # row being removed (Codex ckpt-2). Pointing this at
+                    # ``c.source_accession`` would send an operator auditing the
+                    # correction to the losing accession while labelling it the winner —
+                    # mirrors ``winning_nt_accession`` on the NT kind, which names the
+                    # Notice.
+                    winning_accession=(str(row["winning_accession"]) if row["winning_accession"] else None),
+                    detail=(
+                        f"Filer reported holdings for {row['winning_period']} "
+                        f"(accession {row['winning_accession']}) that omit this security; "
+                        f"Form 13F Special Instruction 5b makes a holdings report a complete statement "
+                        f"of the Manager's Section 13(f) holdings, so the {row['superseded_period']} "
+                        f"position is closed."
+                    ),
+                )
+            )
+    return tuple(rows)
+
+
+def _read_beyond_retention_insiders(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[CorrectionApplied, ...]:
+    """List the insider rows EXCLUDED as beyond the Form 4 ingest retention window
+    (#2788), for the ``corrections_applied`` telemetry.
+
+    The selection is the exact complement of the insiders query's exclusion because both
+    interpolate the SAME :data:`_INSIDER_BEYOND_RETENTION_SQL` fragment — #2229 kept its
+    pair in step by comment alone, and a comment does not fail when someone edits one
+    side.
+
+    ⚠ Read the ``detail`` string before quoting this correction as an exit. It is NOT
+    ``superseded_by_later_13f_hr``. That one rests on a source rule — Form 13F Special
+    Instruction 5b makes a holdings report a complete statement of the Manager's §13(f)
+    holdings, so omitting a security is affirmative evidence of an exit. **Section 16 has
+    no such rule.** Form 4 is transaction-triggered (Exchange Act §16(a); the transaction
+    codes in ``data-sources/sec-edgar.md`` §2.3 — ``S``/``D``/``G``/``U`` — arrive as
+    FILINGS, not as silence), and Rule 16a-2's obligation simply ENDS when the person
+    ceases to be an insider, which is why a frozen row stops moving rather than going to
+    zero. So this correction says only that we no longer hold in-retention evidence, and
+    the operator-facing string must keep saying that.
+
+    The rows this removes are dominated by one event rather than by attrition: the #2701
+    research ingest ran ``ingest_insider_dataset_archive`` with
+    ``retention_cutoff_override=2006-01-01`` on 2026-08-14 and wrote pre-retention Form 4
+    rows into ``ownership_insiders_observations`` — the table
+    ``ownership_insiders_current`` projects — while its own docstring asserted the
+    override "CHANGES NO DEFAULT" for "the operator ALERTING path". The ownership rollup
+    was the unguarded consumer. Reproduce the split with
+    ``scripts/audit_2788_insider_retention.py --census``; do not hand-copy its figures
+    here, they move with every ingest."""
+    rows: list[CorrectionApplied] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT oc.holder_cik, oc.holder_name, oc.shares,
+                   oc.period_end, oc.filed_at::date AS filed_on,
+                   oc.source_accession
+            FROM ownership_insiders_current oc
+            WHERE oc.instrument_id = %(iid)s
+              AND oc.shares IS NOT NULL
+              -- Same de-collision the insiders read applies. Without it a stale
+              -- accession present in BOTH pipelines is reported twice and
+              -- ``shares_removed`` doubles (Codex checkpoint 2).
+              AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
+              AND ({_INSIDER_BEYOND_RETENTION_SQL})
+            ORDER BY oc.shares DESC, oc.holder_cik, oc.holder_name
+            """,
+            {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
+        )
+        for row in cur.fetchall():
+            rows.append(
+                CorrectionApplied(
+                    kind="insider_beyond_form4_retention",
+                    filer_cik=str(row["holder_cik"]) if row["holder_cik"] else None,
+                    filer_name=str(row["holder_name"]),
+                    shares_removed=Decimal(row["shares"]),
+                    superseded_period=row["period_end"],
+                    source_channel="form4",
+                    detail=(
+                        f"Last Form 4 evidence for this holder was filed {row['filed_on']} "
+                        f"(accession {row['source_accession']}), before the "
+                        f"{form4_retention_cutoff()} Form 4 ingest retention cutoff "
+                        f"(#1233 §4.3). NOT evidence the holder sold — Form 4 is "
+                        f"transaction-triggered, so silence proves nothing; we no longer "
+                        f"hold in-retention evidence of the position."
+                    ),
                 )
             )
     return tuple(rows)
@@ -1078,6 +1509,7 @@ def _read_def14a_unmatched_from_current(conn: psycopg.Connection[Any], instrumen
             SELECT
                 row_number() OVER (ORDER BY holder_name_key, ownership_nature) AS holding_id,
                 holder_name,
+                holder_role,
                 ownership_nature,
                 shares,
                 period_end AS as_of_date,
@@ -1089,6 +1521,137 @@ def _read_def14a_unmatched_from_current(conn: psycopg.Connection[Any], instrumen
             (instrument_id,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def _read_def14a_drift(conn: psycopg.Connection[Any], instrument_id: int) -> Def14ADriftInfo | None:
+    """Summarise this instrument's warning/critical drift alerts for the
+    chip (#966). Read-only over ``def14a_drift_alerts`` (the detector
+    runs at the write loci, never here). ``info`` severity excluded —
+    unmatched-name noise already renders as the ``def14a_unmatched``
+    slice. Returns None when no warning/critical alerts exist.
+
+    Uses the existing ``(instrument_id, detected_at)`` index for the
+    instrument scope; the residual severity filter walks that
+    instrument's handful of alert rows.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT holder_name, severity, drift_pct
+            FROM def14a_drift_alerts
+            WHERE instrument_id = %(iid)s
+              AND severity IN ('warning', 'critical')
+            ORDER BY drift_pct DESC NULLS LAST, holder_name
+            """,
+            {"iid": instrument_id},
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    worst: Literal["warning", "critical"] = "critical" if any(r["severity"] == "critical" for r in rows) else "warning"
+    n = len(rows)
+    holders_phrase = f"{n} holder diverges" if n == 1 else f"{n} holders diverge"
+    chip = (
+        f"Proxy vs insider-stream drift: {holders_phrase} ≥5% between the "
+        f"DEF 14A table and Form 4 cumulative positions — possible missed "
+        f"or unreported insider filings."
+    )
+    return Def14ADriftInfo(
+        worst_severity=worst,
+        alert_count=n,
+        chip=chip,
+        holders=tuple(str(r["holder_name"]) for r in rows[:3]),
+    )
+
+
+def _read_nonvested_awards(
+    conn: psycopg.Connection[Any], instrument_id: int, *, today: date
+) -> NonvestedAwardsInfo | None:
+    """Unvested-award memo (#844): winner accession = latest filed
+    ``award_type`` filing; figure = the read-rule pick over the winner's
+    latest-period rows (``select_nonvested_memo`` — never a Σ; the axis is
+    non-additive). None on no data, read-rule abstention, or a note staler
+    than the shared 548-day bound."""
+    from app.services.fsnds_notes_facts import select_nonvested_memo
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH winner AS (
+                SELECT f.source_accession
+                  FROM instrument_dimensional_facts f
+                 WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
+                 ORDER BY f.filed_at DESC, f.source_accession DESC
+                 LIMIT 1
+            ),
+            latest AS (
+                SELECT MAX(f.period_end) AS period_end
+                  FROM instrument_dimensional_facts f
+                  JOIN winner w ON w.source_accession = f.source_accession
+                 WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
+            )
+            SELECT f.member_qname, f.member_label, f.val,
+                   f.period_end, f.source_accession
+              FROM instrument_dimensional_facts f
+              JOIN winner w ON w.source_accession = f.source_accession
+              JOIN latest l ON l.period_end = f.period_end
+             WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
+            """,
+            {"iid": instrument_id},
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    period_end: date = rows[0]["period_end"]
+    if _denominator_too_stale(period_end, today):
+        return None
+    memo = select_nonvested_memo([(str(r["member_qname"]), str(r["member_label"]), Decimal(r["val"])) for r in rows])
+    if memo is None:
+        return None
+    return NonvestedAwardsInfo(
+        shares=memo.shares,
+        label=memo.label,
+        period_end=period_end,
+        source_accession=str(rows[0]["source_accession"]),
+    )
+
+
+_DRS_MAX_AGE_DAYS: Final[int] = 400
+
+
+def _read_drs(conn: psycopg.Connection[Any], instrument_id: int, *, today: date) -> DrsInfo | None:
+    """Latest DRS disclosure for the chip (#844 PR-2): newest row by the
+    disclosure's own as-of date (falling back to filed date when the
+    sentence carried none), suppressed past the 400-day bound."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT registered_shares, registered_pct, street_shares, street_pct,
+                   holders_of_record,
+                   COALESCE(as_of_date, (filed_at AT TIME ZONE 'UTC')::date) AS effective_as_of,
+                   source_accession
+              FROM ownership_drs_observations
+             WHERE instrument_id = %(iid)s
+             ORDER BY COALESCE(as_of_date, (filed_at AT TIME ZONE 'UTC')::date) DESC, filed_at DESC
+             LIMIT 1
+            """,
+            {"iid": instrument_id},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    effective: date = row["effective_as_of"]
+    if (today - effective).days > _DRS_MAX_AGE_DAYS:
+        return None
+    return DrsInfo(
+        registered_shares=Decimal(row["registered_shares"]),
+        registered_pct=Decimal(row["registered_pct"]) if row["registered_pct"] is not None else None,
+        street_shares=Decimal(row["street_shares"]) if row["street_shares"] is not None else None,
+        street_pct=Decimal(row["street_pct"]) if row["street_pct"] is not None else None,
+        holders_of_record=row["holders_of_record"],
+        as_of_date=effective,
+        source_accession=str(row["source_accession"]),
+    )
 
 
 def _enrich_and_union_def14a(
@@ -1113,8 +1676,8 @@ def _enrich_and_union_def14a(
     against. These are mostly named officers in the proxy who never
     filed a Form 4 / Form 3.
 
-    ``def14a_rows`` shape: ``{holding_id, holder_name, ownership_nature,
-    shares, as_of_date, accession_number}`` — supplied by
+    ``def14a_rows`` shape: ``{holding_id, holder_name, holder_role,
+    ownership_nature, shares, as_of_date, accession_number}`` — supplied by
     :func:`_read_def14a_unmatched_from_current`. Codex pre-push review
     for #905 caught the prior shape that omitted ``ownership_nature``:
     ``ownership_def14a_current`` PK is
@@ -1142,6 +1705,7 @@ def _enrich_and_union_def14a(
             accession_number=str(row["accession_number"]),  # type: ignore[arg-type]
             source_row_id=int(row["holding_id"]),  # type: ignore[arg-type]
             ownership_nature=str(row["ownership_nature"]) if row.get("ownership_nature") else None,
+            holder_role=str(row["holder_role"]) if row.get("holder_role") else None,
         )
         # Use the resolver's ``matched`` flag, not just ``cik is not
         # None``. The resolver returns ``matched=True, cik=None`` for a
@@ -1206,6 +1770,23 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 as_of_date=winner.as_of_date,
                 filer_type=winner.filer_type,
                 ownership_nature=winner.ownership_nature,
+                # ANY candidate row for this identity, not just the winning one:
+                # a filer can check "10% Owner" on one accession and omit it on a
+                # later amendment, and the relationship is a property of the
+                # holder, not of the winning filing (#2230).
+                is_ten_percent_owner=any(c.is_ten_percent_owner for c in cands),
+                # ``any``, not ``all`` and not the WINNER's flag (#2386): the group is
+                # already keyed on ``ownership_nature``, so every candidate here carries
+                # the SAME string, and one XML-attested row means this holder did report
+                # that D/I value on a Table I. Taking it from the winning candidate
+                # instead (Codex ckpt-2 P2) would drop an attested ``direct`` out of
+                # ``n_direct`` whenever a later dataset row won the tie-break — widening
+                # :func:`_is_deemed_chain`, which counts ``direct`` AGAINST admission.
+                # That is the false-positive direction #1652/#2230 exist to avoid, and
+                # the class is empty anyway: no (instrument, identity, nature) group in
+                # the corpus mixes the two provenances. Re-check with the mixed-group
+                # query recorded on #2386 before assuming otherwise.
+                nature_from_table_i=any(c.nature_from_table_i for c in cands),
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,
@@ -1281,6 +1862,23 @@ def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
                 as_of_date=winner.as_of_date,
                 filer_type=winner.filer_type,
                 ownership_nature=winner.ownership_nature,
+                # ANY candidate row for this identity, not just the winning one:
+                # a filer can check "10% Owner" on one accession and omit it on a
+                # later amendment, and the relationship is a property of the
+                # holder, not of the winning filing (#2230).
+                is_ten_percent_owner=any(c.is_ten_percent_owner for c in cands),
+                # ``any``, not ``all`` and not the WINNER's flag (#2386): the group is
+                # already keyed on ``ownership_nature``, so every candidate here carries
+                # the SAME string, and one XML-attested row means this holder did report
+                # that D/I value on a Table I. Taking it from the winning candidate
+                # instead (Codex ckpt-2 P2) would drop an attested ``direct`` out of
+                # ``n_direct`` whenever a later dataset row won the tie-break — widening
+                # :func:`_is_deemed_chain`, which counts ``direct`` AGAINST admission.
+                # That is the false-positive direction #1652/#2230 exist to avoid, and
+                # the class is empty anyway: no (instrument, identity, nature) group in
+                # the corpus mixes the two provenances. Re-check with the mixed-group
+                # query recorded on #2386 before assuming otherwise.
+                nature_from_table_i=any(c.nature_from_table_i for c in cands),
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,  # type: ignore[arg-type]
@@ -2033,29 +2631,562 @@ _GROUP_ELIGIBLE_SOURCES: Final[frozenset[SourceTag]] = _INSIDER_GROUP_SOURCES | 
 # stays un-collapsed, the conservative direction (matches the round-lot residual).
 _INSIDER_GROUP_MIN_SHARES: Final[Decimal] = Decimal(1_000_000)
 
+# --- Deemed-chain tier (#2230) -------------------------------------------------
+# The magnitude floor and the roundness guard above are NOT truths about deemed
+# ownership — they are stand-ins for group-membership evidence this pass has to
+# INFER. :func:`_reconcile_same_accession_groups` says so explicitly: a shared
+# accession "IS the group evidence", so that pass "needs NO magnitude floor or
+# roundness proxy". The same logic licenses retiring them wherever equally direct
+# evidence exists — and for a cross-accession Section 16 chain it does, in two
+# structured Form 3/4 fields we already store:
+#
+#   * Form 3/4 relationship box, "10% Owner" checkbox (``insider_filers
+#     .is_ten_percent_owner``). Rule 13d-5(b)(1) group members are 10% owners by
+#     aggregation; a director or officer receiving an equal grant is not. Measured
+#     on the full population: dropping this requirement admits 26 further clusters
+#     that are overwhelmingly equal DIRECTOR grants (FLG 11,220 across 11 CIKs,
+#     BBT 2,595 across 10, NWFL 825 across 8) — the #1659 false-positive class.
+#   * Form 4 Table I column 5, "Ownership Form: Direct (D) or Indirect (I)"
+#     (``ownership_nature``, counted on ``nature_from_table_i`` rows ONLY — the
+#     column has a fourth writer that means something else by it, #2386).
+#     A Rule 16a-1(a)(2) control chain has ONE direct
+#     holder — the fund that actually holds — and N deemed owners restating the
+#     same block INDIRECTLY. The false-positive class inverts that shape: four
+#     family trusts each *fbo* a different beneficiary, or four individuals with
+#     equal grants, each hold DIRECTLY (GSHD 9,787 × 4 trusts, 3 direct; ASST
+#     150,000 × 4, all direct). So "≤1 direct AND ≥2 indirect" is not a threshold
+#     picked to fit — it is the shape the rule prescribes.
+#
+# Cluster size stays gated at ≥3 distinct CIKs, matching the tier #1645/I17 already
+# settled for the 13D channel: a 3-way exact coincidence is negligible, while the
+# 2-member case is not separable from source data. The all-natural-person pair is
+# the unresolvable residue and is deliberately left double-counted — TEAM's two
+# co-founders hold near-identical stakes independently and BY DESIGN, and merging
+# them would erase half of Atlassian's reported insider ownership, a worse error
+# than the double-count this tier exists to remove.
+#
+# Full-population gain side: 40 clusters, every one inspected — Blackstone, NEA,
+# KKR, Benchmark, ARCH, Lubert-Adler, Foresite, SPAC sponsor LLCs, and the
+# Ledbetter family trust with its three deemed members. No false positive found.
+_DEEMED_CHAIN_MIN_CIKS: Final[int] = 3
+_DEEMED_CHAIN_MAX_DIRECT: Final[int] = 1
+_DEEMED_CHAIN_MIN_INDIRECT: Final[int] = 2
 
-def _collapse_insider_control_group(cluster: list[Holder]) -> tuple[Holder, CorrectionApplied]:
+
+def _is_deemed_chain(insiders: list[Holder]) -> bool:
+    """True when ``insiders`` (the Section 16 members of one exact-value bucket)
+    carry the structured Rule 16a-1(a)(2) control-chain signature, and the
+    magnitude/roundness proxies can therefore be retired for this bucket (#2230).
+
+    Requires ALL THREE: ≥``_DEEMED_CHAIN_MIN_CIKS`` distinct non-null CIKs; every
+    member flagged ``is_ten_percent_owner`` on the Form 3/4 relationship box; and
+    the chain's ownership-form shape — at most ``_DEEMED_CHAIN_MAX_DIRECT`` member
+    reporting ``direct`` and at least ``_DEEMED_CHAIN_MIN_INDIRECT`` reporting
+    ``indirect``. Fail-closed on every axis: an unjoined relationship row carries
+    ``is_ten_percent_owner=False``, and a nature outside {direct, indirect}
+    (legacy ``beneficial``) counts toward neither side, so it cannot satisfy the
+    indirect floor.
+
+    ⚠ The shape test counts only members whose nature is **Table I-attested**
+    (``Holder.nature_from_table_i``), because ``ownership_nature`` is an OVERLOADED
+    column (#2386). Three writers derive it from Form 4/3
+    ``directOrIndirectOwnership`` — the field this gate is about — while
+    ``sec_insider_dataset_ingest._map_relationship`` writes the DERA insider
+    dataset's RELATIONSHIP flags into the same column (officer/director →
+    ``direct``, ten-percent-owner → ``beneficial``) and never reads the D/I field.
+    A DERA officer row is not a Rule 16a-1(a)(2) direct holder and must not count
+    against ``_DEEMED_CHAIN_MAX_DIRECT``; a role-derived row counts toward neither
+    side, the same posture already taken for legacy ``beneficial``. The provenance
+    check is what makes the counters mean what the docstring says they mean — it is
+    NOT a loosening of the thresholds, which are unchanged."""
+    if len({h.filer_cik for h in insiders}) < _DEEMED_CHAIN_MIN_CIKS:
+        return False
+    if not all(h.is_ten_percent_owner for h in insiders):
+        return False
+    attested = [h for h in insiders if h.nature_from_table_i]
+    n_direct = sum(1 for h in attested if h.ownership_nature == "direct")
+    n_indirect = sum(1 for h in attested if h.ownership_nature == "indirect")
+    return n_direct <= _DEEMED_CHAIN_MAX_DIRECT and n_indirect >= _DEEMED_CHAIN_MIN_INDIRECT
+
+
+def _control_group_rep_key(h: Holder) -> tuple[bool, Decimal, str, str]:
+    """Sort key selecting a control-group cluster's representative: prefer an insider
+    source (so the rep routes to the insiders slice via owner-once), then a deterministic
+    ``(shares, filer_cik, winning_accession)`` tie-break, all DESCENDING.
+
+    Shared by :func:`_collapse_insider_control_group`, which performs the fold, and the
+    release-hazard preview in :func:`_reconcile_insider_control_groups`, which must
+    identify the SAME holder to know whose other-channel rows would be stranded. Kept in
+    one place so the two cannot drift (review WARNING on PR #2384).
+
+    ⚠ This is the INCUMBENT key only — every component after the source preference is an
+    arbitrary tie-break, so on a real control chain it selects by highest CIK.
+    :func:`_select_control_group_rep` is what the two callers actually use; this stays the
+    fallback and the deterministic order within each preference tier."""
+    return (h.winning_source in _INSIDER_GROUP_SOURCES, h.shares, h.filer_cik or "", h.winning_accession)
+
+
+def _rows_by_identity(*holder_lists: Iterable[Holder]) -> dict[str, list[Holder]]:
+    """Index every row entering a collapse pass by :func:`_identity_key`.
+
+    A collapse pass needs to know, for a holder it is about to DEMOTE, whether that
+    identity holds any row outside the cluster — because demotion removes the identity
+    from ``survivors`` and releases those rows into their own wedges (see the release
+    hazard in :func:`_reconcile_insider_control_groups`). That question is not answerable
+    from the cluster, so both passes build this index over their own inputs and pass it
+    down. Built per pass, not once at the call site: :func:`_reconcile_same_accession_groups`
+    runs first and rewrites both lists, so the second pass must index what it actually
+    receives."""
+    index: dict[str, list[Holder]] = {}
+    for holders in holder_lists:
+        for h in holders:
+            index.setdefault(_identity_key(h.filer_cik, h.filer_name), []).append(h)
+    return index
+
+
+def _stranded_rows(
+    holder: Holder,
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> list[Holder]:
+    """The rows ``holder``'s identity holds OUTSIDE ``cluster`` — what demoting it out of
+    the cluster would leave behind.
+
+    Identity, not object: ``rows_by_identity`` is keyed on :func:`_identity_key`, and
+    cluster membership is tested by object id, so a row of the same identity that is not
+    one of the cluster's own objects counts as stranded."""
+    in_cluster = {id(h) for h in cluster}
+    key = _identity_key(holder.filer_cik, holder.filer_name)
+    return [row for row in rows_by_identity.get(key, ()) if id(row) not in in_cluster]
+
+
+def _releases_other_rows(
+    holder: Holder,
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> bool:
+    """True when demoting ``holder`` out of ``cluster`` would strand rows it holds in
+    OTHER channels — its 13F institutional row, most consequentially.
+
+    ⚠ Strictly WIDER than the hazard the deemed-chain FOLD gate names; that gate asks
+    :func:`_releases_into_another_wedge` instead (#2230).
+
+    ⚠⚠ **:func:`_select_control_group_rep` clause 4 keeps asking THIS one, and #2785
+    measured why** — the narrowing is right for the fold and wrong for a rep swap. Do not
+    "finish the job" by pointing clause 4 at the narrow predicate; that was tried,
+    A/B'd on the full population, and reverted. See clause 4's own docstring for the
+    numbers and the mechanism."""
+    return bool(_stranded_rows(holder, cluster, rows_by_identity))
+
+
+def _releases_into_another_wedge(
+    holder: Holder,
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> bool:
+    """True when demoting ``holder`` out of ``cluster`` would move rows it holds in OTHER
+    channels into a DIFFERENT pie wedge (#2230 residual).
+
+    **Narrower than :func:`_releases_other_rows`, and the narrowing is the point.** A
+    stranded row is only a *release* if it changes what :func:`_reconcile_owner_once`
+    decides about the identity. That function branches on ``present & _INSIDER_SOURCES``:
+    a Section-16 person is classified ``insiders`` at the MAX of its beneficial
+    restatements, and *"any 13F for this CIK is managed assets → it stays a
+    dropped_source, never added to the insider's stake"* (#1640). So an identity that
+    retains **any** ``_INSIDER_SOURCES`` row outside the cluster is still a Section-16
+    person after the fold — same category, 13F still suppressed — and nothing is
+    released. Only an identity left with no insider row at all can change wedge.
+
+    That case is also provably non-inflating, which is why it is safe to fold: the fold
+    removes the cluster's rows from the identity's ``form4``/``form3`` pool and touches no
+    other source, so the per-source MAX can only fall or stay. The category is unchanged
+    and the figure cannot rise.
+
+    ⚠ Keyed on ``winning_source``, deliberately — the SAME field
+    :func:`_reconcile_owner_once` buckets on, so the two cannot disagree about what the
+    identity is. Not on ``ownership_nature``, which has four writers and three meanings
+    and would need the ``nature_from_table_i`` provenance gate (#2385/#2386):
+    ``RYTM``'s stranded Form 4 for ``BARRIS PETER J`` is stored ``beneficial`` where the
+    filing itself says ``I``, and it must still count as insider evidence.
+
+    Measured on the full population by
+    ``PYTHONPATH=. uv run python -m scripts.audit_2230_release_hazard`` (sharded 3 ways):
+    of the deemed-chain clusters this gate refuses, the great majority are refused on
+    stranded ``form4``/``form3``/``def14a`` rows that cannot trigger the mechanism above.
+    Re-run the script rather than trusting a remembered figure."""
+    stranded = _stranded_rows(holder, cluster, rows_by_identity)
+    if not stranded:
+        return False
+    return not any(row.winning_source in _INSIDER_SOURCES for row in stranded)
+
+
+def _attested_direct_holders(cluster: Sequence[Holder]) -> list[Holder]:
+    """The cluster members that state Rule 16a-1(a)(2) DIRECT ownership on their own
+    Form 3/4 Table I column 5.
+
+    Three conditions, each removing a different way the raw ``ownership_nature == "direct"``
+    string lies. Section 16 source, because ``nature_from_table_i`` survives the
+    cross-source merge and a 13F-winning row must never become the rep. Table I provenance,
+    because ``sec_insider_dataset_ingest._map_relationship`` writes DERA RELATIONSHIP flags
+    into the same column and maps officer/director → ``direct`` (#2385/#2386). And the
+    ``direct`` value itself."""
+    return [
+        h
+        for h in cluster
+        if h.winning_source in _INSIDER_GROUP_SOURCES and h.nature_from_table_i and h.ownership_nature == "direct"
+    ]
+
+
+# --- Record-holder evidence for a SAME-accession cluster (#2408) ---------------
+# The Table I clause below cannot separate co-filers of ONE accession, because the
+# ownership XML does not attribute a Table I line to a reporting owner and the parser
+# gives every line to ``filers[0]``. The evidence that DOES name a holder of record on
+# a joint filing is the ``natureOfOwnership`` free text on the INDIRECT lines, plus the
+# footnotes those lines reference.
+#
+# ⚠ Two construction decisions, both forced by measurement rather than preference, and
+# both stated here because SEC publishes no formulation for reading this field:
+#
+#   1. **The evidence is per-ROW, not per-accession.** One Form 4 carries a footnote set
+#      covering many holdings, each naming a DIFFERENT record holder — a Battery Ventures
+#      filing on dev names BV IX, BIP IX, BP IX, The Lee Family Trust and "Roger H. Lee
+#      jointly with his spouse" across five footnotes of one accession. Pooling them and
+#      asking "which member is named" is a category error. The link that exists is the
+#      block VALUE, which is what the fold clusters on, so evidence is keyed
+#      ``(accession, shares)`` against the Table I line's own reported amount.
+#   2. **Names are matched VERBATIM, never rotated to First-Last.** EDGAR conformed names
+#      for natural persons are ``LAST FIRST`` while prose writes ``FIRST LAST``, so adding
+#      the rotated form makes individuals matchable — and measured against ground truth it
+#      makes the rule WORSE, not better (see :func:`_named_record_holder`). Verbatim
+#      matching is therefore not a shortcut; the rotated arm was built, priced and rejected.
+_RECORD_HOLDER_NON_ALNUM: Final[re.Pattern[str]] = re.compile(r"[^A-Z0-9]+")
+# Explicit empty default, so a caller that has not read the evidence degrades to the
+# pre-#2408 behaviour rather than to a silent per-call rebuild of a mutable default.
+_NO_RECORD_HOLDER_EVIDENCE: Final[Mapping[tuple[str, Decimal], tuple[str, ...]]] = MappingProxyType({})
+
+
+def _normalise_holder_text(value: str) -> str:
+    """Fold a filer name or a free-text ownership clause onto one comparable alphabet.
+
+    Case, punctuation and ``&`` only. Entity suffixes are deliberately NOT stripped:
+    ``BIOS FUND III LP`` and ``BIOS FUND IV LP`` differ only there, and collapsing them
+    would attribute a block to the wrong fund — the failure this pass exists to avoid,
+    arriving from the other direction."""
+    return _RECORD_HOLDER_NON_ALNUM.sub(" ", value.upper().replace("&", " AND ")).strip()
+
+
+def _read_record_holder_evidence(
+    conn: psycopg.Connection[Any],
+    accessions: Sequence[str],
+) -> dict[tuple[str, Decimal], tuple[str, ...]]:
+    """``{(accession, shares): (text, …)}`` — every indirect-ownership statement a
+    Section 16 Table I line makes about the block it reports, keyed by that line's own
+    amount (#2408; see the construction note above :func:`_named_record_holder`).
+
+    Both row tables carry ``nature_of_ownership``: a Form 4 lands in
+    ``insider_transactions`` and a Form 3 in ``insider_initial_holdings``, so reading one
+    alone silently halves the evidence. Only ``insider_transactions`` carries
+    ``footnote_refs``, so a Form 3's ``See footnote.`` cannot be resolved and contributes
+    only the literal field — the honest asymmetry, not a gap to paper over.
+
+    Value key: Form 4 reports the post-transaction holding in ``post_transaction_shares``
+    (which is what ``ownership_insiders_current.shares`` holds for that source) and Form 3
+    reports it in ``shares``. Every accession list passed here comes from holders already
+    read for ONE instrument, so all three queries hit an ``accession_number``-leading
+    index.
+
+    ⚠ ``NOT is_derivative`` on both row queries (Codex checkpoint 2). Table II derivative
+    rows carry their own ``nature_of_ownership`` and their own post-transaction amount, and
+    the key is only ``(accession, shares)`` — so a derivative holding that happens to match
+    the equity block's count would name a record holder for a DIFFERENT security. The
+    rollup's insider rows are Table I equity, so the evidence must be too. Measured on the
+    fold population: 11 of 1,425 evidence keys drew on a derivative row, every one of them
+    alongside a non-derivative row at the same amount."""
+    if not accessions:
+        return {}
+    acc = list(dict.fromkeys(accessions))
+    texts: dict[tuple[str, Decimal], list[str]] = {}
+    refs: dict[tuple[str, Decimal], set[str]] = {}
+    footnotes: dict[tuple[str, str], str] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT accession_number, post_transaction_shares, nature_of_ownership, footnote_refs
+              FROM insider_transactions
+             WHERE accession_number = ANY(%s) AND direct_indirect = 'I'
+               AND NOT is_derivative
+               AND post_transaction_shares IS NOT NULL
+            """,
+            (acc,),
+        )
+        for accession, shares, nature, footnote_refs in cur.fetchall():
+            key = (str(accession), Decimal(shares))
+            if nature:
+                texts.setdefault(key, []).append(str(nature))
+            for ref in footnote_refs or ():
+                if isinstance(ref, dict) and ref.get("footnote_id"):
+                    refs.setdefault(key, set()).add(str(ref["footnote_id"]))
+        cur.execute(
+            """
+            SELECT accession_number, shares, nature_of_ownership
+              FROM insider_initial_holdings
+             WHERE accession_number = ANY(%s) AND direct_indirect = 'I'
+               AND NOT is_derivative
+               AND shares IS NOT NULL AND nature_of_ownership IS NOT NULL
+            """,
+            (acc,),
+        )
+        for accession, shares, nature in cur.fetchall():
+            texts.setdefault((str(accession), Decimal(shares)), []).append(str(nature))
+        if refs:
+            cur.execute(
+                """
+                SELECT accession_number, footnote_id, footnote_text
+                  FROM insider_transaction_footnotes
+                 WHERE accession_number = ANY(%s) AND footnote_text IS NOT NULL
+                """,
+                (sorted({a for a, _ in refs}),),
+            )
+            for accession, footnote_id, text in cur.fetchall():
+                footnotes[(str(accession), str(footnote_id))] = str(text)
+    for key, ids in refs.items():
+        accession, _shares = key
+        texts.setdefault(key, []).extend(
+            footnotes[(accession, fid)] for fid in sorted(ids) if (accession, fid) in footnotes
+        )
+    return {key: tuple(values) for key, values in texts.items()}
+
+
+def _named_record_holder(
+    cluster: Sequence[Holder],
+    evidence: Mapping[tuple[str, Decimal], tuple[str, ...]],
+) -> Holder | None:
+    """The ONE cluster member the filing's own indirect-ownership text names, or ``None``.
+
+    **Source rule.** Form 3/4 Table I column 5 carries ``natureOfOwnership`` on every
+    ``I`` line (Rule 16a-1(a)(2) deemed ownership), and the SEC's own instruction is that
+    an indirect holder describe the nature of the indirect ownership — which in practice
+    names the record holder ("Securities are held by BV IX", "Berto Acquisition Sponsor,
+    LLC ... is the record holder of the securities reported herein"). No SEC rule
+    prescribes a GRAMMAR for that sentence, so the reading rule below is fixed **by
+    construction** and validated against ground truth rather than cited.
+
+    **Validation — a labelled set from an independent channel.** Ground truth is not
+    available for same-accession clusters by construction (that is the whole ticket), but
+    it IS available for CROSS-accession ones: there each member files separately, so the
+    Table I ``D`` line is attributed correctly and identifies the record holder per
+    :func:`_select_control_group_rep`'s clause 1. Scoring this rule on the 408 such
+    clusters on dev (``scripts/audit_2408_nature_record_holder.py --validate``):
+
+    ==========================================  =====
+    highest-CIK incumbent already correct         220  (53.9% — an arbitrary tie-break)
+    rule fires (names exactly one member)         125
+    ... agrees with the incumbent                  74
+    ... SWAPS                                      51
+    ......... swap moves to the TRUE holder        47
+    ......... swap is wrong                         4  (3 of them break a correct incumbent)
+    ==========================================  =====
+
+    So the rule fires on 30.6% of clusters and its swaps are 92.2% correct against a 53.9%
+    baseline — net **+44** correct representatives on the labelled set. ⚠ The measurement
+    is on cross-accession clusters and the rule is APPLIED to same-accession ones; the
+    evidence channel and the failure mode (a parent named where a subsidiary holds —
+    ``Transocean Ltd.`` for ``TRANSOCEAN INTERNATIONAL Ltd``) are not accession-dependent,
+    but this is an extrapolation and is recorded as one.
+
+    **Fails closed on 0 or ≥2 named members.** A control-chain footnote routinely names
+    every tier ("GEI Capital VI, LLC is the general partner of GEI VI"), and the
+    uniqueness requirement is what keeps a manager from being read as the holder."""
+    insiders = [h for h in cluster if h.winning_source in _INSIDER_GROUP_SOURCES]
+    if not insiders:
+        return None
+    texts: list[str] = []
+    for key in {(h.winning_accession, h.shares) for h in insiders}:
+        texts.extend(evidence.get(key, ()))
+    if not texts:
+        return None
+    # ⚠ Containment is RAW, not anchored on token boundaries, and that is a MEASURED
+    # decision rather than an oversight — word-boundary anchoring was implemented, priced
+    # and reverted. Both rules have a failure case in this corpus and they fail in
+    # opposite directions:
+    #
+    #   * unanchored OVER-matches a sibling — ``LEGION PARTNERS L P I`` is a prefix of
+    #     ``LEGION PARTNERS L P II``, so a footnote naming fund II also "names" fund I.
+    #     6 folds of 1,434 carry a member pair with that shape. Such a cluster then fails
+    #     the uniqueness guard and keeps its incumbent: a LOST promotion, never a wrong one.
+    #   * anchored UNDER-matches an abbreviated conformed name — EDGAR carries
+    #     ``Ayar Third Investment Co`` while that filer's own footnote says "By Ayar Third
+    #     Investment Company", so the subsidiary that actually holds becomes unmatchable
+    #     and its parent ``PUBLIC INVESTMENT FUND`` is left as the only named member. On
+    #     ``LCID`` that promoted the parent over the record holder and moved the pie by
+    #     280,992,324 shares — a WRONG answer, and the largest single mover in the A/B.
+    #
+    # Fail-closed is this pass's posture (#2230), so the over-matching rule wins.
+    # ⚠ Nothing cheap separated these: both spellings scored an IDENTICAL 47 correct / 4
+    # wrong on the 408 labelled clusters, and every unit test passed under both. Only the
+    # paired full-population A/B distinguished them.
+    blobs = [_normalise_holder_text(t) for t in texts]
+    named = [h for h in insiders if (n := _normalise_holder_text(h.filer_name)) and any(n in b for b in blobs)]
+    if len(named) != 1:
+        return None
+    return named[0]
+
+
+def _select_control_group_rep(
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
+) -> Holder:
+    """Choose the holder a control-group fold keeps (#2385, #2408).
+
+    ⚠ Every figure quoted below is reproduced by
+    ``PYTHONPATH=. uv run python -m scripts.audit_2385_control_group_rep --out /tmp/a.jsonl``
+    (full population, ~4 min sharded 3 ways), which computes one arm per clause so each is
+    priced separately rather than reported as a total. Re-run it rather than trusting these
+    numbers if the corpus has moved.
+
+    **Source rule.** Form 4/3 Table I column 5 ``directOrIndirectOwnership`` — ``D`` =
+    Direct, ``I`` = Indirect (sec-edgar skill §2.3). In a Rule 16a-1(a)(2) control chain
+    exactly one member holds the block DIRECTLY — the fund or trust that actually holds
+    it — and the deemed owners restate the same block INDIRECTLY, naming the direct holder
+    in ``natureOfOwnership``. So the block's holder of record is the member reporting
+    ``D``, and that is the identity the fold should keep. :func:`_control_group_rep_key`
+    has no such component: past the insider-source preference every term is an arbitrary
+    tie-break, so it labels the block with the highest-CIK member.
+
+    Four clauses, each refusing a way the raw ``direct`` string misleads. Evidence for
+    every one is in ``docs/review-prevention-log.md`` (2026-08-08 #2385 entry) and on the
+    PR; the audit script above reprices them on demand.
+
+    1. **Provenance** — ``ownership_nature`` has four writers and three meanings;
+       ``sec_insider_dataset_ingest._map_relationship`` maps DERA officer/director →
+       ``direct`` without reading Table I. See :func:`_attested_direct_holders`, which
+       also restricts to insider sources: ``nature_from_table_i`` survives the cross-source
+       merge, so a 13F-winning holder can carry it and would not route to the insiders
+       slice.
+
+    2. ⚠⚠ **A DIFFERENT accession from the incumbent**, and this is the load-bearing one.
+       The ownership XML has no per-owner Table I attribution — ``<nonDerivativeHolding>``
+       is a SIBLING of ``<reportingOwner>`` — so a joint filing does not say which
+       co-filer holds the ``D`` line, and ``insider_transactions._extract_holdings``
+       assigns every row to ``filers[0]`` (``app/services/insider_transactions.py:449``).
+       **Within one accession "Table I-attested" means "listed first in the XML".** 6 of
+       931 same-accession folds carry ≥2 attested members, against 378 of 503
+       cross-accession. Such a cluster falls through to the ``natureOfOwnership``
+       record-holder evidence (#2408, :func:`_named_record_holder`) and keeps its
+       incumbent when that names nothing or names more than one member.
+
+    3. **EXACTLY ONE attested direct holder.** Rule 16a-1(a)(2)'s chain has one holder of
+       record, the shape ``_DEEMED_CHAIN_MAX_DIRECT`` already encodes. Two members each
+       attesting ``D`` on their own filings is the #1659 equal-value coincidence class,
+       where the choice falls through to arbitrary CIK order. ⚠ Blocks 0 further swaps
+       today — all 33 such folds have the incumbent among the directs, and since
+       ``attested_direct ⊆ cluster`` the incumbent is then maximal by the key, so the
+       identity check already refuses. It states the rule; it is not load-bearing today.
+
+    4. **Decline on release exposure.** The rep is not a label — it is the identity that
+       survives into :func:`_reconcile_owner_once`, so demoting a member RELEASES its
+       other-channel rows into their own wedges. The swap is therefore arithmetic: the
+       promoted member's rows stop being released, the demoted one's would start.
+
+       ⚠⚠ **Asks the WIDE :func:`_releases_other_rows`, deliberately — #2230's narrowing
+       does NOT transfer here, and #2785 measured that rather than assuming it.** The
+       obvious-looking follow-through (point clause 4 at :func:`_releases_into_another_wedge`,
+       since an identity keeping any ``_INSIDER_SOURCES`` row stays Section-16 and changes
+       no wedge) was implemented and A/B'd on the full population. It was **reverted**.
+
+       Census — ``scripts.audit_2785_rep_swap_gate``, 3,108 instruments, 0 harness errors:
+       5,283 clusters reach this selector, 203 reach clause 4, **81 declines**, of which
+       **72 would flip** under the narrow predicate. The 9 that stay refused strand only
+       ``13d``/``13g``/``13f`` and would genuinely change wedge.
+
+       Paired A/B over those 72 (control = a worktree at ``origin/main`` ``8fc1b4ad``,
+       treatment = that SHA plus this one predicate): 3,108 instruments per arm, 0 harness
+       errors, net −385,131,434 shares — and the net hides the finding. **17 instruments
+       GROW, by +82,886,088 in total**, against 26 shrinking and 3,065 unchanged.
+
+       Mechanism, stated at the width it was measured: a swap's hazard is MAGNITUDE, not
+       category. While the incumbent is rep, its stranded rows share an identity key with
+       the block row, so :func:`_reconcile_owner_once` groups them — additively for pooled
+       Section-16 forms (#1941), by MAX across competing beneficial restatements. Demoting
+       the incumbent breaks that grouping, and which way the pie then moves depends on
+       which interaction was in play. Two worked cases, offered as illustrations of the
+       two ends and NOT as a population taxonomy: ``WBD`` is exactly pie-neutral
+       (``Newhouse Steven O`` 184,070,739 becomes the partnership's 184,023,290 + his own
+       47,449 — same total, block finally on the entity that holds it), and ``AIRS`` grows
+       by 14,038,819, exactly the block value.
+
+       ⚠ **No discriminator separates the grow side, and three were tried and killed on
+       the full population** — that is the reason this stays wide rather than becoming a
+       targeted fence. ``max(stranded) >= block`` fires on 11 of 17 growers and 14 of 55
+       non-growers. "The instrument carries more than one collapse" (the ``AIRS`` shape)
+       fires 14/17 GROW, 25/29 SHRINK, 13/26 NEUTRAL. "The incumbent is the kept rep of a
+       collapse" is a tautology — it is true by construction in the control arm (17/17,
+       29/29, 25/26). ``TTRX`` grows by 15,416,260 on an instrument carrying exactly ONE
+       collapse, which is what refutes the ``AIRS`` story as the general explanation.
+       Per the repo rule, repeated failed keys is the signal to question the MODEL rather
+       than guess another: the criterion "neutral-or-better" is a statement about the
+       owner-once GROUPING, and no predicate over one member's stranded rows can decide
+       it.
+
+       Flip outcomes by CALLING PASS — :func:`_reconcile_insider_control_groups` 20
+       neutral / 16 shrink / 7 grow, :func:`_reconcile_same_accession_groups` 6 / 13 / 10.
+       Both grow, so this is not fixable by scoping the narrowing to one of them.
+       (Cluster-level attribution of an instrument-level delta, so an instrument carrying
+       two flipped clusters is counted twice. ⚠ The first label is the caller, NOT the
+       admission route: the #1652 value-proxy route and the #2230 deemed-chain tier share
+       that function and only the latter has a fold-release gate.)
+
+       This clause is therefore an ARITHMETIC fence, not a source rule, and its criterion
+       is its own: neutral-or-better. It deliberately does NOT reverse #1652's
+       exact-value-only consumption rule, which claiming the demoted member's rows would
+       require. Re-measure rather than quoting these counts:
+       ``PYTHONPATH=. uv run python -m scripts.audit_2785_rep_swap_gate --out /tmp/a.jsonl``,
+       and inspect any mover with ``scripts.probe_2785_wedge_detail``.
+
+    5. **The record-holder text, only where clause 2 refused** (#2408). Clauses 1-3 are
+       tried first and unchanged: where the Table I attestation is admissible it IS the
+       source rule, and the free text must not override it. The text tier runs only when
+       they yield no candidate — which is exactly the same-accession case clause 2 exists
+       to refuse. Clause 4 then gates whichever candidate survives, so the arithmetic
+       posture is identical for both routes."""
+    incumbent = max(cluster, key=_control_group_rep_key)
+    attested_direct = _attested_direct_holders(cluster)
+    candidate: Holder | None = None
+    if len(attested_direct) == 1 and attested_direct[0].winning_accession != incumbent.winning_accession:
+        candidate = attested_direct[0]
+    if candidate is None:
+        candidate = _named_record_holder(cluster, record_holder_evidence)
+    if candidate is None:
+        return incumbent
+    if _identity_key(candidate.filer_cik, candidate.filer_name) == _identity_key(
+        incumbent.filer_cik, incumbent.filer_name
+    ):
+        return incumbent
+    if _releases_other_rows(incumbent, cluster, rows_by_identity):
+        return incumbent
+    return candidate
+
+
+def _collapse_insider_control_group(
+    cluster: list[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
+) -> tuple[Holder, CorrectionApplied]:
     """Collapse a confirmed control-group ``cluster`` (≥2 distinct CIKs, ≥1 insider
     member, all at the same exact non-round block value) to ONE holder at that value
     (Rule 13d-3 total beneficial ownership, counted once).
 
-    Representative = a member, preferring an insider source (``form4``/``form3``) so the
-    rep routes to the insiders slice via owner-once, then deterministic tie-break
-    ``(insider-source, shares, filer_cik, winning_accession)`` descending. Non-rep members
+    Representative = :func:`_select_control_group_rep` — the Rule 16a-1(a)(2) Table I
+    ``direct`` holder where the cluster names one and the swap is release-safe, otherwise
+    the insider-source-preferring ``(shares, filer_cik, winning_accession)`` tie-break.
+    ``rows_by_identity`` is the pass's index of every row it received, which is what makes
+    the release-safety half answerable (see :func:`_rows_by_identity`). Non-rep members
     (from BOTH channels) are appended to the rep's existing ``dropped_sources`` (amendment
     provenance preserved) and folded into one ``insider_control_group_collapse`` correction
     whose ``detail`` carries each folded member's CIK + name + shares (``DroppedSource`` has
     no CIK/name field — same limitation as #1645)."""
-    rep = sorted(
-        cluster,
-        key=lambda h: (
-            h.winning_source in _INSIDER_GROUP_SOURCES,
-            h.shares,
-            h.filer_cik or "",
-            h.winning_accession,
-        ),
-        reverse=True,
-    )[0]
+    rep = _select_control_group_rep(cluster, rows_by_identity, record_holder_evidence)
     losers = [h for h in cluster if h is not rep]
     dropped = list(rep.dropped_sources)
     for loser in losers:
@@ -2130,6 +3261,7 @@ def _collapse_same_accession_channel(
 def _reconcile_same_accession_groups(
     survivors: list[Holder],
     blockholders: list[Holder],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
 ) -> tuple[list[Holder], list[Holder], list[CorrectionApplied]]:
     """Collapse a same-accession control-chain duplicate to ONE holder, counted once (#1764).
 
@@ -2169,6 +3301,19 @@ def _reconcile_same_accession_groups(
     representative, never the N dups). The rep keeps its original ``_identity_key`` so the
     downstream survivor-key exclusion + owner-once see it correctly."""
     corrections: list[CorrectionApplied] = []
+    # Every row this pass received, so the rep choice can tell whether demoting a member
+    # would strand its other-channel rows (#2385). Built from the INPUTS, before the pass
+    # rewrites either list.
+    #
+    # ⚠ The Table I clause cannot fire on THIS pass, by construction rather than by
+    # accident: the bucket key is ``(winning_accession, shares)``, so every insider member
+    # shares one accession, and :func:`_select_control_group_rep` refuses a candidate on
+    # the incumbent's accession (the ownership XML does not attribute a Table I row to a
+    # co-filer). The cross-channel members pulled in below are 13D/G-sourced and can never
+    # be candidates either. What DOES fire here is #2408's ``natureOfOwnership`` tier,
+    # which reads the record holder off the filing's own indirect-ownership text — the
+    # same-accession discriminant this comment was written waiting for.
+    rows_by_identity = _rows_by_identity(survivors, blockholders)
 
     # --- Insider side: bucket form4/form3 survivors by (accession, shares), pull matching
     #     cross-channel 13D/G restatements into the cluster so they fold into the rep. ---
@@ -2195,7 +3340,9 @@ def _reconcile_same_accession_groups(
                 if id(b) not in consumed_blockholders:
                     cross_channel.append(b)
                     consumed_blockholders.add(id(b))
-        rep, correction = _collapse_insider_control_group(cluster + cross_channel)
+        rep, correction = _collapse_insider_control_group(
+            cluster + cross_channel, rows_by_identity, record_holder_evidence
+        )
         survivors_out.append(rep)
         corrections.append(correction)
 
@@ -2218,17 +3365,32 @@ def _reconcile_same_accession_groups(
 def _reconcile_insider_control_groups(
     survivors: list[Holder],
     blockholders: list[Holder],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
 ) -> tuple[list[Holder], list[Holder], list[CorrectionApplied]]:
     """Collapse each inferred cross-channel control group to ONE insiders holder at the
     block value, counted once (#1652). Pure read-path.
 
     Operates on the union of insider survivors (``form4``/``form3``) and blockholders
-    (``13d``/``13g``), bucketed by EXACT ``shares`` value. A bucket collapses when it has
-    **≥2 distinct non-null CIKs** AND **≥1 insider-source member** (a Form-4 footprint —
-    the #1652 explosion). A purely-13D/G bucket (a co-investor group with no insider) is
-    left untouched for :func:`_reconcile_13d_groups` (#1645); the two passes partition the
-    work. Only **non-round** (:func:`_is_group_block`), positive, non-null-CIK rows are
-    eligible; everything else passes through to its channel unchanged.
+    (``13d``/``13g``), bucketed by EXACT ``shares`` value. A purely-13D/G bucket (a
+    co-investor group with no insider) is left untouched for
+    :func:`_reconcile_13d_groups` (#1645); the two passes partition the work.
+
+    A bucket with **≥1 insider-source member** collapses via EITHER route:
+
+    * **Value proxies (#1652, original).** ≥2 distinct non-null CIKs at an exact
+      **non-round** (:func:`_is_group_block`) value ≥ ``_INSIDER_GROUP_MIN_SHARES``.
+      Membership is INFERRED from the improbable precision of the shared figure.
+    * **Deemed chain (#2230).** The insider members carry the structured Rule
+      16a-1(a)(2) signature — see :func:`_is_deemed_chain`. Membership is READ from
+      the Form 3/4 relationship box and Table I column 5 rather than inferred, so the
+      magnitude floor and roundness guard do not apply; they exist only to substitute
+      for the evidence this route supplies directly (the same argument
+      :func:`_reconcile_same_accession_groups` makes for a shared accession).
+
+    Bucketing admission (:func:`_is_eligible`) is only positivity + non-null CIK +
+    eligible source, so a bucket failing the value proxies can still be tested against
+    the deemed-chain tier. A bucket satisfying neither is re-emitted to its origin
+    channel unchanged.
 
     Consumption is **exact-value only**: a consumed CIK's 13D/G row at a *different* value
     (usually the larger full group block) stays in ``blockholders`` for #1645/owner-once —
@@ -2244,15 +3406,22 @@ def _reconcile_insider_control_groups(
     eligible_by_value: dict[Decimal, list[tuple[str, Holder]]] = {}
 
     def _is_eligible(h: Holder) -> bool:
+        """Bucketing admission. Deliberately WIDER than the collapse gate: the
+        magnitude floor and roundness guard moved down to :func:`_passes_value_proxies`
+        so a bucket that fails them can still be re-examined under the deemed-chain
+        tier (#2230). A bucket that satisfies neither tier is re-emitted to its origin
+        list unchanged, so widening here is behaviour-preserving."""
         cik = h.filer_cik
-        return (
-            h.shares >= _INSIDER_GROUP_MIN_SHARES
-            and cik is not None
-            and bool(cik.strip())
-            and _is_group_block(h.shares)
-            and h.winning_source in _GROUP_ELIGIBLE_SOURCES
-        )
+        return h.shares > 0 and cik is not None and bool(cik.strip()) and h.winning_source in _GROUP_ELIGIBLE_SOURCES
 
+    def _passes_value_proxies(shares: Decimal) -> bool:
+        """The original #1652 inference gate: an exact non-round block at a magnitude
+        that can actually explode a float."""
+        return shares >= _INSIDER_GROUP_MIN_SHARES and _is_group_block(shares)
+
+    # Every row this pass received, indexed by holder identity, so both the release hazard
+    # below and the rep choice (#2385) can see a member's rows in OTHER channels.
+    rows_by_identity = _rows_by_identity(survivors, blockholders)
     for origin, source_list, out_list in (
         ("s", survivors, survivors_out),
         ("b", blockholders, blockholders_out),
@@ -2264,12 +3433,69 @@ def _reconcile_insider_control_groups(
                 out_list.append(h)
 
     corrections: list[CorrectionApplied] = []
-    for members in eligible_by_value.values():
+    for shares, members in eligible_by_value.items():
         holders = [h for _, h in members]
         distinct_ciks = {h.filer_cik for h in holders}
-        has_insider = any(h.winning_source in _INSIDER_GROUP_SOURCES for h in holders)
-        if len(distinct_ciks) >= 2 and has_insider:
-            collapsed, correction = _collapse_insider_control_group(holders)
+        insiders = [h for h in holders if h.winning_source in _INSIDER_GROUP_SOURCES]
+        has_insider = bool(insiders)
+        # Two independent routes to the same collapse. The value proxies infer
+        # membership from an improbably precise shared figure; the deemed-chain tier
+        # reads it off the Form 3/4 relationship box and ownership-form column
+        # instead, and so does not need them (#2230). Nature/10%-owner flags are
+        # meaningful only on Section 16 rows, so the tier is evaluated over the
+        # insider members; any 13D/G row in the same value bucket still folds into
+        # the rep exactly as before.
+        collapsible = len(distinct_ciks) >= 2 and has_insider and _passes_value_proxies(shares)
+        if not collapsible and has_insider:
+            collapsible = _is_deemed_chain(insiders)
+        # --- Release hazard (#2230) ------------------------------------------------
+        # Folding a member removes its identity from ``survivors`` and therefore from
+        # the owner-once identity grouping downstream. Any OTHER row that identity holds
+        # — most consequentially its 13F institutional row — is then no longer grouped
+        # with an insider row, so :func:`_reconcile_owner_once` stops classifying it as
+        # that insider and RELEASES it into the institutions wedge as a standalone
+        # owner. The pass then removes a small block and adds a large position: measured
+        # on CQP, folding Blackstone Group L.P. (CIK 0001393818) out of a 462,922 deemed
+        # block released its 13F row and the PIE GREW by 101,420,487 shares — the exact
+        # opposite of what this pass exists to do.
+        #
+        # Claiming the folded identity's other rows would fix it and is NOT available:
+        # #1652 settled consumption as exact-value-only precisely so that a member's
+        # larger genuine 13D block is not deleted (spec, Codex ckpt-1 MED; guarded by
+        # ``test_non_exact_13d_residual_stays_for_1645`` and
+        # ``test_rep_residual_split_documented``). Reversing that is a bigger decision
+        # than this ticket.
+        #
+        # So the NEW tier fails closed instead: leave the whole cluster alone rather than
+        # risk the release. The residual double-count is the conservative direction and
+        # matches the posture the rest of this pass takes. The original value-proxy route
+        # is deliberately NOT gated on this — its behaviour is unchanged from #1652.
+        #
+        # ⚠ The gate asks :func:`_releases_into_another_wedge`, NOT "are any rows
+        # stranded". Those are different propositions, and the wider one refused most of
+        # this tier for a hazard that cannot occur: a member whose stranded rows are
+        # themselves ``_INSIDER_SOURCES`` rows keeps its Section-16 classification in
+        # :func:`_reconcile_owner_once`, so its 13F stays a ``dropped_source`` and nothing
+        # changes wedge. Reversing #1652's consumption rule was never needed for those —
+        # the release the comment above describes requires the identity to be left with no
+        # insider row at all. Full-population census:
+        # ``PYTHONPATH=. uv run python -m scripts.audit_2230_release_hazard``.
+        if collapsible and not (len(distinct_ciks) >= 2 and has_insider and _passes_value_proxies(shares)):
+            # Same selector, same inputs, same winner as the fold itself — see
+            # :func:`_select_control_group_rep`. Asking the selector rather than
+            # re-spelling its key is what keeps the gate and the fold from drifting
+            # (review WARNING on PR #2384); the rep is the one member EXEMPT from this
+            # check, so a preview that disagreed with the fold would exempt the wrong one.
+            rep_preview = _select_control_group_rep(holders, rows_by_identity, record_holder_evidence)
+            rep_identity = _identity_key(rep_preview.filer_cik, rep_preview.filer_name)
+            for member in holders:
+                if _identity_key(member.filer_cik, member.filer_name) == rep_identity:
+                    continue
+                if _releases_into_another_wedge(member, holders, rows_by_identity):
+                    collapsible = False
+                    break
+        if collapsible:
+            collapsed, correction = _collapse_insider_control_group(holders, rows_by_identity, record_holder_evidence)
             # The rep is always an insider-source row (≥1 insider member + rep preference),
             # so it routes to the insiders slice via owner-once → goes to survivors.
             survivors_out.append(collapsed)
@@ -2334,6 +3560,11 @@ def _bucket_into_slices(
                 as_of_date=c.as_of_date,
                 filer_type=None,
                 dropped_sources=(),
+                # #2121: display-label only. Populated here on the non-additive
+                # memo overlay ALONE — matched DEF 14A rows go through
+                # ``_dedup_by_priority`` into insiders/blockholders and leave
+                # ``holder_role`` at its ``None`` default (I21/#1659 guarantee).
+                holder_role=c.holder_role,
             )
             for c in unmatched_def14a
         ]
@@ -2562,6 +3793,7 @@ def _build_slice(
             dropped_sources=h.dropped_sources,
             family_members=h.family_members,  # display breakdown of a collapsed family (#1644/#1649)
             lots=h.lots,  # per-lot breakdown of a collapsed direct/indirect owner (#1942)
+            holder_role=h.holder_role,  # DEF 14A proxy display label (#2121); None off the overlay
         )
         for h in holders
     )
@@ -2591,17 +3823,37 @@ def _build_slice(
 def _compute_residual(
     outstanding: Decimal,
     slices: Sequence[OwnershipSlice],
-    treasury: Decimal | None,
 ) -> ResidualBlock:
     """Compute the ``Public / unattributed`` residual.
 
-    Stale-mixed-date inputs (fresh Form 4 + old 13F) can leave the
-    raw residual negative — we clamp to 0 and surface
-    ``oversubscribed=True`` so the frontend renders a warning bar.
-    The category-counted slices use deduped totals, so the only path
-    to oversubscription is the snapshot-lag class of bug, not a
-    dedup mistake."""
-    treasury_d = treasury if treasury is not None else Decimal(0)
+    Treasury is NOT deducted (#2217). ``outstanding`` is
+    ``dei:EntityCommonStockSharesOutstanding`` / ``us-gaap:CommonStockSharesOutstanding``
+    (see :func:`_read_shares_outstanding`), and shares issued = shares outstanding
+    + treasury — so treasury shares were never in this base and subtracting them
+    removed a quantity that is not there. That is the design contract too: the
+    denominator is outstanding only, with treasury drawn as a separate wedge on
+    top of the ring (``docs/proposals/etl/ownership-tier0-cik-history.md``
+    §OwnershipPanel; the module docstring's "wrong denominator" ship-blocker).
+    That doc calls the wedge "additive" in the RENDERING sense — stacked above
+    the ring — which is not a licence to add or subtract it anywhere in the
+    arithmetic. The frontend was corrected then; this residual kept the
+    mirror-image of the same error.
+
+    Left uncorrected it read as a *negative* residual for any serial repurchaser
+    — 9 of 20 sampled large caps, with Coca-Cola, Goldman, JPM, P&G and Exxon
+    rendering a public float of exactly ZERO, and the warning bar below blaming
+    snapshot lag for it. Goldman carries treasury equal to 199.9% of outstanding,
+    which is only possible *because* the base excludes it.
+
+    Stale-mixed-date inputs (fresh Form 4 + old 13F) can still leave the raw
+    residual negative — we clamp to 0 and surface ``oversubscribed=True`` so the
+    frontend renders a warning bar. The category-counted slices use deduped
+    totals, so with the treasury term gone the remaining paths to
+    oversubscription are the snapshot-lag class and a genuine over-attribution,
+    not arithmetic.
+
+    :func:`_compute_concentration` below has always excluded treasury correctly;
+    the two now agree."""
     # Memo-overlay slices (funds N-PORT; DEF 14A proxy_disclosure #1659; future
     # ESOP/DRS/short-interest) do NOT contribute to ``sum_known`` — they describe
     # positions already counted via a pie-wedge slice (N-PORT funds are fund-level
@@ -2611,7 +3863,7 @@ def _compute_residual(
         (s.total_shares for s in slices if s.denominator_basis == "pie_wedge"),
         Decimal(0),
     )
-    raw = outstanding - sum_known - treasury_d
+    raw = outstanding - sum_known
     clamped = raw if raw > 0 else Decimal(0)
     pct = clamped / outstanding if outstanding > 0 else Decimal(0)
     return ResidualBlock(
@@ -2935,6 +4187,113 @@ def _stale_denominator_banner(as_of: date) -> BannerCopy:
             "is on file."
         ),
     )
+
+
+def _partial_class_denominator_banner() -> BannerCopy:
+    """Honest ``no_data`` banner when the shares-outstanding row on file is fresh
+    but does not cover the whole entity (#2232).
+
+    Cause-named, unlike the ``stale_denominator`` copy, because here we DO know
+    why: the issuer publishes no cover-page count we can read, and the balance-sheet
+    count we fell back to is smaller than a single disclosed holder's position. Like
+    #1581 it must NOT tell the operator to trigger a fundamentals sync — re-fetching
+    companyfacts returns the same dimension-stripped payload (sec-edgar §7.17), so
+    that instruction can never work."""
+    return BannerCopy(
+        state="no_data",
+        variant="error",
+        headline="Cannot compute ownership",
+        body=(
+            "The only shares-outstanding figure on file for this issuer is a "
+            "balance-sheet count that does not cover the whole company — a single "
+            "disclosed holder already reports more shares than it contains. "
+            "Ownership percentages are suppressed rather than computed against a "
+            "partial denominator. The breakdown returns once an entity-wide share "
+            "count is on file."
+        ),
+    )
+
+
+def _read_has_dei_cover_share_count(conn: psycopg.Connection[Any], instrument_id: int) -> bool:
+    """Does this issuer have ANY cover-page ``dei:EntityCommonStockSharesOutstanding``
+    fact on file (#2232)?
+
+    Source rule: that element is a REQUIRED cover-page disclosure on Form 10-K /
+    10-Q / 20-F — "the number of shares outstanding of each of the registrant's
+    classes of common stock, as of the latest practicable date". So its total
+    absence from ``financial_facts_raw`` is not "the issuer didn't say"; per
+    sec-edgar §7.17 it means every cover value carried a
+    ``us-gaap:StatementClassOfStockAxis`` member and companyfacts stripped it —
+    i.e. the issuer is MULTI-CLASS and the undimensioned
+    ``us-gaap:CommonStockSharesOutstanding`` we fell back to has unknown scope.
+
+    Verified live 2026-08-08 against ``data.sec.gov/api/xbrl/companyconcept`` for
+    AEVEX (CIK 0002096300), SOLV Energy (0002065636), Galaxy Digital (0001859392)
+    and HMH Holding (0002021880) — HTTP 404 on the ``dei`` concept for all four,
+    while AEVEX's rendered 10-Q cover reports Class A 50,744,176 + Class B
+    63,297,524 against the 1,000-share undimensioned parenthetical we store.
+
+    Deliberately NOT keyed on the winning row's taxonomy: an instrument whose
+    LATEST period happens to come from us-gaap while a dei fact exists at an
+    earlier period is a different (single-class, stale-cover) case, and the §7.17
+    argument does not hold for it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM financial_facts_raw
+                WHERE instrument_id = %(iid)s
+                  AND taxonomy = 'dei'
+                  AND concept = 'EntityCommonStockSharesOutstanding'
+                  AND unit = 'shares'
+                  AND val IS NOT NULL
+            )
+            """,
+            {"iid": instrument_id},
+        )
+        row = cur.fetchone()
+    assert row is not None  # SELECT EXISTS always returns one row
+    return bool(row[0])
+
+
+def denominator_is_partial_class(
+    *,
+    has_dei_cover_share_count: bool,
+    largest_single_holder_pct: Decimal,
+    per_class_denominator_applied: bool,
+) -> bool:
+    """Pure fail-closed policy: is the operative denominator provably NOT the whole
+    entity's share count (#2232)? Table-tested without a DB.
+
+    Both conditions are impossibility arguments, not thresholds — the issue's own
+    worked examples (``PKG`` 1,001x correction vs ``AVAL`` 1.08e9x error) show that
+    magnitude cannot separate a bad denominator from a real reverse split, and the
+    previous attempt's cross-check was ``unavailable`` for 24 of the 47 instruments
+    in the cohort because those issuers file only ONE shares concept.
+
+      1. **No cover-page count exists** — see :func:`_read_has_dei_cover_share_count`.
+         Establishes that the figure we are dividing by is a balance-sheet
+         parenthetical of unknown scope, not the entity-wide cover disclosure.
+      2. **Holdings-plausibility** — a single reconciled pie-wedge holder reports
+         more shares than the denominator contains. Impossible under Rule 13d-3 /
+         Section 16 for one beneficial owner of one class, so either the
+         denominator is partial or the numerator is unadjusted; the percentage is
+         unpublishable either way (#1662: fail closed, never publish the
+         structurally-wrong product).
+
+    This is :func:`_should_use_class_denominator` condition 3 — already worded in
+    this file as "no resolved pie-wedge holder owns more shares than exist in the
+    class (catches a mis-mapped too-small denominator, the %-inflating direction)"
+    — applied to the denominator the rollup ACTUALLY divides by, instead of only to
+    the FSDS per-class swap it was written for.
+
+    ``per_class_denominator_applied`` short-circuits to ``False``: that swap already
+    ran this exact plausibility guard against the class count before taking it, so a
+    verified per-class denominator is never the partial one."""
+    if per_class_denominator_applied:
+        return False
+    return not has_dei_cover_share_count and largest_single_holder_pct > 1
 
 
 def _read_shares_outstanding(
@@ -3551,11 +4910,16 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     """
     outstanding, outstanding_as_of, outstanding_source = _read_shares_outstanding(conn, instrument_id)
     historical_symbols = tuple(historical_symbols_for(conn, instrument_id))
+    # Drift chip (#966) is denominator-independent — read it BEFORE the
+    # no_data short-circuits so a coverage-integrity signal doesn't vanish
+    # exactly when the rollup is otherwise degraded.
+    def14a_drift = _read_def14a_drift(conn, instrument_id)
     if outstanding is None or outstanding <= 0:
         return OwnershipRollup.no_data(
             symbol=symbol,
             instrument_id=instrument_id,
             historical_symbols=historical_symbols,
+            def14a_drift=def14a_drift,
         )
     # A denominator many years stale produces nonsense percentages — a
     # single 13F holding renders >100% of "outstanding" (BRK.B: 124% off a
@@ -3568,8 +4932,13 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
             historical_symbols=historical_symbols,
             reason="stale_denominator",
             stale_as_of=outstanding_as_of,
+            def14a_drift=def14a_drift,
         )
     treasury, treasury_as_of = _read_treasury_from_current(conn, instrument_id)
+    # Unvested-award memo (#844) — overlay only, denominator-independent,
+    # but rendered only on the main (charted) path.
+    nonvested_awards = _read_nonvested_awards(conn, instrument_id, today=_snapshot_today(conn))
+    drs = _read_drs(conn, instrument_id, today=_snapshot_today(conn))
     sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)
     def14a_rows = _read_def14a_unmatched_from_current(conn, instrument_id)
     matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates, def14a_rows=def14a_rows)
@@ -3620,8 +4989,20 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # accession dup leaks. Collapse the PRECISE same-accession signal first (no floor — the
     # shared accession IS the group evidence #1652/#1645 must infer); insiders restricted to
     # {form4,form3}, blockholders to {13d,13g}, never def14a (#1659 FP class).
-    survivors, blockholders, same_accession_corrections = _reconcile_same_accession_groups(survivors, blockholders)
-    survivors, blockholders, insider_group_corrections = _reconcile_insider_control_groups(survivors, blockholders)
+    # #2408: the record-holder text a joint filing states about the block it reports.
+    # Read once, from the accessions the Section 16 survivors actually carry, and shared by
+    # both control-group passes — the same-accession pass is where it decides anything (the
+    # Table I clause cannot separate co-filers of one accession), but the selector is one
+    # implementation and both passes must ask it the same question.
+    record_holder_evidence = _read_record_holder_evidence(
+        conn, [h.winning_accession for h in survivors if h.winning_source in _INSIDER_GROUP_SOURCES]
+    )
+    survivors, blockholders, same_accession_corrections = _reconcile_same_accession_groups(
+        survivors, blockholders, record_holder_evidence
+    )
+    survivors, blockholders, insider_group_corrections = _reconcile_insider_control_groups(
+        survivors, blockholders, record_holder_evidence
+    )
     # 13D/G group collapse (#1645): a Rule 13d-5 group's members each report the
     # identical aggregate stake on separate accessions/CIKs and otherwise sum N× in
     # the blockholders wedge. Collapse a near-equal, same-period, non-round cluster to
@@ -3697,9 +5078,33 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         funds_holders=funds_holders,
         esop_holders=esop_holders,
     )
-    residual = _compute_residual(effective_outstanding, slices, treasury)
+    residual = _compute_residual(effective_outstanding, slices)
     concentration = _compute_concentration(effective_outstanding, slices)
     sanity = _compute_sanity(slices, effective_outstanding)
+    # #2232 — the denominator is fresh but does not cover the whole entity. Placed
+    # AFTER the pie is built on purpose: the plausibility test reads the RECONCILED
+    # largest holder, not a raw table max, so a control-group collapse or an NT
+    # supersession cannot leave a phantom over-100% row behind to fire on.
+    #
+    # The leading ``largest_single_holder_pct > 1`` is a pure PERFORMANCE pre-filter
+    # — it restates a condition :func:`denominator_is_partial_class` already owns, so
+    # that the ~94% of instruments with no over-100% holder skip the extra DB
+    # round-trip. It is redundant by construction and a revert-probe that removes it
+    # changes no output; the policy's enforcement point is the pure function, pinned
+    # by its own table tests (same shape as the sql/259 note on restated predicates).
+    if sanity.largest_single_holder_pct > 1 and denominator_is_partial_class(
+        has_dei_cover_share_count=_read_has_dei_cover_share_count(conn, instrument_id),
+        largest_single_holder_pct=sanity.largest_single_holder_pct,
+        per_class_denominator_applied=per_class_denominator is not None,
+    ):
+        return OwnershipRollup.no_data(
+            symbol=symbol,
+            instrument_id=instrument_id,
+            historical_symbols=historical_symbols,
+            reason="partial_class_denominator",
+            stale_as_of=effective_as_of,
+            def14a_drift=def14a_drift,
+        )
     # Independent denominator tie-out (#1647 part 5) — reads the comparison figure from
     # the same snapshot; facts only, never changes a share count. ``effective_*`` are the
     # post-swap denominator the rollup actually used; per_class set ⟹ dual-class path.
@@ -3714,11 +5119,17 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     estimates = _read_universe_estimates(conn, instrument_id)
     coverage = _compute_coverage(slices, estimates)
     banner = _banner_for_state(coverage.state, coverage, concentration.pct_outstanding_known)
-    # 13F-NT supersession telemetry (#1639): the rows the institutions query
-    # excluded, so the shrunk wedge + grown residual are explainable. Read from
-    # the same snapshot as everything else (caller is inside snapshot_read).
+    # 13F-NT supersession telemetry (#1639) + 13F-HR supersession telemetry (#2229):
+    # the rows the institutions query excluded, so the shrunk wedge + grown residual
+    # are explainable. Read from the same snapshot as everything else (caller is
+    # inside snapshot_read). NT first — a row suppressed by both is reported once,
+    # under the stronger evidence.
     corrections_applied = (
         *_read_notice_suppressions(conn, instrument_id),
+        *_read_hr_supersessions(conn, instrument_id),
+        # #2788 — the insider rows the retention bound excluded. Read the kind's
+        # docstring before quoting it as an exit; it is a coverage statement, not one.
+        *_read_beyond_retention_insiders(conn, instrument_id),
         *family_corrections,
         *same_accession_corrections,
         *insider_group_corrections,
@@ -3748,6 +5159,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         sanity=sanity,
         denominator_cross_check=denominator_cross_check,
         computed_at=datetime.now(tz=UTC),
+        def14a_drift=def14a_drift,
+        nonvested_awards=nonvested_awards,
+        drs=drs,
     )
 
 
@@ -3773,17 +5187,31 @@ _CSV_HEADER: tuple[str, ...] = (
 def build_rollup_csv(rollup: OwnershipRollup) -> str:
     """Flatten a deduped :class:`OwnershipRollup` into a CSV string.
 
-    One row per surviving holder across all slices, plus two memo
-    rows at the end:
+    One row per surviving holder across all slices, plus:
 
-      * ``__treasury__`` — issuer treasury share count (additive
-        wedge on the chart, not a deduped holder).
       * ``__residual__`` — ``Public / unattributed`` block (clamped
-        to 0 when oversubscribed).
+        to 0 when oversubscribed). ADDITIVE.
+      * ``__memo:treasury__`` — issuer treasury share count. NOT
+        additive (#2217).
 
-    The two memo rows let an operator sum the ``shares`` column and
-    verify it equals ``shares_outstanding`` without round-tripping
-    to a separate endpoint.
+    The additive reconciliation an operator can run on the ``shares``
+    column is::
+
+        Σ (rows whose category is neither __memo:* nor __dropped:*)
+            == shares_outstanding
+
+    i.e. pie-wedge holders + residual. **Treasury is not a term.**
+    ``shares_outstanding`` is the DEI/us-gaap OUTSTANDING count, which
+    already excludes treasury (shares issued = outstanding + treasury),
+    so adding treasury back would overshoot by exactly that amount —
+    and treasury can exceed outstanding outright (Goldman: 199.9%).
+    It moved from ``__treasury__`` to the established
+    ``__memo:<category>__`` prefix so the one documented filter rule
+    excludes it, the same way funds and unmatched DEF 14A rows are
+    excluded. It keeps its historical emission position (immediately
+    before ``__residual__``) rather than moving to the trailing memo
+    block — only the category token changed, so a consumer keying on
+    the prefix needs no positional rework.
 
     Header always emitted so an automation pipe can be branchless on
     empty rollups (no_data state, pre-ingest instruments).
@@ -3801,8 +5229,8 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     writer.writerow(_CSV_HEADER)
 
     # Emit pie-wedge slices first so the additive-sum invariant holds
-    # against (treasury_shares + residual.shares + Σ pie-wedge holders)
-    # = shares_outstanding. Memo-overlay slices (funds, esop, future
+    # against (residual.shares + Σ pie-wedge holders) = shares_outstanding.
+    # Treasury is NOT a term (#2217). Memo-overlay slices (funds, esop, future
     # DRS / short-interest) are emitted in a trailing block with the
     # ``__memo:<category>__`` prefix so spreadsheet consumers can
     # filter them OUT of any SUM(shares) reconciliation. Codex
@@ -3840,7 +5268,7 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
             [
                 "",
                 "Treasury (memo)",
-                "__treasury__",
+                "__memo:treasury__",
                 str(rollup.treasury_shares),
                 treasury_pct,
                 "",
@@ -3871,7 +5299,7 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     # Form 4) become ``dropped_sources`` and would otherwise vanish from the
     # CSV audit. Emit them as ``__dropped:<source>__`` memo rows — excluded
     # from any SUM(shares) reconciliation (the sum invariant holds over the
-    # pie-wedge rows + treasury + residual), but visible so an operator can see
+    # pie-wedge rows + residual; treasury is a memo row, #2217), but visible so an operator can see
     # the full filing trail behind a deduped owner.
     for slc in pie_slices:
         for holder in slc.holders:

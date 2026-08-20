@@ -141,7 +141,11 @@ def main() -> int:
         logger.error("eToro credentials missing: %s", exc)
         return 1
 
-    with psycopg.connect(settings.database_url) as conn:
+    # autocommit=True per refresh_market_data's connection contract (#2269):
+    # without it the whole force_backfill deepening — up to 1000 bars per
+    # instrument — rides on a single transaction and is lost whole if the run
+    # is interrupted, which for a multi-hour corpus job is the likely case.
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
         instruments = _load_instruments(conn, args.limit)
         if not instruments:
             logger.info("No Tier 1/2 instruments matched — nothing to deepen.")

@@ -15,6 +15,7 @@ demo key). See spec docs/proposals/etl/2026-06-13-portfolio-value-v2-fx-eod.md.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -48,6 +49,17 @@ class PositionInput:
     amount: Decimal
     open_rate: Decimal
     is_buy: bool
+    # Native-currency P&L -> broker USD conversion fixed by the broker at
+    # entry.  Kept separate from display FX: strategy accounting is USD even
+    # when the operator views the main portfolio in GBP/EUR.
+    open_conversion_rate: Decimal = Decimal("1")
+    # ⚠ `price_daily.price_date` OF `close` — the date the mark is effective, not
+    # the date the snapshot is stamped.  The lookup is carry-forward
+    # (`price_date <= snapshot_date ORDER BY price_date DESC`), so an instrument
+    # that has not traded since is marked from an older bar and the two differ.
+    # #2602 item 4: this was fetched and discarded, which is what made
+    # `local_eod_effective_time_unknown` permanent.  None exactly when `close` is.
+    mark_price_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +71,54 @@ class PositionResult:
     close: Decimal | None
     value_display: Decimal | None
     price_status: PriceStatus
+    unrealised_pnl_usd: Decimal | None = None
+    #: Carried through from ``PositionInput`` unchanged — evidence, not a decision.
+    mark_price_date: date | None = None
+
+
+@dataclass(frozen=True)
+class MarkEffectiveness:
+    """When the marks behind a snapshot's ``positions_value`` were effective.
+
+    ⚠ ``oldest_mark_date`` is a MIN, not a MAX. "As of when is this total true"
+    is bounded by the STALEST input — a snapshot dated today whose worst mark is
+    a week old is a week-old valuation with a today-shaped label on it, and the
+    freshest mark says nothing about that.
+
+    ⚠ ``oldest_mark_date is None`` reads two ways once the value is STORED, and
+    only one of them matters:
+
+    * ``positions_priced > 0`` — the row predates ``sql/350``, so its marks were
+      never recorded. The effective time is genuinely unknown.
+    * ``positions_priced == 0`` — no position contributed to ``positions_value``
+      at all (all cash, or every position unpriced). Pre- and post-migration rows
+      are indistinguishable here **and need not be distinguished**: neither has a
+      mark, so neither has an effective time to be unknown.
+
+    So ``positions_priced`` is the discriminator, and it is only load-bearing in
+    the first case. ``account_equity_evidence.load_account_equity_evidence`` is
+    the only reader that needs it.
+    """
+
+    oldest_mark_date: date | None
+    stale_mark_positions: int
+
+
+def summarise_marks(results: Sequence[PositionResult], snapshot_date: date) -> MarkEffectiveness:
+    """Reduce per-position mark dates to the snapshot-level effectiveness bound.
+
+    ⚠ PRICED POSITIONS ONLY. A ``no_price`` position has no mark to be stale,
+    and a ``no_fx`` one — priced natively but not convertible — contributed
+    nothing to ``positions_value``, so neither can bound a total they are not in.
+    Both are already reported by their own counters, so nothing is hidden by
+    excluding them; including them would make the bound describe a different
+    number than the one it is attached to.
+    """
+    marks = [r.mark_price_date for r in results if r.price_status == "priced" and r.mark_price_date is not None]
+    return MarkEffectiveness(
+        oldest_mark_date=min(marks) if marks else None,
+        stale_mark_positions=sum(1 for mark in marks if mark < snapshot_date),
+    )
 
 
 @dataclass(frozen=True)
@@ -102,8 +162,21 @@ def compute_eod_equity(
     for p in positions:
         if p.close is None:
             no_price += 1
+            # `mark_price_date` is passed rather than left to its default: the
+            # LATERAL filters `close IS NOT NULL`, so it is provably None here —
+            # but a result that is correct only because of an invariant in
+            # another function is one edit away from being wrong silently.
             results.append(
-                PositionResult(p.position_id, p.instrument_id, p.units, p.native_ccy, None, None, "no_price")
+                PositionResult(
+                    p.position_id,
+                    p.instrument_id,
+                    p.units,
+                    p.native_ccy,
+                    None,
+                    None,
+                    "no_price",
+                    mark_price_date=p.mark_price_date,
+                )
             )
             continue
         # Mark-to-market equity, mirroring app/api/portfolio.py:348-357.
@@ -112,13 +185,26 @@ def compute_eod_equity(
         # but stays correct if a leveraged/short row ever appears.
         if p.is_buy:
             value_native = p.amount + p.units * (p.close - p.open_rate)
+            pnl_native = p.units * (p.close - p.open_rate)
         else:
             value_native = p.amount + p.units * (p.open_rate - p.close)
+            pnl_native = p.units * (p.open_rate - p.close)
+        unrealised_pnl_usd = pnl_native * p.open_conversion_rate
         if p.native_ccy is None:
             # No currency to convert from → cannot price into display ccy.
             no_fx += 1
             results.append(
-                PositionResult(p.position_id, p.instrument_id, p.units, p.native_ccy, p.close, None, "no_fx")
+                PositionResult(
+                    p.position_id,
+                    p.instrument_id,
+                    p.units,
+                    p.native_ccy,
+                    p.close,
+                    None,
+                    "no_fx",
+                    unrealised_pnl_usd,
+                    mark_price_date=p.mark_price_date,
+                )
             )
             continue
         try:
@@ -128,13 +214,33 @@ def compute_eod_equity(
         except FxRateNotFound:
             no_fx += 1
             results.append(
-                PositionResult(p.position_id, p.instrument_id, p.units, p.native_ccy, p.close, None, "no_fx")
+                PositionResult(
+                    p.position_id,
+                    p.instrument_id,
+                    p.units,
+                    p.native_ccy,
+                    p.close,
+                    None,
+                    "no_fx",
+                    unrealised_pnl_usd,
+                    mark_price_date=p.mark_price_date,
+                )
             )
             continue
         positions_value += value_display
         priced += 1
         results.append(
-            PositionResult(p.position_id, p.instrument_id, p.units, p.native_ccy, p.close, value_display, "priced")
+            PositionResult(
+                p.position_id,
+                p.instrument_id,
+                p.units,
+                p.native_ccy,
+                p.close,
+                value_display,
+                "priced",
+                unrealised_pnl_usd,
+                mark_price_date=p.mark_price_date,
+            )
         )
 
     cash_value = Decimal("0")
@@ -196,18 +302,26 @@ def _read_positions(conn: psycopg.Connection[Any], snapshot_date: date) -> list[
                 b.units,
                 b.amount,
                 b.open_rate,
+                b.open_conversion_rate,
                 b.is_buy,
                 i.currency AS native_ccy,
-                (
-                    SELECT close FROM price_daily
-                    WHERE instrument_id = b.instrument_id
-                      AND price_date <= %(d)s
-                      AND close IS NOT NULL
-                    ORDER BY price_date DESC
-                    LIMIT 1
-                ) AS close
+                mark.close AS close,
+                mark.price_date AS mark_price_date
             FROM broker_positions b
             JOIN instruments i USING (instrument_id)
+            -- ⚠ LATERAL, not two correlated scalar subqueries. The mark and the
+            -- date it is effective must come from the SAME bar; two independent
+            -- subqueries would re-run the ordering and could in principle be
+            -- planned against different rows, which is a defect no test would
+            -- see because they agree on every ordinary corpus. #2602 item 4.
+            LEFT JOIN LATERAL (
+                SELECT close, price_date FROM price_daily
+                WHERE instrument_id = b.instrument_id
+                  AND price_date <= %(d)s
+                  AND close IS NOT NULL
+                ORDER BY price_date DESC
+                LIMIT 1
+            ) AS mark ON TRUE
             WHERE b.position_id >= 0 AND b.units > 0
             """,
             {"d": snapshot_date},
@@ -223,6 +337,8 @@ def _read_positions(conn: psycopg.Connection[Any], snapshot_date: date) -> list[
             amount=Decimal(str(r["amount"])),
             open_rate=Decimal(str(r["open_rate"])),
             is_buy=bool(r["is_buy"]),
+            open_conversion_rate=Decimal(str(r["open_conversion_rate"])),
+            mark_price_date=r["mark_price_date"],
         )
         for r in rows
     ]
@@ -271,12 +387,13 @@ def compute_and_store_eod_snapshot(conn: psycopg.Connection[Any]) -> EodEquity:
         rates, fx_rate_date = load_fx_rates_for_date(conn, snapshot_date)
 
     equity = compute_eod_equity(positions, cash, display_ccy, rates)
+    marks = summarise_marks(equity.position_results, snapshot_date)
 
     with conn.transaction():
-        _write_snapshot(conn, snapshot_date, display_ccy, fx_rate_date, equity)
+        _write_snapshot(conn, snapshot_date, display_ccy, fx_rate_date, equity, marks)
 
     logger.info(
-        "eod_snapshot %s: total=%s priced=%d/%d no_price=%d no_fx=%d fx_date=%s",
+        "eod_snapshot %s: total=%s priced=%d/%d no_price=%d no_fx=%d fx_date=%s oldest_mark=%s stale_marks=%d",
         snapshot_date,
         equity.total_value,
         equity.positions_priced,
@@ -284,6 +401,8 @@ def compute_and_store_eod_snapshot(conn: psycopg.Connection[Any]) -> EodEquity:
         equity.positions_no_price,
         equity.positions_no_fx,
         fx_rate_date,
+        marks.oldest_mark_date,
+        marks.stale_mark_positions,
     )
     return equity
 
@@ -294,6 +413,7 @@ def _write_snapshot(
     display_ccy: str,
     fx_rate_date: date | None,
     equity: EodEquity,
+    marks: MarkEffectiveness,
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -301,10 +421,12 @@ def _write_snapshot(
             INSERT INTO portfolio_eod_snapshots (
                 snapshot_date, display_currency, total_value, positions_value, cash_value,
                 fx_rate_date, positions_total, positions_priced, positions_no_price,
-                positions_no_fx, cash_no_fx_currencies, computed_at
+                positions_no_fx, cash_no_fx_currencies, oldest_mark_date,
+                stale_mark_positions, computed_at
             ) VALUES (
                 %(d)s, %(ccy)s, %(total)s, %(pos)s, %(cash)s,
-                %(fxd)s, %(ptot)s, %(ppri)s, %(pnp)s, %(pnf)s, %(cnf)s, NOW()
+                %(fxd)s, %(ptot)s, %(ppri)s, %(pnp)s, %(pnf)s, %(cnf)s, %(omd)s,
+                %(smp)s, NOW()
             )
             ON CONFLICT (snapshot_date) DO UPDATE SET
                 display_currency = EXCLUDED.display_currency,
@@ -317,6 +439,12 @@ def _write_snapshot(
                 positions_no_price = EXCLUDED.positions_no_price,
                 positions_no_fx = EXCLUDED.positions_no_fx,
                 cash_no_fx_currencies = EXCLUDED.cash_no_fx_currencies,
+                -- ⚠ A re-run must be able to move these BACK to NULL/0. Omitting
+                -- them from the update set would leave a stale bound sitting
+                -- beside a freshly recomputed total, which is worse than never
+                -- having recorded one.
+                oldest_mark_date = EXCLUDED.oldest_mark_date,
+                stale_mark_positions = EXCLUDED.stale_mark_positions,
                 computed_at = NOW()
             """,
             {
@@ -331,6 +459,8 @@ def _write_snapshot(
                 "pnp": equity.positions_no_price,
                 "pnf": equity.positions_no_fx,
                 "cnf": equity.cash_no_fx_currencies,
+                "omd": marks.oldest_mark_date,
+                "smp": marks.stale_mark_positions,
             },
         )
         # Per-position rows: replace wholesale for this date (re-run overwrites).
@@ -341,10 +471,15 @@ def _write_snapshot(
         if equity.position_results:
             cur.executemany(
                 """
+                -- ⚠ TWO POSITIONAL LISTS THAT MUST AGREE, edited separately: the
+                -- column list here and the tuple below. A new column appended at
+                -- a different ordinal in one of them binds silently to the wrong
+                -- field, and nothing types it. Append to BOTH tails together.
                 INSERT INTO portfolio_eod_position_snapshots (
                     snapshot_date, position_id, instrument_id, units,
-                    close_price, native_currency, value_display, price_status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    close_price, native_currency, value_display, price_status,
+                    unrealised_pnl_usd, mark_price_date
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     (
@@ -356,6 +491,8 @@ def _write_snapshot(
                         r.native_ccy,
                         r.value_display,
                         r.price_status,
+                        r.unrealised_pnl_usd,
+                        r.mark_price_date,
                     )
                     for r in equity.position_results
                 ],

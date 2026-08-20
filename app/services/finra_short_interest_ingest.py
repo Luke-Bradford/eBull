@@ -23,6 +23,11 @@ are ``None`` or ``''``. The per-row defect path explicitly checks
 ``symbolCode`` + ``currentShortPositionQuantity`` + ``settlementDate``
 required-presence and skips rows where any are blank/None.
 
+Body-date contract (#2234): every parsed row's ``settlementDate``
+column MUST equal the caller-supplied ``settlement_date``. Mismatch is
+file-level fatal (``HeaderCorruptionError``), same posture as the
+RegSHO daily sibling's ``Date``-column assertion.
+
 Raw-payload-before-parse contract (#1168) is JOB-enforced: the caller
 MUST run ``raw_filings.store_raw(...)`` + ``conn.commit()`` BEFORE
 calling this function.
@@ -40,7 +45,7 @@ import csv
 import io
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -157,6 +162,27 @@ def build_preloaded_symbol_resolver(
     return resolver
 
 
+def parse_body_settlement_date(raw: Any) -> date | None:
+    """Parse the body ``settlementDate`` column; ``None`` if unparseable.
+
+    Every archive file probed on 2026-08-06 (``shrt20180112`` —
+    the oldest file the CDN still serves — through ``shrt20260715``)
+    carries ISO ``YYYY-MM-DD``. The compact ``YYYYMMDD`` form is
+    accepted as well because the sibling ``accountingYearMonthNumber``
+    column and the CDN filename both use it, so it is a live shape in
+    this feed rather than a hypothetical one.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def _opt_int(v: Any) -> int | None:
     if v is None or v == "":
         return None
@@ -173,6 +199,30 @@ def _opt_decimal(v: Any) -> Decimal | None:
         return Decimal(str(v))
     except InvalidOperation, ValueError, TypeError:
         return None
+
+
+def required_row_fields(row: Mapping[str, Any]) -> tuple[str, int, Any] | None:
+    """Row-shape gate — ``(symbol, current_short, settlement_raw)`` or ``None``.
+
+    ``csv.DictReader`` sets missing trailing fields to ``None``, so a truncated
+    row presents as a dict carrying the expected keys with some values
+    ``None``/blank. Explicit required-field check (Codex 1b r2 MED 1).
+
+    Shared rather than inlined so the sentinel census
+    (``scripts/audit_2337_finra_match_rate.py``) counts the same rows ingest
+    counts. #2337's sentinel is derived FROM that census, so a divergence
+    between the two would silently mis-calibrate the alarm it feeds.
+    """
+    symbol = (row.get("symbolCode") or "").strip()
+    current_short_raw = row.get("currentShortPositionQuantity")
+    settlement_raw = row.get("settlementDate")
+    if not symbol or current_short_raw in (None, "") or settlement_raw in (None, ""):
+        return None
+    try:
+        current_short = int(current_short_raw)
+    except ValueError, TypeError:
+        return None
+    return symbol, current_short, settlement_raw
 
 
 def ingest_settlement_file(
@@ -211,21 +261,28 @@ def ingest_settlement_file(
         for row in reader:
             rows_parsed += 1
 
-            # Row-shape validation. ``csv.DictReader`` sets missing trailing
-            # fields to ``None``; truncated rows present as a dict with the
-            # expected keys but some values None/blank. Explicit required-
-            # field check (Codex 1b r2 MED 1).
-            symbol = (row.get("symbolCode") or "").strip()
-            current_short_raw = row.get("currentShortPositionQuantity")
-            settlement_raw = row.get("settlementDate")
-            if not symbol or current_short_raw in (None, "") or settlement_raw in (None, ""):
+            required = required_row_fields(row)
+            if required is None:
                 skipped_invalid_row += 1
                 continue
-            try:
-                current_short_int = int(current_short_raw)  # type: ignore[arg-type]
-            except ValueError, TypeError:
-                skipped_invalid_row += 1
-                continue
+            symbol, current_short_int, settlement_raw = required
+
+            # Body-date validation — mirrors the RegSHO daily sibling
+            # (``finra_regsho_ingest`` asserts ``row.Date == trade_date``;
+            # skill ``data-sources/finra.md`` §2.6). Without it this
+            # parser DISCARDS the body's own ``settlementDate`` and
+            # stores the caller's, so a file fetched under the wrong URL
+            # date would be silently mis-dated. That matters because the
+            # settlement calendar is DESIGNATED by FINRA rather than
+            # derivable (Rule 4560(a)), so the job resolves holiday-
+            # shifted dates by probing — and a probe must be validated
+            # against the file it lands on, not assumed correct.
+            body_settlement = parse_body_settlement_date(settlement_raw)
+            if body_settlement != settlement_date:
+                raise HeaderCorruptionError(
+                    f"FINRA body settlementDate mismatch at settlement_date={settlement_date}: "
+                    f"symbolCode={symbol!r} carries settlementDate={settlement_raw!r}"
+                )
 
             # Ambiguity check BEFORE resolver call (resolver returns None
             # for both ambiguous + no-match; disambiguate for the counter).

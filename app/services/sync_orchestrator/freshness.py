@@ -18,8 +18,8 @@ BEFORE ordering would hide a newer failure behind an older success.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
 
 import psycopg
 
@@ -98,24 +98,29 @@ def _format_age(delta: timedelta) -> str:
     return f"{minutes}m"
 
 
-def _current_quarter_start(today: date) -> date:
-    quarter = (today.month - 1) // 3
-    return date(today.year, quarter * 3 + 1, 1)
-
-
 # ---------------------------------------------------------------------------
 # Per-layer predicates
 # ---------------------------------------------------------------------------
 
 
+#: Weekly cadence (#277). eToro's /instruments endpoint has no delta filter — we
+#: pull the whole list (~15k rows) every refresh. The universe rarely changes
+#: day-to-day (new listings are rare, ticker changes rarer still), so a daily
+#: refresh was write amplification for no information gain. A 7-day window catches
+#: meaningful changes without re-pulling weekly volumes of identical rows.
+#:
+#: ⚠ NAMED rather than inline because ``ops_monitor._STALENESS_THRESHOLDS`` has to
+#: stay LOOSER than it: this window is what decides how old the universe layer is
+#: ALLOWED to get, so an alert threshold below it fires on the intended state.
+#: They cannot import each other (``sync_orchestrator.adapters`` already imports
+#: ``ops_monitor``), so the relationship is asserted by
+#: ``tests/test_2407_universe_staleness_contract.py`` instead of by a shared
+#: constant. #2407.
+UNIVERSE_REFRESH_WINDOW: Final = timedelta(days=7)
+
+
 def universe_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    # Weekly cadence (#277). eToro's /instruments endpoint has no delta
-    # filter — we pull the whole list (~15k rows) every refresh. The
-    # universe rarely changes day-to-day (new listings are rare, ticker
-    # changes rarer still), so a daily refresh was write amplification
-    # for no information gain. A 7-day window catches meaningful
-    # changes without re-pulling weekly volumes of identical rows.
-    return _fresh_by_audit(conn, "nightly_universe_sync", timedelta(days=7))
+    return _fresh_by_audit(conn, "nightly_universe_sync", UNIVERSE_REFRESH_WINDOW)
 
 
 def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
@@ -123,11 +128,11 @@ def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     if not audit_fresh:
         return False, audit_detail
     # Content check: every T1/T2 instrument must have a candle for the
-    # most recent trading day. Per-instrument query avoids the false-pass
+    # last completed US session. Per-instrument query avoids the false-pass
     # of global MAX(price_date) when the table is uniformly stale.
-    from app.services.market_data import _most_recent_trading_day
+    from app.services.market_calendar import latest_completed_us_session
 
-    trading_day = _most_recent_trading_day(date.today())
+    trading_day = latest_completed_us_session(datetime.now(UTC))
     row = conn.execute(
         """
         SELECT COUNT(*) AS missing
@@ -152,52 +157,39 @@ def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
 
 
 def fundamentals_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    # Liveness audit stays on ``daily_research_refresh`` — the job the
+    # ``fundamentals`` DataLayer's refresh adapter dispatches
+    # (sync_orchestrator/adapters.py::refresh_fundamentals). Audit-job and
+    # refresh-job MUST stay aligned: if the orchestrator marks the layer
+    # stale it re-runs daily_research_refresh, which must be able to clear
+    # the liveness signal (Codex ckpt-2). The snapshot data itself is
+    # produced by the scheduled fundamentals_sync → daily_financial_facts
+    # write-through, and its correctness is checked by the content probe
+    # below (not by this liveness row) — same producer/consumer split as
+    # before #2008 (the snapshot was already made by fundamentals_sync
+    # phase-1b under the default dedupe flag, not by the layer refresh).
     audit_fresh, audit_detail = _fresh_by_audit(conn, "daily_research_refresh", timedelta(hours=24))
     if not audit_fresh:
         return False, audit_detail
-    # Content check: every SEC-CIK-mapped tradable instrument must
-    # have a fundamentals_snapshot row with as_of_date in the
-    # current quarter. #540: scoped to SEC-CIK only — non-US /
-    # crypto / commodity instruments have no public-source
-    # fundamentals path today and would otherwise alarm
-    # indefinitely (cosmetic noise on the operator dashboard).
+    # Content check (#2008): pipeline CONSISTENCY, not filing cadence —
+    # every instrument with normalized quarter rows must have snapshot
+    # rows (the write-through guarantees it; missing > 0 means the
+    # write-through broke). The previous "as_of_date in the current
+    # calendar quarter" rule was structurally unsatisfiable: as_of is a
+    # fiscal period end, so for up to ~6 weeks after every calendar
+    # quarter boundary (Rule 13a-13 10-Q deadlines: 40-45d) NO issuer
+    # can have a row in the current quarter — measured red on the FULL
+    # population (5,349/5,349 "missing", 2026-07-12). Per-instrument
+    # filing-cadence staleness is coverage's job, not this gate's.
     #
-    # Cohort alignment with the producer: this reader scopes to
-    # ``is_primary = TRUE`` CIKs, and the SEC fundamentals producer
-    # in ``app/workers/scheduler.py::daily_research_refresh`` was
-    # tightened in this PR (#540) to filter on the same predicate.
-    # Either side regressing back to "every sec/cik row" would
-    # re-introduce silent issuer-mix corruption on instruments with
-    # demoted historical CIKs — the SQL-shape regression tests in
-    # ``tests/test_sync_orchestrator_freshness.py`` and
-    # ``tests/services/sync_orchestrator/test_content_predicates.py``
-    # pin both sides.
-    quarter_start = _current_quarter_start(date.today())
-    row = conn.execute(
-        """
-        SELECT COUNT(*) AS missing
-        FROM instruments i
-        JOIN external_identifiers ei
-            ON ei.instrument_id = i.instrument_id
-           AND ei.provider = 'sec'
-           AND ei.identifier_type = 'cik'
-           AND ei.is_primary = TRUE
-        WHERE i.is_tradable = TRUE
-          AND NOT EXISTS (
-              SELECT 1 FROM fundamentals_snapshot fs
-              WHERE fs.instrument_id = i.instrument_id
-                AND fs.as_of_date >= %s
-          )
-        """,
-        (quarter_start,),
-    ).fetchone()
-    missing = row[0] if row else 0
-    if missing > 0:
-        return (
-            False,
-            f"{missing} SEC-CIK tradable instruments lack fundamentals snapshot "
-            f"for quarter starting {quarter_start.isoformat()}",
-        )
+    # Delegate to fundamentals_content_ok so the write-through-gap query
+    # lives in exactly one place (review NITPICK — no drift between the
+    # two gates). Imported at call time to avoid a package import cycle.
+    from app.services.sync_orchestrator.content_predicates import fundamentals_content_ok
+
+    content_ok, content_detail = fundamentals_content_ok(conn)
+    if not content_ok:
+        return False, content_detail
     return True, audit_detail
 
 
@@ -225,6 +217,39 @@ def scoring_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     if latest_candle is not None and latest_score < latest_candle:
         return False, "latest score older than latest candle"
     return True, audit_detail
+
+
+def fair_value_band_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    """Content-watermark freshness for the fair-value band layer (#2009).
+
+    Unlike the audit-watermark predicates above, the band is a pure
+    DB-derived layer with no external I/O, so freshness reads the actual
+    band rows (``MAX(computed_at)`` over ``fair_value_band_current`` for the
+    live method version) rather than a ``job_runs`` audit row — the presence
+    of freshly-written band rows IS the freshness signal, and it stays honest
+    even if a manual recompute wrote rows outside the orchestrator job path.
+    24h window matches the layer cadence. Age is computed in SQL as
+    now() - computed_at; note computed_at is written with the Python client
+    clock (``datetime.now(tz=UTC)`` in ``write_band``), NOT SQL now(), so this
+    compares the DB-server clock against the client write-clock — they are
+    co-located, so the skew is negligible.
+    """
+    from app.services.fair_value_band import METHOD_VERSION
+
+    row = conn.execute(
+        """
+        SELECT EXTRACT(EPOCH FROM now() - MAX(computed_at)) AS age_seconds
+        FROM fair_value_band_current
+        WHERE method_version = %s
+        """,
+        (METHOD_VERSION,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return False, "no fair_value_band_current rows for current method_version"
+    age = timedelta(seconds=float(row[0]))
+    if age > timedelta(hours=24):
+        return False, f"fair-value bands last computed {_format_age(age)} ago (window 24h)"
+    return True, f"fair-value bands last computed {_format_age(age)} ago"
 
 
 def recommendations_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
@@ -269,6 +294,13 @@ def risk_metrics_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     # history, which only meaningfully shifts on a weekly horizon. A
     # 7-day audit window matches the layer cadence.
     return _fresh_by_audit(conn, "risk_metrics_refresh", timedelta(days=7))
+
+
+def price_quarantine_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    # 24h window (#2261): the verdicts are derived from price_daily, which the
+    # candles layer rewrites nightly, so a day-old quarantine describes a
+    # day-old series. Matches the layer cadence.
+    return _fresh_by_audit(conn, "price_quarantine_refresh", timedelta(hours=24))
 
 
 def weekly_reports_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:

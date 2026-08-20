@@ -59,10 +59,12 @@ from psycopg_pool import ConnectionPool
 
 from app.config import settings
 from app.db.background_write import background_write_connection
+from app.db.pg_settings import JOBS_NON_SEC_MAX_CONCURRENCY
 from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.locks import JobAlreadyRunning, JobLock
-from app.jobs.sources import JobInvoker
-from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
+from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
+from app.jobs.sources import JobInvoker, source_for
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, fetch_latest_successful_runs, record_job_skip
 from app.services.process_stop import acquire_prelude_lock
 from app.services.processes.bootstrap_gate import check_bootstrap_state_gate
 from app.services.processes.param_metadata import (
@@ -73,6 +75,7 @@ from app.services.processes.param_metadata import (
 from app.services.sync_orchestrator.types import OrchestratorFenceHeld
 from app.workers.scheduler import (
     JOB_ATTRIBUTION_SUMMARY,
+    JOB_CBOE_VIX_REFRESH,
     JOB_CUSIP_EXTID_SWEEP,
     JOB_CUSIP_UNIVERSE_BACKFILL,
     JOB_DAILY_CANDLE_REFRESH,
@@ -82,9 +85,11 @@ from app.workers.scheduler import (
     JOB_DAILY_PORTFOLIO_SYNC,
     JOB_DAILY_RESEARCH_REFRESH,
     JOB_DAILY_TAX_RECONCILIATION,
+    JOB_DRS_DISCLOSURE_REFRESH,
     JOB_ETORO_LOOKUPS_REFRESH,
     JOB_EXCHANGES_METADATA_REFRESH,
     JOB_EXECUTE_APPROVED_ORDERS,
+    JOB_FAIR_VALUE_BAND_REFRESH,
     JOB_FINANCIAL_FACTS_RETENTION_SWEEP,
     JOB_FUNDAMENTALS_SYNC,
     JOB_FX_HISTORY_BACKFILL,
@@ -102,6 +107,8 @@ from app.workers.scheduler import (
     JOB_OWNERSHIP_OBSERVATIONS_SYNC,
     JOB_PG_SIZE_SAMPLE,
     JOB_PORTFOLIO_EOD_SNAPSHOT,
+    JOB_PRICE_QUARANTINE_REFRESH,
+    JOB_QUOTES_REFRESH,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_RETRY_SWEEPER,
@@ -122,12 +129,24 @@ from app.workers.scheduler import (
     JOB_SEC_N_PORT_INGEST,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
+    JOB_STRATEGY_BACKTEST_RUN,
+    JOB_STRATEGY_HALT_FEED_REFRESH,
+    JOB_STRATEGY_INTRADAY_HARVEST,
+    JOB_STRATEGY_OBSERVATION_RETENTION,
+    JOB_STRATEGY_OUTCOME_RESOLUTION,
+    JOB_STRATEGY_PAPER_CYCLE,
+    JOB_STRATEGY_SIGNAL_SCAN,
+    JOB_THESIS_BREAK_SCAN,
+    JOB_THESIS_DQ_AUDIT,
+    JOB_THESIS_OUTCOME_CAPTURE,
+    JOB_THESIS_REFRESH,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
     Cadence,
     CadenceKind,
     ScheduledJob,
     attribution_summary_job,
+    cboe_vix_refresh,
     compute_next_run,
     cusip_extid_sweep,
     cusip_universe_backfill,
@@ -138,9 +157,11 @@ from app.workers.scheduler import (
     daily_portfolio_sync,
     daily_research_refresh,
     daily_tax_reconciliation,
+    drs_disclosure_refresh,
     etoro_lookups_refresh,
     exchanges_metadata_refresh,
     execute_approved_orders,
+    fair_value_band_refresh,
     financial_facts_retention_sweep,
     fundamentals_sync,
     fx_history_backfill_job,
@@ -159,6 +180,8 @@ from app.workers.scheduler import (
     ownership_observations_sync,
     pg_size_sample,
     portfolio_eod_snapshot_job,
+    price_quarantine_refresh,
+    quotes_refresh,
     raw_data_retention_sweep,
     retry_deferred_recommendations_job,
     risk_metrics_refresh,
@@ -178,6 +201,17 @@ from app.workers.scheduler import (
     sec_n_port_ingest,
     sec_nport_filer_directory_sync,
     seed_cost_models,
+    strategy_backtest_run,
+    strategy_halt_feed_refresh,
+    strategy_intraday_harvest,
+    strategy_observation_retention,
+    strategy_outcome_resolution,
+    strategy_paper_cycle,
+    strategy_signal_scan,
+    thesis_break_scan,
+    thesis_dq_audit,
+    thesis_outcome_capture,
+    thesis_refresh,
     weekly_report,
 )
 
@@ -287,6 +321,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_ETORO_LOOKUPS_REFRESH: _adapt_zero_arg(etoro_lookups_refresh),
     JOB_EXCHANGES_METADATA_REFRESH: _adapt_zero_arg(exchanges_metadata_refresh),
     JOB_FX_RATES_REFRESH: _adapt_zero_arg(fx_rates_refresh),
+    JOB_QUOTES_REFRESH: _adapt_zero_arg(quotes_refresh),
     JOB_DAILY_RESEARCH_REFRESH: _adapt_zero_arg(daily_research_refresh),
     JOB_DAILY_NEWS_REFRESH: _adapt_zero_arg(daily_news_refresh),
     JOB_DAILY_PORTFOLIO_SYNC: _adapt_zero_arg(daily_portfolio_sync),
@@ -296,6 +331,13 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_DAILY_TAX_RECONCILIATION: _adapt_zero_arg(daily_tax_reconciliation),
     JOB_RETRY_DEFERRED: _adapt_zero_arg(retry_deferred_recommendations_job),
     JOB_MONITOR_POSITIONS: _adapt_zero_arg(monitor_positions_job),
+    # #1919 PR-B — hourly scheduled + Admin "Run now". The body carries its
+    # own provider-resolvable PREREQ_SKIP guard so the manual path (which
+    # bypasses ScheduledJob.prerequisite) is equally gated.
+    JOB_THESIS_BREAK_SCAN: _adapt_zero_arg(thesis_break_scan),
+    JOB_THESIS_DQ_AUDIT: _adapt_zero_arg(thesis_dq_audit),
+    JOB_THESIS_OUTCOME_CAPTURE: _adapt_zero_arg(thesis_outcome_capture),
+    JOB_THESIS_REFRESH: _adapt_zero_arg(thesis_refresh),
     JOB_PORTFOLIO_EOD_SNAPSHOT: _adapt_zero_arg(portfolio_eod_snapshot_job),
     JOB_FX_HISTORY_BACKFILL: _adapt_zero_arg(fx_history_backfill_job),
     # #591 PR-B — risk-metrics recompute. Orchestrator-driven (DAG layer
@@ -303,7 +345,33 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # layer cadence/freshness gate the DAG walk — a scheduled row would
     # double-fire). Source-lock "risk_metrics" in MANUAL_TRIGGER_JOB_SOURCES;
     # empty params in MANUAL_TRIGGER_JOB_METADATA.
+    JOB_PRICE_QUARANTINE_REFRESH: _adapt_zero_arg(price_quarantine_refresh),
     JOB_RISK_METRICS_REFRESH: _adapt_zero_arg(risk_metrics_refresh),
+    # #2009 — fair-value band recompute. Orchestrator-driven (DAG layer
+    # "fair_value_band") + manual-trigger-only; NOT in SCHEDULED_JOBS (the
+    # layer's 24h cadence/freshness gate the DAG walk — a scheduled row would
+    # double-fire). Source-lock "fair_value_band" in MANUAL_TRIGGER_JOB_SOURCES;
+    # empty params in MANUAL_TRIGGER_JOB_METADATA.
+    JOB_FAIR_VALUE_BAND_REFRESH: _adapt_zero_arg(fair_value_band_refresh),
+    # #2394 §3.1 — the daily signal scan. SCHEDULED (daily 06:45 UTC), not
+    # orchestrator-driven: "after the candle refresh" is enforced structurally by
+    # the frontier watermark rather than by a DAG edge. Own "strategy_scan" lane,
+    # resolved from SCHEDULED_JOBS, so no MANUAL_TRIGGER_JOB_SOURCES entry.
+    JOB_STRATEGY_SIGNAL_SCAN: _adapt_zero_arg(strategy_signal_scan),
+    JOB_CBOE_VIX_REFRESH: _adapt_zero_arg(cboe_vix_refresh),
+    JOB_STRATEGY_HALT_FEED_REFRESH: _adapt_zero_arg(strategy_halt_feed_refresh),
+    JOB_STRATEGY_INTRADAY_HARVEST: _adapt_zero_arg(strategy_intraday_harvest),
+    JOB_STRATEGY_OUTCOME_RESOLUTION: _adapt_zero_arg(strategy_outcome_resolution),
+    JOB_STRATEGY_OBSERVATION_RETENTION: _adapt_zero_arg(strategy_observation_retention),
+    JOB_STRATEGY_PAPER_CYCLE: _adapt_zero_arg(strategy_paper_cycle),
+    # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
+    # SCHEDULED_JOBS: criterion 5 requires a hold-out purpose no cron fire can
+    # supply. ⚠ Registered NATIVELY, not through ``_adapt_zero_arg`` — the body
+    # takes params, and the zero-arg adapter would silently discard the
+    # ``holdout_*`` pair that decides whether the withheld side is measured at
+    # all. Source-lock "strategy_backtest" in MANUAL_TRIGGER_JOB_SOURCES; params
+    # in MANUAL_TRIGGER_JOB_METADATA.
+    JOB_STRATEGY_BACKTEST_RUN: strategy_backtest_run,
     JOB_ATTRIBUTION_SUMMARY: _adapt_zero_arg(attribution_summary_job),
     JOB_SEED_COST_MODELS: _adapt_zero_arg(seed_cost_models),
     JOB_WEEKLY_REPORT: _adapt_zero_arg(weekly_report),
@@ -325,6 +393,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_SEC_FORM3_INGEST: _adapt_zero_arg(sec_form3_ingest),
     JOB_SEC_DEF14A_INGEST: _adapt_zero_arg(sec_def14a_ingest),
     JOB_SEC_DEF14A_BOOTSTRAP: _adapt_zero_arg(sec_def14a_bootstrap),
+    JOB_DRS_DISCLOSURE_REFRESH: _adapt_zero_arg(drs_disclosure_refresh),
     JOB_SEC_8K_EVENTS_INGEST: _adapt_zero_arg(sec_8k_events_ingest),
     JOB_SEC_FILING_DOCUMENTS_INGEST: _adapt_zero_arg(sec_filing_documents_ingest),
     JOB_CUSIP_EXTID_SWEEP: _adapt_zero_arg(cusip_extid_sweep),
@@ -539,6 +608,9 @@ _INVOKERS[_bulk_jobs.JOB_SEC_FSDS_CLASS_SHARES_INGEST] = _tracked_zero_arg(
 _INVOKERS[_bulk_jobs.JOB_SEC_FSDS_DIMENSIONAL_INGEST] = _tracked_zero_arg(
     _bulk_jobs.JOB_SEC_FSDS_DIMENSIONAL_INGEST, _bulk_jobs.sec_fsds_dimensional_ingest_job
 )
+_INVOKERS[_bulk_jobs.JOB_SEC_FSNDS_NOTES_INGEST] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_FSNDS_NOTES_INGEST, _bulk_jobs.sec_fsnds_notes_ingest_job
+)
 _INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _tracked_zero_arg(
     _files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK, _files_walk.sec_submissions_files_walk_job
 )
@@ -572,6 +644,28 @@ _RECURRING_JOB_ID_PREFIX: Final[str] = "recurring:"
 # running job triggers it too), so the honest label is "an instance is already
 # active"; the operator tells wedge from slow via the running row's age.
 _MAX_INSTANCES_SKIP_REASON: Final[str] = "max_instances_active"
+
+_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(SEC_LANE_MAX_CONCURRENCY)
+_NON_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_NON_SEC_MAX_CONCURRENCY)
+
+
+@contextmanager
+def _job_execution_slot(job_name: str) -> Iterator[None]:
+    """Bound every runtime entry path before it opens lock/body connections."""
+    try:
+        source = source_for(job_name)
+    except KeyError:
+        # Preserve the runtime's existing registry-drift handling: the
+        # bootstrap gate and later JobLock remain responsible for surfacing an
+        # unknown name.  For connection budgeting, the conservative safe
+        # classification is the smaller non-SEC allowance.
+        source = None
+    slots = _SEC_EXECUTION_SLOTS if source == "sec_rate" else _NON_SEC_EXECUTION_SLOTS
+    slots.acquire()
+    try:
+        yield
+    finally:
+        slots.release()
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +728,40 @@ def _lane_backoff_for(job_name: str) -> tuple[float, ...]:
     return _LANE_BUSY_RETRY_BACKOFF
 
 
+def _record_lane_busy_skip(
+    database_url: str,
+    job_name: str,
+    detail: str,
+    params: Mapping[str, Any] | None,
+) -> None:
+    """Best-effort ``status='skipped'`` job_runs row for a lane-busy skip (#2052).
+
+    Pre-#2052 both lane-busy exits in ``_fire_scheduled_with_lane_retry`` were
+    log-only — the ONLY silent skips on the scheduled-fire path (param/gate/
+    prereq blocks all write rows). ``thesis_dq_audit`` starved every night with
+    zero trace (#1707 class made worse by an unbounded db-lane holder). The
+    reason carries the machine-checkable ``LANE_BUSY_SKIP_PREFIX`` so the
+    Processes adapter can EXCLUDE these rows from the ``expected_fire_at``
+    anchor — a lane-busy skip is "work was due, couldn't start", and must not
+    reset the schedule-missed clock the way a benign prereq skip does.
+
+    Never raises: a telemetry write must not replace the skip's normal return
+    path (same posture as ``_wrap_invoker``'s param-validation skip writer).
+    Written only when the body never ran — outside any ``_tracked_job``
+    (prevention-log L848).
+    """
+    try:
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            record_job_skip(
+                conn,
+                job_name,
+                LANE_BUSY_SKIP_PREFIX + detail,
+                params_snapshot=dict(params) if params is not None else None,
+            )
+    except Exception:
+        logger.exception("failed to record lane-busy skip for %r", job_name)
+
+
 def _fire_scheduled_with_lane_retry(
     database_url: str,
     job_name: str,
@@ -641,6 +769,7 @@ def _fire_scheduled_with_lane_retry(
     *,
     backoff: tuple[float, ...] = _LANE_BUSY_RETRY_BACKOFF,
     sleep: Callable[[float], None] = time.sleep,
+    params: Mapping[str, Any] | None = None,
 ) -> None:
     """Run a scheduled fire under its source-level ``JobLock``, retrying ONLY a
     failed lock ACQUIRE on lane contention (#1538).
@@ -659,9 +788,12 @@ def _fire_scheduled_with_lane_retry(
       * Worst case (lane held longer than the retry window, or no slot free) is
         the old skip exactly — no new failure mode.
 
-    Returns normally on a lane-contention skip (after logging). Propagates
+    Returns normally on a lane-contention skip — after logging AND a
+    best-effort ``lane_busy`` skip row (#2052; both skip exits were previously
+    the only silent skips on the scheduled path). Propagates
     ``JobAlreadyRunning`` ONLY when ``run`` itself raised it (body-origin), plus
     any exception ``run`` raises — the caller's existing handlers own those.
+    ``params`` is only used for the skip row's ``params_snapshot``.
     """
     slot_held = False
     try:
@@ -678,23 +810,20 @@ def _fire_scheduled_with_lane_retry(
                     raise
                 if attempt == 0:
                     if not _LANE_WAIT_SLOTS.acquire(blocking=False):
-                        logger.info(
-                            "scheduled fire of %r skipped: its lane is busy and all %d "
-                            "lane-retry slots are in use; will fire next cadence",
-                            job_name,
-                            _MAX_CONCURRENT_LANE_WAITERS,
+                        detail = (
+                            f"lane is busy and all {_MAX_CONCURRENT_LANE_WAITERS} "
+                            "lane-retry slots are in use; will fire next cadence"
                         )
+                        logger.info("scheduled fire of %r skipped: %s", job_name, detail)
+                        _record_lane_busy_skip(database_url, job_name, detail, params)
                         return
                     slot_held = True
                 if attempt < len(backoff):
                     sleep(backoff[attempt])
                     continue
-                logger.info(
-                    "scheduled fire of %r skipped: its lane stayed busy through the "
-                    "~%.2fs retry window; will fire next cadence",
-                    job_name,
-                    sum(backoff),
-                )
+                detail = f"lane stayed busy through the ~{sum(backoff):.2f}s retry window; will fire next cadence"
+                logger.info("scheduled fire of %r skipped: %s", job_name, detail)
+                _record_lane_busy_skip(database_url, job_name, detail, params)
                 return
     finally:
         if slot_held:
@@ -1898,7 +2027,7 @@ class JobRuntime:
         database_url = self._database_url
         job = self._job_registry.get(job_name)
 
-        def wrapped() -> None:
+        def run_bounded() -> None:
             # Materialise + validate the registry-default params for this
             # scheduled fire. ParamValidationError here means the
             # registry itself is misconfigured (a default that violates
@@ -2063,6 +2192,7 @@ class JobRuntime:
                     job_name,
                     _run_scheduled_body,
                     backoff=_lane_backoff_for(job_name),
+                    params=params,
                 )
             except JobAlreadyRunning:
                 # The helper retries the ACQUIRE, so this is reached ONLY when
@@ -2090,9 +2220,39 @@ class JobRuntime:
                     job_name,
                 )
 
+        def wrapped() -> None:
+            # The execution budget is the outermost boundary: parameter-error
+            # audit writes, gate/prerequisite checks, advisory locks, the job
+            # body, and terminal writes all occur only after a slot is held.
+            # Catch-up reuses this wrapper, so it has the same bound as the
+            # regular APScheduler path.
+            with _job_execution_slot(job_name):
+                run_bounded()
+
         return wrapped
 
     def _run_manual(
+        self,
+        job_name: str,
+        invoker: JobInvoker,
+        request_id: int | None,
+        mode: str | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Hold the connection-budget slot across the full manual lifecycle."""
+        entered = False
+        try:
+            with _job_execution_slot(job_name):
+                entered = True
+                self._run_manual_bounded(job_name, invoker, request_id, mode, params)
+        finally:
+            # The bounded implementation normally owns the in-flight release.
+            # If slot acquisition itself raises, it never gets control, so the
+            # submission lock must be returned here.
+            if not entered:
+                self._inflight[job_name].release()
+
+    def _run_manual_bounded(
         self,
         job_name: str,
         invoker: JobInvoker,

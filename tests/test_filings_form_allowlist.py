@@ -123,11 +123,13 @@ def test_metadata_only_forms_have_no_parser_today() -> None:
         "F-1",
         "F-3",
         "F-4",
-        "424B2",
-        "424B3",
-        "SC TO-T",
-        "SC 14D9",
-        "DEF 13E-3",
+        "424B8",
+        # SC TO-T(/A) / SC 14D9(/A) / SC TO-I(/A) / SC 13E3(/A) PROMOTED to
+        # SEC_PARSE_AND_RAW (#1982 — sec_tender). The dead ``DEF 13E-3``
+        # string was REMOVED entirely (0 rows ever; EDGAR emits SC 13E3).
+        # PREM14C / DEFM14C stay metadata-only (Schedule 14A Item 14 prose).
+        "PREM14C",
+        "DEFM14C",
         "25-NSE",
         "15F",
         "5",
@@ -138,6 +140,9 @@ def test_metadata_only_forms_have_no_parser_today() -> None:
         # NT 10-K / NT 10-Q PROMOTED to SEC_PARSE_AND_RAW (#1015 — sec_nt).
         # NT 20-F stays metadata-only (foreign deadline regime).
         # PRE 14A / PRER14A PROMOTED to SEC_PARSE_AND_RAW (#1892 — sec_pre14a).
+        # 424B1/B3/B4/B5/B7 PROMOTED to SEC_PARSE_AND_RAW (#1816 — sec_424b);
+        # 424B2 PROMOTED with a volume gate (#1975). 424B8 stays metadata-only
+        # (late-filing duplicate of another 424(b) paragraph).
         "NT 20-F",
         "20-F",
         "40-F",

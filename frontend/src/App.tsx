@@ -5,7 +5,8 @@ import { RequireAuth } from "@/components/RequireAuth";
 import { ConfigProvider } from "@/lib/ConfigContext";
 import { DisplayCurrencyProvider } from "@/lib/DisplayCurrencyContext";
 import { DashboardPage } from "@/pages/DashboardPage";
-import { RankingsPage } from "@/pages/RankingsPage";
+import { ResearchHubPage } from "@/pages/ResearchHubPage";
+import { PresetRedirect } from "@/pages/PresetRedirect";
 import { InstrumentDetailRedirect } from "@/pages/InstrumentDetailRedirect";
 import { InstrumentPage } from "@/pages/InstrumentPage";
 import { Tenk10KDrilldownPage } from "@/pages/Tenk10KDrilldownPage";
@@ -21,7 +22,6 @@ import { NewsAnalysisPage } from "@/pages/NewsAnalysisPage";
 import { PeersPage } from "@/pages/PeersPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { TaxPage } from "@/pages/TaxPage";
-import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { AdminJobDetailPage } from "@/pages/AdminJobDetailPage";
 import { ProcessDetailPage } from "@/pages/ProcessDetailPage";
@@ -35,9 +35,9 @@ import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { OperatorsPage } from "@/pages/OperatorsPage";
 import { CopyTradingPage } from "@/pages/CopyTradingPage";
-import { InstrumentsPage } from "@/pages/InstrumentsPage";
 import { PortfolioPage } from "@/pages/PortfolioPage";
 import { CalendarPage } from "@/pages/CalendarPage";
+import { StrategiesPage } from "@/pages/StrategiesPage";
 
 export function App() {
   return (
@@ -70,6 +70,7 @@ export function App() {
           <Route index element={<DashboardPage />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="calendar" element={<CalendarPage />} />
+          <Route path="strategies" element={<StrategiesPage />} />
           {/* Legacy per-instrument routes redirect to the canonical
               `/instrument/:symbol` research page. Introduced in Slice 3
               of the per-stock research spec; Slice 5 deleted
@@ -80,8 +81,12 @@ export function App() {
             path="portfolio/:instrumentId"
             element={<InstrumentDetailRedirect search="?tab=positions" />}
           />
-          <Route path="rankings" element={<RankingsPage />} />
-          <Route path="instruments" element={<InstrumentsPage />} />
+          {/* #1917 — Research hub subsumes Instruments/Rankings/Theses/
+              Recommendations as view presets. Old routes redirect here,
+              preserving their query strings. */}
+          <Route path="research" element={<ResearchHubPage />} />
+          <Route path="rankings" element={<PresetRedirect view="ranked" />} />
+          <Route path="instruments" element={<PresetRedirect view="universe" />} />
           <Route
             path="instruments/:instrumentId"
             element={<InstrumentDetailRedirect />}
@@ -132,7 +137,8 @@ export function App() {
             element={<PeersPage />}
           />
           <Route path="copy-trading/:mirrorId" element={<CopyTradingPage />} />
-          <Route path="recommendations" element={<RecommendationsPage />} />
+          <Route path="theses" element={<PresetRedirect view="theses" />} />
+          <Route path="recommendations" element={<PresetRedirect view="actioned" />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="tax" element={<TaxPage />} />
           <Route path="admin" element={<AdminPage />} />

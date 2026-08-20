@@ -75,7 +75,8 @@ Two-tier system, tracked per user key over a **1-minute rolling window**:
 
 | Tier | Limit | Applies to |
 |------|-------|------------|
-| **Standard** | **60 req/min** | All GET requests: market data, portfolio info, social reads, watchlist reads |
+| **Market data** | **120 req/min shared** | Instruments, rates, candles, closing prices, search and lookup catalogues; live portal index verified 2026-08-09 |
+| **Standard** | **60 req/min** | Ordinary portfolio/social/watchlist reads unless an endpoint declares another pool |
 | **Heavy** | **20 req/min** | All POST/PUT/DELETE: trade execution, watchlist writes, social writes |
 
 Exceeding returns **429 Too Many Requests**:
@@ -109,7 +110,7 @@ GET+POST requests cannot exceed the API limit.
 - Cache static data locally (instrument IDs are immutable)
 - Batch rate requests (max 100 IDs per call; eBull uses 50 for safety)
 - Sequence per-instrument calls with throttle delay
-- Land every structured field in SQL — raw disk dumps for eToro were retired in #471 (`instruments` / `price_daily` / `quotes` / `exchanges` tables ARE the audit trail)
+- Land every structured field in SQL — raw disk dumps for eToro were retired in #471 (`instruments` / `price_daily` / `quotes` / `exchanges` tables ARE the market-data audit trail). Automated broker mutations additionally retain one small latest response object on their material operation/order row; they do not append polling payloads.
 
 ---
 
@@ -129,7 +130,7 @@ GET+POST requests cannot exceed the API limit.
 | GET | `/api/v1/market-data/instruments/rates` | Live bid/ask/last for up to 100 IDs | **Active** — quote refresh |
 | GET | `/api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}` | OHLCV candles (max 1000) | **Active** — daily candles |
 | GET | `/api/v1/market-data/instruments/history/closing-price` | Bulk closing prices (daily/weekly/monthly) | Not used — candles preferred |
-| GET | `/api/v1/market-data/search` | Search instruments with field projection | Not used — full universe synced |
+| GET | `/api/v1/market-data/search` | Paginated projected market snapshot | **Screening adapter** — two complete pages; never an execution quote |
 | GET | `/api/v1/market-data/exchanges` | Exchange ID → name mapping | Not used — IDs stored raw |
 | GET | `/api/v1/market-data/instrument-types` | Asset class ID → name mapping | Not used — IDs stored raw |
 | GET | `/api/v1/market-data/stocks-industries` | Industry ID → name mapping | Not used — IDs stored raw |
@@ -143,17 +144,139 @@ GET+POST requests cannot exceed the API limit.
 | DELETE | `/api/v1/trading/execution/market-open-orders/{orderId}` | Cancel pending open order | Not used (v1) |
 | POST | `/api/v1/trading/execution/market-close-orders/positions/{positionId}` | Close position — body `UnitsToDeduct` nullable → partial close (omit = full). Live doc also lists `InstrumentID` required; our impl omits it — verify on demo before relying | **Active** (full close; partial plumbed in provider, unexposed) |
 | DELETE | `/api/v1/trading/execution/market-close-orders/{orderId}` | Cancel pending close order | Not used (v1) |
-| PATCH | `/api/v2/trading/positions/{positionId}` | Edit TP/SL on open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). **202 async** `{operationId, positionId, referenceId}` — re-sync before treating as landed. Added between v1.158 and v1.279 (was orphaned `putTradeRequest` schema) | Planned — position detail page (spec 2026-07-04) |
+| PATCH | `/api/v2/trading/{real\|demo}/positions/{positionId}` | Edit TP/SL on one exact open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). Async acceptance `{operationId, positionId, referenceId}` — re-sync before treating as landed | **Demo active for exact strategy-owned fixed-exit repair and registered ratchets**; real path refused |
+| POST | `/api/v2/trading/info/{real\|demo}/eligibility` | Up to 100 ids/symbols; account-specific open/close/partial-close permission, min exposure, max units, order/fill types, and leverage + SL/TP constraints by settlement/direction | **Active as a just-in-time paper gate**; response is process-local |
+| POST | `/api/v2/trading/info/{real\|demo}/costs` | What-if open cost rows for `buy` / `sellShort`: open vocabulary including spread, markup, transaction, overnight/weekend and tax; returns `lastUpdated`. Demo returned `value` while omitting documented `amount`; controlled scaling did not establish one unit equation | **Active fail-closed paper gate**: documented fresh USD `amount` only; `value`/unknown horizon refuses |
+| GET | `/api/v2/trading/info/{real\|demo}/orders:lookup` | Exactly one of numeric `orderId` or submission `referenceId`; returns status and every `positionExecutions[].positionId` with opening units/average price. Shared 60 GET/min quota | **Active for strategy reconciliation** — strict adapter, exact execution persistence and restart backlog |
 | POST | `/api/v1/trading/execution/limit-orders` | Limit/MIT order | Not used (v1 is market-only) |
 | DELETE | `/api/v1/trading/execution/limit-orders/{orderId}` | Cancel limit order | Not used (v1) |
 | GET | `/api/v1/trading/info/portfolio` | Full portfolio: positions, orders, mirrors, credit | **Active** — portfolio sync |
-| GET | `/api/v1/trading/info/real/pnl` | Portfolio with P&L details | Not used — computed locally |
+| GET | `/api/v1/trading/info/{real\|demo}/pnl` | Positions, mirrors, pending orders, credit and P&L inputs for the published cash/invested/equity formula | **Demo active as a just-in-time paper risk gate**; raw response is process-local |
 | GET | `/api/v1/trading/info/real/orders/{orderId}` | Single order status | **Active** — order polling |
+| GET | `/api/v1/trading/info/{real\|demo}/close-orders/{orderId}` | Close-order status plus exact affected `positions[].positionID` | **Demo active for exact strategy close reconciliation**; disappearance alone is not success |
 | GET | `/api/v1/trading/info/trade/history` | Trade history (`minDate` required) | Not used (v1) |
+
+⚠ **Live portal drift, detail pages verified 2026-08-09:** both preflights are
+v2 POSTs and each has a dedicated **20 requests/minute** limit. Their documented
+schemas are now represented by the non-persisting `BrokerEligibilityResponse`
+and `BrokerWhatIfCostResponse` adapters. Documentation examples are not population
+evidence: probe a bounded demo cohort before deciding which fields change often,
+which settlement/direction arms are actually returned, and whether observed
+`sellShort` eligibility and costs are adequate for a short strategy.
+
+The current v2 create-order contract also documents a unique `X-Request-Id`
+UUID as the idempotency key, and `orders:lookup.referenceId` as that same
+submission header. Strategy execution must commit this immutable UUID before
+network I/O and reuse it on every retry. A missing response therefore becomes a
+lookup/retry of one identity, never a newly keyed duplicate order.
+
+`POST /api/v2/trading/execution/demo/orders` is now the sole automated paper
+writer. Its adapter refuses non-demo credentials and its accepted shape is
+long `buy`, `real`, market, x1, USD amount with fixed SL/TP. It validates a
+positive `orderId` and exact `referenceId == X-Request-Id`; the generic legacy
+writer remains manual and is not an automated fallback.
+
+The automated position manager is equally demo-bound. It commits one compact
+material intent before calling either exact-position endpoint, sends the stored
+request UUID, and treats PATCH acceptance as pending until a portfolio re-sync
+shows the requested fixed rates. A close is applied only when the close-order
+detail names the one owned `positionID`. There is no request-id lookup for a
+PATCH or legacy close, so a crash before the broker identity is stored becomes
+`reconcile_required`; the writer is not blindly replayed. Verified against the
+live demo endpoint pages on 2026-08-09 (the downloadable base snapshot remains
+v1.279.0 as recorded above).
+
+### Authenticated demo census (2026-08-09)
+
+`etoro-preflight-v2` selected four Stocks and four ETFs at deterministic latest
+dollar-volume quantiles. Eligibility resolved 8/8, but refused opening for 1/8
+despite local `is_tradable=true`; the canonical parsed response was 12,579
+bytes. Within the dedicated 20-request budget, complete 1x/10x long-real and x1
+short-CFD pairs covered seven permitted instruments. All 20 calls succeeded
+(5,717 canonical parsed bytes total), all cost rows were USD-labelled `value`,
+and none supplied documented `amount`. Eighteen response timestamps were about
+41 hours old; only two were within the local conservative 24-hour ceiling.
+Scaling varied by component between ticket-proportional, invariant,
+rounded/other and zero-only. This evidence does not identify `value` as a
+monetary amount, rate or price-unit and **0/20 responses pass the execution-use
+contract**. Unknown fields are never coerced to zero.
+
+Reproduce against demo only:
+
+```bash
+PYTHONPATH=. uv run python scripts/verify_2437_trading_preflight.py --apply --limit 8 --max-cost-requests 20
+```
+
+The first authenticated demo census (2026-08-09, four exact members of the
+validated US-equity universe) found that HTTP success is not equivalent to
+orderability or current cost evidence. One instrument had
+`allowOpenPosition=false` despite eBull's stored `is_tradable=true`; the returned
+settlement/direction/leverage arms varied materially; minimum exposure ranged
+from USD 10 to USD 1,000; cost rows used `value` rather than documented
+`amount`; and one response's `lastUpdated` was more than five months old. This
+is sufficient to reject the current local tradability flag as an execution
+gate, but not sufficient to infer `value` units or full-universe coverage.
 
 ### Trading — Demo
 
-Same operations as Real, all prefixed with `/demo/` (e.g., `/api/v1/trading/execution/demo/market-open-orders/by-amount`; v2 TP/SL edit: `/api/v2/trading/demo/positions/{positionId}`).
+Same operations as Real with environment-specific paths (e.g., legacy v1 open:
+`/api/v1/trading/execution/demo/market-open-orders/by-amount`; current v2 TP/SL
+edit: `/api/v2/trading/demo/positions/{positionId}`; current v2 info:
+`/api/v2/trading/info/demo/...`).
+
+Automated paper entry uses the fixed path
+`/api/v2/trading/execution/demo/orders`; it is intentionally not formed from a
+real/demo environment prefix. Demo account risk uses
+`/api/v1/trading/info/demo/pnl` and applies the published formulas below.
+The live response shape was verified on 2026-08-11: formula inputs are nested
+under the required `clientPortfolio` object and available cash starts from its
+singular `credit` field. The provider rejects an absent/malformed envelope or
+missing component array; it does not interpret response drift as a zero balance.
+
+### Account base currency — `clientPortfolio.accountCurrencyId`
+
+The same P&L response carries the account's own base currency. The portal schema
+for `api-reference/trading--demo/get-account-pnl-and-portfolio-details` (fetched
+2026-08-13) documents `accountCurrencyId` as *"Currency ID of the account
+(1 = USD)"*, and **1 is the only id it documents** — there is no published
+id → ISO-4217 table. So an id other than 1 is stored as an id with a NULL code
+and refused by name (`account_currency_not_documented`); it is never mapped to a
+code eBull inferred. Adding a member to `DOCUMENTED_ACCOUNT_CURRENCIES`
+(`app/services/account_equity_evidence.py`) requires a portal citation.
+
+Before #2602 item 2 the provider discarded this field and
+`record_account_equity_snapshot` bound a `'USD'` SQL literal against
+`sql/324`'s `CHECK (currency = 'USD')`, so eBull's one table of *official broker
+evidence* recorded its own assumption — the gap #2363 named as "nobody has
+checked the account currency". It is now carried on
+`BrokerAccountRiskSnapshot.account_currency_id` and persisted beside the code
+(`sql/341`).
+
+Do not substitute `GET /api/v1/balances` for this. That endpoint takes a
+`displayCurrency` **conversion** parameter defaulting to USD and returns both a
+per-account `currency` and a converted `displayCurrency`, so a naive read there
+returns the display currency requested rather than the account's own. Its
+history sibling is 403 on this demo connection (below).
+
+### Account-balance history — documented, demo access refused
+
+The live portal documented `GET /api/v1/balances/history` on 2026-08-11. It
+returns no more than 365 daily observations from the preceding 12 months, with
+cash, invested, profit/loss and total-balance fields in the requested display
+currency. A read-only authenticated probe with eBull's configured demo
+credentials returned HTTP 403 and only the standard error keys. Consequently,
+eBull does not claim or synthesize a historical broker-equity backfill.
+
+Foundation F-0 starts a compact prospective ledger from the working
+`/api/v1/trading/info/demo/pnl` endpoint instead: one observation per UTC day
+and environment, aggregate monetary fields only, with no raw response or
+per-position duplication. The newest observation wins within the current UTC
+day. The local EOD row currently records its computation time, not the effective
+time of every closing price, so a same-date difference remains diagnostic and
+must not be labelled reconciled. A collection failure must not block the
+existing portfolio sync.
+
+Primary page: `balances/get-historical-balance-snapshots`.
 
 ### Agent portfolios (copy-trading management)
 
@@ -243,6 +366,23 @@ Same operations as Real, all prefixed with `/demo/` (e.g., `/api/v1/trading/exec
 | `isBuyEnabled` | bool | Buy orders accepted |
 | `currentRate` | float | Available via search |
 | `dailyPriceChange` | float | Available via search |
+
+The live search contract was reverified on 2026-08-12 against the
+[official endpoint reference](https://api-portal.etoro.com/api-reference/market-data/search-for-instruments).
+Despite that page documenting `pageNumber`, the live API ignores it; `page=2`
+returns page 2 and the response `page` must match. `pageSize=10000` returned
+12,187 rows in two pages (10,000 + 2,187) in 8.493 seconds. One provider row
+had a negative ID and was discarded; 12,185 normalised rows supplied both
+`currentRate` and `dailyPriceChange`.
+
+Search is not the full `/instruments` universe and carries no per-row quote
+timestamp or bid/ask. On the same dev census it covered 3,591/6,083 current
+NYSE/Nasdaq common-stock classifications; coverage rose to 1,480/1,601
+(92.44%) after the independently computed ≥$5 and ≥$25m recent-dollar-volume
+cohort, and 637/669 (95.22%) above $100m. Therefore callers must join an exact
+point-in-time local cohort, report the denominator and fail closed below their
+preregistered threshold. Search values may screen or form aggregate context;
+fresh `/instruments/rates` quotes remain mandatory before a candidate or order.
 
 ### Live rates (from `/market-data/instruments/rates`)
 
@@ -428,6 +568,114 @@ Rate message fields: `Ask`, `Bid`, `LastExecution`, `Date` (ISO 8601),
 `UnitMarginBid`, `BidDiscounted`, `AskDiscounted`,
 `UnitMarginBidDiscounted`, `UnitMarginAskDiscounted`).
 
+**Undocumented fields present on the snapshot push** (measured #2241,
+2026-08-04 — absent from `api-reference/websocket/topics.md`, therefore
+unversioned; re-verify anything load-bearing): `InstrumentID`,
+`IsInstrumentActive`, `OfficialClosingPrice`, `IsMarketOpen`,
+`IsExchangeOpen`, `ConversionRateBid`, `ConversionRateAsk`, `AllowBuy`,
+`AllowSell`, `MaxPositionUnits`. `IsMarketOpen` and `IsExchangeOpen` are
+independent and do disagree (EURUSD: `true` / `false` at 23:37 UTC).
+
+**Rate pushes are FIELD-LEVEL SPARSE DELTAS** (measured #2243, 2026-08-04;
+this corrects the "two push shapes" model recorded under #2241). A push
+carries only the fields that changed — any subset of `Bid`, `Ask`,
+`LastExecution`, `BidDiscounted`, `AskDiscounted` may arrive alone. The
+instrument is on the envelope's `topic`, not in the payload, on every shape.
+
+Census over 180,666 messages (240 instruments, 608 s, crypto + FX + Tokyo
+equities):
+
+| share | shape |
+| --- | --- |
+| 59.8% | heartbeat — `{"Date","PriceRateID"}` only, no price field |
+| 16.8% | `Bid`+`Ask` — the only shape a stateless parser can use on its own |
+| 10.5% | `Bid`+`BidDiscounted`+`LastExecution` |
+| 10.1% | `Ask`+`AskDiscounted` |
+| 1.6% | `LastExecution` alone |
+| ~1.2% | 12 further partial combinations |
+
+**A consumer must carry per-instrument state and merge deltas** — requiring a
+complete payload sees under half the market. Until #2252, `_parse_rate_content`
+required **both** `Bid` and `Ask` and discarded every partial: **58.1% of
+price-CHANGING messages dropped** (21,245 of 36,564), making the stored quote
+1.5–2.6× staler than the feed allows (median gap between usable updates vs
+actual price changes: crypto 3.01s vs 1.15s, JP 3.99s vs 1.85s, FX 1.53s vs
+1.02s).
+
+Fixed in #2252: `parse_rate_deltas()` → `RateStateStore.apply()` in
+`app/services/etoro_websocket.py`. Paired-arm acceptance (184 crypto/FX
+instruments, 300 s, one captured stream through both parsers, 46,037 deltas):
+share of wire price-changes captured **39.9% → 91.5%**; median usable-update
+gap **4.09s → 1.27s** against a 1.27s wire gap, i.e. staleness **3.21× →
+1.00×** (crypto 4.58× → 1.00×, FX 2.20× → 1.00×). Two rules fall out of the
+merge and bind any reimplementation:
+
+- **Presence ≠ value.** An absent `LastExecution` means "unchanged"; a present
+  one that is ≤ 0 means "not a real trade → NULL" (#1429). A single nullable
+  field cannot carry both, so the delta type needs explicit presence flags.
+- **A heartbeat must not advance the ordering watermark.** Heartbeats are the
+  majority of the wire; if one stamps the merge state's `quoted_at`, the
+  out-of-order guard then rejects the next genuine price delta behind it.
+
+**Size ingest against the wire, not against parsed ticks.** The earlier "23%
+parse" figure is right but was read as "77% are inert"; only ~60% are.
+
+**`LastExecution` is NOT a trade print** (measured #2243). Over 26,741
+observations it **never left `[bid, ask]`** (0.00%), which a real print would.
+It is bid-side, and how tightly is asset-class-dependent: `== BidDiscounted` on
+**100.0%** of Tokyo-equity and **97.8%** of FX observations, but only **58.7%**
+of crypto (bid-*near*: median spread position 0.000, mean 0.041). `==
+AskDiscounted` is 0.0% everywhere. ⚠ Do not carry a single global label across
+asset classes — crypto does not fit the clean story.
+
+⚠ Against eToro's *marked-up* `Bid`/`Ask` the FX series sits mid-spread (mean
+position 0.399) and looks like a derived mid — **the excursion test must be run
+against `BidDiscounted`/`AskDiscounted` or it returns the wrong answer.**
+
+**Build 1-minute bars from `Bid`** — an empirical compatibility rule: `Bid` is
+the series that reproduces eToro's own `OneMinute` REST candle. Over 131
+complete minutes, `Bid` matched 77.1% of closes / 60.3% of full OHLC;
+`LastExecution` 55.0% / 48.1%; mid or ask 0%. The residual is granularity, not a
+second series — attributing all 42 mismatches, **zero were Tokyo equities**, and
+all were **within 0.20%** of the REST close (median 0.0019%, max 0.0716%).
+
+`OneMinute` volume is **equity-only** — populated for US and Tokyo equities,
+always `None` for crypto and FX.
+
+⚠ **Scope: demo env, one 10-minute window, crypto / FX / Tokyo equities.** Live
+env, US equities (#2243 arm outstanding), HK (shut during capture) and stressed
+regimes (auction, halt, wide spread, FX rollover) are all unmeasured.
+
+### WebSocket limits (measured, #2241 — the portal documents NONE)
+
+| limit | value | behaviour at the boundary |
+| --- | --- | --- |
+| topics per **session** | **4,999** | Subscribe rejected with `errorCode: SubscribeFailed`, `errorMessage: "Too many subscriptions for session"`. Connection survives and keeps serving. Rejection is **per-frame and atomic** — a frame straddling the cap bounces whole. |
+| bytes per **frame** | **25 KiB** (25,600) | **No ack, no error — the socket is dropped** (`1006 ABNORMAL_CLOSURE`, empty reason, i.e. no close frame). Subscription not applied. Bracket: 25,529 B acked / 25,719 B dropped. |
+
+4,999 was replicated exactly on a second independent session. An over-cap
+rejection does **not** poison the session — 3,141 rate messages arrived in
+the following 20s on already-subscribed topics, and both `Subscribe` and
+`Unsubscribe` still acked, so a rejection needs handling rather than a
+reconnect. The over-size drop is **not** a client-side send limit:
+`ws.send()` returns normally and no close frame is received, so
+attribution is server-or-intermediary.
+
+The session cap is **per connection, not per API key**: concurrent sessions
+each get their own 4,999, so the full 12,684-instrument universe fits in 3
+(measured: 12,684/12,684 accepted, 0 failures, 2.21s, no disconnect over a
+120s hold). `Unsubscribe` frees capacity, so it is live occupancy rather
+than a session lifetime budget.
+
+Consequences for any caller: **chunk Subscribe/Unsubscribe by BYTES**, not
+topic count (instrument-id width varies) — 500 topics is ~9.4 KB and is
+proven at scale; and **correlate each frame uuid to its ack**, because an
+over-size frame is silent and a missing ack is the only signal. eToro acks
+both ops as `{"id": …, "success": true, "operation": "Subscribe"}`.
+
+Time-to-first-tick after subscribe held at 0.03–0.18s from 10 through 4,999
+topics — no degradation with topic count.
+
 **No volume / size / quantity field exists on any WS topic** (#608, verified
 2026-06-27 against both api-portal `/websocket/topics` and
 `websocket-doc.html`). eToro's WS has exactly two topics — `instrument:<id>`
@@ -519,6 +767,7 @@ persistence" for the scope-narrowed rule.
 | Universe sync service | `app/services/universe.py` |
 | Market data service | `app/services/market_data.py` |
 | Portfolio sync service | `app/services/portfolio_sync.py` |
+| Strategy position manager | `app/services/strategy_position_manager.py` |
 | Credentials service | `app/services/broker_credentials.py` |
 | Scheduled jobs | `app/workers/scheduler.py` |
 | Configuration | `app/config.py` |

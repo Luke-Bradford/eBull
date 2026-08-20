@@ -31,7 +31,7 @@ import {
   humanizeVolume,
   tickFormatter,
 } from "@/lib/chartFormatters";
-import { lightTheme } from "@/lib/chartTheme";
+import type { ChartTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { useLiveLastBar } from "@/lib/useLiveLastBar";
 import { useMarketSpecials } from "@/lib/useMarketSpecials";
@@ -40,13 +40,22 @@ import type { SessionProfile } from "@/api/types";
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
 export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
 
-// Keep palette keys exhaustively typed against IndicatorId so a missing or
-// misspelled key in theme.indicator fails typecheck rather than
-// returning undefined at runtime. Indicator slots are saturated and
-// identical across light/dark, so reading from `lightTheme` directly
-// avoids threading the theme hook through every indicator setter.
-const SMA_COLORS: Record<IndicatorId, string> = lightTheme.indicator;
-
+// Indicator colours come from the resolved palette's `indicator` slots,
+// read at each use site via useChartTheme(). The exhaustiveness guarantee
+// the old module-scope table provided is unchanged: ChartTheme declares
+// `indicator` with exactly the IndicatorId keys, so adding an id without
+// adding its slot fails typecheck rather than returning undefined at
+// runtime.
+//
+// This used to be a module-scope constant reading the light palette
+// directly, on the rationale that the slots are identical across
+// light/dark so it "avoids threading the theme hook through every
+// indicator setter". That rationale is what #2185 identified as the
+// defect: the aliasing is a current fact about the palettes, not a
+// contract, and the day a slot diverges every such read silently stops
+// following the theme. Module scope is also precisely where the hook
+// cannot run, so the shortcut is self-reinforcing — hence the reads move
+// to the components.
 const SMA_LABELS: Record<IndicatorId, string> = {
   sma20: "SMA(20)",
   sma50: "SMA(50)",
@@ -54,9 +63,18 @@ const SMA_LABELS: Record<IndicatorId, string> = {
   ema50: "EMA(50)",
 };
 
-// Fixed palette for compare overlays — distinct from SMA colors.
-// Compare slots are also saturated and identical across light/dark.
-export const COMPARE_COLORS: readonly string[] = lightTheme.compare;
+// Compare-overlay colours come from the resolved palette's `compare`
+// rotation, distinct from the indicator slots. Formerly an exported
+// module-scope constant off the light palette — the export had exactly one
+// consumer, in this file, on a line that already fell back to
+// `theme.compare[0]`. Removed rather than re-homed.
+//
+// Kept as a pure function of (theme, index) rather than inlined at the two
+// call sites: the series-creation path and the theme-change recolour path
+// MUST agree, and a duplicated `idx % len` is exactly how they would drift.
+function compareColorAt(theme: ChartTheme, idx: number): string {
+  return theme.compare[idx % theme.compare.length] ?? theme.compare[0];
+}
 
 export interface CompareSeries {
   readonly symbol: string;
@@ -279,6 +297,10 @@ export function ChartWorkspaceCanvas({
         background: { color: theme.bg },
         textColor: theme.textSecondary,
         fontSize: 11,
+        // Attribution is satisfied by the shell-level "Charts by TradingView"
+        // link (layout/Sidebar.tsx) + the repo-root NOTICE, which the library
+        // documents as an explicit alternative to this per-chart logo (#2151).
+        attributionLogo: false,
       },
       grid: {
         vertLines: { color: theme.gridLine },
@@ -314,6 +336,14 @@ export function ChartWorkspaceCanvas({
     const volume = chart.addSeries(HistogramSeries, {
       priceScaleId: "volume",
       priceFormat: { type: "volume" },
+      // The volume overlay must NOT draw a last-value badge or price line
+      // (#1908 PR-3). It lives on its own `volume` scale, but lightweight-charts
+      // still paints those onto the VISIBLE right price gutter, where they land
+      // on top of the price ticks — a volume figure rendered in the price axis.
+      // Every sibling series in this file already disables both; the volume
+      // series was the one left on the library defaults.
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
 
@@ -443,7 +473,32 @@ export function ChartWorkspaceCanvas({
       wickDownColor: theme.down,
     });
     primaryLine.applyOptions({ color: theme.primaryLine });
+
+    // Recolour indicator series that already exist. Their colour is chosen in
+    // the creation branch of the indicator effect, which does NOT rerun on a
+    // theme change — so without this a theme toggle would leave a drawn line
+    // on the previous palette while `RichTooltip`, which reads the resolved
+    // theme at render, moved to the new one: the line and its own readout
+    // would disagree about the colour of the same series. Latent while the
+    // saturated slots alias across palettes, real the day one diverges —
+    // which is the whole point of reading them from the theme. Reads refs
+    // only, so it needs no dep beyond `theme`.
+    for (const [id, series] of indicatorRefs.current) {
+      series.applyOptions({ color: theme.indicator[id] });
+    }
   }, [theme]);
+
+  // Compare overlays get their own effect rather than riding the one above:
+  // their colour depends on position in `compares`, and folding that dep into
+  // the theme effect would re-run the whole chart/candle/primaryLine
+  // applyOptions block on every compare-list change (review of PR #2206).
+  useEffect(() => {
+    compares.forEach((cs, colorIdx) => {
+      const color = compareColorAt(theme, colorIdx);
+      compareColorRef.current.set(cs.symbol, color);
+      compareLineRefs.current.get(cs.symbol)?.applyOptions({ color });
+    });
+  }, [theme, compares]);
 
   // Numeric / null-filtered rows. Computed during render so values
   // are available to the live-tick aggregator's historical anchor on
@@ -579,8 +634,7 @@ export function ChartWorkspaceCanvas({
 
     // Add/update series for each compare symbol.
     compares.forEach((cs, colorIdx) => {
-      const color =
-        COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? theme.compare[0];
+      const color = compareColorAt(theme, colorIdx);
       compareColorRef.current.set(cs.symbol, color);
 
       const compareClean: NumericBar[] = cs.rows.flatMap((r) => {
@@ -646,10 +700,26 @@ export function ChartWorkspaceCanvas({
   // it, toggling indicators on a re-fetched range would compute SMAs over
   // the previous range's `cleanRowsRef`. Do not "simplify" by removing
   // `rows` from the deps.
+  //
+  // In compare mode the primary series is drawn as % change and the single
+  // right-hand price scale carries that unit, so the moving averages are
+  // computed on the normalized values too (#2209). Plotting absolute price
+  // here forced the axis to span dollars and percent at once, which both
+  // rendered the overlays against nothing comparable AND stretched the scale
+  // until the compare series themselves were unreadable. Same treatment the
+  // trend-overlay effect below already applies — keep the two families in
+  // agreement about what compare mode does to the scale.
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    const closes = cleanRowsRef.current.map((b) => b.close);
+    const rawCloses = cleanRowsRef.current.map((b) => b.close);
+    // normalizeToPercent nulls the WHOLE array (base 0 or non-finite) or none
+    // of it, so this filter never desynchronises `values[i]` from
+    // `cleanRowsRef.current[i]` — it either keeps every index or yields [],
+    // in which case the indicators simply draw no points.
+    const closes = compareMode
+      ? normalizeToPercent(rawCloses).filter((v): v is number => v !== null)
+      : rawCloses;
 
     // Remove series no longer enabled.
     for (const [id, series] of indicatorRefs.current.entries()) {
@@ -667,7 +737,7 @@ export function ChartWorkspaceCanvas({
       let series = indicatorRefs.current.get(id);
       if (!series) {
         series = chart.addSeries(LineSeries, {
-          color: SMA_COLORS[id]!,
+          color: theme.indicator[id],
           lineWidth: 2,
           priceLineVisible: false,
           lastValueVisible: false,
@@ -683,7 +753,11 @@ export function ChartWorkspaceCanvas({
       }
       series.setData(data);
     }
-  }, [indicators, clean]);
+    // `compareMode` is a dep: entering or leaving compare mode changes the unit
+    // the indicators are computed in, and `clean` does not necessarily change
+    // on that transition (adding a compare ticker leaves the primary rows
+    // untouched). Without it the overlays would keep the previous mode's unit.
+  }, [indicators, clean, compareMode]);
 
   // Trend overlays: linear regression + range channel.
   // In compare mode the visible axis is % change, so we compute trends on
@@ -699,7 +773,7 @@ export function ChartWorkspaceCanvas({
     // non-finite; in that degenerate case filter produces [] and the trend
     // helpers return empty arrays — overlays simply render no points, which is
     // correct.
-    const closes = compares.length > 0
+    const closes = compareMode
       ? normalizeToPercent(rawCloses).filter((v): v is number => v !== null)
       : rawCloses;
 
@@ -772,7 +846,10 @@ export function ChartWorkspaceCanvas({
         channelLowRef.current = null;
       }
     }
-  }, [showRegression, showChannel, clean, compares]);
+    // `compareMode` rather than `compares`: only the mode flip changes the unit
+    // these are computed in, and the array identity changes on every render,
+    // which re-ran this whole effect needlessly. Matches the indicator effect.
+  }, [showRegression, showChannel, clean, compareMode]);
 
   // Live last-bar updates (#602). Disabled in compare mode — when the
   // candle/volume series are hidden in favour of normalized lines,
@@ -886,6 +963,7 @@ export function ChartWorkspaceCanvas({
  * a second row when present.
  */
 function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
+  const theme = useChartTheme();
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const fmtPct = (v: number | null | undefined) => {
     if (v === null || v === undefined) return "—";
@@ -957,7 +1035,7 @@ function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
           {hover.indicators.map((row) => (
             <span key={row.id} className="flex items-baseline gap-1">
               <span className="text-slate-400">{row.label}</span>
-              <span style={{ color: SMA_COLORS[row.id] }}>{fmt(row.value)}</span>
+              <span style={{ color: theme.indicator[row.id] }}>{fmt(row.value)}</span>
             </span>
           ))}
         </>

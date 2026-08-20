@@ -110,21 +110,78 @@ assert rec.rationale == "No action trigger met; score=0.600 rank=2"
 assert rec.rationale == _hold_rationale(score_row, quote_is_fallback=False)
 ```
 
-## Scope the deliberate DB-tier run to the diff — NEVER bare `pytest -m db` locally
+## Run the full DB tier in file-scoped batches — NEVER bare `pytest -m db` locally
 
 Bare full-suite `uv run pytest -m db` on the dev Mac has wedged twice (2026-06-09:
 froze at startup, zero workers; 2026-06-10: ran 2h02m to 98% then froze with all
-xdist workers dead — a moving progress bar does not mean it will finish). Even when
-it moves, ~4,300 db tests × 1-3s fixture overhead ≈ an hour+ of wall-clock for
-milliseconds of test logic; suite-shape fix tracked in #1568.
+xdist workers dead — a moving progress bar does not mean it will finish).
 
-Operator decision: never block a small PR on the full tier. The "run the DB tier
-deliberately" rule is satisfied by running the test files for the touched modules +
-immediate neighbours (e.g. a 2-file rewash change → 4 files / 105 tests / ~60s).
-For broad surface (migrations touching many tables, conftest/fixture changes,
-schema-wide refactors) run the tier in file-scoped batches, not bare `-m db`. A run
-with 0% CPU and no `gw*` workers is wedged: `kill -9` it, then reap leaked test DBs
-with `uv run python -m tests.fixtures.cleanup_test_dbs`.
+Since #1568 the fixture cost is gone (per-test setup+teardown 1,805 ms → ~10 ms),
+so the whole tier runs in **~3.5 min** — but drive it in batches, one pytest
+process per batch, so memory and worker state are reclaimed between them and a
+wedge is contained to one batch instead of the whole run. Bare `-m db` has not
+been re-verified as safe post-#1568 and should still be avoided.
+
+```bash
+docker compose --profile test up -d postgres-test
+find tests -name 'test_*.py' | sort | split -l 40 - /tmp/chunk_
+for f in /tmp/chunk_*; do uv run pytest -m db -q $(tr '\n' ' ' < "$f"); done
+```
+
+Operator decision: a small PR is still not blocked on the full tier — the
+"run the DB tier deliberately" rule is satisfied by the test files for the touched
+modules + immediate neighbours. Run the whole tier for broad surface (migrations
+touching many tables, conftest/fixture changes, schema-wide refactors).
+
+A run with 0% CPU and no `gw*` workers is wedged: `kill -9` it, then reap leaked
+test DBs with `uv run python -m tests.fixtures.cleanup_test_dbs`.
+
+Note: this repo's pytest config suppresses the final `N passed` line — the
+durations block is the last thing printed. Gate on the **exit code**, or pass
+`--junitxml` when you need counts.
+
+## Per-test DB cleanup cost is per-RELATION, not per-row
+
+`TRUNCATE` on an empty table is not free — it takes ACCESS EXCLUSIVE and rewrites
+a relfilenode per relation regardless of content. Truncating the 105-table planner
+set cost **845 ms** against a database that was already empty, twice per test
+(#1568). Cost scales with how many tables you name, not how much the test wrote.
+
+Probe first, then delete only what is dirty:
+
+- `SELECT 't' WHERE EXISTS (SELECT 1 FROM t) UNION ALL …` over the wipe set is an
+  exact non-empty test in one round trip. `pg_class.reltuples` is **not** usable
+  for this — it reported 1,466 "dirty" relations immediately after a TRUNCATE
+  (stale planner estimate).
+- Probe **partition roots only** (`relispartition = false`). `EXISTS` on a
+  partitioned parent already short-circuits across every partition; probing the
+  1,311 individual partitions instead of their 12 parents cost 69.8 ms vs 3.9 ms
+  for the same answer.
+- `DELETE` has no `CASCADE`, so the order must be topological (children first),
+  derived from `pg_constraint` — not a hand-maintained list.
+- `DELETE` has no `RESTART IDENTITY` either. Reset sequences separately, and probe
+  them independently of rows: `nextval` is **not transactional**, so a rolled-back
+  INSERT leaves the sequence advanced while the table stays empty.
+  `pg_sequences.last_value IS NOT NULL` means exactly "read since the last
+  RESTART" and costs 0.8 ms.
+
+Rollback-per-test isolation is the usual answer and does **not** fit this
+codebase: 271 explicit `.commit()` calls across 71 app files would break any
+enclosing transaction. Rule that out by grepping before designing around it.
+
+## Reuse one connection for per-test DB cleanup — a fresh backend is a cold backend
+
+The #1568 dirty-set probe is a 139-branch `UNION ALL … EXISTS`. Planning it costs
+**~110 ms on a brand-new connection and ~3.8 ms on one that has run it before** —
+an empty relcache/syscache has to fault in every referenced relation's catalog
+entry, and psycopg3 only auto-prepares after `prepare_threshold` (5) executions on
+the *same* connection. A fixture that opens a connection per cleanup pass pays the
+cold price every test and hides a 30x win.
+
+Same trap for any per-test helper issuing a catalog-heavy or many-relation query.
+Measure it on a fresh connection, not in a loop on a warm one, or the benchmark
+will flatter the design. Hold the helper's connection at session scope; keep the
+per-test connection the test itself uses fresh.
 
 ## DB write + return value consistency
 
@@ -132,10 +189,10 @@ If a function both writes to the DB and returns a result object, there must be a
 
 ## Integration-marker discipline
 
-Any test that uses the `clean_client` fixture (or any fixture that touches a real DB) MUST be decorated with `@pytest.mark.integration`. Unit-only CI passes deselect integration tests by marker; an unmarked integration test will either be silently skipped or error during fixture setup.
+Any test that uses the `clean_client` fixture (or any fixture that touches a real DB) MUST be decorated with `@pytest.mark.integration` (registered in `pyproject.toml`). Since the 2026-06-07 test-tiering decision this marker is documentation, not the gate: push-gate exclusion is automatic via the `db` marker, auto-applied at collection (`tests/conftest.py::pytest_collection_modifyitems`) to any test pulling a real-DB fixture or whose module source references a real-DB entrypoint (`TestClient`, `ebull_test_conn`, `settings.database_url`, `run_migrations(`, …). Keep the explicit decoration anyway — it declares the tier boundary at the test site instead of leaving it to the collection-time source scan.
 
 ```python
-# Wrong — silently runs against whichever DB mode CI picked
+# Wrong — real-DB test with no tier declaration at the test site
 def test_post_ingest_enabled_unknown_key_404(clean_client: TestClient) -> None:
     ...
 
@@ -145,7 +202,7 @@ def test_post_ingest_enabled_unknown_key_404(clean_client: TestClient) -> None:
     ...
 ```
 
-Self-check before pushing: `grep -n "def test_.*\(clean_client" tests/` and assert each match is preceded by `@pytest.mark.integration`.
+Self-check before pushing: `grep -rn "def test_.*(clean_client" tests/` and assert each match is decorated `@pytest.mark.integration` (or its module sets `pytestmark = pytest.mark.integration`).
 
 ## Dev-DB isolation invariant
 
@@ -154,11 +211,11 @@ The test suite MUST point at `ebull_test_*` databases, never the operator dev DB
 1. **Singleton-row drops** — a test that `TRUNCATE`s or `DELETE`s from a singleton table (e.g. `runtime_config`, `kill_switch`) takes the live system into a fail-closed 503 state until an operator re-seeds. 2026-05-18 is on record.
 2. **Test pollution** — fixtures that mutate state run against a moving target, hiding non-determinism behind cross-suite interference.
 
-Defense in depth (four rails, in order of how often they fire):
+Defense in depth (six rails, in order of how often they fire):
 
 1. **Primary:** `tests/fixtures/ebull_test_db.py::_assert_test_db` rejects any destructive op against a DB whose name does not match `ebull_test_*`. Every cursor obtained through `ebull_test_conn` goes through this guard.
 2. **Tripwire:** `tests/conftest.py::_dev_db_size_tripwire` records `pg_database_size('ebull')` at session start + asserts <1 MB growth at session end. Catches the residual case where a test opens a raw `psycopg.connect(settings.database_url)` outside the fixture. Tripwire only — misses deletes and HOT updates; can false-positive on idle autovacuum.
-3. **Orphan sweep** (#1208 Phase 2): `_drop_orphan_workers_older_than` runs on every controller-start inside `build_template_if_stale()`. Catches the residue of `ebull_test_<epoch>_<hex>_<gw>` databases left behind when a worker SIGSEGV's, the operator force-quits pytest, or the OS reboots mid-run — failure modes that `pytest_sessionfinish` cannot reach because it only fires on graceful exit. Three-rail safety model (activity guard via `pg_stat_activity`, age backstop via parsed epoch, hard-coded `_NEVER_DROP` literal); plain `DROP DATABASE` without `WITH (FORCE)` to eliminate the TOCTOU race against a sibling pytest worker. CI is short-circuited (`os.getenv("CI") == "true"`).
+3. **Orphan sweep** (#1208 Phase 2): `_drop_orphan_workers_older_than` runs on every controller-start inside `build_template_if_stale()`. (Sweep logic + `_NEVER_DROP` protect-set now live in `app/db/dev_test_db_reaper.py`; `tests/fixtures/ebull_test_db.py` wraps/re-exports them.) Catches the residue of `ebull_test_<epoch>_<hex>_<gw>` databases left behind when a worker SIGSEGV's, the operator force-quits pytest, or the OS reboots mid-run — failure modes that `pytest_sessionfinish` cannot reach because it only fires on graceful exit. Three-rail safety model (activity guard via `pg_stat_activity`, age backstop via parsed epoch, hard-coded `_NEVER_DROP` literal); plain `DROP DATABASE` without `WITH (FORCE)` to eliminate the TOCTOU race against a sibling pytest worker. CI is short-circuited (`os.getenv("CI") == "true"`).
 4. **Invalid-DB force-reaper** (#1401): `_force_drop_invalid_test_dbs` runs alongside the orphan sweep at controller-start. It force-drops every `ebull_test_*` **and `ebull_mig*`** database marked `datconnlimit = -2` — the "interrupted-drop corpse" state PG sets when a `kill -9`'d worker (or a wedged `DROP ... WITH (FORCE)`) dies mid-drop. The age-gated, plain-DROP orphan sweep above **cannot** clear these: PG refuses all new connections to a `-2` DB so plain DROP is blocked by the wedged backend, and the corpse has no parseable epoch. Because a `-2` DB is connection-refused there is no concurrent-invocation race — force-drop is unconditionally safe (no age gate, no activity rail). This is the rail that actually clears the leak: the 13.1M-file dev-PG bloat (2026-05-30) was `-2` worker/mig corpses the old sweep matched only by `ebull_test%` and never force-dropped.
 5. **Session-lifetime keepalive** (`_worker_db_keepalive`, autouse from `conftest.py`): each worker holds one autocommit connection to its private DB for the whole pytest session, so the worker DB appears in `pg_stat_activity` even between tests — the load-bearing input to the orphan-sweep activity rail.
 6. **Worker-DB relation-count tripwire** (#1401): `_assert_worker_relations_under_ceiling` runs in `ebull_test_conn` teardown. The worker DB is **reused across every test on the worker** and per-test cleanup is `TRUNCATE` only — it wipes rows but **never drops relations**. Any test (or app code under test) that `CREATE`s a table/index/partition without dropping it leaks relations that accumulate for the whole session; one such runaway ballooned a worker DB past ~2.1M relations and bloated the data dir to 13.1M files. The tripwire fails the first test that pushes `count(*) FROM pg_class` past `_WORKER_DB_RELATION_CEILING` (50k; template baseline ≈9.6k), so a relation leak surfaces as a named failing test instead of a silent disk disaster.
@@ -193,7 +250,7 @@ A clean template returns ONLY `schema_migrations` (= count of applied migration 
 Operationally:
 
 - Test fixtures seed 1–5 rows per-test through `ebull_test_conn`.
-- Bulk-data tests (e.g. ranking-engine integration over 10k rows) opt out of the default suite with `@pytest.mark.slow` + run in a separate CI job.
+- Bulk-data tests (e.g. ranking-engine integration over 10k rows) are auto-`db`-marked, so they never run on the push gate; genuinely long-wall-clock ones also take `@pytest.mark.perf` (registered nightly-tier marker; deselect with `-m "not perf"`). There is no `slow` marker, and CI runs no pytest — no separate CI job to punt them to.
 - Reference data that genuinely belongs in a migration must be flat (`INSERT VALUES (...)` only, no DML loops); a future migration cannot start growing the seed without showing up in the audit above.
 
 Audited 2026-05-19 against #1208 Phase 2 — fresh template returned exactly `schema_migrations | 133`, no other non-zero tables. Codebase already honours this rule; the audit + this skill are the prevention against drift.
@@ -264,3 +321,205 @@ guarded by a prior `assert len(periods) >= 1`.
 Origin: PR #1837 (#1835) review WARNING — `test_fy_rejects_quarter_duration_mislabeled_fy`
 asserted `all(p.revenue is None for p in fy)` where the expected outcome was an
 empty `fy`, so the assertion was vacuously true and did not cover the rejection.
+
+## Revert-probe every regression test — a test that never failed proves nothing
+
+A test written alongside its fix has never been observed to fail. It may assert
+something the fix does not control, or something that was already true. `/insights`
+(2026-07-25) names "vacuous tests that survive deleting the code under test" as a
+recurring self-introduced defect class, caught only by a later gate.
+
+**Before claiming a regression test pins a bug: revert the fix, run the test,
+watch it fail, restore the fix.** For a one-line change, temporarily invert it;
+for an ordering bug, restore the old order. `git stash` is NOT the tool for this
+on a shared checkout — a clean tree makes `stash pop` restore an unrelated
+pre-existing stash (#2140). Copy the file aside and copy it back, or work in a
+worktree.
+
+Worked example (#2157): the fan-out test seeded a typed sibling and an
+observation-only sibling and passed — but it could not detect the real bug,
+because the instrument-set resolution ran after an accession-wide DELETE. Adding
+a **typed-rows-only** sibling (absent from the resolver and from observations)
+made it a real probe. Moving the DELETE back to its pre-fix position produced
+`1 failed`; restoring it produced `1 passed`. Without that check the test would
+have shipped as decoration.
+
+State the probe in the PR — "verified the test fails against the pre-fix
+ordering and passes after" — so a reviewer knows the assertion is load-bearing.
+
+### ⚠ The probe itself can be vacuous, and it reports as a missing test
+
+When probing by string replacement, `assert source.count(old) == 1` is the
+standing guard — a probe that silently matches nothing proves nothing. It is not
+enough. **It guards against matching nothing; it says nothing about whether the
+replacement changes behaviour.**
+
+Precedent (#2240 4a, 2026-08-06): a probe replaced `return "window_truncated"`
+with `return None if False else "window_truncated"`. Anchor unique, file
+changed, test still passed — because the replacement returns the same value. The
+harness reported `NOT CAUGHT`, which reads as *the test is inadequate* rather
+than *the probe is inert*, so the natural next move is to write a redundant test
+or weaken the code until the probe "works". Both make things worse.
+
+- **The tell:** a replacement that keeps the original expression inside it
+  (`X` → `f(X)`, `X` → `cond and X`, `X` → `A if False else X`), or that flips a
+  branch the test input never reaches.
+- **The rule:** a probe must DELETE or INVERT the behaviour, not wrap it. When a
+  probe reports NOT CAUGHT, read the injected source before touching the test.
+- ⚠ **Some invariants cannot be broken at a single site.** "Truncation must not
+  be absorbed into `expired`" needed the window clamp AND the exit-index clamp
+  changed together — either alone still refuses. So the harness takes a *list*
+  of (anchor, replacement) pairs per probe, with the uniqueness assertion per
+  anchor. A probe needing two sites is itself evidence that the two guards are
+  load-bearing together, which is worth knowing before somebody deletes one as
+  redundant.
+
+### ⚠ A boundary defect inside a CONJUNCTION needs one fixture per comparison
+
+Precedent (#2240 S-1, 2026-08-06). The rule is
+`close > sma_200 AND sma_50 > sma_200`. The obvious boundary fixture is a flat
+series, where `close == sma_50 == sma_200`, and it looks like it pins both `>`
+operators at once. It pins **neither**: relaxing one comparison to `>=` leaves
+the other one false, so the conjunction is still false and the verdict does not
+move. Two probes reported `NOT CAUGHT` against a test that reads as exactly the
+right test.
+
+**The rule: for `a > b AND c > d`, each operator needs a fixture where THAT
+comparison is an equality and the other is strictly true.** A degenerate fixture
+that satisfies every comparison at once satisfies none of them separately. The
+same applies to `OR` with the sense reversed — there, a fixture where both
+disjuncts are true cannot see either operator either.
+
+Two things that made the fixtures reliable rather than approximate:
+
+- **Construct the equality exactly.** Integer closes whose window sums stay
+  inside 2^53 make `sum/period` exact in float64, so "the close sits exactly on
+  the 200-day" is a fact rather than a hope. `49*90 + 101*100 + 49*110 + 100 =
+  20,000` over 200 bars gives `sma_200 == close == 100` with `sma_50 == 109.8`;
+  a period-50 saw-tooth over 200 bars (four whole periods) gives
+  `sma_50 == sma_200` exactly while the close sits well above both.
+- **Assert the precondition inside the test.** The test checks
+  `closes[i] == slow and fast > slow` before asserting the verdict. Without it
+  a later fixture edit drifts off the boundary and the test keeps passing while
+  testing nothing — which is the vacuous-test class this whole section is about.
+
+### ⚠ A reference implementation imports NONE of the constants it validates
+
+Precedent twice in one day (#2240 S-3 and S-4, 2026-08-06) — two of the three
+strategies written so far, which makes it the default mistake rather than a slip.
+Both had a reference re-derivation written by a deliberately different algorithm
+(S-4's `sorted(window).index(v)` against the module's count-of-comparisons), and
+both fed it the module's own constants. Probes that shifted the constants
+(S-3: period 14 → 13; S-4: window 100 → 50 and lookback 20 → 10) reported
+`NOT CAUGHT`: the reference moved with the code and both sides agreed on a rule
+neither was checking.
+
+**Independence of the ALGORITHM is not independence of the PARAMETERS**, and a
+parameter is exactly what a spec fixes. So: **a reference transcribes the spec's
+numbers by hand and imports none of them.** The divergence between the
+hand-written literal and the module's constant IS the test; sharing the constant
+deletes it while leaving everything looking right.
+
+**The shape that works, and it needs both halves:**
+
+1. Declare the spec's numbers as `SPEC_*` literals at the top of the test file,
+   with the rule quoted verbatim beside them. Every expected value reads those.
+2. Add exactly ONE bridge test (`TestSpecConstants`) asserting the module's
+   constants equal the `SPEC_*` ones, and let it be the only place the module's
+   constants are read as values. Without it the reference is independent but
+   nothing notices the code quietly using a different number — a constant change
+   then makes other tests silently wrong instead of failing one loudly.
+
+Scope, because over-applying this is its own defect: the rule binds the numbers
+an ASSERTION depends on. Using the module's constant as scaffolding — sizing a
+fixture window, indexing a warm-up boundary — is fine and often clearer; the
+bridge test is what keeps the two in step.
+
+Corollary for probe harnesses: **write a revert probe for a spec constant even
+when it looks inert.** Neither instance was visible until a probe mutated one —
+in S-4's case 37 tests, `ruff`, `pyright` and a clean 32.5M-bar full-population
+arm all passed, the arm clean *because* it was fed the same constants indirectly.
+A constant is the single thing a reference is most tempted to share.
+
+Live examples: `tests/test_strategy_s3.py` and `tests/test_strategy_s4.py`
+(`SPEC_*` block + `TestSpecConstants`).
+
+## A "neutral" fixture is not neutral if the thing under test classifies it
+
+Bit twice in one PR (#2279, 2026-08-05), and both times the test failed against
+**correct** code — which is the expensive direction, because the first instinct
+is to change the code.
+
+A `_flat_bars()` helper built a baseline of identical bars, intended as
+inert background against which a few interesting bars were placed. But the
+function under test classifies every bar against a price band, and the flat
+baseline closed *inside* that band — so every "neutral" bar was already a
+`touch`. A break-and-retest test asserting `retest_index == 32` got `31`: the
+bar immediately after the break was a legitimate retest, and the assertion was
+wrong, not the state machine. Rewriting the fixture so those bars sat clear of
+the band fixed it. The same trap reappeared five tests later.
+
+**The check, before writing the assertion:** run the classifier over the
+baseline alone. If it returns anything other than the "nothing here" verdict,
+the baseline is participating in the test and every index you hand-count is
+suspect.
+
+Corollary for fixtures that carry a status alongside a payload: **derive the
+status from the same rule the producer uses, never hand-write a
+plausible-looking one.** A helper that fabricates `state="not_fired"` for
+hand-made input silently defeats any test about when that state is wrong — the
+fixture asserts the thing under test.
+
+## When a test fails, decide FIRST whether the fixture or the code is wrong
+
+Sounds obvious; is not the default under time pressure, because a red test reads
+as "the code is broken". Both #2279 failures above were fixture bugs, and in
+both the honest fix was to change the *setup*, leaving the assertion intact.
+
+Signal it is the fixture: the observed value is **explainable and defensible**
+(`retest_index == 31` because bar 31 genuinely intersects the band), rather than
+arbitrary. Signal it is the code: the observed value has no account you would
+defend in a PR description.
+
+⚠ The failure mode to avoid is relaxing the assertion to whatever the code
+produced. That converts a real test into a change-detector, and it is
+indistinguishable in the diff from a legitimate fixture fix — so say which one
+it was in the commit message.
+
+## An integration test through a production entry point may open its OWN connection
+
+`ebull_test_conn` gives the TEST database to the *test*. It does not redirect
+production code that calls `psycopg.connect` on `settings.database_url` itself —
+and a surprising amount of this repo's job/worker layer does, because those
+functions run in threads where a shared connection is not safe.
+
+**Before writing an integration test that drives a production function, grep it
+for its own connect.** If it has one, patch the global for the duration:
+
+```python
+@pytest.fixture(autouse=True)
+def _writes_to_the_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "database_url", test_database_url())
+```
+
+Autouse, so a test added to the file later cannot forget it. `conftest.py`'s
+`_filer_ingest_worker_conns_use_test_db` (#1274) is the same fix for the parallel
+filer-ingest driver — that one patches the module's `connect_job` reference
+instead, which is narrower where a single seam exists.
+
+⚠ **The failure is silent and it writes to the operator's dev DB.** The test does
+not error — the production code happily writes rows somewhere real, and the
+assertion then fails with "no row written" because it is reading a different
+database. Precedent (2026-08-05, #2218): `_tracked_job` has three of these connects
+(start, failure, success); the first draft of `test_job_degraded_terminal.py` wrote
+four rows into dev `job_runs` before that was noticed.
+
+⚠ Then the guard catches the DOCSTRING. `tests/smoke/test_no_settings_url_in_destructive_paths.py`
+is a line-literal grep and does not know prose from code, so a comment *explaining*
+the trap trips it. Reword around the literal call spelling and say why, rather than
+adding an exemption — the guard's bluntness is what makes it reliable.
+
+**Prefer not needing this at all.** One DB test per genuinely-new SQL mechanism;
+everything else pure. This one earns its place because only a real database proves
+a new status survives a rewritten `CHECK` constraint — a mocked cursor asserts the
+parameters and passes against a constraint that would reject them.

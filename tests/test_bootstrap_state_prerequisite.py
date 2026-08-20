@@ -22,6 +22,7 @@ import psycopg
 from app.workers.scheduler import (
     JOB_CUSIP_EXTID_SWEEP,
     JOB_CUSIP_UNIVERSE_BACKFILL,
+    JOB_DAILY_NEWS_REFRESH,
     JOB_DAILY_PORTFOLIO_SYNC,
     JOB_ETORO_LOOKUPS_REFRESH,
     JOB_EXCHANGES_METADATA_REFRESH,
@@ -34,6 +35,8 @@ from app.workers.scheduler import (
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     JOB_ORPHAN_TEST_DB_REAP,
     JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
+    JOB_PG_SIZE_SAMPLE,
+    JOB_QUOTES_REFRESH,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_RETRY_SWEEPER,
@@ -42,6 +45,9 @@ from app.workers.scheduler import (
     JOB_SEC_MANIFEST_WORKER,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
+    JOB_STRATEGY_HALT_FEED_REFRESH,
+    JOB_STRATEGY_INTRADAY_HARVEST,
+    JOB_THESIS_REFRESH,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
     _bootstrap_complete,
@@ -156,6 +162,48 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         # bootstrap gate like any non-exempt job (pauses cleanly during
         # bootstrap). No bootstrap dependency of its own.
         JOB_RETRY_SWEEPER,
+        # #2212 (audited 2026-08-03) — three scheduled jobs that drifted in
+        # without a per-job prereq. All three are
+        # ``exempt_from_universal_bootstrap_gate=False``, so the UNIVERSAL gate
+        # (#1181, app/jobs/runtime.py::_wrap_invoker) already rejects their
+        # scheduled fires with ``bootstrap_not_complete`` until bootstrap
+        # completes. Adding a per-job ``_bootstrap_complete`` would double-gate —
+        # the same JOB_NCEN_CLASSIFIER call above.
+        #   * daily_news_refresh — Yahoo-RSS ingest; no bootstrap-produced input.
+        #   * pg_size_sample — DB-size telemetry sampler; meaningful (and
+        #     arguably most useful) during bootstrap itself.
+        #   * thesis_refresh — carries a prereq, but it gates LLM-provider
+        #     reachability (``_llm_provider_resolvable``), not bootstrap state,
+        #     so ``_references_bootstrap_complete`` correctly reports False.
+        JOB_DAILY_NEWS_REFRESH,
+        JOB_PG_SIZE_SAMPLE,
+        JOB_THESIS_REFRESH,
+        # #2449 audit — current quotes have no bootstrap-produced input and
+        # the non-exempt job is already stopped by the universal gate. A
+        # second per-job gate would duplicate that authority.
+        JOB_QUOTES_REFRESH,
+        # #2629 audit (2026-08-13) — two strategy collection jobs that drifted
+        # in carrying a COLLECTION-WINDOW prerequisite
+        # (``_strategy_intraday_collection_due`` / ``_strategy_halt_collection_due``)
+        # rather than a bootstrap one, so ``_references_bootstrap_complete``
+        # correctly reports False — the same shape as JOB_THESIS_REFRESH above,
+        # whose prereq gates LLM reachability.
+        #
+        # Both are ``exempt_from_universal_bootstrap_gate=False`` — measured,
+        # not assumed: of the 56 SCHEDULED_JOBS entries exactly two set it True
+        # (``orchestrator_high_frequency_sync``, ``sec_daily_index_reconcile``)
+        # and the exemption census below pins that. So the UNIVERSAL gate (#1181,
+        # app/jobs/runtime.py::_wrap_invoker, ``needs_gate = not is_exempt``)
+        # already rejects their scheduled fires with ``bootstrap_not_complete``
+        # until bootstrap completes — and it runs BEFORE the per-job prereq, so
+        # the operator-visible reason is the actionable one either way. Adding a
+        # per-job ``_bootstrap_complete`` would double-gate, exactly as recorded
+        # for JOB_NCEN_CLASSIFIER (#1504) and the #2212 trio.
+        #   * strategy_intraday_harvest (#2477) — eToro research-window bars.
+        #   * strategy_halt_feed_refresh (#2507) — Nasdaq halt RSS; a safety
+        #     feed that can refuse but never create a trade.
+        JOB_STRATEGY_INTRADAY_HARVEST,
+        JOB_STRATEGY_HALT_FEED_REFRESH,
     }
 )
 
@@ -219,4 +267,41 @@ def test_every_scheduled_job_either_gated_or_explicitly_excluded() -> None:
         f"Scheduled job(s) {sorted(unexpected_gated)} are listed as "
         f"non-gated in NON_GATED_SCHEDULED but actually carry the "
         f"_bootstrap_complete gate. Pick one."
+    )
+
+
+# The whole NON_GATED_SCHEDULED argument — "no per-job gate is needed because
+# the universal gate already stops it" — is only true for a job the universal
+# gate actually sees. ``exempt_from_universal_bootstrap_gate=True`` is the one
+# flag that takes a job out of its reach, and nothing pinned that set, so a
+# future exemption would quietly invalidate a dozen entries above without
+# failing anything (#2629).
+UNIVERSAL_GATE_EXEMPT: frozenset[str] = frozenset(
+    {
+        # Bypasses the gate so the 5-minute portfolio/FX sync keeps running
+        # during bootstrap.
+        JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
+        # #1181 lane-B carve-out: idempotent, subject_resolver filters every
+        # unknown CIK. See docs/superpowers/specs/2026-05-16-lane-b-discovery-firing.md §4.2.
+        JOB_SEC_DAILY_INDEX_RECONCILE,
+    }
+)
+
+
+def test_universal_gate_exemptions_are_only_the_declared_two() -> None:
+    """Pins the set NON_GATED_SCHEDULED's rationale depends on.
+
+    Entries in ``NON_GATED_SCHEDULED`` justify carrying no per-job
+    ``_bootstrap_complete`` by pointing at the universal gate
+    (``app/jobs/runtime.py::_wrap_invoker``, ``needs_gate = not is_exempt``).
+    Flipping a job to ``exempt_from_universal_bootstrap_gate=True`` removes
+    that backstop, so the exemption must be a deliberate, reviewed change —
+    not a default a new job inherits.
+    """
+    exempt = {job.name for job in SCHEDULED_JOBS if job.exempt_from_universal_bootstrap_gate}
+    assert exempt == set(UNIVERSAL_GATE_EXEMPT), (
+        f"universal-bootstrap-gate exemptions changed: {sorted(exempt)}. Every "
+        f"NON_GATED_SCHEDULED entry justifies itself by the universal gate still "
+        f"applying, so an exemption invalidates that argument for the job it is "
+        f"granted to. Re-check that job's gating and update both sets."
     )

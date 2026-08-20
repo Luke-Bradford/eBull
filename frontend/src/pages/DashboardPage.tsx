@@ -141,6 +141,8 @@ export function DashboardPage() {
                 <PositionsTable
                   positions={portfolio.data?.positions ?? []}
                   mirrors={portfolio.data?.mirrors ?? []}
+                  displayCurrency={portfolio.data?.display_currency ?? "GBP"}
+                  cashCurrency={portfolio.data?.cash_currency ?? "GBP"}
                 />
               </LiveQuoteProvider>
             )}

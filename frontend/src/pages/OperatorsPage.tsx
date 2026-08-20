@@ -24,6 +24,7 @@ import {
   listOperators,
 } from "@/api/operators";
 import { useSession } from "@/lib/session";
+import { Badge } from "@/components/ui/Badge";
 
 const MIN_PASSWORD_LEN = 12;
 
@@ -119,7 +120,7 @@ export function OperatorsPage(): JSX.Element {
       </div>
 
       {loadError !== null && (
-        <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+        <div role="alert" className="rounded bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
           {loadError}
         </div>
       )}
@@ -140,16 +141,16 @@ export function OperatorsPage(): JSX.Element {
                 <div>
                   <span className="font-medium text-slate-800 dark:text-slate-100">{row.username}</span>
                   {row.is_self && (
-                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                    <Badge uppercase className="ml-2">
                       you
-                    </span>
+                    </Badge>
                   )}
                 </div>
                 <button
                   type="button"
                   onClick={() => void handleDelete(row)}
                   disabled={busyId === row.id}
-                  className="rounded border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                  className="rounded border border-red-300 dark:border-red-700 px-2 py-1 text-xs text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
                 >
                   {busyId === row.id ? "Deleting…" : "Delete"}
                 </button>
@@ -158,7 +159,7 @@ export function OperatorsPage(): JSX.Element {
           </ul>
         )}
         {actionError !== null && (
-          <p role="alert" className="mt-2 text-xs text-rose-700">
+          <p role="alert" className="mt-2 text-xs text-red-700 dark:text-red-300">
             {actionError}
           </p>
         )}
@@ -198,7 +199,7 @@ export function OperatorsPage(): JSX.Element {
           {createError !== null && (
             <div
               role="alert"
-              className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300"
+              className="rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300"
             >
               {createError}
             </div>

@@ -46,6 +46,7 @@ JOB_SEC_INSIDER_INGEST_FROM_DATASET: Final[str] = "sec_insider_ingest_from_datas
 JOB_SEC_NPORT_INGEST_FROM_DATASET: Final[str] = "sec_nport_ingest_from_dataset"
 JOB_SEC_FSDS_CLASS_SHARES_INGEST: Final[str] = "sec_fsds_class_shares_ingest"
 JOB_SEC_FSDS_DIMENSIONAL_INGEST: Final[str] = "sec_fsds_dimensional_ingest"
+JOB_SEC_FSNDS_NOTES_INGEST: Final[str] = "sec_fsnds_notes_ingest"
 
 
 # Post-ingest batched _current refresh chunk size (PR-4 spec §8).
@@ -1062,4 +1063,43 @@ def sec_fsds_dimensional_ingest_job() -> None:
     if failed_archives:
         raise RuntimeError(
             f"sec_fsds_dimensional_ingest: {len(failed_archives)} archives failed: " + "; ".join(failed_archives)
+        )
+
+
+def sec_fsnds_notes_ingest_job() -> None:
+    """Stream the cached ``fsnds_*_notes.zip`` monthlies and load unvested
+    RSU/PSU counts (axis ``award_type``) into ``instrument_dimensional_facts``
+    (#844, spec docs/specs/etl/2026-07-23-drs-rsu-issuer-disclosures.md).
+
+    Operator-invokable (not a bootstrap stage in v1 — the stage-slot wiring is
+    a follow-up); standalone-safe: ingests whatever ``fsnds_*_notes.zip`` is
+    cached, skips quietly when none. Archives are NOT deleted (deterministic
+    names — a re-download overwrites, same posture as fsds_*.zip)."""
+    archives = _list_archives_matching("fsnds_")
+    if not archives:
+        logger.info("sec_fsnds_notes_ingest: no fsnds_*_notes.zip cached, skipping")
+        return
+
+    from app.services.fsnds_notes_facts import ingest_fsnds_notes_archive
+
+    failed_archives: list[str] = []
+    total_written = 0
+    n_ok = 0
+    for archive in archives:
+        fsnds_month = archive.name.removeprefix("fsnds_").removesuffix("_notes.zip")
+        with psycopg.connect(settings.database_url) as conn:
+            try:
+                # The ingester commits per accession (advisory-lock hygiene); no outer txn.
+                result = ingest_fsnds_notes_archive(conn=conn, archive_path=archive, fsnds_month=fsnds_month)
+            except Exception as exc:  # noqa: BLE001
+                conn.rollback()
+                logger.exception("sec_fsnds_notes_ingest: archive=%s failed", archive.name)
+                failed_archives.append(f"{archive.name}: {exc}")
+                continue
+        total_written += result.rows_written
+        n_ok += 1
+    logger.info("sec_fsnds_notes_ingest: total_rows_written=%d archives=%d", total_written, n_ok)
+    if failed_archives:
+        raise RuntimeError(
+            f"sec_fsnds_notes_ingest: {len(failed_archives)} archives failed: " + "; ".join(failed_archives)
         )

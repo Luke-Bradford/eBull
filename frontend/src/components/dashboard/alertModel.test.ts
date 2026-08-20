@@ -22,6 +22,8 @@ const NO_CURSORS: Cursors = {
   position: null,
   coverage: null,
   rank: null,
+  thesisChange: null,
+  thesisBreak: null,
 };
 
 function guard(o: Partial<GuardRejection> = {}): GuardRejection {
@@ -101,7 +103,7 @@ describe("guardReasonMeta", () => {
   it("falls back to a humanized label + triage action for an unknown code", () => {
     const m = guardReasonMeta("some_new_rule");
     expect(m.label).toBe("Some new rule");
-    expect(m.action.to).toBe("/recommendations");
+    expect(m.action.to).toBe("/research?view=actioned");
   });
 });
 

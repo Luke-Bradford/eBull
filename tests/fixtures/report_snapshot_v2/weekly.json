@@ -31,7 +31,7 @@
     "unrealized_delta": null,
     "ytd_return": null
   },
-  "generated_at": "2026-06-12T15:15:46.710742+00:00",
+  "generated_at": "2026-07-30T23:50:31.428315+00:00",
   "holdings": [
     {
       "company_name": "Report Co",
@@ -41,7 +41,7 @@
       "period_contribution": null,
       "period_contribution_bps": null,
       "price": "110.000000",
-      "sector": "Technology",
+      "sector": "Information Technology",
       "since_entry_return_pct": "0.100000",
       "symbol": "RPTV2A",
       "units": "10.000000",
@@ -92,6 +92,7 @@
   "report_type": "weekly",
   "schema_version": 2,
   "score_changes": [],
+  "score_changes_total": 0,
   "top_performers": [
     {
       "company_name": "Report Co",

@@ -133,6 +133,10 @@ def _runtime_cursor(
                 "enable_auto_trading": enable_auto_trading,
                 "enable_live_trading": enable_live_trading,
                 "display_currency": "USD",
+                "llm_provider": "openai_compatible",
+                "llm_base_url": "http://localhost:11434/v1",
+                "llm_model_writer": "qwen3:14b",
+                "llm_model_critic": "qwen3:14b",
                 "updated_at": _NOW,
                 "updated_by": "test",
                 "reason": "test",
@@ -244,8 +248,17 @@ def _cost_config_cursor(
 
 
 def _cost_model_cursor(row: dict[str, Any] | None = None) -> MagicMock:
-    """Cost model row.  None = no cost_model for this instrument (use quote spread)."""
-    return _make_cursor([row] if row is not None else [])
+    """Known-complete cost row by default; callers can override its values."""
+    if row is None:
+        row = {
+            "spread_bps": Decimal("20"),
+            "overnight_rate": Decimal("0"),
+            "fx_pair": None,
+            "fx_markup_bps": Decimal("0"),
+            "carry_cost_known": True,
+            "fx_cost_known": True,
+        }
+    return _make_cursor([row])
 
 
 def _audit_cursor(decision_id: int = 99) -> MagicMock:
@@ -620,7 +633,7 @@ class TestCheckConcentration:
 class TestTransactionCostRule:
     """Tests for the transaction_cost_prohibitive guard rule."""
 
-    def test_cost_rule_passes_when_below_threshold(self) -> None:
+    def test_quote_only_cost_fails_when_below_spread_threshold(self) -> None:
         result = _check_transaction_cost(
             quote={"spread_pct": Decimal("0.20"), "spread_flag": False},
             cost_model_row=None,
@@ -630,8 +643,9 @@ class TestTransactionCostRule:
                 "default_hold_days": 90,
             },
         )
-        assert result.passed is True
+        assert result.passed is False
         assert result.rule == "transaction_cost_prohibitive"
+        assert "carry and FX" in result.detail
 
     def test_cost_rule_fails_when_above_threshold(self) -> None:
         result = _check_transaction_cost(
@@ -641,6 +655,8 @@ class TestTransactionCostRule:
                 "overnight_rate": Decimal("0"),
                 "fx_pair": None,
                 "fx_markup_bps": Decimal("0"),
+                "carry_cost_known": True,
+                "fx_cost_known": True,
             },
             cost_config={
                 "max_total_cost_bps": Decimal("150"),
@@ -651,7 +667,7 @@ class TestTransactionCostRule:
         assert result.passed is False
         assert "200" in result.detail
 
-    def test_cost_rule_uses_quote_spread_when_no_cost_model(self) -> None:
+    def test_quote_spread_cannot_stand_in_for_missing_cost_components(self) -> None:
         result = _check_transaction_cost(
             quote={"spread_pct": Decimal("1.2"), "spread_flag": True},
             cost_model_row=None,
@@ -661,9 +677,8 @@ class TestTransactionCostRule:
                 "default_hold_days": 90,
             },
         )
-        # 1.2% spread = 120 bps < 150 threshold → passes via quote fallback
-        assert result.passed is True
-        assert "120" in result.detail
+        assert result.passed is False
+        assert "carry and FX" in result.detail
 
     def test_cost_rule_fails_via_quote_spread_fallback(self) -> None:
         """Quote spread exceeds threshold when no cost_model row exists."""
@@ -676,9 +691,8 @@ class TestTransactionCostRule:
                 "default_hold_days": 90,
             },
         )
-        # 2.0% spread = 200 bps > 150 threshold → fails
         assert result.passed is False
-        assert "200" in result.detail
+        assert "carry and FX" in result.detail
 
     def test_cost_rule_fails_closed_when_no_quote(self) -> None:
         result = _check_transaction_cost(
@@ -714,6 +728,8 @@ class TestTransactionCostRule:
                 "overnight_rate": Decimal("0"),
                 "fx_pair": None,
                 "fx_markup_bps": Decimal("0"),
+                "carry_cost_known": True,
+                "fx_cost_known": True,
             },
             cost_config={
                 "max_total_cost_bps": Decimal("150"),
@@ -722,6 +738,26 @@ class TestTransactionCostRule:
             },
         )
         assert result.passed is True
+
+    def test_numeric_zero_is_not_cost_evidence(self) -> None:
+        result = _check_transaction_cost(
+            quote={"spread_pct": Decimal("0.2"), "spread_flag": False},
+            cost_model_row={
+                "spread_bps": Decimal("20"),
+                "overnight_rate": Decimal("0"),
+                "fx_pair": None,
+                "fx_markup_bps": Decimal("0"),
+                "carry_cost_known": False,
+                "fx_cost_known": False,
+            },
+            cost_config={
+                "max_total_cost_bps": Decimal("150"),
+                "min_return_vs_cost_ratio": Decimal("3.0"),
+                "default_hold_days": 90,
+            },
+        )
+        assert result.passed is False
+        assert "carry, FX" in result.detail
 
 
 # ---------------------------------------------------------------------------

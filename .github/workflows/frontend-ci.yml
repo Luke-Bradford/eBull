@@ -40,6 +40,12 @@ jobs:
       - name: Dark-mode class gate (#708)
         run: pnpm dark:check
 
+      - name: Hand-rolled status pill gate (#2148)
+        run: pnpm pills:check
+
+      - name: Chart-integrity gate (#2185)
+        run: pnpm charts:check
+
       - name: Typecheck
         run: pnpm typecheck
 

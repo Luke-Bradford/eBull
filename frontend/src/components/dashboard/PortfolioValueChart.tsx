@@ -247,6 +247,10 @@ function ValueCanvas({
         background: { color: theme.bg },
         textColor: theme.textSecondary,
         fontSize: 11,
+        // Attribution is satisfied by the shell-level "Charts by TradingView"
+        // link (layout/Sidebar.tsx) + the repo-root NOTICE, which the library
+        // documents as an explicit alternative to this per-chart logo (#2151).
+        attributionLogo: false,
       },
       grid: {
         vertLines: { color: theme.gridLine },

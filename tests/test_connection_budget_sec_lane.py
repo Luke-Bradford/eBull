@@ -19,14 +19,19 @@ def test_demand_is_exactly_the_known_terms_plus_sec_lane_bodies():
         + pg_settings.JOBS_POOL_MAX_SIZE
         + pg_settings.BACKGROUND_POOL_MAX_SIZE
         + pg_settings.JOBS_FIXED_LONGLIVED_CONNS
-        + pg_settings.JOBS_STEADY_STATE_EXEC_CONNS
-        + pg_settings.ORCHESTRATOR_GATE_CHECK_CONN
+        + pg_settings.JOBS_NON_SEC_MAX_CONCURRENCY * pg_settings.JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION
+        + pg_settings.JOBS_BACKTEST_PROGRESS_CONNECTIONS
         + SEC_LANE_MAX_CONCURRENCY
     )
     assert pg_settings._dev_profile_connection_demand() == expected
 
 
-def test_demand_plus_reserve_fits_usable_with_margin():
+def test_demand_plus_reserve_exactly_fits_usable():
     demand = pg_settings._dev_profile_connection_demand() + pg_settings.CONNECTION_BUDGET_RESERVE
-    assert demand <= _DEV_USABLE, f"demand {demand} > usable {_DEV_USABLE}"
-    assert _DEV_USABLE - demand >= 1, "no connection margin left"
+    assert demand == _DEV_USABLE
+
+
+def test_execution_gates_fit_the_modeled_cadence_burst():
+    assert pg_settings.JOBS_NON_SEC_MAX_CONCURRENCY == 2
+    assert pg_settings.JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION == 2
+    assert pg_settings.JOBS_BACKTEST_PROGRESS_CONNECTIONS == 1

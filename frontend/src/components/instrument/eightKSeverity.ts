@@ -1,10 +1,22 @@
 /**
- * Shared severity → Tailwind tone map for 8-K item / filing chips.
- * Defined once so adding a new severity level (or rebalancing the
- * palette) doesn't drift across `EightKDetailPanel` + `EightKListPage`.
+ * Shared 8-K severity → `Badge` tone. Defined once so adding a new severity
+ * level doesn't drift across `EightKDetailPanel` + `EightKListPage`.
+ *
+ * Previously this module held raw light-only Tailwind tint classes with no
+ * dark-mode partners — and `frontend/scripts/check-dark-classes.mjs` walked
+ * only `.tsx`, so a `.ts` tone map was structurally invisible to the gate
+ * (that walk now covers `.ts` too, same PR). Holding tones as semantic
+ * `BadgeTone` values removes the failure mode entirely: the colour classes
+ * live once in `Badge` (#1908).
  */
-export const SEVERITY_TONE: Record<string, string> = {
-  high: "bg-red-100 text-red-700",
-  medium: "bg-amber-100 text-amber-700",
-  low: "bg-slate-100 text-slate-600",
+import type { BadgeTone } from "@/components/ui/Badge";
+
+const SEVERITY_TONE: Record<string, BadgeTone> = {
+  high: "risk",
+  medium: "warn",
+  low: "neutral",
 };
+
+export function severityTone(severity: string | null): BadgeTone {
+  return SEVERITY_TONE[severity ?? ""] ?? "neutral";
+}

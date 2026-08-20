@@ -34,6 +34,7 @@ from app.services.finra_short_interest_ingest import (
     build_preloaded_symbol_resolver,
     ingest_settlement_file,
     normalise_symbol,
+    parse_body_settlement_date,
 )
 
 _PRISTINE = Path("tests/fixtures/finra/shrt20260430_sample.csv")
@@ -294,6 +295,99 @@ def test_ingest_blank_file_raises_header_corruption() -> None:
             lambda _s: None,
             uuid4(),
         )
+
+
+# ----------------------------------------------------------------------
+# 5b — Body settlementDate contract (#2234)
+# ----------------------------------------------------------------------
+
+
+class _RecordingConn:
+    """Fake connection that counts ``execute`` calls and never touches a DB.
+
+    ``ingest_settlement_file`` opens ``with conn.cursor() as cur:``
+    BEFORE the row loop, so the body-date check cannot use the
+    ``_NeverUsed`` sentinel the header tests rely on. Counting executes
+    proves the raise happens before any write is emitted.
+    """
+
+    def __init__(self) -> None:
+        self.executed = 0
+
+    def cursor(self) -> _RecordingConn:
+        return self
+
+    def __enter__(self) -> _RecordingConn:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def execute(self, *_a: object, **_kw: object) -> None:
+        self.executed += 1
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("2026-04-30", date(2026, 4, 30)),  # every archive file probed uses ISO
+        ("20260430", date(2026, 4, 30)),  # the filename / accountingYearMonthNumber shape
+        (" 2026-04-30 ", date(2026, 4, 30)),  # surrounding whitespace tolerated
+        ("", None),
+        ("30/04/2026", None),
+        ("not-a-date", None),
+        (None, None),
+    ],
+)
+def test_parse_body_settlement_date(raw: object, expected: date | None) -> None:
+    assert parse_body_settlement_date(raw) == expected
+
+
+def test_ingest_body_settlement_date_mismatch_raises() -> None:
+    """A file whose rows carry a DIFFERENT settlementDate is file-level fatal.
+
+    This is the guard that makes the job's holiday walk-back safe: the
+    probe guesses a date, and the file it lands on has to agree.
+    """
+    raw = _PRISTINE.read_bytes()
+    conn = _RecordingConn()
+
+    with pytest.raises(HeaderCorruptionError, match="settlementDate mismatch"):
+        ingest_settlement_file(
+            conn,  # type: ignore[arg-type]
+            date(2026, 4, 29),  # fixture body says 2026-04-30
+            raw,
+            lambda _s: 1001,
+            uuid4(),
+        )
+
+    assert conn.executed == 0, "must raise before emitting any write"
+
+
+def test_ingest_body_settlement_date_match_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same fixture under its OWN date reaches the write path.
+
+    Pins the mismatch test above to the DATE rather than to the fixture:
+    without this, a comparison that rejected EVERY file would still make
+    the mismatch test pass.
+    """
+    monkeypatch.setattr(
+        "app.services.data_freshness.seed_freshness_for_manifest_row",
+        lambda *_a, **_kw: None,
+    )
+    raw = _PRISTINE.read_bytes()
+    conn = _RecordingConn()
+
+    stats = ingest_settlement_file(
+        conn,  # type: ignore[arg-type]
+        date(2026, 4, 30),
+        raw,
+        lambda _s: 1001,
+        uuid4(),
+    )
+
+    assert stats.rows_upserted > 0
+    assert conn.executed > 0
 
 
 # ----------------------------------------------------------------------

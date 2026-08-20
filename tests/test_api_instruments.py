@@ -67,8 +67,16 @@ def _make_instrument_row(
     last: float | None = 185.55,
     spread_pct: float | None = 0.054,
     quoted_at: datetime | None = _NOW,
+    session_profile: str = "us_equity",
 ) -> dict[str, Any]:
-    """Build a dict matching the joined instruments+quotes+coverage query shape."""
+    """Build a dict matching the joined instruments+quotes+coverage query shape.
+
+    Superset of both endpoints' SELECT lists: the list query
+    (``app/api/instruments.py:771``) ignores the extra keys, while the detail
+    query adds ``session_profile`` (``_SESSION_PROFILE_SQL``, :566) which
+    ``get_instrument`` reads unconditionally at :4180 — a row missing it raises
+    KeyError inside the endpoint rather than failing an assertion (#2212).
+    """
     return {
         "instrument_id": instrument_id,
         "symbol": symbol,
@@ -88,6 +96,7 @@ def _make_instrument_row(
         "last": last,
         "spread_pct": spread_pct,
         "quoted_at": quoted_at,
+        "session_profile": session_profile,
     }
 
 
@@ -109,12 +118,22 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
     ``cursor_results`` is a list of result sets, one per ``cur.execute()`` call.
     Each ``fetchone()`` returns the first row (or None), and ``fetchall()``
     returns the full list.
+
+    Queries beyond the end of the script yield an EMPTY result set rather than
+    raising ``StopIteration`` — the fake models "a DB holding only the scripted
+    rows", not "a DB that explodes on the Nth+1 query". Without this, adding any
+    query to an endpoint turns every test in this file red at once for a reason
+    unrelated to what it asserts: #1924's per-page ``load_day_changes`` call
+    (``app/api/instruments.py:796``) was a third query on a two-result script and
+    took all 13 TestListInstruments cases that return a row down at once (#2212).
+    Matches the tolerant ``next(result_iter, [])`` already used by
+    ``tests/test_api_filings.py::_mock_conn``.
     """
     cur = MagicMock()
     result_iter = iter(cursor_results)
 
     def _on_execute(*_args: Any, **_kwargs: Any) -> None:
-        rows = next(result_iter)
+        rows = next(result_iter, [])
         cur.fetchone.return_value = rows[0] if rows else None
         cur.fetchall.return_value = rows
 

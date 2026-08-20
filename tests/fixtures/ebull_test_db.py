@@ -19,9 +19,9 @@ The strategy:
    from the template via ``CREATE DATABASE ... TEMPLATE
    ebull_test_template``. Postgres copies pages directly so this is
    sub-second on local SSD.
-3. The fixture's per-test ``TRUNCATE`` runs against the worker's
-   private DB. Cross-worker contention is impossible because each
-   worker owns its DB.
+3. The fixture's per-test cleanup (``_reset_planner_tables``, #1568)
+   runs against the worker's private DB. Cross-worker contention is
+   impossible because each worker owns its DB.
 4. ``settings.database_url`` (the operator's dev DB) is never written
    to by the test suite, with the documented exception of
    ``tests/smoke/test_app_boots.py`` (the lifespan smoke gate).
@@ -128,13 +128,24 @@ def _hash_cache_path() -> Path:
     return cache_root / "test_template_hash"
 
 
-# Tables the per-test fixture truncates between tests. Keep child-to-
-# parent so CASCADE handles any FK we missed. New tables added by a
-# migration that introduces FKs MUST be appended here in the same PR
-# (review-prevention-log entry "Test-teardown list missing new FK-child
-# tables").
+# ROOTS of the per-test wipe set. The set actually emptied is this list plus
+# everything reachable from it through inbound FKs — 450 tables today. That
+# closure is DERIVED from ``pg_constraint`` at session start (see
+# ``_build_cleanup_plan``, #1568), so a migration that adds an FK CHILD of a
+# table already listed here needs no edit: it is picked up automatically, and
+# the delete order with it.
+#
+# What still MUST be appended here in the same PR is a table with NO inbound-FK
+# path from an existing entry — a standalone table, or one whose "link" to
+# instruments is a bare BIGINT rather than a real FK (``copy_mirror_positions``,
+# ``fx_rates_daily`` below). Nothing can derive those, so rows leak across tests
+# exactly as the review-prevention-log entry "Test-teardown list missing new
+# FK-child tables" describes.
+#
+# Ordering within this tuple is now irrelevant — the delete order is computed
+# topologically. It is kept child-to-parent only because that also happens to
+# be a safe TRUNCATE order for the fallback path.
 _PLANNER_TABLES: tuple[str, ...] = (
-    "cascade_retry_queue",
     "cik_upsert_timing",
     "financial_facts_raw",
     # #554 — dimensional XBRL facts (segments / product / geographic).
@@ -157,13 +168,99 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #1594 — EOD equity snapshots (child → parent; parent → instruments).
     "portfolio_eod_position_snapshots",
     "portfolio_eod_snapshots",
+    # #2559 — one compact official broker-equity row per environment/day.
+    # Standalone by design: account evidence is not tied to an instrument.
+    "broker_account_equity_snapshots",
     # #1594 — dated FX (standalone, no FK). Listed so DB tests inserting FX
     # rows don't leak across tests (Codex ckpt-3).
     "fx_rates_daily",
+    # #2240 phase 5c (sql/262) — backtest result provenance. STANDALONE: it
+    # carries an instrument COUNT rather than instrument ids (spec §6 — the set
+    # is thousands per row and the promotion gate compares it against a
+    # freshly-loaded universe), so it has no FK to `instruments` and nothing
+    # derives it from `pg_constraint`. ⚠ The decision that keeps the row narrow
+    # is the same one that makes it invisible to the cleanup planner; without
+    # this line `tests/test_strategy_results_table.py`'s committed rows leak
+    # and collide on `strategy_results_unique` under a reordered run.
+    # ⚠ `strategy_signals` / `strategy_outcomes` are NOT listed and must not be:
+    # both have an inbound-FK path (→ instruments, → strategy_signals) and are
+    # picked up automatically.
+    #
+    # ⚠⚠ #2240 phase 5e-1 (sql/264) RENAMED the storage. `strategy_results` is
+    # now a VIEW (in-sample only, criterion 5), and naming a view here would
+    # wipe half the rows while reporting success — the hold-out half survives
+    # and collides on the next test. The STORE is the relation to truncate.
+    "strategy_results_store",
+    # #2240 phase 5e-1 (sql/264) — criterion 5's access log. Also STANDALONE, and
+    # for a reason worth stating: an access may name a result_version that no row
+    # carries yet (the record is written BEFORE the row it authorises), so an FK
+    # would refuse the exact ordering the trigger requires.
+    "strategy_holdout_accesses",
+    # #2611 (sql/340) — refused outcome-access attempts. STANDALONE for the same
+    # reason its writer needs it to be: no FK to the declaration, because the
+    # audit row is written from a SECOND connection that cannot see a
+    # declaration the caller froze in its own open transaction.
+    # ⚠⚠ LISTED BECAUSE IT IS THE ONE TABLE A DB TEST CANNOT ROLL BACK. Every
+    # other row a test writes dies with the fixture's transaction; this one
+    # commits on its own connection by design, so without this line a refusal
+    # from one test is still there for the next one to count.
+    "strategy_holdout_access_refusals",
+    # #2454 — governance roots.  Their children are discovered through inbound
+    # FKs, but neither root has an FK path from instruments.  Keeping them here
+    # prevents a promotion/deployment in one DB test becoming another test's
+    # current operator decision.
+    "strategy_promotions",
+    "strategy_deployments",
+    # #2450 — immutable preregistered live threshold root. Drill and
+    # assessment children are discovered through their FKs.
+    "strategy_live_gate_policies",
+    # #2599 (sql/333) — the frozen preregistration declaration. ⚠ LISTED
+    # BECAUSE IT IS A PARENT, NOT A CHILD: `strategy_live_gate_policies`
+    # references IT, so the inbound-FK closure walking down from the roots
+    # above never reaches it. Measured, not assumed — two new live-gate tests
+    # failed with `DID NOT RAISE` and a UniqueViolation on a declaration a
+    # previous test had frozen. Listed AFTER its own child so the fallback
+    # TRUNCATE order stays child-to-parent.
+    "strategy_preregistration_declarations",
+    # #2451 — bounded current kill state has no FK by design.
+    "strategy_execution_blocks",
+    # #2469 — the shared paper-pool current state is an append-only standalone
+    # event stream. It intentionally has no FK to a deployment, so the inbound
+    # FK closure cannot discover it from the strategy roots above.
+    "strategy_paper_pool_events",
+    # #2545 — calibration evidence is an immutable standalone root. Forecasts
+    # reference both it and signals, so those children are derived; the parent
+    # itself cannot be discovered from an existing inbound-FK root.
+    "strategy_forecast_calibrations",
+    # #2555 — immutable prospective-assessment policy is a standalone root;
+    # assessment evidence and bounded current pointers are FK descendants.
+    "strategy_forecast_assessment_policies",
+    # #2553 — the forecast outcome round-robin cursor is standalone. Outcome
+    # rows are discovered through their FK to forecasts/signals.
+    "strategy_forecast_outcome_cursor",
+    # #2448/#2449 — bounded strategy current-state roots have no FKs. Their
+    # signal/deployment children are derived by the planner from roots above.
+    "strategy_scan_watermark",
+    "strategy_halt_feed_state",
+    "strategy_market_halts",
+    "strategy_paper_account_risk_state",
     "positions",
     "quotes",
+    # #1919 — thesis generation attempts (FK → instruments + theses).
+    "thesis_runs",
+    # #2002 — calibration-ledger realized outcomes (FK → theses).
+    "thesis_outcomes",
     "instruments",
     "job_runs",
+    # #1508 C6 / migration 185 — per-job first-seen anchor. Standalone: its only
+    # constraint is the PK on job_name, so no inbound-FK path reaches it and the
+    # derived closure cannot pick it up. Omitted when it shipped, so anchors
+    # leaked between tests: tests/test_job_first_seen.py's "no anchor row" case
+    # read whichever anchor the previously-run test in that file had committed
+    # and flipped never_started with it. Presented as an xdist flake (#2212) —
+    # it is order-dependence, and reproduces every time when the 7-day-anchor
+    # test runs immediately before it.
+    "job_first_seen",
     "financial_periods_raw",
     "financial_periods",
     "dividend_events",
@@ -283,14 +380,20 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "report_snapshots",
 )
 
+# DELETE intentionally cannot remove these immutable audit children. Test DB
+# cleanup is allowed to empty them, but must do so explicitly before deleting
+# their parents; otherwise every test that stores real promotion evidence falls
+# through to the much slower whole-schema TRUNCATE recovery path (#2737).
+_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset({"strategy_result_universe"})
+
 
 # #1401 — worker-DB relation-count tripwire ceiling.
 #
 # The per-worker private DB is cloned from ``ebull_test_template``
 # (≈9.6k pg_class rows: tables + indexes + toast + sequences across the
 # full migration set) and is REUSED across every test on that worker —
-# per-test cleanup is ``TRUNCATE`` only, which wipes rows but never
-# drops relations. Any test (or app code under test) that ``CREATE``s a
+# per-test cleanup wipes rows but never drops relations. Any test (or
+# app code under test) that ``CREATE``s a
 # table/index/partition without dropping it leaks relations that
 # accumulate for the whole session. One such runaway ballooned a worker
 # DB past ~2.1M relations and bloated the dev-PG data dir to 13.1M
@@ -761,6 +864,11 @@ def ensure_worker_database() -> None:
 def drop_worker_database() -> None:
     """Drop the worker's private DB at session end."""
     db_name = test_db_name()
+    # The DB is about to stop existing, so nothing may go on believing it is
+    # available or holding a cleanup plan derived from its catalog (#1568).
+    _TEST_DB_AVAILABLE.discard(db_name)
+    _CLEANUP_PLANS.pop(db_name, None)
+    _close_janitor_conn()
     try:
         with psycopg.connect(_admin_database_url(), autocommit=True) as admin:
             _drop_database_force(admin, db_name)
@@ -772,6 +880,16 @@ def drop_worker_database() -> None:
             f"reclaim leaked databases.",
             stacklevel=2,
         )
+
+
+# Worker DBs whose availability has already been established. A SUCCESS is
+# memoised because re-answering it costs ~10 ms per test (admin connect, two
+# advisory-lock round trips, a second connect and a probe query) to re-derive
+# something that cannot change: the ``_worker_db_keepalive`` session fixture
+# holds a backend open for the whole run precisely so a sibling controller's
+# orphan sweep sees the DB as active and leaves it alone. A FAILURE is never
+# memoised — a cluster that was not up yet may come up (#1568).
+_TEST_DB_AVAILABLE: set[str] = set()
 
 
 def test_db_available() -> bool:  # noqa: D401 — `test_*` here is the legacy public name, not a pytest test
@@ -789,11 +907,14 @@ def test_db_available() -> bool:  # noqa: D401 — `test_*` here is the legacy p
     configuration bugs (role lacks CREATEDB privilege, etc.) don't
     hide under the same skip path as "no Postgres".
     """
+    if test_db_name() in _TEST_DB_AVAILABLE:
+        return True
     try:
         ensure_worker_database()
         with psycopg.connect(test_database_url(), connect_timeout=2) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
+        _TEST_DB_AVAILABLE.add(test_db_name())
         return True
     except Exception as exc:
         warnings.warn(
@@ -840,24 +961,324 @@ _assert_test_db = assert_test_db
 
 
 def _truncate_planner_tables(conn: psycopg.Connection[tuple]) -> None:
-    """Truncate the planner table set in chunks.
+    """Truncate the planner table set — the FALLBACK cleanup path.
 
-    A single ``TRUNCATE ... CASCADE`` over 70+ tables on a worker
-    running concurrently with other workers exhausts Postgres'
-    ``max_locks_per_transaction`` (default 64). Splitting into
-    bounded chunks keeps the per-transaction lock count safe even
-    when CASCADE pulls in extra child tables.
+    ``_reset_planner_tables`` is the normal path (see #1568); this runs
+    only when the probe/DELETE plan cannot be built or a DELETE hits a
+    constraint the cached plan did not know about (a test that CREATEd
+    its own FK-bearing table, say). Correct but slow: TRUNCATE takes
+    ACCESS EXCLUSIVE and rewrites a relfilenode per relation whether or
+    not the table holds rows, measured at ~845 ms per call on the
+    Docker-Desktop-macOS test cluster.
+
+    Issued as one statement. The chunking this function used to do cited
+    ``max_locks_per_transaction`` "(default 64)", but the test cluster is
+    configured at 1024 (``docker-compose.yml`` ``postgres-test``), and
+    CASCADE reaches 450 relations — under the real ceiling, and one shot
+    measured ~20% faster than six chunks (#1568).
     """
     assert_test_db(conn)
-    chunk_size = 20
-    chunks = [_PLANNER_TABLES[i : i + chunk_size] for i in range(0, len(_PLANNER_TABLES), chunk_size)]
     with conn.cursor() as cur:
-        for chunk in chunks:
-            query = sql.SQL("TRUNCATE {tables} RESTART IDENTITY CASCADE").format(
-                tables=sql.SQL(", ").join(sql.Identifier(t) for t in chunk),
-            )
-            cur.execute(query)
-            conn.commit()
+        query = sql.SQL("TRUNCATE {tables} RESTART IDENTITY CASCADE").format(
+            tables=sql.SQL(", ").join(sql.Identifier(t) for t in _PLANNER_TABLES),
+        )
+        cur.execute(query)
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# #1568 — per-test cleanup by probe + FK-topological DELETE.
+#
+# The old lifecycle TRUNCATEd the whole planner set twice per test (setup +
+# teardown) at ~845 ms a pass, ~1.7 s/test, ~99% of the db tier's wall-clock —
+# and it did that against tables that are almost always ALREADY EMPTY, because
+# TRUNCATE's cost is per-RELATION (ACCESS EXCLUSIVE + relfilenode rewrite), not
+# per-row.
+#
+# The replacement asks Postgres which tables actually hold rows and deletes only
+# those. Measured on the test cluster: probe 3.9 ms, whole cleanup 4.1 ms on a
+# clean DB / 7.2 ms after a test that wrote 3 rows — vs 845 ms. Rollback-based
+# isolation (the usual answer) is NOT available here: the app makes 271 explicit
+# ``.commit()`` calls across 71 files, which would break any enclosing
+# transaction.
+#
+# Three things make it exact rather than approximate:
+#
+# 1. **The wipe set is DERIVED, not re-listed.** ``TRUNCATE ... CASCADE`` over
+#    ``_PLANNER_TABLES`` today reaches 450 relations — the 105 listed plus 345
+#    pulled in through inbound FKs. DELETE has no CASCADE, so the closure is
+#    computed from ``pg_constraint`` at session start. Same wipe set as before,
+#    with no second hand-maintained list to drift.
+#
+# 2. **Partitions collapse to their root.** ``public`` holds 1,478 tables but
+#    only 167 non-partition roots; the rest are partitions of 12 parents.
+#    ``EXISTS (SELECT 1 FROM parent)`` already short-circuits across every
+#    partition, so probing partitions individually is 18x the planning cost for
+#    the same answer (69.8 ms vs 3.9 ms measured). ``DELETE FROM parent``
+#    likewise reaches every partition.
+#
+# 3. **Sequences are probed separately from rows.** DELETE has no RESTART
+#    IDENTITY. A ROLLED-BACK insert advances a sequence permanently while
+#    leaving the table empty (nextval is non-transactional — verified on the
+#    test cluster), so a row-only probe would miss it and the next test would
+#    see ids starting at 2. ``pg_sequences.last_value IS NOT NULL`` is exactly
+#    "has been read since the last RESTART" and costs 0.8 ms.
+#
+# Any failure falls back to ``_truncate_planner_tables`` and invalidates the
+# cached plan, so a test that creates its own FK-bearing table degrades to the
+# old (correct, slow) path for one test instead of erroring.
+# ---------------------------------------------------------------------------
+
+
+class _CleanupPlan:
+    """Session-cached derivation of what per-test cleanup must touch."""
+
+    __slots__ = ("delete_order", "owned_sequences", "probe_sql")
+
+    def __init__(
+        self,
+        delete_order: tuple[str, ...],
+        probe_sql: sql.Composed,
+        owned_sequences: frozenset[str],
+    ) -> None:
+        self.delete_order = delete_order
+        self.probe_sql = probe_sql
+        self.owned_sequences = owned_sequences
+
+
+# Keyed by database name: one worker process only ever talks to one test DB,
+# but keying makes a stale plan impossible if that ever stops being true.
+_CLEANUP_PLANS: dict[str, _CleanupPlan] = {}
+
+# Catalog queries. Every one resolves names via ``pg_class.relname`` rather than
+# ``::regclass::text``: regclass rendering schema-qualifies and double-quotes
+# whatever the current ``search_path`` requires, and those decorated strings
+# would then be re-quoted by ``sql.Identifier`` into a name that matches nothing.
+# ``pg_partition_root`` returns NULL for a non-partition, hence the COALESCE.
+
+# Every ordinary/partitioned table in ``public``, collapsed to its partition root.
+_ROOT_TABLES_SQL = """
+SELECT DISTINCT root.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_class root ON root.oid = COALESCE(pg_partition_root(c.oid), c.oid)
+WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+"""
+
+# FK edges as (referencing_root, referenced_root). Both sides collapsed to the
+# partition root so a constraint declared on a partition orders its parent.
+_FK_EDGES_SQL = """
+SELECT child.relname, parent.relname
+FROM pg_constraint c
+JOIN pg_class r ON r.oid = c.conrelid
+JOIN pg_namespace n ON n.oid = r.relnamespace
+JOIN pg_class child ON child.oid = COALESCE(pg_partition_root(c.conrelid), c.conrelid)
+JOIN pg_class parent ON parent.oid = COALESCE(pg_partition_root(c.confrelid), c.confrelid)
+WHERE c.contype = 'f' AND n.nspname = 'public'
+"""
+
+# Sequences owned by a table column (serial / GENERATED AS IDENTITY). These are
+# precisely the ones ``TRUNCATE ... RESTART IDENTITY`` would have reset, so
+# restricting to them keeps the new path's sequence behaviour identical.
+# ``s.relname`` is the same string ``pg_sequences.sequencename`` reports.
+_OWNED_SEQUENCES_SQL = """
+SELECT s.relname, owner_root.relname
+FROM pg_class s
+JOIN pg_namespace n ON n.oid = s.relnamespace
+JOIN pg_depend d
+  ON d.classid = 'pg_class'::regclass
+ AND d.objid = s.oid
+ AND d.refclassid = 'pg_class'::regclass
+ AND d.deptype IN ('a', 'i')
+JOIN pg_class owner ON owner.oid = d.refobjid
+JOIN pg_class owner_root ON owner_root.oid = COALESCE(pg_partition_root(owner.oid), owner.oid)
+WHERE s.relkind = 'S' AND n.nspname = 'public'
+"""
+
+
+def _topological_delete_order(
+    tables: set[str],
+    referencing: dict[str, set[str]],
+) -> tuple[str, ...]:
+    """Order ``tables`` so every table precedes the tables it references.
+
+    DELETE has no CASCADE, so a parent may only be emptied once nothing that
+    references it still holds rows — children first, parents last. Kahn's
+    algorithm over the reversed FK graph, restricted to ``tables``.
+
+    Self-references are ignored (a row referencing its own table is removed by
+    the same DELETE). A genuine multi-table FK cycle cannot be ordered; those
+    tables are appended in a stable order and, if a DELETE among them then
+    violates a constraint, the caller's fallback TRUNCATEs instead.
+    """
+    remaining = set(tables)
+    order: list[str] = []
+    while remaining:
+        ready = sorted(
+            t for t in remaining if all(child not in remaining for child in referencing.get(t, ()) if child != t)
+        )
+        if not ready:  # pragma: no cover — no FK cycle exists in the schema today
+            order.extend(sorted(remaining))
+            break
+        order.extend(ready)
+        remaining -= set(ready)
+    return tuple(order)
+
+
+def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
+    """Derive the wipe set, delete order and owned sequences from the catalog."""
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(_ROOT_TABLES_SQL)
+        roots = {row[0] for row in cur.fetchall()}
+        cur.execute(_FK_EDGES_SQL)
+        edges = [(row[0], row[1]) for row in cur.fetchall()]
+        cur.execute(_OWNED_SEQUENCES_SQL)
+        sequence_owners = [(row[0], row[1]) for row in cur.fetchall()]
+    conn.rollback()
+
+    referencing: dict[str, set[str]] = {}
+    for child, parent in edges:
+        if child in roots and parent in roots:
+            referencing.setdefault(parent, set()).add(child)
+
+    missing = sorted(t for t in _PLANNER_TABLES if t not in roots)
+    if missing:
+        raise RuntimeError(
+            f"_PLANNER_TABLES names tables absent from the worker DB: {missing}. "
+            f"A migration renamed or dropped them without updating the list."
+        )
+
+    # CASCADE closure: everything TRUNCATE would reach from the planner set.
+    closure = set(_PLANNER_TABLES)
+    stack = list(closure)
+    while stack:
+        table = stack.pop()
+        for child in referencing.get(table, ()):
+            if child not in closure:
+                closure.add(child)
+                stack.append(child)
+
+    delete_order = _topological_delete_order(closure, referencing)
+    assert set(delete_order) == closure, "delete order must cover the whole wipe set"
+
+    probe_sql = sql.SQL(" UNION ALL ").join(
+        sql.SQL("SELECT {name} WHERE EXISTS (SELECT 1 FROM {table})").format(
+            name=sql.Literal(table),
+            table=sql.Identifier(table),
+        )
+        for table in delete_order
+    )
+    owned = frozenset(seq for seq, owner in sequence_owners if owner in closure)
+    return _CleanupPlan(delete_order, probe_sql, owned)
+
+
+def _cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
+    key = test_db_name()
+    plan = _CLEANUP_PLANS.get(key)
+    if plan is None:
+        plan = _build_cleanup_plan(conn)
+        _CLEANUP_PLANS[key] = plan
+    return plan
+
+
+# One long-lived connection per worker process does all per-test cleanup.
+#
+# This is a load-bearing performance decision, not tidiness (#1568). The probe is
+# a ``UNION ALL ... EXISTS`` with one branch per NON-PARTITION ROOT of the wipe
+# set — 139 branches for today's 450-relation closure, since 311 of those
+# relations are partitions covered by their parent's branch. Planning it on a
+# FRESH backend costs ~110 ms because an empty relcache/syscache must fault in
+# every one of those relations' catalog entries. On a connection that has already
+# run it the same query costs ~3.8 ms — warm catalog caches, plus psycopg3's
+# automatic server-side prepare once ``prepare_threshold`` (5) executions pass.
+# Opening a connection per cleanup pass, as the fixture used to, paid the cold
+# price every single time.
+#
+# Lifetime is the worker session; ``_close_janitor_conn`` runs from the
+# ``_worker_db_keepalive`` teardown. Keyed by database name so a plan and its
+# connection can never disagree about which DB they refer to.
+_JANITOR_CONNS: dict[str, psycopg.Connection[tuple]] = {}
+
+
+def _janitor_conn() -> psycopg.Connection[tuple]:
+    """Return the worker's long-lived cleanup connection, opening it if needed."""
+    key = test_db_name()
+    conn = _JANITOR_CONNS.get(key)
+    if conn is not None and not conn.closed:
+        return conn
+    conn = psycopg.connect(test_database_url())
+    _JANITOR_CONNS[key] = conn
+    return conn
+
+
+def _close_janitor_conn() -> None:
+    """Close and forget the worker's cleanup connection (session teardown)."""
+    conn = _JANITOR_CONNS.pop(test_db_name(), None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+
+
+def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
+    """Empty every table the old TRUNCATE pass emptied — but only the dirty ones.
+
+    See the block comment above for why this is shaped the way it is (#1568).
+    Falls back to ``_truncate_planner_tables`` on any operational failure so a
+    test that outgrows the cached plan still gets a clean database.
+
+    ``assert_test_db`` runs INSIDE the try deliberately. Its wrong-database guard
+    raises ``RuntimeError``, which is not a ``psycopg.Error`` and so still escapes
+    uncaught — a connection pointed at the dev DB is never TRUNCATEd. But the same
+    call raises ``psycopg.Error`` on a connection whose backend has died, and that
+    must reach the fallback rather than abort cleanup.
+    """
+    try:
+        assert_test_db(conn)
+        plan = _cleanup_plan(conn)
+        with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+            cur.execute(plan.probe_sql)
+            dirty = {row[0] for row in cur.fetchall()}
+            for table in sorted(_TRUNCATE_BEFORE_DELETE & dirty):
+                cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(table)))
+                dirty.remove(table)
+            for table in plan.delete_order:
+                if table in dirty:
+                    cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table)))
+            # DELETE has no RESTART IDENTITY; reset only sequences that have
+            # actually been read (``last_value IS NOT NULL``), which includes
+            # ones advanced by a rolled-back INSERT on a now-empty table.
+            cur.execute("SELECT sequencename FROM pg_sequences WHERE schemaname = 'public' AND last_value IS NOT NULL")
+            advanced = {row[0] for row in cur.fetchall()} & plan.owned_sequences
+            for sequence in sorted(advanced):
+                cur.execute(sql.SQL("ALTER SEQUENCE {} RESTART").format(sql.Identifier(sequence)))
+        conn.commit()
+    except psycopg.Error as exc:
+        # A test that CREATEd its own FK-bearing table, or a schema change since
+        # the plan was cached. Drop the plan so the next test rebuilds it, and
+        # let TRUNCATE ... CASCADE — which needs no precomputed order — clean up.
+        _CLEANUP_PLANS.pop(test_db_name(), None)
+        try:
+            conn.rollback()
+        except psycopg.Error:
+            pass
+        fallback_conn = conn
+        if conn.broken:
+            # A dead backend cannot run the fallback either, and the whole point
+            # of the fallback is that cleanup still happens. Discard it if it was
+            # the janitor — otherwise the cache serves a corpse to every later
+            # test — and TRUNCATE on a fresh backend instead.
+            if _JANITOR_CONNS.get(test_db_name()) is conn:
+                _JANITOR_CONNS.pop(test_db_name(), None)
+            fallback_conn = _janitor_conn()
+        warnings.warn(
+            f"Fast per-test cleanup failed ({type(exc).__name__}: {exc}); "
+            f"falling back to TRUNCATE and rebuilding the cleanup plan. If this "
+            f"warning is not rare, the FK topology changed — see #1568.",
+            stacklevel=2,
+        )
+        _truncate_planner_tables(fallback_conn)
 
 
 def _assert_worker_relations_under_ceiling(conn: psycopg.Connection[tuple]) -> None:
@@ -865,7 +1286,7 @@ def _assert_worker_relations_under_ceiling(conn: psycopg.Connection[tuple]) -> N
 
     Tripwire (#1401): a test that ``CREATE``s relations without
     dropping them leaks into the session-reused worker DB (per-test
-    cleanup is ``TRUNCATE`` only — it never drops relations). This
+    cleanup empties rows — it never drops relations). This
     catches the runaway at the first test that crosses the ceiling
     instead of letting it silently bloat the data dir to millions of
     files. See ``_WORKER_DB_RELATION_CEILING``.
@@ -879,7 +1300,7 @@ def _assert_worker_relations_under_ceiling(conn: psycopg.Connection[tuple]) -> N
         f"pg_class relations (ceiling {_WORKER_DB_RELATION_CEILING}; "
         f"template baseline ≈9.6k). A test CREATEd relations without "
         f"dropping them — they accumulate across the session because "
-        f"per-test cleanup is TRUNCATE only. The failing test is the "
+        f"per-test cleanup only empties rows. The failing test is the "
         f"(or first) culprit: bound its relation creation and tear it "
         f"down via a registered finalizer. Do NOT raise this ceiling to "
         f"silence it. See #1401."
@@ -890,40 +1311,41 @@ def _assert_worker_relations_under_ceiling(conn: psycopg.Connection[tuple]) -> N
 def ebull_test_conn() -> Iterator[psycopg.Connection[tuple]]:
     """Yield a fresh connection to the worker's private test DB.
 
-    TRUNCATE before and after each test. Both passes go through
-    ``_assert_test_db`` so the dev DB can never be wiped by a
-    misconfigured connection.
+    Cleaned before and after each test by ``_reset_planner_tables``
+    (#1568) — same wipe set the old TRUNCATE pass produced, ~200x
+    cheaper. Both passes go through ``_assert_test_db`` so the dev DB
+    can never be wiped by a misconfigured connection.
     """
     if not test_db_available():
         pytest.skip("ebull_test DB unavailable")
 
-    url = test_database_url()
-    with psycopg.connect(url) as setup_conn:
-        _truncate_planner_tables(setup_conn)
-        # #1444 — creation-time relation budget. The teardown tripwire
-        # below is skipped by a ``kill -9`` (OOM / Ctrl-C), which is
-        # exactly how a runaway test left ~6-10M-relfile worker DBs that
-        # stalled crash recovery for hours (2026-06-02). Asserting at
-        # SETUP too means the FIRST surviving test after a skipped
-        # teardown fails fast and names the worker DB, bounding the
-        # accumulation a single session can reach.
-        _assert_worker_relations_under_ceiling(setup_conn)
+    janitor = _janitor_conn()
+    _reset_planner_tables(janitor)
+    # #1444 — creation-time relation budget. The teardown tripwire
+    # below is skipped by a ``kill -9`` (OOM / Ctrl-C), which is
+    # exactly how a runaway test left ~6-10M-relfile worker DBs that
+    # stalled crash recovery for hours (2026-06-02). Asserting at
+    # SETUP too means the FIRST surviving test after a skipped
+    # teardown fails fast and names the worker DB, bounding the
+    # accumulation a single session can reach.
+    _assert_worker_relations_under_ceiling(janitor)
 
-    conn = psycopg.connect(url)
+    conn = psycopg.connect(test_database_url())
     try:
         yield conn
     finally:
+        # Close the test's own connection FIRST: cleanup runs on the janitor,
+        # and a test that left a transaction open would otherwise hold row
+        # locks the janitor's DELETE would block on.
         try:
             conn.rollback()
         except Exception:
             pass
-        try:
-            _truncate_planner_tables(conn)
-            # #1401 — tripwire on the same conn before close so a
-            # relation leak fails THIS test and names the culprit.
-            _assert_worker_relations_under_ceiling(conn)
-        finally:
-            conn.close()
+        conn.close()
+        _reset_planner_tables(_janitor_conn())
+        # #1401 — tripwire in THIS test's teardown so a relation leak fails
+        # the test that caused it and names the culprit.
+        _assert_worker_relations_under_ceiling(_janitor_conn())
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -969,6 +1391,8 @@ def _worker_db_keepalive() -> Iterator[None]:
     try:
         yield
     finally:
+        # #1568 — the per-test cleanup connection has the same lifetime.
+        _close_janitor_conn()
         if keepalive is not None:
             try:
                 keepalive.close()

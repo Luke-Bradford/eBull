@@ -737,10 +737,13 @@ ren.tsv (rendering / report metadata):
 **Coverage verified 2026-05-25 (live HEAD).**
 
 ```json
-// company_tickers.json (CIK-grain, primary symbol)
+// company_tickers.json — ticker-grain as of 2026-07-22 re-fetch (10,419 rows /
+// 8,014 unique CIKs / 1,463 multi-ticker CIKs; the earlier "CIK-grain, primary
+// symbol" shape no longer holds — #2108)
 {"0":{"cik_str":1045810,"ticker":"NVDA","title":"NVIDIA CORP"}, ...}
 
-// company_tickers_exchange.json (ticker-grain, share-class siblings split)
+// company_tickers_exchange.json (ticker-grain, share-class siblings split;
+// same row cohort as company_tickers.json as of 2026-07-22)
 {"fields":["cik","name","ticker","exchange"],
  "data":[[1045810,"NVIDIA CORP","NVDA","Nasdaq"], ...]}
 

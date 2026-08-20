@@ -15,7 +15,7 @@ Data layers monitored:
   - universe   — instruments.last_seen_at
   - prices     — price_daily.price_date
   - quotes     — quotes.quoted_at
-  - fundamentals — fundamentals_snapshot.as_of_date
+  - fundamentals — financial_periods_raw.fetched_at (#2008)
   - filings    — filing_events.created_at
   - news       — news_events.created_at
   - theses     — theses.created_at
@@ -28,10 +28,10 @@ than that threshold, the layer is flagged as stale.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, LiteralString
 
 import psycopg
 import psycopg.rows
@@ -98,7 +98,29 @@ ALL_LAYERS: list[LayerName] = [
 #   - theses refresh daily for stale Tier 1 → 3 days
 #   - scores run each morning → 2 days
 _STALENESS_THRESHOLDS: dict[LayerName, timedelta] = {
-    "universe": timedelta(days=2),
+    # #2407 — 9 days, not 2. ⚠ The 2-day value contradicted a settled decision.
+    # `sync_orchestrator.freshness.UNIVERSE_REFRESH_WINDOW` is 7 days by #277's
+    # explicit reasoning (eToro's /instruments has no delta filter, so a daily
+    # pull of ~15k identical rows was write amplification for no information
+    # gain), and `nightly_universe_sync` has NO cadence of its own — the
+    # orchestrator fires it only when that 7-day window lapses. So an alert at
+    # 2 days fires on the INTENDED state.
+    #
+    # It never showed because the query below used to read a column that barely
+    # moved; fixing the source without this would have turned a silently-wrong
+    # signal into a permanently-red one, which is worse — a panel that is red by
+    # design teaches you to stop reading it.
+    #
+    # The arithmetic, so a future change can re-derive rather than guess:
+    #   7d   the declared refresh window
+    # + 1d   the orchestrator plans once daily at 03:00, so the window can lapse
+    #        up to a full day before the next planning slot notices
+    # + 1d   `last_confirmed_on` is a DATE, so `latest` resolves to midnight and
+    #        reads up to 24h older than the sync that wrote it
+    #   = 9d, beyond which the cadence itself is not being honoured — which is
+    #        exactly what this alert should mean.
+    # `tests/test_2407_universe_staleness_contract.py` fails if the two drift.
+    "universe": timedelta(days=9),
     "prices": timedelta(hours=4),
     "quotes": timedelta(hours=4),
     "fundamentals": timedelta(days=3),
@@ -111,17 +133,91 @@ _STALENESS_THRESHOLDS: dict[LayerName, timedelta] = {
 # Queries to find the most recent timestamp for each data layer.
 # Each returns a single row with a nullable 'latest' column.
 _LAYER_QUERIES: dict[LayerName, str] = {
-    "universe": "SELECT MAX(last_seen_at) AS latest FROM instruments",
+    # #2407 — NOT `MAX(instruments.last_seen_at)`, which this read until now.
+    #
+    # ⚠⚠ `last_seen_at` does not mean "last seen". `sync_universe`'s upsert bumps
+    # it inside a changed-metadata guard (`app/services/universe.py:106-171`), and
+    # that `WHERE` suppresses the whole UPDATE — the bump included — when nothing
+    # changed. So the column means "last time this row's METADATA CHANGED", and a
+    # MAX over it means "last time ANY instrument's metadata changed". A sync that
+    # runs nightly and returns an identical feed left the reported staleness
+    # advancing one day per day, indistinguishable from the sync having stopped;
+    # conversely one instrument renaming made the layer look fresh for two days
+    # after the sync died. Measured 2026-08-08: 12,696 instruments carried NINE
+    # distinct `last_seen_at` dates, 9,850 of them frozen on 2026-06-12.
+    #
+    # `sql/271_instrument_universe_membership.sql:25-50` is the source rule and
+    # was written for exactly this: `last_confirmed_on` is bumped by every code
+    # path that OBSERVES PRESENCE, unconditionally, which is the question this
+    # layer asks. `sync_universe` calls `reconcile_universe_membership` in the
+    # same pass (`universe.py:227`), so the two cannot drift apart.
+    #
+    # ⚠ Deliberately NOT `job_runs`' last successful `nightly_universe_sync`,
+    # which was the other option on the ticket and is the more obvious one. That
+    # reads the job's OWN SELF-REPORT — precisely the "a job that no-ops and
+    # reports success is invisible to every automated check we have" class this
+    # fix exists to close. `last_confirmed_on` is evidence the rows were touched.
+    #
+    # ⚠ `last_confirmed_on` is a DATE, so this resolves to midnight and reads up
+    # to ~24h older than the sync that produced it. That is affordable ONLY
+    # because the threshold above is 2 days: a nightly sync leaves at least ~26h
+    # of margin, and one missed night trips the alert ~26h later, which is the
+    # intended sensitivity. Tightening `universe` below 2 days requires changing
+    # this source too.
+    #
+    # `effective_to IS NULL` = currently a member. A closed row's
+    # `last_confirmed_on` IS its `effective_to` (`sql/271:126`), so including
+    # them would let a departed instrument's final confirmation stand in for a
+    # refresh that never happened.
+    "universe": (
+        "SELECT MAX(last_confirmed_on)::timestamptz AS latest "
+        "FROM instrument_universe_membership WHERE effective_to IS NULL"
+    ),
     "prices": "SELECT MAX(price_date)::timestamptz AS latest FROM price_daily",
     "quotes": "SELECT MAX(quoted_at) AS latest FROM quotes",
-    "fundamentals": "SELECT MAX(as_of_date)::timestamptz AS latest FROM fundamentals_snapshot",
+    # #2008: probe the ingest layer, not fundamentals_snapshot.as_of_date —
+    # as_of is a fiscal period end (always days-to-weeks behind wall clock,
+    # structurally >3d "stale"). financial_periods_raw.fetched_at advances
+    # on every daily normalize of touched CIKs = honest pipeline liveness.
+    "fundamentals": "SELECT MAX(fetched_at) AS latest FROM financial_periods_raw",
     "filings": "SELECT MAX(created_at) AS latest FROM filing_events",
     "news": "SELECT MAX(created_at) AS latest FROM news_events",
     "theses": "SELECT MAX(created_at) AS latest FROM theses",
     "scores": "SELECT MAX(scored_at) AS latest FROM scores",
 }
 
-JobStatus = Literal["running", "success", "failure", "skipped"]
+# ⚠ "cancelled" was missing here before #2218 even though sql/137 added it to
+# the CHECK constraint in 2026 — the same drift this ticket is about, one
+# vocabulary over. Kept in sync with JOB_TERMINAL_STATUSES below by
+# tests/test_job_terminal_status_contract.py.
+JobStatus = Literal["running", "success", "failure", "skipped", "cancelled", "degraded"]
+
+# #2218 — THE terminal-status vocabulary for ``job_runs``, in one place.
+#
+# It was in five SQL string literals across four modules, all spelling
+# ``IN ('success', 'failure', 'skipped', 'cancelled')`` by hand. Adding
+# 'degraded' to the CHECK constraint without touching all five leaves the new
+# status invisible to the admin verdict, the retry sweeper and the bootstrap
+# gate — the row exists and nothing reads it, which is the same defect shape
+# this ticket is about. pyright cannot see inside a SQL string, so the only
+# defences are this constant and the derive-from-the-migration contract test
+# in tests/test_job_terminal_status_contract.py.
+#
+# 'running' is deliberately absent: it is a status but not a TERMINAL one.
+#: The ``IN (...)`` list, spelled ONCE and interpolated into every query that
+#: needs it. Declared as the literal rather than joined from the tuple below
+#: because psycopg3 types ``execute(query=...)`` as ``LiteralString`` — a
+#: runtime-joined string is ``str`` and pyright rejects it, which is a real
+#: guard against interpolating caller input and worth keeping rather than
+#: casting around.
+TERMINAL_STATUS_SQL: Final[LiteralString] = "('success', 'failure', 'skipped', 'cancelled', 'degraded')"
+
+#: Derived FROM the SQL literal, not maintained beside it — two hand-written
+#: copies of a vocabulary is the defect this whole constant exists to stop.
+JOB_TERMINAL_STATUSES: Final[tuple[str, ...]] = tuple(
+    part.strip().strip("'") for part in TERMINAL_STATUS_SQL.strip("()").split(",")
+)
+
 
 LayerStatus = Literal["ok", "stale", "empty", "error"]
 
@@ -236,11 +332,11 @@ def _retry_plan(
     # cap we stop retrying regardless, so deeper history is irrelevant.
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT status FROM job_runs
              WHERE job_name = %(job)s
                AND run_id   <> %(id)s
-               AND status IN ('success', 'failure', 'skipped', 'cancelled')
+               AND status IN {TERMINAL_STATUS_SQL}
                AND (started_at < %(ts)s
                     OR (started_at = %(ts)s AND run_id < %(id)s))
              ORDER BY started_at DESC, run_id DESC
@@ -327,7 +423,7 @@ def check_all_layers(
 ) -> list[LayerHealth]:
     """Check staleness for every monitored data layer.
 
-    Each per-layer query is wrapped in a try/except so a single broken layer
+    Each per-layer query runs in its own SAVEPOINT so a single broken layer
     (e.g. table missing during a partial migration) yields a ``LayerHealth``
     with ``status="error"`` instead of bubbling out and 500-ing the entire
     operator visibility endpoint.
@@ -335,12 +431,27 @@ def check_all_layers(
     Prevention-log #70: never let an infra-level fault degrade into a silent
     HTTP 200; here we surface it per-layer so the operator can see *which*
     layer failed, while the rest of the report still renders.
+
+    ⚠ ``conn.transaction()`` is what makes that last clause TRUE, and the
+    try/except alone did not (#2674).  ``get_conn`` hands out a NON-autocommit
+    pooled connection, so a failed query leaves Postgres' transaction ABORTED;
+    catching the Python exception does not clear it, and every later statement on
+    the same connection raises ``InFailedSqlTransaction``.  So ONE broken layer
+    used to fail all eight — seven of them for a reason unrelated to their own
+    health, which also hides which layer started it — and then took out
+    ``check_job_health`` and ``_build_credential_health_summary`` downstream, i.e.
+    exactly the whole-endpoint failure this containment exists to prevent.
+
+    The general shape, for the next reader: **a try/except around a DB call
+    contains the exception, not the transaction.**  It reads as correct at the
+    call site because the damage lands on an unrelated later statement.
     """
     now = now or _utcnow()
     results: list[LayerHealth] = []
     for layer in ALL_LAYERS:
         try:
-            results.append(check_layer_staleness(conn, layer, now=now))
+            with conn.transaction():
+                results.append(check_layer_staleness(conn, layer, now=now))
         except Exception:
             # Full exception detail goes to the server-side log only.
             # The `detail` field is surfaced verbatim in the API response,
@@ -428,10 +539,11 @@ def record_job_finish(
     conn: psycopg.Connection[Any],
     run_id: int,
     *,
-    status: Literal["success", "failure"],
+    status: Literal["success", "failure", "degraded"],
     row_count: int | None = None,
     error_msg: str | None = None,
     error_category: FailureCategory | None = None,
+    progress: Mapping[str, Any] | None = None,
     now: datetime | None = None,
 ) -> None:
     """Record the completion of a scheduled job.
@@ -441,6 +553,13 @@ def record_job_finish(
     ``attempt`` so the ``jobs_retry_sweeper`` re-fires it before its next
     natural cadence slot. A non-failure terminal clears ``next_retry_at``
     and leaves ``attempt`` at its default.
+
+    ``degraded`` (#2218) — the run COMPLETED and made no progress. It takes
+    the non-failure retry path deliberately: nothing raised, so there is no
+    transient-vs-permanent classification to make and re-firing it immediately
+    would just re-hit whatever is not progressing. It is a signal to the
+    operator, not a retry trigger. ``progress`` is the evidence, persisted so
+    the successor to #2213 is a query rather than log archaeology.
     """
     now = now or _utcnow()
     if status == "failure":
@@ -463,7 +582,8 @@ def record_job_finish(
             error_msg      = %(error_msg)s,
             error_category = %(error_category)s,
             next_retry_at  = %(next_retry_at)s,
-            attempt        = %(attempt)s
+            attempt        = %(attempt)s,
+            progress_json  = %(progress)s
         WHERE run_id = %(run_id)s
           AND status = 'running'
         """,
@@ -475,6 +595,7 @@ def record_job_finish(
             "error_category": error_category.value if error_category else None,
             "next_retry_at": next_retry_at,
             "attempt": attempt,
+            "progress": Jsonb(dict(progress)) if progress is not None else None,
             "run_id": run_id,
         },
     )
@@ -564,6 +685,17 @@ def reap_orphaned_job_runs(
             {"a": attempt, "n": next_retry_at, "id": int(run_id)},
         )
     return len(reaped)
+
+
+# #2052 — machine-checkable reason prefix for a scheduled fire skipped because
+# its lane stayed busy (``_fire_scheduled_with_lane_retry`` exhausted its
+# acquire-retry window, or no waiter slot was free). Delimiter included so a
+# future ``lane_busyX`` reason can never be misclassified. Consumed by the
+# writer (``app/jobs/runtime.py``) and by the ``expected_fire_at`` anchor
+# exclusion in ``app/services/processes/scheduled_adapter.py`` — a lane-busy
+# skip means "work was due, couldn't start", so unlike prereq/gate skips it
+# must NOT reset the schedule-missed clock.
+LANE_BUSY_SKIP_PREFIX: Final[str] = "lane_busy: "
 
 
 def record_job_skip(

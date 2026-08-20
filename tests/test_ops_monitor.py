@@ -89,8 +89,11 @@ class TestCheckLayerStaleness:
         assert "no data rows" in result.detail
 
     def test_fresh_layer_returns_ok(self) -> None:
-        # Universe threshold is 2 days; set latest to 1 hour ago.
-        latest = _NOW - timedelta(hours=1)
+        # ⚠ Derived from the threshold, not from a hand-written age. Both of
+        # these cases hard-coded "2 days" until #2407 moved the universe
+        # threshold to 9 days, and the stale case then silently became a fresh
+        # one — a test asserting a boundary must move with the boundary.
+        latest = _NOW - (_STALENESS_THRESHOLDS["universe"] / 2)
         conn = _make_conn([_make_cursor([{"latest": latest}])])
         result = check_layer_staleness(conn, "universe", now=_NOW)
         assert result.status == "ok"
@@ -99,8 +102,8 @@ class TestCheckLayerStaleness:
         assert result.age < _STALENESS_THRESHOLDS["universe"]
 
     def test_stale_layer_returns_stale(self) -> None:
-        # Universe threshold is 2 days; set latest to 3 days ago.
-        latest = _NOW - timedelta(days=3)
+        # One hour past the threshold, whatever the threshold currently is.
+        latest = _NOW - (_STALENESS_THRESHOLDS["universe"] + timedelta(hours=1))
         conn = _make_conn([_make_cursor([{"latest": latest}])])
         result = check_layer_staleness(conn, "universe", now=_NOW)
         assert result.status == "stale"
@@ -196,6 +199,80 @@ class TestCheckAllLayers:
         for layer, status in status_map.items():
             if layer != "universe":
                 assert status == "ok", f"layer {layer} should be ok, got {status}"
+
+    def test_a_failed_layer_leaves_the_connection_usable(self) -> None:
+        """The containment claim tested as CONTAINMENT, not as a caught error (#2674).
+
+        ``get_conn`` hands out a NON-autocommit pooled connection, so a failed
+        query leaves Postgres' transaction aborted and catching the Python
+        exception does not clear it — every later statement raises
+        ``InFailedSqlTransaction``. So the broken version failed ALL eight
+        layers off ONE bad table (seven of them for a reason unrelated to their
+        own health, which also hides which layer started it) and then 500'd
+        ``/system/status`` via ``_build_credential_health_summary``.
+
+        The fake models exactly that rule: statements raise while ``aborted``
+        is set, and only the savepoint rollback clears it. Note
+        ``test_single_layer_failure_does_not_abort_others`` above PASSES
+        against the broken version — asserting the ``error`` row cannot
+        distinguish contained from poisoned, so the post-condition here is a
+        SUBSEQUENT statement.
+        """
+
+        class _FakeTransaction:
+            def __init__(self, conn: _FakeConn) -> None:
+                self._conn = conn
+
+            def __enter__(self) -> _FakeTransaction:
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                if exc_type is not None:
+                    self._conn.aborted = False  # the savepoint rollback
+                return False
+
+        class _FakeCursor:
+            def __init__(self, conn: _FakeConn) -> None:
+                self._conn = conn
+
+            def __enter__(self) -> _FakeCursor:
+                return self
+
+            def __exit__(self, *_exc: object) -> bool:
+                return False
+
+            def execute(self, *_args: object, **_kwargs: object) -> None:
+                if self._conn.aborted:
+                    raise RuntimeError("InFailedSqlTransaction")
+                if self._conn.queries == 0:  # the one genuinely broken layer
+                    self._conn.aborted = True
+                    self._conn.queries += 1
+                    raise RuntimeError("relation 'instruments' does not exist")
+                self._conn.queries += 1
+
+            def fetchone(self) -> dict[str, Any]:
+                return {"latest": _NOW - timedelta(hours=1)}
+
+        class _FakeConn:
+            def __init__(self) -> None:
+                self.aborted = False
+                self.queries = 0
+
+            def transaction(self) -> _FakeTransaction:
+                return _FakeTransaction(self)
+
+            def cursor(self, **_kwargs: object) -> _FakeCursor:
+                return _FakeCursor(self)
+
+        conn = _FakeConn()
+        results = check_all_layers(conn, now=_NOW)  # type: ignore[arg-type]
+
+        status_map = {r.layer: r.status for r in results}
+        assert status_map["universe"] == "error"
+        # Exactly ONE error: the seven healthy layers are not collateral damage.
+        assert sum(1 for s in status_map.values() if s == "error") == 1
+        # The post-condition that distinguishes contained from poisoned.
+        assert not conn.aborted, "a failed layer left the connection in an aborted transaction"
 
     def test_mixed_status_layers(self) -> None:
         # universe: fresh, prices: stale, rest: empty
