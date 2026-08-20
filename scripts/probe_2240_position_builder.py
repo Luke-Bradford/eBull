@@ -143,7 +143,32 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
                 "    redundant = list(tied)",
             )
         ],
-        "test_a_LEVEL_TOUCH_tying_with_a_signal_pair_exit_resolves_by_precedence",
+        "test_a_LEVEL_TOUCH_tying_with_a_signal_pair_exit_loses_to_the_OPEN_FILL",
+    ),
+    (
+        # ⚠⚠ THE TIER, NOT THE ORDER. Collapsing the two-tier key back to a bare
+        # `_SOURCE_PRECEDENCE` lookup restores the construction #2779's first
+        # repair shipped — `level` ahead of `signal_pair` — which books an
+        # intraday stop against a position that already closed at that bar's
+        # open. The mutation leaves `_SOURCE_PRECEDENCE` itself untouched, so
+        # nothing about the constant looks wrong.
+        "the execution-moment tier collapsed, so an intraday touch preempts an open fill",
+        [("            0 if _executes_at_open(candidate) else 1,", "            0,")],
+        "test_a_LEVEL_TOUCH_tying_with_a_signal_pair_exit_loses_to_the_OPEN_FILL",
+    ),
+    (
+        # ⚠ The other side of the same tier: `expired` is open-priced only
+        # because `redundant_with_max_hold` says so. Dropping that clause pushes
+        # it into the intraday tier, behind `max_hold`, and reverses the one
+        # label preference §3.2 actually cites.
+        "the expired outcome dropped out of the open-priced tier",
+        [
+            (
+                "    return candidate.source in _OPEN_PRICED_SOURCES or candidate.redundant_with_max_hold",
+                "    return candidate.source in _OPEN_PRICED_SOURCES",
+            )
+        ],
+        "test_an_EXPIRED_outcome_still_outranks_max_hold_on_the_same_bar",
     ),
     (
         # ⚠ `tp_hit` / `sl_hit` are intraday touches, not a recomputation of the

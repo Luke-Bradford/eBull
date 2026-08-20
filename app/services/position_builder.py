@@ -127,12 +127,54 @@ SPEC_CLOSE_SOURCES: frozenset[str] = CLOSE_SOURCES - OUR_ADDITIONAL_CLOSE_SOURCE
 #: ⚠ Spec §3.2 does NOT settle that case, and this comment says so rather than
 #: implying a citation. Its table assigns C1 to S-1/S-3 and C2 to S-4, so a
 #: signal-pair/level tie could not arise when it was written; the hybrid regime
-#: (#2723) created it. The construction chosen is: an intraday level touch
-#: closed the position before any close-based exit fill could, so ``level``
-#: precedes ``signal_pair``. ``RULE_SET_VERSION`` hashes this module's source, so
-#: this ordering is frozen into strategy identity by construction — changing it
-#: moves every strategy version, which is the intended cost of changing it.
+#: (#2723) created it.
+#:
+#: ⚠⚠ THIS ORDER RUNS *WITHIN* AN EXECUTION MOMENT, NOT ACROSS ONE — see
+#: ``_executes_at_open``. An earlier construction had ``level`` precede
+#: ``signal_pair`` on the reasoning that "an intraday level touch closed the
+#: position before any close-based exit fill could". That premise is FALSE:
+#: ``signal_ledger.resolve_fills`` states its rule outright — *"the fill price is
+#: that bar's OPEN. There is no other path"* — and it does not distinguish entry
+#: fills from exit fills. A signal-pair exit therefore executes at the FIRST tick
+#: of its bar, before any intraday path exists to touch a level. The real case
+#: from #2779 is unambiguous: signal 7694 on 2011-06-16 had ``signal_pair=326.9``
+#: (that bar's open) against ``level=318.874053244667719`` (a stop), and booking
+#: the stop records a ~2.5% loss on a position that had already closed at the
+#: open.
+#:
+#: ``RULE_SET_VERSION`` hashes this module's source, so this ordering is frozen
+#: into strategy identity by construction — changing it moves every strategy
+#: version, which is the intended cost of changing it.
 _SOURCE_PRECEDENCE: tuple[CloseSource, ...] = ("level", "ambiguous", "max_hold", "calendar", "signal_pair")
+
+#: Sources whose close executes at a bar's OPEN, so they precede anything that
+#: needs an intraday path. ``signal_pair`` is here because
+#: ``signal_ledger.resolve_fills`` prices EVERY fill at ``open(signal_index + 1)``;
+#: ``max_hold`` and ``calendar`` because spec §3.2's table says "its **open**" for
+#: both.
+_OPEN_PRICED_SOURCES: frozenset[CloseSource] = frozenset({"signal_pair", "max_hold", "calendar"})
+
+
+def _executes_at_open(candidate: _Candidate) -> bool:
+    """Whether this close happens at its bar's open rather than somewhere inside it.
+
+    ⚠⚠ THE ORDER OF EVENTS INSIDE ONE BAR IS open → intraday path → close, and
+    that is the whole basis for resolving a tie the spec does not settle. A
+    source that executes at the open cannot be preempted by one that needs the
+    price to travel somewhere first.
+
+    ``level`` is on BOTH sides of this line, which is why the test is not a bare
+    source lookup. An ``expired`` outcome exits at the next bar's OPEN
+    (``outcome_resolver``: *"a max-hold exit fills at the NEXT open"*), and it is
+    exactly the ``expired`` case that carries ``redundant_with_max_hold``. A
+    ``tp``/``sl`` touch is intraday.
+
+    ⚠ A gap-through ``tp``/``sl`` also resolves at the open and is NOT detectable
+    here — but it prices AT that open, so it ties with the open-priced sources on
+    the number and can only differ in the label. Sorting it late is therefore
+    price-neutral, which is the property that matters.
+    """
+    return candidate.source in _OPEN_PRICED_SOURCES or candidate.redundant_with_max_hold
 
 
 @dataclass(frozen=True)
@@ -546,9 +588,16 @@ def _pick_close(candidates: Sequence[_Candidate], *, signal_id: int) -> _Candida
 
     ⚠ The generalisation also made ``_SOURCE_PRECEDENCE`` unreachable for every
     case it was written for: an ordering over tied sources only means anything
-    if tied sources may disagree. ``level`` outranking ``signal_pair`` is the
-    answer here — a stop touched intraday closed the position before any
-    close-based exit fill could.
+    if tied sources may disagree.
+
+    ⚠⚠ THE TIE IS BROKEN BY WHEN THE CLOSE EXECUTED, NOT BY SOURCE ALONE — see
+    ``_executes_at_open``. A signal-pair exit is priced at its bar's OPEN
+    (``signal_ledger.resolve_fills``: *"the fill price is that bar's OPEN. There
+    is no other path"*), so it closes the position at the first tick and no
+    intraday level touch on the same bar can reach it. #2779's own reported case
+    is the proof: ``signal_pair=326.9`` (the open) against ``level=318.87`` (a
+    stop) on 2011-06-16 — preferring the stop books a loss on a position that no
+    longer existed.
     """
     earliest = min(candidate.when for candidate in candidates)
     tied = [candidate for candidate in candidates if candidate.when == earliest]
@@ -561,7 +610,22 @@ def _pick_close(candidates: Sequence[_Candidate], *, signal_id: int) -> _Candida
             f"signal {signal_id}: the max-hold expiry disagrees with the resolver on {earliest} ({detail}) — "
             "C2's `expired` and C3 compute the same window, so a disagreement is a failure, not a tie-break"
         )
-    return min(tied, key=lambda candidate: _SOURCE_PRECEDENCE.index(candidate.source))
+    # ⚠ TWO-TIER, and the tiers are not interchangeable. The first asks WHEN in
+    # the bar the close executed, which is a fact about the market; the second is
+    # the declared label preference among sources that executed at the same
+    # moment, which is a convention. Collapsing them into one tuple is what
+    # produced the cycle: `level` must precede `max_hold` (spec §3.2 names
+    # `outcome_resolver.py:470` as the expiry reference, and the two are
+    # price-equal by the check above), `signal_pair` must precede an intraday
+    # `level`, and a single total order cannot hold both while keeping
+    # `max_hold` ahead of `signal_pair`.
+    return min(
+        tied,
+        key=lambda candidate: (
+            0 if _executes_at_open(candidate) else 1,
+            _SOURCE_PRECEDENCE.index(candidate.source),
+        ),
+    )
 
 
 def build_positions(
