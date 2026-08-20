@@ -217,6 +217,27 @@ def main() -> int:
     print(f"\ncross-check — clause 4 never reached (harness blind)   : {never_reached}")
     print(f"cross-check — wide verdict neither ungated nor incumbent: {len(bad_refusal)}")
     print(f"cross-check — flip without a retained insider row       : {len(bad_flip)}")
+
+    # ⚠ EXIT NON-ZERO on any of them. Printing a fault and returning 0 is the very failure
+    # this script's docstring is about: a caller — CI, a shell `&&` chain, the next
+    # session skimming the tail — cannot distinguish "clean population" from "harness
+    # measured nothing". A shard legitimately holding no clause-4 cluster (say a small
+    # ``--limit`` smoke) will trip ``never reached``; that false alarm is the cheap
+    # direction, and a silent clean census is the expensive one.
+    faults: list[str] = []
+    if errors:
+        faults.append(f"{len(errors)} instrument(s) raised")
+    if never_reached:
+        faults.append("clause 4 never reached — nothing was measured about it")
+    if bad_refusal:
+        faults.append(f"{len(bad_refusal)} cluster(s) where the wide verdict is neither ungated nor incumbent")
+    if bad_flip:
+        faults.append(f"{len(bad_flip)} flip(s) with no retained insider row")
+    if faults:
+        print("\nHARNESS FAULT — census is NOT usable:", file=sys.stderr)
+        for f in faults:
+            print(f"  - {f}", file=sys.stderr)
+        return 1
     return 0
 
 
