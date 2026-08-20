@@ -36,7 +36,7 @@ _GIT_ENV = {
 
 
 def _env(**extra: str) -> dict[str, str]:
-    """os.environ with every GIT_* variable removed, then our own put back.
+    """os.environ with every GIT_* and TA_LOOP_* variable removed, then our own put back.
 
     ⚠ A git hook exports GIT_DIR, GIT_INDEX_FILE and GIT_PREFIX into the
     environment of everything it runs, so under the pre-push gate an inherited
@@ -44,8 +44,18 @@ def _env(**extra: str) -> dict[str, str]:
     tests then pass standalone and ERROR only from the hook. Scrub the whole
     prefix rather than the two names that happened to bite: the point is that
     the subprocesses must see no ambient git context at all.
+
+    ⚠⚠ TA_LOOP_* is the SAME defect one layer over, and it bites harder because the
+    contaminating value is a legitimate configuration rather than an accident. A loop
+    driver exports TA_LOOP_PROMPT / TA_LOOP_WORKTREE into everything it runs, and the
+    driver under test resolves `PROMPT="${TA_LOOP_PROMPT:-$SELF_DIR/ta_loop_prompt.md}"`
+    — so when pytest runs from INSIDE a loop, the hermetic fixture is bypassed and the
+    stub agent is handed that loop's real prompt. Observed 2026-08-20 from the ownership
+    loop's worktree: 3 of 5 failed with the ownership prompt text in the assertion diff,
+    while the same tests pass for a human running them by hand. `extra` is applied last,
+    so the fixture's own TA_LOOP_* values survive the scrub.
     """
-    base = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "TA_LOOP_"))}
     return {**base, **_GIT_ENV, **extra}
 
 

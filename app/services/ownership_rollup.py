@@ -49,6 +49,7 @@ import psycopg
 import psycopg.rows
 
 from app.services.holder_name_resolver import resolve_holder_to_filer
+from app.services.insider_transactions import form4_retention_cutoff
 from app.services.institutional_families import (
     InstitutionalFamily,
     resolve_family,
@@ -172,6 +173,15 @@ class CorrectionApplied:
         counted once at MAX and the other members are folded. ``source_channel`` ==
         ``winning_source`` (intra-blockholder-channel collapse); the per-member fold
         detail is in ``detail`` + the surviving holder's ``dropped_sources``.
+      * ``insider_beyond_form4_retention`` (#2788) — a Form 4 row whose SEC filing date
+        precedes ``form4_retention_cutoff()`` removed from the insiders slice. NOT a claim
+        that the holder sold: Form 4 is transaction-triggered, so silence is not evidence
+        of an exit (unlike ``superseded_by_later_13f_hr``, which rests on Form 13F SI 5b
+        making a holdings report a COMPLETE statement). It is the read side of the ingest
+        retention cap #1233 §4.3 already enforces on every Form 4 writer — we no longer
+        hold in-retention evidence of the position, so we stop asserting it, per the #790
+        posture that the truthful state beats a fabricated one. ``superseded_period`` is
+        the removed row's own period; NT fields None.
       * ``insider_control_group_collapse`` (#1652) — a sponsor's GP/LP chain reported the
         same deemed block under many related CIKs across Form 4 / Form 3 / 13D / 13G; the
         cross-channel group is counted once (insiders slice) and the other members folded.
@@ -855,6 +865,48 @@ _RESIDUAL_TOOLTIP = (
 )
 
 
+# #2788 — a Form 4 row filed before the Form 4 ingest retention cutoff is not
+# evidence of a CURRENT holding, and every other Form 4 writer already refuses to
+# store one. Held as ONE fragment because the rollup's exclusion and
+# :func:`_read_beyond_retention_insiders` must select exact complements; #2229
+# shipped that pairing as two hand-kept-in-step predicates and said so in a comment,
+# which is a drift hazard the constant removes.
+#
+# ``source = 'form4'`` only. Form 3 is deliberately NOT gated: #1233 §4.3 exempts it
+# ("Form 3 rows are NOT gated here — Form 3 is read-side latest-per-pair") because
+# the initial statement is the only evidence for a holder who has never transacted.
+# Form 5 has no separate ``source`` value in this layer —
+# ``sec_insider_dataset_ingest._map_form_to_source`` folds 4/4-A/5/5-A into
+# ``form4`` — so a Form 5 row is bounded by the 3y Form 4 cutoff rather than its own
+# 18-month one. That is the conservative direction: the wider window removes fewer
+# rows.
+_INSIDER_BEYOND_RETENTION_SQL: Final = """
+    oc.source = 'form4' AND oc.filed_at::date < %(form4_cutoff)s
+"""
+
+# Dual-pipeline de-collision (#788), extracted so the insiders read and every producer
+# that must agree with it share ONE copy. A DERA-dataset row (``:NDT:`` / ``:NDH:``
+# marker) is dropped whenever an XML-manifest row exists for the same
+# ``(holder_cik, source_accession)`` — the manifest parse is the authoritative
+# full-Table-II view of that filing.
+#
+# ⚠ Any producer that reports rows the insiders read REMOVED must apply this too, or it
+# double-reports: a stale accession present in BOTH pipelines contributes one row to the
+# wedge but two to a naive complement, overstating ``shares_removed`` by the duplicate
+# (Codex checkpoint 2 on #2788 — the telemetry shipped without it and would have told an
+# operator that twice the actual shares had left).
+_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL: Final = """
+    oc.source_document_id ~ ':(NDT|NDH):'
+    AND EXISTS (
+        SELECT 1 FROM ownership_insiders_current x
+        WHERE x.instrument_id = oc.instrument_id
+          AND x.holder_cik IS NOT DISTINCT FROM oc.holder_cik
+          AND x.source_accession = oc.source_accession
+          AND x.source_document_id !~ ':(NDT|NDH):'
+    )
+"""
+
+
 def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
     """Build the canonical-holder candidate set from the per-source
     ``ownership_*_current`` snapshots populated by Phase 1 write-through
@@ -893,7 +945,7 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
         # full-Table-II view of that filing; the dataset only fills accessions the
         # manifest never parsed.
         cur.execute(
-            """
+            f"""
             SELECT oc.holder_cik, oc.holder_name, oc.ownership_nature,
                    oc.source, oc.source_accession, oc.shares, oc.period_end,
                    COALESCE(f.is_ten_percent_owner, FALSE) AS is_ten_percent_owner,
@@ -907,20 +959,15 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
             LEFT JOIN insider_filers f
               ON f.accession_number = oc.source_accession
              AND f.filer_cik = oc.holder_cik
-            WHERE instrument_id = %s
-              AND shares IS NOT NULL
-              AND NOT (
-                oc.source_document_id ~ ':(NDT|NDH):'
-                AND EXISTS (
-                    SELECT 1 FROM ownership_insiders_current x
-                    WHERE x.instrument_id = oc.instrument_id
-                      AND x.holder_cik IS NOT DISTINCT FROM oc.holder_cik
-                      AND x.source_accession = oc.source_accession
-                      AND x.source_document_id !~ ':(NDT|NDH):'
-                )
-              )
+            WHERE oc.instrument_id = %(iid)s
+              AND oc.shares IS NOT NULL
+              AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
+              -- #2788 — beyond-retention Form 4 rows excluded; see
+              -- _INSIDER_BEYOND_RETENTION_SQL and _read_beyond_retention_insiders,
+              -- which lists exactly the rows this removes.
+              AND NOT ({_INSIDER_BEYOND_RETENTION_SQL})
             """,
-            (instrument_id,),
+            {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
         )
         for row in cur.fetchall():
             source = str(row["source"])
@@ -1227,6 +1274,76 @@ def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) ->
                         f"Form 13F Special Instruction 5b makes a holdings report a complete statement "
                         f"of the Manager's Section 13(f) holdings, so the {row['superseded_period']} "
                         f"position is closed."
+                    ),
+                )
+            )
+    return tuple(rows)
+
+
+def _read_beyond_retention_insiders(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[CorrectionApplied, ...]:
+    """List the insider rows EXCLUDED as beyond the Form 4 ingest retention window
+    (#2788), for the ``corrections_applied`` telemetry.
+
+    The selection is the exact complement of the insiders query's exclusion because both
+    interpolate the SAME :data:`_INSIDER_BEYOND_RETENTION_SQL` fragment — #2229 kept its
+    pair in step by comment alone, and a comment does not fail when someone edits one
+    side.
+
+    ⚠ Read the ``detail`` string before quoting this correction as an exit. It is NOT
+    ``superseded_by_later_13f_hr``. That one rests on a source rule — Form 13F Special
+    Instruction 5b makes a holdings report a complete statement of the Manager's §13(f)
+    holdings, so omitting a security is affirmative evidence of an exit. **Section 16 has
+    no such rule.** Form 4 is transaction-triggered (Exchange Act §16(a); the transaction
+    codes in ``data-sources/sec-edgar.md`` §2.3 — ``S``/``D``/``G``/``U`` — arrive as
+    FILINGS, not as silence), and Rule 16a-2's obligation simply ENDS when the person
+    ceases to be an insider, which is why a frozen row stops moving rather than going to
+    zero. So this correction says only that we no longer hold in-retention evidence, and
+    the operator-facing string must keep saying that.
+
+    The rows this removes are dominated by one event rather than by attrition: the #2701
+    research ingest ran ``ingest_insider_dataset_archive`` with
+    ``retention_cutoff_override=2006-01-01`` on 2026-08-14 and wrote pre-retention Form 4
+    rows into ``ownership_insiders_observations`` — the table
+    ``ownership_insiders_current`` projects — while its own docstring asserted the
+    override "CHANGES NO DEFAULT" for "the operator ALERTING path". The ownership rollup
+    was the unguarded consumer. Reproduce the split with
+    ``scripts/audit_2788_insider_retention.py --census``; do not hand-copy its figures
+    here, they move with every ingest."""
+    rows: list[CorrectionApplied] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT oc.holder_cik, oc.holder_name, oc.shares,
+                   oc.period_end, oc.filed_at::date AS filed_on,
+                   oc.source_accession
+            FROM ownership_insiders_current oc
+            WHERE oc.instrument_id = %(iid)s
+              AND oc.shares IS NOT NULL
+              -- Same de-collision the insiders read applies. Without it a stale
+              -- accession present in BOTH pipelines is reported twice and
+              -- ``shares_removed`` doubles (Codex checkpoint 2).
+              AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
+              AND ({_INSIDER_BEYOND_RETENTION_SQL})
+            ORDER BY oc.shares DESC, oc.holder_cik, oc.holder_name
+            """,
+            {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
+        )
+        for row in cur.fetchall():
+            rows.append(
+                CorrectionApplied(
+                    kind="insider_beyond_form4_retention",
+                    filer_cik=str(row["holder_cik"]) if row["holder_cik"] else None,
+                    filer_name=str(row["holder_name"]),
+                    shares_removed=Decimal(row["shares"]),
+                    superseded_period=row["period_end"],
+                    source_channel="form4",
+                    detail=(
+                        f"Last Form 4 evidence for this holder was filed {row['filed_on']} "
+                        f"(accession {row['source_accession']}), before the "
+                        f"{form4_retention_cutoff()} Form 4 ingest retention cutoff "
+                        f"(#1233 §4.3). NOT evidence the holder sold — Form 4 is "
+                        f"transaction-triggered, so silence proves nothing; we no longer "
+                        f"hold in-retention evidence of the position."
                     ),
                 )
             )
@@ -2627,6 +2744,22 @@ def _rows_by_identity(*holder_lists: Iterable[Holder]) -> dict[str, list[Holder]
     return index
 
 
+def _stranded_rows(
+    holder: Holder,
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> list[Holder]:
+    """The rows ``holder``'s identity holds OUTSIDE ``cluster`` — what demoting it out of
+    the cluster would leave behind.
+
+    Identity, not object: ``rows_by_identity`` is keyed on :func:`_identity_key`, and
+    cluster membership is tested by object id, so a row of the same identity that is not
+    one of the cluster's own objects counts as stranded."""
+    in_cluster = {id(h) for h in cluster}
+    key = _identity_key(holder.filer_cik, holder.filer_name)
+    return [row for row in rows_by_identity.get(key, ()) if id(row) not in in_cluster]
+
+
 def _releases_other_rows(
     holder: Holder,
     cluster: Sequence[Holder],
@@ -2635,12 +2768,56 @@ def _releases_other_rows(
     """True when demoting ``holder`` out of ``cluster`` would strand rows it holds in
     OTHER channels — its 13F institutional row, most consequentially.
 
-    Identity, not object: ``rows_by_identity`` is keyed on :func:`_identity_key`, and
-    cluster membership is tested by object id, so a row of the same identity that is not
-    one of the cluster's own objects counts as stranded."""
-    in_cluster = {id(h) for h in cluster}
-    key = _identity_key(holder.filer_cik, holder.filer_name)
-    return any(id(row) not in in_cluster for row in rows_by_identity.get(key, ()))
+    ⚠ Strictly WIDER than the hazard the deemed-chain FOLD gate names; that gate asks
+    :func:`_releases_into_another_wedge` instead (#2230).
+
+    ⚠⚠ **:func:`_select_control_group_rep` clause 4 keeps asking THIS one, and #2785
+    measured why** — the narrowing is right for the fold and wrong for a rep swap. Do not
+    "finish the job" by pointing clause 4 at the narrow predicate; that was tried,
+    A/B'd on the full population, and reverted. See clause 4's own docstring for the
+    numbers and the mechanism."""
+    return bool(_stranded_rows(holder, cluster, rows_by_identity))
+
+
+def _releases_into_another_wedge(
+    holder: Holder,
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> bool:
+    """True when demoting ``holder`` out of ``cluster`` would move rows it holds in OTHER
+    channels into a DIFFERENT pie wedge (#2230 residual).
+
+    **Narrower than :func:`_releases_other_rows`, and the narrowing is the point.** A
+    stranded row is only a *release* if it changes what :func:`_reconcile_owner_once`
+    decides about the identity. That function branches on ``present & _INSIDER_SOURCES``:
+    a Section-16 person is classified ``insiders`` at the MAX of its beneficial
+    restatements, and *"any 13F for this CIK is managed assets → it stays a
+    dropped_source, never added to the insider's stake"* (#1640). So an identity that
+    retains **any** ``_INSIDER_SOURCES`` row outside the cluster is still a Section-16
+    person after the fold — same category, 13F still suppressed — and nothing is
+    released. Only an identity left with no insider row at all can change wedge.
+
+    That case is also provably non-inflating, which is why it is safe to fold: the fold
+    removes the cluster's rows from the identity's ``form4``/``form3`` pool and touches no
+    other source, so the per-source MAX can only fall or stay. The category is unchanged
+    and the figure cannot rise.
+
+    ⚠ Keyed on ``winning_source``, deliberately — the SAME field
+    :func:`_reconcile_owner_once` buckets on, so the two cannot disagree about what the
+    identity is. Not on ``ownership_nature``, which has four writers and three meanings
+    and would need the ``nature_from_table_i`` provenance gate (#2385/#2386):
+    ``RYTM``'s stranded Form 4 for ``BARRIS PETER J`` is stored ``beneficial`` where the
+    filing itself says ``I``, and it must still count as insider evidence.
+
+    Measured on the full population by
+    ``PYTHONPATH=. uv run python -m scripts.audit_2230_release_hazard`` (sharded 3 ways):
+    of the deemed-chain clusters this gate refuses, the great majority are refused on
+    stranded ``form4``/``form3``/``def14a`` rows that cannot trigger the mechanism above.
+    Re-run the script rather than trusting a remembered figure."""
+    stranded = _stranded_rows(holder, cluster, rows_by_identity)
+    if not stranded:
+        return False
+    return not any(row.winning_source in _INSIDER_SOURCES for row in stranded)
 
 
 def _attested_direct_holders(cluster: Sequence[Holder]) -> list[Holder]:
@@ -2909,13 +3086,63 @@ def _select_control_group_rep(
 
     4. **Decline on release exposure.** The rep is not a label — it is the identity that
        survives into :func:`_reconcile_owner_once`, so demoting a member RELEASES its
-       other-channel rows into their own wedges. The swap is therefore arithmetic, and is
-       neutral-or-better only when the incumbent holds nothing outside the cluster:
-       the promoted member's rows stop being released, the demoted one's would start.
-       Declines 24 of 75 otherwise-eligible swaps. This is #2230's fail-closed posture
-       applied to the rep choice, and it deliberately does NOT reverse #1652's
-       exact-value-only consumption rule, which claiming the demoted member's rows
-       would require.
+       other-channel rows into their own wedges. The swap is therefore arithmetic: the
+       promoted member's rows stop being released, the demoted one's would start.
+
+       ⚠⚠ **Asks the WIDE :func:`_releases_other_rows`, deliberately — #2230's narrowing
+       does NOT transfer here, and #2785 measured that rather than assuming it.** The
+       obvious-looking follow-through (point clause 4 at :func:`_releases_into_another_wedge`,
+       since an identity keeping any ``_INSIDER_SOURCES`` row stays Section-16 and changes
+       no wedge) was implemented and A/B'd on the full population. It was **reverted**.
+
+       Census — ``scripts.audit_2785_rep_swap_gate``, 3,108 instruments, 0 harness errors:
+       5,283 clusters reach this selector, 203 reach clause 4, **81 declines**, of which
+       **72 would flip** under the narrow predicate. The 9 that stay refused strand only
+       ``13d``/``13g``/``13f`` and would genuinely change wedge.
+
+       Paired A/B over those 72 (control = a worktree at ``origin/main`` ``8fc1b4ad``,
+       treatment = that SHA plus this one predicate): 3,108 instruments per arm, 0 harness
+       errors, net −385,131,434 shares — and the net hides the finding. **17 instruments
+       GROW, by +82,886,088 in total**, against 26 shrinking and 3,065 unchanged.
+
+       Mechanism, stated at the width it was measured: a swap's hazard is MAGNITUDE, not
+       category. While the incumbent is rep, its stranded rows share an identity key with
+       the block row, so :func:`_reconcile_owner_once` groups them — additively for pooled
+       Section-16 forms (#1941), by MAX across competing beneficial restatements. Demoting
+       the incumbent breaks that grouping, and which way the pie then moves depends on
+       which interaction was in play. Two worked cases, offered as illustrations of the
+       two ends and NOT as a population taxonomy: ``WBD`` is exactly pie-neutral
+       (``Newhouse Steven O`` 184,070,739 becomes the partnership's 184,023,290 + his own
+       47,449 — same total, block finally on the entity that holds it), and ``AIRS`` grows
+       by 14,038,819, exactly the block value.
+
+       ⚠ **No discriminator separates the grow side, and three were tried and killed on
+       the full population** — that is the reason this stays wide rather than becoming a
+       targeted fence. ``max(stranded) >= block`` fires on 11 of 17 growers and 14 of 55
+       non-growers. "The instrument carries more than one collapse" (the ``AIRS`` shape)
+       fires 14/17 GROW, 25/29 SHRINK, 13/26 NEUTRAL. "The incumbent is the kept rep of a
+       collapse" is a tautology — it is true by construction in the control arm (17/17,
+       29/29, 25/26). ``TTRX`` grows by 15,416,260 on an instrument carrying exactly ONE
+       collapse, which is what refutes the ``AIRS`` story as the general explanation.
+       Per the repo rule, repeated failed keys is the signal to question the MODEL rather
+       than guess another: the criterion "neutral-or-better" is a statement about the
+       owner-once GROUPING, and no predicate over one member's stranded rows can decide
+       it.
+
+       Flip outcomes by CALLING PASS — :func:`_reconcile_insider_control_groups` 20
+       neutral / 16 shrink / 7 grow, :func:`_reconcile_same_accession_groups` 6 / 13 / 10.
+       Both grow, so this is not fixable by scoping the narrowing to one of them.
+       (Cluster-level attribution of an instrument-level delta, so an instrument carrying
+       two flipped clusters is counted twice. ⚠ The first label is the caller, NOT the
+       admission route: the #1652 value-proxy route and the #2230 deemed-chain tier share
+       that function and only the latter has a fold-release gate.)
+
+       This clause is therefore an ARITHMETIC fence, not a source rule, and its criterion
+       is its own: neutral-or-better. It deliberately does NOT reverse #1652's
+       exact-value-only consumption rule, which claiming the demoted member's rows would
+       require. Re-measure rather than quoting these counts:
+       ``PYTHONPATH=. uv run python -m scripts.audit_2785_rep_swap_gate --out /tmp/a.jsonl``,
+       and inspect any mover with ``scripts.probe_2785_wedge_detail``.
 
     5. **The record-holder text, only where clause 2 refused** (#2408). Clauses 1-3 are
        tried first and unchanged: where the Table I attestation is admissible it IS the
@@ -3239,11 +3466,20 @@ def _reconcile_insider_control_groups(
         # ``test_rep_residual_split_documented``). Reversing that is a bigger decision
         # than this ticket.
         #
-        # So the NEW tier fails closed instead: if folding would strand a non-rep
-        # member's other-channel rows, leave the whole cluster alone. The residual
-        # double-count is the conservative direction and matches the posture the rest of
-        # this pass takes. The original value-proxy route is deliberately NOT gated on
-        # this — its behaviour is unchanged from #1652.
+        # So the NEW tier fails closed instead: leave the whole cluster alone rather than
+        # risk the release. The residual double-count is the conservative direction and
+        # matches the posture the rest of this pass takes. The original value-proxy route
+        # is deliberately NOT gated on this — its behaviour is unchanged from #1652.
+        #
+        # ⚠ The gate asks :func:`_releases_into_another_wedge`, NOT "are any rows
+        # stranded". Those are different propositions, and the wider one refused most of
+        # this tier for a hazard that cannot occur: a member whose stranded rows are
+        # themselves ``_INSIDER_SOURCES`` rows keeps its Section-16 classification in
+        # :func:`_reconcile_owner_once`, so its 13F stays a ``dropped_source`` and nothing
+        # changes wedge. Reversing #1652's consumption rule was never needed for those —
+        # the release the comment above describes requires the identity to be left with no
+        # insider row at all. Full-population census:
+        # ``PYTHONPATH=. uv run python -m scripts.audit_2230_release_hazard``.
         if collapsible and not (len(distinct_ciks) >= 2 and has_insider and _passes_value_proxies(shares)):
             # Same selector, same inputs, same winner as the fold itself — see
             # :func:`_select_control_group_rep`. Asking the selector rather than
@@ -3255,7 +3491,7 @@ def _reconcile_insider_control_groups(
             for member in holders:
                 if _identity_key(member.filer_cik, member.filer_name) == rep_identity:
                     continue
-                if _releases_other_rows(member, holders, rows_by_identity):
+                if _releases_into_another_wedge(member, holders, rows_by_identity):
                     collapsible = False
                     break
         if collapsible:
@@ -4891,6 +5127,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     corrections_applied = (
         *_read_notice_suppressions(conn, instrument_id),
         *_read_hr_supersessions(conn, instrument_id),
+        # #2788 — the insider rows the retention bound excluded. Read the kind's
+        # docstring before quoting it as an exit; it is a coverage statement, not one.
+        *_read_beyond_retention_insiders(conn, instrument_id),
         *family_corrections,
         *same_accession_corrections,
         *insider_group_corrections,

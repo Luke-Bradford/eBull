@@ -28,6 +28,8 @@ from app.services.ownership_rollup import (
     _dedup_by_priority,
     _is_deemed_chain,
     _reconcile_insider_control_groups,
+    _releases_into_another_wedge,
+    _releases_other_rows,
     _rows_by_identity,
     _select_control_group_rep,
 )
@@ -456,6 +458,33 @@ def test_swap_is_declined_when_the_incumbent_holds_other_channel_rows() -> None:
     assert _rep(cluster, elsewhere).filer_name == "THRC Management, LLC"  # exposed: declined
 
 
+def test_swap_is_declined_even_when_the_stranded_row_is_an_insider_row() -> None:
+    """⚠⚠ The #2785 regression pin. ``WBD``: the incumbent ``Newhouse Steven O`` is a
+    natural person holding the block only by the arbitrary CIK tie-break, and he strands
+    his OWN 47,449-share Form 4 against a 184,023,290 block. Under
+    ``_releases_into_another_wedge`` he keeps an insider row, so no wedge changes and the
+    swap looks free — that is the 72-of-81 class #2785 measured.
+
+    It is still declined, because a swap's hazard is MAGNITUDE and not category. Demoting
+    the incumbent breaks the owner-once grouping that was folding his stranded rows
+    together with the block; the full-population A/B showed 17 instruments GROW by
+    +82,886,088 that way (``AIRS`` +14,038,819). If this test starts failing, the change
+    that broke it is the one that was measured and reverted — read
+    ``_select_control_group_rep`` clause 4 before "fixing" it."""
+    incumbent = _h("000001913168", "Newhouse Steven O", _SUB_FLOOR, nature="indirect")
+    cluster = [
+        incumbent,
+        _h("000001455382", "ADVANCE/NEWHOUSE PROGRAMMING PARTNERSHIP", _SUB_FLOOR, nature="direct"),
+    ]
+    # Release-free: the swap is taken and the partnership holds the block.
+    assert _rep(cluster).filer_name == "ADVANCE/NEWHOUSE PROGRAMMING PARTNERSHIP"
+    # His own personal Form 4 stake elsewhere — an ``_INSIDER_SOURCES`` row, so the
+    # NARROW predicate would admit this. Clause 4 must still decline.
+    personal = [_h("000001913168", "Newhouse Steven O", "47449", nature="direct", source="form4")]
+    assert _releases_into_another_wedge(incumbent, cluster, _rows_by_identity(cluster, personal)) is False
+    assert _rep(cluster, personal).filer_name == "Newhouse Steven O"
+
+
 def test_institutional_row_carrying_table_i_provenance_cannot_become_the_rep() -> None:
     """``nature_from_table_i`` survives the cross-source merge via
     ``any(c.nature_from_table_i for c in cands)``, so a 13F-winning holder can carry it.
@@ -689,3 +718,120 @@ def test_a_sibling_fund_substring_declines_rather_than_guessing() -> None:
     )
     evidence = _evidence("Securities are held of record by Legion Partners, L.P. II.")
     assert _rep_with(cluster, evidence).filer_name == "Legion Partners, L.P. I"  # incumbent
+
+
+# ---------------------------------------------------------------------------
+# Release hazard: a stranded row is not a release (#2230 residual)
+# ---------------------------------------------------------------------------
+#
+# The fold gate asks whether demoting a member would move its OTHER rows into a
+# DIFFERENT wedge, not whether any row is stranded. ``_reconcile_owner_once`` branches
+# on ``present & _INSIDER_SOURCES`` — a Section-16 person is classified ``insiders`` and
+# its 13F stays a ``dropped_source`` (#1640) — so an identity retaining ANY form4 /
+# form3 / def14a row outside the cluster is unchanged by the fold.
+#
+# Cases are the real refused clusters from
+# ``PYTHONPATH=. uv run python -m scripts.audit_2230_release_hazard``.
+
+
+def _with_stranded(*stranded: Holder) -> list:
+    """A 3-member chain plus rows belonging to its non-rep members. ⚠ Values differ from
+    the block so the stranded rows do not join the cluster's own value bucket."""
+    holders = _chain(_SUB_FLOOR, n=3)
+    return holders + list(stranded)
+
+
+def test_stranded_form4_row_does_not_block_the_fold() -> None:
+    """``ESTC`` / ``RYTM`` / ``COUR``: the dominant shape. NEA's managing members restate
+    the fund's block INDIRECTLY on Form 3 and each also holds a personal DIRECT stake on
+    Form 4. Folding the restatement leaves the personal row, so the identity is still a
+    Section-16 person to owner-once — same wedge, 13F still suppressed, nothing released.
+    18 of the 21 refused clusters are this shape."""
+    personal = _h("000000002", "Sponsor GP 0 L.L.C.", "4155995", nature="direct")
+    _out_s, _b, corrs = _reconcile_insider_control_groups(_with_stranded(personal), [])
+    assert _kinds(corrs) == ["insider_control_group_collapse"]
+
+
+def test_stranded_form3_row_does_not_block_the_fold() -> None:
+    """``ALTO`` / ``GTES``: same argument, other Section-16 form. ``form3`` is in
+    ``_INSIDER_SOURCES``, and ``_merge_section16_forms`` pools it with ``form4``."""
+    other = _h("000000002", "Sponsor GP 0 L.L.C.", "64708", nature="direct", source="form3")
+    _out_s, _b, corrs = _reconcile_insider_control_groups(_with_stranded(other), [])
+    assert _kinds(corrs) == ["insider_control_group_collapse"]
+
+
+def test_stranded_def14a_row_does_not_block_the_fold() -> None:
+    """``ROLR``: ``OEH Invest AB`` strands a proxy row. ``def14a`` is in
+    ``_INSIDER_SOURCES`` (though NOT in ``_INSIDER_GROUP_SOURCES``), so it too keeps the
+    identity classified ``insiders`` — the two sets are not interchangeable here."""
+    proxy = _h("000000002", "Sponsor GP 0 L.L.C.", "2010631", nature=None, source="def14a")
+    _out_s, _b, corrs = _reconcile_insider_control_groups(_with_stranded(proxy), [])
+    assert _kinds(corrs) == ["insider_control_group_collapse"]
+
+
+def test_zero_share_stranded_row_still_counts_as_insider_evidence() -> None:
+    """``EXE`` / ``ALOY`` / ``UPWK``: the stranded Form 4 reports 0 shares. It is below
+    ``_is_eligible``'s positivity bar so it never joins a bucket, but it is still a
+    Section-16 row for owner-once's classification, which is what the gate turns on."""
+    zeroed = _h("000000002", "Sponsor GP 0 L.L.C.", "0", nature="direct")
+    _out_s, _b, corrs = _reconcile_insider_control_groups(_with_stranded(zeroed), [])
+    assert _kinds(corrs) == ["insider_control_group_collapse"]
+
+
+def test_a_13f_row_beside_an_insider_row_does_not_block_the_fold() -> None:
+    """``TG`` / ``KG`` shape, taken to its limit: the member strands BOTH a Form 4 row and
+    a 13F row. The Form 4 keeps the identity Section-16, so owner-once still routes the
+    13F to ``dropped_sources`` rather than the institutions wedge — the release cannot
+    happen, and refusing here would be refusing on a hazard that is already fenced."""
+    member = ("000000002", "Sponsor GP 0 L.L.C.")
+    holders = _with_stranded(
+        _h(*member, "524624", nature="direct"),
+        _h(*member, "5997453", nature=None, source="13f"),
+    )
+    _out_s, _b, corrs = _reconcile_insider_control_groups(holders, [])
+    assert _kinds(corrs) == ["insider_control_group_collapse"]
+
+
+def test_stranded_13d_row_still_blocks_the_fold() -> None:
+    """``HSIC``: the two KKR partnerships strand ONLY 13D rows. Nothing keeps the identity
+    Section-16, so folding moves it to the blockholders wedge at its 13D figure — a real
+    release, and one of the 3 refusals that survive."""
+    kkr = _h("000000002", "Sponsor GP 0 L.L.C.", "17583918", nature=None, source="13d")
+    _out_s, _b, corrs = _reconcile_insider_control_groups(_with_stranded(kkr), [])
+    assert corrs == []
+
+
+def test_stranded_13g_row_still_blocks_the_fold() -> None:
+    """``EXE``: ``Blackstone Holdings III L.P.`` strands a 13G row and nothing else."""
+    bx = _h("000000002", "Sponsor GP 0 L.L.C.", "10320090", nature=None, source="13g")
+    _out_s, _b, corrs = _reconcile_insider_control_groups(_with_stranded(bx), [])
+    assert corrs == []
+
+
+def test_the_two_release_predicates_disagree_exactly_on_insider_rows() -> None:
+    """Pins the narrowing itself. ``_releases_other_rows`` stays WIDE — it is what
+    ``_select_control_group_rep`` clause 4 asks, and #2785 MEASURED that the narrowing
+    must not be carried over to it (see that clause's docstring) — so the two must
+    diverge on an insider-source row and agree elsewhere."""
+    cluster = _chain(_SUB_FLOOR, n=3)
+    member = cluster[1]
+    idx = _rows_by_identity
+    # Annotated, not inferred: a bare tuple literal widens the first element to ``str`` and
+    # ``_h``'s ``source`` parameter is the ``SourceTag`` literal union.
+    cases: tuple[tuple[SourceTag, bool], ...] = (
+        ("form4", False),
+        ("form3", False),
+        ("def14a", False),
+        ("13f", True),
+        ("13d", True),
+        ("13g", True),
+    )
+    for source, expect_release in cases:
+        elsewhere = [_h(member.filer_cik or "", member.filer_name, "12345", nature=None, source=source)]
+        rows = idx(cluster + elsewhere, [])
+        assert _releases_other_rows(member, cluster, rows) is True, source
+        assert _releases_into_another_wedge(member, cluster, rows) is expect_release, source
+    # No rows outside the cluster at all: both predicates agree there is nothing to release.
+    rows = idx(cluster, [])
+    assert _releases_other_rows(member, cluster, rows) is False
+    assert _releases_into_another_wedge(member, cluster, rows) is False
