@@ -45,7 +45,7 @@ import csv
 import io
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -201,6 +201,30 @@ def _opt_decimal(v: Any) -> Decimal | None:
         return None
 
 
+def required_row_fields(row: Mapping[str, Any]) -> tuple[str, int, Any] | None:
+    """Row-shape gate — ``(symbol, current_short, settlement_raw)`` or ``None``.
+
+    ``csv.DictReader`` sets missing trailing fields to ``None``, so a truncated
+    row presents as a dict carrying the expected keys with some values
+    ``None``/blank. Explicit required-field check (Codex 1b r2 MED 1).
+
+    Shared rather than inlined so the sentinel census
+    (``scripts/audit_2337_finra_match_rate.py``) counts the same rows ingest
+    counts. #2337's sentinel is derived FROM that census, so a divergence
+    between the two would silently mis-calibrate the alarm it feeds.
+    """
+    symbol = (row.get("symbolCode") or "").strip()
+    current_short_raw = row.get("currentShortPositionQuantity")
+    settlement_raw = row.get("settlementDate")
+    if not symbol or current_short_raw in (None, "") or settlement_raw in (None, ""):
+        return None
+    try:
+        current_short = int(current_short_raw)
+    except ValueError, TypeError:
+        return None
+    return symbol, current_short, settlement_raw
+
+
 def ingest_settlement_file(
     conn: psycopg.Connection[Any],
     settlement_date: date,
@@ -237,21 +261,11 @@ def ingest_settlement_file(
         for row in reader:
             rows_parsed += 1
 
-            # Row-shape validation. ``csv.DictReader`` sets missing trailing
-            # fields to ``None``; truncated rows present as a dict with the
-            # expected keys but some values None/blank. Explicit required-
-            # field check (Codex 1b r2 MED 1).
-            symbol = (row.get("symbolCode") or "").strip()
-            current_short_raw = row.get("currentShortPositionQuantity")
-            settlement_raw = row.get("settlementDate")
-            if not symbol or current_short_raw in (None, "") or settlement_raw in (None, ""):
+            required = required_row_fields(row)
+            if required is None:
                 skipped_invalid_row += 1
                 continue
-            try:
-                current_short_int = int(current_short_raw)  # type: ignore[arg-type]
-            except ValueError, TypeError:
-                skipped_invalid_row += 1
-                continue
+            symbol, current_short_int, settlement_raw = required
 
             # Body-date validation — mirrors the RegSHO daily sibling
             # (``finra_regsho_ingest`` asserts ``row.Date == trade_date``;
