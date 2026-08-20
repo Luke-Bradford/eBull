@@ -577,8 +577,11 @@ def test_run_partial_universe_match_logs_no_warning(
             provider=provider,  # type: ignore[arg-type]
         )
 
-    assert stats.total_resolved == 1
-    assert stats.total_parsed == 9
+    # The 20-day window covers both April anchors, and the fake rebadges the
+    # pristine fixture for the one not explicitly supplied — 2 files x 9 rows,
+    # 1 resolving each, so an 11% match rate on both.
+    assert stats.total_resolved == 2
+    assert stats.total_parsed == 18
     assert [rec.message for rec in caplog.records] == []
 
 
@@ -601,9 +604,14 @@ def test_run_reports_the_previous_stored_settlement_date(
     )
 
     assert _previous_stored_resolved(ebull_test_conn, []) == {}
-    # Nothing is stored before the only ingested date.
-    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 4, 30)]) == {}
-    # A later date sees it, with the row count actually stored.
+    # The fire ingested both April anchors, so 04-30's baseline is 04-15 — the
+    # newest STRICTLY-earlier stored date, with the row count actually stored.
+    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 4, 30)]) == {
+        date(2026, 4, 30): (date(2026, 4, 15), 1)
+    }
+    # Nothing is stored before the oldest ingested date.
+    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 4, 15)]) == {}
+    # A later date skips past nothing — it still picks the newest, not the oldest.
     assert _previous_stored_resolved(ebull_test_conn, [date(2026, 5, 15)]) == {
         date(2026, 5, 15): (date(2026, 4, 30), 1)
     }
