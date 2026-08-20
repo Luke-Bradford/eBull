@@ -306,14 +306,113 @@ class TestLevelClose:
         assert (position.close_source, position.close_bar_date, position.bars_held) == ("level", _d(6), 4)
 
     def test_a_disagreement_about_the_same_bar_raises(self) -> None:
-        """§3.2: *a disagreement is a failure, not a tie-break*."""
-        with pytest.raises(ValueError, match="close sources disagree"):
+        """§3.2: *a disagreement is a failure, not a tie-break*.
+
+        ⚠ Scoped to the REDUNDANT pair (#2779). ``expired`` is C2's own
+        recomputation of C3's max-hold window, so the two must agree; the
+        sibling test below pins that a NON-redundant tie must not raise.
+        """
+        with pytest.raises(ValueError, match="max-hold expiry disagrees with the resolver"):
             _build(
                 entries=[_entry(1, 2)],
                 outcomes=[self._outcome("expired", at=6, price=Decimal("999"))],
                 outcome_pin=_PIN,
                 regime=self._level_regime(),
             )
+
+    def test_a_LEVEL_TOUCH_tying_with_a_signal_pair_exit_loses_to_the_OPEN_FILL(self) -> None:
+        """⚠⚠ #2779 — the defect that killed a 13.6-hour full-set run, and the
+        wrong answer the first repair gave it.
+
+        A ``tp_hit`` is an intraday touch priced AT the level; a signal-pair exit
+        is a fill priced at the bar. They are NOT redundant, so landing on one
+        date at two prices is ordinary, not a defect — §3.2's general rule is
+        *"the earliest date wins"* and says nothing about prices agreeing. The
+        blanket equality check made this fatal, and it first arose on the hybrid
+        ``signal_pair`` + ``level_based`` regime (#2723) that §3.2's table
+        predates.
+
+        ⚠⚠ THE SPEC DOES NOT SETTLE WHICH WINS, AND THE FIRST CONSTRUCTION GOT IT
+        BACKWARDS. It preferred ``level`` on the reasoning that a stop touched
+        intraday "closed the position before any close-based fill could" — but
+        ``signal_ledger.resolve_fills`` prices EVERY fill, exit fills included, at
+        ``open(signal_index + 1)``: *"the fill price is that bar's OPEN. There is
+        no other path."* The exit therefore executes at the first tick, before any
+        intraday path exists. #2779's own reported case is the proof —
+        ``signal_pair=326.9`` (the open) against ``level=318.874053244667719`` (a
+        stop) on 2011-06-16 — where preferring the stop books a ~2.5% loss on a
+        position that had already closed at the open.
+        """
+        hybrid = ExitRegime(signal_pair=True, level_based=True, max_hold_bars=None, rebalance_dates=None)
+        built = _build(
+            entries=[_entry(1, 2)],
+            exits=[_exit(6)],
+            outcomes=[self._outcome("tp_hit", at=6, price=Decimal("123.456789"))],
+            outcome_pin=_PIN,
+            regime=hybrid,
+        )
+        (position,) = built.positions
+        assert position.close_source == "signal_pair", "an open-priced fill precedes an intraday touch on its own bar"
+        assert position.close_bar_date == _d(6)
+        assert position.close_price != Decimal("123.456789"), (
+            "the intraday level price must not be booked — the position closed at the open"
+        )
+
+    def test_an_EXPIRED_outcome_still_outranks_max_hold_on_the_same_bar(self) -> None:
+        """⚠ The spec-cited preference the two-tier key must NOT disturb.
+
+        §3.2 names ``outcome_resolver.py:470`` as the reference for the expiry
+        bar, so where C2's ``expired`` and C3 coincide the ``level`` label wins.
+        Both execute at an open, so they share the first tier and
+        ``_SOURCE_PRECEDENCE`` decides — exactly as before #2779. The redundancy
+        check above guarantees they agree on the price, so this is a label
+        preference and not a number.
+        """
+        regime = ExitRegime(signal_pair=False, level_based=True, max_hold_bars=4, rebalance_dates=None)
+        built = _build(
+            entries=[_entry(1, 2)],
+            exits=[],
+            outcomes=[self._outcome("expired", at=6, price=Decimal(106))],  # the fixture's open at bar 6
+            outcome_pin=_PIN,
+            regime=regime,
+        )
+        (position,) = built.positions
+        assert position.close_source == "level", "expired outranks max_hold; both execute at an open"
+
+    def test_a_tp_touch_landing_on_the_max_hold_bar_is_NOT_a_redundancy_failure(self) -> None:
+        """⚠⚠ Only `expired` is redundant with C3, and this is what that buys.
+
+        A ``tp_hit`` can land on the very bar the max-hold expiry falls on
+        without the two being two readings of one window: the stop was touched
+        intraday, the expiry is a bar's open. Marking every level outcome
+        redundant would demand they agree and turn an ordinary coincidence into
+        a fatal error — the same over-generalisation as #2779, one level down.
+
+        ⚠ The fixture must carry BOTH candidates on one date for this to
+        discriminate: with no max-hold candidate the redundant set is a single
+        element and the defect is invisible, which is exactly how the first
+        version of this test let the mutation through.
+
+        ⚠⚠ NOT RAISING IS THIS TEST'S CLAIM; WHICH SOURCE WINS IS THE OTHER RULE.
+        The tie goes to ``max_hold`` because the expiry takes *"that bar's
+        **open**"* (§3.2's table) while the touch needs the price to travel there
+        first — the same open-before-intraday ordering that decides the
+        signal-pair case above. ⚠ ``tp_hit`` is NOT ``redundant_with_max_hold``
+        (only ``expired`` is), so this genuinely crosses the tier boundary rather
+        than resolving inside it.
+        """
+        built = _build(
+            entries=[_entry(1, 2)],
+            outcomes=[self._outcome("tp_hit", at=6, price=Decimal("777.5"))],
+            outcome_pin=_PIN,
+            regime=self._level_regime(max_hold=4),
+        )
+        (position,) = built.positions
+        assert position.close_source == "max_hold", "an open-priced expiry precedes an intraday touch on its bar"
+        assert position.close_bar_date == _d(6), "the max-hold expiry lands on this bar too"
+        assert position.close_price != Decimal("777.5"), (
+            "the intraday touch price must not be booked — the position closed at that bar's open"
+        )
 
     def test_a_missing_outcome_raises_rather_than_falling_through_to_max_hold(self) -> None:
         with pytest.raises(ValueError, match="no outcome at the pinned"):

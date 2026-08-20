@@ -983,6 +983,33 @@ class TestScaleGate:
         assert unmeasured.admissible_workers() is None
         assert replace(self._report(parent=1_000, per_worker=0, ceiling=8_000)).admissible_workers() is None
 
+    def test_the_cohort_bound_is_a_SHARE_of_the_run_budget_not_a_second_constant(self) -> None:
+        """⚠⚠ The flat version destroyed a run on 2026-08-19.
+
+        It was ``20 * 60.0``, itself recalibrated from 15 after ONE full-S-1
+        pilot measured 16.4 — a threshold fitted to a single sample. The very
+        first real workload straddled it: two arms of the same strategy
+        projected 862.7s and 1245.1s, a 44% spread. The second exceeded the
+        bound by 45 seconds and aborted a full-set invocation that had already
+        completed a 1,000-member cohort, persisting nothing.
+
+        Two independently maintained thresholds mean the tighter one silently
+        wins. Expressing the per-cohort bound as a share of the invocation
+        budget keeps a real runaway guard — a cohort claiming a third of the
+        whole invocation is pathological by construction — while making it
+        structurally unable to refuse a cohort the invocation could afford.
+        """
+        assert synthetic_control_run.SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S == (
+            synthetic_control_run.SYNTHETIC_CONTROL_MAX_PROJECTED_RUN_S
+            * synthetic_control_run.SYNTHETIC_CONTROL_COHORT_BUDGET_SHARE
+        )
+        assert 0.0 < synthetic_control_run.SYNTHETIC_CONTROL_COHORT_BUDGET_SHARE < 1.0, (
+            "a cohort bound at or above the whole invocation budget guards nothing"
+        )
+        # The exact projection the flat bound refused, in seconds. A regression
+        # that re-tightens the bound past this has re-broken the same run.
+        assert synthetic_control_run.SYNTHETIC_CONTROL_MAX_PROJECTED_COHORT_S > 1245.1
+
     def test_the_memory_ceiling_is_a_function_of_the_MACHINE_not_a_constant(self) -> None:
         """⚠⚠ It was a flat 8 GiB, invented while the projection was written.
 

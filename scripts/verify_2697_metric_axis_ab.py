@@ -72,6 +72,7 @@ from app.services.synthetic_control_run import (
     SYNTHETIC_CONTROL_MAX_WORKERS,
     CohortCollector,
     CohortResult,
+    SyntheticControlScaleBudget,
     _place_member,
 )
 
@@ -456,10 +457,20 @@ def main() -> None:
             quarantine_arm: QuarantineArm,
             ambiguity_arm: AmbiguityArm | None = None,
             progress: backtest_run.ProgressCallback | None = None,
+            # ⚠ A STUB THAT SHADOWS A REAL FUNCTION ROTS WHEN THAT FUNCTION'S
+            # SIGNATURE MOVES, and silently: nothing type-checks a monkeypatch
+            # against its target. #2772 added `scale_budget` to
+            # `_run_cohort_for`, and this harness — which #2697's acceptance
+            # step 3 depends on — has been raising `TypeError: capture_cohort()
+            # got an unexpected keyword argument 'scale_budget'` ever since,
+            # discoverable only by running it. Forwarded rather than swallowed
+            # so the A/B honours the same launch gates production does.
+            scale_budget: SyntheticControlScaleBudget | None = None,
         ) -> CohortResult | None:
             current_result = original_run_cohort_for(
                 collector,
                 measured=measured,
+                scale_budget=scale_budget,
                 corpus=corpus,
                 cohort_size=cohort_size,
                 label=label,
