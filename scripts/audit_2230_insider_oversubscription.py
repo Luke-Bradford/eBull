@@ -317,10 +317,8 @@ def main() -> int:
     # exits 0 with an empty output file — indistinguishable from a clean population. That
     # is the exact failure this script exists to avoid making, so it is an error, not a
     # no-op (review NITPICK on PR #2791).
-    if args.shards < 1:
-        ap.error(f"--shards must be >= 1, got {args.shards}")
     if not 0 <= args.shard < args.shards:
-        ap.error(f"--shard must be in [0, {args.shards}), got {args.shard}")
+        ap.error(f"--shard must satisfy 0 <= shard < shards, got shard={args.shard} shards={args.shards}")
     if not args.out:
         ap.error("--out is required unless --summarise is given")
 
