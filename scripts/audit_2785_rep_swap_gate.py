@@ -89,6 +89,13 @@ def main() -> int:
         return False
 
     def recording_rep(cluster: Any, rows_by_identity: Any, record_holder_evidence: Any) -> orl.Holder:
+        # ⚠ Rebinding ``orl._releases_other_rows`` is a MODULE-GLOBAL mutation, which is
+        # what makes the three arms possible at all (the selector resolves the predicate
+        # by global lookup at call time) and what makes this script single-threaded ONLY.
+        # Do not import it into a concurrent harness, and do not run two of these in one
+        # process: shard with separate processes, as the ``--shard`` flag does. Each arm
+        # restores in a ``finally`` so an exception cannot leave production code pointing
+        # at ``_never``.
         members = list(cluster)
         # Production arm FIRST and returned unchanged — the two extra arms must not be
         # able to influence what the rollup actually computes.
@@ -142,6 +149,24 @@ def main() -> int:
         return wide_rep
 
     def wrap_route(fn: Any, name: str) -> Any:
+        """Tag each selector call with the pass it came from.
+
+        ``route`` is one shared dict, so the save/restore of ``prev`` is what makes this
+        correct rather than incidental — it is stack discipline, valid whether or not the
+        two passes nest. Verified they do not today: ``_reconcile_same_accession_groups``
+        and ``_reconcile_insider_control_groups`` are called sequentially from a single
+        site (``ownership_rollup.py`` ~4880/4883) and neither calls the other. Verified
+        empirically too — across 5,283 clusters the census emitted only
+        ``same_accession`` and ``value_bucket``, never the initial ``unknown``, so no
+        selector call escaped a wrapper.
+
+        ⚠ ``value_bucket`` names the CALLER, not the admission route: both the #1652
+        value-proxy route and the #2230 deemed-chain tier live inside
+        ``_reconcile_insider_control_groups``, and this label does not separate them.
+        That matters because only the deemed-chain tier has a fold-release gate. Split
+        them before drawing any conclusion that turns on which tier admitted a cluster.
+        """
+
         def wrapped(*a: Any, **kw: Any) -> Any:
             prev, route["name"] = route["name"], name
             try:

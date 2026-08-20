@@ -3012,10 +3012,13 @@ def _select_control_group_rep(
        owner-once GROUPING, and no predicate over one member's stranded rows can decide
        it.
 
-       Flip outcomes by admission route (cluster-level attribution of an instrument-level
-       delta, so an instrument carrying two flipped clusters is counted twice):
-       ``value_bucket`` 20 neutral / 16 shrink / 7 grow; ``same_accession`` 6 / 13 / 10.
-       Both routes grow, so this is not fixable by scoping the narrowing to one of them.
+       Flip outcomes by CALLING PASS — :func:`_reconcile_insider_control_groups` 20
+       neutral / 16 shrink / 7 grow, :func:`_reconcile_same_accession_groups` 6 / 13 / 10.
+       Both grow, so this is not fixable by scoping the narrowing to one of them.
+       (Cluster-level attribution of an instrument-level delta, so an instrument carrying
+       two flipped clusters is counted twice. ⚠ The first label is the caller, NOT the
+       admission route: the #1652 value-proxy route and the #2230 deemed-chain tier share
+       that function and only the latter has a fold-release gate.)
 
        This clause is therefore an ARITHMETIC fence, not a source rule, and its criterion
        is its own: neutral-or-better. It deliberately does NOT reverse #1652's
