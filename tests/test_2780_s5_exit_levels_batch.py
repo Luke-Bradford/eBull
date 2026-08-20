@@ -183,7 +183,12 @@ class TestBatchEqualsTheScalarOracle:
         """
         series = _wavy()
         entry = STRATEGY_MANIFEST[strategy_id]
-        assert entry.exit_levels is not None
+        # ⚠ Bound to a local before the lambda. Narrowing an ATTRIBUTE does not
+        # survive into a closure — the checker cannot assume it is still
+        # non-None when the lambda runs — and the pre-push gate refused the
+        # version that relied on it.
+        scalar = entry.exit_levels
+        assert scalar is not None
         bad = (9_999, Decimal("200"))
 
         def outcome(call: object) -> object:
@@ -192,7 +197,7 @@ class TestBatchEqualsTheScalarOracle:
             except Exception as exc:  # noqa: BLE001 - the exception TYPE is the observation
                 return ("raised", type(exc).__name__)
 
-        oracle = outcome(lambda: entry.exit_levels(series, signal_index=bad[0], entry_price=bad[1], universe=UNIVERSE))
+        oracle = outcome(lambda: scalar(series, signal_index=bad[0], entry_price=bad[1], universe=UNIVERSE))
         batched = outcome(lambda: batch(series, requests=(bad,), universe=UNIVERSE)[0])  # type: ignore[operator]
         assert batched == oracle, f"{strategy_id}: batch and oracle disagree on an out-of-range index"
 
