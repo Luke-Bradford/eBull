@@ -423,30 +423,44 @@ class TestSpecConstants:
     def test_the_boundary_is_the_spec_boundary(self) -> None:
         assert HOLDOUT_BOUNDARY == SPEC_HOLDOUT_BOUNDARY
 
-    def test_the_SQL_constraint_carries_the_same_boundary_as_python(self) -> None:
-        """⚠ A THIRD COPY OF THE BOUNDARY LIVES IN SQL, and nothing tied it here.
+    def test_the_SQL_migrations_carry_the_same_dates_as_python(self) -> None:
+        """⚠ EVERY DATE LITERAL IN A MIGRATION IS ANOTHER COPY OF A PYTHON CONSTANT.
 
-        ``sql/359``'s ``strategy_results_metric_axis_namespace`` check hardcodes
-        the in-sample boundary as a date literal. The assertion above pins the
-        Python constant against the spec, so a recalibration fails there — but
-        the SQL literal would keep the OLD boundary silently, and a CHECK
-        constraint that disagrees with the code either rejects valid rows or
-        admits invalid ones, with no test in between.
+        `sql/359`'s `strategy_results_metric_axis_namespace` and `sql/360`'s
+        control-support predicate both hardcode boundary dates. A CHECK or a
+        WHERE that disagrees with the code either rejects valid rows or admits
+        invalid ones, and nothing sat in between — the Python constants are
+        pinned against the spec above, so a recalibration fails THERE while the
+        SQL keeps the old date silently.
 
-        Reads the literal out of the migration rather than restating it, so this
-        cannot drift into a fourth copy of the same date.
+        ⚠ Reads each literal OUT of the migration rather than restating it, so
+        this test cannot itself become one more copy of the same date.
+
+        ⚠ Scoped per file to the predicate that owns the literal: `sql/359` also
+        registers the evidence windows, which carry their own different and
+        correct dates, so asserting over every `DATE '...'` in that file fails on
+        those.
         """
-        sql = (Path(__file__).resolve().parents[1] / "sql" / "359_strategy_result_metric_axis.sql").read_text()
-        # ⚠ Scoped to the one constraint. The migration also registers the
-        # evidence windows, which carry their own (different, correct) dates —
-        # asserting over every DATE literal in the file would fail on those.
-        block = re.search(r"ADD CONSTRAINT strategy_results_metric_axis_namespace CHECK \((.*?)\n    \)", sql, re.S)
-        assert block, "constraint strategy_results_metric_axis_namespace not found in sql/359"
-        literals = {date.fromisoformat(m) for m in re.findall(r"DATE '(\d{4}-\d{2}-\d{2})'", block.group(1))}
-        assert literals == {HOLDOUT_BOUNDARY}, (
-            f"strategy_results_metric_axis_namespace carries {sorted(literals)} "
-            f"but HOLDOUT_BOUNDARY is {HOLDOUT_BOUNDARY}"
+        sql_dir = Path(__file__).resolve().parents[1] / "sql"
+
+        namespace_block = re.search(
+            r"ADD CONSTRAINT strategy_results_metric_axis_namespace CHECK \((.*?)\n    \)",
+            (sql_dir / "359_strategy_result_metric_axis.sql").read_text(),
+            re.S,
         )
+        assert namespace_block, "constraint strategy_results_metric_axis_namespace not found in sql/359"
+
+        cases: list[tuple[str, str, set[date]]] = [
+            ("sql/359 metric_axis_namespace", namespace_block.group(1), {HOLDOUT_BOUNDARY}),
+            (
+                "sql/360 control-support",
+                (sql_dir / "360_strategy_control_support_metric_axis.sql").read_text(),
+                {EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY},
+            ),
+        ]
+        for label, text, expected in cases:
+            literals = {date.fromisoformat(m) for m in re.findall(r"DATE '(\d{4}-\d{2}-\d{2})'", text)}
+            assert literals == expected, f"{label} carries {sorted(literals)}, python says {sorted(expected)}"
 
     def test_the_split_is_bar_weighted(self) -> None:
         assert HOLDOUT_WEIGHTING == SPEC_HOLDOUT_WEIGHTING
