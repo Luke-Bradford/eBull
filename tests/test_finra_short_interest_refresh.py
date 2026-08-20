@@ -12,7 +12,8 @@ ScheduledJob-level integration against ``ebull_test_conn``. Covers:
 * FinraNotFound on one target → benign skip; other targets processed.
 * Fetch 5xx → per-file failed; ``RuntimeError`` raised at end.
 * Empty file (0 bytes) → per-file failed; no store_raw attempted.
-* Match-rate < 50% → WARNING logger captured.
+* A partial-universe match (11%) logs NO warning (#2337), and
+  ``_previous_stored_resolved`` picks the newest strictly-earlier date.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from app.jobs.finra_short_interest_refresh import (
     _compute_targets,
     _fetch_designated_file,
     _is_disseminated,
+    _previous_stored_resolved,
     _settlement_dates_to_fetch,
     _walk_back_to_weekday,
     run_finra_short_interest_refresh,
@@ -542,27 +544,77 @@ def test_run_empty_file_records_failed(
 
 
 # ----------------------------------------------------------------------
-# 8 — Match-rate < 50% logs WARNING
+# 8 — A partial-universe match is NOT a fault (#2337)
 # ----------------------------------------------------------------------
 
 
-def test_run_match_rate_below_threshold_logs_warning(
+def test_run_partial_universe_match_logs_no_warning(
     ebull_test_conn: psycopg.Connection[tuple], caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Seed only 1 of 5 panel symbols → match rate = 1/9 = 11% (well below 50%).
+    """1 of 9 rows resolving (11%) must stay silent.
+
+    This test previously asserted the OPPOSITE — it pinned a WARNING when the
+    match rate fell below an absolute 0.50 floor. #2337 measured that floor
+    against every stored payload
+    (``scripts/audit_2337_finra_match_rate.py``): the real operating range is
+    25.47%-26.58% and 34 of 34 files sat below the floor, so the arm fired on
+    every normal fire and detected nothing. The ratio's two sides are governed
+    by different populations — FINRA reports every US-reported symbol, our
+    resolver holds ``instruments WHERE is_tradable`` — so a low match rate is
+    the healthy state, not a signal. The alarm now sits on the arms in
+    ``evaluate_file_sentinels``; this asserts the false positive is gone.
+    """
+    # Seed only 1 of 5 panel symbols → match rate = 1/9 = 11%.
     _seed_instrument(ebull_test_conn, instrument_id=1001, symbol="AAPL")
     provider = _FakeProvider(settlements={date(2026, 4, 30): _PRISTINE.read_bytes()})
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
     with caplog.at_level(logging.WARNING, logger="app.jobs.finra_short_interest_refresh"):
-        run_finra_short_interest_refresh(
+        stats = run_finra_short_interest_refresh(
             ebull_test_conn,
             now=now,
             backfill_window_days=20,
             provider=provider,  # type: ignore[arg-type]
         )
 
-    assert any("match rate" in rec.message and "below 50%" in rec.message for rec in caplog.records)
+    # The 20-day window covers both April anchors, and the fake rebadges the
+    # pristine fixture for the one not explicitly supplied — 2 files x 9 rows,
+    # 1 resolving each, so an 11% match rate on both.
+    assert stats.total_resolved == 2
+    assert stats.total_parsed == 18
+    assert [rec.message for rec in caplog.records] == []
+
+
+def test_run_reports_the_previous_stored_settlement_date(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """``_previous_stored_resolved`` picks the newest STRICTLY-earlier date.
+
+    Exercises the LATERAL against real rows rather than a mocked cursor: the
+    retention arm is silent whenever the lookup wrongly returns nothing, so a
+    broken query fails open.
+    """
+    _seed_instrument(ebull_test_conn, instrument_id=1001, symbol="AAPL")
+    provider = _FakeProvider(settlements={date(2026, 4, 30): _PRISTINE.read_bytes()})
+    run_finra_short_interest_refresh(
+        ebull_test_conn,
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        backfill_window_days=20,
+        provider=provider,  # type: ignore[arg-type]
+    )
+
+    assert _previous_stored_resolved(ebull_test_conn, []) == {}
+    # The fire ingested both April anchors, so 04-30's baseline is 04-15 — the
+    # newest STRICTLY-earlier stored date, with the row count actually stored.
+    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 4, 30)]) == {
+        date(2026, 4, 30): (date(2026, 4, 15), 1)
+    }
+    # Nothing is stored before the oldest ingested date.
+    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 4, 15)]) == {}
+    # A later date skips past nothing — it still picks the newest, not the oldest.
+    assert _previous_stored_resolved(ebull_test_conn, [date(2026, 5, 15)]) == {
+        date(2026, 5, 15): (date(2026, 4, 30), 1)
+    }
 
 
 # ----------------------------------------------------------------------
