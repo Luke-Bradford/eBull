@@ -123,9 +123,43 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         # max-hold are redundant BY DESIGN, so "a disagreement is a failure, not
         # a tie-break". Deleting the equality check silently picks one of two
         # numbers that cannot both be right.
+        # ⚠ RE-ANCHORED (#2779). The check used to run over every tied candidate
+        # and now runs over the redundant pair only, so the anchor moved from the
+        # price set to the redundant subset. The DEFECT is unchanged.
         "the same-bar price-agreement check deleted (a disagreement becomes a tie-break)",
-        [("    if len(prices) > 1:", "    if len(prices) > 99:")],
+        [("    if len({candidate.price for candidate in redundant}) > 1:", "    if False:")],
         "test_a_disagreement_about_the_same_bar_raises",
+    ),
+    (
+        # ⚠⚠ THE OTHER HALF OF #2779, and the one that cost 13.6 hours. Widening
+        # the redundant set back to every tied candidate makes an ordinary
+        # level-vs-signal_pair tie fatal again — they are different exit rules,
+        # not two readings of one window, so they have no reason to agree.
+        "the redundancy check widened back to every tied source",
+        [
+            (
+                "    redundant = [candidate for candidate in tied "
+                'if candidate.redundant_with_max_hold or candidate.source == "max_hold"]',  # noqa: E501
+                "    redundant = list(tied)",
+            )
+        ],
+        "test_a_LEVEL_TOUCH_tying_with_a_signal_pair_exit_resolves_by_precedence",
+    ),
+    (
+        # ⚠ `tp_hit` / `sl_hit` are intraday touches, not a recomputation of the
+        # max-hold window. Marking them redundant would demand they agree with a
+        # max-hold close they have no relationship to.
+        "a tp/sl touch marked redundant with the max-hold expiry",
+        [
+            (
+                '                            redundant_with_max_hold=outcome.outcome == "expired",',
+                "                            redundant_with_max_hold=True,",
+            )
+        ],
+        # ⚠ The selector must build BOTH a level and a max-hold candidate on one
+        # date, or the redundant set is a single element and this mutation is
+        # invisible. The hybrid fixture has no max-hold leg and let it through.
+        "test_a_tp_touch_landing_on_the_max_hold_bar_is_NOT_a_redundancy_failure",
     ),
     (
         "the tie label taken from position construction rather than the resolver",

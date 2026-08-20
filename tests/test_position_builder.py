@@ -349,6 +349,31 @@ class TestLevelClose:
         assert position.close_bar_date == _d(6)
         assert position.close_price == Decimal("123.456789"), "precedence now decides the PRICE, not only the label"
 
+    def test_a_tp_touch_landing_on_the_max_hold_bar_is_NOT_a_redundancy_failure(self) -> None:
+        """⚠⚠ Only `expired` is redundant with C3, and this is what that buys.
+
+        A ``tp_hit`` can land on the very bar the max-hold expiry falls on
+        without the two being two readings of one window: the stop was touched
+        intraday, the expiry is a bar's open. Marking every level outcome
+        redundant would demand they agree and turn an ordinary coincidence into
+        a fatal error — the same over-generalisation as #2779, one level down.
+
+        ⚠ The fixture must carry BOTH candidates on one date for this to
+        discriminate: with no max-hold candidate the redundant set is a single
+        element and the defect is invisible, which is exactly how the first
+        version of this test let the mutation through.
+        """
+        built = _build(
+            entries=[_entry(1, 2)],
+            outcomes=[self._outcome("tp_hit", at=6, price=Decimal("777.5"))],
+            outcome_pin=_PIN,
+            regime=self._level_regime(max_hold=4),
+        )
+        (position,) = built.positions
+        assert position.close_source == "level"
+        assert position.close_bar_date == _d(6), "the max-hold expiry lands on this bar too"
+        assert position.close_price == Decimal("777.5"), "the touch price, not the expiry bar's open of 106"
+
     def test_a_missing_outcome_raises_rather_than_falling_through_to_max_hold(self) -> None:
         with pytest.raises(ValueError, match="no outcome at the pinned"):
             _build(entries=[_entry(1, 2)], outcomes=[], outcome_pin=_PIN, regime=self._level_regime())
