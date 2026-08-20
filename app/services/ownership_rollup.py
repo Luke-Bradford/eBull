@@ -2983,24 +2983,39 @@ def _select_control_group_rep(
        **72 would flip** under the narrow predicate. The 9 that stay refused strand only
        ``13d``/``13g``/``13f`` and would genuinely change wedge.
 
-       Paired A/B over those 72 (control = a worktree at ``origin/main``): net
-       −385,131,434 shares, but the net hides the finding. **17 instruments GROW, by
-       +82,886,088 in total.** The mechanism is that a swap's hazard is MAGNITUDE, not
-       category: while the incumbent is rep, its stranded rows share an identity with the
-       block row, so :func:`_reconcile_owner_once` folds them together — additively for
-       pooled Section-16 forms (#1941), by MAX across competing restatements. Demoting it
-       breaks that grouping. Where the interaction was additive the swap is exactly
-       pie-neutral (``WBD``: ``Newhouse Steven O`` 184,070,739 becomes the partnership's
-       184,023,290 + his own 47,449, same total, correct holder). Where it was a MAX
-       absorption, the absorbed row stands up on its own and the pie inflates — ``AIRS``
-       +14,038,819, exactly the block value, because the demoted incumbent is also the rep
-       of a SECOND cluster on the same instrument.
+       Paired A/B over those 72 (control = a worktree at ``origin/main`` ``8fc1b4ad``,
+       treatment = that SHA plus this one predicate): 3,108 instruments per arm, 0 harness
+       errors, net −385,131,434 shares — and the net hides the finding. **17 instruments
+       GROW, by +82,886,088 in total**, against 26 shrinking and 3,065 unchanged.
 
-       A ``max(stranded) >= block`` discriminator was tried against the grow side and
-       FALSIFIED: it fires on 11 of the 17 growers and on 14 of the 55 non-growers. Per
-       the repo rule, two failed keys is the signal to question the model — so the fence
-       stays wide until the owner-once grouping interaction is modelled, not until a
-       third key is guessed.
+       Mechanism, stated at the width it was measured: a swap's hazard is MAGNITUDE, not
+       category. While the incumbent is rep, its stranded rows share an identity key with
+       the block row, so :func:`_reconcile_owner_once` groups them — additively for pooled
+       Section-16 forms (#1941), by MAX across competing beneficial restatements. Demoting
+       the incumbent breaks that grouping, and which way the pie then moves depends on
+       which interaction was in play. Two worked cases, offered as illustrations of the
+       two ends and NOT as a population taxonomy: ``WBD`` is exactly pie-neutral
+       (``Newhouse Steven O`` 184,070,739 becomes the partnership's 184,023,290 + his own
+       47,449 — same total, block finally on the entity that holds it), and ``AIRS`` grows
+       by 14,038,819, exactly the block value.
+
+       ⚠ **No discriminator separates the grow side, and three were tried and killed on
+       the full population** — that is the reason this stays wide rather than becoming a
+       targeted fence. ``max(stranded) >= block`` fires on 11 of 17 growers and 14 of 55
+       non-growers. "The instrument carries more than one collapse" (the ``AIRS`` shape)
+       fires 14/17 GROW, 25/29 SHRINK, 13/26 NEUTRAL. "The incumbent is the kept rep of a
+       collapse" is a tautology — it is true by construction in the control arm (17/17,
+       29/29, 25/26). ``TTRX`` grows by 15,416,260 on an instrument carrying exactly ONE
+       collapse, which is what refutes the ``AIRS`` story as the general explanation.
+       Per the repo rule, repeated failed keys is the signal to question the MODEL rather
+       than guess another: the criterion "neutral-or-better" is a statement about the
+       owner-once GROUPING, and no predicate over one member's stranded rows can decide
+       it.
+
+       Flip outcomes by admission route (cluster-level attribution of an instrument-level
+       delta, so an instrument carrying two flipped clusters is counted twice):
+       ``value_bucket`` 20 neutral / 16 shrink / 7 grow; ``same_accession`` 6 / 13 / 10.
+       Both routes grow, so this is not fixable by scoping the narrowing to one of them.
 
        This clause is therefore an ARITHMETIC fence, not a source rule, and its criterion
        is its own: neutral-or-better. It deliberately does NOT reverse #1652's
