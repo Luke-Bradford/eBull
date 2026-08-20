@@ -947,6 +947,15 @@ def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> 
             registered.window.end,
         ):
             return False
+    # ⚠ THE TIGHT TOLERANCE IS SAFE BECAUSE THIS IS NOT A REDUCTION.
+    # `periods_per_year` is `(len(dates) - 1) / (span_days / DAYS_PER_YEAR)` —
+    # two exact integers and a division — so recomputing it from the same axis
+    # is bit-identical, and 1e-12 is already looser than the equality that
+    # actually holds. The prevention-log entry about pairwise-summation drift
+    # governs SUMS and MEANS over arrays, where accumulation order is a free
+    # variable; there is no accumulation here. The tolerance exists only to
+    # absorb a stored value that made a decimal round-trip, not arithmetic
+    # noise.
     expected_ppy = periods_per_year(dates)
     if not math.isclose(metrics.periods_per_year, expected_ppy, rel_tol=1e-12, abs_tol=1e-12):
         return False
