@@ -2627,6 +2627,22 @@ def _rows_by_identity(*holder_lists: Iterable[Holder]) -> dict[str, list[Holder]
     return index
 
 
+def _stranded_rows(
+    holder: Holder,
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> list[Holder]:
+    """The rows ``holder``'s identity holds OUTSIDE ``cluster`` — what demoting it out of
+    the cluster would leave behind.
+
+    Identity, not object: ``rows_by_identity`` is keyed on :func:`_identity_key`, and
+    cluster membership is tested by object id, so a row of the same identity that is not
+    one of the cluster's own objects counts as stranded."""
+    in_cluster = {id(h) for h in cluster}
+    key = _identity_key(holder.filer_cik, holder.filer_name)
+    return [row for row in rows_by_identity.get(key, ()) if id(row) not in in_cluster]
+
+
 def _releases_other_rows(
     holder: Holder,
     cluster: Sequence[Holder],
@@ -2635,12 +2651,45 @@ def _releases_other_rows(
     """True when demoting ``holder`` out of ``cluster`` would strand rows it holds in
     OTHER channels — its 13F institutional row, most consequentially.
 
-    Identity, not object: ``rows_by_identity`` is keyed on :func:`_identity_key`, and
-    cluster membership is tested by object id, so a row of the same identity that is not
-    one of the cluster's own objects counts as stranded."""
-    in_cluster = {id(h) for h in cluster}
-    key = _identity_key(holder.filer_cik, holder.filer_name)
-    return any(id(row) not in in_cluster for row in rows_by_identity.get(key, ()))
+    ⚠ Strictly WIDER than the hazard it is named for; see
+    :func:`_releases_into_another_wedge`, which is what the deemed-chain fold gate uses.
+    Kept as-is for :func:`_select_control_group_rep` clause 4, whose arithmetic was
+    measured under this predicate (#2385) and is not this ticket's surface (#2789)."""
+    return bool(_stranded_rows(holder, cluster, rows_by_identity))
+
+
+def _releases_into_another_wedge(
+    holder: Holder,
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> bool:
+    """True when demoting ``holder`` out of ``cluster`` would move rows it holds in OTHER
+    channels into a DIFFERENT pie wedge (#2230 residual).
+
+    **Narrower than :func:`_releases_other_rows`, and the narrowing is the point.** A
+    stranded row is only a *release* if it changes what :func:`_reconcile_owner_once`
+    decides about the identity. That function branches on ``present & _INSIDER_SOURCES``:
+    a Section-16 person is classified ``insiders`` at the MAX of its beneficial
+    restatements, and *"any 13F for this CIK is managed assets → it stays a
+    dropped_source, never added to the insider's stake"* (#1640). So an identity that
+    retains **any** ``_INSIDER_SOURCES`` row outside the cluster is still a Section-16
+    person after the fold — same category, 13F still suppressed — and nothing is
+    released. Only an identity left with no insider row at all can change wedge.
+
+    That case is also provably non-inflating, which is why it is safe to fold: the fold
+    removes the cluster's rows from the identity's ``form4``/``form3`` pool and touches no
+    other source, so the per-source MAX can only fall or stay. The category is unchanged
+    and the figure cannot rise.
+
+    Measured on the full population by
+    ``PYTHONPATH=. uv run python -m scripts.audit_2230_release_hazard`` (sharded 3 ways):
+    of the deemed-chain clusters this gate refuses, the great majority are refused on
+    stranded ``form4``/``form3``/``def14a`` rows that cannot trigger the mechanism above.
+    Re-run the script rather than trusting a remembered figure."""
+    stranded = _stranded_rows(holder, cluster, rows_by_identity)
+    if not stranded:
+        return False
+    return not any(row.winning_source in _INSIDER_SOURCES for row in stranded)
 
 
 def _attested_direct_holders(cluster: Sequence[Holder]) -> list[Holder]:
@@ -3239,11 +3288,20 @@ def _reconcile_insider_control_groups(
         # ``test_rep_residual_split_documented``). Reversing that is a bigger decision
         # than this ticket.
         #
-        # So the NEW tier fails closed instead: if folding would strand a non-rep
-        # member's other-channel rows, leave the whole cluster alone. The residual
-        # double-count is the conservative direction and matches the posture the rest of
-        # this pass takes. The original value-proxy route is deliberately NOT gated on
-        # this — its behaviour is unchanged from #1652.
+        # So the NEW tier fails closed instead: leave the whole cluster alone rather than
+        # risk the release. The residual double-count is the conservative direction and
+        # matches the posture the rest of this pass takes. The original value-proxy route
+        # is deliberately NOT gated on this — its behaviour is unchanged from #1652.
+        #
+        # ⚠ The gate asks :func:`_releases_into_another_wedge`, NOT "are any rows
+        # stranded". Those are different propositions, and the wider one refused most of
+        # this tier for a hazard that cannot occur: a member whose stranded rows are
+        # themselves ``_INSIDER_SOURCES`` rows keeps its Section-16 classification in
+        # :func:`_reconcile_owner_once`, so its 13F stays a ``dropped_source`` and nothing
+        # changes wedge. Reversing #1652's consumption rule was never needed for those —
+        # the release the comment above describes requires the identity to be left with no
+        # insider row at all. Full-population census:
+        # ``PYTHONPATH=. uv run python -m scripts.audit_2230_release_hazard``.
         if collapsible and not (len(distinct_ciks) >= 2 and has_insider and _passes_value_proxies(shares)):
             # Same selector, same inputs, same winner as the fold itself — see
             # :func:`_select_control_group_rep`. Asking the selector rather than
@@ -3255,7 +3313,7 @@ def _reconcile_insider_control_groups(
             for member in holders:
                 if _identity_key(member.filer_cik, member.filer_name) == rep_identity:
                     continue
-                if _releases_other_rows(member, holders, rows_by_identity):
+                if _releases_into_another_wedge(member, holders, rows_by_identity):
                     collapsible = False
                     break
         if collapsible:
