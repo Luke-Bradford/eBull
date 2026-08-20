@@ -158,6 +158,15 @@ def swing_pivots(
     )
 
 
+#: NumPy's reduction runs sequentially below this many elements and switches to
+#: PAIRWISE summation at or above it. ⚠ Not a tuned constant and not ours: it is
+#: the boundary at which a sequential accumulation stops being bit-identical to
+#: ``ndarray.sum``, so it is the exact point where the fast path below must hand
+#: back to ``np.average``. Verified empirically in
+#: ``tests/test_price_levels.py`` rather than trusted from the NumPy source.
+_PAIRWISE_SUMMATION_BLOCK = 8
+
+
 def _cluster(
     indices: list[int],
     prices: npt.NDArray[np.float64],
@@ -179,20 +188,69 @@ def _cluster(
     """
     if not indices:
         return []
-    order = sorted(indices, key=lambda i: prices[i])
-    clusters: list[list[int]] = [[order[0]]]
-    for idx in order[1:]:
-        if abs(prices[idx] - prices[clusters[-1][-1]]) <= tolerance:
-            clusters[-1].append(idx)
-        else:
-            clusters.append([idx])
+
+    # ⚠⚠ VECTORISED, AND BIT-IDENTICAL TO THE LOOP IT REPLACES BY CONSTRUCTION
+    # (#2780). This was 77% of s5-support-bounce's runtime — ``np.average`` alone
+    # was called 30,056,519 times in one 300-series profile, a third of the whole
+    # evaluation — because it built two NumPy arrays per cluster and averaged
+    # them, on clusters that are typically a handful of pivots. Every step below
+    # reproduces the previous arithmetic exactly rather than approximately:
+    #
+    #   * ``kind="stable"`` reproduces ``sorted(..., key=...)``, which is stable,
+    #     so equal prices keep their original index order and the cluster member
+    #     lists are unchanged. Callers depend on that order — ``at`` sums
+    #     ``volumes`` over a cluster, and float addition is not commutative.
+    #   * the walk compared each pivot with the LAST MEMBER APPENDED, which in
+    #     price order is simply its predecessor, so ``diff`` is the same test.
+    #     ``> tolerance`` starts a cluster exactly where ``<= tolerance`` failed
+    #     to continue one; ``abs`` was redundant on an ascending sort.
+    #   * ``bincount`` accumulates in array order, which IS the sorted order the
+    #     old per-cluster arrays carried, so the summation order is preserved.
+    #
+    # ⚠⚠ THE ONE PLACE THEY WOULD DIVERGE IS HANDLED, NOT ASSUMED AWAY. NumPy's
+    # reduction switches from sequential to PAIRWISE summation at 8 elements, so
+    # for a cluster that large ``bincount``'s sequential accumulation differs
+    # from ``np.average`` in the last bits. Measured on the prototype: max
+    # absolute difference 7.1e-15. That is not negligible here — a level price
+    # feeds a threshold comparison, so a last-bit change can flip which trades
+    # exist. Clusters of 8 or more therefore fall back to ``np.average`` on
+    # exactly the old inputs. The boundary is NumPy's own blocksize, not a fitted
+    # constant.
+    idx = np.asarray(indices, dtype=np.int64)
+    order = idx[np.argsort(prices[idx], kind="stable")]
+    ordered_prices = prices[order]
+    if order.size == 1:
+        starts_cluster = np.zeros(0, dtype=np.bool_)
+    else:
+        starts_cluster = np.diff(ordered_prices) > tolerance
+    group = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(starts_cluster, dtype=np.int64)))
+    sizes = np.bincount(group)
+    bounds = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sizes, dtype=np.int64)))
+
+    if volumes is None:
+        totals = np.bincount(group, weights=ordered_prices)
+        fast_prices = totals / sizes
+    else:
+        ordered_weights = np.maximum(volumes[order], 0.0)
+        weight_totals = np.bincount(group, weights=ordered_weights)
+        value_totals = np.bincount(group, weights=ordered_prices * ordered_weights)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            fast_prices = value_totals / weight_totals
+        # ``weights.sum() > 0`` fell back to the unweighted mean; reproduced here.
+        unweighted = np.bincount(group, weights=ordered_prices) / sizes
+        fast_prices = np.where(weight_totals > 0.0, fast_prices, unweighted)
+
     out: list[tuple[float, list[int]]] = []
-    for cluster in clusters:
-        if volumes is None:
-            price = float(np.mean([prices[i] for i in cluster]))
+    for gid in range(int(sizes.size)):
+        lo, hi = int(bounds[gid]), int(bounds[gid + 1])
+        cluster = [int(i) for i in order[lo:hi]]
+        if hi - lo < _PAIRWISE_SUMMATION_BLOCK:
+            price = float(fast_prices[gid])
+        elif volumes is None:
+            price = float(np.mean(ordered_prices[lo:hi]))
         else:
-            weights = np.array([max(volumes[i], 0.0) for i in cluster])
-            values = np.array([prices[i] for i in cluster])
+            weights = ordered_weights[lo:hi]
+            values = ordered_prices[lo:hi]
             price = float(np.average(values, weights=weights)) if weights.sum() > 0 else float(values.mean())
         out.append((price, cluster))
     return out
