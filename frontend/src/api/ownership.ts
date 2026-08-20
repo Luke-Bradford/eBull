@@ -310,7 +310,17 @@ export type OwnershipCorrectionKind =
   | "insider_control_group_collapse"
   /** #2229 — a filer's stale 13F-HR removed because the filer filed a LATER
    *  holdings report omitting this security (Form 13F Special Instruction 5b). */
-  | "superseded_by_later_13f_hr";
+  | "superseded_by_later_13f_hr"
+  /** #2788 — a Form 4 row filed before the Form 4 ingest retention cutoff removed
+   *  from the insiders slice. ⚠ NOT an exit claim: Form 4 is transaction-triggered,
+   *  so silence is not evidence of a sale (unlike ``superseded_by_later_13f_hr``,
+   *  which rests on a 13F holdings report being a COMPLETE statement). It says only
+   *  that no in-retention evidence of the position remains, so any label shown for
+   *  it must read as coverage rather than as a disposal.
+   *  ⚠ Do not put a quoted string in this comment — the vocabulary contract test
+   *  (tests/test_correction_kind_vocab_contract.py) reads the union by scanning
+   *  quoted literals in this block and counts one as a declared kind. */
+  | "insider_beyond_form4_retention";
 
 export interface OwnershipCorrectionApplied {
   readonly kind: OwnershipCorrectionKind;

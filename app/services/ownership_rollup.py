@@ -49,6 +49,7 @@ import psycopg
 import psycopg.rows
 
 from app.services.holder_name_resolver import resolve_holder_to_filer
+from app.services.insider_transactions import form4_retention_cutoff
 from app.services.institutional_families import (
     InstitutionalFamily,
     resolve_family,
@@ -172,6 +173,15 @@ class CorrectionApplied:
         counted once at MAX and the other members are folded. ``source_channel`` ==
         ``winning_source`` (intra-blockholder-channel collapse); the per-member fold
         detail is in ``detail`` + the surviving holder's ``dropped_sources``.
+      * ``insider_beyond_form4_retention`` (#2788) — a Form 4 row whose SEC filing date
+        precedes ``form4_retention_cutoff()`` removed from the insiders slice. NOT a claim
+        that the holder sold: Form 4 is transaction-triggered, so silence is not evidence
+        of an exit (unlike ``superseded_by_later_13f_hr``, which rests on Form 13F SI 5b
+        making a holdings report a COMPLETE statement). It is the read side of the ingest
+        retention cap #1233 §4.3 already enforces on every Form 4 writer — we no longer
+        hold in-retention evidence of the position, so we stop asserting it, per the #790
+        posture that the truthful state beats a fabricated one. ``superseded_period`` is
+        the removed row's own period; NT fields None.
       * ``insider_control_group_collapse`` (#1652) — a sponsor's GP/LP chain reported the
         same deemed block under many related CIKs across Form 4 / Form 3 / 13D / 13G; the
         cross-channel group is counted once (insiders slice) and the other members folded.
@@ -855,6 +865,48 @@ _RESIDUAL_TOOLTIP = (
 )
 
 
+# #2788 — a Form 4 row filed before the Form 4 ingest retention cutoff is not
+# evidence of a CURRENT holding, and every other Form 4 writer already refuses to
+# store one. Held as ONE fragment because the rollup's exclusion and
+# :func:`_read_beyond_retention_insiders` must select exact complements; #2229
+# shipped that pairing as two hand-kept-in-step predicates and said so in a comment,
+# which is a drift hazard the constant removes.
+#
+# ``source = 'form4'`` only. Form 3 is deliberately NOT gated: #1233 §4.3 exempts it
+# ("Form 3 rows are NOT gated here — Form 3 is read-side latest-per-pair") because
+# the initial statement is the only evidence for a holder who has never transacted.
+# Form 5 has no separate ``source`` value in this layer —
+# ``sec_insider_dataset_ingest._map_form_to_source`` folds 4/4-A/5/5-A into
+# ``form4`` — so a Form 5 row is bounded by the 3y Form 4 cutoff rather than its own
+# 18-month one. That is the conservative direction: the wider window removes fewer
+# rows.
+_INSIDER_BEYOND_RETENTION_SQL: Final = """
+    oc.source = 'form4' AND oc.filed_at::date < %(form4_cutoff)s
+"""
+
+# Dual-pipeline de-collision (#788), extracted so the insiders read and every producer
+# that must agree with it share ONE copy. A DERA-dataset row (``:NDT:`` / ``:NDH:``
+# marker) is dropped whenever an XML-manifest row exists for the same
+# ``(holder_cik, source_accession)`` — the manifest parse is the authoritative
+# full-Table-II view of that filing.
+#
+# ⚠ Any producer that reports rows the insiders read REMOVED must apply this too, or it
+# double-reports: a stale accession present in BOTH pipelines contributes one row to the
+# wedge but two to a naive complement, overstating ``shares_removed`` by the duplicate
+# (Codex checkpoint 2 on #2788 — the telemetry shipped without it and would have told an
+# operator that twice the actual shares had left).
+_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL: Final = """
+    oc.source_document_id ~ ':(NDT|NDH):'
+    AND EXISTS (
+        SELECT 1 FROM ownership_insiders_current x
+        WHERE x.instrument_id = oc.instrument_id
+          AND x.holder_cik IS NOT DISTINCT FROM oc.holder_cik
+          AND x.source_accession = oc.source_accession
+          AND x.source_document_id !~ ':(NDT|NDH):'
+    )
+"""
+
+
 def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
     """Build the canonical-holder candidate set from the per-source
     ``ownership_*_current`` snapshots populated by Phase 1 write-through
@@ -893,7 +945,7 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
         # full-Table-II view of that filing; the dataset only fills accessions the
         # manifest never parsed.
         cur.execute(
-            """
+            f"""
             SELECT oc.holder_cik, oc.holder_name, oc.ownership_nature,
                    oc.source, oc.source_accession, oc.shares, oc.period_end,
                    COALESCE(f.is_ten_percent_owner, FALSE) AS is_ten_percent_owner,
@@ -907,20 +959,15 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
             LEFT JOIN insider_filers f
               ON f.accession_number = oc.source_accession
              AND f.filer_cik = oc.holder_cik
-            WHERE instrument_id = %s
-              AND shares IS NOT NULL
-              AND NOT (
-                oc.source_document_id ~ ':(NDT|NDH):'
-                AND EXISTS (
-                    SELECT 1 FROM ownership_insiders_current x
-                    WHERE x.instrument_id = oc.instrument_id
-                      AND x.holder_cik IS NOT DISTINCT FROM oc.holder_cik
-                      AND x.source_accession = oc.source_accession
-                      AND x.source_document_id !~ ':(NDT|NDH):'
-                )
-              )
+            WHERE oc.instrument_id = %(iid)s
+              AND oc.shares IS NOT NULL
+              AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
+              -- #2788 — beyond-retention Form 4 rows excluded; see
+              -- _INSIDER_BEYOND_RETENTION_SQL and _read_beyond_retention_insiders,
+              -- which lists exactly the rows this removes.
+              AND NOT ({_INSIDER_BEYOND_RETENTION_SQL})
             """,
-            (instrument_id,),
+            {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
         )
         for row in cur.fetchall():
             source = str(row["source"])
@@ -1227,6 +1274,76 @@ def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) ->
                         f"Form 13F Special Instruction 5b makes a holdings report a complete statement "
                         f"of the Manager's Section 13(f) holdings, so the {row['superseded_period']} "
                         f"position is closed."
+                    ),
+                )
+            )
+    return tuple(rows)
+
+
+def _read_beyond_retention_insiders(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[CorrectionApplied, ...]:
+    """List the insider rows EXCLUDED as beyond the Form 4 ingest retention window
+    (#2788), for the ``corrections_applied`` telemetry.
+
+    The selection is the exact complement of the insiders query's exclusion because both
+    interpolate the SAME :data:`_INSIDER_BEYOND_RETENTION_SQL` fragment — #2229 kept its
+    pair in step by comment alone, and a comment does not fail when someone edits one
+    side.
+
+    ⚠ Read the ``detail`` string before quoting this correction as an exit. It is NOT
+    ``superseded_by_later_13f_hr``. That one rests on a source rule — Form 13F Special
+    Instruction 5b makes a holdings report a complete statement of the Manager's §13(f)
+    holdings, so omitting a security is affirmative evidence of an exit. **Section 16 has
+    no such rule.** Form 4 is transaction-triggered (Exchange Act §16(a); the transaction
+    codes in ``data-sources/sec-edgar.md`` §2.3 — ``S``/``D``/``G``/``U`` — arrive as
+    FILINGS, not as silence), and Rule 16a-2's obligation simply ENDS when the person
+    ceases to be an insider, which is why a frozen row stops moving rather than going to
+    zero. So this correction says only that we no longer hold in-retention evidence, and
+    the operator-facing string must keep saying that.
+
+    The rows this removes are dominated by one event rather than by attrition: the #2701
+    research ingest ran ``ingest_insider_dataset_archive`` with
+    ``retention_cutoff_override=2006-01-01`` on 2026-08-14 and wrote pre-retention Form 4
+    rows into ``ownership_insiders_observations`` — the table
+    ``ownership_insiders_current`` projects — while its own docstring asserted the
+    override "CHANGES NO DEFAULT" for "the operator ALERTING path". The ownership rollup
+    was the unguarded consumer. Reproduce the split with
+    ``scripts/audit_2788_insider_retention.py --census``; do not hand-copy its figures
+    here, they move with every ingest."""
+    rows: list[CorrectionApplied] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT oc.holder_cik, oc.holder_name, oc.shares,
+                   oc.period_end, oc.filed_at::date AS filed_on,
+                   oc.source_accession
+            FROM ownership_insiders_current oc
+            WHERE oc.instrument_id = %(iid)s
+              AND oc.shares IS NOT NULL
+              -- Same de-collision the insiders read applies. Without it a stale
+              -- accession present in BOTH pipelines is reported twice and
+              -- ``shares_removed`` doubles (Codex checkpoint 2).
+              AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
+              AND ({_INSIDER_BEYOND_RETENTION_SQL})
+            ORDER BY oc.shares DESC, oc.holder_cik, oc.holder_name
+            """,
+            {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
+        )
+        for row in cur.fetchall():
+            rows.append(
+                CorrectionApplied(
+                    kind="insider_beyond_form4_retention",
+                    filer_cik=str(row["holder_cik"]) if row["holder_cik"] else None,
+                    filer_name=str(row["holder_name"]),
+                    shares_removed=Decimal(row["shares"]),
+                    superseded_period=row["period_end"],
+                    source_channel="form4",
+                    detail=(
+                        f"Last Form 4 evidence for this holder was filed {row['filed_on']} "
+                        f"(accession {row['source_accession']}), before the "
+                        f"{form4_retention_cutoff()} Form 4 ingest retention cutoff "
+                        f"(#1233 §4.3). NOT evidence the holder sold — Form 4 is "
+                        f"transaction-triggered, so silence proves nothing; we no longer "
+                        f"hold in-retention evidence of the position."
                     ),
                 )
             )
@@ -5010,6 +5127,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     corrections_applied = (
         *_read_notice_suppressions(conn, instrument_id),
         *_read_hr_supersessions(conn, instrument_id),
+        # #2788 — the insider rows the retention bound excluded. Read the kind's
+        # docstring before quoting it as an exit; it is a coverage statement, not one.
+        *_read_beyond_retention_insiders(conn, instrument_id),
         *family_corrections,
         *same_accession_corrections,
         *insider_group_corrections,

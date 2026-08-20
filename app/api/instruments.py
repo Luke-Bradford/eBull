@@ -4768,6 +4768,7 @@ class _CorrectionAppliedModel(BaseModel):
         "blockholder_group_collapse",
         "insider_control_group_collapse",
         "superseded_by_later_13f_hr",
+        "insider_beyond_form4_retention",
     ]
     filer_cik: str | None
     filer_name: str

@@ -4952,3 +4952,39 @@ with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
 > ```
 >
 > It is the largest single axis of the #2226 oversubscription tracker — 452 of the 664 instruments whose rendered insiders wedge exceeds `shares_outstanding` fall back under it when insider rows are bounded to two years, against 16 for the Section-16 deemed-attribution collapse (`scripts/audit_2230_insider_oversubscription.py`, which reprices both). ⚠ That bound is a **diagnostic, not a proposed rule** — it over-removes by 183% of the overage. The source rule differs from 13F's and has to be derived, not copied: a 13F exit is reported by omission, whereas a Section-16 disposal is an affirmative filing (sec-edgar §2.3 transaction codes `S`/`D`/`G`/`U`), so a frozen insider row does not mean what a frozen 13F row means.
+
+## ⚠⚠ A "research-only" ingest override wrote the operator-visible ownership layer — check the WRITE TARGET, not the caller's intent (#2788, 2026-08-20)
+
+- First seen in: #2788, investigating why `ownership_insiders_current` rows freeze. The ticket's framing — "no `_current` table can ever release a position" — described a structural gap. Measured on the full population this run, most of the symptom is **six days old** and has a single cause.
+- `sec_insider_dataset_ingest.ingest_insider_dataset_archive` takes a `retention_cutoff_override`, added for #2701 so a RESEARCH run could read past #1233 §4.3's 3-year Form 4 cap. Its comment says the injection exists so "both consumers keep the boundary they need" and that the override "CHANGES NO DEFAULT" for "the operator ALERTING path". Both statements are about the alerting path. **Neither is about the consumer that was actually exposed.** The function's only write target is `ownership_insiders_observations`, which is the sole source of `ownership_insiders_current`, which is the insiders wedge on the ownership rollup. There is one store, not two.
+- `scripts/backfill_2701_insider_research_ingest.py` ran it at `RESEARCH_CUTOFF = date(2006, 1, 1)` on 2026-08-14. Measured (`PYTHONPATH=. uv run python -m scripts.audit_2788_insider_retention --census`, which computes every figure below at run time rather than storing it):
+
+  ```
+  -- ownership_insiders_current rows beyond form4_retention_cutoff(), by backing
+  -- observation's ingest day:
+  --   written 2026-08-14 : 76,920 rows / 3,559 instruments / 203,364,662,254 shares
+  --   every other day    :  1,123 rows /   719 instruments /   1,992,203,569 shares
+  ```
+
+  **98.6% of the beyond-retention rows arrived in that one run**, carrying filings back to `2006-01-03`. Before it, the form4 observation corpus was retention-bounded by construction: pre-2026-08-14 rows split 975,515 within-retention against 19,650 beyond, and the beyond side reached back only to `2023-06-05` — rows that had aged past the rolling boundary, not rows written past it.
+- ⚠ **The research goal was not met either.** #2701's own consumer is `insider_transactions` / `insider_filings` (`scripts/verify_2437_insider_forward_returns.py`); the DERA ingest never writes those — its only INSERT target is `ownership_insiders_observations`. Measured after the run:
+
+  ```sql
+  SELECT count(*) FILTER (WHERE period_of_report < date '2017-01-01') AS pre_2017,
+         count(*) AS total, count(*) FILTER (WHERE period_of_report IS NULL) AS undated
+    FROM insider_filings;
+  -- 2,581 | 568,814 | 22,434     (pre-2017 is 0.45% of the corpus)
+  ```
+
+  So the run moved ~4.5M rows into the ownership layer and left the research corpus's pre-2017 share where #2701 found it. That is the inverse of its intent, and nothing failed or reported an error.
+- Prevention: before widening ANY ingest bound "for research", grep the ingest function for its INSERT targets and then grep those tables for readers. Write the answer in the PR. A parameter that is injected rather than defaulted proves the caller had to ask; it does not prove the callee is isolated, and "changes no default" is a statement about configuration, not about blast radius. The general form: **an ingest's blast radius is its write set's read set, and neither is visible from the call site.** Same family as the repo's standing "a job that no-ops and reports success is invisible to every automated check we have" — here a job that succeeded loudly and wrote 4.5M rows to the wrong layer was equally invisible, because every row it wrote was valid.
+- Enforced in: this entry; `app/services/ownership_rollup.py::_INSIDER_BEYOND_RETENTION_SQL` + `_read_beyond_retention_insiders` (read side honours the write chokepoint, with per-row telemetry); `scripts/audit_2788_insider_retention.py --census`; `tests/test_ownership_insider_retention_bound.py` (6 cases, 5/5 revert-probed). Follow-ups filed for the write side and for the equal-value de-fold interaction.
+
+## ⚠⚠ A reporting person's EDGAR submissions JSON is per-FILER, not per-issuer — it manufactures coverage gaps (#2788, 2026-08-20)
+
+- First seen in: #2788 clause 9. Cross-checking whether we were missing Form 4s for `BALLMER STEVEN A` (CIK `0000902015`) on MSFT, where our stored position is dated `2014-08-19`, `data.sec.gov/submissions/CIK0000902015.json` reports a **latest Section-16 filing of `2025-04-25`**. Read at face value that is an eleven-year ingest gap, and it is the claim I was about to write.
+- It is not. `filings.recent` for a reporting person carries every Section-16 form that PERSON filed against ANY issuer, and **has no issuer field at all**. The 2025 filing is a **Form 3 for Stagwell Inc** (`STGW`, issuer CIK `0000876883`, resolved from `…/Archives/edgar/data/902015/000095017025058893/ownership.xml`). His last MSFT **Form 4** is `2014-08-20`, so the stored row is correct and there is no gap.
+- One tell was visible in the JSON before fetching anything: the 2025 form is a **`3`**, and Form 3 is by definition the INITIAL statement of beneficial ownership — a person who has been filing Form 4s against an issuer since 2003 does not file a fresh Form 3 for that same issuer. That is a definitional read of the form, not a measured frequency; the issuer still has to be resolved from the document before the claim is made.
+- ⚠ Fetch the RAW `ownership.xml` to attribute a filing to an issuer. The path `…/{accession_nodashes}/xslF345X02/ownership.xml` that appears in `primaryDocument` is the XSL-RENDERED view — an `<issuerCik>` regex against it silently returns `None`, which reads as "the filing has no issuer" rather than "you fetched the wrong representation". Use `…/{accession_nodashes}/index.json` and take the bare `ownership.xml`.
+- Prevention: never derive a per-issuer coverage claim from a reporting person's submissions feed. Resolve the issuer from the document, or compare against the issuer's own submissions feed instead. Test: if a sentence says "this holder's latest filing is X" while the subject of the sentence is an ISSUER's ownership, the two nouns disagree and the claim is unverified.
+- ⚠ **PENDING SKILL EDIT** — belongs in `.claude/skills/data-sources/sec-edgar.md` as §7.4.1, immediately before §7.5. Writes to `.claude/skills/**` were **DENIED on this worktree again** (seventh recorded occurrence, tracked as #2403), so it is parked here. Apply on a session that has permission.
