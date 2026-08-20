@@ -14,7 +14,6 @@ retention min 0.99929.
 
 from __future__ import annotations
 
-import math
 from datetime import date
 
 import pytest
@@ -114,10 +113,19 @@ def test_retention_below_floor_warns() -> None:
 
 
 def test_retention_exactly_at_floor_is_silent() -> None:
-    """The floor is a strict ``<``, so the boundary value does not fire."""
-    at_floor = math.ceil(5716 * _RESOLVED_RETENTION_FLOOR)
-    assert evaluate_file_sentinels(_stats(rows_resolved=at_floor), (_PRIOR, 5716)) == []
-    assert evaluate_file_sentinels(_stats(rows_resolved=at_floor - 1), (_PRIOR, 5716))
+    """The floor is a strict ``<``, so the boundary value itself does not fire.
+
+    ⚠ The counts are chosen so the ratio lands EXACTLY on the floor: a revert
+    probe flipping ``<`` to ``<=`` was NOT caught by a
+    ``ceil(prev * floor)`` pair, because 5145/5716 = 0.90010 is merely near the
+    boundary and both comparisons agree there. 900/1000 is the same double as
+    the constant, so the two comparisons disagree and the probe bites.
+    """
+    baseline = 1000
+    at_floor = round(baseline * _RESOLVED_RETENTION_FLOOR)
+    assert at_floor / baseline == _RESOLVED_RETENTION_FLOOR, "counts must land exactly on the floor"
+    assert evaluate_file_sentinels(_stats(rows_resolved=at_floor), (_PRIOR, baseline)) == []
+    assert evaluate_file_sentinels(_stats(rows_resolved=at_floor - 1), (_PRIOR, baseline))
 
 
 def test_no_baseline_skips_retention() -> None:
