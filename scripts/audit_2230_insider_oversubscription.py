@@ -50,6 +50,7 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.db.snapshot import snapshot_read
 from app.services.ownership_rollup import Holder, get_ownership_rollup
 
 POPULATION_SQL = """
@@ -60,7 +61,13 @@ SELECT instrument_id, symbol
 
 
 def _snapshot(conn: psycopg.Connection[Any], symbol: str, instrument_id: int) -> dict[str, Any]:
-    rollup = get_ownership_rollup(conn, symbol, instrument_id)
+    # ``get_ownership_rollup``'s docstring: the caller MUST already be inside
+    # ``snapshot_read``. It issues many reads, so without one REPEATABLE READ snapshot a
+    # concurrent ownership refresh can hand back a denominator and a wedge from different
+    # commits — a torn row that raises nothing and simply misclassifies the instrument
+    # (Codex checkpoint 2).
+    with snapshot_read(conn):
+        rollup = get_ownership_rollup(conn, symbol, instrument_id)
     wedges = {s.category: s.total_shares for s in rollup.slices if s.denominator_basis == "pie_wedge"}
     pie_total = sum(wedges.values(), Decimal(0))
     outstanding = rollup.shares_outstanding
@@ -193,7 +200,8 @@ def _classify(conn: psycopg.Connection[Any], symbol: str, instrument_id: int) ->
     ``ownership_insiders_current``, because the fold passes and owner-once both run between
     the two and the ticket is about what the operator sees.
     """
-    rollup = get_ownership_rollup(conn, symbol, instrument_id)
+    with snapshot_read(conn):  # see _snapshot — the reader requires it
+        rollup = get_ownership_rollup(conn, symbol, instrument_id)
     insiders = next((s for s in rollup.slices if s.category == "insiders"), None)
     holders = list(insiders.holders) if insiders else []
     return {
