@@ -106,11 +106,21 @@ def main() -> int:
         print(f"[ab] scoring the panel on {len(wanted)} distinct dates", flush=True)
         scores = _scores_at(conn, instrument_ids, wanted)
 
-    def selected(when: date) -> tuple[int, int]:
+    def selected(when: date) -> tuple[int, int | None]:
+        """Panel size and names selected, or ``None`` where the runner refuses.
+
+        ``None`` rather than a sentinel int: "refused" is a different kind of
+        answer from "selected zero", and a magic -1 that later gets summed or
+        formatted alongside real counts is how the two get conflated.
+        """
         panel = scores[when]
         if len(panel) < MIN_CROSS_SECTION:
-            return len(panel), -1  # thin_cross_section — the runner refuses it
+            return len(panel), None  # thin_cross_section — the runner refuses it
         return len(panel), len(s2_select(when, panel))
+
+    def _row(when: date, panel: int, picked: int | None) -> str:
+        verdict = "refused" if picked is None else str(picked)
+        return f"{when!s:<12} {when.strftime('%a'):<4} {panel:>7} {verdict:>9}"
 
     moved_out = sorted(set(control) - set(treatment))
     moved_in = sorted(set(treatment) - set(control))
@@ -121,16 +131,16 @@ def main() -> int:
     control_only_fired = 0
     for when in moved_out:
         panel, picked = selected(when)
-        control_only_fired += max(picked, 0)
-        print(f"{when!s:<12} {when.strftime('%a'):<4} {panel:>7} {('refused' if picked < 0 else picked):>9}")
+        control_only_fired += picked or 0
+        print(_row(when, panel, picked))
 
     print("\n[ab] TREATMENT-only dates (what the fix gains)")
     print(f"{'date':<12} {'day':<4} {'panel':>7} {'selected':>9}")
     treatment_only_fired = 0
     for when in moved_in:
         panel, picked = selected(when)
-        treatment_only_fired += max(picked, 0)
-        print(f"{when!s:<12} {when.strftime('%a'):<4} {panel:>7} {('refused' if picked < 0 else picked):>9}")
+        treatment_only_fired += picked or 0
+        print(_row(when, panel, picked))
 
     print(f"\n[ab] entry signals on control-only dates:   {control_only_fired}")
     print(f"[ab] entry signals on treatment-only dates: {treatment_only_fired}")

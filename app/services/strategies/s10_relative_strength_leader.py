@@ -170,9 +170,9 @@ def s10_rebalance_dates(calendar: Iterable[date]) -> frozenset[date]:
     weekend`` on ``s2_cross_sectional_momentum.py`` returned nothing — so the
     only record of S-2's exposure was this sentence, in the module that did not
     have it. S-2 then fired zero signals for two weeks (#2797). Both modules now
-    carry the cut, duplicated rather than shared so that neither identity moves
-    for the other's sake, and bound against drift by
-    ``tests/test_2797_s2_weekday_rebalance.py::test_s2_and_s10_agree_on_the_rebalance_calendar``.
+    carry the cut, duplicated rather than shared so that the check for drift can
+    be behavioural rather than a tautology over one shared import, and bound by
+    ``tests/test_2797_s2_weekday_rebalance.py::TestNoDriftAgainstS10``.
 
     ⚠ A corpus-hole WEEKDAY (243 of ~3,500 names on 2023-12-01) still takes
     its month and is then refused by ``MIN_CROSS_SECTION`` — that month
