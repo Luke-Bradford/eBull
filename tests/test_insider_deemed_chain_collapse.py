@@ -458,6 +458,33 @@ def test_swap_is_declined_when_the_incumbent_holds_other_channel_rows() -> None:
     assert _rep(cluster, elsewhere).filer_name == "THRC Management, LLC"  # exposed: declined
 
 
+def test_swap_is_declined_even_when_the_stranded_row_is_an_insider_row() -> None:
+    """⚠⚠ The #2785 regression pin. ``WBD``: the incumbent ``Newhouse Steven O`` is a
+    natural person holding the block only by the arbitrary CIK tie-break, and he strands
+    his OWN 47,449-share Form 4 against a 184,023,290 block. Under
+    ``_releases_into_another_wedge`` he keeps an insider row, so no wedge changes and the
+    swap looks free — that is the 72-of-81 class #2785 measured.
+
+    It is still declined, because a swap's hazard is MAGNITUDE and not category. Demoting
+    the incumbent breaks the owner-once grouping that was folding his stranded rows
+    together with the block; the full-population A/B showed 17 instruments GROW by
+    +82,886,088 that way (``AIRS`` +14,038,819). If this test starts failing, the change
+    that broke it is the one that was measured and reverted — read
+    ``_select_control_group_rep`` clause 4 before "fixing" it."""
+    incumbent = _h("000001913168", "Newhouse Steven O", _SUB_FLOOR, nature="indirect")
+    cluster = [
+        incumbent,
+        _h("000001455382", "ADVANCE/NEWHOUSE PROGRAMMING PARTNERSHIP", _SUB_FLOOR, nature="direct"),
+    ]
+    # Release-free: the swap is taken and the partnership holds the block.
+    assert _rep(cluster).filer_name == "ADVANCE/NEWHOUSE PROGRAMMING PARTNERSHIP"
+    # His own personal Form 4 stake elsewhere — an ``_INSIDER_SOURCES`` row, so the
+    # NARROW predicate would admit this. Clause 4 must still decline.
+    personal = [_h("000001913168", "Newhouse Steven O", "47449", nature="direct", source="form4")]
+    assert _releases_into_another_wedge(incumbent, cluster, _rows_by_identity(cluster, personal)) is False
+    assert _rep(cluster, personal).filer_name == "Newhouse Steven O"
+
+
 def test_institutional_row_carrying_table_i_provenance_cannot_become_the_rep() -> None:
     """``nature_from_table_i`` survives the cross-source merge via
     ``any(c.nature_from_table_i for c in cands)``, so a 13F-winning holder can carry it.
@@ -783,8 +810,9 @@ def test_stranded_13g_row_still_blocks_the_fold() -> None:
 
 def test_the_two_release_predicates_disagree_exactly_on_insider_rows() -> None:
     """Pins the narrowing itself. ``_releases_other_rows`` stays WIDE — it is what
-    ``_select_control_group_rep`` clause 4 was measured under (#2385) and is not changed
-    here (#2785) — so the two must diverge on an insider-source row and agree elsewhere."""
+    ``_select_control_group_rep`` clause 4 asks, and #2785 MEASURED that the narrowing
+    must not be carried over to it (see that clause's docstring) — so the two must
+    diverge on an insider-source row and agree elsewhere."""
     cluster = _chain(_SUB_FLOOR, n=3)
     member = cluster[1]
     idx = _rows_by_identity
