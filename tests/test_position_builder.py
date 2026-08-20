@@ -306,14 +306,48 @@ class TestLevelClose:
         assert (position.close_source, position.close_bar_date, position.bars_held) == ("level", _d(6), 4)
 
     def test_a_disagreement_about_the_same_bar_raises(self) -> None:
-        """§3.2: *a disagreement is a failure, not a tie-break*."""
-        with pytest.raises(ValueError, match="close sources disagree"):
+        """§3.2: *a disagreement is a failure, not a tie-break*.
+
+        ⚠ Scoped to the REDUNDANT pair (#2779). ``expired`` is C2's own
+        recomputation of C3's max-hold window, so the two must agree; the
+        sibling test below pins that a NON-redundant tie must not raise.
+        """
+        with pytest.raises(ValueError, match="max-hold expiry disagrees with the resolver"):
             _build(
                 entries=[_entry(1, 2)],
                 outcomes=[self._outcome("expired", at=6, price=Decimal("999"))],
                 outcome_pin=_PIN,
                 regime=self._level_regime(),
             )
+
+    def test_a_LEVEL_TOUCH_tying_with_a_signal_pair_exit_resolves_by_precedence(self) -> None:
+        """⚠⚠ #2779 — the defect that killed a 13.6-hour full-set run.
+
+        A ``tp_hit`` is an intraday touch priced AT the level; a signal-pair
+        exit is a fill priced at the bar. They are NOT redundant, so landing on
+        one date at two prices is ordinary, not a defect — §3.2's general rule
+        is *"the earliest date wins"* and says nothing about prices agreeing.
+        The blanket equality check made this fatal, and it first arose on the
+        hybrid ``signal_pair`` + ``level_based`` regime (#2723) that §3.2's
+        table predates.
+
+        ⚠ The spec does not settle WHICH wins, so this pins the construction
+        rather than claiming a citation: ``_SOURCE_PRECEDENCE`` puts ``level``
+        first, because a stop touched intraday closed the position before any
+        close-based fill could.
+        """
+        hybrid = ExitRegime(signal_pair=True, level_based=True, max_hold_bars=None, rebalance_dates=None)
+        built = _build(
+            entries=[_entry(1, 2)],
+            exits=[_exit(6)],
+            outcomes=[self._outcome("tp_hit", at=6, price=Decimal("123.456789"))],
+            outcome_pin=_PIN,
+            regime=hybrid,
+        )
+        (position,) = built.positions
+        assert position.close_source == "level", "the intraday touch precedes a close-based exit fill"
+        assert position.close_bar_date == _d(6)
+        assert position.close_price == Decimal("123.456789"), "precedence now decides the PRICE, not only the label"
 
     def test_a_missing_outcome_raises_rather_than_falling_through_to_max_hold(self) -> None:
         with pytest.raises(ValueError, match="no outcome at the pinned"):

@@ -114,11 +114,24 @@ SPEC_OPEN_REASONS: frozenset[str] = OPEN_REASONS - OUR_ADDITIONAL_OPEN_REASONS
 OUR_ADDITIONAL_CLOSE_SOURCES: frozenset[str] = frozenset({"series_termination"})
 SPEC_CLOSE_SOURCES: frozenset[str] = CLOSE_SOURCES - OUR_ADDITIONAL_CLOSE_SOURCES
 
-#: Which label a tie carries. ⚠ Only reachable once the tied candidates have
-#: been checked to AGREE on the price, so this decides the label and never the
-#: number. ``level`` wins over ``max_hold`` because spec §3.2 names
-#: ``outcome_resolver.py:470`` as the reference for the expiry bar — the two are
-#: redundant for S-4 by design and must agree.
+#: Which candidate a tie resolves to. ``level`` wins over ``max_hold`` because
+#: spec §3.2 names ``outcome_resolver.py:470`` as the reference for the expiry
+#: bar — the two are redundant for S-4 by design and must agree.
+#:
+#: ⚠⚠ THIS NOW DECIDES THE PRICE, NOT ONLY THE LABEL (#2779), and the change is
+#: deliberate. It previously ran only after every tied candidate had been checked
+#: to agree on the price, so it chose a label over identical numbers. That check
+#: is now scoped to the genuinely redundant pair, so a tie between sources the
+#: spec never expected to coincide resolves HERE.
+#:
+#: ⚠ Spec §3.2 does NOT settle that case, and this comment says so rather than
+#: implying a citation. Its table assigns C1 to S-1/S-3 and C2 to S-4, so a
+#: signal-pair/level tie could not arise when it was written; the hybrid regime
+#: (#2723) created it. The construction chosen is: an intraday level touch
+#: closed the position before any close-based exit fill could, so ``level``
+#: precedes ``signal_pair``. ``RULE_SET_VERSION`` hashes this module's source, so
+#: this ordering is frozen into strategy identity by construction — changing it
+#: moves every strategy version, which is the intended cost of changing it.
 _SOURCE_PRECEDENCE: tuple[CloseSource, ...] = ("level", "ambiguous", "max_hold", "calendar", "signal_pair")
 
 
@@ -501,6 +514,11 @@ class _Candidate:
     when: date
     price: Decimal | None
     source: CloseSource
+    #: ⚠ True ONLY for a C2 outcome of ``expired``, which is the one candidate
+    #: the spec calls redundant with C3's max-hold expiry. ``tp_hit`` / ``sl_hit``
+    #: are NOT redundant with anything — they are an intraday touch, not a
+    #: recomputation of the same window — so they must not carry it.
+    redundant_with_max_hold: bool = False
 
 
 def _pick_close(candidates: Sequence[_Candidate], *, signal_id: int) -> _Candidate:
@@ -512,21 +530,36 @@ def _pick_close(candidates: Sequence[_Candidate], *, signal_id: int) -> _Candida
     not a tie-break — it means the resolver and position construction disagree
     about the window"*.
 
-    ⚠ Generalised to every pair rather than special-cased to C2/C3. Two sources
-    naming the same bar at different prices is the same defect whichever two
-    they are, and a silent precedence would pick one of two numbers that cannot
-    both be right.
+    ⚠⚠ THE EQUALITY CHECK IS SCOPED TO THE REDUNDANT PAIR, NOT GENERALISED
+    (#2779). It used to fire on ANY two tied sources carrying different prices,
+    which contradicts the general rule quoted above — *the earliest date wins* —
+    and says nothing about prices agreeing. Only C2's ``expired`` and C3 are
+    redundant: both compute the same max-hold window, so disagreeing means the
+    resolver and position construction disagree, which is a real defect.
+
+    C1-vs-C2 is NOT that. A level exit is an intraday touch priced AT the level;
+    a signal-pair exit is a fill priced at the bar. Both can be true on one bar
+    and there is no reason they should be equal. The generalisation made that
+    ordinary case fatal, and it killed a 13.6-hour full-set run at
+    ``s7-trend-pullback`` — the first hybrid ``signal_pair`` + ``level_based``
+    regime (#2723), a combination §3.2's table predates.
+
+    ⚠ The generalisation also made ``_SOURCE_PRECEDENCE`` unreachable for every
+    case it was written for: an ordering over tied sources only means anything
+    if tied sources may disagree. ``level`` outranking ``signal_pair`` is the
+    answer here — a stop touched intraday closed the position before any
+    close-based exit fill could.
     """
     earliest = min(candidate.when for candidate in candidates)
     tied = [candidate for candidate in candidates if candidate.when == earliest]
-    prices = {candidate.price for candidate in tied}
-    if len(prices) > 1:
+    redundant = [candidate for candidate in tied if candidate.redundant_with_max_hold or candidate.source == "max_hold"]
+    if len({candidate.price for candidate in redundant}) > 1:
         detail = ", ".join(
-            f"{candidate.source}={candidate.price}" for candidate in sorted(tied, key=lambda c: c.source)
+            f"{candidate.source}={candidate.price}" for candidate in sorted(redundant, key=lambda c: c.source)
         )
         raise ValueError(
-            f"signal {signal_id}: close sources disagree on {earliest} ({detail}) — a disagreement about the "
-            "same bar is a failure, not a tie-break"
+            f"signal {signal_id}: the max-hold expiry disagrees with the resolver on {earliest} ({detail}) — "
+            "C2's `expired` and C3 compute the same window, so a disagreement is a failure, not a tie-break"
         )
     return min(tied, key=lambda candidate: _SOURCE_PRECEDENCE.index(candidate.source))
 
@@ -712,7 +745,18 @@ def build_positions(
                 else:
                     assert outcome.exit_bar_date is not None  # narrowed by ResolvedOutcome's own check
                     source: CloseSource = "ambiguous" if outcome.outcome == "ambiguous" else "level"
-                    candidates.append(_Candidate(outcome.exit_bar_date, outcome.exit_price, source))
+                    candidates.append(
+                        _Candidate(
+                            outcome.exit_bar_date,
+                            outcome.exit_price,
+                            source,
+                            # ⚠ §3.2: C3 "for S-4 is redundant with C2's `expired`
+                            # and must agree with it". Only `expired` — a tp/sl
+                            # touch is an intraday event, not a second reading of
+                            # the max-hold window, so it is redundant with nothing.
+                            redundant_with_max_hold=outcome.outcome == "expired",
+                        )
+                    )
 
             # ⚠⚠ `ceiling` IS THE BAR ON WHICH THE HOLD IS FORCED TO END, and it
             # binds whether or not that bar can be priced. C3 and C4 are not
