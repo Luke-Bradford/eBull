@@ -2411,3 +2411,55 @@ class TestPartialClassDenominator:
         assert rollup.no_data_reason is None
         assert rollup.shares_outstanding == Decimal("1000")
         assert rollup.sanity.largest_single_holder_pct == Decimal("0.4")
+
+    def test_more_managers_than_shares_suppresses_despite_a_cover_count(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#2232 arm 3, end-to-end. Modelled on Grupo Aval (``AVAL``, CIK
+        0001504764): the FY2025 20-F cover reports ``dei:EntityCommonStockShares
+        Outstanding`` = 7 — SEC's own R1 rendering of ``0001104659-26-044493``
+        shows the same undimensioned 7, so it is the issuer's tag and not a §7.17
+        stripping artefact, and the SAME filing's equity note (``R297``) reports
+        23,743,475,754 — while 88 distinct 13F managers file against it.
+
+        Seeded as 13F holdings specifically. Arm 3 counts only that channel: Form
+        13F is additive across filers (Special Instruction 5) and reports whole
+        shares (Column 5), whereas Section 16 / 13D-G holders may restate one
+        deemed block under many identities and may hold fractions.
+
+        ⚠ This case is unreachable through arms 1+2 by construction, which is the
+        point of it: the cover count EXISTS (arm 1 off) and no single manager
+        exceeds it (``largest_single_holder_pct`` = 1/7), so it also pins the
+        CALLER's pre-filter. Narrow that disjunction back to
+        ``largest_single_holder_pct > 1`` and the guard goes silently dark on
+        exactly the population arm 3 was added for — the pure truth table cannot
+        see that, because the pre-filter is not in it."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=self._IID, symbol="ZAVAL")
+        _seed_outstanding(
+            conn,
+            instrument_id=self._IID,
+            shares="7",
+            period_end=self._FRESH,
+            taxonomy="dei",
+        )
+        for n in range(9):
+            _seed_inst_holding(
+                conn,
+                accession=f"0002232200-26-00000{n}",
+                instrument_id=self._IID,
+                filer_cik=f"000199991{n}",
+                filer_name=f"Unaffiliated Manager {n}",
+                filer_type="INV",
+                period_of_report=self._FRESH,
+                shares="1",
+            )
+        conn.commit()
+        # Seeded largest manager holds 1 share against 7 outstanding, so arms 1+2
+        # are both off. (Asserting that on the RESULT would prove nothing — a fired
+        # guard returns ``SanityChecks.empty()``, whose every pct is 0.)
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="ZAVAL", instrument_id=self._IID)
+        assert rollup.no_data_reason == "partial_class_denominator"
+        assert rollup.shares_outstanding is None
+        assert rollup.slices == ()

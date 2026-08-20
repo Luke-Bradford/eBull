@@ -7,13 +7,14 @@ worktree checked out at ``origin/main``, so the control is real code and not a
 simulation (``.claude/skills/engineering/full-population-ab.md``).
 
 ⚠ **The population is bounded, and here is exactly what it excludes.** The guard has
-two conditions, and this runs the union of BOTH conditions' surfaces independently —
+three conditions, and this runs the union of ALL of their surfaces independently —
 every instrument with no cover-page DEI fact (condition 1's surface, whatever its
 holders look like) UNION every instrument where some holder exceeds the denominator
-(condition 2's surface, whatever its facts look like). So if either half of the
-reasoning is wrong, this A/B sees it; only an instrument that satisfies NEITHER
-condition is excluded, and such an instrument cannot reach the new branch through
-any argument except one this pair would have already falsified.
+(condition 2's surface, whatever its facts look like) UNION every instrument with
+more disclosed holders than shares (condition 3's surface, ditto). So if any part of
+the reasoning is wrong, this A/B sees it; only an instrument that satisfies NONE of
+them is excluded, and such an instrument cannot reach the new branch through any
+argument except one this set would have already falsified.
 
 That bound is a cost decision and is stated rather than hidden: the whole
 denominator-carrying universe is 4,654 instruments and `get_ownership_rollup`
@@ -73,11 +74,29 @@ holder_over_100 AS (        -- condition 2's surface, any facts
                         WHERE o.instrument_id = d.instrument_id), 0)
            ) > d.latest_shares
 ),
+holder_count_over AS (      -- condition 3's surface (#2232 arm 3), any facts
+    -- ⚠ DELIBERATELY WIDER than the guard. The guard counts 13F managers only
+    -- (`count_additive_institutional_holders`); this counts every channel's raw
+    -- `_current` rows, before `_reconcile_owner_once` collapses an owner appearing
+    -- in two of them. Both differences point the same way — the surface is a strict
+    -- SUPERSET of what arm 3 can fire on — so the A/B sees any instrument the guard
+    -- touches AND the ones it declines to, which is where over-firing would show.
+    SELECT d.instrument_id, d.symbol FROM denom d
+     WHERE (
+             COALESCE((SELECT count(DISTINCT filer_cik) FROM ownership_institutions_current o
+                        WHERE o.instrument_id = d.instrument_id), 0)
+           + COALESCE((SELECT count(*) FROM ownership_insiders_current o
+                        WHERE o.instrument_id = d.instrument_id), 0)
+           + COALESCE((SELECT count(*) FROM ownership_blockholders_current o
+                        WHERE o.instrument_id = d.instrument_id), 0)
+           ) > d.latest_shares
+),
 panel AS (                  -- golden panel: must be byte-identical across arms
     SELECT instrument_id, symbol FROM denom WHERE symbol IN ('AAPL','GME','MSFT','JPM','HD')
 )
 SELECT instrument_id, symbol FROM no_cover_fact
 UNION SELECT instrument_id, symbol FROM holder_over_100
+UNION SELECT instrument_id, symbol FROM holder_count_over
 UNION SELECT instrument_id, symbol FROM panel
  ORDER BY instrument_id
 """
