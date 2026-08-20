@@ -2651,10 +2651,14 @@ def _releases_other_rows(
     """True when demoting ``holder`` out of ``cluster`` would strand rows it holds in
     OTHER channels — its 13F institutional row, most consequentially.
 
-    ⚠ Strictly WIDER than the hazard it is named for; see
-    :func:`_releases_into_another_wedge`, which is what the deemed-chain fold gate uses.
-    Kept as-is for :func:`_select_control_group_rep` clause 4, whose arithmetic was
-    measured under this predicate (#2385) and is not this ticket's surface (#2785)."""
+    ⚠ Strictly WIDER than the hazard the deemed-chain FOLD gate names; that gate asks
+    :func:`_releases_into_another_wedge` instead (#2230).
+
+    ⚠⚠ **:func:`_select_control_group_rep` clause 4 keeps asking THIS one, and #2785
+    measured why** — the narrowing is right for the fold and wrong for a rep swap. Do not
+    "finish the job" by pointing clause 4 at the narrow predicate; that was tried,
+    A/B'd on the full population, and reverted. See clause 4's own docstring for the
+    numbers and the mechanism."""
     return bool(_stranded_rows(holder, cluster, rows_by_identity))
 
 
@@ -2965,13 +2969,45 @@ def _select_control_group_rep(
 
     4. **Decline on release exposure.** The rep is not a label — it is the identity that
        survives into :func:`_reconcile_owner_once`, so demoting a member RELEASES its
-       other-channel rows into their own wedges. The swap is therefore arithmetic, and is
-       neutral-or-better only when the incumbent holds nothing outside the cluster:
-       the promoted member's rows stop being released, the demoted one's would start.
-       Declines 24 of 75 otherwise-eligible swaps. This is #2230's fail-closed posture
-       applied to the rep choice, and it deliberately does NOT reverse #1652's
-       exact-value-only consumption rule, which claiming the demoted member's rows
-       would require.
+       other-channel rows into their own wedges. The swap is therefore arithmetic: the
+       promoted member's rows stop being released, the demoted one's would start.
+
+       ⚠⚠ **Asks the WIDE :func:`_releases_other_rows`, deliberately — #2230's narrowing
+       does NOT transfer here, and #2785 measured that rather than assuming it.** The
+       obvious-looking follow-through (point clause 4 at :func:`_releases_into_another_wedge`,
+       since an identity keeping any ``_INSIDER_SOURCES`` row stays Section-16 and changes
+       no wedge) was implemented and A/B'd on the full population. It was **reverted**.
+
+       Census — ``scripts.audit_2785_rep_swap_gate``, 3,108 instruments, 0 harness errors:
+       5,283 clusters reach this selector, 203 reach clause 4, **81 declines**, of which
+       **72 would flip** under the narrow predicate. The 9 that stay refused strand only
+       ``13d``/``13g``/``13f`` and would genuinely change wedge.
+
+       Paired A/B over those 72 (control = a worktree at ``origin/main``): net
+       −385,131,434 shares, but the net hides the finding. **17 instruments GROW, by
+       +82,886,088 in total.** The mechanism is that a swap's hazard is MAGNITUDE, not
+       category: while the incumbent is rep, its stranded rows share an identity with the
+       block row, so :func:`_reconcile_owner_once` folds them together — additively for
+       pooled Section-16 forms (#1941), by MAX across competing restatements. Demoting it
+       breaks that grouping. Where the interaction was additive the swap is exactly
+       pie-neutral (``WBD``: ``Newhouse Steven O`` 184,070,739 becomes the partnership's
+       184,023,290 + his own 47,449, same total, correct holder). Where it was a MAX
+       absorption, the absorbed row stands up on its own and the pie inflates — ``AIRS``
+       +14,038,819, exactly the block value, because the demoted incumbent is also the rep
+       of a SECOND cluster on the same instrument.
+
+       A ``max(stranded) >= block`` discriminator was tried against the grow side and
+       FALSIFIED: it fires on 11 of the 17 growers and on 14 of the 55 non-growers. Per
+       the repo rule, two failed keys is the signal to question the model — so the fence
+       stays wide until the owner-once grouping interaction is modelled, not until a
+       third key is guessed.
+
+       This clause is therefore an ARITHMETIC fence, not a source rule, and its criterion
+       is its own: neutral-or-better. It deliberately does NOT reverse #1652's
+       exact-value-only consumption rule, which claiming the demoted member's rows would
+       require. Re-measure rather than quoting these counts:
+       ``PYTHONPATH=. uv run python -m scripts.audit_2785_rep_swap_gate --out /tmp/a.jsonl``,
+       and inspect any mover with ``scripts.probe_2785_wedge_detail``.
 
     5. **The record-holder text, only where clause 2 refused** (#2408). Clauses 1-3 are
        tried first and unchanged: where the Table I attestation is admissible it IS the
