@@ -2654,7 +2654,7 @@ def _releases_other_rows(
     ⚠ Strictly WIDER than the hazard it is named for; see
     :func:`_releases_into_another_wedge`, which is what the deemed-chain fold gate uses.
     Kept as-is for :func:`_select_control_group_rep` clause 4, whose arithmetic was
-    measured under this predicate (#2385) and is not this ticket's surface (#2789)."""
+    measured under this predicate (#2385) and is not this ticket's surface (#2785)."""
     return bool(_stranded_rows(holder, cluster, rows_by_identity))
 
 
@@ -2680,6 +2680,13 @@ def _releases_into_another_wedge(
     removes the cluster's rows from the identity's ``form4``/``form3`` pool and touches no
     other source, so the per-source MAX can only fall or stay. The category is unchanged
     and the figure cannot rise.
+
+    ⚠ Keyed on ``winning_source``, deliberately — the SAME field
+    :func:`_reconcile_owner_once` buckets on, so the two cannot disagree about what the
+    identity is. Not on ``ownership_nature``, which has four writers and three meanings
+    and would need the ``nature_from_table_i`` provenance gate (#2385/#2386):
+    ``RYTM``'s stranded Form 4 for ``BARRIS PETER J`` is stored ``beneficial`` where the
+    filing itself says ``I``, and it must still count as insider evidence.
 
     Measured on the full population by
     ``PYTHONPATH=. uv run python -m scripts.audit_2230_release_hazard`` (sharded 3 ways):

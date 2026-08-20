@@ -149,9 +149,7 @@ def main() -> int:
                     {
                         **_describe(m),
                         "releases": bool(stranded),
-                        "stranded": [
-                            {"source": str(r.winning_source), "shares": str(r.shares)} for r in stranded
-                        ],
+                        "stranded": [{"source": str(r.winning_source), "shares": str(r.shares)} for r in stranded],
                     }
                 )
             # The pie carries the block once per member today; folding leaves one.

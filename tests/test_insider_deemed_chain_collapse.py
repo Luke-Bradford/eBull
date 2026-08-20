@@ -784,11 +784,21 @@ def test_stranded_13g_row_still_blocks_the_fold() -> None:
 def test_the_two_release_predicates_disagree_exactly_on_insider_rows() -> None:
     """Pins the narrowing itself. ``_releases_other_rows`` stays WIDE — it is what
     ``_select_control_group_rep`` clause 4 was measured under (#2385) and is not changed
-    here (#2789) — so the two must diverge on an insider-source row and agree elsewhere."""
+    here (#2785) — so the two must diverge on an insider-source row and agree elsewhere."""
     cluster = _chain(_SUB_FLOOR, n=3)
     member = cluster[1]
     idx = _rows_by_identity
-    for source, expect_release in (("form4", False), ("form3", False), ("def14a", False), ("13f", True), ("13d", True)):
+    # Annotated, not inferred: a bare tuple literal widens the first element to ``str`` and
+    # ``_h``'s ``source`` parameter is the ``SourceTag`` literal union.
+    cases: tuple[tuple[SourceTag, bool], ...] = (
+        ("form4", False),
+        ("form3", False),
+        ("def14a", False),
+        ("13f", True),
+        ("13d", True),
+        ("13g", True),
+    )
+    for source, expect_release in cases:
         elsewhere = [_h(member.filer_cik or "", member.filer_name, "12345", nature=None, source=source)]
         rows = idx(cluster + elsewhere, [])
         assert _releases_other_rows(member, cluster, rows) is True, source
