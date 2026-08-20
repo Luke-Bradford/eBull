@@ -100,6 +100,16 @@ def main() -> int:
         # Production arm FIRST and returned unchanged — the two extra arms must not be
         # able to influence what the rollup actually computes.
         wide_rep = real_rep(members, rows_by_identity, record_holder_evidence)
+        # ⚠ These two per-arm restores look redundant next to the module-level ``finally``
+        # in ``main`` and they are NOT — do not collapse them. That one runs once, at the
+        # END of the whole run. These run once per cluster, and both cases matter:
+        #   * normal flow — the NEXT cluster's ``wide_rep`` above must see ``real_wide``;
+        #   * exceptional flow — the population loop catches ``Exception`` per instrument
+        #     and CONTINUES. Without the ``finally``, a raise inside the ungated arm would
+        #     leave ``_never`` bound for every remaining instrument, so ``wide_rep`` would
+        #     silently become a second ungated arm and the census would report the two as
+        #     agreeing. Exit 0, no error, and the clause-4 decline count collapses toward
+        #     zero — the same silent-clean-measurement failure this module documents.
         orl._releases_other_rows = _never  # type: ignore[assignment]
         try:
             ungated_rep = real_rep(members, rows_by_identity, record_holder_evidence)
