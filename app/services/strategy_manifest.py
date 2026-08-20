@@ -152,7 +152,11 @@ from app.services.strategies.s10_relative_strength_leader import (
     s10_identity,
     s10_rebalance_dates,
 )
-from app.services.strategy_exit_levels_batch import s4_exit_levels_batch, s5_exit_levels_batch
+from app.services.strategy_exit_levels_batch import (
+    s4_exit_levels_batch,
+    s5_exit_levels_batch,
+    s6_exit_levels_batch,
+)
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
     CrossSectionalMember,
@@ -917,6 +921,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             decision_calendar=_no_decision_calendar,
             signals=_s6_signals,
             exit_levels=_s6_exit_levels,
+            exit_levels_batch=s6_exit_levels_batch,
         ),
         S7_STRATEGY_ID: StrategyEntry(
             strategy_id=S7_STRATEGY_ID,

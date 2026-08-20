@@ -43,6 +43,24 @@ from app.services.strategies.s5_support_bounce import (
     _support_below,
     _volumes,
 )
+from app.services.strategies.s6_resistance_breakout import (
+    ATR_PERIOD as S6_ATR_PERIOD,
+)
+from app.services.strategies.s6_resistance_breakout import (
+    ATR_STOP_MULTIPLE as S6_ATR_STOP_MULTIPLE,
+)
+from app.services.strategies.s6_resistance_breakout import (
+    ATR_TARGET_MULTIPLE as S6_ATR_TARGET_MULTIPLE,
+)
+from app.services.strategies.s6_resistance_breakout import (
+    MAX_HOLD_BARS as S6_MAX_HOLD_BARS,
+)
+from app.services.strategies.s6_resistance_breakout import (
+    _resistance_below,
+)
+from app.services.strategies.s6_resistance_breakout import (
+    _volumes as _s6_volumes,
+)
 
 
 def s4_exit_levels_batch(
@@ -134,4 +152,46 @@ def s5_exit_levels_batch(
     return tuple(levels)
 
 
-__all__ = ["s4_exit_levels_batch", "s5_exit_levels_batch"]
+def s6_exit_levels_batch(
+    series: BarSeries,
+    *,
+    requests: Sequence[tuple[int, Decimal]],
+    universe: Universe,
+) -> tuple[ExitLevels | UnresolvedReason, ...]:
+    """S-6's brackets from one ATR pass and one level scan — S-5's shape mirrored.
+
+    ⚠ S-6 has its OWN ``_volumes`` and its own multiples, so nothing is shared
+    with S-5 beyond the shape. The stop anchors to the RESISTANCE level and the
+    target to the entry, and ``ATR_TARGET_MULTIPLE`` is 3.0 here against S-5's
+    2.0 — reading either from the wrong module would be a silent strategy change
+    that no type checker could see, which is why every constant is aliased with
+    its strategy prefix.
+
+    Same legality argument as ``s5_exit_levels_batch``: the ATR at bar ``i``
+    reads bars ``<= i``, ``LevelScan`` shares only pivot detection, and
+    ``scan.at(index)`` still applies the causal confirmation filter per request.
+    """
+    atr = atr_series(series, period=S6_ATR_PERIOD, universe=universe)
+    scan = LevelScan.build(highs=series.array_highs, lows=series.array_lows, volumes=_s6_volumes(series))
+    levels: list[ExitLevels | UnresolvedReason] = []
+    for signal_index, entry_price in requests:
+        try:
+            atr_at_signal = atr.values[signal_index]
+            if atr_at_signal is None:
+                raise ValueError(f"S-6 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
+            level = _resistance_below(series, index=signal_index, atr=atr_at_signal, scan=scan)
+            if level is None:
+                raise ValueError(f"S-6 bracket needs the resistance level at index {signal_index}; none is live")
+            stop = Decimal(str(level - S6_ATR_STOP_MULTIPLE * atr_at_signal))
+            target = entry_price + Decimal(str(S6_ATR_TARGET_MULTIPLE * atr_at_signal))
+        except ValueError, IndexError:
+            levels.append("unorderable_exit_levels")
+            continue
+        if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
+            levels.append("unorderable_exit_levels")
+            continue
+        levels.append(ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=S6_MAX_HOLD_BARS))
+    return tuple(levels)
+
+
+__all__ = ["s4_exit_levels_batch", "s5_exit_levels_batch", "s6_exit_levels_batch"]
