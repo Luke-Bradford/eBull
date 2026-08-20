@@ -54,7 +54,7 @@ import math
 import time
 from array import array
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -116,7 +116,9 @@ from app.services.random_entry_cohort import SPEC_COHORT_SIZE, SyntheticControl
 from app.services.research_price_structure_store import (
     QUARANTINE_ARMS,
     QUARANTINE_RULE_SET_VERSION,
+    MaskedSeries,
     QuarantineArm,
+    load_arms,
     load_masked_series,
 )
 from app.services.result_ledger import (
@@ -136,6 +138,7 @@ from app.services.strategies.validated_universe import (
     load_validated_universe,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
+from app.services.strategy_recent_evidence import recent_evidence_window
 from app.services.strategy_regime_evidence import (
     RegimeCohort,
     RegimeTradeObservation,
@@ -155,6 +158,7 @@ from app.services.strategy_result import (
     EVALUATION_WINDOW_START,
     HOLDOUT_BOUNDARY,
     LEGACY_RETURN_BASIS,
+    METRIC_AXIS_RULE_VERSION,
     TOTAL_RETURN_BASIS,
     AmbiguityArm,
     PromotionCandidate,
@@ -163,6 +167,7 @@ from app.services.strategy_result import (
     ResultNamespace,
     StrategyResult,
     check_promotable,
+    metric_axis_sha256,
     namespace_for_position,
 )
 from app.services.strategy_result_ambiguity import (
@@ -176,16 +181,18 @@ from app.services.strategy_result_ambiguity import (
 from app.services.strategy_result_universe import (
     ResultUniverseRecord,
     load_result_universe,
+    record_sha256,
     store_result_universe,
     store_termination_census,
 )
 from app.services.strategy_segmented_evaluation import segmented_member, segmented_signals
-from app.services.strategy_statistics import StrategyMetrics, TradeReturns, compute_metrics
+from app.services.strategy_statistics import DatedEquityCurve, StrategyMetrics, TradeReturns, compute_metrics
 from app.services.synthetic_control_run import (
     CONTROL_NAMESPACE,
     HOLDOUT_CONTROL_REASON,
     CohortCollector,
     CohortResult,
+    SyntheticControlScaleBudget,
     run_cohort,
 )
 from app.services.technical_analysis import OHLCVRow
@@ -210,7 +217,7 @@ from app.services.walk_forward import (
 
 logger = logging.getLogger(__name__)
 
-BacktestPhase = Literal["corpus", "ranking", "evaluation", "deflation", "write"]
+BacktestPhase = Literal["corpus", "ranking", "evaluation", "synthetic_control", "deflation", "write"]
 
 
 @dataclass(frozen=True)
@@ -223,9 +230,29 @@ class BacktestProgressEvent:
     ambiguity_arm: AmbiguityArm | None = None
     series_seen: int = 0
     series_total: int | None = None
+    control_seen: int = 0
+    control_total: int | None = None
 
 
 ProgressCallback = Callable[[BacktestProgressEvent], None]
+
+
+@dataclass
+class _ControlProgress:
+    """Add a global control ordinal without exposing a member outcome."""
+
+    callback: ProgressCallback | None
+    total: int
+    seen: dict[tuple[object, ...], int] = field(default_factory=dict)
+
+    def __call__(self, event: BacktestProgressEvent) -> None:
+        if self.callback is None:
+            return
+        current = len(self.seen)
+        if event.phase == "synthetic_control":
+            key = (event.strategy_id, event.quarantine_arm, event.ambiguity_arm)
+            current = self.seen.setdefault(key, len(self.seen) + 1)
+        self.callback(dataclasses.replace(event, control_seen=current, control_total=self.total))
 
 
 def _emit_progress(callback: ProgressCallback | None, event: BacktestProgressEvent) -> None:
@@ -400,6 +427,21 @@ _INSAMPLE_AXIS_SQL = """
     ORDER BY 1
 """
 
+_OPPORTUNITY_SERIES_SQL = """
+    SELECT d.series_id
+    FROM research_price_daily d
+    WHERE d.series_id = ANY(%(series_ids)s)
+      AND d.bar_date >= %(start)s
+      AND d.bar_date <= %(end)s
+      AND (%(before_boundary)s::boolean IS FALSE OR d.bar_date < %(boundary)s)
+      AND d.close > 0
+      AND d.adj_close > 0
+      AND d.close::text NOT IN ('NaN', 'Infinity', '-Infinity')
+      AND d.adj_close::text NOT IN ('NaN', 'Infinity', '-Infinity')
+    GROUP BY d.series_id
+    HAVING count(*) >= 2
+"""
+
 #: ⚠ Reads the STORE, not the ``strategy_results`` view: the view is filtered to
 #: ``namespace = 'in_sample'``, so a collision check through it would be blind to
 #: every hold-out row and the run would discover the duplicate at INSERT — after
@@ -433,12 +475,12 @@ class ExcludedStrategy:
 class NamespaceMeasurement:
     """One ``(strategy, quarantine arm, namespace)`` measurement, before writing.
 
-    ⚠ The equity AXIS here is the namespace's own truncated span (§5) while
-    ``window_start`` / ``window_end`` on the row stay the full evaluation window.
-    ``sql/262`` is explicit that no CHECK ties the two — *"the window is the
-    EVALUATION window and the namespace selects within it"* — and storing the
-    truncated span in the window columns would make two rows over one corpus
-    look like two corpora.
+    ⚠ ``axis_dates`` is the complete fixed namespace axis derived before any
+    strategy pass: the pre-boundary panel tuple for ``in_sample`` or the exact
+    registered evidence-window tuple for ``hold_out``. It is never truncated to
+    the strategy's first/last position. ``window_start`` / ``window_end`` on the
+    eventual row still identify the enclosing evaluation window; the full axis
+    tuple and digest make the actual metric denominator independently auditable.
     """
 
     namespace: ResultNamespace
@@ -447,10 +489,9 @@ class NamespaceMeasurement:
     #: Mean realised trade return per ENTRY date. Criterion 3's cluster key, so
     #: this phase's two correlation constructions agree about "the same day".
     daily_returns: Mapping[date, float]
-    evaluated_instrument_ids: frozenset[int]
+    universe_record: ResultUniverseRecord
     position_count: int
-    axis_first: date
-    axis_last: date
+    axis_dates: tuple[date, ...]
     #: Criterion 5's label windows, on the panel axis — populated for the
     #: ``in_sample`` namespace and EMPTY for ``hold_out``, which has no split.
     #: ⚠ These are the legs that reached the CURVE, so the census describes the
@@ -477,6 +518,18 @@ class NamespaceMeasurement:
     #: One causal signal-date cohort for every realised trade. The child rows
     #: explain this result; they are not separate promotion candidates.
     regime_cohorts: tuple[RegimeCohort, ...] = ()
+
+    @property
+    def evaluated_instrument_ids(self) -> frozenset[int]:
+        return self.universe_record.evaluated_instrument_ids
+
+    @property
+    def axis_first(self) -> date:
+        return self.axis_dates[0]
+
+    @property
+    def axis_last(self) -> date:
+        return self.axis_dates[-1]
 
 
 @dataclass(frozen=True)
@@ -979,10 +1032,11 @@ def _terminate_open_positions(
 class _NamespaceBook:
     """One namespace's legs and trades, accumulated on the FULL evaluation axis.
 
-    ⚠ Absolute axis indices, re-based only at report time. The namespace's own
-    axis (§5) is the closed span of ITS OWN positions, which is not knowable
-    until the corpus pass has finished — so the legs are collected against the
-    one axis every instrument shares and shifted once at the end.
+    ⚠ Legs retain absolute indices on the one panel axis every instrument
+    shares. Metric construction shifts them only by the predeclared namespace
+    axis start; ``first_index`` / ``last_index`` are boundary-audit fields and
+    support the isolated A/B verifier, never selection of the production metric
+    span.
     """
 
     book: LegBook = field(default_factory=LegBook)
@@ -1128,7 +1182,7 @@ def _benchmark_book(
     lo: int,
     hi: int,
 ) -> LegBook:
-    """Criterion 7's buy-and-hold arm, on ONE namespace's truncated axis.
+    """Criterion 7's one-leg-per-opportunity-name comparator on the fixed axis.
 
     ⚠⚠ THE BENCHMARK RUNS THROUGH THE SAME ENGINE, and criterion 7's twelfth
     metric is why. *"Return relative to buy-and-hold"* has no published
@@ -1137,59 +1191,58 @@ def _benchmark_book(
     machinery would attribute the machinery's difference to the strategy. It is
     charged the same cost model: one round trip at the entry band's half-spread.
 
-    ⚠ ONE LEG PER INSTRUMENT THE NAMESPACE ACTUALLY EVALUATED, not per corpus
-    series. The row's ``evaluated_instrument_count`` is the namespace's own set
-    (§0: the two namespaces differ by 23.6%), and a benchmark over a wider
-    population would be a comparison against names this row does not claim to
-    have measured.
+    ⚠ ONE LEG PER PRE-MASK OPPORTUNITY NAME, including an unlinked series under
+    its negative in-pass key. The durable child splits linked instrument IDs
+    from unlinked series IDs, while this construction uses their exact union.
+    Membership is fixed before signals, fills, positions or costs.
 
     ⚠ CLIPPED TO ``[lo, hi]``, which is the namespace's axis and not the
-    evaluation window. A leg outside it is dropped; one straddling it opens at
-    the first usable close inside and closes at the last. That is the same
-    "first usable bar in the window to its last" rule the whole-window benchmark
-    applies, with the namespace's axis as the window — the alternative, holding
-    the full-window benchmark against a truncated strategy curve, compares two
-    different spans.
+    enclosing evaluation window. A history straddling it opens at the first
+    usable close inside and closes at the last; reserved capital remains cash
+    before entry and proceeds remain cash after exit. A name with fewer than two
+    usable dates inside the fixed axis is refused rather than dropped, because
+    shrinking the population would make the comparator outcome-dependent.
     """
     book = LegBook()
     one = Decimal(1)
     for instrument_id in sorted(instruments):
         located = raw_closes_by_instrument.get(instrument_id)
         wealth_located = wealth_closes_by_instrument.get(instrument_id)
-        if located is None or wealth_located is None:  # pragma: no cover - every evaluated instrument was loaded
-            continue
+        if located is None or wealth_located is None:
+            raise RuntimeError(f"benchmark price history is missing for opportunity name {instrument_id}")
         first_axis_index, closes = located
         wealth_first_axis_index, wealth_closes = wealth_located
         if wealth_first_axis_index != first_axis_index or len(wealth_closes) != len(closes):
-            raise RuntimeError(f"raw and wealth price axes disagree for instrument {instrument_id}")
+            raise RuntimeError(f"raw and wealth price axes disagree for opportunity name {instrument_id}")
         start = max(lo, first_axis_index)
         end = min(hi, first_axis_index + len(closes) - 1)
         if end <= start:
-            continue
+            raise RuntimeError(f"opportunity name {instrument_id} has fewer than two axis endpoints")
         window = np.frombuffer(closes, dtype=np.float64)[start - first_axis_index : end - first_axis_index + 1]
         wealth_window = np.frombuffer(wealth_closes, dtype=np.float64)[
             start - first_axis_index : end - first_axis_index + 1
         ]
+        raw_observed = ~np.isnan(window)
+        if np.any(
+            raw_observed
+            & ((~np.isfinite(window)) | (~np.isfinite(wealth_window)) | (window <= 0.0) | (wealth_window <= 0.0))
+        ):
+            raise RuntimeError(
+                f"opportunity name {instrument_id} has invalid raw or wealth beside an observed raw close"
+            )
         usable = np.flatnonzero(
             np.isfinite(window) & np.isfinite(wealth_window) & (window > 0.0) & (wealth_window > 0.0)
         )
         if usable.size < 2:
-            continue
+            raise RuntimeError(f"opportunity name {instrument_id} has fewer than two usable comparator endpoints")
         entry_offset = int(usable[0])
         exit_offset = int(usable[-1])
-        raw_span = window[entry_offset : exit_offset + 1]
         wealth_span = wealth_window[entry_offset : exit_offset + 1]
-        raw_observed = ~np.isnan(raw_span)
-        if np.any(
-            raw_observed
-            & ((~np.isfinite(raw_span)) | (~np.isfinite(wealth_span)) | (raw_span <= 0.0) | (wealth_span <= 0.0))
-        ):
-            continue
         entry_close = float(window[entry_offset])
         entry_wealth = float(wealth_window[entry_offset])
         exit_wealth = float(wealth_window[exit_offset])
-        if entry_close <= 0.0 or entry_wealth <= 0.0 or exit_wealth <= 0.0:
-            continue
+        if not all(math.isfinite(value) and value > 0.0 for value in (entry_close, entry_wealth, exit_wealth)):
+            raise RuntimeError(f"opportunity name {instrument_id} has invalid comparator endpoints")
         # The corpus OHLC is split-adjusted and has no point-in-time split
         # factors.  It cannot honestly choose a nominal-price cost band (#2400).
         half = UNKNOWN_NOMINAL_PRICE_BAND.half_spread
@@ -1202,7 +1255,36 @@ def _benchmark_book(
             realised=True,
             marks=[float(value) for value in wealth_span],
         )
+    if len(book) != len(instruments):
+        raise RuntimeError(f"benchmark built {len(book)} legs for {len(instruments)} opportunity names")
     return book
+
+
+def _dense_price_history(
+    source: MaskedSeries,
+    *,
+    axis_pos: Mapping[date, int],
+    return_basis: str,
+) -> tuple[BarSeries, int, array[float], array[float]] | None:
+    """Project one arm's own observations onto its sparse span of the panel axis."""
+    series = _to_series(source.bars)
+    if len(source.wealth_closes) != len(series):
+        raise RuntimeError(f"series {source.series_id} has misaligned raw and wealth observations")
+    indices = [axis_pos[when] for when in series.dates if when in axis_pos]
+    if not indices:
+        return None
+    first_axis_index, last_axis_index = indices[0], indices[-1]
+    raw_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
+    wealth_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
+    for when, row, wealth_close in zip(series.dates, series.rows, source.wealth_closes, strict=True):
+        slot = axis_pos.get(when)
+        close = row.get("close")
+        if slot is not None and close is not None:
+            raw_closes[slot - first_axis_index] = float(close)
+        selected_wealth_close = close if return_basis == LEGACY_RETURN_BASIS else wealth_close
+        if slot is not None and selected_wealth_close is not None:
+            wealth_closes[slot - first_axis_index] = float(selected_wealth_close)
+    return series, first_axis_index, array("d", raw_closes), array("d", wealth_closes)
 
 
 def _absorb(
@@ -1378,6 +1460,7 @@ class _Corpus:
     #: termination census (criterion 9 — the exclusions are counted, not
     #: narrated). ``None`` only on a hand-built harness corpus.
     selection: UniverseSelection | None = None
+    opportunity_records: Mapping[ResultNamespace, ResultUniverseRecord] = field(default_factory=dict)
 
     @property
     def window(self) -> Window:
@@ -1472,6 +1555,29 @@ def load_corpus(
             "evaluation axis before the frozen boundary — a fold index is a position on the evaluation axis, so a "
             "split cut over a different axis would store indices and dates that do not describe each other"
         )
+    rule_version = (
+        UNIVERSE_SELECTION_RULE_VERSION if universe_basis == "survivorship_free" else VALIDATED_UNIVERSE_RULE_VERSION
+    )
+    opportunity_records: dict[ResultNamespace, ResultUniverseRecord] = {}
+    by_series = {series.series_id: series for series in admitted}
+    namespace_specs: tuple[tuple[ResultNamespace, bool], ...] = (("in_sample", True), ("hold_out", False))
+    for namespace, before_boundary in namespace_specs:
+        eligible_series = {
+            int(row[0])
+            for row in conn.execute(
+                _OPPORTUNITY_SERIES_SQL,
+                {**bounds, "before_boundary": before_boundary, "boundary": HOLDOUT_BOUNDARY},
+            ).fetchall()
+        }
+        eligible = [by_series[series_id] for series_id in sorted(eligible_series)]
+        opportunity_records[namespace] = ResultUniverseRecord(
+            universe_rule_version=rule_version,
+            evaluated_instrument_ids=frozenset(
+                series.instrument_id for series in eligible if series.instrument_id is not None
+            ),
+            evaluated_series_ids=frozenset(series.series_id for series in eligible if series.instrument_id is None),
+            validated_universe_ids=frozenset(universe),
+        )
     return _Corpus(
         universe=universe,
         axis=axis,
@@ -1485,6 +1591,7 @@ def load_corpus(
         universe_basis=universe_basis,
         termination=termination,
         selection=selection,
+        opportunity_records=opportunity_records,
     )
 
 
@@ -1497,31 +1604,25 @@ def _measure_namespace(
     wealth_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
     sizing_rule: str = SIZING_RULE_ID,
 ) -> NamespaceMeasurement | None:
-    """Build this namespace's curve on its own axis and compute criterion 7's set.
-
-    §5's rule, fixed by construction because no published formulation covers it:
-    *a namespace's equity axis is the evaluation axis truncated to the closed
-    span of that namespace's own positions.* Both ends are MEASURED — the
-    in-sample start is that namespace's earliest entry fill and NOT the corpus
-    start, because a strategy's warm-up means its first position lands well
-    after the first bar and an axis padded back to 1962 would dilute exactly the
-    CAGR this rule exists to protect.
-
-    ⚠ THE IN-SAMPLE BOUND IS ASSERTED AGAINST THE FROZEN BOUNDARY. A violation
-    means ``namespace_for_position`` mis-classified a position; it never means
-    the axis needs widening, so it raises rather than adjusting.
-    """
-    if book.first_index is None or book.last_index is None:
+    """Build every metric on the namespace's complete predeclared panel axis."""
+    dates = corpus.in_sample_axis if namespace == "in_sample" else corpus.axis
+    if len(dates) < 2:
+        raise RuntimeError(f"the {namespace} metric axis has {len(dates)} date(s); at least two are required")
+    opportunity = corpus.opportunity_records[namespace]
+    opportunity_keys = frozenset(opportunity.evaluated_instrument_ids) | frozenset(
+        -series_id for series_id in opportunity.evaluated_series_ids
+    )
+    if not opportunity_keys:
         return None
-    lo, hi = book.first_index, book.last_index
-    if hi - lo < 1:
-        return None
-    if namespace == "in_sample" and corpus.axis[hi] >= HOLDOUT_BOUNDARY:
-        raise RuntimeError(
-            f"an in-sample position closes {corpus.axis[hi]}, on or after the frozen boundary {HOLDOUT_BOUNDARY} — "
-            "namespace_for_position must have mis-classified it, and widening the axis would import a withheld bar "
-            "into a training number"
-        )
+    lo = corpus.axis_pos[dates[0]]
+    hi = corpus.axis_pos[dates[-1]]
+    if book.first_index is not None and book.first_index < lo:
+        raise RuntimeError(f"the {namespace} strategy has a leg before its fixed metric axis")
+    if book.last_index is not None and book.last_index > hi:
+        raise RuntimeError(f"the {namespace} strategy has a leg after its fixed metric axis")
+    unexpected = book.instruments - opportunity_keys
+    if unexpected:
+        raise RuntimeError(f"the {namespace} strategy traded names outside its opportunity set: {sorted(unexpected)}")
     # ⚠ ``namespace_for_position`` returns ``in_sample`` only for a position
     # with a close date, so an in-sample book can hold no unrealised leg and
     # every one of them carries a RESOLVED label window. Asserted rather than
@@ -1535,7 +1636,6 @@ def _measure_namespace(
             "would carry an unresolved span"
         )
 
-    dates = corpus.axis[lo : hi + 1]
     shifted = _shifted(book.book, lo)
     if sizing_rule == SIZING_RULE_ID:
         curve = build_equity_curve(shifted, date_count=len(dates))
@@ -1545,7 +1645,6 @@ def _measure_namespace(
         curve = build_month_end_rebalanced_curve(shifted, dates=dates)
     else:
         raise ValueError(f"unknown sizing rule {sizing_rule!r}")
-    instruments = frozenset(book.instruments)
     # ⚠⚠ NOT ``build_equity_curve`` — #2426. The benchmark shares this engine's
     # cost model and fill contract deliberately, but NOT its sizing rule:
     # ``equal_weight_concurrent_v1`` re-imposes equal weight on every event date,
@@ -1554,7 +1653,7 @@ def _measure_namespace(
     # over 137,477,862x the pot. See ``BENCHMARK_RULE_ID``.
     benchmark = build_buy_and_hold_curve(
         _benchmark_book(
-            instruments=instruments,
+            instruments=opportunity_keys,
             raw_closes_by_instrument=raw_closes_by_instrument,
             wealth_closes_by_instrument=wealth_closes_by_instrument,
             lo=lo,
@@ -1563,8 +1662,7 @@ def _measure_namespace(
         date_count=len(dates),
     )
     metrics = compute_metrics(
-        curve,
-        dates=dates,
+        DatedEquityCurve(dates=dates, curve=curve),
         trades=TradeReturns(
             net_return_pct=tuple(book.returns),
             entry_fill_date=tuple(book.entry_dates),
@@ -1572,7 +1670,7 @@ def _measure_namespace(
             open_count=book.open_at_end,
             unpriced_count=sum(book.excluded.values()),
         ),
-        buy_and_hold=benchmark,
+        buy_and_hold=DatedEquityCurve(dates=dates, curve=benchmark),
         bootstrap_seed=BACKTEST_BOOTSTRAP_SEED,
     )
     # ⚠ ACCEPTANCE 7 — every stored row carries a non-null effective sample
@@ -1581,7 +1679,7 @@ def _measure_namespace(
     # carrying a trade), and criterion 3 forbids reporting a nominal *n* in its
     # place. Refused HERE, where the message names the namespace, rather than
     # three layers later as an unexplained refusal-list mismatch.
-    if metrics.effective_sample_size is None:
+    if metrics.trade_count > 0 and metrics.effective_sample_size is None:
         raise RuntimeError(
             f"the {namespace} namespace produced {metrics.trade_count} realised trade(s) over "
             f"{len(dates)} dates and the block bootstrap computed no effective sample size — criterion 3 forbids "
@@ -1602,10 +1700,9 @@ def _measure_namespace(
         # deflation consumes.
         moments=trade_moments(list(book.returns)),
         daily_returns=book.daily_trade_returns(),
-        evaluated_instrument_ids=instruments,
+        universe_record=opportunity,
         position_count=book.positions,
-        axis_first=dates[0],
-        axis_last=dates[-1],
+        axis_dates=dates,
         label_starts=book.label_starts,
         label_ends=book.label_ends,
         rebalance_costs=curve.rebalance_costs,
@@ -1629,6 +1726,7 @@ def evaluate_arm(
     return_basis: str = TOTAL_RETURN_BASIS,
     sizing_rule: str = SIZING_RULE_ID,
     cohort_size: int | None = None,
+    scale_budget: SyntheticControlScaleBudget | None = None,
     regime_provider: MarketRegimeProvider | None = None,
 ) -> ArmMeasurement:
     """One ``(strategy, quarantine arm)`` corpus pass, end to end.
@@ -1693,6 +1791,13 @@ def evaluate_arm(
     raw_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     wealth_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     ranking: dict[SignalKind, _CrossSection] | None = None
+    opportunity_keys = set().union(
+        *(
+            set(corpus.opportunity_records[name].evaluated_instrument_ids)
+            | {-series_id for series_id in corpus.opportunity_records[name].evaluated_series_ids}
+            for name in namespaces
+        )
+    )
 
     if entry.strategy_class == "cross_sectional":
         ranking = _rank_cross_sections(
@@ -1701,14 +1806,14 @@ def evaluate_arm(
             corpus=corpus,
             quarantine_arm=quarantine_arm,
             regime_provider=regime_provider,
+            opportunity_keys=opportunity_keys,
             progress=progress,
         )
 
     evaluated = 0
     total = len(corpus.pairs)
     for series_seen, (instrument_id, series_id) in enumerate(corpus.pairs, start=1):
-        masked = load_masked_series(conn, series_id, arm=quarantine_arm)
-        if not masked.bars:
+        if instrument_id not in opportunity_keys:
             _emit_series_progress(
                 progress,
                 phase="evaluation",
@@ -1719,7 +1824,31 @@ def evaluate_arm(
                 series_total=total,
             )
             continue
-        series = _to_series(masked.bars)
+        price_arms = load_arms(conn, series_id, through_date=corpus.window.end)
+        masked = price_arms[quarantine_arm]
+        benchmark_source = price_arms["admitted"]
+        benchmark_history = _dense_price_history(
+            benchmark_source,
+            axis_pos=corpus.axis_pos,
+            return_basis=return_basis,
+        )
+        if benchmark_history is None:
+            raise RuntimeError(f"opportunity series {series_id} has no admitted observation on the metric axis")
+        _, benchmark_first, benchmark_raw, benchmark_wealth = benchmark_history
+        raw_closes_by_instrument[instrument_id] = (benchmark_first, benchmark_raw)
+        wealth_closes_by_instrument[instrument_id] = (benchmark_first, benchmark_wealth)
+
+        strategy_history = _dense_price_history(masked, axis_pos=corpus.axis_pos, return_basis=return_basis)
+        series = _to_series(masked.bars) if strategy_history is None else strategy_history[0]
+        signals = _signals_for(
+            entry,
+            series,
+            instrument_id=instrument_id,
+            ranking=ranking,
+            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+            regime_provider=regime_provider,
+            universe=corpus.universe_basis,
+        )
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
             _emit_series_progress(
@@ -1732,36 +1861,18 @@ def evaluate_arm(
                 series_total=total,
             )
             continue
+        # ⚠ AFTER the two-bar skip, not before it. `series_evaluated` is a
+        # reported evidence figure and feeds `evaluated_instrument_count`, so it
+        # must count series that CONTRIBUTED to the corpus pass — a series with
+        # fewer than two axis-aligned bars contributes nothing and inflating the
+        # count makes an arm look broader than it was.
         evaluated += 1
-        first_axis_index, last_axis_index = indices[0], indices[-1]
+        assert strategy_history is not None
+        _, first_axis_index, strategy_raw_closes, strategy_wealth_closes = strategy_history
         # ⚠ One dense close array per INSTRUMENT, spanning its own first to last
         # axis index with `nan` in between. That is what makes a leg's mark slice
         # O(1) to cut, and it is ~25M floats over the corpus rather than the 85M
         # a full dense panel would need.
-        if len(masked.wealth_closes) != len(series):
-            raise RuntimeError(f"series {series_id} has misaligned raw and wealth observations")
-        raw_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
-        wealth_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
-        for when, row, wealth_close in zip(series.dates, series.rows, masked.wealth_closes, strict=True):
-            slot = corpus.axis_pos.get(when)
-            close = row.get("close")
-            if slot is not None and close is not None:
-                raw_closes[slot - first_axis_index] = float(close)
-            selected_wealth_close = close if return_basis == LEGACY_RETURN_BASIS else wealth_close
-            if slot is not None and selected_wealth_close is not None:
-                wealth_closes[slot - first_axis_index] = float(selected_wealth_close)
-        raw_closes_by_instrument[instrument_id] = (first_axis_index, array("d", raw_closes))
-        wealth_closes_by_instrument[instrument_id] = (first_axis_index, array("d", wealth_closes))
-
-        signals = _signals_for(
-            entry,
-            series,
-            instrument_id=instrument_id,
-            ranking=ranking,
-            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
-            regime_provider=regime_provider,
-            universe=corpus.universe_basis,
-        )
         rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
         entries, exits = _fills(rows, instrument_id)
         outcomes = (
@@ -1794,8 +1905,8 @@ def evaluate_arm(
             series=series,
             window=corpus.window,
             axis_pos=corpus.axis_pos,
-            raw_closes=raw_closes,
-            wealth_closes=wealth_closes,
+            raw_closes=strategy_raw_closes,
+            wealth_closes=strategy_wealth_closes,
             first_axis_index=first_axis_index,
             instrument_id=instrument_id,
             books=books,
@@ -1809,8 +1920,8 @@ def evaluate_arm(
                 series=series,
                 costed=costed,
                 axis_pos=corpus.axis_pos,
-                raw_closes=raw_closes,
-                wealth_closes=wealth_closes,
+                raw_closes=strategy_raw_closes,
+                wealth_closes=strategy_wealth_closes,
                 first_axis_index=first_axis_index,
             )
         _emit_series_progress(
@@ -1851,6 +1962,11 @@ def evaluate_arm(
             corpus=corpus,
             cohort_size=cohort_size,
             label=f"{entry.strategy_id}/{ambiguity_arm or 'shared'}/{quarantine_arm}",
+            progress=progress,
+            strategy_id=entry.strategy_id,
+            quarantine_arm=quarantine_arm,
+            ambiguity_arm=ambiguity_arm,
+            scale_budget=scale_budget,
         ),
     )
 
@@ -1881,6 +1997,11 @@ def _run_cohort_for(
     corpus: _Corpus,
     cohort_size: int | None,
     label: str,
+    strategy_id: str,
+    quarantine_arm: QuarantineArm,
+    ambiguity_arm: AmbiguityArm | None = None,
+    progress: ProgressCallback | None = None,
+    scale_budget: SyntheticControlScaleBudget | None = None,
 ) -> CohortResult | None:
     """§9's control for this arm, once the sleeve it is compared against exists.
 
@@ -1898,29 +2019,40 @@ def _run_cohort_for(
             f"{label} asked for §9's control but produced no {CONTROL_NAMESPACE} measurement to compare it against — "
             "a cohort with no strategy Sharpe beside it is a null distribution nobody can read"
         )
+    if outcome.metrics.trade_count == 0:
+        return None
+
+    def report_member(member_seen: int, member_total: int) -> None:
+        _emit_progress(
+            progress,
+            BacktestProgressEvent(
+                phase="synthetic_control",
+                strategy_id=strategy_id,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=ambiguity_arm,
+                series_seen=member_seen,
+                series_total=member_total,
+            ),
+        )
+
     result = run_cohort(
         collector,
-        axis=corpus.axis,
+        axis=outcome.axis_dates,
         strategy_metrics=outcome.metrics,
         benchmark=None,
         cohort_size=cohort_size,
+        progress=report_member if progress is not None else None,
+        scale_budget=scale_budget,
+        label=label,
     )
     logger.info(
-        "strategy_backtest_run: %s synthetic control — %d members over %d series in %.1fs (%.3fs/member), "
-        "cohort mean %.3f%% CI [%.3f, %.3f], cohort Sharpe p%.0f %.4f against %.4f, passed=%s, unmatchable %s",
+        "strategy_backtest_run: %s synthetic control completed — %d members over %d series in %.1fs "
+        "(%.3fs/member); outcomes withheld pending structural completion audit",
         label,
         result.control.cohort_size,
         result.series_placed,
         result.elapsed_s,
         result.seconds_per_member,
-        result.control.mean_return_pct,
-        result.control.mean_return_ci_low_pct,
-        result.control.mean_return_ci_high_pct,
-        result.control.sharpe_percentile,
-        result.control.cohort_sharpe_threshold,
-        result.control.strategy_sharpe,
-        result.control.passed,
-        result.unmatchable,
     )
     return result
 
@@ -1937,6 +2069,7 @@ def evaluate_level_arms(
     return_basis: str = TOTAL_RETURN_BASIS,
     sizing_rule: str = SIZING_RULE_ID,
     cohort_size: int | None = None,
+    scale_budget: SyntheticControlScaleBudget | None = None,
     regime_provider: MarketRegimeProvider | None = None,
 ) -> tuple[ArmMeasurement, ...]:
     """Evaluate both daily-OHLC ambiguity projections from one corpus pass.
@@ -1990,6 +2123,13 @@ def evaluate_level_arms(
     }
     raw_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     wealth_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
+    opportunity_keys = set().union(
+        *(
+            set(corpus.opportunity_records[name].evaluated_instrument_ids)
+            | {-series_id for series_id in corpus.opportunity_records[name].evaluated_series_ids}
+            for name in namespaces
+        )
+    )
     ranking = (
         _rank_cross_sections(
             conn,
@@ -1997,6 +2137,7 @@ def evaluate_level_arms(
             corpus=corpus,
             quarantine_arm=quarantine_arm,
             regime_provider=regime_provider,
+            opportunity_keys=opportunity_keys,
             progress=progress,
         )
         if entry.strategy_class == "cross_sectional"
@@ -2006,8 +2147,7 @@ def evaluate_level_arms(
     evaluated = 0
     total = len(corpus.pairs)
     for series_seen, (instrument_id, series_id) in enumerate(corpus.pairs, start=1):
-        masked = load_masked_series(conn, series_id, arm=quarantine_arm)
-        if not masked.bars:
+        if instrument_id not in opportunity_keys:
             _emit_series_progress(
                 progress,
                 phase="evaluation",
@@ -2018,7 +2158,31 @@ def evaluate_level_arms(
                 series_total=total,
             )
             continue
-        series = _to_series(masked.bars)
+        price_arms = load_arms(conn, series_id, through_date=corpus.window.end)
+        masked = price_arms[quarantine_arm]
+        benchmark_source = price_arms["admitted"]
+        benchmark_history = _dense_price_history(
+            benchmark_source,
+            axis_pos=corpus.axis_pos,
+            return_basis=return_basis,
+        )
+        if benchmark_history is None:
+            raise RuntimeError(f"opportunity series {series_id} has no admitted observation on the metric axis")
+        _, benchmark_first, benchmark_raw, benchmark_wealth = benchmark_history
+        raw_closes_by_instrument[instrument_id] = (benchmark_first, benchmark_raw)
+        wealth_closes_by_instrument[instrument_id] = (benchmark_first, benchmark_wealth)
+
+        strategy_history = _dense_price_history(masked, axis_pos=corpus.axis_pos, return_basis=return_basis)
+        series = _to_series(masked.bars) if strategy_history is None else strategy_history[0]
+        signals = _signals_for(
+            entry,
+            series,
+            instrument_id=instrument_id,
+            ranking=ranking,
+            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+            regime_provider=regime_provider,
+            universe=corpus.universe_basis,
+        )
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
             _emit_series_progress(
@@ -2031,34 +2195,14 @@ def evaluate_level_arms(
                 series_total=total,
             )
             continue
+        # ⚠ AFTER the two-bar skip, not before it. `series_evaluated` is a
+        # reported evidence figure and feeds `evaluated_instrument_count`, so it
+        # must count series that CONTRIBUTED to the corpus pass — a series with
+        # fewer than two axis-aligned bars contributes nothing and inflating the
+        # count makes an arm look broader than it was.
         evaluated += 1
-        first_axis_index, last_axis_index = indices[0], indices[-1]
-        if len(masked.wealth_closes) != len(series):
-            raise RuntimeError(f"series {series_id} has misaligned raw and wealth observations")
-        raw_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
-        wealth_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
-        for when, row, wealth_close in zip(series.dates, series.rows, masked.wealth_closes, strict=True):
-            slot = corpus.axis_pos.get(when)
-            close = row.get("close")
-            if slot is not None and close is not None:
-                raw_closes[slot - first_axis_index] = float(close)
-            selected_wealth_close = close if return_basis == LEGACY_RETURN_BASIS else wealth_close
-            if slot is not None and selected_wealth_close is not None:
-                wealth_closes[slot - first_axis_index] = float(selected_wealth_close)
-        # Read-only after construction. Both namespace measurements must mark
-        # against the same observations; no arm mutates this array.
-        raw_closes_by_instrument[instrument_id] = (first_axis_index, array("d", raw_closes))
-        wealth_closes_by_instrument[instrument_id] = (first_axis_index, array("d", wealth_closes))
-
-        signals = _signals_for(
-            entry,
-            series,
-            instrument_id=instrument_id,
-            ranking=ranking,
-            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
-            regime_provider=regime_provider,
-            universe=corpus.universe_basis,
-        )
+        assert strategy_history is not None
+        _, first_axis_index, strategy_raw_closes, strategy_wealth_closes = strategy_history
         rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
         entries, exits = _fills(rows, instrument_id)
         outcomes: Mapping[AmbiguityArm, Sequence[ResolvedOutcome]]
@@ -2118,8 +2262,8 @@ def evaluate_level_arms(
                 series=series,
                 window=corpus.window,
                 axis_pos=corpus.axis_pos,
-                raw_closes=raw_closes,
-                wealth_closes=wealth_closes,
+                raw_closes=strategy_raw_closes,
+                wealth_closes=strategy_wealth_closes,
                 first_axis_index=first_axis_index,
                 instrument_id=instrument_id,
                 books=books[ambiguity],
@@ -2135,8 +2279,8 @@ def evaluate_level_arms(
                     series=series,
                     costed=costed,
                     axis_pos=corpus.axis_pos,
-                    raw_closes=raw_closes,
-                    wealth_closes=wealth_closes,
+                    raw_closes=strategy_raw_closes,
+                    wealth_closes=strategy_wealth_closes,
                     first_axis_index=first_axis_index,
                 )
         _emit_series_progress(
@@ -2181,6 +2325,11 @@ def evaluate_level_arms(
                     corpus=corpus,
                     cohort_size=cohort_size,
                     label=f"{entry.strategy_id}/{ambiguity}/{quarantine_arm}",
+                    progress=progress,
+                    strategy_id=entry.strategy_id,
+                    quarantine_arm=quarantine_arm,
+                    ambiguity_arm=ambiguity,
+                    scale_budget=scale_budget,
                 ),
             )
         )
@@ -2283,6 +2432,7 @@ def _rank_cross_sections(
     corpus: _Corpus,
     quarantine_arm: QuarantineArm,
     regime_provider: MarketRegimeProvider,
+    opportunity_keys: Set[int],
     progress: ProgressCallback | None = None,
 ) -> dict[SignalKind, _CrossSection]:
     """Sub-pass A per ranked leg — one corpus read per leg, S-2 one, S-10 two.
@@ -2300,6 +2450,7 @@ def _rank_cross_sections(
             corpus=corpus,
             quarantine_arm=quarantine_arm,
             regime_provider=regime_provider,
+            opportunity_keys=opportunity_keys,
             leg=leg,
             progress=progress,
         )
@@ -2314,10 +2465,11 @@ def _rank_cross_section(
     corpus: _Corpus,
     quarantine_arm: QuarantineArm,
     regime_provider: MarketRegimeProvider,
+    opportunity_keys: Set[int],
     leg: SignalKind = "entry",
     progress: ProgressCallback | None = None,
 ) -> _CrossSection:
-    """Sub-pass A: stage every member and rank each decision date's cross-section.
+    """Sub-pass A: stage every opportunity member and rank each decision date's cross-section.
 
     ⚠ ONLY THE SCORES ARE KEPT. ``stage_cross_sectional_member`` is public for
     exactly this — *"a full-corpus census cannot hold every member's bars in
@@ -2342,7 +2494,23 @@ def _rank_cross_section(
     scores: dict[date, dict[int, float]] = {}
     total = len(corpus.pairs)
     for series_seen, (instrument_id, series_id) in enumerate(corpus.pairs, start=1):
-        masked = load_masked_series(conn, series_id, arm=quarantine_arm)
+        if instrument_id not in opportunity_keys:
+            _emit_series_progress(
+                progress,
+                phase="ranking",
+                entry=entry,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=None,
+                series_seen=series_seen,
+                series_total=total,
+            )
+            continue
+        masked = load_masked_series(
+            conn,
+            series_id,
+            arm=quarantine_arm,
+            through_date=corpus.window.end,
+        )
         if not masked.bars:
             _emit_series_progress(
                 progress,
@@ -2551,6 +2719,7 @@ def build_result(
     quarantine_arm: QuarantineArm,
     deflated: DeflatedSharpeResult | None,
     evaluation_window: Window | None = None,
+    evidence_window_id: str | None = None,
     synthetic_control: SyntheticControl | None = None,
     universe_basis: Universe = BACKTEST_UNIVERSE,
 ) -> StrategyResult:
@@ -2597,6 +2766,13 @@ def build_result(
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
             return_basis=TOTAL_RETURN_BASIS,
             ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+            metric_axis_dates=outcome.axis_dates,
+            metric_axis_start=outcome.axis_dates[0],
+            metric_axis_end=outcome.axis_dates[-1],
+            metric_axis_digest=metric_axis_sha256(outcome.axis_dates),
+            opportunity_set_digest=record_sha256(outcome.universe_record),
+            evidence_window_id=evidence_window_id,
         ),
         purpose=purpose,
         metrics=outcome.metrics,
@@ -2607,7 +2783,9 @@ def build_result(
         # silently undo.
         carry_unmodelled=CARRY_UNMODELLED,
         fx_unmodelled=FX_UNMODELLED,
-        evaluated_instrument_count=len(outcome.evaluated_instrument_ids),
+        evaluated_instrument_count=(
+            len(outcome.universe_record.evaluated_instrument_ids) + len(outcome.universe_record.evaluated_series_ids)
+        ),
         trial_count=None if deflated is None else deflated.declared_trials,
         deflated_sharpe=None if deflated is None else Decimal(repr(deflated.deflated_sharpe)),
         deflated=deflated,
@@ -2626,6 +2804,7 @@ def _candidate(
     *,
     validated: frozenset[int],
     evaluated: frozenset[int],
+    evaluated_series: frozenset[int] = frozenset(),
     holdout_evaluations: int,
     recorded_accesses: int,
     ambiguity_material: bool | None,
@@ -2650,6 +2829,7 @@ def _candidate(
         result=result,
         evaluated_instrument_ids=evaluated,
         validated_universe_ids=validated,
+        evaluated_series_ids=evaluated_series,
         holdout_evaluations=holdout_evaluations,
         recorded_accesses=recorded_accesses,
         ambiguity_material=ambiguity_material,
@@ -2889,7 +3069,7 @@ def run_backtest(
     holdout_accessed_by: str | None = None,
     trial_register_version: str | None = None,
     limit: int | None = None,
-    evaluation_window: Window | None = None,
+    evidence_window_id: str | None = None,
     manifest: Mapping[str, StrategyEntry] = STRATEGY_MANIFEST,
     progress: ProgressCallback | None = None,
     synthetic_control: bool = False,
@@ -2966,9 +3146,10 @@ def run_backtest(
             "that does not describe the search"
         )
     holdout_requested = _check_holdout_pairing(purpose=holdout_purpose, accessed_by=holdout_accessed_by)
-    namespaces = _namespaces_for_window(
+    window, namespaces = _resolve_invocation_window(
         holdout_requested=holdout_requested,
-        evaluation_window=evaluation_window,
+        evidence_window_id=evidence_window_id,
+        universe=universe,
     )
 
     cohort_size = SPEC_COHORT_SIZE if synthetic_control else None
@@ -2989,7 +3170,7 @@ def run_backtest(
         raise RuntimeError("no manifest strategy is runnable — every entry is blocked, so there is nothing to store")
 
     _emit_progress(progress, BacktestProgressEvent(phase="corpus"))
-    corpus = load_corpus(conn, universe_basis=universe, limit=limit, evaluation_window=evaluation_window)
+    corpus = load_corpus(conn, universe_basis=universe, limit=limit, evaluation_window=window)
     _emit_progress(
         progress,
         BacktestProgressEvent(
@@ -3020,6 +3201,13 @@ def run_backtest(
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
             return_basis=TOTAL_RETURN_BASIS,
             ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+            metric_axis_dates=(corpus.in_sample_axis if namespace == "in_sample" else corpus.axis),
+            metric_axis_start=(corpus.in_sample_axis if namespace == "in_sample" else corpus.axis)[0],
+            metric_axis_end=(corpus.in_sample_axis if namespace == "in_sample" else corpus.axis)[-1],
+            metric_axis_digest=metric_axis_sha256(corpus.in_sample_axis if namespace == "in_sample" else corpus.axis),
+            opportunity_set_digest=record_sha256(corpus.opportunity_records[namespace]),
+            evidence_window_id=evidence_window_id,
         )
         for entry_id in runnable
         for namespace in namespaces
@@ -3027,6 +3215,15 @@ def run_backtest(
         for quarantine in QUARANTINE_ARM_ORDER
     ]
     assert_no_existing_results(conn, planned)
+
+    planned_controls = 0
+    if cohort_size is not None:
+        for entry_id in runnable:
+            ambiguity_passes = (
+                2 if _regime_for(manifest[entry_id], corpus.axis).level_based or corpus.termination else 1
+            )
+            planned_controls += len(QUARANTINE_ARM_ORDER) * ambiguity_passes
+    progress = _ControlProgress(progress, planned_controls)
 
     logger.info(
         "strategy_backtest_run: %d runnable strategy(ies) %s x %d quarantine arm(s) over %d series, "
@@ -3052,6 +3249,7 @@ def run_backtest(
 
     # 1. Evaluate every strategy x quarantine arm, holding metrics in memory.
     arms: list[ArmMeasurement] = []
+    scale_budget = SyntheticControlScaleBudget() if cohort_size is not None else None
     for entry_id in runnable:
         regime = _regime_for(manifest[entry_id], corpus.axis)
         for quarantine in QUARANTINE_ARM_ORDER:
@@ -3065,6 +3263,7 @@ def run_backtest(
                     namespaces=namespaces,
                     progress=progress,
                     cohort_size=cohort_size,
+                    scale_budget=scale_budget,
                 )
             else:
                 measurements = (
@@ -3078,20 +3277,20 @@ def run_backtest(
                         namespaces=namespaces,
                         progress=progress,
                         cohort_size=cohort_size,
+                        scale_budget=scale_budget,
                     ),
                 )
             for measurement in measurements:
                 _assert_ambiguity_contract(measurement)
                 arms.append(measurement)
                 logger.info(
-                    "strategy_backtest_run: %s/%s/%s evaluated %d series in %.1fs — %s, hold-out discarded %d",
+                    "strategy_backtest_run: %s/%s/%s evaluation completed over %d series in %.1fs; "
+                    "outcomes withheld pending structural completion audit",
                     entry_id,
                     measurement.ambiguity_arm or "shared",
                     quarantine,
                     measurement.series_evaluated,
                     measurement.elapsed_s,
-                    {name: outcome.position_count for name, outcome in measurement.namespaces.items()},
-                    measurement.holdout_positions_discarded,
                 )
             if release_read_locks:
                 # An arm is a full corpus pass, and the arms are independent —
@@ -3117,13 +3316,6 @@ def run_backtest(
         deflations[group] = deflation
         if reason is not None:
             refusals[f"{group[0]}/{group[1]}/{group[2]}"] = reason
-            logger.warning(
-                "strategy_backtest_run: no Deflated Sharpe for %s/%s/%s — %s",
-                group[0],
-                group[1],
-                group[2],
-                reason,
-            )
 
     # 3. Write, one transaction per arm pair.
     _emit_progress(progress, BacktestProgressEvent(phase="write"))
@@ -3146,6 +3338,7 @@ def run_backtest(
             holdout_purpose=holdout_purpose,
             holdout_accessed_by=holdout_accessed_by,
             corpus=corpus,
+            evidence_window_id=evidence_window_id,
             strategy_purposes={strategy_id: entry.purpose for strategy_id, entry in manifest.items()},
         )
         report = BacktestRunReport(
@@ -3192,28 +3385,32 @@ def _check_holdout_pairing(*, purpose: str | None, accessed_by: str | None) -> b
     return True
 
 
-def _namespaces_for_window(
+def _resolve_invocation_window(
     *,
     holdout_requested: bool,
-    evaluation_window: Window | None,
-) -> tuple[ResultNamespace, ...]:
-    """Bind custom windows to audited hold-out evidence and nothing else.
+    evidence_window_id: str | None,
+    universe: Universe,
+) -> tuple[Window | None, tuple[ResultNamespace, ...]]:
+    """Close the invocation matrix before any corpus read (#2697).
 
-    The frozen 1962–2026 run keeps its original namespace behaviour. A custom
-    window is deliberately narrower: it may only inspect dates from the hold-out
-    side of the frozen boundary and cannot produce an ``in_sample`` row under a
-    different date range. The public runner only supplies registered windows.
+    In-sample has neither an evidence-window ID nor hold-out audit fields.
+    Hold-out is reachable only through one append-only registered recent window
+    and requires both audit fields (already validated by ``_check_holdout_pairing``).
+    The former full-history hold-out mode is intentionally no longer expressible.
     """
-    if evaluation_window is None:
-        return ("in_sample", "hold_out") if holdout_requested else ("in_sample",)
-    if evaluation_window.start < HOLDOUT_BOUNDARY:
-        raise ValueError(
-            f"a custom recent-evidence window must start on or after the frozen hold-out boundary "
-            f"{HOLDOUT_BOUNDARY}; got {evaluation_window.start}"
-        )
+    if evidence_window_id is None:
+        if holdout_requested:
+            raise ValueError(
+                "hold-out audit fields require a registered evidence_window_id; "
+                "full-history hold-out evaluation is not a frozen causal construction"
+            )
+        return None, ("in_sample",)
     if not holdout_requested:
-        raise ValueError("a custom recent-evidence window is hold-out evidence and requires an audited access")
-    return ("hold_out",)
+        raise ValueError("evidence_window_id is hold-out evidence and requires both non-blank audit fields")
+    item = recent_evidence_window(evidence_window_id)
+    if universe == "survivorship_free" and item.window.end > INTRADER_CAPTURE_DATE:  # pragma: no cover - registry guard
+        raise ValueError(f"registered evidence window {evidence_window_id!r} exceeds the frozen archive capture")
+    return item.window, ("hold_out",)
 
 
 def _assert_ambiguity_contract(measurement: ArmMeasurement) -> None:
@@ -3242,6 +3439,21 @@ def _control_for(measurement: ArmMeasurement, namespace: ResultNamespace) -> Syn
     return measurement.cohort.control
 
 
+def _assert_same_opportunity_population(
+    *,
+    strategy_id: str,
+    ambiguity: AmbiguityArm,
+    namespace: ResultNamespace,
+    masked: NamespaceMeasurement,
+    admitted: NamespaceMeasurement,
+) -> None:
+    """Refuse an arm pair whose supposedly pre-mask population moved."""
+    if masked.universe_record != admitted.universe_record:
+        raise RuntimeError(
+            f"{strategy_id}/{ambiguity}/{namespace} quarantine arms carry different pre-mask opportunity populations"
+        )
+
+
 def _write_rows(
     conn: psycopg.Connection[Any],
     *,
@@ -3252,6 +3464,7 @@ def _write_rows(
     holdout_purpose: str | None,
     holdout_accessed_by: str | None,
     corpus: _Corpus,
+    evidence_window_id: str | None,
     strategy_purposes: Mapping[str, StrategyPurpose],
 ) -> tuple[WrittenRow, ...]:
     """Criterion 9's arm pairs, ``masked`` and ``admitted`` in one transaction each.
@@ -3306,6 +3519,13 @@ def _write_rows(
                     f"{strategy_id}/{ambiguity} produced {sorted(measured)} rather than both quarantine arms"
                 )
             for namespace in sorted(set(masked_arm.namespaces) & set(admitted_arm.namespaces)):
+                _assert_same_opportunity_population(
+                    strategy_id=strategy_id,
+                    ambiguity=ambiguity,
+                    namespace=namespace,
+                    masked=masked_arm.namespaces[namespace],
+                    admitted=admitted_arm.namespaces[namespace],
+                )
                 masked = build_result(
                     masked_arm.namespaces[namespace],
                     strategy_id=strategy_id,
@@ -3318,6 +3538,7 @@ def _write_rows(
                         deflations.get((namespace, ambiguity, "masked")),
                     ),
                     evaluation_window=corpus.window,
+                    evidence_window_id=evidence_window_id,
                     synthetic_control=_control_for(masked_arm, namespace),
                     universe_basis=corpus.universe_basis,
                 )
@@ -3333,6 +3554,7 @@ def _write_rows(
                         deflations.get((namespace, ambiguity, "admitted")),
                     ),
                     evaluation_window=corpus.window,
+                    evidence_window_id=evidence_window_id,
                     synthetic_control=_control_for(admitted_arm, namespace),
                     universe_basis=corpus.universe_basis,
                 )
@@ -3348,7 +3570,6 @@ def _write_rows(
     _preflight_gate(
         pending,
         arms=arms,
-        validated=validated,
         holdout_requested=holdout_requested,
         prior_holdout=prior_holdout,
     )
@@ -3482,6 +3703,7 @@ def _write_rows(
                 result,
                 validated=record.validated_universe_ids,
                 evaluated=record.evaluated_instrument_ids,
+                evaluated_series=record.evaluated_series_ids,
                 holdout_evaluations=evaluations,
                 recorded_accesses=accesses,
                 ambiguity_material=ambiguity_material,
@@ -3583,16 +3805,10 @@ def _cut_splits(
             bar_counts=corpus.in_sample_bar_counts,
         )
         logger.info(
-            "strategy_backtest_run: %s/%s split %s over %d observation(s) of %d in-sample position(s) — "
-            "embargo %s, purged %s, embargoed %s",
+            "strategy_backtest_run: %s/%s split %s prepared; census withheld pending structural completion audit",
             measurement.strategy_id,
             measurement.quarantine_arm,
             split.model_id,
-            split.observation_count,
-            outcome.position_count,
-            [record.embargo_bars for record in split.folds],
-            [record.census.purged for record in split.folds],
-            [record.census.embargoed for record in split.folds],
         )
         # ⚠⚠ A DUPLICATE KEY IS REFUSED, NOT OVERWRITTEN. ``run_backtest`` builds
         # ``arms`` one per ``(strategy, quarantine arm)`` so this cannot fire
@@ -3627,6 +3843,19 @@ def _evaluated_ids(arms: Sequence[ArmMeasurement], result: StrategyResult) -> fr
     raise RuntimeError(  # pragma: no cover - every stored row came from a measurement
         f"no measurement matches the stored row {result.identity.version}"
     )
+
+
+def _universe_record_for(arms: Sequence[ArmMeasurement], result: StrategyResult) -> ResultUniverseRecord:
+    for measurement in arms:
+        if (
+            measurement.strategy_id == result.identity.strategy_id
+            and measurement.quarantine_arm == result.identity.quarantine_arm
+            and measurement.ambiguity_arm in {None, result.identity.ambiguity_arm}
+        ):
+            outcome = measurement.namespaces.get(result.identity.namespace)
+            if outcome is not None:
+                return outcome.universe_record
+    raise RuntimeError(f"no universe record matches the stored row {result.identity.version}")
 
 
 def _termination_census_for(
@@ -3717,40 +3946,24 @@ def _store_universe_record(
     a drift would otherwise surface only at the promotion transition, as an
     ``evaluated_universe_count_mismatch`` refusal on a row already committed.
     """
-    evaluated = _evaluated_ids(arms, result)
-    if len(evaluated) != result.evaluated_instrument_count:
+    record = _universe_record_for(arms, result)
+    population_count = len(record.evaluated_instrument_ids) + len(record.evaluated_series_ids)
+    if population_count != result.evaluated_instrument_count:
         raise RuntimeError(
-            f"{result.identity.version} would freeze {len(evaluated)} evaluated names against a row "
+            f"{result.identity.version} would freeze {population_count} evaluated names against a row "
             f"claiming {result.evaluated_instrument_count} — the universe record must describe its own row"
         )
-    # #2721 step 3 — the in-pass name key splits at the write boundary: real
-    # instrument ids persist as instrument ids, and a negative key (an
-    # unlinked dead series) persists as its SERIES id. No negative value may
-    # reach a column typed as an instrument id.
-    instrument_ids = frozenset(key for key in evaluated if key > 0)
-    series_ids = frozenset(-key for key in evaluated if key < 0)
-    rule_version = (
-        UNIVERSE_SELECTION_RULE_VERSION
-        if result.universe_basis == "survivorship_free"
-        else VALIDATED_UNIVERSE_RULE_VERSION
-    )
-    store_result_universe(
-        conn,
-        result_id=result_id,
-        record=ResultUniverseRecord(
-            universe_rule_version=rule_version,
-            evaluated_instrument_ids=instrument_ids,
-            validated_universe_ids=validated,
-            evaluated_series_ids=series_ids,
-        ),
-    )
+    if record.validated_universe_ids != validated:
+        raise RuntimeError(f"{result.identity.version} opportunity record disagrees with the run's validated set")
+    if record_sha256(record) != result.identity.opportunity_set_digest:
+        raise RuntimeError(f"{result.identity.version} opportunity digest disagrees with its universe child")
+    store_result_universe(conn, result_id=result_id, record=record)
 
 
 def _preflight_gate(
     pending: Sequence[tuple[str, ResultNamespace, AmbiguityArm, StrategyResult, StrategyResult]],
     *,
     arms: Sequence[ArmMeasurement],
-    validated: frozenset[int],
     holdout_requested: bool,
     prior_holdout: Mapping[tuple[str, str], int],
 ) -> None:
@@ -3778,16 +3991,13 @@ def _preflight_gate(
         for result in (masked, admitted):
             count = projected[(result.identity.strategy_id, result.identity.strategy_version)]
             ambiguity_material = _ambiguity_material_for(arms, result)
+            record = _universe_record_for(arms, result)
             outcome = check_promotable(
                 _candidate(
                     result,
-                    validated=validated,
-                    # ⚠ The row's OWN evaluated set is not needed to predict the
-                    # refusal list — only whether it is empty and inside the
-                    # validated universe — and both hold for any namespace this
-                    # job measured. A non-empty subset is supplied so the two
-                    # universe clauses are exercised rather than skipped.
-                    evaluated=frozenset({next(iter(validated))}) if validated else frozenset(),
+                    validated=record.validated_universe_ids,
+                    evaluated=record.evaluated_instrument_ids,
+                    evaluated_series=record.evaluated_series_ids,
                     holdout_evaluations=count,
                     recorded_accesses=count,
                     ambiguity_material=ambiguity_material,
@@ -3857,7 +4067,7 @@ def _assert_every_runnable_produced_rows(
 
 
 def log_report(report: BacktestRunReport) -> None:
-    """Spec §11's per-run report, emitted by the job rather than by a script."""
+    """Outcome-free completion report; values stay behind the structural audit."""
     logger.info(
         "strategy_backtest_run: %d row(s) over %s; hold-out %s; trial register %s (M = %d)",
         report.rows_written,
@@ -3879,61 +4089,27 @@ def log_report(report: BacktestRunReport) -> None:
         logger.info("  EXCLUDED %s: %s", excluded.strategy_id, excluded.reason)
     for measurement in report.arms:
         logger.info(
-            "  %s/%s %.1fs series=%d close_sources=%s holdout_discarded=%d",
+            "  %s/%s/%s %.1fs series=%d; outcomes withheld pending structural audit",
             measurement.strategy_id,
+            measurement.ambiguity_arm or "shared",
             measurement.quarantine_arm,
             measurement.elapsed_s,
             measurement.series_evaluated,
-            dict(sorted(measurement.close_sources.items())),
-            measurement.holdout_positions_discarded,
         )
-        for namespace, outcome in sorted(measurement.namespaces.items()):
-            logger.info(
-                "    %s axis %s…%s positions=%d instruments=%d sharpe=%.4f ess=%s",
-                namespace,
-                outcome.axis_first,
-                outcome.axis_last,
-                outcome.position_count,
-                len(outcome.evaluated_instrument_ids),
-                outcome.metrics.sharpe,
-                outcome.metrics.effective_sample_size,
-            )
         cohort = measurement.cohort
-        if cohort is None:
-            # ⚠ SAID, not omitted. §11's report is what an operator reads to
-            # find out why a row refuses, and "the control does not appear in
-            # the report" is indistinguishable from "the control was lost".
-            logger.info("    synthetic control: NOT RUN — the invocation did not ask for one")
-        else:
+        if cohort is not None:
             logger.info(
-                "    synthetic control %s/%s: %d members, %d series, %.1fs (%.3fs/member); "
-                "mean %.3f%% CI [%.3f, %.3f] contains_zero=%s; sharpe p%.0f %.4f vs strategy %.4f exceeds=%s; "
-                "passed=%s; exposure %+.2fpp turnover %+.3f; unmatchable=%s no_slack_series=%d",
+                "    synthetic control %s/%s: %d members, %d series, %.1fs (%.3fs/member); outcomes withheld",
                 cohort.control.model_id,
                 cohort.placement_space_id,
                 cohort.control.cohort_size,
                 cohort.series_placed,
                 cohort.elapsed_s,
                 cohort.seconds_per_member,
-                cohort.control.mean_return_pct,
-                cohort.control.mean_return_ci_low_pct,
-                cohort.control.mean_return_ci_high_pct,
-                cohort.control.mean_return_ci_contains_zero,
-                cohort.control.sharpe_percentile,
-                cohort.control.cohort_sharpe_threshold,
-                cohort.control.strategy_sharpe,
-                cohort.control.sharpe_exceeds_cohort,
-                cohort.control.passed,
-                cohort.residual.exposure_delta_pct_points,
-                cohort.residual.turnover_delta,
-                dict(sorted(cohort.unmatchable.items())),
-                cohort.no_slack_series,
             )
-    for group, reason in sorted(report.deflation_refusals.items()):
-        logger.warning("  no Deflated Sharpe for %s: %s", group, reason)
     for row in report.rows:
         logger.info(
-            "    stored %s %s/%s/%s %s instruments=%d folds=%d refusals=%s",
+            "    stored %s %s/%s/%s %s instruments=%d folds=%d; outcomes withheld",
             row.strategy_id,
             row.namespace,
             row.ambiguity_arm,
@@ -3941,7 +4117,6 @@ def log_report(report: BacktestRunReport) -> None:
             row.result_version,
             row.evaluated_instrument_count,
             row.folds_written,
-            list(row.refusals),
         )
 
 

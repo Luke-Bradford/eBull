@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -76,11 +77,11 @@ from typing import Final, Literal, cast, get_args
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
-from app.services.random_entry_cohort import SyntheticControl
+from app.services.random_entry_cohort import MATCH_QUALITY_POLICY_ID, SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
 from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION, LEGACY_AMBIGUITY_RULE_VERSION
 from app.services.strategy_promotion_evidence import PromotionEvidence, evidence_refusals
-from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
+from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics, periods_per_year
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
 # ---------------------------------------------------------------------------
@@ -303,6 +304,11 @@ PromotionRefusal = Literal[
     #: magnitudes, verbatim. So the magnitude refusals here are the spec's, not
     #: invented, and their absence would be the omission.
     "synthetic_control_not_run",
+    "synthetic_control_match_evidence_missing",
+    "synthetic_control_match_policy_unrecognised",
+    "synthetic_control_population_mismatch",
+    "synthetic_control_exposure_mismatch",
+    "synthetic_control_turnover_mismatch",
     "synthetic_control_cohort_shows_edge",
     "synthetic_control_sharpe_below_cohort",
     "promotion_evidence_missing",
@@ -326,6 +332,7 @@ PromotionRefusal = Literal[
     "ev_bucket_ranking_not_monotonic",
     "outcome_contrast_evidence_incomplete",
     "outcome_contrast_population_not_comparable",
+    "metric_axis_unproven",
 ]
 PROMOTION_REFUSALS: frozenset[str] = frozenset(get_args(PromotionRefusal))
 
@@ -424,9 +431,16 @@ def namespace_for_position(entry_fill_bar_date: date, close_bar_date: date | Non
 RESULT_SET_ID = "strategy-result-v1"
 TOTAL_RETURN_RESULT_SET_ID = "strategy-result-v2"
 AMBIGUITY_AWARE_RESULT_SET_ID = "strategy-result-v3"
+AXIS_AWARE_RESULT_SET_ID = "strategy-result-v4"
+METRIC_AXIS_RULE_VERSION: Final = "full-namespace-panel-v1"
 LEGACY_RETURN_BASIS = "raw-close-price-return-v1"
 TOTAL_RETURN_BASIS = "split-dividend-adjusted-wealth-v1"
 RETURN_BASES: Final[frozenset[str]] = frozenset({LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS})
+
+
+def metric_axis_sha256(dates: tuple[date, ...]) -> str:
+    payload = "axis-v1:" + json.dumps([item.isoformat() for item in dates], separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -509,6 +523,58 @@ class ResultIdentity:
     #: unable to carry the matched-control threshold. The legacy default exists
     #: only so old stored hashes can be reconstructed byte-for-byte.
     ambiguity_rule_version: str = LEGACY_AMBIGUITY_RULE_VERSION
+    metric_axis_rule_version: str | None = None
+    metric_axis_dates: tuple[date, ...] | None = None
+    metric_axis_start: date | None = None
+    metric_axis_end: date | None = None
+    metric_axis_digest: str | None = None
+    opportunity_set_digest: str | None = None
+    evidence_window_id: str | None = None
+
+    def __post_init__(self) -> None:
+        axis_fields = (
+            self.metric_axis_rule_version,
+            self.metric_axis_dates,
+            self.metric_axis_start,
+            self.metric_axis_end,
+            self.metric_axis_digest,
+            self.opportunity_set_digest,
+        )
+        present = sum(value is not None for value in axis_fields)
+        if present not in {0, len(axis_fields)}:
+            raise ValueError("metric-axis provenance is all present for current rows or all null for legacy rows")
+        if present == 0:
+            if self.evidence_window_id is not None:
+                raise ValueError("a legacy result identity cannot carry an evidence-window ID")
+            return
+        assert self.metric_axis_dates is not None
+        if self.metric_axis_rule_version != METRIC_AXIS_RULE_VERSION:
+            raise ValueError(f"unknown metric-axis rule {self.metric_axis_rule_version!r}")
+        if len(self.metric_axis_dates) < 2 or any(
+            current <= previous for previous, current in zip(self.metric_axis_dates, self.metric_axis_dates[1:])
+        ):
+            raise ValueError("metric-axis dates must contain at least two strictly increasing dates")
+        if (self.metric_axis_start, self.metric_axis_end) != (
+            self.metric_axis_dates[0],
+            self.metric_axis_dates[-1],
+        ):
+            raise ValueError("metric-axis endpoints do not match the stored tuple")
+        if self.metric_axis_digest != metric_axis_sha256(self.metric_axis_dates):
+            raise ValueError("metric-axis digest does not match the stored tuple")
+        if self.metric_axis_dates[0] < self.window_start or self.metric_axis_dates[-1] > self.window_end:
+            raise ValueError("metric-axis dates must be contained in the declared evaluation window")
+        if (
+            self.opportunity_set_digest is None
+            or len(self.opportunity_set_digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.opportunity_set_digest)
+        ):
+            raise ValueError("opportunity-set digest must be a lower-case SHA-256 hex digest")
+        if self.namespace == "in_sample" and self.evidence_window_id is not None:
+            raise ValueError("an in-sample result cannot carry an evidence-window ID")
+        if self.namespace == "in_sample" and self.metric_axis_dates[-1] >= HOLDOUT_BOUNDARY:
+            raise ValueError("an in-sample metric axis cannot reach the frozen hold-out boundary")
+        if self.namespace == "hold_out" and not (self.evidence_window_id and self.evidence_window_id.strip()):
+            raise ValueError("a current hold-out result requires a non-blank evidence-window ID")
 
     @property
     def version(self) -> str:
@@ -542,12 +608,27 @@ class ResultIdentity:
             fields["return_basis"] = self.return_basis
         if self.ambiguity_rule_version != LEGACY_AMBIGUITY_RULE_VERSION:
             fields["ambiguity_rule_version"] = self.ambiguity_rule_version
+        if self.metric_axis_rule_version is not None:
+            assert self.metric_axis_dates is not None
+            fields.update(
+                {
+                    "metric_axis_rule_version": self.metric_axis_rule_version,
+                    "metric_axis_dates": [item.isoformat() for item in self.metric_axis_dates],
+                    "metric_axis_start": self.metric_axis_start.isoformat(),  # type: ignore[union-attr]
+                    "metric_axis_end": self.metric_axis_end.isoformat(),  # type: ignore[union-attr]
+                    "metric_axis_digest": self.metric_axis_digest,
+                    "opportunity_set_digest": self.opportunity_set_digest,
+                    "evidence_window_id": self.evidence_window_id,
+                }
+            )
         payload = json.dumps(
             fields,
             sort_keys=True,
             separators=(",", ":"),
         )
-        if self.ambiguity_rule_version != LEGACY_AMBIGUITY_RULE_VERSION:
+        if self.metric_axis_rule_version is not None:
+            prefix = AXIS_AWARE_RESULT_SET_ID
+        elif self.ambiguity_rule_version != LEGACY_AMBIGUITY_RULE_VERSION:
             prefix = AMBIGUITY_AWARE_RESULT_SET_ID
         else:
             prefix = RESULT_SET_ID if self.return_basis == LEGACY_RETURN_BASIS else TOTAL_RETURN_RESULT_SET_ID
@@ -735,6 +816,18 @@ class StrategyResult:
                     f"the synthetic control was evaluated against a total return of {control.strategy_return_pct} "
                     f"but the metric set carries {self.metrics.total_return_pct}"
                 )
+            match = control.match_quality
+            if match is not None:
+                if match.strategy_exposure_time_pct != self.metrics.exposure_time_pct:
+                    raise ValueError(
+                        f"the synthetic match was measured against exposure {match.strategy_exposure_time_pct} "
+                        f"but the metric set carries {self.metrics.exposure_time_pct}"
+                    )
+                if match.strategy_turnover_annualised != self.metrics.turnover_annualised:
+                    raise ValueError(
+                        f"the synthetic match was measured against turnover {match.strategy_turnover_annualised} "
+                        f"but the metric set carries {self.metrics.turnover_annualised}"
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -748,9 +841,9 @@ class PromotionCandidate:
 
     ⚠ Each of the three is OFF the row on purpose:
 
-    - the evaluated instrument ids and the validated universe are SETS of
-      thousands, and a row cannot carry either; the gate compares them and the
-      row keeps only the count;
+    - the evaluated instrument/series ids and the validated universe are SETS
+      of thousands, and a row cannot carry them; the gate compares the linked
+      ids and the row keeps only the combined name count;
     - the hold-out access counts are properties of the STRATEGY's history, not
       of one row — they live in stage 5e's access log;
     - ``ambiguity_material`` is a property of the ARM PAIR (§3.4 computes the
@@ -769,6 +862,11 @@ class PromotionCandidate:
     #: guard must be able to evaluate it without a database round-trip in the
     #: order path.
     validated_universe_ids: frozenset[int]
+    #: Admitted dead/unlinked series are opportunity names too, but have no
+    #: instrument foreign key against which the validated set can be checked.
+    #: Their presence prevents an unlinked-only result being misclassified as
+    #: an empty evaluation by the pure/write-time gate.
+    evaluated_series_ids: frozenset[int] = frozenset()
     #: How many times this strategy's hold-out arm has been evaluated (5e).
     holdout_evaluations: int = 0
     #: How many of those evaluations have a recorded access (timestamp +
@@ -815,7 +913,63 @@ class PromotionCandidate:
 #: no longer carries it. The policy's reachable outcomes changed, so the
 #: version moves: frozen declarations pin this string precisely so a change
 #: like this cannot reinterpret them silently.
-STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v3-survivorship-free-satisfiable"
+STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v4-metric-axis"
+
+
+def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> bool:
+    """Reconcile current provenance and annualisation from one shared rule."""
+    if (
+        identity.metric_axis_rule_version != METRIC_AXIS_RULE_VERSION
+        or identity.metric_axis_dates is None
+        or identity.metric_axis_digest != metric_axis_sha256(identity.metric_axis_dates)
+        or identity.metric_axis_start != identity.metric_axis_dates[0]
+        or identity.metric_axis_end != identity.metric_axis_dates[-1]
+        or identity.opportunity_set_digest is None
+    ):
+        return False
+    dates = identity.metric_axis_dates
+    if dates[0] < identity.window_start or dates[-1] > identity.window_end:
+        return False
+    if identity.namespace == "in_sample" and dates[-1] >= HOLDOUT_BOUNDARY:
+        return False
+    if identity.namespace == "hold_out":
+        # Local import avoids making the append-only registry's import of this
+        # module cyclic. A non-blank label is not provenance by itself: the ID
+        # must name the exact declared window, matching sql/359's constraint.
+        from app.services.strategy_recent_evidence import recent_evidence_window
+
+        try:
+            registered = recent_evidence_window(identity.evidence_window_id or "")
+        except ValueError:
+            return False
+        if (identity.window_start, identity.window_end) != (
+            registered.window.start,
+            registered.window.end,
+        ):
+            return False
+    # ⚠ THE TIGHT TOLERANCE IS SAFE BECAUSE THIS IS NOT A REDUCTION.
+    # `periods_per_year` is `(len(dates) - 1) / (span_days / DAYS_PER_YEAR)` —
+    # two exact integers and a division — so recomputing it from the same axis
+    # is bit-identical, and 1e-12 is already looser than the equality that
+    # actually holds. The prevention-log entry about pairwise-summation drift
+    # governs SUMS and MEANS over arrays, where accumulation order is a free
+    # variable; there is no accumulation here. The tolerance exists only to
+    # absorb a stored value that made a decimal round-trip, not arithmetic
+    # noise.
+    expected_ppy = periods_per_year(dates)
+    if not math.isclose(metrics.periods_per_year, expected_ppy, rel_tol=1e-12, abs_tol=1e-12):
+        return False
+    final_multiple = 1.0 + metrics.total_return_pct / 100.0
+    if final_multiple < 0.0:
+        return False
+    years = (len(dates) - 1) / expected_ppy
+    expected_cagr = -100.0 if final_multiple == 0.0 else (final_multiple ** (1.0 / years) - 1.0) * 100.0
+    return math.isclose(metrics.cagr_pct, expected_cagr, rel_tol=1e-10, abs_tol=1e-10)
+
+
+def metric_axis_promotion_refusals(result: StrategyResult) -> tuple[PromotionRefusal, ...]:
+    """Fail closed unless the result carries the current coherent axis identity."""
+    return () if metric_axis_is_valid(result.identity, result.metrics) else ("metric_axis_unproven",)
 
 
 def structural_promotion_refusals(
@@ -974,6 +1128,18 @@ def synthetic_control_promotion_refusals(control: SyntheticControl | None) -> tu
     if control is None:
         return ("synthetic_control_not_run",)
     refusals: list[PromotionRefusal] = []
+    match = control.match_quality
+    if match is None:
+        refusals.append("synthetic_control_match_evidence_missing")
+    else:
+        if match.policy_id != MATCH_QUALITY_POLICY_ID:
+            refusals.append("synthetic_control_match_policy_unrecognised")
+        if not match.population_matches:
+            refusals.append("synthetic_control_population_mismatch")
+        if not match.exposure_matches:
+            refusals.append("synthetic_control_exposure_mismatch")
+        if not match.turnover_matches:
+            refusals.append("synthetic_control_turnover_mismatch")
     if not control.mean_return_ci_contains_zero:
         refusals.append("synthetic_control_cohort_shows_edge")
     if not control.sharpe_exceeds_cohort:
@@ -1009,6 +1175,7 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
             fx_unmodelled=result.fx_unmodelled,
         )
     )
+    refusals.extend(metric_axis_promotion_refusals(result))
 
     # §6 — "instrument outside the §4.0 validated universe". §4.0's allocation
     # invariant 2 is a universe rule, not only a survivorship one.
@@ -1016,7 +1183,7 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
     # ⚠ An EMPTY evaluated set is refused separately and is not vacuously fine:
     # `set() - anything` is empty, so a result over no instruments would sail
     # through the subset test while being no evidence at all.
-    if not candidate.evaluated_instrument_ids:
+    if not candidate.evaluated_instrument_ids and not candidate.evaluated_series_ids:
         refusals.append("no_instruments_evaluated")
     elif candidate.evaluated_instrument_ids - candidate.validated_universe_ids:
         refusals.append("instrument_outside_validated_universe")
@@ -1116,12 +1283,14 @@ CURRENT_RESULT_PROVENANCE: Mapping[str, object] = {
 
 __all__ = [
     "AMBIGUITY_AWARE_RESULT_SET_ID",
+    "AXIS_AWARE_RESULT_SET_ID",
     "AMBIGUITY_ARMS",
     "BENCHMARK_RULE",
     "CORPUS_FROZEN_LAST_BAR",
     "CORPUS_VENDORS",
     "CORPUS_VERSION",
     "LEGACY_RETURN_BASIS",
+    "METRIC_AXIS_RULE_VERSION",
     "RETURN_BASES",
     "TOTAL_RETURN_BASIS",
     "TOTAL_RETURN_RESULT_SET_ID",
@@ -1151,6 +1320,9 @@ __all__ = [
     "deflation_promotion_refusals",
     "holdout_count_promotion_refusals",
     "is_promotable",
+    "metric_axis_promotion_refusals",
+    "metric_axis_is_valid",
+    "metric_axis_sha256",
     "purpose_promotion_refusals",
     "structural_promotion_refusals",
     "synthetic_control_promotion_refusals",

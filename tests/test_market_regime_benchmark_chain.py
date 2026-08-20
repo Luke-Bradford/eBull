@@ -22,6 +22,7 @@ from app.services.market_regime_provider import (
     CHAIN_SEAM,
     RULE_SET_VERSION,
     BenchmarkUnavailableError,
+    MarketRegimeProvider,
     _chain_closes,
 )
 
@@ -78,6 +79,42 @@ class TestTheChainHasOneSeam:
         fallback = _bars((SEAM - timedelta(days=1), 300.0))
         chained = _chain_closes(primary, fallback, seam=SEAM)
         assert chained == [(SEAM - timedelta(days=1), 300.0), (SEAM, 400.0)]
+
+
+def test_a_sealed_research_regime_query_never_reads_beyond_its_boundary() -> None:
+    boundary = date(2021, 12, 31)
+    fallback: list[tuple[object, ...]] = [
+        (boundary - timedelta(days=399 - offset), 100.0 + offset * 0.1) for offset in range(400)
+    ]
+
+    class _Rows:
+        def __init__(self, rows: list[tuple[object, ...]]) -> None:
+            self.rows = rows
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return self.rows
+
+    class _Connection:
+        def __init__(self) -> None:
+            self.price_queries: list[tuple[str, tuple[object, ...]]] = []
+
+        def execute(self, query: str, params: tuple[object, ...]) -> _Rows:
+            if "SELECT series_id, adjustment_basis" in query:
+                if params == CHAIN_PRIMARY:
+                    return _Rows([(1, CHAIN_PRIMARY_BASIS)])
+                if params == CHAIN_FALLBACK:
+                    return _Rows([(2, CHAIN_FALLBACK_BASIS)])
+                raise AssertionError(f"unexpected series pin {params!r}")
+            self.price_queries.append((query, params))
+            return _Rows([] if params[0] == 1 else fallback)
+
+    conn = _Connection()
+    provider = MarketRegimeProvider.load_research(conn, through_date=boundary)  # type: ignore[arg-type]
+
+    assert len(conn.price_queries) == 2
+    assert all("bar_date <= %s::date" in query for query, _ in conn.price_queries)
+    assert all(params[1:] == (boundary, boundary) for _, params in conn.price_queries)
+    assert provider.for_dates((boundary,)).values[0] is not None
 
 
 class TestTheChainRefusesRatherThanDegrades:

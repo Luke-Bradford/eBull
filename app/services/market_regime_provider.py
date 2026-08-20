@@ -254,7 +254,12 @@ class MarketRegimeProvider:
         return cls(regime_by_date=dict(zip(dates, series.values, strict=True)))
 
     @classmethod
-    def load_research(cls, conn: psycopg.Connection[Any]) -> MarketRegimeProvider:
+    def load_research(
+        cls,
+        conn: psycopg.Connection[Any],
+        *,
+        through_date: date | None = None,
+    ) -> MarketRegimeProvider:
         """The BACKTEST's benchmark: ``spy_chain_v1`` over the research corpus.
 
         The live scan keeps ``load`` (``price_daily``); this constructor exists
@@ -274,6 +279,9 @@ class MarketRegimeProvider:
 
         ⚠ Both segment reads happen on the one connection passed in, inside its
         current transaction, so the two queries observe one corpus snapshot.
+        A sealed in-sample caller supplies ``through_date`` so post-boundary
+        benchmark observations are not even read; classification remains a
+        backward-looking prefix of the same frozen chain.
         """
         segments: dict[str, list[tuple[date, float]]] = {}
         for role, (vendor, vendor_symbol), expected_basis in (
@@ -306,12 +314,27 @@ class MarketRegimeProvider:
                 SELECT bar_date, close
                 FROM research_price_daily
                 WHERE series_id = %s AND close IS NOT NULL
+                  AND (%s::date IS NULL OR bar_date <= %s::date)
                 ORDER BY bar_date
                 """,
-                (series_id,),
+                (series_id, through_date, through_date),
             ).fetchall()
             segments[role] = [(row[0], float(row[1])) for row in bar_rows]
-        chained = _chain_closes(segments["primary"], segments["fallback"])
+        if through_date is not None and through_date < CHAIN_SEAM:
+            # A sealed prefix ending before the vendor seam must not read a
+            # later primary observation merely to satisfy the full-chain path.
+            chained = segments["fallback"]
+            if not chained:
+                raise BenchmarkUnavailableError(
+                    f"chain fallback has no bars through the sealed boundary {through_date}"
+                )
+            for index, (day, close) in enumerate(chained):
+                if index and day <= chained[index - 1][0]:
+                    raise BenchmarkUnavailableError(f"chain dates are not strictly increasing at {day}")
+                if not math.isfinite(close) or close <= 0:
+                    raise BenchmarkUnavailableError(f"chain close on {day} is {close!r} — not a positive finite price")
+        else:
+            chained = _chain_closes(segments["primary"], segments["fallback"])
         return cls._classify([day for day, _ in chained], [close for _, close in chained], label="spy_chain_v1")
 
     def for_dates(self, dates: tuple[date, ...]) -> RegimeSeries:

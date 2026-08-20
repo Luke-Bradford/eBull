@@ -67,7 +67,7 @@ def verify(window_id: str) -> dict[str, object]:
             conn,
             holdout_purpose="issue #2429 total-return A/B; transaction rolled back",
             holdout_accessed_by="scripts/verify_2429_total_return.py",
-            evaluation_window=window,
+            evidence_window_id=window_id,
         )
         new_versions = [row.result_version for row in report.rows]
         with conn.cursor(row_factory=dict_row) as cursor:

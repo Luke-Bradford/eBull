@@ -511,6 +511,9 @@ def test_the_counts_move_the_promotion_gate_off_holdout_never_evaluated(
             "synthetic_control_not_run",
             # #2505: reproducible performance is still not attributable edge.
             "promotion_evidence_missing",
+            # #2697: this deliberately legacy-shaped fixture has no complete
+            # metric-axis provenance and therefore remains unpromotable.
+            "metric_axis_unproven",
         }
 
 
@@ -649,7 +652,8 @@ def test_a_result_carrying_the_synthetic_control_survives_the_round_trip(
     """⚠⚠ THE SAME GAP sql/265 AND sql/266 EACH OPENED, ONE STAGE LATER AGAIN.
 
     ``build_result`` leaves §9's whole block NULL, so every one of ``sql/268``'s
-    ten columns round-trips as ``None`` in every test above — and a ledger that
+    ten columns and ``sql/361``'s thirteen match-evidence columns round-trips as
+    ``None`` in every test above — and a ledger that
     omitted them, or read them back in the wrong positional order, would pass
     all of them. Twice now that is exactly how the ledger went stale when a
     migration landed.
@@ -681,6 +685,12 @@ def test_a_result_carrying_the_synthetic_control_survives_the_round_trip(
         # ⚠ Rebuilt from the metric set, never from a second stored copy.
         assert control.strategy_sharpe == read_back[0].metrics.sharpe
         assert control.strategy_return_pct == read_back[0].metrics.total_return_pct
+        match = control.match_quality
+        assert match is not None
+        assert match.policy_id == "synthetic-control-exact-match-v1"
+        assert match.placement_space_id == "test-fixed-panel-v1"
+        assert match.unmatchable_by_reason == {}
+        assert match.passed is True
         # ⚠ A FALSE verdict stored and read back. §10 makes this the expected
         # state, and a fixture that only ever stored a pass would leave the
         # derived-verdict CHECK exercised in one direction.

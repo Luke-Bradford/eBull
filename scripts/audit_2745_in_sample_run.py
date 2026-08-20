@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Read-only audit of run 98349 against the outcome-blind #2745 protocol.
+"""Read-only, outcome-gated audit of run 98349 against the #2745 protocol.
 
-The job status is read before any result metric.  A non-successful job exits
+The job status is read before any result metric. A non-successful job exits
 without opening the result relations, preserving the invocation's atomic
-evidence boundary.  Once successful, every strategy is judged conjunctively
-across best/worst ambiguity and masked/admitted quarantine arms; this script
-never ranks rows or chooses a favourable arm.
+evidence boundary. Once successful, this script DOES read outcome metrics, then
+judges every strategy conjunctively across best/worst ambiguity and
+masked/admitted quarantine arms. It never ranks rows or chooses a favourable
+arm. Use ``audit_2697_legacy_metric_axis.py`` for the structural-only audit that
+must precede any interpretation of this run.
 """
 
 from __future__ import annotations

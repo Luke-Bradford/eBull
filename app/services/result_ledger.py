@@ -48,7 +48,7 @@ check somebody has to remember to run.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
@@ -56,6 +56,7 @@ from typing import Final, Literal, NoReturn, cast, get_args
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.types.json import Jsonb
 
 from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELLED
 from app.services.deflated_sharpe import DeflatedSharpeResult
@@ -68,13 +69,15 @@ from app.services.prereg_contract import (
     declaration_refusals,
     supersession_refusals,
 )
-from app.services.random_entry_cohort import SyntheticControl
+from app.services.random_entry_cohort import SyntheticControl, SyntheticControlMatchQuality
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import (
     PromotionRefusal,
     ResultIdentity,
     StrategyResult,
     deflation_promotion_refusals,
+    metric_axis_is_valid,
+    metric_axis_promotion_refusals,
     purpose_promotion_refusals,
     synthetic_control_promotion_refusals,
 )
@@ -404,6 +407,8 @@ _RESULT_COLUMNS = """
     ambiguity_arm, quarantine_arm, window_start, window_end, purpose, universe_basis, corpus_version,
     cost_model_id, carry_unmodelled, fx_unmodelled, sizing_rule, benchmark_rule, return_basis,
     ambiguity_rule_version,
+    metric_axis_rule_version, metric_axis_dates, metric_axis_start, metric_axis_end,
+    metric_axis_digest, opportunity_set_digest, evidence_window_id,
     position_rule_set_version,
     outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
     trial_count, deflated_sharpe,
@@ -420,7 +425,13 @@ _RESULT_COLUMNS = """
     synthetic_control_mean_return_pct, synthetic_control_mean_return_ci_low_pct,
     synthetic_control_mean_return_ci_high_pct, synthetic_control_sharpe_percentile,
     synthetic_control_sharpe_threshold, synthetic_control_return_threshold_pct,
-    synthetic_control_passed
+    synthetic_control_passed, synthetic_control_match_policy_id, synthetic_control_placement_space_id,
+    synthetic_control_matchable_trade_count, synthetic_control_cohort_mean_trade_count,
+    synthetic_control_unmatchable_count, synthetic_control_unmatchable_by_reason,
+    synthetic_control_no_slack_series, synthetic_control_series_placed,
+    synthetic_control_strategy_exposure_time_pct, synthetic_control_cohort_mean_exposure_time_pct,
+    synthetic_control_strategy_turnover_annualised, synthetic_control_cohort_mean_turnover_annualised,
+    synthetic_control_match_passed
 """
 
 _RESULT_VALUES = """
@@ -429,6 +440,8 @@ _RESULT_VALUES = """
     %(universe_basis)s, %(corpus_version)s,
     %(cost_model_id)s, %(carry_unmodelled)s, %(fx_unmodelled)s, %(sizing_rule)s, %(benchmark_rule)s,
     %(return_basis)s, %(ambiguity_rule_version)s,
+    %(metric_axis_rule_version)s, %(metric_axis_dates)s, %(metric_axis_start)s, %(metric_axis_end)s,
+    %(metric_axis_digest)s, %(opportunity_set_digest)s, %(evidence_window_id)s,
     %(position_rule_set_version)s,
     %(outcome_rule_set_version)s, %(input_rule_set_version)s, %(evaluated_instrument_count)s,
     %(trial_count)s, %(deflated_sharpe)s,
@@ -448,7 +461,13 @@ _RESULT_VALUES = """
     %(synthetic_control_mean_return_pct)s, %(synthetic_control_mean_return_ci_low_pct)s,
     %(synthetic_control_mean_return_ci_high_pct)s, %(synthetic_control_sharpe_percentile)s,
     %(synthetic_control_sharpe_threshold)s, %(synthetic_control_return_threshold_pct)s,
-    %(synthetic_control_passed)s
+    %(synthetic_control_passed)s, %(synthetic_control_match_policy_id)s,
+    %(synthetic_control_placement_space_id)s, %(synthetic_control_matchable_trade_count)s,
+    %(synthetic_control_cohort_mean_trade_count)s, %(synthetic_control_unmatchable_count)s,
+    %(synthetic_control_unmatchable_by_reason)s, %(synthetic_control_no_slack_series)s,
+    %(synthetic_control_series_placed)s, %(synthetic_control_strategy_exposure_time_pct)s,
+    %(synthetic_control_cohort_mean_exposure_time_pct)s, %(synthetic_control_strategy_turnover_annualised)s,
+    %(synthetic_control_cohort_mean_turnover_annualised)s, %(synthetic_control_match_passed)s
 """
 
 #: ⚠⚠ TARGETS THE VIEW. ``sql/264`` gave ``strategy_results`` a cascaded check
@@ -548,6 +567,7 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
     """One ``StrategyResult`` flattened to ``sql/262`` + ``sql/263``'s columns."""
     identity = result.identity
     metrics = result.metrics
+    _assert_axis_metric_reconciliation(identity, metrics)
     return {
         "strategy_id": identity.strategy_id,
         "strategy_version": identity.strategy_version,
@@ -568,6 +588,13 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         "benchmark_rule": identity.benchmark_rule,
         "return_basis": identity.return_basis,
         "ambiguity_rule_version": identity.ambiguity_rule_version,
+        "metric_axis_rule_version": identity.metric_axis_rule_version,
+        "metric_axis_dates": None if identity.metric_axis_dates is None else list(identity.metric_axis_dates),
+        "metric_axis_start": identity.metric_axis_start,
+        "metric_axis_end": identity.metric_axis_end,
+        "metric_axis_digest": identity.metric_axis_digest,
+        "opportunity_set_digest": identity.opportunity_set_digest,
+        "evidence_window_id": identity.evidence_window_id,
         "position_rule_set_version": identity.position_rule_set_version,
         "outcome_rule_set_version": identity.outcome_rule_set_version,
         "input_rule_set_version": identity.input_rule_set_version,
@@ -626,6 +653,14 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
     }
 
 
+def _assert_axis_metric_reconciliation(identity: ResultIdentity, metrics: StrategyMetrics) -> None:
+    """Apply the same axis rule used by both promotion paths before storage."""
+    if identity.metric_axis_dates is None:
+        return
+    if not metric_axis_is_valid(identity, metrics):
+        raise ValueError("stored metrics do not reconcile with current metric-axis provenance")
+
+
 def _dsr_params(deflated: DeflatedSharpeResult | None) -> dict[str, object]:
     """``sql/266``'s ten columns, all present or all null.
 
@@ -669,31 +704,71 @@ def _synthetic_params(control: SyntheticControl | None) -> dict[str, object]:
     so a second copy would be a second thing to keep in step. `StrategyResult`
     binds the object's copy to `metrics` at assembly time.
     """
-    if control is None:
-        return {
-            "synthetic_control_model_id": None,
-            "synthetic_control_size": None,
-            "synthetic_control_root_seed": None,
-            "synthetic_control_mean_return_pct": None,
-            "synthetic_control_mean_return_ci_low_pct": None,
-            "synthetic_control_mean_return_ci_high_pct": None,
-            "synthetic_control_sharpe_percentile": None,
-            "synthetic_control_sharpe_threshold": None,
-            "synthetic_control_return_threshold_pct": None,
-            "synthetic_control_passed": None,
-        }
-    return {
-        "synthetic_control_model_id": control.model_id,
-        "synthetic_control_size": control.cohort_size,
-        "synthetic_control_root_seed": control.root_seed,
-        "synthetic_control_mean_return_pct": _numeric(control.mean_return_pct),
-        "synthetic_control_mean_return_ci_low_pct": _numeric(control.mean_return_ci_low_pct),
-        "synthetic_control_mean_return_ci_high_pct": _numeric(control.mean_return_ci_high_pct),
-        "synthetic_control_sharpe_percentile": _numeric(control.sharpe_percentile),
-        "synthetic_control_sharpe_threshold": _numeric(control.cohort_sharpe_threshold),
-        "synthetic_control_return_threshold_pct": _numeric(control.cohort_return_threshold_pct),
-        "synthetic_control_passed": control.passed,
+    match = None if control is None else control.match_quality
+    params: dict[str, object] = {
+        "synthetic_control_match_policy_id": None,
+        "synthetic_control_placement_space_id": None,
+        "synthetic_control_matchable_trade_count": None,
+        "synthetic_control_cohort_mean_trade_count": None,
+        "synthetic_control_unmatchable_count": None,
+        "synthetic_control_unmatchable_by_reason": None,
+        "synthetic_control_no_slack_series": None,
+        "synthetic_control_series_placed": None,
+        "synthetic_control_strategy_exposure_time_pct": None,
+        "synthetic_control_cohort_mean_exposure_time_pct": None,
+        "synthetic_control_strategy_turnover_annualised": None,
+        "synthetic_control_cohort_mean_turnover_annualised": None,
+        "synthetic_control_match_passed": None,
     }
+    if match is not None:
+        params.update(
+            {
+                "synthetic_control_match_policy_id": match.policy_id,
+                "synthetic_control_placement_space_id": match.placement_space_id,
+                "synthetic_control_matchable_trade_count": match.matchable_trade_count,
+                "synthetic_control_cohort_mean_trade_count": _numeric(match.cohort_mean_trade_count),
+                "synthetic_control_unmatchable_count": match.unmatchable_count,
+                "synthetic_control_unmatchable_by_reason": Jsonb(dict(match.unmatchable_by_reason)),
+                "synthetic_control_no_slack_series": match.no_slack_series,
+                "synthetic_control_series_placed": match.series_placed,
+                "synthetic_control_strategy_exposure_time_pct": _numeric(match.strategy_exposure_time_pct),
+                "synthetic_control_cohort_mean_exposure_time_pct": _numeric(match.cohort_mean_exposure_time_pct),
+                "synthetic_control_strategy_turnover_annualised": _numeric(match.strategy_turnover_annualised),
+                "synthetic_control_cohort_mean_turnover_annualised": _numeric(match.cohort_mean_turnover_annualised),
+                "synthetic_control_match_passed": match.passed,
+            }
+        )
+    if control is None:
+        params.update(
+            {
+                "synthetic_control_model_id": None,
+                "synthetic_control_size": None,
+                "synthetic_control_root_seed": None,
+                "synthetic_control_mean_return_pct": None,
+                "synthetic_control_mean_return_ci_low_pct": None,
+                "synthetic_control_mean_return_ci_high_pct": None,
+                "synthetic_control_sharpe_percentile": None,
+                "synthetic_control_sharpe_threshold": None,
+                "synthetic_control_return_threshold_pct": None,
+                "synthetic_control_passed": None,
+            }
+        )
+        return params
+    params.update(
+        {
+            "synthetic_control_model_id": control.model_id,
+            "synthetic_control_size": control.cohort_size,
+            "synthetic_control_root_seed": control.root_seed,
+            "synthetic_control_mean_return_pct": _numeric(control.mean_return_pct),
+            "synthetic_control_mean_return_ci_low_pct": _numeric(control.mean_return_ci_low_pct),
+            "synthetic_control_mean_return_ci_high_pct": _numeric(control.mean_return_ci_high_pct),
+            "synthetic_control_sharpe_percentile": _numeric(control.sharpe_percentile),
+            "synthetic_control_sharpe_threshold": _numeric(control.cohort_sharpe_threshold),
+            "synthetic_control_return_threshold_pct": _numeric(control.cohort_return_threshold_pct),
+            "synthetic_control_passed": control.passed,
+        }
+    )
+    return params
 
 
 def _result_from_row(row: Sequence[object]) -> StrategyResult:
@@ -724,6 +799,13 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         benchmark_rule,
         return_basis,
         ambiguity_rule_version,
+        metric_axis_rule_version,
+        metric_axis_dates,
+        metric_axis_start,
+        metric_axis_end,
+        metric_axis_digest,
+        opportunity_set_digest,
+        evidence_window_id,
         position_rule_set_version,
         outcome_rule_set_version,
         input_rule_set_version,
@@ -783,6 +865,19 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         synthetic_control_sharpe_threshold,
         synthetic_control_return_threshold_pct,
         synthetic_control_passed,
+        synthetic_control_match_policy_id,
+        synthetic_control_placement_space_id,
+        synthetic_control_matchable_trade_count,
+        synthetic_control_cohort_mean_trade_count,
+        synthetic_control_unmatchable_count,
+        synthetic_control_unmatchable_by_reason,
+        synthetic_control_no_slack_series,
+        synthetic_control_series_placed,
+        synthetic_control_strategy_exposure_time_pct,
+        synthetic_control_cohort_mean_exposure_time_pct,
+        synthetic_control_strategy_turnover_annualised,
+        synthetic_control_cohort_mean_turnover_annualised,
+        synthetic_control_match_passed,
     ) = row
 
     identity = ResultIdentity(
@@ -803,6 +898,13 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         position_rule_set_version=str(position_rule_set_version),
         outcome_rule_set_version=str(outcome_rule_set_version),
         input_rule_set_version=str(input_rule_set_version),
+        metric_axis_rule_version=None if metric_axis_rule_version is None else str(metric_axis_rule_version),
+        metric_axis_dates=None if metric_axis_dates is None else tuple(metric_axis_dates),  # type: ignore[arg-type]
+        metric_axis_start=metric_axis_start,  # type: ignore[arg-type]
+        metric_axis_end=metric_axis_end,  # type: ignore[arg-type]
+        metric_axis_digest=None if metric_axis_digest is None else str(metric_axis_digest),
+        opportunity_set_digest=None if opportunity_set_digest is None else str(opportunity_set_digest),
+        evidence_window_id=None if evidence_window_id is None else str(evidence_window_id),
     )
     # ⚠ The stored `result_version` is the hash of everything above, so a
     # mismatch means the stored row and the identity it claims have diverged —
@@ -885,6 +987,37 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
     # two blocks above — `synthetic_control_model_id`, which is the field a
     # partial write is least likely to have set. The strategy side is rebuilt
     # FROM `metrics`, because the table deliberately stores only the cohort side.
+    match_quality = (
+        None
+        if synthetic_control_match_policy_id is None
+        else SyntheticControlMatchQuality(
+            policy_id=str(synthetic_control_match_policy_id),
+            placement_space_id=str(synthetic_control_placement_space_id),
+            matchable_trade_count=int(synthetic_control_matchable_trade_count),  # type: ignore[arg-type]
+            cohort_mean_trade_count=float(synthetic_control_cohort_mean_trade_count),  # type: ignore[arg-type]
+            unmatchable_by_reason={
+                str(reason): int(count)
+                for reason, count in cast(Mapping[str, int], synthetic_control_unmatchable_by_reason).items()
+            },
+            no_slack_series=int(synthetic_control_no_slack_series),  # type: ignore[arg-type]
+            series_placed=int(synthetic_control_series_placed),  # type: ignore[arg-type]
+            strategy_exposure_time_pct=float(synthetic_control_strategy_exposure_time_pct),  # type: ignore[arg-type]
+            cohort_mean_exposure_time_pct=float(synthetic_control_cohort_mean_exposure_time_pct),  # type: ignore[arg-type]
+            strategy_turnover_annualised=float(synthetic_control_strategy_turnover_annualised),  # type: ignore[arg-type]
+            cohort_mean_turnover_annualised=float(synthetic_control_cohort_mean_turnover_annualised),  # type: ignore[arg-type]
+        )
+    )
+    if match_quality is not None and match_quality.unmatchable_count != int(
+        cast(int, synthetic_control_unmatchable_count)
+    ):
+        raise ValueError(
+            f"stored synthetic-control unmatchable count {synthetic_control_unmatchable_count} disagrees with "
+            f"its reason census ({match_quality.unmatchable_count})"
+        )
+    if match_quality is not None and match_quality.passed != bool(synthetic_control_match_passed):
+        raise ValueError(
+            f"stored synthetic_control_match_passed {synthetic_control_match_passed!r} disagrees with its inputs"
+        )
     control = (
         None
         if synthetic_control_model_id is None
@@ -900,6 +1033,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
             strategy_sharpe=metrics.sharpe,
             cohort_return_threshold_pct=float(synthetic_control_return_threshold_pct),  # type: ignore[arg-type]
             strategy_return_pct=metrics.total_return_pct,
+            match_quality=match_quality,
         )
     )
     # ⚠ THE STORED VERDICT IS RE-DERIVED AND COMPARED, which is what makes this
@@ -911,6 +1045,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
             f"stored synthetic_control_passed {synthetic_control_passed!r} disagrees with the verdict its own stored "
             f"inputs produce ({control.passed!r}) — the row's thresholds and its flag have diverged"
         )
+    _assert_axis_metric_reconciliation(identity, metrics)
     return StrategyResult(
         identity=identity,
         purpose=purpose,  # type: ignore[arg-type]
@@ -2090,6 +2225,7 @@ def _refusals_for_result(
     # their own frozen records (universe, ambiguity) or reads separately (the
     # structural stamps, the #2505 evidence).
     refusals.extend(purpose_promotion_refusals(result.purpose))
+    refusals.extend(metric_axis_promotion_refusals(result))
     refusals.extend(
         deflation_promotion_refusals(
             deflated_sharpe=result.deflated_sharpe,

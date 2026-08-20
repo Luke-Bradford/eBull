@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.api.strategies import _evidence_window_counts
-from app.services.backtest_run import BacktestProgressEvent
+from app.services.backtest_run import BacktestProgressEvent, _ControlProgress
 from app.services.position_builder import Window
 from app.services.processes.param_metadata import MANUAL_TRIGGER_JOB_METADATA
 from app.services.strategy_recent_evidence import (
@@ -100,7 +100,7 @@ def test_refresh_recent_skips_complete_windows_and_commits_each_missing_window(
     calls: list[object] = []
 
     def run_backtest(_conn: object, **kwargs: object) -> SimpleNamespace:
-        calls.append(kwargs["evaluation_window"])
+        calls.append(kwargs["evidence_window_id"])
         return SimpleNamespace(rows_written=12)
 
     monkeypatch.setattr(scheduler, "_tracked_job", tracked)
@@ -216,6 +216,60 @@ def test_refresh_progress_is_transient_until_evidence_commit(
     assert conn.execute.call_count == 0
 
 
+def test_single_run_reports_progress_and_only_checkpoints_after_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = SimpleNamespace(row_count=None, run_id=9, progress=None, note=None)
+    conn = MagicMock()
+    events: list[str] = []
+
+    class Writer:
+        def start_window(self, window_id: str) -> None:
+            events.append(f"start:{window_id}")
+
+        def __call__(self, event: BacktestProgressEvent) -> None:
+            events.append(f"progress:{event.phase}:{event.series_seen}/{event.series_total}")
+
+        def record_window_commit(self, *, rows_written: int, completed: int) -> bool:
+            events.append(f"checkpoint:{rows_written}:{completed}")
+            return True
+
+        def close(self) -> None:
+            events.append("closed")
+
+    @contextmanager
+    def tracked(_job_name: str) -> Iterator[SimpleNamespace]:
+        yield tracker
+
+    @contextmanager
+    def connected() -> Iterator[MagicMock]:
+        yield conn
+
+    def run_backtest(_conn: object, **kwargs: object) -> SimpleNamespace:
+        progress = kwargs["progress"]
+        assert callable(progress)
+        progress(BacktestProgressEvent(phase="synthetic_control", series_seen=17, series_total=1000))
+        events.append("evidence_returned")
+        return SimpleNamespace(rows_written=40)
+
+    writer = Writer()
+    monkeypatch.setattr(scheduler, "_tracked_job", tracked)
+    monkeypatch.setattr(scheduler, "connect_job", connected)
+    monkeypatch.setattr(scheduler, "_open_backtest_progress_writer", lambda **_kwargs: writer)
+    monkeypatch.setattr("app.services.backtest_run.run_backtest", run_backtest)
+
+    scheduler.strategy_backtest_run({"synthetic_control": True})
+
+    assert events == [
+        "start:in_sample",
+        "progress:synthetic_control:17/1000",
+        "evidence_returned",
+        "checkpoint:40:1",
+        "closed",
+    ]
+    assert tracker.row_count == 40
+
+
 def test_refresh_failure_before_commit_never_publishes_a_window_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -322,7 +376,68 @@ def test_progress_writer_does_not_claim_window_completion_before_commit() -> Non
         "ambiguity_arm": None,
         "series_seen": 50,
         "series_total": 100,
+        "work_unit": "series",
+        "elapsed_s": 0.0,
+        "rate_per_s": None,
+        "eta_s": None,
+        "control_seen": 0,
+        "control_total": None,
     }
+
+
+def test_progress_writer_publishes_outcome_free_rate_and_eta(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = MagicMock()
+    writer = scheduler._BacktestProgressWriter(  # noqa: SLF001 - payload contract under test
+        conn,
+        run_id=9,
+        total_windows=1,
+        already_complete=0,
+    )
+    writer.start_window("in_sample")
+    clock = iter((100.0, 106.0))
+    monkeypatch.setattr(scheduler.time, "monotonic", lambda: next(clock))
+
+    writer(BacktestProgressEvent(phase="synthetic_control", series_seen=3, series_total=1000))
+    writer(BacktestProgressEvent(phase="synthetic_control", series_seen=15, series_total=1000))
+
+    payload = conn.execute.call_args.args[1]["progress"].obj["active"]
+    assert payload["work_unit"] == "members"
+    assert payload["elapsed_s"] == 6.0
+    assert payload["rate_per_s"] == 2.0
+    assert payload["eta_s"] == 492.5
+    assert not ({"return", "sharpe", "passed", "profit"} & set(payload))
+
+
+def test_global_control_progress_counts_an_arm_once_across_member_ticks() -> None:
+    events: list[BacktestProgressEvent] = []
+    progress = _ControlProgress(events.append, total=40)
+    for seen in (1, 2, 25):
+        progress(
+            BacktestProgressEvent(
+                phase="synthetic_control",
+                strategy_id="s1",
+                quarantine_arm="admitted",
+                ambiguity_arm="worst_case",
+                series_seen=seen,
+                series_total=1000,
+            )
+        )
+    progress(
+        BacktestProgressEvent(
+            phase="synthetic_control",
+            strategy_id="s1",
+            quarantine_arm="admitted",
+            ambiguity_arm="best_case",
+            series_seen=1,
+            series_total=1000,
+        )
+    )
+    assert [(event.control_seen, event.control_total) for event in events] == [
+        (1, 40),
+        (1, 40),
+        (1, 40),
+        (2, 40),
+    ]
 
 
 def test_overview_counts_missing_members_and_empty_runnable_set_without_crashing() -> None:

@@ -26,7 +26,9 @@ import pytest
 
 from app.services import backtest_run
 from app.services.backtest_run import _Corpus, run_backtest
+from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_result_universe import ResultUniverseRecord
 from tests.fixtures.ebull_test_db import test_database_url
 
 #: The relations a migration on the strategy result surface takes ACCESS
@@ -52,7 +54,12 @@ class _Observation:
 
 
 def _tiny_corpus() -> _Corpus:
-    axis = (date(2022, 1, 3), date(2022, 1, 4))
+    axis = (date(2020, 1, 3), date(2020, 1, 4))
+    opportunity = ResultUniverseRecord(
+        universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+        evaluated_instrument_ids=frozenset({1}),
+        validated_universe_ids=frozenset({1}),
+    )
     return _Corpus(
         universe=(1,),
         axis=axis,
@@ -60,8 +67,9 @@ def _tiny_corpus() -> _Corpus:
         pairs=(),
         evaluation_start=axis[0],
         evaluation_end=axis[-1],
-        in_sample_axis=(),
-        in_sample_bar_counts=(),
+        in_sample_axis=axis,
+        in_sample_bar_counts=(1, 1),
+        opportunity_records={"in_sample": opportunity},
     )
 
 

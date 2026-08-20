@@ -22,6 +22,27 @@ shared extraction):
 the metrics over it. The harness restores both regardless of which one a probe
 touched.
 
+⚠⚠ THREE IMPLEMENTATIONS OF THE STRATEGY WALK, AND A PROBE MUST NAME ONE
+(#2772). ``build_equity_curve`` dispatches on the STORAGE type: a
+``SharedMarkLegBook`` reaches the compiled kernel and a ``LegBook`` reaches the
+Python reference, which then splits again on ``all_realised``. The cash cap, the
+spread charge, the exit-before-entry order, the same-bar split, the halted-mark
+carry and the basket denominator therefore exist in up to three copies of one
+rule. Mutating the copy the selector's book shape never reaches injects the
+defect into code the test does not execute, and the harness prints ``NOT
+CAUGHT`` for a defect it injected perfectly — criterion 3's selector fault,
+arriving through a dispatch split rather than a renamed test. #2772 shipped
+exactly that on the leverage cap and the free sell side. Every copy now carries
+its own probe and its own selector; the compiled ones are killed by
+``test_the_compiled_walk_is_EXACTLY_the_reference_on_an_adversarial_book`` and
+the unrealised half by
+``test_an_unrealised_book_keeps_the_exit_split_the_same_bar_split_and_the_halt``.
+
+⚠ ``@njit(cache=True)`` DOES NOT DEFEAT THIS HARNESS. Numba re-keys its on-disk
+cache on the source file, so rewriting the file recompiles rather than serving
+the pre-mutation kernel. Measured 2026-08-19: every compiled probe below is
+``CAUGHT``, which is only reachable if the mutated source was compiled.
+
 ⚠ NOT A TEST, and it must never become one: it mutates tracked source files on
 disk. CI does not run it. Everything here is pure-tier, so no database is needed.
 
@@ -79,6 +100,32 @@ STATS_TESTS = "tests/test_strategy_statistics.py"
 #: (what the injected defect IS, source file, test file, [(anchor, replacement), ...], -k selector)
 PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
     (
+        # ⚠⚠ NumPy accepts negative indices by wrapping to the end of an array.
+        # Removing this guard therefore does not reliably crash: a compact leg
+        # whose source starts after its entry can consume a plausible but wrong
+        # close from the opposite end of the series.
+        "a compact leg allowed to read outside its shared mark source",
+        CURVE,
+        CURVE_TESTS,
+        [("            if bool(np.any(invalid_span)):", "            if False:")],
+        "test_a_leg_cannot_start_before_its_mark_source or test_a_leg_cannot_end_after_its_mark_source",
+    ),
+    (
+        # The flat LegBook refuses this shape in ``add``. Shared storage must
+        # retain the same boundary rather than letting the opening/closing
+        # buckets process a position backwards.
+        "a compact leg allowed to close before it opens",
+        CURVE,
+        CURVE_TESTS,
+        [
+            (
+                "        if size and bool(np.any(self.exit_index < self.entry_index)):",
+                "        if False:",
+            )
+        ],
+        "test_a_leg_cannot_close_before_it_opens",
+    ),
+    (
         "the sizing rule id renamed without the rule moving",
         CURVE,
         CURVE_TESTS,
@@ -89,49 +136,104 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # ⚠⚠ §3.2 RULE 4 INVERTED. Entries before exits funds a new position out
         # of cash a same-day exit has not released, which shows up as a spurious
         # short-funded entry rather than as an error.
-        "entries processed BEFORE same-date exits (§3.2 rule 4 inverted)",
+        # ⚠ RE-ANCHORED (#2772). The buckets now split on ``all_realised``, and
+        # a book whose every leg is realised — which is every production cohort
+        # member — takes the FAST half. The general half is a separate copy of
+        # the same rule with its own probe below.
+        "entries processed BEFORE same-date exits, all-realised walk (§3.2 rule 4 inverted)",
         CURVE,
         CURVE_TESTS,
         [
             (
-                "        closed_today = [leg for leg in closing_now if realised[leg] and int(entry_index[leg]) < day]",
-                "        closed_today = []",
+                "            closed_today = [leg for leg in closing_now if entry_indices[leg] < day]",
+                "            closed_today = []",
             )
         ],
         "test_an_exit_frees_cash_before_a_same_date_entry_uses_it",
     ),
     (
-        # ⚠⚠ THE SAME-BAR SPLIT. Applying "exit before entry" to a leg's OWN
-        # exit closes it before it opens, so it never leaves the open set — and
-        # then reads marks past the end of its own array.
-        "the same-bar split removed (a bars_held=0 leg closed before it opened)",
+        # The general half of the same split. Its selector carries an unrealised
+        # leg, which is the only thing that reaches this copy.
+        "entries processed BEFORE same-date exits, unrealised-carrying walk",
         CURVE,
         CURVE_TESTS,
         [
             (
-                "        same_bar = [leg for leg in closing_now if realised[leg] and int(entry_index[leg]) == day]",
-                "        same_bar = []",
+                "            closed_today = [leg for leg in closing_now if realised[leg] and entry_indices[leg] < day]",
+                "            closed_today = []",
+            )
+        ],
+        "test_an_unrealised_book_keeps_the_exit_split_the_same_bar_split_and_the_halt",
+    ),
+    (
+        # ⚠⚠ THE COMPILED COPY (#2772). ``build_equity_curve`` dispatches on the
+        # STORAGE type — a ``SharedMarkLegBook`` reaches the Numba kernel and a
+        # ``LegBook`` reaches the Python walk — so neither probe above can reach
+        # this branch, and a kernel-only mutation is injected into code the
+        # reference tests never execute.
+        "entries processed BEFORE same-date exits, compiled kernel",
+        CURVE,
+        CURVE_TESTS,
+        [("            if entry_index[leg] < day:", "            if False:")],
+        "test_the_compiled_walk_is_EXACTLY_the_reference_on_an_adversarial_book",
+    ),
+    (
+        # ⚠⚠ THE SAME-BAR SPLIT. Applying "exit before entry" to a leg's OWN
+        # exit closes it before it opens, so it never leaves the open set — and
+        # then reads marks past the end of its own array.
+        # ⚠ RE-ANCHORED (#2772) to the all-realised half; see the exit probe.
+        "the same-bar split removed, all-realised walk (a bars_held=0 leg closed before it opened)",
+        CURVE,
+        CURVE_TESTS,
+        [
+            (
+                "            same_bar = [leg for leg in closing_now if entry_indices[leg] == day]",
+                "            same_bar = []",
             )
         ],
         "test_a_same_bar_leg_is_legal",
+    ),
+    (
+        "the same-bar split removed, unrealised-carrying walk",
+        CURVE,
+        CURVE_TESTS,
+        [
+            (
+                "            same_bar = [leg for leg in closing_now if realised[leg] and entry_indices[leg] == day]",
+                "            same_bar = []",
+            )
+        ],
+        "test_an_unrealised_book_keeps_the_exit_split_the_same_bar_split_and_the_halt",
+    ),
+    (
+        "the same-bar split removed, compiled kernel",
+        CURVE,
+        CURVE_TESTS,
+        [("            if entry_index[leg] == day:", "            if False:")],
+        "test_the_compiled_walk_is_EXACTLY_the_reference_on_an_adversarial_book",
     ),
     (
         # ⚠⚠ THE CODEX CHECKPOINT-2 DEFECT, injected. Bucketing an unrealised
         # leg with the realised closes liquidates it at its mark bar: it leaves
         # `open_count` and `invested` for the rest of the window, and its
         # notional lands in cash where it can fund a same-date entry.
+        # ⚠ RE-ANCHORED (#2772) to the general half, which is the only half that
+        # can carry an unrealised leg at all — the fast half hard-codes an empty
+        # freeze bucket, and the compiled kernel refuses a book that is not
+        # wholly realised.
         "an unrealised leg treated as an EXIT instead of frozen at its mark",
         CURVE,
         CURVE_TESTS,
         [
             (
-                "        closed_today = [leg for leg in closing_now if realised[leg] and int(entry_index[leg]) "
-                "< day]\n"
-                "        same_bar = [leg for leg in closing_now if realised[leg] and int(entry_index[leg]) == day]\n"
-                "        freezing_today = [leg for leg in closing_now if not realised[leg]]",
-                "        closed_today = [leg for leg in closing_now if int(entry_index[leg]) < day]\n"
-                "        same_bar = [leg for leg in closing_now if int(entry_index[leg]) == day]\n"
-                "        freezing_today = []",
+                "            closed_today = [leg for leg in closing_now if realised[leg] "
+                "and entry_indices[leg] < day]\n"
+                "            same_bar = [leg for leg in closing_now if realised[leg] "
+                "and entry_indices[leg] == day]\n"
+                "            freezing_today = [leg for leg in closing_now if not realised[leg]]",
+                "            closed_today = [leg for leg in closing_now if entry_indices[leg] < day]\n"
+                "            same_bar = [leg for leg in closing_now if entry_indices[leg] == day]\n"
+                "            freezing_today = []",
             )
         ],
         "test_its_notional_CANNOT_fund_a_same_date_entry",
@@ -141,12 +243,15 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # set sets a target it can never move to and forces every tradeable leg
         # to absorb the shortfall — a different sizing rule wearing the declared
         # rule's id.
+        # ⚠ RE-ANCHORED (#2772): the exclusion is now the else-arm of an
+        # ``all_realised`` shortcut, and removing the whole expression removes
+        # it under either arm.
         "the rebalance target computed over frozen legs it cannot trade",
         CURVE,
         CURVE_TESTS,
         [
             (
-                "        tradeable = [leg for leg in open_legs if leg not in frozen]",
+                "        tradeable = open_legs if all_realised else [leg for leg in open_legs if leg not in frozen]",
                 "        tradeable = list(open_legs)",
             )
         ],
@@ -156,11 +261,24 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # ⚠⚠ LEVERAGE. Spending the full desired amount rather than what is on
         # hand takes cash negative — arithmetically small and forbidden outright
         # by the project posture.
-        "the rebalance buy no longer capped by cash (leverage)",
+        "the rebalance buy no longer capped by cash (leverage), reference walk",
+        CURVE,
+        CURVE_TESTS,
+        [("                spend = min(wanted, cash / (1.0 + half_spreads[leg]))", "                spend = wanted")],
+        "test_cash_never_goes_negative",
+    ),
+    (
+        # ⚠⚠ THE SAME CAP IN THE COMPILED KERNEL, and the reason this file grew
+        # a compiled arm at all: #2772 left this probe pointed at the kernel
+        # while its selector built a ``LegBook``, so the mutation went into code
+        # the test never ran and the harness reported ``NOT CAUGHT`` for a
+        # defect it had injected correctly. The selector below is the one test
+        # that executes the kernel's arithmetic.
+        "the rebalance buy no longer capped by cash (leverage), compiled kernel",
         CURVE,
         CURVE_TESTS,
         [("                spend = min(wanted, cash / (1.0 + half_spread[leg]))", "                spend = wanted")],
-        "test_cash_never_goes_negative",
+        "test_the_compiled_walk_is_EXACTLY_the_reference_on_an_adversarial_book",
     ),
     (
         # ⚠⚠ §5.4's "rebalanced ONLY on position open/close". Rebalancing every
@@ -183,42 +301,115 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_weights_DRIFT_between_event_dates_and_are_not_restored_daily",
     ),
     (
-        "the rebalance sell side charging nothing (a free trade)",
+        "the rebalance sell side charging nothing (a free trade), reference walk",
+        CURVE,
+        CURVE_TESTS,
+        [("                    charge = sold * half_spreads[leg]", "                    charge = 0.0")],
+        "test_BOTH_sides_of_a_rebalance_are_charged",
+    ),
+    (
+        "the rebalance sell side charging nothing (a free trade), compiled kernel",
         CURVE,
         CURVE_TESTS,
         [("                    charge = sold * half_spread[leg]", "                    charge = 0.0")],
-        "test_BOTH_sides_of_a_rebalance_are_charged",
+        "test_the_compiled_walk_is_EXACTLY_the_reference_on_an_adversarial_book",
     ),
     (
         # ⚠ §3.3's halt. Overwriting the mark with the `nan` fabricates a
         # valuation of nothing, and every arithmetic downstream becomes NaN
         # silently.
-        # ⚠⚠ RE-ANCHORED, AND THE DUPLICATE IS ITS OWN PROBE (#2695). This block
-        # now exists TWICE — in `_build_strategy_curve` and again in
-        # `build_buy_and_hold_curve` — so the bare copy matched twice and proved
-        # nothing. Disambiguated by the frozen-leg `continue` that only the
-        # strategy curve has; the benchmark's copy is probed separately below,
-        # because a mark-carry defect in the BENCHMARK moves
-        # `return_vs_buy_and_hold_pct` on every result just as surely.
-        "a missing bar overwriting the mark with NaN instead of carrying it forward",
+        # ⚠⚠ RE-ANCHORED AGAIN (#2772). The single walk this probe was written
+        # against is now THREE copies of the carry decision: the all-realised
+        # half below, the half that skips a frozen leg, and the compiled kernel.
+        # Each gets its own probe and its own selector, because a mutation in
+        # one is invisible to a test that runs another.
+        "a missing bar overwriting the mark with NaN instead of carrying it forward, all-realised walk",
         CURVE,
         CURVE_TESTS,
         [
             (
-                "                continue\n"
-                "            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
-                "            mark = marks[offset]\n"
+                "        if all_realised:\n"
+                "            for leg in open_legs:\n"
+                "                if marks_by_source:\n"
+                "                    source = mark_sources[leg]\n"
+                "                    offset = day - marks_first_by_leg[leg]\n"
+                "                    mark = marks_by_source[source][offset]\n"
+                "                else:\n"
+                "                    offset = mark_offsets[leg] + (day - entry_indices[leg])\n"
+                "                    mark = marks[offset]\n"
+                "                if np.isnan(mark):\n"
+                "                    stale_marks += 1\n"
+                "                else:\n"
+                "                    last_price[leg] = mark",
+                "        if all_realised:\n"
+                "            for leg in open_legs:\n"
+                "                if marks_by_source:\n"
+                "                    source = mark_sources[leg]\n"
+                "                    offset = day - marks_first_by_leg[leg]\n"
+                "                    mark = marks_by_source[source][offset]\n"
+                "                else:\n"
+                "                    offset = mark_offsets[leg] + (day - entry_indices[leg])\n"
+                "                    mark = marks[offset]\n"
+                "                last_price[leg] = mark",
+            )
+        ],
+        "test_a_missing_bar_carries_the_previous_mark_forward_and_is_counted",
+    ),
+    (
+        "a missing bar overwriting the mark with NaN instead of carrying it forward, unrealised-carrying walk",
+        CURVE,
+        CURVE_TESTS,
+        [
+            (
+                "            for leg in open_legs:\n"
+                "                if leg in frozen:\n"
+                "                    continue\n"
+                "                if marks_by_source:\n"
+                "                    source = mark_sources[leg]\n"
+                "                    offset = day - marks_first_by_leg[leg]\n"
+                "                    mark = marks_by_source[source][offset]\n"
+                "                else:\n"
+                "                    offset = mark_offsets[leg] + (day - entry_indices[leg])\n"
+                "                    mark = marks[offset]\n"
+                "                if np.isnan(mark):\n"
+                "                    stale_marks += 1\n"
+                "                else:\n"
+                "                    last_price[leg] = mark",
+                "            for leg in open_legs:\n"
+                "                if leg in frozen:\n"
+                "                    continue\n"
+                "                if marks_by_source:\n"
+                "                    source = mark_sources[leg]\n"
+                "                    offset = day - marks_first_by_leg[leg]\n"
+                "                    mark = marks_by_source[source][offset]\n"
+                "                else:\n"
+                "                    offset = mark_offsets[leg] + (day - entry_indices[leg])\n"
+                "                    mark = marks[offset]\n"
+                "                last_price[leg] = mark",
+            )
+        ],
+        "test_an_unrealised_book_keeps_the_exit_split_the_same_bar_split_and_the_halt",
+    ),
+    (
+        "a missing bar overwriting the mark with NaN instead of carrying it forward, compiled kernel",
+        CURVE,
+        CURVE_TESTS,
+        [
+            (
+                "            source = mark_source[leg]\n"
+                "            offset = day - marks_first_by_source[source]\n"
+                "            mark = marks_by_source[source][offset]\n"
                 "            if np.isnan(mark):\n"
                 "                stale_marks += 1\n"
                 "            else:\n"
                 "                last_price[leg] = mark",
-                "                continue\n"
-                "            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
-                "            mark = marks[offset]\n"
+                "            source = mark_source[leg]\n"
+                "            offset = day - marks_first_by_source[source]\n"
+                "            mark = marks_by_source[source][offset]\n"
                 "            last_price[leg] = mark",
             )
         ],
-        "test_a_missing_bar_carries_the_previous_mark_forward_and_is_counted",
+        "test_the_compiled_walk_is_EXACTLY_the_reference_on_an_adversarial_book",
     ),
     (
         # ⚠⚠ CLASS 2 (#2695): the branch no probe named. `build_buy_and_hold_curve`
@@ -257,6 +448,16 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         CURVE_TESTS,
         [("        basket = len(open_legs) + len(opened_today)", "        basket = len(open_legs) + 1")],
         "test_entries_on_the_SAME_date_are_sized_against_the_whole_basket",
+    ),
+    (
+        # The compiled copy of the basket denominator. ⚠ It is only observable
+        # on a book where two legs open on ONE date; the adversarial fixture
+        # carries such a pair for exactly this probe.
+        "today's entries sized one at a time instead of against the whole basket, compiled kernel",
+        CURVE,
+        CURVE_TESTS,
+        [("        basket = active_count + opened_count", "        basket = active_count + 1")],
+        "test_the_compiled_walk_is_EXACTLY_the_reference_on_an_adversarial_book",
     ),
     (
         # ⚠ Without it a leg reads past the end of its own mark slice into the
@@ -524,21 +725,21 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_a_NEGATIVE_final_equity_raises_rather_than_returning_a_COMPLEX_number",
     ),
     (
-        "the benchmark axis-length check removed (two windows subtracted as one)",
+        "the benchmark exact-date check removed (equal-length windows subtracted as one)",
         STATS,
         STATS_TESTS,
         [
             (
-                "        if len(buy_and_hold.equity) != len(equity):\n"
+                "        if buy_and_hold.dates != dates:\n"
                 "            raise ValueError(\n"
-                "                f\"benchmark curve has {len(buy_and_hold.equity)} points against the strategy's "
-                '{len(equity)} — the "\n'
-                '                "two must run on the same axis or the comparison is between different windows"\n'
+                '                "benchmark dates differ from the strategy dates — equal curve lengths do not prove '
+                'the same "\n'
+                '                "measurement window"\n'
                 "            )\n",
                 "",
             )
         ],
-        "test_a_benchmark_on_a_different_axis_is_refused",
+        "test_equal_length_curves_on_different_dates_are_refused",
     ),
 ]
 

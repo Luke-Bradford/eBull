@@ -8,12 +8,11 @@ Any script that calls ``freeze_preregistration`` must call
 A frozen declaration records the ``STRUCTURAL_REFUSAL_POLICY_VERSION`` it was
 written under, and ``prereg_contract.declaration_refusals`` returns
 ``structural_refusal_policy_superseded`` the moment that string stops matching
-the current constant. The row cannot be repaired: ``sql/333`` bars UPDATE and
-DELETE outright and holds ``UNIQUE (strategy_id, strategy_version)``, so a
-corrected row cannot be inserted either. Freeze under a policy version that then
-moves and the trial's outcomes are refused **forever**; the only escape is a new
-``strategy_version``, which changes the trial's identity — the one thing
-preregistration exists to hold fixed.
+the current constant. ``sql/333`` bars UPDATE and DELETE, so the original row
+cannot be rewritten. The narrow policy-only supersession path added by #2634
+can repair a stranded declaration before any exposure, but it requires a
+frozen no-exposure attestation and preserves every substantive trial term.
+Freezing under a version known to be stale is therefore still refused here.
 
 ⚠ WHAT THIS GUARD DOES, AND — MORE USEFULLY — WHAT IT DOES NOT
 ---------------------------------------------------------------------------
@@ -172,8 +171,8 @@ def assert_policy_version_merged(*, allow_divergence: bool = False) -> dict[str,
     raise SystemExit(
         "refusing to freeze: this tree's STRUCTURAL_REFUSAL_POLICY_VERSION is "
         f"{STRUCTURAL_REFUSAL_POLICY_VERSION!r} and {detail}. A declaration frozen under an unmerged "
-        "policy version is refused forever once the merged one wins, and sql/333 permits no repair "
-        "(UPDATE and DELETE barred, the identity key taken). Merge or rebase first, or pass "
+        "policy version is refused once the merged one wins and requires a policy-only, pre-exposure "
+        "supersession to repair. Merge or rebase first, or pass "
         "--allow-policy-divergence if you have established the divergence is harmless."
     )
 

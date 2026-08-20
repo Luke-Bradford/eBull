@@ -130,7 +130,13 @@ from app.services.strategies.s3_mean_reversion_in_trend import (
 )
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_result import EVALUATION_WINDOW_END, EVALUATION_WINDOW_START
-from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics, TradeReturns, compute_metrics
+from app.services.strategy_statistics import (
+    METRIC_SET_ID,
+    DatedEquityCurve,
+    StrategyMetrics,
+    TradeReturns,
+    compute_metrics,
+)
 
 # ⚠ REUSED, not re-derived. 5a built the corpus→positions path, 5b the costing
 # and 5d the curve layer. This script owns the PERMUTATION and the aggregation.
@@ -692,8 +698,7 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int, zero_cost: bo
             problems.append(f"R1 member {index}: {len(book):,} legs against the strategy's {expected_trades:,}")
         curve = build_equity_curve(book, date_count=len(axis))
         metrics = compute_metrics(
-            curve,
-            dates=axis,
+            DatedEquityCurve(dates=axis, curve=curve),
             trades=TradeReturns(
                 net_return_pct=tuple(returns),
                 entry_fill_date=tuple(entry_dates),
@@ -701,7 +706,7 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int, zero_cost: bo
                 open_count=0,
                 unpriced_count=0,
             ),
-            buy_and_hold=benchmark_curve,
+            buy_and_hold=DatedEquityCurve(dates=axis, curve=benchmark_curve),
             # ⚠ NO BOOTSTRAP. §9 reads the cohort's Sharpe and net return; the
             # criterion-3 correction is a property of the REAL sleeve's trade
             # population and running it 1,000 times would add hours to compute a

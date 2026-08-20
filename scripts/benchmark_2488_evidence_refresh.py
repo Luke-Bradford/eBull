@@ -121,7 +121,6 @@ def compare_s4(*, window_id: str, quarantine_arm: QuarantineArm, limit: int | No
 
 
 def full_run(*, window_id: str) -> dict[str, object]:
-    window = recent_evidence_window(window_id).window
     started_wall = time.monotonic()
     started_cpu = time.process_time()
     with psycopg.connect(settings.database_url) as conn:
@@ -134,7 +133,7 @@ def full_run(*, window_id: str) -> dict[str, object]:
             conn,
             holdout_purpose="issue #2488 benchmark; transaction rolled back",
             holdout_accessed_by="codex benchmark",
-            evaluation_window=window,
+            evidence_window_id=window_id,
         )
         result_versions = [row.result_version for row in report.rows]
         with conn.cursor(row_factory=dict_row) as cursor:

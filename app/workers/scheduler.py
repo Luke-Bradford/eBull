@@ -5389,10 +5389,14 @@ class _BacktestProgressWriter:
         self._window_id: str | None = None
         self._last_flush = 0.0
         self._last_stage: tuple[object, ...] | None = None
+        self._stage_started_at: float | None = None
+        self._stage_started_seen = 0
 
     def start_window(self, window_id: str) -> None:
         self._window_id = window_id
         self._last_stage = None
+        self._stage_started_at = None
+        self._stage_started_seen = 0
 
     def __call__(self, event: object) -> None:
         from app.services.backtest_run import BacktestProgressEvent
@@ -5407,6 +5411,14 @@ class _BacktestProgressWriter:
         )
         now = time.monotonic()
         stage_changed = stage != self._last_stage
+        if stage_changed:
+            self._stage_started_at = now
+            self._stage_started_seen = event.series_seen
+        elapsed_s = 0.0 if self._stage_started_at is None else max(0.0, now - self._stage_started_at)
+        advanced = max(0, event.series_seen - self._stage_started_seen)
+        rate_per_s = advanced / elapsed_s if elapsed_s > 0.0 and advanced > 0 else None
+        remaining = None if event.series_total is None else max(0, event.series_total - event.series_seen)
+        eta_s = remaining / rate_per_s if remaining is not None and rate_per_s is not None else None
         final_tick = event.series_total is not None and event.series_seen == event.series_total
         if not stage_changed and not final_tick and now - self._last_flush < _BACKTEST_PROGRESS_FLUSH_SECONDS:
             return
@@ -5419,6 +5431,12 @@ class _BacktestProgressWriter:
                 "ambiguity_arm": event.ambiguity_arm,
                 "series_seen": event.series_seen,
                 "series_total": event.series_total,
+                "work_unit": "members" if event.phase == "synthetic_control" else "series",
+                "elapsed_s": elapsed_s,
+                "rate_per_s": rate_per_s,
+                "eta_s": eta_s,
+                "control_seen": event.control_seen,
+                "control_total": event.control_total,
             }
         )
         try:
@@ -5590,7 +5608,8 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                 "refresh_recent cannot be combined with synthetic_control — the control is a per-arm cohort and "
                 "this path runs every pinned window; ask for one window at a time through evidence_window"
             )
-        evaluation_window = None if evidence_window_id is None else recent_evidence_window(evidence_window_id).window
+        if evidence_window_id is not None:
+            recent_evidence_window(evidence_window_id)
         with connect_job() as conn:
             if refresh_recent:
                 complete, partial = _recent_evidence_completion(conn)
@@ -5622,7 +5641,7 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                             holdout_purpose=_optional_str(params.get("holdout_purpose")),
                             holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
                             trial_register_version=_optional_str(params.get("trial_register_version")),
-                            evaluation_window=item.window,
+                            evidence_window_id=window_id,
                             progress=progress_writer,
                             release_read_locks=True,
                         )
@@ -5683,17 +5702,31 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                     else f"completed {newly_completed} missing recent evidence window(s)"
                 )
                 return
-            report = run_backtest(
-                conn,
-                strategy_id=_optional_str(params.get("strategy_id")),
-                holdout_purpose=_optional_str(params.get("holdout_purpose")),
-                holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
-                trial_register_version=_optional_str(params.get("trial_register_version")),
-                evaluation_window=evaluation_window,
-                synthetic_control=synthetic_control,
-                release_read_locks=True,
+            progress_writer = _open_backtest_progress_writer(
+                run_id=tracker.run_id,
+                total_windows=1,
+                already_complete=0,
             )
-            tracker.row_count = report.rows_written
+            if progress_writer is not None:
+                progress_writer.start_window(evidence_window_id or "in_sample")
+            try:
+                report = run_backtest(
+                    conn,
+                    strategy_id=_optional_str(params.get("strategy_id")),
+                    holdout_purpose=_optional_str(params.get("holdout_purpose")),
+                    holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
+                    trial_register_version=_optional_str(params.get("trial_register_version")),
+                    evidence_window_id=evidence_window_id,
+                    synthetic_control=synthetic_control,
+                    progress=progress_writer,
+                    release_read_locks=True,
+                )
+                tracker.row_count = report.rows_written
+                if progress_writer is not None:
+                    progress_writer.record_window_commit(rows_written=report.rows_written, completed=1)
+            finally:
+                if progress_writer is not None:
+                    progress_writer.close()
 
 
 def _recent_evidence_completion(
@@ -5709,6 +5742,7 @@ def _recent_evidence_completion(
         BACKTEST_UNIVERSE,
         RESULT_SCOPE,
         corpus_version_for,
+        load_corpus,
         runnable_strategies,
     )
     from app.services.cost_model import COST_MODEL_ID
@@ -5724,15 +5758,21 @@ def _recent_evidence_completion(
     from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
     from app.services.strategy_result import (
         AMBIGUITY_ARMS,
+        METRIC_AXIS_RULE_VERSION,
         TOTAL_RETURN_BASIS,
         AmbiguityArm,
         ResultIdentity,
+        metric_axis_sha256,
     )
     from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION
+    from app.services.strategy_result_universe import record_sha256
 
     runnable, _excluded = runnable_strategies()
     expected: dict[str, set[str]] = {}
     for window_id, item in RECENT_EVIDENCE_WINDOWS.items():
+        corpus = load_corpus(conn, universe_basis=BACKTEST_UNIVERSE, evaluation_window=item.window)
+        axis = corpus.axis
+        opportunity_digest = record_sha256(corpus.opportunity_records["hold_out"])
         versions: set[str] = set()
         for strategy_id in runnable:
             entry = STRATEGY_MANIFEST[strategy_id]
@@ -5758,6 +5798,13 @@ def _recent_evidence_completion(
                             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
                             return_basis=TOTAL_RETURN_BASIS,
                             ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+                            metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+                            metric_axis_dates=axis,
+                            metric_axis_start=axis[0],
+                            metric_axis_end=axis[-1],
+                            metric_axis_digest=metric_axis_sha256(axis),
+                            opportunity_set_digest=opportunity_digest,
+                            evidence_window_id=window_id,
                         ).version
                     )
         expected[window_id] = versions

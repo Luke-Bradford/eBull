@@ -115,7 +115,13 @@ from app.services.strategies.s1_time_series_momentum import S1_STRATEGY_ID, s1_i
 from app.services.strategies.s3_mean_reversion_in_trend import S3_STRATEGY_ID, s3_identity, s3_signals
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_result import EVALUATION_WINDOW_END, EVALUATION_WINDOW_START
-from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics, TradeReturns, compute_metrics
+from app.services.strategy_statistics import (
+    METRIC_SET_ID,
+    DatedEquityCurve,
+    StrategyMetrics,
+    TradeReturns,
+    compute_metrics,
+)
 from app.services.trial_register import TRIAL_REGISTER
 
 # ⚠ REUSED, not re-derived. Phase 5a built the corpus→positions path and 5b the
@@ -324,8 +330,7 @@ class _Sleeve:
 
         try:
             metrics = compute_metrics(
-                curve,
-                dates=axis,
+                DatedEquityCurve(dates=axis, curve=curve),
                 trades=TradeReturns(
                     net_return_pct=tuple(self.returns),
                     entry_fill_date=tuple(self.entry_dates),
@@ -333,7 +338,7 @@ class _Sleeve:
                     open_count=self.open_at_end,
                     unpriced_count=sum(self.excluded.values()),
                 ),
-                buy_and_hold=benchmark_curve,
+                buy_and_hold=DatedEquityCurve(dates=axis, curve=benchmark_curve),
                 bootstrap_seed=BOOTSTRAP_SEED,
             )
         except ValueError as exc:

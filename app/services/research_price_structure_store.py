@@ -46,6 +46,7 @@ counted separately by the census instead (``quarantine_sensitivity``).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Any, Final, Literal, get_args
 
@@ -77,6 +78,7 @@ _LOAD_SQL = """
      AND q.bar_date = d.bar_date
      AND q.rule_set_version = %(quarantine_version)s
     WHERE d.series_id = %(series_id)s
+      AND (%(through_date)s::date IS NULL OR d.bar_date <= %(through_date)s::date)
     ORDER BY d.bar_date
 """
 
@@ -168,6 +170,7 @@ def load_masked_series(
     series_id: int,
     *,
     arm: QuarantineArm = "masked",
+    through_date: date | None = None,
 ) -> MaskedSeries:
     """Load one research series with quarantined fields masked to ``None``.
 
@@ -198,10 +201,18 @@ def load_masked_series(
     ``arm="admitted"`` is criterion 9's sensitivity arm: the same rows, the same
     verdicts counted, and every flagged field passed through at its **stored**
     value. It is a measurement of what masking cost, never a production read.
+
+    A sealed evaluator supplies ``through_date`` at the query boundary. This is
+    not an after-fetch slice: bars beyond an in-sample authority boundary must
+    never enter application memory merely to be discarded later.
     """
     rows = conn.execute(
         _LOAD_SQL,
-        {"series_id": series_id, "quarantine_version": QUARANTINE_RULE_SET_VERSION},
+        {
+            "series_id": series_id,
+            "quarantine_version": QUARANTINE_RULE_SET_VERSION,
+            "through_date": through_date,
+        },
     ).fetchall()
     return _apply_arm(series_id, rows, arm=arm)
 
@@ -268,16 +279,24 @@ def _apply_arm(
 def load_arms(
     conn: psycopg.Connection[Any],
     series_id: int,
+    *,
+    through_date: date | None = None,
 ) -> dict[QuarantineArm, MaskedSeries]:
     """Both criterion-9 arms of one series, off a SINGLE fetch.
 
     ⚠ The point is that the two arms are guaranteed to describe the same rows.
     A caller looping over 5,266 series with two queries each would also be
     reading twice as much, but the reason this exists is the first one.
+    ``through_date`` is applied by that single database read, so both arms also
+    share the same sealed outcome boundary.
     """
     rows = conn.execute(
         _LOAD_SQL,
-        {"series_id": series_id, "quarantine_version": QUARANTINE_RULE_SET_VERSION},
+        {
+            "series_id": series_id,
+            "quarantine_version": QUARANTINE_RULE_SET_VERSION,
+            "through_date": through_date,
+        },
     ).fetchall()
     return {arm: _apply_arm(series_id, rows, arm=arm) for arm in ("masked", "admitted")}
 

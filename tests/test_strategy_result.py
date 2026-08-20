@@ -16,14 +16,20 @@ value.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
-from app.services.random_entry_cohort import SyntheticControl
+from app.services.random_entry_cohort import (
+    MATCH_QUALITY_POLICY_ID,
+    SyntheticControl,
+    SyntheticControlMatchQuality,
+)
 from app.services.strategy_promotion_evidence import (
     EVIDENCE_VERSION,
     REQUIRED_CHALLENGERS,
@@ -44,6 +50,7 @@ from app.services.strategy_result import (
     HOLDOUT_BOUNDARY,
     HOLDOUT_WEIGHTING,
     LEGACY_RETURN_BASIS,
+    METRIC_AXIS_RULE_VERSION,
     PROMOTABLE_UNIVERSE_BASES,
     PROMOTION_REFUSALS,
     RESULT_SET_ID,
@@ -58,6 +65,7 @@ from app.services.strategy_result import (
     deflation_promotion_refusals,
     holdout_count_promotion_refusals,
     is_promotable,
+    metric_axis_sha256,
     namespace_for_bar,
     namespace_for_position,
     namespace_for_signal,
@@ -65,7 +73,7 @@ from app.services.strategy_result import (
     synthetic_control_promotion_refusals,
 )
 from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION, LEGACY_AMBIGUITY_RULE_VERSION
-from app.services.strategy_statistics import StrategyMetrics
+from app.services.strategy_statistics import StrategyMetrics, periods_per_year
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
 # --- transcribed from the spec, never imported -----------------------------
@@ -83,6 +91,9 @@ SPEC_CORPUS_VENDOR = "paperswithbacktest/Stocks-Daily-Price"
 SPEC_SIZING_RULE = "equal_weight_concurrent_v1"
 #: sql/255's vocabulary, which §6 reuses for the result row.
 SPEC_UNIVERSE_BASES = {"survivor_only", "survivorship_free"}
+_CURRENT_TEST_AXIS = (EVALUATION_WINDOW_START, date(2021, 6, 28))
+_CURRENT_TEST_PPY = periods_per_year(_CURRENT_TEST_AXIS)
+_CURRENT_TEST_CAGR = (1.21 ** (1.0 / ((len(_CURRENT_TEST_AXIS) - 1) / _CURRENT_TEST_PPY)) - 1.0) * 100.0
 
 
 def _identity(**overrides: object) -> ResultIdentity:
@@ -118,7 +129,7 @@ def _metrics(**overrides: object) -> StrategyMetrics:
     base: dict[str, object] = {
         "expectancy_per_trade_pct": 0.5,
         "profit_factor": 1.2,
-        "cagr_pct": 4.0,
+        "cagr_pct": _CURRENT_TEST_CAGR,
         "annualised_volatility_pct": 12.0,
         "sharpe": 0.33,
         "sortino": 0.44,
@@ -132,7 +143,7 @@ def _metrics(**overrides: object) -> StrategyMetrics:
         "losing_period_count": 300,
         "open_trade_count": 2,
         "unpriced_trade_count": 1,
-        "periods_per_year": 251.7,
+        "periods_per_year": _CURRENT_TEST_PPY,
         "total_return_pct": 21.0,
         "buy_and_hold_return_pct": 22.5,
         "expectancy_ci_low_pct": -0.2,
@@ -180,8 +191,17 @@ def _metrics_without_bootstrap(**overrides: object) -> StrategyMetrics:
 
 
 def _result(**overrides: object) -> StrategyResult:
+    axis = _CURRENT_TEST_AXIS
     base: dict[str, object] = {
-        "identity": _identity(),
+        "identity": _identity(
+            namespace="in_sample",
+            metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+            metric_axis_dates=axis,
+            metric_axis_start=axis[0],
+            metric_axis_end=axis[-1],
+            metric_axis_digest=metric_axis_sha256(axis),
+            opportunity_set_digest="a" * 64,
+        ),
         "purpose": "capital_candidate",
         "metrics": _metrics(),
         "universe_basis": "survivor_only",
@@ -217,9 +237,54 @@ def _passing_control(**overrides: object) -> SyntheticControl:
         "strategy_sharpe": 0.33,
         "cohort_return_threshold_pct": 5.0,
         "strategy_return_pct": 21.0,
+        "match_quality": SyntheticControlMatchQuality(
+            policy_id=MATCH_QUALITY_POLICY_ID,
+            placement_space_id="test-fixed-panel-v1",
+            matchable_trade_count=100,
+            cohort_mean_trade_count=100.0,
+            unmatchable_by_reason={},
+            no_slack_series=0,
+            series_placed=3,
+            strategy_exposure_time_pct=61.0,
+            cohort_mean_exposure_time_pct=61.0,
+            strategy_turnover_annualised=2.5,
+            cohort_mean_turnover_annualised=2.5,
+        ),
     }
     base.update(overrides)
     return SyntheticControl(**base)  # type: ignore[arg-type]
+
+
+class TestSyntheticControlMatchQuality:
+    def test_exact_policy_does_not_hide_sub_nanounit_residuals(self) -> None:
+        match = _passing_control().match_quality
+        assert match is not None
+        changed = replace(
+            match,
+            cohort_mean_trade_count=match.cohort_mean_trade_count + 5e-10,
+            cohort_mean_exposure_time_pct=match.cohort_mean_exposure_time_pct + 5e-10,
+            cohort_mean_turnover_annualised=match.cohort_mean_turnover_annualised + 5e-10,
+        )
+        assert not changed.population_matches
+        assert not changed.exposure_matches
+        assert not changed.turnover_matches
+        assert not changed.passed
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("cohort_mean_trade_count", float("nan")), ("cohort_mean_turnover_annualised", float("inf"))],
+    )
+    def test_non_finite_match_measurements_are_refused(self, field: str, value: float) -> None:
+        match = _passing_control().match_quality
+        assert match is not None
+        with pytest.raises(ValueError, match="must be finite"):
+            replace(match, **{field: value})
+
+    def test_the_reason_census_cannot_change_after_validation(self) -> None:
+        match = _passing_control().match_quality
+        assert match is not None
+        with pytest.raises(TypeError):
+            match.unmatchable_by_reason["late mutation"] = 1  # type: ignore[index]
 
 
 def _deflated_result(**overrides: object) -> DeflatedSharpeResult:
@@ -357,6 +422,53 @@ class TestSpecConstants:
 
     def test_the_boundary_is_the_spec_boundary(self) -> None:
         assert HOLDOUT_BOUNDARY == SPEC_HOLDOUT_BOUNDARY
+
+    def test_the_SQL_migrations_carry_the_same_dates_as_python(self) -> None:
+        """⚠ EVERY DATE LITERAL IN A MIGRATION IS ANOTHER COPY OF A PYTHON CONSTANT.
+
+        `sql/359`'s `strategy_results_metric_axis_namespace` and `sql/360`'s
+        control-support predicate both hardcode boundary dates. A CHECK or a
+        WHERE that disagrees with the code either rejects valid rows or admits
+        invalid ones, and nothing sat in between — the Python constants are
+        pinned against the spec above, so a recalibration fails THERE while the
+        SQL keeps the old date silently.
+
+        ⚠ Reads each literal OUT of the migration rather than restating it, so
+        this test cannot itself become one more copy of the same date.
+
+        ⚠ Scoped per file to the PREDICATE that owns the literal, never to the
+        whole file — `sql/359`'s namespace CHECK and `sql/360`'s `candidates`
+        CTE. `sql/359` also registers the evidence windows, which carry their own
+        different and correct dates; and an unrelated literal added to either
+        file later must not break this test for the wrong reason.
+        """
+        sql_dir = Path(__file__).resolve().parents[1] / "sql"
+
+        namespace_block = re.search(
+            r"ADD CONSTRAINT strategy_results_metric_axis_namespace CHECK \((.*?)\n    \)",
+            (sql_dir / "359_strategy_result_metric_axis.sql").read_text(),
+            re.S,
+        )
+        assert namespace_block, "constraint strategy_results_metric_axis_namespace not found in sql/359"
+
+        candidates_cte = re.search(
+            r"WITH candidates AS \((.*?)\n\)",
+            (sql_dir / "360_strategy_control_support_metric_axis.sql").read_text(),
+            re.S,
+        )
+        assert candidates_cte, "CTE `candidates` not found in sql/360"
+
+        cases: list[tuple[str, str, set[date]]] = [
+            ("sql/359 metric_axis_namespace", namespace_block.group(1), {HOLDOUT_BOUNDARY}),
+            (
+                "sql/360 candidates CTE",
+                candidates_cte.group(1),
+                {EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY},
+            ),
+        ]
+        for label, text, expected in cases:
+            literals = {date.fromisoformat(m) for m in re.findall(r"DATE '(\d{4}-\d{2}-\d{2})'", text)}
+            assert literals == expected, f"{label} carries {sorted(literals)}, python says {sorted(expected)}"
 
     def test_the_split_is_bar_weighted(self) -> None:
         assert HOLDOUT_WEIGHTING == SPEC_HOLDOUT_WEIGHTING
@@ -551,6 +663,69 @@ class TestResultIdentity:
         """§3.4's two arms are two results, not two views of one."""
         assert _identity(ambiguity_arm="worst_case").version != _identity(ambiguity_arm="best_case").version
 
+    def test_current_identity_hashes_the_interior_axis_and_opportunity_population(self) -> None:
+        first_axis = (date(2022, 1, 1), date(2023, 1, 3), date(2024, 9, 27))
+        second_axis = (date(2022, 1, 1), date(2023, 1, 4), date(2024, 9, 27))
+
+        def current(
+            axis: tuple[date, ...],
+            *,
+            opportunity: str = "a" * 64,
+            window_id: str = "primary-2022-plus",
+        ) -> ResultIdentity:
+            return _identity(
+                return_basis=TOTAL_RETURN_BASIS,
+                ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+                window_start=date(2022, 1, 1),
+                window_end=date(2024, 9, 27),
+                metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+                metric_axis_dates=axis,
+                metric_axis_start=axis[0],
+                metric_axis_end=axis[-1],
+                metric_axis_digest=metric_axis_sha256(axis),
+                opportunity_set_digest=opportunity,
+                evidence_window_id=window_id,
+            )
+
+        baseline = current(first_axis)
+        assert baseline.version.startswith("strategy-result-v4+")
+        assert baseline.version != current(second_axis)
+        assert baseline.version != current(first_axis, opportunity="b" * 64)
+        assert baseline.version != current(first_axis, window_id="successor-window")
+
+        with pytest.raises(ValueError, match="opportunity-set digest"):
+            current(first_axis, opportunity="not-a-digest")
+        with pytest.raises(ValueError, match="non-blank evidence-window ID"):
+            current(first_axis, window_id="   ")
+
+    def test_current_axis_must_stay_inside_its_declared_window(self) -> None:
+        axis = (date(2019, 12, 31), date(2020, 1, 2))
+        with pytest.raises(ValueError, match="contained in the declared evaluation window"):
+            _identity(
+                namespace="in_sample",
+                window_start=date(2020, 1, 1),
+                window_end=date(2020, 1, 3),
+                metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+                metric_axis_dates=axis,
+                metric_axis_start=axis[0],
+                metric_axis_end=axis[-1],
+                metric_axis_digest=metric_axis_sha256(axis),
+                opportunity_set_digest="a" * 64,
+            )
+
+    def test_in_sample_axis_must_stop_before_the_holdout_boundary(self) -> None:
+        axis = (date(2021, 6, 28), HOLDOUT_BOUNDARY)
+        with pytest.raises(ValueError, match="cannot reach the frozen hold-out boundary"):
+            _identity(
+                namespace="in_sample",
+                metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+                metric_axis_dates=axis,
+                metric_axis_start=axis[0],
+                metric_axis_end=axis[-1],
+                metric_axis_digest=metric_axis_sha256(axis),
+                opportunity_set_digest="a" * 64,
+            )
+
 
 class TestStrategyResultValidation:
     """The writer-side shape, which RAISES — unlike the gate."""
@@ -694,6 +869,49 @@ class TestPromotionGateClears:
 
 
 class TestPromotionGateRefusals:
+    def test_a_legacy_result_has_unproven_metric_axis(self) -> None:
+        candidate = _clean_candidate(result=_result(identity=_identity(), **_CLEAN_RESULT_FIELDS))
+        assert "metric_axis_unproven" in check_promotable(candidate)
+
+    def test_metrics_that_do_not_reconcile_with_the_axis_are_unproven(self) -> None:
+        result = _result(
+            **_CLEAN_RESULT_FIELDS,
+            metrics=_metrics(periods_per_year=_CURRENT_TEST_PPY + 1.0),
+            synthetic_control=_passing_control(),
+        )
+        assert "metric_axis_unproven" in check_promotable(_clean_candidate(result=result))
+
+    @pytest.mark.parametrize("window_id", ["invented", "year-2023"])
+    def test_holdout_axis_requires_the_exact_registered_evidence_window(self, window_id: str) -> None:
+        axis = (date(2022, 1, 3), date(2024, 9, 27))
+        ppy = periods_per_year(axis)
+        metrics = _metrics(
+            periods_per_year=ppy,
+            cagr_pct=(1.21 ** (1.0 / ((len(axis) - 1) / ppy)) - 1.0) * 100.0,
+        )
+        identity = _identity(
+            namespace="hold_out",
+            window_start=date(2022, 1, 1),
+            window_end=date(2024, 9, 27),
+            return_basis=TOTAL_RETURN_BASIS,
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+            metric_axis_dates=axis,
+            metric_axis_start=axis[0],
+            metric_axis_end=axis[-1],
+            metric_axis_digest=metric_axis_sha256(axis),
+            opportunity_set_digest="a" * 64,
+            evidence_window_id=window_id,
+        )
+        result = _result(
+            identity=identity,
+            metrics=metrics,
+            **_CLEAN_RESULT_FIELDS,
+            synthetic_control=_passing_control(),
+        )
+
+        assert "metric_axis_unproven" in check_promotable(_clean_candidate(result=result))
+
     def test_a_harness_control_is_permanently_refused(self) -> None:
         assert (
             check_promotable(
@@ -756,6 +974,15 @@ class TestPromotionGateRefusals:
         refusals = check_promotable(_clean_candidate(evaluated_instrument_ids=frozenset()))
         assert "no_instruments_evaluated" in refusals
         assert "instrument_outside_validated_universe" not in refusals
+
+    def test_an_unlinked_only_opportunity_set_is_not_vacuously_empty(self) -> None:
+        refusals = check_promotable(
+            _clean_candidate(
+                evaluated_instrument_ids=frozenset(),
+                evaluated_series_ids=frozenset({101}),
+            )
+        )
+        assert "no_instruments_evaluated" not in refusals
 
     def test_a_never_evaluated_holdout_is_refused(self) -> None:
         refusals = check_promotable(_clean_candidate(holdout_evaluations=0, recorded_accesses=0))
@@ -888,6 +1115,44 @@ class TestPromotionGateRefusals:
         default, the same posture as the DSR and the effective sample size."""
         candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=None))
         assert "synthetic_control_not_run" in check_promotable(candidate)
+
+    def test_a_legacy_control_without_match_evidence_is_refused(self) -> None:
+        control = replace(_passing_control(), match_quality=None)
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert set(check_promotable(candidate)) == {"synthetic_control_match_evidence_missing"}
+
+    def test_an_unknown_match_policy_is_refused(self) -> None:
+        control = _passing_control()
+        assert control.match_quality is not None
+        control = replace(
+            control,
+            match_quality=replace(control.match_quality, policy_id="synthetic-control-favourable-tolerance-v99"),
+        )
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert set(check_promotable(candidate)) == {"synthetic_control_match_policy_unrecognised"}
+
+    def test_every_match_dimension_is_checked_independently(self) -> None:
+        """No favourable cohort can hide a population, exposure, or turnover
+        mismatch behind the two outcome thresholds."""
+        control = _passing_control()
+        assert control.match_quality is not None
+        control = replace(
+            control,
+            match_quality=replace(
+                control.match_quality,
+                cohort_mean_trade_count=99.0,
+                unmatchable_by_reason={"open_at_window_end": 1},
+                no_slack_series=1,
+                cohort_mean_exposure_time_pct=60.0,
+                cohort_mean_turnover_annualised=2.4,
+            ),
+        )
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert set(check_promotable(candidate)) == {
+            "synthetic_control_population_mismatch",
+            "synthetic_control_exposure_mismatch",
+            "synthetic_control_turnover_mismatch",
+        }
 
     def test_a_cohort_whose_mean_return_excludes_zero_blocks_the_result(self) -> None:
         """§9's FIRST threshold, and it is a verdict on the HARNESS rather than
@@ -1113,6 +1378,11 @@ _HELPER_CODES: dict[str, frozenset[str]] = {
     "synthetic": frozenset(
         {
             "synthetic_control_not_run",
+            "synthetic_control_match_evidence_missing",
+            "synthetic_control_match_policy_unrecognised",
+            "synthetic_control_population_mismatch",
+            "synthetic_control_exposure_mismatch",
+            "synthetic_control_turnover_mismatch",
             "synthetic_control_cohort_shows_edge",
             "synthetic_control_sharpe_below_cohort",
         }
