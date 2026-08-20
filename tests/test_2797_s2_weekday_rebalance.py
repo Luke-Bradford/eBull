@@ -4,12 +4,16 @@ The bug these pin: ``price_daily`` carries weekend rows (3,669 across 389
 instruments on 329 distinct dates, measured 2026-08-20 on the validated
 universe), and because S-2's rule takes the FIRST bar of a new month over the
 panel's *union* calendar, one weekend artefact consumed the whole month. The
-real first trading day then never rebalanced, and the cross-section on the
-weekend date was 4-117 names against 3,629-5,747 on every real one.
+real first trading day then never rebalanced.
 
-The most recent instance, Sat 2026-08-01, had 9 eligible names — below S-2's
-``MIN_CROSS_SECTION`` of 10 — and is the entire reason S-2 had fired zero
-signals in production under every version.
+On the DECISION population — masked bars past the 273-bar warm-up and above the
+$1 floor, which is the one ``MIN_CROSS_SECTION`` is compared against — the 13
+weekend dates ranked 0-11 names and yielded 7 entry signals across five years,
+against up to 3,346 names and 2,419 signals on the weekday dates that replace
+them (``scripts/ab_2797_s2_weekday_rebalance.py``).
+
+The most recent instance, Sat 2026-08-01, ranked 0 — and is the entire reason
+S-2 had fired zero signals in production under every version.
 """
 
 from __future__ import annotations

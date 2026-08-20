@@ -200,13 +200,23 @@ def rebalance_dates(calendar: Iterable[date]) -> frozenset[date]:
     Measured on the validated universe at 2026-08-20 (6,774 instruments,
     3,673,648 bars): **3,669 weekend bars** across 389 instruments and 329
     distinct weekend dates — 0.0998% of the corpus, controlling **13 of 73**
-    rebalance dates (17.8%). On those dates the panel ran 4–117 names against
-    3,629–5,747 on every real one. The most recent, Sat 2026-08-01, had 9
-    eligible names — below ``MIN_CROSS_SECTION`` — and Mon 2026-08-03 had 5,380,
-    which is the whole of S-2's zero fired signals in production. Reproduce::
+    rebalance dates (17.8%). Reproduce::
 
         select count(*), count(distinct instrument_id), count(distinct price_date)
         from price_daily where extract(isodow from price_date) >= 6;
+
+    ⚠ TWO POPULATIONS ANSWER "HOW BIG WAS THE PANEL", AND ONLY ONE OF THEM
+    DECIDES ANYTHING. The query above counts raw ``price_daily`` rows; the
+    number this rule is judged on is the DECISION population — masked bars, past
+    the 273-bar warm-up, above the $1 floor — which is what
+    ``scripts/ab_2797_s2_weekday_rebalance.py`` reports and what
+    ``MIN_CROSS_SECTION`` is compared against. On that population the 13 weekend
+    dates ranked **0–11** names and yielded **7** entry signals across five
+    years; the 13 weekday dates that replace them rank up to **3,346** and yield
+    **2,419**. Sat 2026-08-01 ranked **0** and Mon 2026-08-03 ranks **3,204**,
+    which is the whole of S-2's zero fired signals in production. Quoting the raw
+    row count here instead would state a larger, truer-sounding number that no
+    gate reads.
 
     ⚠ The failure this removes was SILENT: the junk instruments are not
     frontier-eligible, so the scan wrote no row of any kind for 2026-08-01 — not
@@ -222,7 +232,12 @@ def rebalance_dates(calendar: Iterable[date]) -> frozenset[date]:
     .s10_rebalance_dates`` — identical rule, two modules, and that is a choice
     rather than an oversight. Both identities move in #2797 regardless (a
     docstring edit moves ``_source_hash``), so co-location was not ruled out on
-    cost. It is ruled out because the binding that catches drift has to be
+    cost. What is duplicated is the four-line rule AND this rationale prose; the
+    thresholds are NOT — S-2 cuts at ``MIN_CROSS_SECTION`` 10 and 273 warm-up
+    bars, S-10 at 1000 with no warm-up constant, deliberately (its own comment
+    says "much larger than S-2's 10 on purpose"). So there is no lockstep
+    requirement on the constants, and the test below covers the rule but not the
+    prose. Co-location is ruled out because the binding that catches drift has to be
     behavioural: two independent implementations checked against each other is
     evidence, whereas a test over one shared import is the tautology this repo
     has already shipped once (prevention log, *"a reference that IMPORTS the
