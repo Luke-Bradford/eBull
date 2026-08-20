@@ -17,7 +17,11 @@ import pytest
 
 from app.services.price_levels import (
     _PAIRWISE_SUMMATION_BLOCK,
+    CLUSTER_ATR_TOLERANCE,
+    MAX_TOUCH_AGE_BARS,
+    MIN_TOUCHES,
     LevelScan,
+    PriceLevel,
     _cluster,
     levels_at,
     swing_pivots,
@@ -157,3 +161,152 @@ class TestClusteringIsBitIdenticalAfterVectorisation:
 
     def test_an_empty_pivot_set_is_still_empty(self) -> None:
         assert _cluster([], np.zeros(3), None, tolerance=1.0) == []
+
+
+def _reference_at(
+    scan: LevelScan,
+    *,
+    atr: float,
+    index: int,
+) -> tuple[PriceLevel, ...]:
+    """The pre-filter-hoist ``LevelScan.at``, transcribed.
+
+    ⚠ A COPY ON PURPOSE, and built on ``_reference_cluster`` rather than on
+    ``_cluster``, so the whole chain is checked against hand-written arithmetic
+    instead of against another part of the implementation. The #2240 S-3 lesson
+    is that a reference which imports what it validates is a tautology; that
+    applies to a reference which imports the validated thing's *helper* too.
+
+    This form materialised every cluster and asked ``len``/``max`` of the list.
+    ``at`` now answers both from ``_segment``'s arrays and never builds the
+    list. The two must return equal tuples — ``==``, never ``approx``.
+    """
+    if index < 0 or index >= scan.highs.size:
+        return ()
+    if not np.isfinite(atr) or atr <= 0:
+        return ()
+    tolerance = CLUSTER_ATR_TOLERANCE * atr
+    last_confirmed = index - scan.pivots.half_window
+    hi_idx = [i for i in scan.pivots.high_indices if i <= last_confirmed]
+    lo_idx = [i for i in scan.pivots.low_indices if i <= last_confirmed]
+
+    total = 0.0 if scan.volume_cumsum is None else float(scan.volume_cumsum[index])
+    out: list[PriceLevel] = []
+    for kind, idxs, prices in (("resistance", hi_idx, scan.highs), ("support", lo_idx, scan.lows)):
+        for price, cluster in _reference_cluster(idxs, prices, scan.volumes, tolerance=tolerance):
+            touches = len(cluster)
+            last_touch = max(cluster)
+            if touches < MIN_TOUCHES:
+                continue
+            if index - last_touch > MAX_TOUCH_AGE_BARS:
+                continue
+            if scan.volumes is None:
+                share = 1.0
+            else:
+                share = float(np.nansum([scan.volumes[i] for i in cluster])) / total if total > 0 else 0.0
+            strength = touches * float(np.log1p(share))
+            out.append(
+                PriceLevel(
+                    price=price,
+                    kind=kind,  # type: ignore[arg-type]
+                    touches=touches,
+                    last_touch_index=last_touch,
+                    strength=strength,
+                )
+            )
+    return tuple(sorted(out, key=lambda level: level.strength, reverse=True))
+
+
+class TestAtFiltersBeforeMaterialisingWithoutMovingAVerdict:
+    """#2780 — ``at`` discarded 94.1% of the clusters ``_cluster`` built for it.
+
+    ⚠⚠ ``touches`` AND ``last_touch`` ARE THE ONLY THINGS THE MEMBER LIST WAS
+    EVER READ FOR, and ``PriceLevel`` stores neither list nor anything derived
+    from its order except the volume share. The hoist is therefore legal only if
+    every surviving level is bit-identical, which is asserted here over
+    randomised series rather than argued from the shape of the change.
+
+    Pure tier: no database, no fixtures, no IO.
+    """
+
+    @staticmethod
+    def _series(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        """A wandering series, so pivots recur near the same prices and cluster."""
+        steps = rng.normal(0.0, 1.0, n).cumsum()
+        mid = 100.0 + 6.0 * np.sin(np.arange(n) / 7.0) + 0.6 * steps
+        highs = mid + rng.uniform(0.05, 1.2, n)
+        lows = mid - rng.uniform(0.05, 1.2, n)
+        volumes: np.ndarray | None
+        mode = int(rng.integers(0, 3))
+        if mode == 0:
+            volumes = None
+        else:
+            volumes = rng.uniform(0.0, 5e6, n)
+            if mode == 2:
+                # Zero-weight and NaN volumes reach the fallback and `nansum`.
+                volumes[rng.integers(0, n, size=max(1, n // 5))] = 0.0
+                volumes[rng.integers(0, n, size=max(1, n // 20))] = np.nan
+        return highs, lows, volumes
+
+    def test_it_matches_the_materialising_form_at_every_bar(self) -> None:
+        rng = np.random.default_rng(20260820)
+        levels_seen = 0
+        bars_compared = 0
+        for _ in range(25):
+            n = int(rng.integers(200, 950))
+            highs, lows, volumes = self._series(rng, n)
+            scan = LevelScan.build(highs=highs, lows=lows, volumes=volumes)
+            atr = float(rng.choice([0.75, 1.5, 4.0, 12.0]))
+            for index in range(n):
+                actual = scan.at(atr=atr, index=index)
+                expected = _reference_at(scan, atr=atr, index=index)
+                assert actual == expected
+                levels_seen += len(actual)
+                bars_compared += 1
+        assert bars_compared > 5_000, "too few bars walked for the comparison to mean much"
+        # ⚠ A fixture that refuses everything proves nothing: equality against
+        # the oracle passes trivially when both sides are empty at every bar.
+        assert levels_seen > 500, f"only {levels_seen} levels survived — the filters are being tested on nothing"
+
+    def test_both_filters_actually_reject_something_in_the_fixture(self) -> None:
+        """⚠ The hoist moves ``MIN_TOUCHES`` and ``MAX_TOUCH_AGE_BARS`` into the
+        vectorised pass. If neither ever rejected a cluster here, the test above
+        would be comparing two unfiltered paths and the hoist would be unproven.
+        """
+        rng = np.random.default_rng(4)
+        highs, lows, volumes = self._series(rng, 900)
+        scan = LevelScan.build(highs=highs, lows=lows, volumes=volumes)
+        thin = 0
+        stale = 0
+        built = 0
+        for index in range(scan.highs.size):
+            last_confirmed = index - scan.pivots.half_window
+            for idxs, prices in ((scan.pivots.high_indices, scan.highs), (scan.pivots.low_indices, scan.lows)):
+                live = [i for i in idxs if i <= last_confirmed]
+                for _, cluster in _reference_cluster(live, prices, scan.volumes, tolerance=CLUSTER_ATR_TOLERANCE * 1.5):
+                    built += 1
+                    if len(cluster) < MIN_TOUCHES:
+                        thin += 1
+                    elif index - max(cluster) > MAX_TOUCH_AGE_BARS:
+                        stale += 1
+        assert thin > 0, "no cluster was ever rejected for too few touches"
+        assert stale > 0, "no cluster was ever rejected for staleness — the age filter is untested"
+        assert built > thin + stale, "every cluster was rejected; nothing survived to compare"
+
+    def test_a_series_with_no_confirmed_pivots_yet_returns_nothing(self) -> None:
+        """``_segment`` returns ``None`` for an empty pivot prefix; ``at`` must
+        treat that as no levels rather than raising on a zero-length reduceat."""
+        highs = np.linspace(10.0, 40.0, 60)
+        lows = highs - 1.0
+        scan = LevelScan.build(highs=highs, lows=lows, volumes=None)
+        assert scan.at(atr=1.0, index=0) == ()
+        assert scan.at(atr=1.0, index=3) == ()
+
+    def test_a_nonfinite_or_nonpositive_atr_still_refuses(self) -> None:
+        highs, lows, volumes = self._series(np.random.default_rng(9), 120)
+        scan = LevelScan.build(highs=highs, lows=lows, volumes=volumes)
+        assert scan.at(atr=float("nan"), index=100) == ()
+        assert scan.at(atr=0.0, index=100) == ()
+        assert scan.at(atr=-1.0, index=100) == ()
+        assert scan.at(atr=1.5, index=scan.highs.size) == ()
+        assert scan.at(atr=1.5, index=-1) == ()
