@@ -227,11 +227,16 @@ def _cluster(
     sizes = np.bincount(group)
     bounds = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sizes, dtype=np.int64)))
 
-    if volumes is None:
+    # ⚠ Bound unconditionally so the fallback below narrows on THIS name rather
+    # than re-testing ``volumes``. Two separate ``volumes is None`` checks are
+    # equivalent at runtime but not to a type checker, and the pre-push gate was
+    # right to refuse the version that had them.
+    ordered_weights = None if volumes is None else np.maximum(volumes[order], 0.0)
+
+    if ordered_weights is None:
         totals = np.bincount(group, weights=ordered_prices)
         fast_prices = totals / sizes
     else:
-        ordered_weights = np.maximum(volumes[order], 0.0)
         weight_totals = np.bincount(group, weights=ordered_weights)
         value_totals = np.bincount(group, weights=ordered_prices * ordered_weights)
         with np.errstate(invalid="ignore", divide="ignore"):
@@ -246,7 +251,7 @@ def _cluster(
         cluster = [int(i) for i in order[lo:hi]]
         if hi - lo < _PAIRWISE_SUMMATION_BLOCK:
             price = float(fast_prices[gid])
-        elif volumes is None:
+        elif ordered_weights is None:
             price = float(np.mean(ordered_prices[lo:hi]))
         else:
             weights = ordered_weights[lo:hi]
