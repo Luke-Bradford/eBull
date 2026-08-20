@@ -10,8 +10,10 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from app.services.ownership_rollup import Holder
-from scripts.audit_2230_insider_oversubscription import _years_before, partition_insiders
+from scripts.audit_2230_insider_oversubscription import _years_before, main, partition_insiders
 
 
 def _holder(
@@ -146,3 +148,22 @@ def test_denominator_under_1m_is_flagged_independently_of_the_wedge() -> None:
     out = partition_insiders([_holder("10")], Decimal(999_999), date(2026, 1, 1))
     assert out["denominator_under_1m"] is True
     assert out["single_holder_over"] is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--shard", "5", "--shards", "2", "--out", "/tmp/never-written.jsonl"],
+        ["--shard", "-1", "--shards", "2", "--out", "/tmp/never-written.jsonl"],
+        ["--shard", "0", "--shards", "0", "--out", "/tmp/never-written.jsonl"],
+    ],
+)
+def test_an_out_of_range_shard_is_an_error_not_an_empty_run(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """An out-of-range shard selects nothing, so the census would exit 0 with an empty
+    output file — indistinguishable from a clean population. This script exists to avoid
+    making exactly that mistake, so the guard is pinned. Validation runs BEFORE any
+    connection, which is why this test needs no DB."""
+    monkeypatch.setattr("sys.argv", ["audit", *argv])
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 2

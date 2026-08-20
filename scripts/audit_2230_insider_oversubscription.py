@@ -313,6 +313,14 @@ def main() -> int:
         return _run_classify(list(args.classify), args.out)
     if args.summarise:
         return _summarise(list(args.summarise))
+    # An out-of-range shard silently selects nothing, and a census that measured nothing
+    # exits 0 with an empty output file — indistinguishable from a clean population. That
+    # is the exact failure this script exists to avoid making, so it is an error, not a
+    # no-op (review NITPICK on PR #2791).
+    if args.shards < 1:
+        ap.error(f"--shards must be >= 1, got {args.shards}")
+    if not 0 <= args.shard < args.shards:
+        ap.error(f"--shard must be in [0, {args.shards}), got {args.shard}")
     if not args.out:
         ap.error("--out is required unless --summarise is given")
 
