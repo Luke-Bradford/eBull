@@ -436,10 +436,11 @@ class TestSpecConstants:
         ⚠ Reads each literal OUT of the migration rather than restating it, so
         this test cannot itself become one more copy of the same date.
 
-        ⚠ Scoped per file to the predicate that owns the literal: `sql/359` also
-        registers the evidence windows, which carry their own different and
-        correct dates, so asserting over every `DATE '...'` in that file fails on
-        those.
+        ⚠ Scoped per file to the PREDICATE that owns the literal, never to the
+        whole file — `sql/359`'s namespace CHECK and `sql/360`'s `candidates`
+        CTE. `sql/359` also registers the evidence windows, which carry their own
+        different and correct dates; and an unrelated literal added to either
+        file later must not break this test for the wrong reason.
         """
         sql_dir = Path(__file__).resolve().parents[1] / "sql"
 
@@ -450,11 +451,18 @@ class TestSpecConstants:
         )
         assert namespace_block, "constraint strategy_results_metric_axis_namespace not found in sql/359"
 
+        candidates_cte = re.search(
+            r"WITH candidates AS \((.*?)\n\)",
+            (sql_dir / "360_strategy_control_support_metric_axis.sql").read_text(),
+            re.S,
+        )
+        assert candidates_cte, "CTE `candidates` not found in sql/360"
+
         cases: list[tuple[str, str, set[date]]] = [
             ("sql/359 metric_axis_namespace", namespace_block.group(1), {HOLDOUT_BOUNDARY}),
             (
-                "sql/360 control-support",
-                (sql_dir / "360_strategy_control_support_metric_axis.sql").read_text(),
+                "sql/360 candidates CTE",
+                candidates_cte.group(1),
                 {EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY},
             ),
         ]
