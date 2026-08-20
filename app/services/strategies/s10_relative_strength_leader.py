@@ -163,9 +163,16 @@ def s10_rebalance_dates(calendar: Iterable[date]) -> frozenset[date]:
     calendars) — yet ``price_daily`` carries weekend rows for ~11 instruments,
     and because the FIRST qualifying bar takes the month, an unfiltered union
     calendar hands entire months' rebalances to an 11-name Sunday and the
-    real first trading day then never rebalances at all (measured on #2437;
-    S-2 shares the exposure and that is noted there, not silently fixed here
-    — editing its calendar would move its identity).
+    real first trading day then never rebalances at all (measured on #2437).
+
+    ⚠ AN EARLIER VERSION OF THIS DOCSTRING SAID S-2's SHARED EXPOSURE WAS
+    *"noted there, not silently fixed here"*. It was not noted there — ``grep -n
+    weekend`` on ``s2_cross_sectional_momentum.py`` returned nothing — so the
+    only record of S-2's exposure was this sentence, in the module that did not
+    have it. S-2 then fired zero signals for two weeks (#2797). Both modules now
+    carry the cut, duplicated rather than shared so that neither identity moves
+    for the other's sake, and bound against drift by
+    ``tests/test_2797_s2_weekday_rebalance.py::test_s2_and_s10_agree_on_the_rebalance_calendar``.
 
     ⚠ A corpus-hole WEEKDAY (243 of ~3,500 names on 2023-12-01) still takes
     its month and is then refused by ``MIN_CROSS_SECTION`` — that month
