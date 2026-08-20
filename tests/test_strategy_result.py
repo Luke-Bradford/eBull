@@ -16,9 +16,11 @@ value.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -420,6 +422,31 @@ class TestSpecConstants:
 
     def test_the_boundary_is_the_spec_boundary(self) -> None:
         assert HOLDOUT_BOUNDARY == SPEC_HOLDOUT_BOUNDARY
+
+    def test_the_SQL_constraint_carries_the_same_boundary_as_python(self) -> None:
+        """⚠ A THIRD COPY OF THE BOUNDARY LIVES IN SQL, and nothing tied it here.
+
+        ``sql/359``'s ``strategy_results_metric_axis_namespace`` check hardcodes
+        the in-sample boundary as a date literal. The assertion above pins the
+        Python constant against the spec, so a recalibration fails there — but
+        the SQL literal would keep the OLD boundary silently, and a CHECK
+        constraint that disagrees with the code either rejects valid rows or
+        admits invalid ones, with no test in between.
+
+        Reads the literal out of the migration rather than restating it, so this
+        cannot drift into a fourth copy of the same date.
+        """
+        sql = (Path(__file__).resolve().parents[1] / "sql" / "359_strategy_result_metric_axis.sql").read_text()
+        # ⚠ Scoped to the one constraint. The migration also registers the
+        # evidence windows, which carry their own (different, correct) dates —
+        # asserting over every DATE literal in the file would fail on those.
+        block = re.search(r"ADD CONSTRAINT strategy_results_metric_axis_namespace CHECK \((.*?)\n    \)", sql, re.S)
+        assert block, "constraint strategy_results_metric_axis_namespace not found in sql/359"
+        literals = {date.fromisoformat(m) for m in re.findall(r"DATE '(\d{4}-\d{2}-\d{2})'", block.group(1))}
+        assert literals == {HOLDOUT_BOUNDARY}, (
+            f"strategy_results_metric_axis_namespace carries {sorted(literals)} "
+            f"but HOLDOUT_BOUNDARY is {HOLDOUT_BOUNDARY}"
+        )
 
     def test_the_split_is_bar_weighted(self) -> None:
         assert HOLDOUT_WEIGHTING == SPEC_HOLDOUT_WEIGHTING

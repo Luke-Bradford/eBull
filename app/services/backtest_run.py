@@ -1849,7 +1849,6 @@ def evaluate_arm(
             regime_provider=regime_provider,
             universe=corpus.universe_basis,
         )
-        evaluated += 1
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
             _emit_series_progress(
@@ -1862,6 +1861,12 @@ def evaluate_arm(
                 series_total=total,
             )
             continue
+        # ⚠ AFTER the two-bar skip, not before it. `series_evaluated` is a
+        # reported evidence figure and feeds `evaluated_instrument_count`, so it
+        # must count series that CONTRIBUTED to the corpus pass — a series with
+        # fewer than two axis-aligned bars contributes nothing and inflating the
+        # count makes an arm look broader than it was.
+        evaluated += 1
         assert strategy_history is not None
         _, first_axis_index, strategy_raw_closes, strategy_wealth_closes = strategy_history
         # ⚠ One dense close array per INSTRUMENT, spanning its own first to last
@@ -2178,7 +2183,6 @@ def evaluate_level_arms(
             regime_provider=regime_provider,
             universe=corpus.universe_basis,
         )
-        evaluated += 1
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
             _emit_series_progress(
@@ -2191,6 +2195,12 @@ def evaluate_level_arms(
                 series_total=total,
             )
             continue
+        # ⚠ AFTER the two-bar skip, not before it. `series_evaluated` is a
+        # reported evidence figure and feeds `evaluated_instrument_count`, so it
+        # must count series that CONTRIBUTED to the corpus pass — a series with
+        # fewer than two axis-aligned bars contributes nothing and inflating the
+        # count makes an arm look broader than it was.
+        evaluated += 1
         assert strategy_history is not None
         _, first_axis_index, strategy_raw_closes, strategy_wealth_closes = strategy_history
         rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
