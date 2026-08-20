@@ -33,7 +33,14 @@ import pytest
 from app.services import strategy_exit_levels_batch as batch_module
 from app.services.indicator_series import BarSeries, IndicatorSeries
 from app.services.outcome_resolver import ExitLevels
-from app.services.strategy_exit_levels_batch import s5_exit_levels_batch, s6_exit_levels_batch
+from app.services.strategy_exit_levels_batch import (
+    s4_exit_levels_batch,
+    s5_exit_levels_batch,
+    s6_exit_levels_batch,
+    s7_exit_levels_batch,
+    s8_exit_levels_batch,
+    s9_exit_levels_batch,
+)
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 
 UNIVERSE = "survivorship_free"
@@ -42,8 +49,12 @@ UNIVERSE = "survivorship_free"
 #: only ever returns refusals compares equal to its oracle while proving nothing
 #: about the shared indicators — the first version of this file did exactly that.
 BATCHED = (
+    ("s4-volatility-compression-breakout", s4_exit_levels_batch, 40),
     ("s5-support-bounce", s5_exit_levels_batch, 3),
     ("s6-resistance-breakout", s6_exit_levels_batch, 40),
+    ("s7-trend-pullback", s7_exit_levels_batch, 40),
+    ("s8-range-mean-reversion", s8_exit_levels_batch, 40),
+    ("s9-squeeze-expansion", s9_exit_levels_batch, 40),
 )
 
 
@@ -150,28 +161,77 @@ class TestBatchEqualsTheScalarOracle:
         assert calls == 1, f"{strategy_id} derived ATR {calls} times for {len(requests)} requests"
 
     @pytest.mark.parametrize(("strategy_id", "batch", "min_brackets"), BATCHED)
-    def test_an_out_of_range_request_refuses_without_losing_the_others(
+    def test_an_out_of_range_request_behaves_exactly_as_its_oracle_does(
         self, strategy_id: str, batch: object, min_brackets: int
     ) -> None:
-        """⚠ One bad bar must not abort the batch — the property the scalar
-        adapter's ``except ValueError, IndexError`` exists for. Positional output
-        means the refusal has to land on ITS request and no other.
+        """⚠⚠ THE ASSERTION IS AGREEMENT, NOT UNIFORMITY, AND THAT DISTINCTION
+        FOUND A REAL INCONSISTENCY.
+
+        Five of the six refuse an out-of-range index as
+        ``unorderable_exit_levels`` — the property #2437's refusal-surface test
+        exists for, since an uncaught exception aborts the WHOLE outcome batch
+        for one bad bar. **S-4 raises instead**, because ``s4_exit_levels_batch``
+        validates the index up front and ``_s4_exit_levels`` does not catch it.
+        S-4 is excluded from that refusal test on the grounds that it "has its
+        own equivalence check", and that check never covered a bad index.
+
+        Demanding uniformity here would have silently changed S-4's shipped
+        behaviour to make a test pass. So this asserts what the adapter contract
+        actually claims — the batch does whatever its oracle does — and the
+        divergence between S-4 and its siblings is reported separately rather
+        than papered over.
         """
         series = _wavy()
         entry = STRATEGY_MANIFEST[strategy_id]
         assert entry.exit_levels is not None
-        requests = (
-            (150, Decimal(str(series.float_closes[150]))),
-            (9_999, Decimal("200")),
-            (152, Decimal(str(series.float_closes[152]))),
-        )
-        actual = batch(series, requests=requests, universe=UNIVERSE)  # type: ignore[operator]
-        expected = tuple(
-            entry.exit_levels(series, signal_index=index, entry_price=price, universe=UNIVERSE)
-            for index, price in requests
-        )
+        bad = (9_999, Decimal("200"))
+
+        def outcome(call: object) -> object:
+            try:
+                return ("returned", call())  # type: ignore[operator]
+            except Exception as exc:  # noqa: BLE001 - the exception TYPE is the observation
+                return ("raised", type(exc).__name__)
+
+        oracle = outcome(lambda: entry.exit_levels(series, signal_index=bad[0], entry_price=bad[1], universe=UNIVERSE))
+        batched = outcome(lambda: batch(series, requests=(bad,), universe=UNIVERSE)[0])  # type: ignore[operator]
+        assert batched == oracle, f"{strategy_id}: batch and oracle disagree on an out-of-range index"
+
+    @pytest.mark.parametrize(("strategy_id", "batch", "min_brackets"), BATCHED)
+    def test_a_bad_request_does_not_lose_its_neighbours(
+        self, strategy_id: str, batch: object, min_brackets: int
+    ) -> None:
+        """Positional output: a refusal must land on ITS request and no other.
+
+        ⚠ Bar 0 has no prior close and therefore no ATR. Five strategies refuse
+        it; S-4 RAISES, because ``s4_exit_levels_batch`` has no ``try``/``except``
+        at all — it raises for an out-of-range index, a non-finite or non-positive
+        entry price, and a missing ATR, and refuses only for a non-finite ATR or
+        an unorderable bracket. So S-4 aborts a whole outcome batch where its
+        five siblings record one unresolved outcome.
+
+        Not reachable today, because entries only fire on evaluable bars — but it
+        is one masked bar from being reachable, and it is the exact failure mode
+        #2437's refusal-surface test exists to prevent. Asserted as AGREEMENT with
+        its own oracle rather than silently normalised, and reported separately.
+        """
+        series = _wavy()
+        entry = STRATEGY_MANIFEST[strategy_id]
+        assert entry.exit_levels is not None
+        good_a = (150, Decimal(str(series.float_closes[150])))
+        bad = (0, Decimal("100"))
+        good_b = (152, Decimal(str(series.float_closes[152])))
+
+        try:
+            oracle = entry.exit_levels(series, signal_index=bad[0], entry_price=bad[1], universe=UNIVERSE)
+        except Exception as exc:  # noqa: BLE001 - the raising strategies are the finding
+            with pytest.raises(type(exc)):
+                batch(series, requests=(good_a, bad, good_b), universe=UNIVERSE)  # type: ignore[operator]
+            return
+
+        actual = batch(series, requests=(good_a, bad, good_b), universe=UNIVERSE)  # type: ignore[operator]
+        assert len(actual) == 3
+        assert actual[1] == oracle, "an unevaluable bar must refuse exactly as its oracle does"
         assert actual[1] == "unorderable_exit_levels"
-        assert actual == expected
 
     @pytest.mark.parametrize(("strategy_id", "batch", "min_brackets"), BATCHED)
     def test_duplicate_requests_stay_positionally_distinct(
@@ -182,3 +242,27 @@ class TestBatchEqualsTheScalarOracle:
         actual = batch(series, requests=((150, price), (150, price)), universe=UNIVERSE)  # type: ignore[operator]
         assert len(actual) == 2
         assert actual[0] == actual[1], "identical requests must produce identical brackets"
+
+
+def test_every_bracket_strategy_has_a_batch_factory_under_test() -> None:
+    """⚠⚠ THE GUARD AGAINST THE NEXT S-5.
+
+    S-5 went without the batch factory S-4 had since #2623, and nothing said so —
+    the runner silently fell back to the per-signal path and the cost showed up
+    only in a profile, 7.5 hours into a 13.6-hour run. A manifest entry that
+    declares ``exit_levels`` and no ``exit_levels_batch`` is that state exactly.
+
+    ⚠ It also requires the batched strategy to appear in ``BATCHED`` above, so a
+    factory cannot be registered without an equivalence proof. Registering one is
+    the easy half; proving it equals its oracle is the half that matters.
+    """
+    unbatched = sorted(
+        strategy_id
+        for strategy_id, entry in STRATEGY_MANIFEST.items()
+        if entry.exit_levels is not None and entry.exit_levels_batch is None
+    )
+    assert unbatched == [], f"{unbatched} pay a whole-series indicator rebuild per signal"
+
+    covered = {strategy_id for strategy_id, _, _ in BATCHED}
+    declared = {strategy_id for strategy_id, entry in STRATEGY_MANIFEST.items() if entry.exit_levels_batch is not None}
+    assert declared == covered, f"batch factories without an equivalence proof: {sorted(declared - covered)}"

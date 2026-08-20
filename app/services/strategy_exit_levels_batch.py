@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from math import isfinite
 
-from app.services.indicator_series import BarSeries, Universe, atr_series
+from app.services.indicator_series import BarSeries, Universe, atr_series, bollinger_series
 from app.services.outcome_resolver import ExitLevels, UnresolvedReason, exit_levels_are_orderable
 from app.services.price_levels import LevelScan
 from app.services.strategies.s4_volatility_compression_breakout import (
@@ -60,6 +60,42 @@ from app.services.strategies.s6_resistance_breakout import (
 )
 from app.services.strategies.s6_resistance_breakout import (
     _volumes as _s6_volumes,
+)
+from app.services.strategies.s7_trend_pullback import (
+    ATR_PERIOD as S7_ATR_PERIOD,
+)
+from app.services.strategies.s7_trend_pullback import (
+    ATR_STOP_MULTIPLE as S7_ATR_STOP_MULTIPLE,
+)
+from app.services.strategies.s7_trend_pullback import (
+    MAX_HOLD_BARS as S7_MAX_HOLD_BARS,
+)
+from app.services.strategies.s8_range_mean_reversion import (
+    ATR_PERIOD as S8_ATR_PERIOD,
+)
+from app.services.strategies.s8_range_mean_reversion import (
+    ATR_STOP_MULTIPLE as S8_ATR_STOP_MULTIPLE,
+)
+from app.services.strategies.s8_range_mean_reversion import (
+    ENTRY_BAND_NUM_STD as S8_ENTRY_BAND_NUM_STD,
+)
+from app.services.strategies.s8_range_mean_reversion import (
+    ENTRY_BAND_PERIOD as S8_ENTRY_BAND_PERIOD,
+)
+from app.services.strategies.s8_range_mean_reversion import (
+    MAX_HOLD_BARS as S8_MAX_HOLD_BARS,
+)
+from app.services.strategies.s9_squeeze_expansion import (
+    ATR_PERIOD as S9_ATR_PERIOD,
+)
+from app.services.strategies.s9_squeeze_expansion import (
+    ATR_STOP_MULTIPLE as S9_ATR_STOP_MULTIPLE,
+)
+from app.services.strategies.s9_squeeze_expansion import (
+    ATR_TARGET_MULTIPLE as S9_ATR_TARGET_MULTIPLE,
+)
+from app.services.strategies.s9_squeeze_expansion import (
+    MAX_HOLD_BARS as S9_MAX_HOLD_BARS,
 )
 
 
@@ -194,4 +230,123 @@ def s6_exit_levels_batch(
     return tuple(levels)
 
 
-__all__ = ["s4_exit_levels_batch", "s5_exit_levels_batch", "s6_exit_levels_batch"]
+def s7_exit_levels_batch(
+    series: BarSeries,
+    *,
+    requests: Sequence[tuple[int, Decimal]],
+    universe: Universe,
+) -> tuple[ExitLevels | UnresolvedReason, ...]:
+    """S-7's STOP-ONLY brackets from one ATR pass.
+
+    ⚠⚠ ``take_profit`` IS ``None`` BY DESIGN and must stay so — the stop-only
+    bracket #2723 introduced. Substituting a target here would make
+    ``outcome_resolver``'s precedence rules 2/3/5 reachable and change which bar
+    closes the position. There is no level scan: S-7's stop is ENTRY-anchored,
+    because no level's failure defines the trade being wrong.
+    """
+    atr = atr_series(series, period=S7_ATR_PERIOD, universe=universe)
+    levels: list[ExitLevels | UnresolvedReason] = []
+    for signal_index, entry_price in requests:
+        try:
+            atr_at_signal = atr.values[signal_index]
+            if atr_at_signal is None:
+                raise ValueError(f"S-7 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
+            stop = entry_price - Decimal(str(S7_ATR_STOP_MULTIPLE * atr_at_signal))
+        except ValueError, IndexError:
+            levels.append("unorderable_exit_levels")
+            continue
+        if not exit_levels_are_orderable(entry_price=entry_price, take_profit=None, stop_loss=stop):
+            levels.append("unorderable_exit_levels")
+            continue
+        levels.append(ExitLevels(take_profit=None, stop_loss=stop, max_hold_bars=S7_MAX_HOLD_BARS))
+    return tuple(levels)
+
+
+def s9_exit_levels_batch(
+    series: BarSeries,
+    *,
+    requests: Sequence[tuple[int, Decimal]],
+    universe: Universe,
+) -> tuple[ExitLevels | UnresolvedReason, ...]:
+    """S-9's brackets from one ATR pass. Both legs anchor to the ENTRY.
+
+    ⚠ S-9 has no level — its setup is a volatility state, not a price — so there
+    is nothing to scan and nothing to anchor a stop to but the entry, same as
+    S-4. Only the ATR pass is shared.
+    """
+    atr = atr_series(series, period=S9_ATR_PERIOD, universe=universe)
+    levels: list[ExitLevels | UnresolvedReason] = []
+    for signal_index, entry_price in requests:
+        try:
+            atr_at_signal = atr.values[signal_index]
+            if atr_at_signal is None:
+                raise ValueError(f"S-9 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
+            stop = entry_price - Decimal(str(S9_ATR_STOP_MULTIPLE * atr_at_signal))
+            target = entry_price + Decimal(str(S9_ATR_TARGET_MULTIPLE * atr_at_signal))
+        except ValueError, IndexError:
+            levels.append("unorderable_exit_levels")
+            continue
+        if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
+            levels.append("unorderable_exit_levels")
+            continue
+        levels.append(ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=S9_MAX_HOLD_BARS))
+    return tuple(levels)
+
+
+def s8_exit_levels_batch(
+    series: BarSeries,
+    *,
+    requests: Sequence[tuple[int, Decimal]],
+    universe: Universe,
+) -> tuple[ExitLevels | UnresolvedReason, ...]:
+    """S-8's brackets from one ATR pass and one Bollinger pass.
+
+    ⚠ S-8 rebuilt TWO whole-series indicators per signal, not one — the bands as
+    well as the ATR — so it had the worst per-signal cost of the bracket
+    strategies despite being cheap per bar.
+
+    ⚠⚠ THE TARGET IS THE MIDDLE BAND AT THE SIGNAL BAR AND NEVER MOVES. Reading
+    it at any other index would make the target track the band, which is a
+    trailing exit — a different rule, whose exit price depends on bars after the
+    entry. Sharing the SERIES is safe precisely because each request still reads
+    its own ``signal_index`` out of it.
+
+    ⚠ An inverted bracket is reachable here and is not a bug: the target anchors
+    to the signal bar's band while the stop anchors to the FILL, so a gap up
+    leaves ``target <= stop``. That refuses as ``unorderable_exit_levels``, and
+    the batch must reproduce the refusal rather than repair it.
+    """
+    atr = atr_series(series, period=S8_ATR_PERIOD, universe=universe)
+    bands = bollinger_series(series, universe=universe, period=S8_ENTRY_BAND_PERIOD, num_std=S8_ENTRY_BAND_NUM_STD)
+    middles = bands.components["middle"]
+    levels: list[ExitLevels | UnresolvedReason] = []
+    for signal_index, entry_price in requests:
+        try:
+            atr_at_signal = atr.values[signal_index]
+            if atr_at_signal is None:
+                raise ValueError(f"S-8 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
+            middle = middles[signal_index]
+            if middle is None:
+                raise ValueError(
+                    f"S-8 bracket needs the middle band at the signal bar; index {signal_index} is unevaluable"
+                )
+            stop = entry_price - Decimal(str(S8_ATR_STOP_MULTIPLE * atr_at_signal))
+            target = Decimal(str(middle))
+        except ValueError, IndexError:
+            levels.append("unorderable_exit_levels")
+            continue
+        if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
+            levels.append("unorderable_exit_levels")
+            continue
+        levels.append(ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=S8_MAX_HOLD_BARS))
+    return tuple(levels)
+
+
+__all__ = [
+    "s4_exit_levels_batch",
+    "s5_exit_levels_batch",
+    "s6_exit_levels_batch",
+    "s7_exit_levels_batch",
+    "s8_exit_levels_batch",
+    "s9_exit_levels_batch",
+]

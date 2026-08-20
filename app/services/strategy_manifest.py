@@ -156,6 +156,9 @@ from app.services.strategy_exit_levels_batch import (
     s4_exit_levels_batch,
     s5_exit_levels_batch,
     s6_exit_levels_batch,
+    s7_exit_levels_batch,
+    s8_exit_levels_batch,
+    s9_exit_levels_batch,
 )
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
@@ -933,6 +936,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             decision_calendar=_no_decision_calendar,
             signals=_s7_signals,
             exit_levels=_s7_exit_levels,
+            exit_levels_batch=s7_exit_levels_batch,
         ),
         S8_STRATEGY_ID: StrategyEntry(
             strategy_id=S8_STRATEGY_ID,
@@ -944,6 +948,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             decision_calendar=_no_decision_calendar,
             signals=_s8_signals,
             exit_levels=_s8_exit_levels,
+            exit_levels_batch=s8_exit_levels_batch,
         ),
         S9_STRATEGY_ID: StrategyEntry(
             strategy_id=S9_STRATEGY_ID,
@@ -955,6 +960,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             decision_calendar=_no_decision_calendar,
             signals=_s9_signals,
             exit_levels=_s9_exit_levels,
+            exit_levels_batch=s9_exit_levels_batch,
         ),
         S10_STRATEGY_ID: StrategyEntry(
             strategy_id=S10_STRATEGY_ID,
