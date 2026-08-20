@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.services.ownership_rollup import Holder
-from scripts.audit_2230_insider_oversubscription import partition_insiders
+from scripts.audit_2230_insider_oversubscription import _years_before, partition_insiders
 
 
 def _holder(
@@ -121,6 +121,25 @@ def test_no_denominator_yields_no_ratio_and_no_clearance_claims() -> None:
         assert out["single_holder_over"] is False
         assert out["clears_if_clusters_folded"] is False
         assert out["clears_if_bounded_2y"] is False
+
+
+def test_the_cutoff_is_calendar_years_not_365_day_blocks() -> None:
+    """`timedelta(days=365 * years)` drifts one day per leap day in the span, moving the
+    boundary the whole classification is scored against (Codex checkpoint 2)."""
+    assert _years_before(date(2026, 3, 1), 2) == date(2024, 3, 1)
+    assert _years_before(date(2026, 3, 1), 5) == date(2021, 3, 1)
+
+
+def test_a_29_february_anchor_clamps_to_the_28th() -> None:
+    assert _years_before(date(2024, 2, 29), 2) == date(2022, 2, 28)
+    assert _years_before(date(2024, 2, 29), 4) == date(2020, 2, 29)
+
+
+def test_a_holding_exactly_on_the_calendar_boundary_is_kept() -> None:
+    anchor = date(2026, 3, 1)
+    holders = [_holder("150", cik="A", as_of=date(2024, 3, 1))]
+    out = partition_insiders(holders, Decimal(100), anchor)
+    assert out["total_within_2y"] == "150"
 
 
 def test_denominator_under_1m_is_flagged_independently_of_the_wedge() -> None:

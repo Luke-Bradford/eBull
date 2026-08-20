@@ -43,7 +43,7 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -81,6 +81,21 @@ def _snapshot(conn: psycopg.Connection[Any], symbol: str, instrument_id: int) ->
 #: Counterfactual staleness bounds, in years. NOT proposed rules — see
 #: :func:`partition_insiders`.
 STALENESS_ARMS: tuple[int, ...] = (2, 5)
+
+
+def _years_before(anchor: date, years: int) -> date:
+    """``anchor`` minus ``years`` CALENDAR years.
+
+    ``timedelta(days=365 * years)`` drifts by a day for every leap day in the span, which
+    moves the boundary of a bound the whole classification is scored against (Codex
+    checkpoint 2). 29 February has no counterpart in a non-leap year and clamps to the
+    28th, the same convention ``dateutil.relativedelta`` takes — kept in-repo rather than
+    adding a dependency for one subtraction.
+    """
+    try:
+        return anchor.replace(year=anchor.year - years)
+    except ValueError:
+        return anchor.replace(year=anchor.year - years, month=2, day=28)
 
 
 def partition_insiders(
@@ -139,7 +154,7 @@ def partition_insiders(
         if anchor is None:
             arms[f"total_within_{years}y"] = total
             continue
-        cutoff = anchor - timedelta(days=365 * years)
+        cutoff = _years_before(anchor, years)
         arms[f"total_within_{years}y"] = sum(
             (h.shares for h in holders if h.as_of_date is None or h.as_of_date >= cutoff),
             Decimal(0),
