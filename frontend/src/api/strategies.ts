@@ -3,6 +3,8 @@ import type {
   AllocationUpdateRequest,
   AllocationUpdateResponse,
   FiredSignalsResponse,
+  StrategyAdvanceResponse,
+  StrategyOperatorAction,
   StrategyOverviewResponse,
   StrategyEvidenceRefreshResponse,
   StrategyOwnedPositionsResponse,
@@ -56,6 +58,23 @@ export function updateStrategyPaperPool(body: {
 }): Promise<StrategyPaperPool> {
   return apiFetch("/strategies/paper-pool", {
     method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Advance one strategy by one ordered step (#2770).
+ *
+ * ⚠ Sends the ACTION and a reason, and nothing else. No `strategy_version`, no
+ * `to_stage`, no `result_ids` — those are the three inputs that would let this
+ * client choose its own promotion denominator, and the endpoint does not accept
+ * them. The evidence is assembled server-side inside the locked transaction.
+ */
+export function advanceStrategyStage(
+  strategyId: string,
+  body: { action: StrategyOperatorAction; reason: string },
+): Promise<StrategyAdvanceResponse> {
+  return apiFetch(`/strategies/${encodeURIComponent(strategyId)}/advance`, {
+    method: "POST",
     body: JSON.stringify(body),
   });
 }

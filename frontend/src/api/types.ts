@@ -2636,6 +2636,30 @@ export interface StrategyOverview {
   allocation: StrategyAllocation;
   allocation_ready: boolean;
   allocation_refusals: string[];
+  /** The one ordered promotion step available from this stage (#2770).
+   *
+   * ⚠ NAMED ALONGSIDE its refusals rather than nulled by them — an operator who
+   * cannot act needs to know WHICH step is blocked. `null` means a terminal stage.
+   * ⚠ Advisory: the transaction re-checks everything, so a stale page gets a 409. */
+  next_operator_action: StrategyOperatorAction | null;
+  next_operator_action_refusals: string[];
+}
+
+export type StrategyOperatorAction =
+  | "register_research_candidate"
+  | "validate_historical"
+  | "start_forward_observation"
+  | "enable_paper";
+
+export interface StrategyAdvanceResponse {
+  strategy_id: string;
+  strategy_version: string;
+  from_stage: string | null;
+  stage: string;
+  promotion_id: number;
+  evidence_ref: string | null;
+  /** 24 for the two result-evidence stages; 0 for registration and paper enable. */
+  pinned_result_count: number;
 }
 
 /** How often the entry rule fires, from the durable census (#2623 gap 2).

@@ -318,6 +318,8 @@ const OVERVIEW: StrategyOverviewResponse = {
     allocation: { deployment_id: null, capital_limit: "0", currency: "USD", enabled: false, revision: null, reserved_capital: "0", invested_capital: "0", remaining_capital: "0", policy_configured: false, max_drawdown_limit_pct: null, ticket_sizing_mode: null, ticket_value: null, max_ticket_amount: null },
     allocation_ready: false,
     allocation_refusals: ["recent_evidence_incomplete", "paper_promotion_missing", "execution_policy_missing"],
+    next_operator_action: "validate_historical",
+    next_operator_action_refusals: ["recent_evidence_window_missing x6"],
   }],
 };
 
@@ -685,6 +687,89 @@ describe("StrategiesPage", () => {
     expect(within(validation).getByText("106")).toBeInTheDocument();
     expect(within(validation).getByText("2")).toBeInTheDocument();
     expect(within(validation).getAllByText("1", { selector: "dd" })).toHaveLength(2);
+  });
+
+  it("names the next promotion step and the reasons it would refuse", async () => {
+    // #2770: the step stays NAMED when it is blocked — "which step, and why" is
+    // the thing an operator needs; hiding it leaves the page saying nothing.
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    expect(screen.getByText("Next step: Validate historical evidence")).toBeInTheDocument();
+    expect(screen.getByText("recent_evidence_window_missing x6")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Validate historical evidence" })).toBeDisabled();
+  });
+
+  it("advances a strategy whose evidence no longer refuses, sending no denominator", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{ ...strategy, next_operator_action_refusals: [] }],
+    });
+    const advance = vi.spyOn(strategiesApi, "advanceStrategyStage").mockResolvedValue({
+      strategy_id: strategy.strategy_id,
+      strategy_version: strategy.strategy_version,
+      from_stage: "research_candidate",
+      stage: "historical_validated",
+      promotion_id: 1,
+      evidence_ref: `recent-evidence-v1+${"a".repeat(64)}`,
+      pinned_result_count: 24,
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    const button = screen.getByRole("button", { name: "Validate historical evidence" });
+    // A promotion is an authorisation; without a rationale there is nothing to record.
+    expect(button).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("Why are you advancing this strategy?"), "  all six windows landed  ");
+    await userEvent.click(button);
+    await waitFor(() => expect(advance).toHaveBeenCalledTimes(1));
+    const [, body] = advance.mock.calls[0]!;
+    expect(body.action).toBe("validate_historical");
+    expect(body.reason).toBe("all six windows landed");
+    // ⚠ The client must not be able to name its own evidence.
+    expect(Object.keys(body).sort()).toEqual(["action", "reason"]);
+  });
+
+  it("will not advance on a whitespace-only rationale", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{ ...strategy, next_operator_action_refusals: [] }],
+    });
+    const advance = vi.spyOn(strategiesApi, "advanceStrategyStage");
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.type(screen.getByLabelText("Why are you advancing this strategy?"), "   ");
+    expect(screen.getByRole("button", { name: "Validate historical evidence" })).toBeDisabled();
+    expect(advance).not.toHaveBeenCalled();
+  });
+
+  it("renders a refused promotion verbatim rather than as a friendlier fiction", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{ ...strategy, next_operator_action_refusals: [] }],
+    });
+    vi.spyOn(strategiesApi, "advanceStrategyStage").mockRejectedValue(
+      new Error("action 'validate_historical' is not available from stage 'historical_validated'"),
+    );
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.type(screen.getByLabelText("Why are you advancing this strategy?"), "page was stale");
+    await userEvent.click(screen.getByRole("button", { name: "Validate historical evidence" }));
+    expect(
+      await screen.findByText("action 'validate_historical' is not available from stage 'historical_validated'"),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no promotion step to a harness control", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{ ...strategy, purpose: "harness_validation", next_operator_action: null, next_operator_action_refusals: [] }],
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    expect(screen.queryByText(/^Next step:/)).not.toBeInTheDocument();
   });
 
   it("does not present a legacy enabled harness deployment as approved", async () => {
