@@ -11,6 +11,7 @@ import pytest
 from app.api.strategies import (
     _PRESENTATION,
     _TITLES,
+    REGIME_COHORT_DISPLAY_ORDER,
     ResultArm,
     _ambiguity_record_from_result_row,
     _current_scan_versions,
@@ -27,6 +28,11 @@ from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERS
 from app.services.result_ledger import store_holdout_result, store_in_sample_result
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
+from app.services.strategy_regime_evidence import (
+    REGIME_COHORT_LABELS,
+    RegimeCohort,
+    store_result_regime_cohorts,
+)
 from app.services.strategy_result import LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS
 from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION, AmbiguityRecord, record_sha256
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -432,6 +438,7 @@ def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:
         hold_days_p25=None,
         hold_days_p75=None,
         promotion_refusals=[],
+        regime_cohorts=[],
     )
 
     assert arm.sortino is None
@@ -627,6 +634,175 @@ def test_overview_maps_only_exact_current_holdout_provenance(
     assert primary.arms[0].sortino is None
     assert primary.arms[0].profit_factor is None
     assert strategy.legacy_result_count == 3
+
+
+def test_overview_regime_cohorts_follow_the_result_ids_not_a_second_pin_predicate(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2817. Two arms, one current and one on a stale cost model, both with cohorts.
+
+    The current arm must carry ITS OWN cohorts and nothing else. Storing cohorts
+    against the excluded result is the point of the fixture: a reader that
+    restated `_RESULTS_SQL`'s identity pins instead of keying on the ids that
+    query returned would either leak the stale split in or drop both.
+
+    Also pins the display order. The two labels are stored `bear_quiet` then
+    `bull_quiet` — which is what `build_regime_cohorts` writes, since it sorts
+    alphabetically — and must READ back bull-before-bear.
+    """
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    window = RECENT_EVIDENCE_WINDOWS["primary-2022-plus"].window
+    identity = {
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "window_start": window.start,
+        "window_end": window.end,
+        "corpus_version": corpus_version_for(BACKTEST_UNIVERSE),
+        "cost_model_id": COST_MODEL_ID,
+        "sizing_rule": SIZING_RULE_ID,
+        "benchmark_rule": BENCHMARK_RULE_ID,
+        "return_basis": TOTAL_RETURN_BASIS,
+        "ambiguity_rule_version": AMBIGUITY_RULE_VERSION,
+        "position_rule_set_version": POSITION_RULE_SET_VERSION,
+        "outcome_rule_set_version": OUTCOME_RULE_SET_VERSION,
+        "input_rule_set_version": QUARANTINE_RULE_SET_VERSION,
+    }
+    metrics = build_metrics(trade_count=5, losing_trade_count=2, open_trade_count=0)
+    current_id = store_holdout_result(
+        ebull_test_conn,
+        build_result(**identity, ambiguity_arm="best_case", quarantine_arm="admitted", metrics=metrics),
+        accessed_by="tests/test_api_strategies.py",
+        purpose="verify regime cohort mapping",
+    )
+    stale_id = store_holdout_result(
+        ebull_test_conn,
+        build_result(
+            **{**identity, "cost_model_id": "stale-cost-v0"},
+            ambiguity_arm="worst_case",
+            quarantine_arm="admitted",
+            metrics=metrics,
+        ),
+        accessed_by="tests/test_api_strategies.py",
+        purpose="prove an excluded result's cohorts cannot leak in",
+    )
+    for result_id, expectancy in ((current_id, 1.5), (stale_id, -9.5)):
+        store_result_regime_cohorts(
+            ebull_test_conn,
+            result_id=result_id,
+            cohorts=[
+                RegimeCohort(
+                    regime="bear_quiet",
+                    trade_count=2,
+                    instrument_count=2,
+                    decision_date_count=2,
+                    losing_trade_count=1,
+                    expectancy_pct=expectancy,
+                    profit_factor=1.25,
+                    worst_trade_pct=-3.5,
+                    effective_sample_size=None,
+                    expectancy_ci_low_pct=None,
+                    expectancy_ci_high_pct=None,
+                    bootstrap_block_length=None,
+                    bootstrap_cluster_count=None,
+                    bootstrap_resamples=None,
+                    bootstrap_seed=None,
+                    bootstrap_design_effect=None,
+                    bootstrap_model_id=None,
+                ),
+                RegimeCohort(
+                    regime="bull_quiet",
+                    trade_count=3,
+                    instrument_count=3,
+                    decision_date_count=3,
+                    losing_trade_count=0,
+                    expectancy_pct=expectancy,
+                    # Null exactly because the cohort has no losing trade — the
+                    # strongest cohort, not an absent measurement.
+                    profit_factor=None,
+                    worst_trade_pct=-0.25,
+                    effective_sample_size=None,
+                    expectancy_ci_low_pct=None,
+                    expectancy_ci_high_pct=None,
+                    bootstrap_block_length=None,
+                    bootstrap_cluster_count=None,
+                    bootstrap_resamples=None,
+                    bootstrap_seed=None,
+                    bootstrap_design_effect=None,
+                    bootstrap_model_id=None,
+                ),
+            ],
+            expected_trade_count=5,
+        )
+
+    overview = get_strategy_overview(ebull_test_conn)
+    strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
+    primary = next(item for item in strategy.evidence_windows if item.window_id == "primary-2022-plus")
+
+    assert len(primary.arms) == 1
+    cohorts = primary.arms[0].regime_cohorts
+    assert [item.regime for item in cohorts] == ["bull_quiet", "bear_quiet"]
+    assert [item.trade_count for item in cohorts] == [3, 2]
+    assert sum(item.trade_count for item in cohorts) == primary.arms[0].trade_count
+    # The stale arm's -9.5 never appears: it is excluded by provenance, so its
+    # cohorts are not fetched at all.
+    assert all(item.expectancy_pct == Decimal("1.5") for item in cohorts)
+    assert cohorts[0].profit_factor is None
+    assert cohorts[0].losing_trade_count == 0
+    assert cohorts[1].profit_factor == Decimal("1.25")
+
+
+def test_overview_leaves_regime_cohorts_empty_for_a_result_written_before_the_writer_existed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2817. Every one of the 324 rows stored on dev predates #2726 and has no split.
+
+    The arm must report an EMPTY list beside a non-zero `trade_count`, which is
+    what lets the reader say "not measured for this result version" instead of
+    "no trades in any regime".
+    """
+    strategy_id = "s1-time-series-momentum"
+    window = RECENT_EVIDENCE_WINDOWS["primary-2022-plus"].window
+    store_holdout_result(
+        ebull_test_conn,
+        build_result(
+            strategy_id=strategy_id,
+            strategy_version=_current_versions()[strategy_id],
+            window_start=window.start,
+            window_end=window.end,
+            corpus_version=corpus_version_for(BACKTEST_UNIVERSE),
+            cost_model_id=COST_MODEL_ID,
+            sizing_rule=SIZING_RULE_ID,
+            benchmark_rule=BENCHMARK_RULE_ID,
+            return_basis=TOTAL_RETURN_BASIS,
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            position_rule_set_version=POSITION_RULE_SET_VERSION,
+            outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
+            input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+            ambiguity_arm="best_case",
+            quarantine_arm="admitted",
+        ),
+        accessed_by="tests/test_api_strategies.py",
+        purpose="verify an unsplit result reads as unsplit",
+    )
+
+    overview = get_strategy_overview(ebull_test_conn)
+    strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
+    primary = next(item for item in strategy.evidence_windows if item.window_id == "primary-2022-plus")
+
+    assert primary.arms[0].trade_count > 0
+    assert primary.arms[0].regime_cohorts == []
+
+
+def test_regime_cohort_display_order_covers_every_label_the_producer_can_write() -> None:
+    """A label added to `RegimeCohortLabel` must land in a defined display slot.
+
+    `REGIME_COHORT_DISPLAY_ORDER` is `get_args(RegimeCohortLabel)`, so this holds
+    by construction today; the test is what stops a later hand-written copy from
+    silently dropping a label and raising `ValueError` inside the sort.
+    """
+    assert set(REGIME_COHORT_DISPLAY_ORDER) == set(REGIME_COHORT_LABELS)
+    assert REGIME_COHORT_DISPLAY_ORDER[-1] == "unclassified"
 
 
 def test_overview_declares_exactly_the_manifest_strategies_with_exit_adapters_as_forward_resolvable(

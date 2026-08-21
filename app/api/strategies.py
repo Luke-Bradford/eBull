@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast, get_args
 
 import psycopg
 import psycopg.rows
@@ -103,6 +103,7 @@ from app.services.strategy_position_manager import (
     manage_owned_position,
 )
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
+from app.services.strategy_regime_evidence import RegimeCohortLabel
 from app.services.strategy_result import TOTAL_RETURN_BASIS
 from app.services.strategy_result_ambiguity import (
     AmbiguityRecord,
@@ -250,6 +251,47 @@ class PriorVersionTrackRecord(BaseModel):
     incomparable_reasons: list[str]
 
 
+class ResultRegimeCohort(BaseModel):
+    """One arm's realised trades, split by the regime that held when it fired (#2437).
+
+    ⚠ Explains a parent arm; NOT independently promotable. Portfolio path
+    statistics — drawdown above all — stay on the arm, because filtering closed
+    trades cannot reconstruct overlapping marked paths
+    (``app/services/strategy_regime_evidence.py`` module docstring).
+
+    Two absences the reader must render differently, both enforced by
+    ``RegimeCohort.__post_init__`` on the writer side:
+
+    - **A regime with no row had no realised trade in this arm.** Every stored
+      cohort carries ``trade_count >= 1``, so the five labels are never all
+      present. "No trades in bear_volatile" is a measurement, not a gap.
+    - **``profit_factor`` is null exactly when ``losing_trade_count == 0``** —
+      the ratio has no denominator. That is the strongest possible cohort, and
+      rendering it as a blank cell says the opposite.
+
+    ``unclassified`` is its own label, not an error: the regime is classified on
+    the entry SIGNAL date, and a date the regime series does not cover cannot be
+    labelled without conditioning on state the strategy did not have.
+    """
+
+    # The producer's own alias, not a copy of its members: a label added there
+    # must not need a matching edit here to be renderable.
+    regime: RegimeCohortLabel
+    trade_count: int
+    instrument_count: int
+    decision_date_count: int
+    losing_trade_count: int
+    expectancy_pct: Decimal
+    expectancy_ci_low_pct: Decimal | None
+    expectancy_ci_high_pct: Decimal | None
+    profit_factor: Decimal | None
+    worst_trade_pct: Decimal
+    effective_sample_size: Decimal | None
+    # Ships with the interval it produced, so a null CI reads as "not
+    # bootstrapped" rather than as a missing number under an unnamed model.
+    bootstrap_model_id: str | None
+
+
 class ResultArm(BaseModel):
     result_version: str
     purpose: Literal["harness_validation", "capital_candidate"]
@@ -301,6 +343,31 @@ class ResultArm(BaseModel):
     hold_days_p25: Decimal | None
     hold_days_p75: Decimal | None
     promotion_refusals: list[str]
+    # Ordered by `REGIME_COHORT_DISPLAY_ORDER`, never by the storage order.
+    # Short of five whenever a regime saw no trade, because a cohort row needs
+    # `trade_count >= 1`.
+    #
+    # ⚠ EMPTY IS TWO DIFFERENT STATEMENTS and the reader must separate them on
+    # `trade_count`, exactly as `metric_set_id` separates the hold-period nulls:
+    # empty with `trade_count == 0` means the arm realised no trade; empty with
+    # `trade_count > 0` means the row PREDATES the cohort writer (#2726) and was
+    # never split — not "no trades in any regime". Backfilling is not available
+    # either way, since it means re-running the backtest and charging the trial
+    # register (#2599/#2616), so these rows stay empty forever.
+    regime_cohorts: list[ResultRegimeCohort]
+
+
+# Fields on `ResultArm` that are COMPUTED rather than selected, and so must not
+# be read off the result row. Named once: the row-splat below skips exactly this
+# set, so adding a computed field cannot leave a `KeyError` behind.
+_RESULT_ARM_COMPUTED_FIELDS: Final[frozenset[str]] = frozenset({"promotion_refusals", "regime_cohorts"})
+
+# Bull before bear, quiet before volatile, `unclassified` last — the producer's
+# own declaration order (`RegimeCohortLabel`), taken rather than restated so a
+# label added there lands in a defined slot instead of an arbitrary one.
+# ⚠ NOT the storage order: `build_regime_cohorts` writes `sorted(grouped)`,
+# which is alphabetical and puts bear before bull.
+REGIME_COHORT_DISPLAY_ORDER: Final[tuple[str, ...]] = get_args(RegimeCohortLabel)
 
 
 class EvidenceWindow(BaseModel):
@@ -1274,6 +1341,31 @@ _RESULT_COUNTS_SQL = """
     GROUP BY strategy_id
 """
 
+# ⚠ Keyed on the result ids `_RESULTS_SQL` ACTUALLY RETURNED, not on a second
+# copy of its ten identity pins. Restating the pins here is the #2806 defect
+# shape: the two predicates drift, the join silently returns nothing, and a
+# panel that reads "no regime evidence" is indistinguishable from one measuring
+# a strategy that never traded. Deriving the key from the producer's own output
+# makes the two sets equal by construction.
+_REGIME_COHORTS_SQL = """
+    SELECT
+        result_id,
+        regime,
+        trade_count,
+        instrument_count,
+        decision_date_count,
+        losing_trade_count,
+        expectancy_pct,
+        expectancy_ci_low_pct,
+        expectancy_ci_high_pct,
+        profit_factor,
+        worst_trade_pct,
+        effective_sample_size,
+        bootstrap_model_id
+    FROM strategy_result_regime_cohorts
+    WHERE result_id = ANY(%(result_ids)s::bigint[])
+"""
+
 _SCAN_SQL = """
     SELECT
         w.strategy_id,
@@ -1574,6 +1666,8 @@ def get_strategy_overview(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(_RESULTS_SQL, params)
         result_rows = list(cur.fetchall())
+        cur.execute(_REGIME_COHORTS_SQL, {"result_ids": [row["result_id"] for row in result_rows]})
+        regime_cohort_rows = list(cur.fetchall())
         cur.execute(_RESULT_COUNTS_SQL, params)
         result_count_rows = list(cur.fetchall())
         # ⚠ SCAN RELATIONS TAKE `scan_params`, RESULT RELATIONS TAKE `params`.
@@ -1670,6 +1764,13 @@ def get_strategy_overview(
     results_by_strategy: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in result_rows:
         results_by_strategy[str(row["strategy_id"])].append(row)
+    cohorts_by_result: dict[int, list[ResultRegimeCohort]] = defaultdict(list)
+    for row in regime_cohort_rows:
+        cohorts_by_result[int(row["result_id"])].append(
+            ResultRegimeCohort(**{field: row[field] for field in ResultRegimeCohort.model_fields})
+        )
+    for cohorts in cohorts_by_result.values():
+        cohorts.sort(key=lambda cohort: REGIME_COHORT_DISPLAY_ORDER.index(cohort.regime))
     result_counts = {str(row["strategy_id"]): int(row["count"]) for row in result_count_rows}
     scan_by_strategy = {str(row["strategy_id"]): row for row in scan_rows}
     exclusions: dict[str, Counter[str]] = defaultdict(Counter)
@@ -1736,13 +1837,18 @@ def get_strategy_overview(
                 accesses_complete = int(row["accesses"]) >= int(row["evaluations"]) > 0
                 arms.append(
                     ResultArm(
-                        **{field: row[field] for field in ResultArm.model_fields if field != "promotion_refusals"},
+                        **{
+                            field: row[field]
+                            for field in ResultArm.model_fields
+                            if field not in _RESULT_ARM_COMPUTED_FIELDS
+                        },
                         promotion_refusals=_promotion_refusals(
                             row,
                             ambiguity_complete=ambiguity_complete,
                             quarantine_complete=quarantine_complete,
                             accesses_complete=accesses_complete,
                         ),
+                        regime_cohorts=cohorts_by_result.get(int(row["result_id"]), []),
                     )
                 )
             windows.append(
