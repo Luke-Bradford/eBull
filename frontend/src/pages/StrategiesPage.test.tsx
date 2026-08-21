@@ -1186,6 +1186,30 @@ describe("StrategiesPage", () => {
     expect(screen.getByText(/Result version criterion7-v1/)).toBeInTheDocument();
   });
 
+  it("says a periodic strategy was never asked rather than showing it declined", async () => {
+    // #2811. S-2 and S-10 rebalance monthly and are `not_fired` on every bar that
+    // is not a rebalance date, so a version the scan has never carried to one has a
+    // denominator in the thousands and a numerator of zero. Rendering that as
+    // "0.00%" is a confident measured zero standing for a non-measurement — the
+    // live shape on 2026-08-21, where S-2 showed 0/3,277.
+    const uncovered = structuredClone(OVERVIEW);
+    const strategy = uncovered.strategies[0]!;
+    strategy.purpose = "harness_validation";
+    strategy.fire_rate.decision_days = 0;
+    strategy.fire_rate.fired_entry_signals = 0;
+    strategy.fire_rate.evaluable_entry_decisions = 0;
+    strategy.fire_rate.fired_share_of_evaluable = null;
+    strategy.fire_rate.share_unavailable_reason = "no_decision_date_scanned";
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(uncovered);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+
+    expect(await screen.findByText("No decision date scanned")).toBeInTheDocument();
+    // ⚠ The whole point: the misleading zero must be GONE, not merely accompanied.
+    expect(screen.queryByText("0.00%")).not.toBeInTheDocument();
+  });
+
   it("distinguishes a result version that never measured the hold from one that closed no trades", async () => {
     // The other branch of the same blank. `sql/347` permits a null median under
     // `criterion7-v2` ONLY when trade_count is 0, so under the current version an
