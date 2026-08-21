@@ -2532,6 +2532,11 @@ export interface StrategyOverview {
 export interface StrategyFireRate {
   universe: string;
   scanned_days: number;
+  /** ⚠ `scanned_days` is COVERAGE; this is OPPORTUNITY, and the four counts below are
+   *  measured on it (#2811). `null` means no published decision calendar — a per-series
+   *  strategy acts on every bar it is evaluable at — which is NOT `0`, meaning it has a
+   *  calendar and the scan has reached none of it. */
+  decision_days: number | null;
   fired_days: number;
   fired_entry_signals: number;
   evaluable_entry_decisions: number;
@@ -2540,7 +2545,11 @@ export interface StrategyFireRate {
   entries_per_calendar_week: string | null;
   first_scanned_bar: string | null;
   last_scanned_bar: string | null;
-  share_unavailable_reason: "never_scanned" | "no_evaluable_decisions" | null;
+  share_unavailable_reason:
+    | "never_scanned"
+    | "no_decision_date_scanned"
+    | "no_evaluable_decisions"
+    | null;
   weekly_rate_unavailable_reason: "never_scanned" | "single_scan_day" | null;
 }
 
