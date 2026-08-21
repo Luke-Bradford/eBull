@@ -108,6 +108,7 @@ from app.services.strategy_result_ambiguity import (
     composed_holdout_ambiguity_refusals,
     record_sha256,
 )
+from app.services.strategy_signal_scan import SCAN_UNIVERSE
 from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -1001,8 +1002,38 @@ def _live_gate_view(report: LiveGateReport) -> LiveGateResponse:
 
 
 def _current_versions() -> dict[str, str]:
+    """The identities STORED RESULTS carry — the backtest measurement basis.
+
+    ⚠ NOT the identities the live scan writes. See ``_current_scan_versions``.
+    """
     return {
         strategy_id: entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
+        for strategy_id, entry in STRATEGY_MANIFEST.items()
+    }
+
+
+def _current_scan_versions() -> dict[str, str]:
+    """The identities the LIVE SCAN writes — the scan basis (#2803).
+
+    ⚠⚠ ``universe`` IS PART OF ``StrategyIdentity``, and the two bases are
+    different universes: results are measured on ``BACKTEST_UNIVERSE``
+    (``survivorship_free``) while ``strategy_signal_scan`` stamps
+    ``SCAN_UNIVERSE`` (``survivor_only``, ``strategy_signal_scan.py:484``). So
+    the two version sets are DISJOINT — measured, not assumed: the intersection
+    over the full manifest is 0, and of the 28 rows in
+    ``strategy_scan_watermark``, 0 match the backtest basis and 10 match the
+    scan basis.
+
+    ⚠ Filtering a scan relation by ``_current_versions()`` therefore does not
+    merely risk a miss, it can never match. That is the #2803 defect: every
+    strategy read ``scan.status = "rotated"`` with zero counts immediately after
+    a scan that wrote 81,485 rows, because the panel and the scanner disagreed
+    about which identity "current" means. Route ``strategy_scan_watermark`` and
+    ``strategy_signal_daily_counts`` through THIS function; keep
+    ``strategy_results*`` on ``_current_versions``.
+    """
+    return {
+        strategy_id: entry.identity(universe=SCAN_UNIVERSE, cost_model_id=COST_MODEL_ID).version
         for strategy_id, entry in STRATEGY_MANIFEST.items()
     }
 
@@ -1454,6 +1485,11 @@ def get_strategy_overview(
     as_of = datetime.now(tz=UTC)
     versions = _current_versions()
     version_values = list(versions.values())
+    # ⚠ A SECOND, DISJOINT VERSION SET — not a convenience alias (#2803). The
+    # scan relations are keyed by the scan basis and share no identity with the
+    # result basis, so binding `version_values` to them matches nothing at all.
+    scan_versions = _current_scan_versions()
+    scan_params = {"versions": list(scan_versions.values())}
     params = {
         "versions": version_values,
         "corpus_version": corpus_version_for(BACKTEST_UNIVERSE),
@@ -1471,9 +1507,10 @@ def get_strategy_overview(
         result_rows = list(cur.fetchall())
         cur.execute(_RESULT_COUNTS_SQL, params)
         result_count_rows = list(cur.fetchall())
-        cur.execute(_SCAN_SQL, params)
+        # ⚠ SCAN RELATIONS TAKE `scan_params`, RESULT RELATIONS TAKE `params`.
+        cur.execute(_SCAN_SQL, scan_params)
         scan_rows = list(cur.fetchall())
-        cur.execute(_EXCLUSIONS_SQL, params)
+        cur.execute(_EXCLUSIONS_SQL, scan_params)
         exclusion_rows = list(cur.fetchall())
         # Two parallel arrays `unnest`ed into current `(id, version)` pairs. Built
         # from one `items()` pass so the pairing cannot drift on a later edit.
@@ -1481,9 +1518,16 @@ def get_strategy_overview(
             "strategy_ids": [strategy_id for strategy_id, _ in versions.items()],
             "versions": [version for _, version in versions.items()],
         }
+        # The "everything that is NOT current" predicate has to exclude the
+        # CURRENT SCAN identity, or the live version is itself reported as a
+        # prior one — which is what manufactured #2803's bogus `rotation` block.
+        prior_scan_params = {
+            "strategy_ids": [strategy_id for strategy_id, _ in scan_versions.items()],
+            "versions": [version for _, version in scan_versions.items()],
+        }
         cur.execute(_PRIOR_VERSION_RESULTS_SQL, prior_params)
         prior_result_rows = list(cur.fetchall())
-        cur.execute(_PRIOR_VERSION_SCANS_SQL, prior_params)
+        cur.execute(_PRIOR_VERSION_SCANS_SQL, prior_scan_params)
         prior_scan_rows = list(cur.fetchall())
         cur.execute(_LATEST_CORPUS_SQL)
         latest_row = cur.fetchone()

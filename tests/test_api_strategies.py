@@ -13,6 +13,7 @@ from app.api.strategies import (
     _TITLES,
     ResultArm,
     _ambiguity_record_from_result_row,
+    _current_scan_versions,
     _current_versions,
     _promotion_refusals,
     get_strategy_overview,
@@ -460,7 +461,7 @@ def test_completed_zero_signal_scan_uses_its_watermark(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s2-cross-sectional-momentum"
-    version = _current_versions()[strategy_id]
+    version = _current_scan_versions()[strategy_id]
     frontier = date(2026, 7, 8)
     ebull_test_conn.execute(
         """
@@ -485,7 +486,7 @@ def test_scan_freshness_reads_the_ingest_census_without_scanning_daily_bars(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s2-cross-sectional-momentum"
-    version = _current_versions()[strategy_id]
+    version = _current_scan_versions()[strategy_id]
     frontier = date(2026, 7, 8)
     ebull_test_conn.execute(
         """
@@ -515,7 +516,7 @@ def test_scan_health_reads_durable_daily_counts_after_detail_retention(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    version = _current_versions()[strategy_id]
+    version = _current_scan_versions()[strategy_id]
     ebull_test_conn.execute(
         """
         INSERT INTO strategy_scan_watermark (strategy_id, strategy_version, frontier_date)
