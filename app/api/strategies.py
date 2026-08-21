@@ -2416,8 +2416,13 @@ def get_fired_signals(
 ) -> FiredSignalsResponse:
     # Direct service/test callers do not receive FastAPI's default coercion.
     selected_strategy = strategy_id if isinstance(strategy_id, str) else None
-    params = {
-        "versions": list(_current_versions().values()),
+    # ⚠ SCAN basis, not the result basis (#2814). ``_FIRED_SIGNALS_SQL`` reads
+    # ``strategy_signals``, whose only writer is ``signal_ledger`` under
+    # ``SCAN_UNIVERSE``; the two bases are disjoint, so the result basis returns
+    # an empty page forever rather than a partial one. Measured at the fix: 0
+    # rows on the result basis against 33,655 fired rows on the scan basis.
+    scan_params = {
+        "versions": list(_current_scan_versions().values()),
         "cursor": cursor,
         "limit": limit,
         "strategy_id": selected_strategy,
@@ -2425,7 +2430,7 @@ def get_fired_signals(
         "input_version": QUARANTINE_RULE_SET_VERSION,
     }
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(_FIRED_SIGNALS_SQL, params)
+        cur.execute(_FIRED_SIGNALS_SQL, scan_params)
         rows = list(cur.fetchall())
     items = [_fired_signal(row) for row in rows]
     return FiredSignalsResponse(items=items, next_cursor=items[-1].signal_id if len(items) == limit else None)

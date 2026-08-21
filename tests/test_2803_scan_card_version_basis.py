@@ -17,10 +17,8 @@ import inspect
 import re
 import textwrap
 
+from app.api import strategies as strategies_api
 from app.api.strategies import (
-    _EXCLUSIONS_SQL,
-    _PRIOR_VERSION_SCANS_SQL,
-    _SCAN_SQL,
     _current_scan_versions,
     _current_versions,
     get_strategy_overview,
@@ -159,32 +157,104 @@ def test_the_two_bases_are_disjoint_so_one_cannot_stand_in_for_the_other() -> No
     assert not set(_current_versions().values()) & set(_current_scan_versions().values())
 
 
+def _scan_basis_sql_in_the_api_module() -> dict[str, str]:
+    """Module-level ``_*_SQL`` in ``app.api.strategies`` -> the scan relation it reads.
+
+    DERIVED over the whole module, never listed — the same narrowings as
+    ``_loaders_over_a_scan_relation``: the relation must follow ``FROM``/``JOIN``
+    and match exactly, and the SQL must bind ``%(versions)s`` at all.
+
+    ⚠ This replaced a literal list of three constants read out of
+    ``get_strategy_overview`` alone, which is how #2814 survived #2806 by one
+    function. ``strategy_signals`` was already in ``_SCAN_RELATIONS`` and
+    ``_FIRED_SIGNALS_SQL`` already read it on the result basis; the guard simply
+    was not looking at ``get_fired_signals``. #2806's own prevention entry says
+    "derive the guarded set from the code under guard, never from a literal
+    list" — it derived the ``strategy_monitoring`` half and left this half
+    enumerated.
+    """
+    found: dict[str, str] = {}
+    for name in dir(strategies_api):
+        if not name.endswith("_SQL"):
+            continue
+        sql = getattr(strategies_api, name)
+        if not isinstance(sql, str) or "%(versions)s" not in sql:
+            continue
+        read = set(_READ_RELATION.findall(sql))
+        relation = next((r for r in _SCAN_RELATIONS if r in read), None)
+        if relation is not None:
+            found[name] = relation
+    return found
+
+
+def _executors_of(constant: str) -> dict[str, list[str]]:
+    """Function name -> the params names it passes to ``cur.execute(constant, …)``.
+
+    Searched across every function in the module, not one named endpoint: the
+    executor of a scan-relation query is exactly what #2814 got wrong.
+    """
+    executed: dict[str, list[str]] = {}
+    for name in dir(strategies_api):
+        function = getattr(strategies_api, name)
+        if not inspect.isfunction(function) or function.__module__ != strategies_api.__name__:
+            continue
+        arguments = re.findall(rf"cur\.execute\(\s*{constant}\s*,\s*(\w+)\s*\)", inspect.getsource(function))
+        if arguments:
+            executed[name] = arguments
+    return executed
+
+
+def test_a_result_basis_query_is_not_swept_into_the_api_scan_guard() -> None:
+    """The result-store queries must stay OUT, or the guard cries wolf (#2808).
+
+    Same asymmetry as ``test_a_result_basis_loader_is_not_swept_into_the_scan_guard``:
+    a guard that fires on a correctly-bound result-basis query gets muted, and a
+    muted guard is how #2803 came back twice.
+    """
+    guarded = _scan_basis_sql_in_the_api_module()
+    for name in ("_RESULTS_SQL", "_RESULT_COUNTS_SQL", "_PRIOR_VERSION_RESULTS_SQL"):
+        assert name not in guarded, f"{name} reads the result store and must stay on _current_versions()"
+        assert "%(versions)s" in getattr(strategies_api, name), (
+            f"{name} no longer binds versions — recheck which basis it belongs on"
+        )
+
+
 def test_every_scan_relation_query_is_executed_on_the_scan_basis() -> None:
     """Guard the BINDING, not just the helper.
 
-    ``_current_scan_versions`` existing changes nothing if the overview keeps
-    passing ``params``; that pairing is the thing that regressed, and no type or
-    comment catches it because both dicts have the same shape and key name.
+    ``_current_scan_versions`` existing changes nothing if a caller keeps passing
+    the result-basis params; that pairing is the thing that regressed three
+    times, and no type or comment catches it because both dicts have the same
+    shape and the same ``versions`` key.
+
+    The basis sets are computed per EXECUTING FUNCTION rather than once over
+    ``get_strategy_overview``: an endpoint that binds only the scan basis (as
+    ``get_fired_signals`` does after #2814) mentions ``_current_versions``
+    nowhere, so a whole-module or single-function floor on both names would
+    either fail spuriously or send the reader to the wrong function.
     """
-    source = inspect.getsource(get_strategy_overview)
-    scan_derived, result_derived = _the_two_bases_as_named_in(source)
-    scan_sql = {
-        "_SCAN_SQL": _SCAN_SQL,
-        "_EXCLUSIONS_SQL": _EXCLUSIONS_SQL,
-        "_PRIOR_VERSION_SCANS_SQL": _PRIOR_VERSION_SCANS_SQL,
-    }
-    for name, sql in scan_sql.items():
-        assert any(relation in sql for relation in _SCAN_RELATIONS), (
-            f"{name} no longer reads a scan relation — retarget this guard rather than deleting it"
-        )
-        executed = re.findall(rf"cur\.execute\(\s*{name}\s*,\s*(\w+)\s*\)", source)
-        assert executed, f"{name} is not executed by get_strategy_overview"
-        for params_name in executed:
-            assert params_name in scan_derived and params_name not in result_derived, (
-                f"{name} reads {_SCAN_RELATIONS} but is executed with {params_name!r}, which is not "
-                "derived from _current_scan_versions(); live-scan relations are keyed by the scan "
-                "identity basis (#2803)"
-            )
+    guarded = _scan_basis_sql_in_the_api_module()
+    # ⚠ A FLOOR, not a list — the same revert-probe lesson as the loader guard
+    # below. New constants are still picked up automatically; a known one
+    # dropping out (a renamed table, a dropped version predicate) has to be loud,
+    # because the surviving subjects would satisfy every assertion beneath it.
+    assert {"_SCAN_SQL", "_EXCLUSIONS_SQL", "_PRIOR_VERSION_SCANS_SQL", "_FIRED_SIGNALS_SQL"} <= set(guarded), (
+        f"a known scan-basis query dropped out of the derived set ({sorted(guarded)}) — "
+        "retarget this guard rather than letting it pass on the remainder"
+    )
+    for name, relation in sorted(guarded.items()):
+        executed = _executors_of(name)
+        assert executed, f"{name} filters {relation} but no function in app.api.strategies executes it"
+        for function_name, arguments in sorted(executed.items()):
+            source = inspect.getsource(getattr(strategies_api, function_name))
+            scan_derived = _names_derived_from(source, "_current_scan_versions")
+            result_derived = _names_derived_from(source, "_current_versions")
+            for params_name in arguments:
+                assert params_name in scan_derived and params_name not in result_derived, (
+                    f"{function_name} executes {name}, which reads {relation}, with {params_name!r} — "
+                    "not derived from _current_scan_versions(); live-scan relations are keyed by the "
+                    "scan identity basis (#2803/#2806/#2814)"
+                )
 
 
 def test_every_loader_over_a_scan_relation_is_called_on_the_scan_basis() -> None:

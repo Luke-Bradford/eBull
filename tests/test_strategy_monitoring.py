@@ -27,9 +27,11 @@ from app.api.strategies import (
     update_strategy_paper_pool,
 )
 from app.security.sessions import SessionRow
+from app.services.cost_model import COST_MODEL_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import get_runtime_config, update_runtime_config
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_monitoring import (
     load_attribution,
     load_control_state,
@@ -37,6 +39,21 @@ from app.services.strategy_monitoring import (
     load_owned_pnl,
 )
 from app.services.strategy_position_manager import PositionManagerResult
+from app.services.strategy_signal_scan import SCAN_UNIVERSE
+
+
+def _scan_version(strategy_id: str) -> str:
+    """The version the SCANNER stamps on a ``strategy_signals`` row.
+
+    ⚠ Constructed from the manifest + ``SCAN_UNIVERSE``, deliberately NOT read
+    from ``app.api.strategies._current_scan_versions`` — a fixture that seeds
+    through the same constant its reader uses is self-consistent and proves
+    nothing (#2806 prevention entry). That is precisely how #2814 hid: every
+    test below seeded ``_current_versions()`` and ``get_fired_signals``
+    filtered on ``_current_versions()``, so nine passing DB tests sat on top of
+    an endpoint that returned an empty page against real data forever.
+    """
+    return STRATEGY_MANIFEST[strategy_id].identity(universe=SCAN_UNIVERSE, cost_model_id=COST_MODEL_ID).version
 
 
 def _instrument(conn: psycopg.Connection[Any], instrument_id: int) -> None:
@@ -65,11 +82,15 @@ def _signal(
             signal_kind, verdict, fill_bar_date, fill_price, universe,
             input_rule_set_versions
         ) VALUES (%s, %s, %s, %s, 'entry', 'fired', %s::date + 1,
-                  %s, 'survivorship_free',
+                  %s, %s,
                   '{"indicator_series":"rules-v1"}'::jsonb)
         RETURNING signal_id
         """,
-        (strategy_id, strategy_version, instrument_id, signal_date, signal_date, fill_price),
+        # ⚠ SCAN_UNIVERSE, not a literal. ``signal_ledger`` is the only writer of
+        # this table and stamps the scan universe; the fixture previously wrote
+        # 'survivorship_free', which no production row carries — measured on dev
+        # at #2814, all 56,835 rows are 'survivor_only'.
+        (strategy_id, strategy_version, instrument_id, signal_date, signal_date, fill_price, SCAN_UNIVERSE),
     ).fetchone()
     assert row is not None
     return int(row[0])
@@ -653,7 +674,7 @@ def test_unprocessed_current_entry_is_visible_as_not_funded_with_reason(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    strategy_version = _current_versions()[strategy_id]
+    strategy_version = _scan_version(strategy_id)
     instrument_id = 2453004
     _instrument(ebull_test_conn, instrument_id)
     signal_id = _signal(
@@ -668,7 +689,7 @@ def test_unprocessed_current_entry_is_visible_as_not_funded_with_reason(
         ebull_test_conn,
         instrument_id=instrument_id,
         strategy_id="s3-mean-reversion-in-trend",
-        strategy_version=_current_versions()["s3-mean-reversion-in-trend"],
+        strategy_version=_scan_version("s3-mean-reversion-in-trend"),
         signal_date="2026-08-02",
         fill_price=Decimal("11"),
     )
@@ -688,11 +709,53 @@ def test_unprocessed_current_entry_is_visible_as_not_funded_with_reason(
     assert signal.trade_lifecycle is None
 
 
+def test_fired_signals_read_the_scan_basis_the_ledger_actually_writes(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2814: the endpoint filtered ``strategy_signals`` on the RESULT basis.
+
+    ``universe`` is part of ``StrategyIdentity`` and the two bases are disjoint,
+    so the wrong one returns an empty page permanently rather than a short one.
+    On dev before the fix: 0 rows returned against 33,655 fired rows stored.
+
+    Both arms are asserted in one test on purpose. Seeding only the scan basis
+    would pass equally well against a reader that filtered on nothing at all,
+    and "returns rows" was never the property in question — "returns rows keyed
+    the way the ledger keys them, and only those" is.
+    """
+    strategy_id = "s1-time-series-momentum"
+    _instrument(ebull_test_conn, 2453101)
+    _instrument(ebull_test_conn, 2453102)
+    scanned = _signal(
+        ebull_test_conn,
+        instrument_id=2453101,
+        strategy_id=strategy_id,
+        strategy_version=_scan_version(strategy_id),
+        signal_date="2026-08-05",
+        fill_price=Decimal("10"),
+    )
+    result_basis = _signal(
+        ebull_test_conn,
+        instrument_id=2453102,
+        strategy_id=strategy_id,
+        strategy_version=_current_versions()[strategy_id],
+        signal_date="2026-08-05",
+        fill_price=Decimal("10"),
+    )
+    assert _scan_version(strategy_id) != _current_versions()[strategy_id]
+
+    response = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+
+    returned = {item.signal_id for item in response.items}
+    assert scanned in returned
+    assert result_basis not in returned
+
+
 def test_fired_signal_exposes_exact_completed_trade_lifecycle(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    strategy_version = _current_versions()[strategy_id]
+    strategy_version = _scan_version(strategy_id)
     instrument_id = 2453005
     _instrument(ebull_test_conn, instrument_id)
     signal_id = _signal(
@@ -808,7 +871,7 @@ def test_fired_signal_keeps_open_owned_trade_distinct_from_closed_history(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    strategy_version = _current_versions()[strategy_id]
+    strategy_version = _scan_version(strategy_id)
     instrument_id = 2453006
     _instrument(ebull_test_conn, instrument_id)
     signal_id = _signal(
@@ -849,7 +912,7 @@ def test_fired_signal_treats_failed_entry_without_position_as_terminal_not_missi
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    strategy_version = _current_versions()[strategy_id]
+    strategy_version = _scan_version(strategy_id)
     instrument_id = 2453011
     _instrument(ebull_test_conn, instrument_id)
     signal_id = _signal(
@@ -888,7 +951,7 @@ def test_fired_signal_exposes_a_submitted_close_without_claiming_it_completed(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    strategy_version = _current_versions()[strategy_id]
+    strategy_version = _scan_version(strategy_id)
     instrument_id = 2453009
     _instrument(ebull_test_conn, instrument_id)
     signal_id = _signal(
@@ -1007,7 +1070,7 @@ def test_fired_signal_fails_closed_on_released_position_without_close_history(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    strategy_version = _current_versions()[strategy_id]
+    strategy_version = _scan_version(strategy_id)
     instrument_id = 2453007
     _instrument(ebull_test_conn, instrument_id)
     signal_id = _signal(
@@ -1051,7 +1114,7 @@ def test_fired_signal_never_returns_a_partial_close_money_pair(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    strategy_version = _current_versions()[strategy_id]
+    strategy_version = _scan_version(strategy_id)
     instrument_id = 2453012
     _instrument(ebull_test_conn, instrument_id)
     signal_id = _signal(
@@ -1106,7 +1169,7 @@ def test_fired_signal_does_not_choose_between_ambiguous_position_owners(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     strategy_id = "s1-time-series-momentum"
-    strategy_version = _current_versions()[strategy_id]
+    strategy_version = _scan_version(strategy_id)
     instrument_id = 2453008
     _instrument(ebull_test_conn, instrument_id)
     signal_id = _signal(
