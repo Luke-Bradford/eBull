@@ -118,6 +118,10 @@ from app.services.strategy_signal_scan import (
     modal_bar_date,
     window_decides_the_mode,
 )
+from app.services.strategy_walk_forward_evidence import (
+    SplitUnavailableReason,
+    derive_walk_forward_split,
+)
 from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -379,6 +383,77 @@ class EvidenceWindow(BaseModel):
     arms: list[ResultArm]
 
 
+class WalkForwardFold(BaseModel):
+    """One block of criterion 5's split (#2823).
+
+    ⚠ ``first_date`` / ``last_date`` bound the **test** block, not a training
+    interval — ``app/services/walk_forward.py``: *"One contiguous block of the
+    panel axis, held out for testing."*
+
+    ⚠ The four counts are ONE population re-classified by this fold, and
+    ``FoldCensus.total`` asserts exactly that. Summing any of them across folds
+    counts the same observations ``fold_count`` times, so no total is exposed
+    here and none may be rendered.
+
+    ⚠ NO PER-FOLD PERFORMANCE FIELD EXISTS AND NONE MAY BE ADDED. §5.3: the
+    split is a validity GATE, not a training loop, and a per-fold number *"would
+    invite exactly the 'which fold did best' search criterion 6 exists to
+    bound"*.
+
+    Two legitimate zeroes (``sql/269``): ``test_count`` may be 0 on a fold that
+    spans real dates when no observation STARTS inside a thin era, and
+    ``embargo_bars`` 0 means *"nothing to measure on this fold's training
+    side"* — never that the embargo was skipped.
+    """
+
+    fold_index: int
+    first_date: date
+    last_date: date
+    bar_count: int
+    #: MEASURED, on the PANEL-date axis — not instrument bars, not calendar days
+    #: and not a declared holding period. It is the maximum panel-axis label span
+    #: over this fold's own post-purge training set, so it varies per fold and
+    #: needs no constant from any strategy.
+    embargo_bars: int
+    test_count: int
+    train_count: int
+    #: Training observations whose LABEL WINDOW overlaps the test block.
+    purged_count: int
+    #: Training observations that START in the window immediately FOLLOWING the
+    #: test block. A separate verdict from ``purged_count`` and not a second
+    #: symmetric purge — collapsing the two would make §5.3's finding about
+    #: their relative size unreportable.
+    embargoed_count: int
+
+
+class WalkForwardSplit(BaseModel):
+    """The strategy's stored split, or the named reason it has none (#2823).
+
+    Grain is the STRATEGY CARD, not the arm and not the evidence window: the
+    geometry is identical across all four stored arms (measured — see
+    ``strategy_walk_forward_evidence``), and the folds sit inside the in-sample
+    prefix, so they belong to no hold-out window.
+
+    ⚠ The construction is **purged K-fold over contiguous blocks**, NOT an
+    anchored or rolling walk-forward, whatever the table's name suggests. Both
+    sides of a test block carry training data; that is what leaves room for the
+    embargo at all.
+    """
+
+    folds: list[WalkForwardFold]
+    #: The STORED id, never today's constant — a split cut under a superseded
+    #: construction stays readable as that construction.
+    walk_forward_model_id: str | None
+    fold_count: int | None
+    #: Which arm's census the counts are. The geometry is arm-invariant; the
+    #: census is not, because masking changes the universe.
+    quarantine_arm: str | None
+    window_start: date | None
+    window_end: date | None
+    #: Non-null exactly when ``folds`` is empty.
+    unavailable_reason: SplitUnavailableReason | None
+
+
 class StrategyOverview(BaseModel):
     strategy_id: str
     strategy_version: str
@@ -391,6 +466,10 @@ class StrategyOverview(BaseModel):
     exclusion_reason: str | None
     scan: ScanHealth
     evidence_windows: list[EvidenceWindow]
+    #: Criterion 5's split for this version, per strategy rather than per window
+    #: — the folds partition the in-sample prefix and belong to no hold-out
+    #: window (#2823).
+    walk_forward_split: WalkForwardSplit
     prior_versions: list[PriorVersionTrackRecord]
     # ⚠ NOT a prior-version summary, despite the name: `_RESULT_COUNTS_SQL`
     # filters on the CURRENT versions, so this counts rows under the current
@@ -1365,6 +1444,59 @@ _REGIME_COHORTS_SQL = """
     WHERE result_id = ANY(%(result_ids)s::bigint[])
 """
 
+# Criterion 5's stored split (#2823). ⚠ THE ONE PREDICATE THAT DIFFERS FROM
+# `_RESULTS_SQL` IS `namespace`, AND IT HAS TO: folds hang off `in_sample`
+# results while the card's arms are `hold_out` ones. Keying this on the result
+# ids `_RESULTS_SQL` returned — #2817's pattern, and the right one there — would
+# match nothing at all, forever, and read as "no strategy has a split".
+# `strategy_result_control_support` does not bridge the two either: it holds 0
+# rows on dev, and its `control_result_id` is the control ARM, not the in-sample
+# companion. So the link is the identity pins.
+#
+# ⚠ Restating those pins is the #2806 shape — two copies drift, the join
+# silently empties, and a panel reading "no walk-forward evidence" becomes
+# indistinguishable from a split that was never cut. They are not restated: this
+# statement binds THE SAME `params` dict as `_RESULTS_SQL`, with the same
+# placeholder names, so the two pin sets are equal by construction and a new pin
+# added to one is a `ProgrammingError` on the other rather than a silent drift.
+#
+# ⚠ LEFT JOIN, not INNER. An in-sample result carrying no folds must still
+# arrive, or `no_split_stored` collapses into `no_in_sample_result` and the two
+# states stop being distinguishable — which is the whole point of naming them.
+_WALK_FORWARD_SPLIT_SQL = """
+    SELECT
+        r.strategy_id,
+        r.result_id,
+        r.quarantine_arm,
+        r.window_start,
+        r.window_end,
+        f.fold_index,
+        f.walk_forward_model_id,
+        f.fold_count,
+        f.first_date,
+        f.last_date,
+        f.bar_count,
+        f.embargo_bars,
+        f.test_count,
+        f.train_count,
+        f.purged_count,
+        f.embargoed_count
+    FROM strategy_results_store r
+    LEFT JOIN strategy_result_folds f ON f.result_id = r.result_id
+    WHERE r.strategy_version = ANY(%(versions)s)
+      AND r.namespace = 'in_sample'
+      AND r.corpus_version = %(corpus_version)s
+      AND r.cost_model_id = %(cost_model_id)s
+      AND r.sizing_rule = %(sizing_rule)s
+      AND r.benchmark_rule = %(benchmark_rule)s
+      AND r.return_basis = %(return_basis)s
+      AND r.ambiguity_rule_version = %(ambiguity_rule_version)s
+      AND r.position_rule_set_version = %(position_version)s
+      AND r.outcome_rule_set_version = %(outcome_version)s
+      AND r.input_rule_set_version = %(input_version)s
+    ORDER BY r.strategy_id, r.result_id, f.fold_index
+"""
+
 _SCAN_SQL = """
     SELECT
         w.strategy_id,
@@ -1667,6 +1799,10 @@ def get_strategy_overview(
         result_rows = list(cur.fetchall())
         cur.execute(_REGIME_COHORTS_SQL, {"result_ids": [row["result_id"] for row in result_rows]})
         regime_cohort_rows = list(cur.fetchall())
+        # ⚠ `params`, deliberately — the SAME pin dict `_RESULTS_SQL` binds. See
+        # the statement's own header for why it is not a second copy.
+        cur.execute(_WALK_FORWARD_SPLIT_SQL, params)
+        walk_forward_rows = list(cur.fetchall())
         cur.execute(_RESULT_COUNTS_SQL, params)
         result_count_rows = list(cur.fetchall())
         # ⚠ SCAN RELATIONS TAKE `scan_params`, RESULT RELATIONS TAKE `params`.
@@ -1770,6 +1906,9 @@ def get_strategy_overview(
         )
     for cohorts in cohorts_by_result.values():
         cohorts.sort(key=lambda cohort: REGIME_COHORT_DISPLAY_ORDER.index(cohort.regime))
+    walk_forward_by_strategy: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for row in walk_forward_rows:
+        walk_forward_by_strategy[str(row["strategy_id"])].append(row)
     result_counts = {str(row["strategy_id"]): int(row["count"]) for row in result_count_rows}
     scan_by_strategy = {str(row["strategy_id"]): row for row in scan_rows}
     exclusions: dict[str, Counter[str]] = defaultdict(Counter)
@@ -1980,6 +2119,7 @@ def get_strategy_overview(
                 ):
                     allocation_refusals.append("prospective_assessment_stale")
         remaining = max(control.capital_limit - control.reserved_capital, Decimal("0"))
+        split = derive_walk_forward_split(walk_forward_by_strategy.get(strategy_id, []))
         strategies.append(
             StrategyOverview(
                 strategy_id=strategy_id,
@@ -1993,6 +2133,12 @@ def get_strategy_overview(
                 exclusion_reason=excluded_by_id.get(strategy_id),
                 scan=scan,
                 evidence_windows=windows,
+                walk_forward_split=WalkForwardSplit(
+                    **{
+                        **split.__dict__,
+                        "folds": [WalkForwardFold(**fold.__dict__) for fold in split.folds],
+                    }
+                ),
                 prior_versions=prior_versions_by_strategy.get(strategy_id, []),
                 legacy_result_count=result_counts.get(strategy_id, 0) - sum(len(rows) for rows in exact.values()),
                 all_recent_evidence_complete=all_complete,

@@ -17,6 +17,7 @@ import type {
   FiredSignal,
   FiredSignalsResponse,
   StrategyEvidenceWindow,
+  StrategySplitUnavailableReason,
   StrategyFireRate,
   StrategyOverview,
   StrategyOverviewResponse,
@@ -246,6 +247,115 @@ function RegimeBreakdown({ arm }: { arm: StrategyResultArm }) {
               No trades in {absent.map((regime) => REGIME_LABELS[regime].toLowerCase()).join(", ")}.
             </p>
           ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+const SPLIT_UNAVAILABLE_LABELS: Record<StrategySplitUnavailableReason, string> = {
+  // NOT "the split was skipped" — the ordinary state for a version whose
+  // backtest has not been re-run under today's identity pins.
+  no_in_sample_result: "No in-sample run under this version",
+  // Distinct from the above on purpose: the run happened, the split did not
+  // reach storage. A different thing to chase.
+  no_split_stored: "In-sample run stored no split",
+  // Describes US, not the evidence — same contract as the fire-rate card.
+  invariant_violated: "Split inconsistent — refused",
+};
+
+/** Criterion 5's split, per STRATEGY (#2823).
+ *
+ * `strategy_result_folds` has been written since #2240 and read by nothing but
+ * tests and scripts, so the evidence that the in-sample panel was actually
+ * purged and embargoed has never reached this page. #2817 closed the same gap
+ * on the per-regime cohorts.
+ *
+ * ⚠ THE HEADING SAYS "PURGED K-FOLD", NOT "WALK-FORWARD", DELIBERATELY.
+ * `app/services/walk_forward.py`: the design is *"ch. 7's purged K-fold over
+ * contiguous time blocks, not a strictly anchored walk-forward"* — both sides of
+ * a test block carry training data, and an anchored design has none after it,
+ * which would delete the embargo. Calling it rolling or anchored here would
+ * describe a construction we do not run.
+ *
+ * ⚠ EACH ROW IS A TEST BLOCK. `first_date`/`last_date` bound the block held OUT,
+ * not a training interval.
+ *
+ * ⚠ NO COLUMN TOTALS, AND NONE MAY BE ADDED. Each fold re-classifies the WHOLE
+ * observation population into test/train/purged/embargoed, so a sum down any
+ * column counts the same observations `fold_count` times over.
+ *
+ * ⚠ NO PERFORMANCE FIGURE EXISTS HERE, by design — the split is a validity
+ * gate, not a training loop, and a per-fold Sharpe would invite the
+ * "which fold did best" search criterion 6 exists to bound. Nothing on this
+ * panel may be worded as a return.
+ *
+ * Two zeroes that are measurements: `test_count` 0 on a fold spanning a thin
+ * era, and `embargo_bars` 0 meaning "nothing to measure on this fold's training
+ * side" — never "no embargo applied". Both render as plain zeroes rather than
+ * dashes for that reason. */
+function WalkForwardSplitPanel({ strategy }: { strategy: StrategyOverview }) {
+  const split = strategy.walk_forward_split;
+  return (
+    <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
+      <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+        Purged K-fold{" "}
+        <span className="font-normal normal-case tracking-normal">
+          · contiguous in-sample blocks, purged and embargoed
+        </span>
+      </h4>
+      {split.unavailable_reason !== null ? (
+        <p className="mt-2 text-xs text-slate-500">
+          {SPLIT_UNAVAILABLE_LABELS[split.unavailable_reason]}.
+        </p>
+      ) : (
+        <>
+          <p className="mt-1 text-xs text-slate-500">
+            {split.fold_count} folds over {formatDate(split.window_start)}–{formatDate(split.window_end)} ·{" "}
+            {/* The arm is NAMED. The geometry is arm-invariant but the census is
+                not, so a count whose arm is implicit is one the reader cannot
+                attribute. */}
+            {split.quarantine_arm} universe · {split.walk_forward_model_id}
+          </p>
+          <table className="mt-2 w-full text-xs tabular-nums">
+            <thead className="text-slate-500">
+              <tr className="text-left">
+                {/* "Test block", not "Fold" alone — the dates are the held-out
+                    block and readers assume a training range otherwise. */}
+                <th className="font-medium">Test block</th>
+                <th className="font-medium">Bars</th>
+                <th className="font-medium">Tested</th>
+                <th className="font-medium">Trained</th>
+                <th className="font-medium">Purged</th>
+                <th className="font-medium">Embargoed</th>
+              </tr>
+            </thead>
+            <tbody className="text-slate-700 dark:text-slate-200">
+              {split.folds.map((fold) => (
+                <tr key={fold.fold_index} className="border-t border-slate-100 dark:border-slate-800/60">
+                  <td className="py-1">
+                    {formatDate(fold.first_date)}–{formatDate(fold.last_date)}
+                  </td>
+                  <td className="py-1">{formatNumber(fold.bar_count, 0)}</td>
+                  <td className="py-1">{formatNumber(fold.test_count, 0)}</td>
+                  <td className="py-1">{formatNumber(fold.train_count, 0)}</td>
+                  <td className="py-1">{formatNumber(fold.purged_count, 0)}</td>
+                  <td className="py-1">
+                    {formatNumber(fold.embargoed_count, 0)}
+                    {/* The embargo WIDTH beside the count it produced: the count
+                        alone cannot be judged without knowing how wide a window
+                        it came from, and the width is measured per fold. */}
+                    <span className="text-slate-500"> · {formatNumber(fold.embargo_bars, 0)} bar window</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-2 text-[10px] text-slate-500">
+            Purged = training observations whose label window overlaps the test block. Embargoed = training
+            observations starting immediately after it. Each fold re-classifies the whole population, so these
+            columns do not total.
+          </p>
         </>
       )}
     </div>
@@ -1475,6 +1585,12 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
         <p className={strategy.scan.status === "rotated" ? "mt-2" : undefined}>
           No completed valid evidence is available under the current version. {failures[0] ?? "The research run has not finished."}
         </p>
+        {/* ⚠ RENDERED ON THE BLANK BRANCH TOO, and that is the point. The split
+            belongs to the in-sample panel and is independent of whether any
+            hold-out arm survived the identity pins — so on a card with no arms
+            it may be the only stored evidence there is. Measured 2026-08-21:
+            all ten cards were in exactly that state. */}
+        <WalkForwardSplitPanel strategy={strategy} />
         <PriorVersionsBlock strategy={strategy} />
       </div>
     );
@@ -1515,6 +1631,7 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
         </div>
       </div>
       <RegimeBreakdown arm={arm} />
+      <WalkForwardSplitPanel strategy={strategy} />
       <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
         <span>Evidence windows complete: <strong className="text-slate-700 dark:text-slate-200">{completed}/{strategy.evidence_windows.length}</strong></span>
         <span>Forward observations: <strong className="text-slate-700 dark:text-slate-200">{strategy.attribution.fired_entries}</strong></span>
