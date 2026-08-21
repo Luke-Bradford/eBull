@@ -916,6 +916,20 @@ class PromotionCandidate:
 STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v4-metric-axis"
 
 
+#: The largest ``final_equity / starting_equity`` whose ``total_return_pct``
+#: still rounds to exactly ``-100.0``.
+#:
+#: ⚠ DERIVED FROM IEEE-754, NOT CHOSEN. ``total_return_pct`` is
+#: ``(ratio - 1.0) * 100.0``. Doubles in ``[0.5, 1.0)`` have an ulp of
+#: ``2**-53``, so ``ratio - 1.0`` rounds to exactly ``-1.0`` for every ratio up
+#: to half of that — ``2**-54``, spelled here as ``ulp(1.0) / 4`` so the
+#: platform states it rather than a literal asserting it.
+#: ``tests/test_2820_cagr_saturation.py`` re-derives the same value by binary
+#: search and checks the very next double up fails, so this cannot drift
+#: silently.
+SATURATED_TOTAL_RETURN_MAX_MULTIPLE: Final = math.ulp(1.0) / 4
+
+
 def metric_axis_invalid_reason(identity: ResultIdentity, metrics: StrategyMetrics) -> str | None:
     """The clause that refuses this axis, or ``None`` when it reconciles.
 
@@ -994,7 +1008,37 @@ def metric_axis_invalid_reason(identity: ResultIdentity, metrics: StrategyMetric
     if final_multiple < 0.0:
         return f"total_return_below_negative_100pct ({metrics.total_return_pct!r})"
     years = (len(dates) - 1) / expected_ppy
-    expected_cagr = -100.0 if final_multiple == 0.0 else (final_multiple ** (1.0 / years) - 1.0) * 100.0
+    if final_multiple == 0.0:
+        # ⚠⚠ A SATURATED TOTAL RETURN CANNOT PIN A CAGR, AND DEMANDING ONE
+        # REFUSES CORRECT ROWS (#2820). `compute_metrics` derives both figures
+        # from the SAME `final_equity / starting_equity`, so they cannot
+        # genuinely disagree — but `total_return_pct` is `(ratio - 1) * 100`,
+        # and for any ratio below half an ulp of 1.0 that rounds to EXACTLY
+        # -100.0. Reconstructing `ratio` from it therefore yields 0.0 and the
+        # old code demanded a -100% CAGR.
+        #
+        # Measured on backtest run 112188, `s1-time-series-momentum
+        # in_sample/masked`: stored CAGR -63.08857514295101% over
+        # 59.48528405201917 years is a final multiple of 1.788e-26 — a sleeve
+        # that all but wiped out over six decades, which is a real outcome and
+        # not a defect. Its `total_return_pct` is exactly -100.0, so the row was
+        # refused as `metric_axis_unproven` and killed the whole invocation at
+        # the write phase.
+        #
+        # The gate is NOT skipped here, it is narrowed to what the stored number
+        # can actually carry: `ratio` is known only to lie in
+        # ``[0, SATURATED_TOTAL_RETURN_MAX_MULTIPLE]``, so the CAGR is known only
+        # to lie in the closed interval those endpoints imply. A positive CAGR,
+        # or one too shallow for a wipeout, is still refused.
+        ceiling_cagr = (SATURATED_TOTAL_RETURN_MAX_MULTIPLE ** (1.0 / years) - 1.0) * 100.0
+        if -100.0 <= metrics.cagr_pct <= ceiling_cagr:
+            return None
+        return (
+            f"cagr_outside_saturated_total_return_bounds (stored {metrics.cagr_pct!r}, "
+            f"a total return that rounds to -100% over {years!r}y admits only "
+            f"[-100.0, {ceiling_cagr!r}])"
+        )
+    expected_cagr = (final_multiple ** (1.0 / years) - 1.0) * 100.0
     if not math.isclose(metrics.cagr_pct, expected_cagr, rel_tol=1e-10, abs_tol=1e-10):
         return (
             f"cagr_does_not_reconcile (stored {metrics.cagr_pct!r}, "
@@ -1337,6 +1381,7 @@ __all__ = [
     "LEGACY_RETURN_BASIS",
     "METRIC_AXIS_RULE_VERSION",
     "RETURN_BASES",
+    "SATURATED_TOTAL_RETURN_MAX_MULTIPLE",
     "TOTAL_RETURN_BASIS",
     "TOTAL_RETURN_RESULT_SET_ID",
     "CURRENT_RESULT_PROVENANCE",
