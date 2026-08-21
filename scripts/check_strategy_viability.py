@@ -21,7 +21,9 @@ from decimal import Decimal
 import psycopg
 
 from app.config import settings
+from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import BANDS
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 
 #: Novy-Marx & Velikov (2016), RFS 29(1). Turnover above this rarely survives costs.
 MAX_MONTHLY_TURNOVER_PCT = 50.0
@@ -56,7 +58,7 @@ def main() -> int:
         rows = conn.execute(_SQL, {"hours": args.since_hours}).fetchall()
 
     if not rows:
-        print(f"no hold_out results in the last {args.since_hours}h")
+        print(f"no hold_out results in the last {args.since_hours}h for universe {BACKTEST_UNIVERSE}")
         return 1
 
     print(f"round-trip cost band: {cheapest}% (>=$100) .. {dearest}% (<$5)\n")
@@ -64,8 +66,29 @@ def main() -> int:
     print(header)
     print("-" * (len(header) + 34))
 
+    measured = {row[0] for row in rows}
+    # ⚠ EVERY MANIFEST STRATEGY IS REPORTED, NOT ONLY THE ONES WITH ROWS. A gate
+    # that omits a strategy with no evidence reads as "not shown" when it means
+    # "not measured", and absent-is-not-pass is the whole point of a gate.
+    missing = sorted(set(STRATEGY_MANIFEST) - measured)
+
     viable = 0
     for sid, turnover, expectancy, pf, trade_sr, bar, cagr, skew, kurt in rows:
+        # ⚠ `avg()` over an all-NULL column returns NULL. Refuse on the missing
+        # figure rather than crashing the report — a viability gate that dies on
+        # sparse data tells you nothing about the strategies that DID measure.
+        required = {
+            "turnover": turnover,
+            "expectancy_per_trade_pct": expectancy,
+            "profit_factor": pf,
+            "dsr_trade_sharpe": trade_sr,
+            "dsr_expected_max_sharpe": bar,
+        }
+        absent = sorted(name for name, value in required.items() if value is None)
+        if absent:
+            print(f"{sid:36}{'':>9}{'':>12}{'':>7}{'':>9}{'':>8}  NO VERDICT — null: {', '.join(absent)}")
+            continue
+
         per_month = float(turnover) / 12 * 100
         refusals: list[str] = []
         # 1. turnover — the pre-backtest gate
@@ -78,7 +101,7 @@ def main() -> int:
         if float(pf) < 1.0:
             refusals.append(f"profit factor {float(pf):.2f} < 1.0")
         # 4. deflation
-        if trade_sr is not None and bar is not None and float(trade_sr) <= float(bar):
+        if float(trade_sr) <= float(bar):
             refusals.append(f"trade Sharpe {float(trade_sr):+.3f} <= bar {float(bar):.3f}")
 
         verdict = "VIABLE" if not refusals else "; ".join(refusals)
@@ -89,13 +112,19 @@ def main() -> int:
         )
         # ⚠ Say it out loud when the compounded figures disagree with the per-trade
         # ones — that disagreement IS the trap this script exists for.
-        if float(cagr) > 0 and float(expectancy) <= 0:
+        if cagr is not None and float(cagr) > 0 and float(expectancy) <= 0:
+            skew_txt = f"{float(skew):.0f}" if skew is not None else "?"
+            kurt_txt = f"{float(kurt):.0f}" if kurt is not None else "?"
             print(
                 f"{'':36}⚠ CAGR {float(cagr):+.1f}% is positive on a NEGATIVE per-trade edge "
-                f"(skew {float(skew):.0f}, kurtosis {float(kurt):.0f}) — a right-tail payoff, not an edge"
+                f"(skew {skew_txt}, kurtosis {kurt_txt}) — a right-tail payoff, not an edge"
             )
 
-    print(f"\n{viable}/{len(rows)} viable")
+    for sid in missing:
+        print(f"{sid:36}{'':>9}{'':>12}{'':>7}{'':>9}{'':>8}  NO EVIDENCE — no hold_out rows in window")
+
+    total = len(STRATEGY_MANIFEST)
+    print(f"\n{viable}/{total} viable ({len(rows)} measured, {len(missing)} with no hold_out evidence)")
     return 0 if viable else 2
 
 
