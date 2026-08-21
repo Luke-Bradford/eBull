@@ -916,22 +916,50 @@ class PromotionCandidate:
 STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v4-metric-axis"
 
 
-def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> bool:
-    """Reconcile current provenance and annualisation from one shared rule."""
-    if (
-        identity.metric_axis_rule_version != METRIC_AXIS_RULE_VERSION
-        or identity.metric_axis_dates is None
-        or identity.metric_axis_digest != metric_axis_sha256(identity.metric_axis_dates)
-        or identity.metric_axis_start != identity.metric_axis_dates[0]
-        or identity.metric_axis_end != identity.metric_axis_dates[-1]
-        or identity.opportunity_set_digest is None
-    ):
-        return False
+def metric_axis_invalid_reason(identity: ResultIdentity, metrics: StrategyMetrics) -> str | None:
+    """The clause that refuses this axis, or ``None`` when it reconciles.
+
+    ⚠⚠ THE REASON IS DIAGNOSTIC ONLY AND NEVER A VERDICT INPUT. The verdict is
+    "reconciles or does not"; ``metric_axis_unproven`` stays one closed refusal
+    code, because splitting it would change what a frozen
+    ``STRUCTURAL_REFUSAL_POLICY_VERSION`` declaration means. Nothing may branch
+    on the string — read it, print it, do not gate on it.
+
+    ⚠ Written because a bare ``bool`` over eight independent clauses cost a
+    FIVE-HOUR run and told nobody why (#2820). Backtest run 111610 evaluated the
+    full S-1..S-10 set from 2026-08-21T02:07:51Z, refused
+    ``s1-time-series-momentum in_sample/masked`` at the write phase at 07:18:35Z
+    on a one-code refusal-set delta, and persisted nothing. The only way to learn
+    WHICH clause closed was to pay for the run again.
+
+    The clause ids are labels for the code below and carry no threshold, so they
+    are not the invented-constant class: renaming one changes a log line and
+    nothing else.
+    """
+    # ⚠ ABSENCE IS TESTED BEFORE THE RULE VERSION, which inverts the order the
+    # original `or` chain short-circuited in. The VERDICT is identical either
+    # way — both return non-``None`` — and only the label moves: a legacy
+    # pre-#2697 row carries `metric_axis_rule_version = NULL`, so the old order
+    # reported "rule_version_moved" for a row that has no axis at all. Those
+    # rows are the bulk of what the table holds, so the misleading label would
+    # have been the common one.
+    if identity.metric_axis_dates is None:
+        return "axis_absent"
+    if identity.metric_axis_rule_version != METRIC_AXIS_RULE_VERSION:
+        return "rule_version_moved"
+    if identity.metric_axis_digest != metric_axis_sha256(identity.metric_axis_dates):
+        return "digest_mismatch"
+    if identity.metric_axis_start != identity.metric_axis_dates[0]:
+        return "start_not_axis_first"
+    if identity.metric_axis_end != identity.metric_axis_dates[-1]:
+        return "end_not_axis_last"
+    if identity.opportunity_set_digest is None:
+        return "opportunity_set_digest_absent"
     dates = identity.metric_axis_dates
     if dates[0] < identity.window_start or dates[-1] > identity.window_end:
-        return False
+        return "axis_outside_window"
     if identity.namespace == "in_sample" and dates[-1] >= HOLDOUT_BOUNDARY:
-        return False
+        return "in_sample_axis_crosses_holdout_boundary"
     if identity.namespace == "hold_out":
         # Local import avoids making the append-only registry's import of this
         # module cyclic. A non-blank label is not provenance by itself: the ID
@@ -941,12 +969,12 @@ def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> 
         try:
             registered = recent_evidence_window(identity.evidence_window_id or "")
         except ValueError:
-            return False
+            return "evidence_window_unregistered"
         if (identity.window_start, identity.window_end) != (
             registered.window.start,
             registered.window.end,
         ):
-            return False
+            return "window_not_the_declared_evidence_window"
     # ⚠ THE TIGHT TOLERANCE IS SAFE BECAUSE THIS IS NOT A REDUCTION.
     # `periods_per_year` is `(len(dates) - 1) / (span_days / DAYS_PER_YEAR)` —
     # two exact integers and a division — so recomputing it from the same axis
@@ -958,13 +986,30 @@ def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> 
     # noise.
     expected_ppy = periods_per_year(dates)
     if not math.isclose(metrics.periods_per_year, expected_ppy, rel_tol=1e-12, abs_tol=1e-12):
-        return False
+        return (
+            f"periods_per_year_mismatch (stored {metrics.periods_per_year!r}, "
+            f"axis of {len(dates)} bars gives {expected_ppy!r})"
+        )
     final_multiple = 1.0 + metrics.total_return_pct / 100.0
     if final_multiple < 0.0:
-        return False
+        return f"total_return_below_negative_100pct ({metrics.total_return_pct!r})"
     years = (len(dates) - 1) / expected_ppy
     expected_cagr = -100.0 if final_multiple == 0.0 else (final_multiple ** (1.0 / years) - 1.0) * 100.0
-    return math.isclose(metrics.cagr_pct, expected_cagr, rel_tol=1e-10, abs_tol=1e-10)
+    if not math.isclose(metrics.cagr_pct, expected_cagr, rel_tol=1e-10, abs_tol=1e-10):
+        return (
+            f"cagr_does_not_reconcile (stored {metrics.cagr_pct!r}, "
+            f"{metrics.total_return_pct!r}% over {years!r}y gives {expected_cagr!r})"
+        )
+    return None
+
+
+def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> bool:
+    """Reconcile current provenance and annualisation from one shared rule.
+
+    A thin wrapper so the verdict has exactly one implementation and no caller's
+    semantics moved when the diagnostic was added (#2820).
+    """
+    return metric_axis_invalid_reason(identity, metrics) is None
 
 
 def metric_axis_promotion_refusals(result: StrategyResult) -> tuple[PromotionRefusal, ...]:
@@ -1321,6 +1366,7 @@ __all__ = [
     "holdout_count_promotion_refusals",
     "is_promotable",
     "metric_axis_promotion_refusals",
+    "metric_axis_invalid_reason",
     "metric_axis_is_valid",
     "metric_axis_sha256",
     "purpose_promotion_refusals",
