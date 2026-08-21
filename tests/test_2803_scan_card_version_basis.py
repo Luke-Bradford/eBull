@@ -12,8 +12,10 @@ Measured on dev at the fix: ``_SCAN_SQL`` returned 0 rows on the result basis an
 
 from __future__ import annotations
 
+import ast
 import inspect
 import re
+import textwrap
 
 from app.api.strategies import (
     _EXCLUSIONS_SQL,
@@ -38,6 +40,57 @@ _SCAN_RELATIONS = ("strategy_scan_watermark", "strategy_signal_daily_counts", "s
 
 #: Relations a query actually READS, as opposed to ones its comments mention.
 _READ_RELATION = re.compile(r"(?:FROM|JOIN)\s+(\w+)", re.IGNORECASE)
+
+
+def _names_derived_from(source: str, origin: str) -> frozenset[str]:
+    """Local names in ``source`` whose value FLOWS FROM ``origin()``.
+
+    Provenance, not naming — PR #2808 review, raised on two rounds. The earlier
+    form of the guards below asserted ``"scan" in argument``, which reads the
+    variable's NAME: a misleadingly named result-basis value would pass, and a
+    correctly derived one called something else would fail. Both errors point the
+    wrong way, because what regressed in #2803/#2806 is where the value CAME
+    FROM, and the two bases are structurally identical otherwise (same dict
+    shape, same ``versions`` key, same ``str`` versions).
+
+    Forward taint over assignments: a name is derived when its right-hand side
+    mentions ``origin`` or an already-derived name. That reaches the real chain
+    in ``get_strategy_overview`` — ``scan_versions`` -> ``scan_version_values``
+    -> ``scan_params`` / ``scan_pnl_versions`` / ``scan_key`` — without naming
+    any of them here.
+    """
+    tree = ast.parse(textwrap.dedent(source))
+    assignments = [
+        (
+            [target.id for target in node.targets if isinstance(target, ast.Name)],
+            {ref.id for ref in ast.walk(node.value) if isinstance(ref, ast.Name)},
+        )
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+    ]
+    derived = {origin}
+    while True:
+        grown = {name for targets, refs in assignments if refs & derived for name in targets} - derived
+        if not grown:
+            return frozenset(derived - {origin})
+        derived |= grown
+
+
+def _the_two_bases_as_named_in(source: str) -> tuple[frozenset[str], frozenset[str]]:
+    """``(scan-derived, result-derived)`` names in ``source``, both floored non-empty.
+
+    ⚠ Deliberately NOT asserting the two sets are globally disjoint, though they
+    are today. Taint flows forward, so any value that legitimately consumes both
+    bases — a card field assembled from a result row and a scan count — would be
+    in both and trip a confusing failure far from the binding it is about. That
+    is the cry-wolf shape this file has already been narrowed twice to avoid.
+    The mixing check belongs per-name, at the three sites that bind a basis.
+    """
+    scan_derived = _names_derived_from(source, "_current_scan_versions")
+    result_derived = _names_derived_from(source, "_current_versions")
+    assert scan_derived, "nothing is derived from _current_scan_versions — retarget this guard"
+    assert result_derived, "nothing is derived from _current_versions — retarget this guard"
+    return scan_derived, result_derived
 
 
 def _loaders_over_a_scan_relation() -> dict[str, str]:
@@ -114,6 +167,7 @@ def test_every_scan_relation_query_is_executed_on_the_scan_basis() -> None:
     comment catches it because both dicts have the same shape and key name.
     """
     source = inspect.getsource(get_strategy_overview)
+    scan_derived, result_derived = _the_two_bases_as_named_in(source)
     scan_sql = {
         "_SCAN_SQL": _SCAN_SQL,
         "_EXCLUSIONS_SQL": _EXCLUSIONS_SQL,
@@ -126,9 +180,10 @@ def test_every_scan_relation_query_is_executed_on_the_scan_basis() -> None:
         executed = re.findall(rf"cur\.execute\(\s*{name}\s*,\s*(\w+)\s*\)", source)
         assert executed, f"{name} is not executed by get_strategy_overview"
         for params_name in executed:
-            assert "scan" in params_name, (
-                f"{name} reads {_SCAN_RELATIONS} but is executed with {params_name!r}; "
-                "live-scan relations are keyed by the scan identity basis (#2803)"
+            assert params_name in scan_derived and params_name not in result_derived, (
+                f"{name} reads {_SCAN_RELATIONS} but is executed with {params_name!r}, which is not "
+                "derived from _current_scan_versions(); live-scan relations are keyed by the scan "
+                "identity basis (#2803)"
             )
 
 
@@ -143,6 +198,7 @@ def test_every_loader_over_a_scan_relation_is_called_on_the_scan_basis() -> None
     hours after a scan wrote 216 census rows for all ten of them.
     """
     source = inspect.getsource(get_strategy_overview)
+    scan_derived, result_derived = _the_two_bases_as_named_in(source)
     loaders = _loaders_over_a_scan_relation()
     # ⚠ A FLOOR, not a list — new loaders are still picked up automatically, but
     # a known one dropping out has to be loud. Found by revert-probe: renaming the
@@ -157,9 +213,10 @@ def test_every_loader_over_a_scan_relation_is_called_on_the_scan_basis() -> None
         called_with = re.findall(rf"\b{name}\(\s*conn\s*,\s*versions=(\w+)", source)
         assert called_with, f"{name} filters {relation} but get_strategy_overview does not call it"
         for argument in called_with:
-            assert "scan" in argument, (
-                f"{name} filters {relation} but is called with {argument!r}; "
-                "live-scan relations are keyed by the scan identity basis (#2806)"
+            assert argument in scan_derived and argument not in result_derived, (
+                f"{name} filters {relation} but is called with {argument!r}, which is not derived "
+                "from _current_scan_versions(); live-scan relations are keyed by the scan identity "
+                "basis (#2806)"
             )
 
 
@@ -170,6 +227,7 @@ def test_the_scan_basis_loaders_are_read_back_at_the_scan_key() -> None:
     card, so fixing one and not the other looks exactly like fixing neither.
     """
     source = inspect.getsource(get_strategy_overview)
+    scan_derived, result_derived = _the_two_bases_as_named_in(source)
     for name in sorted(_loaders_over_a_scan_relation()):
         assigned = re.findall(rf"(\w+)\s*=\s*{name}\(", source)
         assert assigned, f"{name} result is not bound to a name in get_strategy_overview"
@@ -177,6 +235,7 @@ def test_the_scan_basis_loaders_are_read_back_at_the_scan_key() -> None:
             lookups = re.findall(rf"\b{holder}\.get\(\s*(\w+)", source)
             assert lookups, f"{holder} is never read back"
             for lookup_key in lookups:
-                assert "scan" in lookup_key, (
-                    f"{holder} holds rows keyed by the scan basis but is read at {lookup_key!r} (#2806)"
+                assert lookup_key in scan_derived and lookup_key not in result_derived, (
+                    f"{holder} holds rows keyed by the scan basis but is read at {lookup_key!r}, "
+                    "which is not derived from _current_scan_versions() (#2806)"
                 )
