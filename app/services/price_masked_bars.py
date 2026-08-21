@@ -101,6 +101,33 @@ _LAST_BAR_SQL = """
     GROUP BY d.instrument_id
 """
 
+#: ``_LAST_BAR_SQL`` aggregated one step further and bounded to a recent window:
+#: how many instruments' last bar falls on each date. Same coverage predicate, for
+#: the same fail-closed reason.
+#:
+#: ⚠ The ``since`` bound is why this is a SEPARATE query rather than a caller-side
+#: `Counter` over ``load_bar_spans`` — which returns the identical distribution
+#: and costs 0.60s against this one's 0.036s on the live corpus (6,773
+#: instruments, 3.6M bars), on an endpoint that answers in 30-66ms. The bound is
+#: sound HERE and would be wrong in ``load_bar_spans``: an instrument with no bar
+#: inside the window cannot be the freshest date the corpus reached, but it is
+#: still a universe member the scan must account for.
+_RECENT_LAST_BAR_COUNTS_SQL = """
+    SELECT spans.last_bar, count(*)
+    FROM (
+        SELECT d.instrument_id, max(d.price_date) AS last_bar
+        FROM price_daily d
+        JOIN price_quarantine_coverage cov
+          ON cov.instrument_id = d.instrument_id
+         AND cov.rule_set_version = %(quarantine_version)s
+         AND d.price_date BETWEEN cov.first_bar AND cov.last_bar
+        WHERE d.instrument_id = ANY(%(instrument_ids)s)
+          AND d.price_date >= %(since)s
+        GROUP BY d.instrument_id
+    ) spans
+    GROUP BY spans.last_bar
+"""
+
 _UNION_CALENDAR_SQL = """
     SELECT DISTINCT d.price_date
     FROM price_daily d
@@ -231,6 +258,34 @@ def load_bar_spans(
         int(instrument_id): InstrumentBarSpan(last_bar=last_bar, bars=int(bars))
         for instrument_id, last_bar, bars in rows
     }
+
+
+def load_recent_last_bar_counts(
+    conn: psycopg.Connection[Any],
+    instrument_ids: Sequence[int],
+    *,
+    since: date,
+) -> dict[date, int]:
+    """How many instruments' last bar falls on each date at or after ``since``.
+
+    The distribution ``choose_frontier`` picks the mode of, through the same
+    masked predicate, for a reader that needs the corpus's frontier WITHOUT
+    paying for the whole per-instrument span. See ``_RECENT_LAST_BAR_COUNTS_SQL``
+    for the measured reason the bound exists and why it is sound only here.
+
+    ⚠ Empty result is a MEASUREMENT, not a gap: no universe member has a bar in
+    the window, so the corpus has not been refreshed inside it. Callers must not
+    default that to "fresh".
+    """
+    rows = conn.execute(
+        _RECENT_LAST_BAR_COUNTS_SQL,
+        {
+            "instrument_ids": list(instrument_ids),
+            "quarantine_version": QUARANTINE_RULE_SET_VERSION,
+            "since": since,
+        },
+    ).fetchall()
+    return {last_bar: int(members) for last_bar, members in rows}
 
 
 def load_union_calendar(conn: psycopg.Connection[Any], instrument_ids: Sequence[int]) -> tuple[date, ...]:

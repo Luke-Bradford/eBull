@@ -221,9 +221,32 @@ def choose_frontier(last_bars: Mapping[int, date]) -> Frontier | None:
     """
     if not last_bars:
         return None
-    counts = Counter(last_bars.values())
-    bar_date, modal_count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    modal = modal_bar_date(Counter(last_bars.values()))
+    if modal is None:
+        return None
+    bar_date, modal_count = modal
     return Frontier(bar_date=bar_date, modal_count=modal_count, loadable=len(last_bars))
+
+
+def modal_bar_date(counts: Mapping[date, int]) -> tuple[date, int] | None:
+    """``(modal last bar, how many instruments sit on it)`` — the rule, alone.
+
+    Split out of ``choose_frontier`` so a reader that already holds the
+    distribution — the ``/strategies/overview`` freshness bar, which reads it
+    from ``load_recent_last_bar_counts`` rather than paying for every
+    instrument's span — applies the SAME tie-break instead of a second copy.
+
+    ⚠ That second copy is what #2809 was: the card compared this frontier against
+    ``MAX(research_price_series.last_bar)`` — a different table, a different
+    statistic and a different population — and reported all 10 strategies
+    ``stale`` while every one of them sat exactly on the frontier. A ``max`` is
+    forbidden HERE (module docstring item 2) and re-importing it through a
+    reader's own SQL is the same error at one remove.
+    """
+    if not counts:
+        return None
+    bar_date, modal_count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    return bar_date, modal_count
 
 
 def write_window_indices(dates: Sequence[date], *, watermark: date | None, frontier: date) -> range:
@@ -1021,6 +1044,7 @@ __all__ = [
     "assert_census_complete",
     "choose_frontier",
     "log_report",
+    "modal_bar_date",
     "read_watermarks",
     "run_signal_scan",
     "write_window_indices",
