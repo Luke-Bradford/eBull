@@ -88,10 +88,12 @@ def test_cash_and_counts_add_across_two_versions() -> None:
         }
     )["s5-support-bounce"]
 
-    assert pooled.realised_pnl == Decimal("30")
-    assert pooled.unrealised_pnl == Decimal("7.50")
+    realised, unrealised = pooled.realised_pnl, pooled.unrealised_pnl
+    assert realised is not None and unrealised is not None
+    assert realised == Decimal("30")
+    assert unrealised == Decimal("7.50")
     assert pooled.total_pnl == Decimal("37.50")
-    assert pooled.total_pnl == pooled.realised_pnl + pooled.unrealised_pnl
+    assert pooled.total_pnl == realised + unrealised
     assert pooled.invested_capital == Decimal("400")
     assert pooled.observed_fees == Decimal("2.00")
     assert pooled.strategy_trade_count == 4
