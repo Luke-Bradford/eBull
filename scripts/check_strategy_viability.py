@@ -27,8 +27,34 @@ from app.services.strategy_manifest import STRATEGY_MANIFEST
 #: Novy-Marx & Velikov (2016), RFS 29(1). Turnover above this rarely survives costs.
 MAX_MONTHLY_TURNOVER_PCT = 50.0
 
+#: ⚠⚠ ``evidence_window_id`` IS IN THE GROUP BY, AND IT IS LOAD-BEARING.
+#: A registered evidence window is a MEASUREMENT WINDOW, so two of them are two
+#: different measurements of the same strategy — averaging across them produces
+#: a number that describes neither. This query grouped on ``strategy_id`` alone
+#: until 2026-08-21, and on that day the dev database held two complete 40-row
+#: hold-out runs written four hours apart:
+#:
+#:   primary-2022-plus  2022-01-01..2024-09-27  40 rows  13:56 UTC
+#:   rolling-36m        2021-09-28..2024-09-27  40 rows  18:04 UTC
+#:
+#: Both are legitimate and neither is a double-write — ``evidence_window_id`` is
+#: part of the result identity, so ``assert_no_existing_results`` correctly let
+#: the second run store beside the first. What was wrong was reading them
+#: together. Measured that day, the blend moved every strategy: s8's expectancy
+#: read -0.868 mixed against -0.778 (primary-2022-plus) and -0.958
+#: (rolling-36m), and s2 read -6.902 against -6.282 and -7.523.
+#:
+#: ⚠ It changed no VERDICT on that data, because all ten fail in both windows.
+#: That is luck, not safety: the mixed figure is closer to the bar than the
+#: better window's on every row, so the blend is capable of failing a strategy
+#: one window passes, and of passing one that only the kinder window supports.
+#:
+#: Same defect family as ``sql/256``'s header — *"EVERY AGGREGATE OVER THIS
+#: TABLE MUST PIN ONE (rule_set_version, input_rule_set_version) PAIR … an
+#: unpinned count counts one trade twice"*. The key differs; the failure does not.
 _SQL = """
-SELECT strategy_id,
+SELECT evidence_window_id,
+       strategy_id,
        avg(turnover_annualised)       AS turnover,
        avg(expectancy_per_trade_pct)  AS expectancy,
        avg(profit_factor)             AS profit_factor,
@@ -40,39 +66,31 @@ SELECT strategy_id,
 FROM strategy_results_store
 WHERE created_at > now() - make_interval(hours => %(hours)s)
   AND namespace = 'hold_out'
-GROUP BY 1
-ORDER BY 3 DESC
+  AND (%(window)s::text IS NULL OR evidence_window_id = %(window)s::text)
+GROUP BY 1, 2
+ORDER BY 1, 4 DESC
 """
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--since-hours", type=int, default=24)
-    args = parser.parse_args()
+def _verdict_block(window: str, rows: list[tuple], *, header: str) -> int:
+    """Print one evidence window's table. Returns how many strategies passed.
 
-    cheapest = min(band.p75_spread_pct for band in BANDS)
-    dearest = max(band.p75_spread_pct for band in BANDS)
-
-    with psycopg.connect(settings.database_url) as conn:
-        rows = conn.execute(_SQL, {"hours": args.since_hours}).fetchall()
-
-    if not rows:
-        print(f"no hold_out results in the last {args.since_hours}h for universe {BACKTEST_UNIVERSE}")
-        return 1
-
-    print(f"round-trip cost band: {cheapest}% (>=$100) .. {dearest}% (<$5)\n")
-    header = f"{'strategy':36}{'turn/mo':>9}{'exp%/trade':>12}{'PF':>7}{'tradeSR':>9}{'bar':>8}  verdict"
+    ⚠ ONE WINDOW PER BLOCK AND NEVER A MERGED ONE. See ``_SQL``: two registered
+    windows are two measurements, and a strategy that clears the bar in one and
+    fails in the other has told you something a single averaged row destroys.
+    """
+    print(f"\nevidence window: {window}")
     print(header)
     print("-" * (len(header) + 34))
 
-    measured = {row[0] for row in rows}
+    measured = {row[1] for row in rows}
     # ⚠ EVERY MANIFEST STRATEGY IS REPORTED, NOT ONLY THE ONES WITH ROWS. A gate
     # that omits a strategy with no evidence reads as "not shown" when it means
     # "not measured", and absent-is-not-pass is the whole point of a gate.
     missing = sorted(set(STRATEGY_MANIFEST) - measured)
 
     viable = 0
-    for sid, turnover, expectancy, pf, trade_sr, bar, cagr, skew, kurt in rows:
+    for _window, sid, turnover, expectancy, pf, trade_sr, bar, cagr, skew, kurt in rows:
         # ⚠ `avg()` over an all-NULL column returns NULL. Refuse on the missing
         # figure rather than crashing the report — a viability gate that dies on
         # sparse data tells you nothing about the strategies that DID measure.
@@ -122,9 +140,52 @@ def main() -> int:
     for sid in missing:
         print(f"{sid:36}{'':>9}{'':>12}{'':>7}{'':>9}{'':>8}  NO EVIDENCE — no hold_out rows in window")
 
-    total = len(STRATEGY_MANIFEST)
-    print(f"\n{viable}/{total} viable ({len(rows)} measured, {len(missing)} with no hold_out evidence)")
-    return 0 if viable else 2
+    print(f"  {viable}/{len(STRATEGY_MANIFEST)} viable in {window} ({len(rows)} measured, {len(missing)} unmeasured)")
+    return viable
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--since-hours", type=int, default=24)
+    parser.add_argument(
+        "--evidence-window",
+        default=None,
+        help="restrict to one registered evidence window id; default reports every window separately",
+    )
+    args = parser.parse_args()
+
+    cheapest = min(band.p75_spread_pct for band in BANDS)
+    dearest = max(band.p75_spread_pct for band in BANDS)
+
+    with psycopg.connect(settings.database_url) as conn:
+        rows = conn.execute(_SQL, {"hours": args.since_hours, "window": args.evidence_window}).fetchall()
+
+    if not rows:
+        scope = f" for evidence window {args.evidence_window}" if args.evidence_window else ""
+        print(f"no hold_out results in the last {args.since_hours}h for universe {BACKTEST_UNIVERSE}{scope}")
+        return 1
+
+    print(f"round-trip cost band: {cheapest}% (>=$100) .. {dearest}% (<$5)")
+    header = f"{'strategy':36}{'turn/mo':>9}{'exp%/trade':>12}{'PF':>7}{'tradeSR':>9}{'bar':>8}  verdict"
+
+    by_window: dict[str, list[tuple]] = {}
+    for row in rows:
+        by_window.setdefault(row[0], []).append(row)
+    if len(by_window) > 1:
+        # ⚠ SAID OUT LOUD, not silently handled. The previous version averaged
+        # these together, and a reader of that table had no way to know two
+        # measurement windows had been blended into one number.
+        print(
+            f"\n⚠ {len(by_window)} evidence windows in this period: {', '.join(sorted(by_window))} — "
+            "reported SEPARATELY. Averaging across them describes neither; pass --evidence-window to pin one."
+        )
+
+    total_viable = 0
+    for window in sorted(by_window):
+        total_viable += _verdict_block(window, by_window[window], header=header)
+
+    print(f"\n{total_viable} viable strategy-window pair(s) across {len(by_window)} window(s)")
+    return 0 if total_viable else 2
 
 
 if __name__ == "__main__":
