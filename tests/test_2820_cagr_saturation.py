@@ -1,26 +1,29 @@
-"""#2820 part 1 — a wiped-out sleeve is a real outcome, not an invalid axis.
+"""#2820 part 1 — a near-wiped-out sleeve is a real outcome, not an invalid axis.
 
 `compute_metrics` derives `total_return_pct` and `cagr_pct` from the SAME
-`final_equity / starting_equity`, so they cannot genuinely disagree. But
-`total_return_pct` is `(ratio - 1.0) * 100.0`, which saturates at exactly
-`-100.0` for any ratio below `2**-54` — so reconstructing the ratio from it
-gives `0.0`, and the axis rule used to demand a `-100%` CAGR.
+`final_equity / starting_equity`, so they cannot genuinely disagree. What failed
+is the round trip: `total_return_pct` is `(ratio - 1.0) * 100.0`, which for a
+near-wipeout loses almost every significant digit of `ratio` to cancellation,
+and below `2**-54` loses all of them and rounds to exactly `-100.0`.
 
 Measured on backtest run 112188 (`s1-time-series-momentum in_sample/masked`):
 CAGR `-63.08857514295101%` over `59.48528405201917` years is a final multiple of
-`1.788e-26`. Correct, and refused — which killed the whole invocation at the
-write phase and is what has been blocking the walk-forward evidence run.
+`1.788e-26`. Correct, and refused — which killed the invocation at the write
+phase and has been blocking the walk-forward evidence run.
 
-⚠ The gate is narrowed, never skipped: a positive CAGR, or one too shallow for a
-wipeout, is still refused. What it stops asserting is the one thing the stored
-number provably cannot carry.
+The rule now brackets the terminal multiples each stored number is consistent
+with and asks whether the two brackets overlap. ⚠ That is STRICTER than the
+`isclose(rel_tol=1e-10)` it replaces wherever the floats are well conditioned —
+a 1e-12 CAGR drift is now refused — and widens only where a stored number
+provably cannot distinguish its neighbours. Both sides are bracketed because
+either can saturate: the total return over a long span, the CAGR over a sub-year
+one.
 
 Pure — no DB.
 """
 
 from __future__ import annotations
 
-import math
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
@@ -34,8 +37,9 @@ from app.services.strategy_result import (
     EVALUATION_WINDOW_START,
     LEGACY_RETURN_BASIS,
     METRIC_AXIS_RULE_VERSION,
-    SATURATED_TOTAL_RETURN_MAX_MULTIPLE,
     ResultIdentity,
+    _ratio_from_cagr_pct,
+    _ratio_from_total_return_pct,
     metric_axis_invalid_reason,
     metric_axis_sha256,
     periods_per_year,
@@ -77,70 +81,150 @@ def _metrics(*, cagr_pct: float, total_return_pct: float = -100.0) -> Any:
     return SimpleNamespace(periods_per_year=_PPY, total_return_pct=total_return_pct, cagr_pct=cagr_pct)
 
 
-def _ceiling() -> float:
-    return (SATURATED_TOTAL_RETURN_MAX_MULTIPLE ** (1.0 / _YEARS) - 1.0) * 100.0
-
-
-def test_the_constant_is_the_actual_saturation_point_on_this_platform() -> None:
-    """Re-derived, not trusted: the next double up must NOT saturate.
-
-    Pins the constant to IEEE-754 rather than to a literal someone typed, which
-    is what stops it drifting into an invented number.
-    """
-    r = SATURATED_TOTAL_RETURN_MAX_MULTIPLE
-
-    assert (r - 1.0) * 100.0 == -100.0
-    assert (math.nextafter(r, math.inf) - 1.0) * 100.0 != -100.0
-
-    lo, hi = 0.0, 1e-10
-    for _ in range(200):
-        mid = (lo + hi) / 2
-        if (mid - 1.0) * 100.0 == -100.0:
-            lo = mid
-        else:
-            hi = mid
-    assert lo == r
+def _honest(ratio: float, years: float = _YEARS) -> tuple[float, float]:
+    """Exactly what ``compute_metrics`` stores for a sleeve ending at ``ratio``."""
+    return ((ratio - 1.0) * 100.0, (ratio ** (1.0 / years) - 1.0) * 100.0)
 
 
 def test_the_run_112188_row_is_admitted() -> None:
     """The exact figures that killed the invocation, verbatim from the job row."""
-    reason = metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=-63.08857514295101))
-
-    assert reason is None
+    assert metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=-63.08857514295101)) is None
 
 
-def test_a_true_zero_wipeout_is_still_admitted() -> None:
-    """The endpoint the old code special-cased must not regress."""
-    assert metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=-100.0)) is None
+@pytest.mark.parametrize("exponent", range(-30, 4))
+def test_no_honest_sleeve_is_refused_across_thirty_four_orders_of_magnitude(exponent: int) -> None:
+    """The whole reachable range of terminal equity, wipeout to 100x."""
+    total_return_pct, cagr_pct = _honest(10.0**exponent)
+
+    assert (
+        metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=cagr_pct, total_return_pct=total_return_pct)) is None
+    )
 
 
-@pytest.mark.parametrize("cagr_pct", [0.0, 5.0, -10.0, -101.0])
-def test_a_cagr_the_saturated_bound_excludes_is_still_refused(cagr_pct: float) -> None:
-    """Narrowed, not disabled — a wipeout cannot annualise to a shallow loss."""
-    assert cagr_pct > _ceiling() or cagr_pct < -100.0, "test case must lie outside the admissible interval"
+def test_a_true_zero_wipeout_is_admitted() -> None:
+    """Both brackets reach zero, so they overlap there.
 
+    ⚠ This is the row that breaks if `_ratio_from_cagr_pct` ever clamps its
+    lower bound above zero: a true wipeout is the one outcome whose terminal
+    multiple IS zero.
+    """
+    assert metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=-100.0, total_return_pct=-100.0)) is None
+
+
+@pytest.mark.parametrize("cagr_pct", [0.0, 5.0, -10.0, -30.0])
+def test_a_cagr_inconsistent_with_a_wipeout_is_still_refused(cagr_pct: float) -> None:
+    """Narrowed, not disabled: a wipeout cannot annualise to a shallow loss."""
     reason = metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=cagr_pct))
 
     assert reason is not None
-    assert reason.startswith("cagr_outside_saturated_total_return_bounds")
+    assert reason.startswith("cagr_does_not_reconcile")
 
 
-def test_the_bound_is_a_closed_interval_at_both_ends() -> None:
-    ceiling = _ceiling()
+def test_a_cagr_below_negative_100pct_is_refused_and_never_goes_complex() -> None:
+    """A negative base under a fractional exponent returns a COMPLEX number."""
+    reason = metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=-150.0))
 
-    assert metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=ceiling)) is None
-    assert metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=math.nextafter(ceiling, math.inf))) is not None
-    assert metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=math.nextafter(-100.0, -math.inf))) is not None
+    assert reason is not None
+    assert "implies None" in reason
 
 
-def test_an_unsaturated_total_return_still_reconciles_exactly() -> None:
-    """The ordinary path keeps its 1e-10 equality — this change must not loosen it."""
-    multiple = 1.21
-    exact = (multiple ** (1.0 / _YEARS) - 1.0) * 100.0
-    total_return_pct = (multiple - 1.0) * 100.0
+def test_the_near_saturated_band_cannot_launder_an_inconsistent_cagr() -> None:
+    """Codex review counterexample, kept as a regression test.
 
-    assert metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=exact, total_return_pct=total_return_pct)) is None
-    drifted = _metrics(cagr_pct=exact + 1e-6, total_return_pct=total_return_pct)
-    reason = metric_axis_invalid_reason(_identity(), drifted)
+    Two earlier attempts at this fix passed the row below. `total_return_pct` of
+    `-99.9999999999999` is a terminal multiple of 1e-15, whose true CAGR over
+    this span is about -44.05% — but a comparison performed in PERCENTAGE space
+    has roughly 1e-8 of absolute slack down there, which spans a decade of
+    multiples. Bracketing the multiples instead is what closes it.
+    """
+    reason = metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=-34.0, total_return_pct=-99.9999999999999))
+
     assert reason is not None
     assert reason.startswith("cagr_does_not_reconcile")
+
+
+def test_the_saturated_bracket_is_not_wider_than_saturation_actually_reaches() -> None:
+    """Second Codex review counterexample, kept as a regression test.
+
+    A terminal multiple of `2e-16` does NOT store a total return of `-100.0` —
+    it stores `-99.99999999999997` — so its CAGR must not pair with `-100.0`.
+    An earlier attempt widened the bracket by a full `ulp(1.0)` and admitted it.
+    The slack is three units of `2**-54`, which is the smallest that rejects no
+    honest row, and that is tight enough to catch this.
+    """
+    assert (2e-16 - 1.0) * 100.0 != -100.0, "premise: this multiple does not saturate"
+    cagr_pct = (2e-16 ** (1.0 / _YEARS) - 1.0) * 100.0
+
+    reason = metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=cagr_pct, total_return_pct=-100.0))
+
+    assert reason is not None
+    assert reason.startswith("cagr_does_not_reconcile")
+
+
+@pytest.mark.parametrize(
+    ("total_return_pct", "cagr_pct"),
+    [
+        (-100.0, float("nan")),
+        (float("nan"), -63.0),
+        (-100.0, float("inf")),
+        (float("-inf"), -63.0),
+    ],
+)
+def test_a_non_finite_metric_is_refused_before_any_interval_arithmetic(
+    total_return_pct: float, cagr_pct: float
+) -> None:
+    """Third Codex review counterexample, kept as a regression test.
+
+    Every NaN comparison is `False`, so `max(0.0, nan)` is `0.0` — a NaN CAGR
+    would collapse its bracket to `(0.0, 0.0)`, which OVERLAPS a saturated total
+    return's bracket and would promote a malformed row. The `math.isclose` rule
+    this replaced refused NaN for free; interval arithmetic does not.
+    """
+    reason = metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=cagr_pct, total_return_pct=total_return_pct))
+
+    assert reason is not None
+    assert reason.startswith("metrics_not_finite")
+
+
+def test_a_well_conditioned_row_is_reconciled_more_tightly_than_before() -> None:
+    """⚠ The bracket rule is STRICTER here, not looser.
+
+    The old rule compared with `isclose(rel_tol=1e-10)`, which admitted a 1e-12
+    CAGR drift. The bracket collapses to near-nothing where the floats are well
+    conditioned, so that drift is now refused.
+    """
+    total_return_pct, cagr_pct = _honest(1.21)
+
+    assert (
+        metric_axis_invalid_reason(_identity(), _metrics(cagr_pct=cagr_pct, total_return_pct=total_return_pct)) is None
+    )
+    for drift in (1e-12, 1e-10, 1e-6, 1e-3):
+        drifted = _metrics(cagr_pct=cagr_pct + drift, total_return_pct=total_return_pct)
+        reason = metric_axis_invalid_reason(_identity(), drifted)
+        assert reason is not None, f"drift {drift!r} slipped through"
+        assert reason.startswith("cagr_does_not_reconcile")
+
+
+@pytest.mark.parametrize("years", [0.25, 0.5, 0.74, 0.9, 0.99, 1.0, 2.0, 5.0, 25.0, 100.0])
+@pytest.mark.parametrize("exponent", [-30, -20, -15, -10, -5, -1, 0, 2, 10, 22, 30])
+def test_either_side_may_saturate_depending_on_the_span(years: float, exponent: int) -> None:
+    """⚠ Why both sides are bracketed rather than just the total return.
+
+    Over 59 years a wipeout saturates `total_return_pct`; over a sub-year window
+    the annualisation saturates `cagr_pct` instead. A rule that brackets one
+    side only refuses honest rows on the other, so the grid crosses both.
+
+    Exercised through the module-level helper rather than `metric_axis_invalid_reason`,
+    because `years` is a function of the axis and the identity fixture pins one.
+    """
+    ratio = 10.0**exponent
+    total_return_pct = (ratio - 1.0) * 100.0
+    cagr_pct = (ratio ** (1.0 / years) - 1.0) * 100.0
+
+    from_total_return = _ratio_from_total_return_pct(total_return_pct)
+    from_cagr = _ratio_from_cagr_pct(cagr_pct, years)
+
+    assert from_cagr is not None
+    assert from_total_return[0] <= from_cagr[1] and from_cagr[0] <= from_total_return[1], (
+        f"honest row rejected: ratio 1e{exponent} over {years}y"
+    )

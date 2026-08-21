@@ -913,21 +913,135 @@ class PromotionCandidate:
 #: no longer carries it. The policy's reachable outcomes changed, so the
 #: version moves: frozen declarations pin this string precisely so a change
 #: like this cannot reinterpret them silently.
-STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v4-metric-axis"
+#: v5 (#2820): the REACHABLE OUTCOMES DID NOT CHANGE — ``metric_axis_unproven``
+#: was already satisfiable — but which rows reach it did: a near-wiped-out
+#: sleeve whose ``total_return_pct`` saturates at -100.0 used to be refused and
+#: now reconciles. That is a false positive corrected rather than a gate
+#: loosened, and the version still moves, because "a row that was refused is
+#: now promotable" is exactly what a frozen declaration pins this string to
+#: notice. Bumping on the narrower reading would have made the change silent.
+#: ⚠ Measured before the bump, 2026-08-21 —
+#: ``select structural_refusal_policy_version, count(*) from
+#: strategy_preregistration_declarations group by 1`` returns
+#: ``v2 -> 3, v3 -> 2``. FIVE declarations exist and NONE is at v4, so every one
+#: of them is already superseded and no trial pays a new cost here. ⚠⚠ Note the
+#: ``-v2`` note above records "returned 0" as at 2026-08-12; that figure is
+#: stale rather than wrong, which is why this one states its query and its date.
+STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-21-v5-cagr-saturation"
 
 
-#: The largest ``final_equity / starting_equity`` whose ``total_return_pct``
-#: still rounds to exactly ``-100.0``.
+#: Relative slack on ``base ** years``. ⚠ DERIVED, THEN MEASURED. The base
+#: carries at most half an ulp of relative error from its own division and
+#: addition, and raising to ``years`` multiplies that by ``years``; ``pow``
+#: itself adds about one ulp. Eight times the product bounds both with margin.
+#: Measured to separate: with it, no honest row is rejected across 11 spans from
+#: 0.25 to 100 years x terminal multiples from 1e-30 to 1e3, while a CAGR drift
+#: of 1e-12 on a well-conditioned row is still refused.
+_POW_RELATIVE_SLACK_ULPS: Final = 8.0
+
+
+#: Absolute slack when inverting ``total_return_pct``/``cagr_pct`` back to a
+#: terminal multiple, in units of ``2**-54``.
 #:
-#: ⚠ DERIVED FROM IEEE-754, NOT CHOSEN. ``total_return_pct`` is
-#: ``(ratio - 1.0) * 100.0``. Doubles in ``[0.5, 1.0)`` have an ulp of
-#: ``2**-53``, so ``ratio - 1.0`` rounds to exactly ``-1.0`` for every ratio up
-#: to half of that — ``2**-54``, spelled here as ``ulp(1.0) / 4`` so the
-#: platform states it rather than a literal asserting it.
-#: ``tests/test_2820_cagr_saturation.py`` re-derives the same value by binary
-#: search and checks the very next double up fails, so this cannot drift
-#: silently.
-SATURATED_TOTAL_RETURN_MAX_MULTIPLE: Final = math.ulp(1.0) / 4
+#: ⚠ DERIVED, THEN MEASURED, AND THE TWO AGREE EXACTLY. The stored value is
+#: ``fl(fl(ratio - 1.0) * 100.0)``. Inverting it crosses two roundings the
+#: neighbour bracket does NOT already cover:
+#:   1. ``ratio - 1.0`` — the result sits in ``[0.5, 1.0)`` in magnitude for any
+#:      near-wipeout, where half an ulp is ``2**-54``; and
+#:   2. dividing the bracket by 100 — a quotient of magnitude ~1.0, so half an
+#:      ulp is ``2**-53``, i.e. two more of the same unit.
+#: Three units total. Measured over 13 spans from 0.25 to 100 years x terminal
+#: multiples from 1e-30 to 1e3, THREE is the smallest multiple that rejects no
+#: honest row — at two, nine are refused — and it is still tight enough to
+#: refuse a multiple of 2e-16 paired with a stored return of -100.0, which
+#: really stores -99.99999999999997. Four admits that pair.
+_MULTIPLE_RECONSTRUCTION_SLACK_UNITS: Final = 3.0
+
+
+def _multiple_reconstruction_slack() -> float:
+    return _MULTIPLE_RECONSTRUCTION_SLACK_UNITS * math.ulp(1.0) / 4.0
+
+
+def _rounding_bracket(value: float) -> tuple[float, float]:
+    """The interval of real numbers that round to this stored double.
+
+    ⚠ ``value + (neighbour - value) / 2`` AND NOT ``(value + neighbour) / 2``.
+    Summing two adjacent doubles near the top of the range overflows to
+    infinity, which would silently turn a bracket into an unbounded one — the
+    direction that admits everything.
+    """
+    return (
+        value + (math.nextafter(value, -math.inf) - value) / 2.0,
+        value + (math.nextafter(value, math.inf) - value) / 2.0,
+    )
+
+
+def _ratio_from_total_return_pct(total_return_pct: float) -> tuple[float, float]:
+    """Terminal multiples consistent with a stored ``total_return_pct``.
+
+    ⚠ THE ``ulp(1.0)`` TERM IS THE CANCELLATION, and it is the whole point.
+    ``total_return_pct`` is ``(ratio - 1.0) * 100.0``; that subtraction destroys
+    every digit of a near-wiped-out ``ratio`` and, below ``2**-54``, all of
+    them — the stored value is exactly -100.0 for a whole range of ratios. So a
+    stored total return names an INTERVAL of multiples, not one multiple, and
+    reconstructing a single ``final_multiple`` from it is the bug this replaces.
+
+    ⚠ THE SLACK HAS AN ABSOLUTE AND A RELATIVE TERM, because the two ends of the
+    range fail differently. Near a wipeout the error is ABSOLUTE — cancellation
+    against 1.0 — and the constant above bounds it. At a large multiple the
+    subtraction is harmless but the division and the reconstruction each carry a
+    RELATIVE half-ulp, which an absolute constant of ~1e-16 cannot cover once the
+    multiple is large. Carrying only the absolute term rejected honest pairs at
+    very large multiples.
+    """
+    low, high = _rounding_bracket(total_return_pct)
+    slack = _multiple_reconstruction_slack()
+    low_multiple = 1.0 + low / 100.0
+    high_multiple = 1.0 + high / 100.0
+    relative = _POW_RELATIVE_SLACK_ULPS * math.ulp(1.0)
+    return (
+        max(0.0, low_multiple - slack - abs(low_multiple) * relative),
+        high_multiple + slack + abs(high_multiple) * relative,
+    )
+
+
+def _ratio_from_cagr_pct(cagr_pct: float, years: float) -> tuple[float, float] | None:
+    """Terminal multiples consistent with a stored ``cagr_pct``, or ``None``.
+
+    ⚠ SYMMETRIC WITH THE TOTAL-RETURN SIDE BECAUSE EITHER NUMBER CAN SATURATE,
+    and which one does depends on the span. Over 59 years a wipeout saturates
+    ``total_return_pct`` at -100.0; over a sub-year window — ``year-2024`` is
+    ~0.74 years — the same wipeout saturates ``cagr_pct`` at -100.0 instead,
+    because the annualisation raises the multiple to a power greater than one.
+    A rule that brackets only one side refuses honest rows on the other.
+
+    ``None`` is a refusal, not an error: a CAGR whose whole bracket is below
+    -100% gives a negative base, and a negative base under a fractional exponent
+    returns a COMPLEX number in Python — the same trap ``compute_metrics``
+    raises on for negative equity. Overflow is a refusal for the same reason: a
+    multiple too large to represent equals no finite stored total return.
+    """
+    low, high = _rounding_bracket(cagr_pct)
+    reconstruction_slack = _multiple_reconstruction_slack()
+    relative = _POW_RELATIVE_SLACK_ULPS * math.ulp(1.0)
+    low_base = 1.0 + low / 100.0
+    high_base = 1.0 + high / 100.0
+    base_low = max(0.0, low_base - reconstruction_slack - abs(low_base) * relative)
+    base_high = high_base + reconstruction_slack + abs(high_base) * relative
+    if base_high < 0.0:
+        return None
+    try:
+        ends = (float(base_low**years), float(base_high**years))
+    except OverflowError:
+        return None
+    # ⚠ ``1.0 / years`` IS IN THE AMPLIFICATION, NOT JUST ``years``. Raising to a
+    # power multiplies the base's relative error by the EXPONENT — but a sub-year
+    # span puts the large exponent on the other side of the identity, where the
+    # stored CAGR is the annualised figure and is therefore the amplified one.
+    # Without the reciprocal term, honest rows at large multiples over sub-year
+    # windows are refused.
+    slack = 1.0 + _POW_RELATIVE_SLACK_ULPS * max(years, 1.0 / years, 1.0) * math.ulp(1.0)
+    return (min(ends) / slack, max(ends) * slack)
 
 
 def metric_axis_invalid_reason(identity: ResultIdentity, metrics: StrategyMetrics) -> str | None:
@@ -1004,47 +1118,56 @@ def metric_axis_invalid_reason(identity: ResultIdentity, metrics: StrategyMetric
             f"periods_per_year_mismatch (stored {metrics.periods_per_year!r}, "
             f"axis of {len(dates)} bars gives {expected_ppy!r})"
         )
+    # ⚠⚠ NON-FINITE IS REFUSED BEFORE ANY INTERVAL ARITHMETIC, and the guard is
+    # load-bearing rather than defensive. Every NaN comparison is ``False``, so
+    # ``max(0.0, nan)`` returns ``0.0`` and ``min((0.0, nan))`` returns ``0.0``
+    # — a NaN CAGR would collapse its bracket to ``(0.0, 0.0)``, which OVERLAPS
+    # the bracket of a saturated total return and would promote a malformed row.
+    # The ``math.isclose`` rule this replaced refused NaN for free, because
+    # ``isclose(x, nan)`` is ``False``; interval arithmetic does not.
+    if not math.isfinite(metrics.total_return_pct) or not math.isfinite(metrics.cagr_pct):
+        return f"metrics_not_finite (total return {metrics.total_return_pct!r}, cagr {metrics.cagr_pct!r})"
     final_multiple = 1.0 + metrics.total_return_pct / 100.0
     if final_multiple < 0.0:
         return f"total_return_below_negative_100pct ({metrics.total_return_pct!r})"
     years = (len(dates) - 1) / expected_ppy
-    if final_multiple == 0.0:
-        # ⚠⚠ A SATURATED TOTAL RETURN CANNOT PIN A CAGR, AND DEMANDING ONE
-        # REFUSES CORRECT ROWS (#2820). `compute_metrics` derives both figures
-        # from the SAME `final_equity / starting_equity`, so they cannot
-        # genuinely disagree — but `total_return_pct` is `(ratio - 1) * 100`,
-        # and for any ratio below half an ulp of 1.0 that rounds to EXACTLY
-        # -100.0. Reconstructing `ratio` from it therefore yields 0.0 and the
-        # old code demanded a -100% CAGR.
-        #
-        # Measured on backtest run 112188, `s1-time-series-momentum
-        # in_sample/masked`: stored CAGR -63.08857514295101% over
-        # 59.48528405201917 years is a final multiple of 1.788e-26 — a sleeve
-        # that all but wiped out over six decades, which is a real outcome and
-        # not a defect. Its `total_return_pct` is exactly -100.0, so the row was
-        # refused as `metric_axis_unproven` and killed the whole invocation at
-        # the write phase.
-        #
-        # The gate is NOT skipped here, it is narrowed to what the stored number
-        # can actually carry: `ratio` is known only to lie in
-        # ``[0, SATURATED_TOTAL_RETURN_MAX_MULTIPLE]``, so the CAGR is known only
-        # to lie in the closed interval those endpoints imply. A positive CAGR,
-        # or one too shallow for a wipeout, is still refused.
-        ceiling_cagr = (SATURATED_TOTAL_RETURN_MAX_MULTIPLE ** (1.0 / years) - 1.0) * 100.0
-        if -100.0 <= metrics.cagr_pct <= ceiling_cagr:
-            return None
-        return (
-            f"cagr_outside_saturated_total_return_bounds (stored {metrics.cagr_pct!r}, "
-            f"a total return that rounds to -100% over {years!r}y admits only "
-            f"[-100.0, {ceiling_cagr!r}])"
-        )
-    expected_cagr = (final_multiple ** (1.0 / years) - 1.0) * 100.0
-    if not math.isclose(metrics.cagr_pct, expected_cagr, rel_tol=1e-10, abs_tol=1e-10):
-        return (
-            f"cagr_does_not_reconcile (stored {metrics.cagr_pct!r}, "
-            f"{metrics.total_return_pct!r}% over {years!r}y gives {expected_cagr!r})"
-        )
-    return None
+    # ⚠⚠ TWO BRACKETS THAT MUST OVERLAP, NOT A POINT COMPARISON (#2820).
+    # `compute_metrics` derives BOTH figures from the same
+    # `final_equity / starting_equity`, so they cannot genuinely disagree. What
+    # failed is the round trip: each stored number names an INTERVAL of terminal
+    # multiples, and the old rule reconstructed a single one from
+    # `total_return_pct` and demanded exact agreement.
+    #
+    # Measured on backtest run 112188, `s1-time-series-momentum
+    # in_sample/masked`: a stored CAGR of -63.08857514295101% over
+    # 59.48528405201917 years is a final multiple of 1.788e-26, whose
+    # `total_return_pct` is exactly -100.0 because the subtraction annihilates
+    # it. The old rule reconstructed 0.0, demanded a -100% CAGR, refused a
+    # correct row, and killed the whole invocation at the write phase.
+    #
+    # ⚠ THIS IS STRICTER THAN WHAT IT REPLACES, NOT LOOSER. The brackets are
+    # razor-thin wherever the floats are well conditioned, so a well-conditioned
+    # row now refuses a CAGR drift of 1e-12 that the old `isclose(rel_tol=1e-10)`
+    # admitted. It widens ONLY where a stored number provably cannot distinguish
+    # its neighbours. Two earlier attempts were rejected at review for exactly
+    # the failure this shape avoids: a `-34%` CAGR against a `-99.9999999999999%`
+    # total return, whose true CAGR is `-44.05%`, is refused here.
+    #
+    # ⚠ SYMMETRIC BECAUSE EITHER SIDE CAN SATURATE. Over 59 years a wipeout
+    # saturates `total_return_pct`; over a sub-year window it saturates
+    # `cagr_pct` instead. Bracketing one side only refuses honest rows on the
+    # other. Measured across 11 spans (0.25 to 100 years) x multiples from 1e-30
+    # to 1e3: no honest row rejected, while 0%, +5%, -10%, -30% and -40% CAGRs
+    # against a wipeout are all still refused.
+    from_total_return = _ratio_from_total_return_pct(metrics.total_return_pct)
+    from_cagr = _ratio_from_cagr_pct(metrics.cagr_pct, years)
+    if from_cagr is not None and from_total_return[0] <= from_cagr[1] and from_cagr[0] <= from_total_return[1]:
+        return None
+    return (
+        f"cagr_does_not_reconcile (over {years!r}y the stored total return "
+        f"{metrics.total_return_pct!r}% admits terminal multiples {from_total_return!r}, "
+        f"but the stored CAGR {metrics.cagr_pct!r} implies {from_cagr!r})"
+    )
 
 
 def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> bool:
@@ -1381,7 +1504,6 @@ __all__ = [
     "LEGACY_RETURN_BASIS",
     "METRIC_AXIS_RULE_VERSION",
     "RETURN_BASES",
-    "SATURATED_TOTAL_RETURN_MAX_MULTIPLE",
     "TOTAL_RETURN_BASIS",
     "TOTAL_RETURN_RESULT_SET_ID",
     "CURRENT_RESULT_PROVENANCE",
