@@ -233,6 +233,38 @@ const OVERVIEW: StrategyOverviewResponse = {
     // fixture used to say `primary` / `holdout`, neither of which the API can
     // emit — which is why `primaryEvidence()` matching a dead id went unnoticed
     // (#2624): the fallback branch covered for it in prod and in the test alike.
+    walk_forward_split: {
+      folds: [
+        {
+          fold_index: 0,
+          first_date: "1962-01-02",
+          last_date: "1999-09-02",
+          bar_count: 4375006,
+          embargo_bars: 615,
+          test_count: 639464,
+          train_count: 1694643,
+          purged_count: 0,
+          embargoed_count: 122531,
+        },
+        {
+          fold_index: 1,
+          first_date: "1999-09-03",
+          last_date: "2009-03-19",
+          bar_count: 4373756,
+          embargo_bars: 931,
+          test_count: 581900,
+          train_count: 1541705,
+          purged_count: 597,
+          embargoed_count: 332436,
+        },
+      ],
+      walk_forward_model_id: "c5-purged-walk-forward-v1",
+      fold_count: 2,
+      quarantine_arm: "admitted",
+      window_start: "1962-01-02",
+      window_end: "2026-07-08",
+      unavailable_reason: null,
+    },
     evidence_windows: [
       { window_id: "primary-2022-plus", label: "Primary: 2022 onward", window_start: "2022-01-01", window_end: "2026-07-08", status: "complete", arms: [ARM] },
       { window_id: "year-2022", label: "Calendar 2022", window_start: "2022-01-01", window_end: "2022-12-31", status: "missing", arms: [] },
@@ -1236,6 +1268,55 @@ describe("StrategiesPage", () => {
     // either fire-rate reason, and must not read as a zero.
     expect(screen.getByText("Not measured")).toBeInTheDocument();
     expect(screen.getByText(/Result version criterion7-v1/)).toBeInTheDocument();
+  });
+
+  it("shows the purged K-fold split, and never calls it a walk-forward", async () => {
+    // #2823. `strategy_result_folds` has been written since #2240 and read by
+    // nothing but tests and scripts. ⚠ The construction is purged K-fold over
+    // contiguous blocks — `app/services/walk_forward.py` is explicit that it is
+    // "not a strictly anchored walk-forward" — so the heading must not promise
+    // one.
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+
+    await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(await screen.findByText(/Purged K-fold/)).toBeInTheDocument();
+    // The census is arm-dependent even though the geometry is not, so the arm
+    // it belongs to has to be on screen with it.
+    expect(screen.getByText(/admitted universe/)).toBeInTheDocument();
+    expect(screen.getByText(/c5-purged-walk-forward-v1/)).toBeInTheDocument();
+    // "Test block", because the dates bound the HELD-OUT block; a reader who
+    // takes them for a training range has the split backwards.
+    expect(screen.getByText("Test block")).toBeInTheDocument();
+    expect(screen.getByText(/these columns do not total/i)).toBeInTheDocument();
+  });
+
+  it("names why a split is absent instead of leaving the panel blank", async () => {
+    // The `derive_fire_rate` contract one panel over: an unexplained blank and a
+    // measured zero are indistinguishable. ⚠ `no_in_sample_result` is the
+    // ORDINARY state for a version whose backtest has not been re-run, so the
+    // copy must not imply the split was skipped or failed.
+    const unsplit = structuredClone(OVERVIEW);
+    const strategy = unsplit.strategies[0]!;
+    strategy.walk_forward_split = {
+      folds: [],
+      walk_forward_model_id: null,
+      fold_count: null,
+      quarantine_arm: null,
+      window_start: null,
+      window_end: null,
+      unavailable_reason: "no_in_sample_result",
+    };
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(unsplit);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+
+    await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(await screen.findByText(/No in-sample run under this version/)).toBeInTheDocument();
+    expect(screen.queryByText("Test block")).not.toBeInTheDocument();
   });
 
   it("says a periodic strategy was never asked rather than showing it declined", async () => {

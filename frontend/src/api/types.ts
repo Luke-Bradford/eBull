@@ -2436,6 +2436,75 @@ export interface StrategyRegimeCohort {
   effective_sample_size: string | null;
 }
 
+/** Why a card carries no split. Named rather than blank, because a silent
+ *  absence and a measured zero look identical to a reader (#2823).
+ *
+ * - `no_in_sample_result` — no in-sample result under the current identity
+ *   pins. The usual state for a version whose backtest has not been re-run;
+ *   it does NOT mean the split was skipped.
+ * - `no_split_stored` — the run happened and the split never reached storage.
+ * - `invariant_violated` — the stored rows contradict the writer's contract.
+ *   Describes US, not the evidence.
+ */
+export type StrategySplitUnavailableReason =
+  | "no_in_sample_result"
+  | "no_split_stored"
+  | "invariant_violated";
+
+/** One block of criterion 5's split.
+ *
+ * ⚠ `first_date` / `last_date` bound the **test** block, NOT a training
+ * interval.
+ *
+ * ⚠ The four counts are ONE population re-classified by this fold. Summing any
+ * of them across folds counts the same observations `fold_count` times, so a
+ * column total is always wrong and must never be rendered.
+ *
+ * ⚠ There is no per-fold return, score or Sharpe, by design — the split is a
+ * validity gate, not a training loop. Do not present these counts as
+ * performance.
+ *
+ * Two legitimate zeroes: `test_count` can be 0 on a fold spanning a thin era,
+ * and `embargo_bars` 0 means "nothing to measure on this fold's training side",
+ * never that the embargo was skipped.
+ */
+export interface StrategyWalkForwardFold {
+  fold_index: number;
+  first_date: string;
+  last_date: string;
+  bar_count: number;
+  /** MEASURED, on the PANEL-date axis — not instrument bars, not calendar days,
+   *  and not a declared holding period. Varies per fold. */
+  embargo_bars: number;
+  test_count: number;
+  train_count: number;
+  /** Training observations whose LABEL WINDOW overlaps the test block. */
+  purged_count: number;
+  /** Training observations STARTING in the window immediately after the test
+   *  block. A separate verdict from `purged_count`, never merged with it. */
+  embargoed_count: number;
+}
+
+/** The strategy's stored split, or the named reason it has none (#2823).
+ *
+ * ⚠ The construction is **purged K-fold over contiguous blocks**, not an
+ * anchored or rolling walk-forward — both sides of a test block carry training
+ * data, which is what leaves room for the embargo at all. Label it accordingly.
+ *
+ * `folds` is non-empty exactly when `unavailable_reason` is null.
+ */
+export interface StrategyWalkForwardSplit {
+  folds: StrategyWalkForwardFold[];
+  /** The STORED construction id, never today's constant. */
+  walk_forward_model_id: string | null;
+  fold_count: number | null;
+  /** Whose census the counts are. Geometry is arm-invariant; the census is not. */
+  quarantine_arm: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  unavailable_reason: StrategySplitUnavailableReason | null;
+}
+
 export interface StrategyResultArm {
   result_version: string;
   purpose: "harness_validation" | "capital_candidate";
@@ -2553,6 +2622,8 @@ export interface StrategyOverview {
     exclusions_by_reason: Record<string, number>;
   };
   evidence_windows: StrategyEvidenceWindow[];
+  /** Criterion 5's split — per STRATEGY, not per window (#2823). */
+  walk_forward_split: StrategyWalkForwardSplit;
   prior_versions: StrategyPriorVersion[];
   /** ⚠ NOT a prior-version summary despite the name — counts rows under the
    *  CURRENT version matching no declared window. Use `prior_versions`. */
