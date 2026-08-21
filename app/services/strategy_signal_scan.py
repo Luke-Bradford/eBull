@@ -249,6 +249,35 @@ def modal_bar_date(counts: Mapping[date, int]) -> tuple[date, int] | None:
     return bar_date, modal_count
 
 
+def window_decides_the_mode(*, modal_count: int, seen: int, universe_size: int) -> bool:
+    """Can a reader that only looked at a RECENT window trust its mode?
+
+    A caller that bounds the last-bar query to a window — ``/strategies/overview``
+    does, because the unbounded distribution costs 0.60s on a 30-66ms endpoint —
+    is not computing the same statistic. The bound cannot corrupt an instrument's
+    last bar (a ``max`` over the tail of a series still equals the true max
+    whenever that max is inside the window), but it DROPS every instrument whose
+    last bar predates the window, and dropped instruments do not vote.
+
+    So the windowed mode differs from the true one exactly when the dropped set
+    could outvote it. ``universe_size - seen`` is an upper bound on that set, and
+    if it is no larger than ``modal_count`` then no date outside the window can
+    beat the mode even if every dropped instrument shares one. The comparison is
+    ``<=`` and not ``<`` because an exact tie breaks on the LATER date, which is
+    the in-window one — the same rule ``modal_bar_date`` applies.
+
+    ⚠ Caught by Codex at checkpoint 2 on #2809, not by any test: with most of the
+    universe stale and a minority freshly refreshed, the windowed mode is the
+    minority's date while a scan run now would choose the stale majority's — so
+    the card would call a scan sitting exactly on the frontier ``stale``, which
+    is the very defect #2809 fixed, reintroduced by its own optimisation.
+
+    False here is not an error. It says the cheap read is not decisive, so the
+    caller must pay for the full distribution.
+    """
+    return universe_size - seen <= modal_count
+
+
 def write_window_indices(dates: Sequence[date], *, watermark: date | None, frontier: date) -> range:
     """The bar indices this run may write for one instrument.
 
@@ -1047,5 +1076,6 @@ __all__ = [
     "modal_bar_date",
     "read_watermarks",
     "run_signal_scan",
+    "window_decides_the_mode",
     "write_window_indices",
 ]

@@ -24,15 +24,13 @@ from datetime import date, timedelta
 
 from app.api.strategies import _CORPUS_FRESHNESS_WINDOW, _corpus_frontier, get_strategy_overview
 from app.services.price_masked_bars import _LAST_BAR_SQL, _RECENT_LAST_BAR_COUNTS_SQL
-from app.services.strategy_signal_scan import choose_frontier, modal_bar_date
+from app.services.strategy_signal_scan import choose_frontier, modal_bar_date, window_decides_the_mode
 
 
 def _calls_in(func: object) -> set[str]:
     """Every plain function name called in ``func``'s body."""
     tree = ast.parse(textwrap.dedent(inspect.getsource(func)))  # type: ignore[arg-type]
-    return {
-        node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
+    return {node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
 
 
 class TestOneTieBreakRule:
@@ -95,6 +93,53 @@ class TestTheFreshnessBarIsTheScannersOwnStatistic:
             "the scan card's freshness bar must not come from the backtest archive (#2809)"
         )
         assert "_corpus_frontier(" in source, "get_strategy_overview no longer computes a freshness bar"
+
+
+class TestTheWindowedReadKnowsWhenItCannotAnswer:
+    """Codex checkpoint 2 on #2809: the optimisation can change the answer.
+
+    Bounding the last-bar query drops every instrument whose last bar predates
+    the window, and dropped instruments do not vote. With most of the universe
+    stale and a minority freshly refreshed, the windowed mode is the minority's
+    date while a scan run now would choose the stale majority's — the card would
+    then call a scan sitting exactly on the frontier ``stale``, which is #2809
+    reintroduced by its own fix.
+    """
+
+    def test_the_live_shape_is_decisive(self) -> None:
+        """6,773 in the universe, 5,819 on the mode: the dropped set cannot win."""
+        assert window_decides_the_mode(modal_count=5819, seen=6584, universe_size=6773)
+
+    def test_a_fresh_minority_over_a_stale_majority_is_not_decisive(self) -> None:
+        """The case Codex named, and the one the old code answered wrongly."""
+        assert not window_decides_the_mode(modal_count=800, seen=1000, universe_size=6773)
+
+    def test_the_boundary_is_a_tie_and_a_tie_goes_to_the_later_date(self) -> None:
+        """``<=`` not ``<``.
+
+        With the dropped set exactly the size of the mode, the worst case is a
+        tie — and ``modal_bar_date`` breaks ties on the later date, which is the
+        in-window one. So the windowed answer still stands.
+        """
+        assert window_decides_the_mode(modal_count=100, seen=900, universe_size=1000)
+        assert not window_decides_the_mode(modal_count=100, seen=899, universe_size=1000)
+        assert modal_bar_date({date(2026, 8, 19): 100, date(2026, 8, 18): 100}) == (date(2026, 8, 19), 100)
+
+    def test_seeing_nothing_is_never_decisive(self) -> None:
+        assert not window_decides_the_mode(modal_count=0, seen=0, universe_size=6773)
+
+    def test_the_endpoint_falls_back_rather_than_answering_from_the_window(self) -> None:
+        """Structural: an undecisive window must reach the full distribution.
+
+        The failure is silent — a windowed mode is a plausible date whether or
+        not it is the right one — so the fallback is asserted rather than
+        reasoned about.
+        """
+        calls = _calls_in(_corpus_frontier)
+        assert "window_decides_the_mode" in calls, "the windowed read must check that it is decisive"
+        assert {"load_bar_spans", "choose_frontier"} <= calls, (
+            "an undecisive window must fall back to the scanner's own unbounded distribution"
+        )
 
 
 class TestTheBoundedQueryKeepsTheMaskedPopulation:

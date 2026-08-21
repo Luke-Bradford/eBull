@@ -37,7 +37,7 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
-from app.services.price_masked_bars import load_recent_last_bar_counts
+from app.services.price_masked_bars import load_bar_spans, load_recent_last_bar_counts
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import (
     RuntimeConfigCorrupt,
@@ -110,7 +110,12 @@ from app.services.strategy_result_ambiguity import (
     composed_holdout_ambiguity_refusals,
     record_sha256,
 )
-from app.services.strategy_signal_scan import SCAN_UNIVERSE, modal_bar_date
+from app.services.strategy_signal_scan import (
+    SCAN_UNIVERSE,
+    choose_frontier,
+    modal_bar_date,
+    window_decides_the_mode,
+)
 from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -1069,13 +1074,22 @@ def _corpus_frontier(conn: psycopg.Connection[Any], *, as_of: date) -> date | No
     The old comment justified the choice as an optimisation — *"avoids a full
     scan of the multi-million-row bar corpus on every Strategies page load"* —
     and the cost was real: the honest statistic unbounded is 0.60s on a 30-66ms
-    endpoint. ``_CORPUS_FRESHNESS_WINDOW`` is what buys it back, at 0.036s for
-    the identical answer.
+    endpoint. The windowed read buys it back at 0.036s, and
+    ``window_decides_the_mode`` is what keeps it from buying a different answer.
     """
     universe = load_validated_universe(conn)
     counts = load_recent_last_bar_counts(conn, universe, since=as_of - _CORPUS_FRESHNESS_WINDOW)
     modal = modal_bar_date(counts)
-    return None if modal is None else modal[0]
+    if modal is not None and window_decides_the_mode(
+        modal_count=modal[1], seen=sum(counts.values()), universe_size=len(universe)
+    ):
+        return modal[0]
+    # The window cannot settle it, so pay for the whole distribution rather than
+    # answer from the part of the corpus that happened to refresh recently.
+    frontier = choose_frontier(
+        {instrument_id: span.last_bar for instrument_id, span in load_bar_spans(conn, universe).items()}
+    )
+    return None if frontier is None else frontier.bar_date
 
 
 def _ambiguity_record_from_result_row(
