@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from decimal import Decimal
 
 import psycopg
 
@@ -95,7 +94,7 @@ def main() -> int:
         if per_month > MAX_MONTHLY_TURNOVER_PCT:
             refusals.append(f"turnover {per_month:.0f}%/mo > {MAX_MONTHLY_TURNOVER_PCT:.0f}%")
         # 2. break-even — one trade must clear one round trip
-        if Decimal(str(expectancy)) <= 0:
+        if float(expectancy) <= 0:
             refusals.append(f"expectancy {float(expectancy):+.2f}%/trade <= 0")
         # 3. profit factor
         if float(pf) < 1.0:
