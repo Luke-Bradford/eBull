@@ -75,7 +75,7 @@ from app.services.backtest_run import (
     load_corpus,
     runnable_strategies,
 )
-from app.services.cost_model import BANDS, COST_MODEL_ID
+from app.services.cost_model import BANDS, COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.result_ledger import HoldoutAccess, record_holdout_access
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import ResultNamespace
@@ -243,11 +243,17 @@ def _print_band_table(label: str, gross: Sequence[float]) -> None:
     """
     print(f"\n  band sensitivity on {label} (SENSITIVITY, not a result — the corpus cannot assign a band):")
     print(f"    {'band':12}{'round trip%':>13}{'exp%/trade':>12}{'PF':>8}")
+    # The band every split-adjusted entry is actually charged, resolved once.
+    # ⚠ Read off `UNKNOWN_NOMINAL_PRICE_BAND` rather than re-derived from a max
+    # over BANDS: that constant IS what `cost_band_for` returns, so a future
+    # change to the selection rule moves the marker with it instead of leaving a
+    # second, silently-diverging copy of the choice here.
+    charged = UNKNOWN_NOMINAL_PRICE_BAND.label
     for band in sorted(BANDS, key=lambda item: item.p75_spread_pct):
         repriced = _repriced(gross, half_spread=float(band.half_spread))
         pf = _profit_factor(repriced)
         pf_text = f"{pf:.3f}" if pf is not None else "n/a"
-        marker = "  <- charged" if band.p75_spread_pct == max(item.p75_spread_pct for item in BANDS) else ""
+        marker = "  <- charged" if band.label == charged else ""
         print(
             f"    {band.label:12}{float(band.p75_spread_pct):>13.3f}{_expectancy(repriced):>12.3f}{pf_text:>8}{marker}"
         )
