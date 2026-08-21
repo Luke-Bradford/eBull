@@ -3194,6 +3194,22 @@ Two things S-4 adds to the prevention above:
 - Enforced in: this prevention log; `scripts/ab_2140_def14a_parser.py`
   (`traced_parse_table` and `patched` both take `**kwargs`, with the measured
   `67,828 -> 0` in the why-comment).
+- ⚠ **The RETURN shape rots the same way, and `**kwargs` does not cover it
+  (#2778, 2026-08-21).** `_run_cohort_for` returned `CohortResult | None`;
+  #2778 widened it to `(control, refusal)` so a scale refusal stops aborting the
+  invocation. Three shadows of that contract had to move in the same commit, and
+  none of them would have failed at import: `scripts/verify_2697_metric_axis_ab.py`
+  (a monkeypatch whose own why-comment already records this exact rot happening
+  once before, when #2772 added `scale_budget`), plus three
+  `SimpleNamespace(rows_written=N)` report stubs in
+  `tests/test_strategy_recent_evidence.py` that stood in for `BacktestRunReport`
+  and lacked the new attribute the scheduler now reads.
+- Prevention, generalised: **when a function's signature OR return shape moves,
+  grep for its name across `scripts/` AND `tests/` in the same commit** —
+  `grep -rn "_run_cohort_for" scripts tests`. A `SimpleNamespace` standing in for
+  a real dataclass is a monkeypatch by another name and rots on exactly the same
+  trigger; the fast tier catches the test stubs, and nothing at all catches the
+  script until someone runs it.
 
 ### Cite a migration by its SLUG — a renumber re-aims every bare "sql/NNN" at someone else's SQL (#2304, 2026-08-07)
 

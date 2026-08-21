@@ -101,7 +101,7 @@ def test_refresh_recent_skips_complete_windows_and_commits_each_missing_window(
 
     def run_backtest(_conn: object, **kwargs: object) -> SimpleNamespace:
         calls.append(kwargs["evidence_window_id"])
-        return SimpleNamespace(rows_written=12)
+        return SimpleNamespace(rows_written=12, control_refusals={})
 
     monkeypatch.setattr(scheduler, "_tracked_job", tracked)
     monkeypatch.setattr(scheduler, "connect_job", connected)
@@ -186,7 +186,7 @@ def test_refresh_progress_is_transient_until_evidence_commit(
         progress = kwargs["progress"]
         assert callable(progress)
         progress(BacktestProgressEvent(phase="evaluation", series_seen=25, series_total=100))
-        return SimpleNamespace(rows_written=16)
+        return SimpleNamespace(rows_written=16, control_refusals={})
 
     monkeypatch.setattr(scheduler, "_tracked_job", tracked)
     monkeypatch.setattr(scheduler, "connect_job", connected)
@@ -250,7 +250,7 @@ def test_single_run_reports_progress_and_only_checkpoints_after_return(
         assert callable(progress)
         progress(BacktestProgressEvent(phase="synthetic_control", series_seen=17, series_total=1000))
         events.append("evidence_returned")
-        return SimpleNamespace(rows_written=40)
+        return SimpleNamespace(rows_written=40, control_refusals={})
 
     writer = Writer()
     monkeypatch.setattr(scheduler, "_tracked_job", tracked)
@@ -268,6 +268,48 @@ def test_single_run_reports_progress_and_only_checkpoints_after_return(
         "closed",
     ]
     assert tracker.row_count == 40
+    assert tracker.note is None
+
+
+def test_a_scale_refused_control_lands_on_the_job_row_not_only_in_the_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2778 — the run survives a refused cohort, and says so where an operator looks.
+
+    ``refresh_recent + synthetic_control`` is refused outright so an operator who
+    asked for a control never silently receives rows saying
+    ``synthetic_control_not_run``. A scale refusal is discovered mid-run and so
+    cannot be refused up front — but the same principle binds it, which is why
+    it reaches ``job_runs.error_msg`` through ``tracker.note`` rather than
+    living only in a log line.
+    """
+    tracker = SimpleNamespace(row_count=None, run_id=9, progress=None, note=None)
+    refusal = "synthetic-control scale gate refused s1/worst_case/admitted: projected cohort wall time ..."
+
+    @contextmanager
+    def tracked(_job_name: str) -> Iterator[SimpleNamespace]:
+        yield tracker
+
+    @contextmanager
+    def connected() -> Iterator[MagicMock]:
+        yield MagicMock()
+
+    def run_backtest(_conn: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(rows_written=40, control_refusals={"s1/worst_case/admitted": refusal})
+
+    monkeypatch.setattr(scheduler, "_tracked_job", tracked)
+    monkeypatch.setattr(scheduler, "connect_job", connected)
+    monkeypatch.setattr(scheduler, "_open_backtest_progress_writer", lambda **_kwargs: None)
+    monkeypatch.setattr("app.services.backtest_run.run_backtest", run_backtest)
+
+    scheduler.strategy_backtest_run({"synthetic_control": True})
+
+    # The rows still landed: the refusal cost one arm's control, not the run.
+    assert tracker.row_count == 40
+    assert tracker.note is not None
+    assert "refused 1 arm(s)" in tracker.note
+    assert "s1/worst_case/admitted" in tracker.note
+    assert "synthetic_control_not_run" in tracker.note
 
 
 def test_refresh_failure_before_commit_never_publishes_a_window_checkpoint(

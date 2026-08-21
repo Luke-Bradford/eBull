@@ -5722,6 +5722,18 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                     release_read_locks=True,
                 )
                 tracker.row_count = report.rows_written
+                if report.control_refusals:
+                    # ⚠ ON THE JOB ROW AND NOT ONLY IN THE LOG (#2778). The
+                    # `refresh_recent` refusal above exists so an operator who
+                    # asked for a control never silently gets rows saying
+                    # `synthetic_control_not_run`; a scale refusal is discovered
+                    # mid-run rather than up front, so it cannot be refused
+                    # up front — but it must not be silent either.
+                    refused = ", ".join(sorted(report.control_refusals))
+                    tracker.note = (
+                        f"the synthetic-control scale gate refused {len(report.control_refusals)} arm(s) "
+                        f"({refused}); their rows carry synthetic_control_not_run and the rest of the run stands"
+                    )
                 if progress_writer is not None:
                     progress_writer.record_window_commit(rows_written=report.rows_written, completed=1)
             finally:
