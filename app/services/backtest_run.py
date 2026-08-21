@@ -167,6 +167,7 @@ from app.services.strategy_result import (
     ResultNamespace,
     StrategyResult,
     check_promotable,
+    metric_axis_invalid_reason,
     metric_axis_sha256,
     namespace_for_position,
 )
@@ -4092,11 +4093,22 @@ def _preflight_gate(
                 universe_basis=cast("Universe", result.universe_basis),
             )
             if set(outcome) != expected:
+                # ⚠ THE DELTA ALONE IS NOT A DIAGNOSIS (#2820). This assertion
+                # ended a five-hour full-set run naming `metric_axis_unproven`
+                # and nothing about WHICH of that gate's eight clauses closed,
+                # so the only route to an answer was to pay for the run again.
+                # Appended only when the axis is the disputed code, so every
+                # other delta reads exactly as it did before.
+                axis_reason = (
+                    f" — metric axis refused on: {metric_axis_invalid_reason(result.identity, result.metrics)}"
+                    if "metric_axis_unproven" in set(outcome) ^ expected
+                    else ""
+                )
                 raise RuntimeError(
                     f"{result.identity.strategy_id} {result.identity.namespace}/"
                     f"{result.identity.quarantine_arm} would store with refusals {sorted(outcome)} against the "
                     f"expected {sorted(expected)} — refusing before the first INSERT rather than leaving rows "
-                    "behind whose gate verdict nobody predicted"
+                    f"behind whose gate verdict nobody predicted{axis_reason}"
                 )
 
 
