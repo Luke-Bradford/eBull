@@ -193,6 +193,26 @@ class TestRenderedSplit:
         )
         assert split.walk_forward_model_id == "c5-purged-walk-forward-v0"
 
+    def test_the_response_model_carries_exactly_the_derivation_s_fields(self) -> None:
+        """Drift between the dataclass and the response model fails HERE.
+
+        `_walk_forward_split_view` copies field by field, so a rename on either
+        side is a type error rather than a silent drop — but only for fields that
+        still exist on both. This pins the SETS equal, which is what catches a
+        field ADDED to the derivation and never surfaced: the endpoint would keep
+        returning a valid, quietly incomplete payload, and no request would fail.
+        """
+        from dataclasses import fields
+
+        from app.api.strategies import WalkForwardFold, WalkForwardSplit
+        from app.services.strategy_walk_forward_evidence import (
+            StrategyWalkForwardSplit,
+            WalkForwardFoldView,
+        )
+
+        assert {field.name for field in fields(StrategyWalkForwardSplit)} == set(WalkForwardSplit.model_fields)
+        assert {field.name for field in fields(WalkForwardFoldView)} == set(WalkForwardFold.model_fields)
+
     def test_a_zero_test_count_is_a_measurement_not_a_gap(self) -> None:
         """`sql/269`: a fold spanning a thin era can carry no STARTING observation."""
         thin = _fold_row(result_id=1, fold_index=0) | {"test_count": 0, "embargo_bars": 0}

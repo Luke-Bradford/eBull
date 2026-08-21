@@ -120,6 +120,7 @@ from app.services.strategy_signal_scan import (
 )
 from app.services.strategy_walk_forward_evidence import (
     SplitUnavailableReason,
+    StrategyWalkForwardSplit,
     derive_walk_forward_split,
 )
 from app.services.strategy_wealth import load_strategy_wealth_history
@@ -1673,6 +1674,42 @@ def _evidence_window_counts(strategies: list[StrategyOverview]) -> tuple[int, in
     return completed, partial
 
 
+def _walk_forward_split_view(split: StrategyWalkForwardSplit) -> WalkForwardSplit:
+    """The derivation's dataclass as the response model, field by field.
+
+    ⚠ EXPLICIT RATHER THAN ``**split.__dict__``, which is the house pattern two
+    lines below on ``StrategyAttributionView``. The splat is fine where the two
+    shapes are flat and parallel; this one also has to rebuild ``folds`` into a
+    different type on the way through, so the splat hid a nested conversion
+    inside a dict literal and would have reported a later field rename at
+    request time instead of at review time. ``tests/test_strategy_walk_forward
+    _evidence.py`` pins the two field sets equal so drift fails at the fast tier
+    rather than here.
+    """
+    return WalkForwardSplit(
+        folds=[
+            WalkForwardFold(
+                fold_index=fold.fold_index,
+                first_date=fold.first_date,
+                last_date=fold.last_date,
+                bar_count=fold.bar_count,
+                embargo_bars=fold.embargo_bars,
+                test_count=fold.test_count,
+                train_count=fold.train_count,
+                purged_count=fold.purged_count,
+                embargoed_count=fold.embargoed_count,
+            )
+            for fold in split.folds
+        ],
+        walk_forward_model_id=split.walk_forward_model_id,
+        fold_count=split.fold_count,
+        quarantine_arm=split.quarantine_arm,
+        window_start=split.window_start,
+        window_end=split.window_end,
+        unavailable_reason=split.unavailable_reason,
+    )
+
+
 def _current_identity_pins() -> dict[str, str]:
     """The pins a stored row must match to sit on today's measurement basis.
 
@@ -2133,12 +2170,7 @@ def get_strategy_overview(
                 exclusion_reason=excluded_by_id.get(strategy_id),
                 scan=scan,
                 evidence_windows=windows,
-                walk_forward_split=WalkForwardSplit(
-                    **{
-                        **split.__dict__,
-                        "folds": [WalkForwardFold(**fold.__dict__) for fold in split.folds],
-                    }
-                ),
+                walk_forward_split=_walk_forward_split_view(split),
                 prior_versions=prior_versions_by_strategy.get(strategy_id, []),
                 legacy_result_count=result_counts.get(strategy_id, 0) - sum(len(rows) for rows in exact.values()),
                 all_recent_evidence_complete=all_complete,
