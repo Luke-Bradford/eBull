@@ -192,6 +192,7 @@ from app.services.synthetic_control_run import (
     HOLDOUT_CONTROL_REASON,
     CohortCollector,
     CohortResult,
+    ScaleBudgetExceeded,
     SyntheticControlScaleBudget,
     run_cohort,
 )
@@ -532,6 +533,18 @@ class NamespaceMeasurement:
         return self.axis_dates[-1]
 
 
+def _arm_label(strategy_id: str, ambiguity_arm: AmbiguityArm | None, quarantine_arm: QuarantineArm) -> str:
+    """The one spelling of an arm's name, shared by the gate and the report.
+
+    ⚠ ONE FUNCTION AND NOT AN f-STRING AT EACH SITE. This label is what a scale
+    refusal is keyed by in ``BacktestRunReport.control_refusals``, so the string
+    the gate refuses under and the string an operator looks the refusal up by
+    have to be the same string by construction rather than by two format
+    expressions agreeing.
+    """
+    return f"{strategy_id}/{ambiguity_arm or 'shared'}/{quarantine_arm}"
+
+
 @dataclass(frozen=True)
 class ArmMeasurement:
     """Everything one ``(strategy, quarantine arm)`` corpus pass produced."""
@@ -553,7 +566,25 @@ class ArmMeasurement:
     #: invocation asked for one. ⚠ ``None`` is the DEFAULT and means the run did
     #: not compute it — never that a computed control was lost: ``run_cohort``
     #: raises rather than returning a partial one.
+    #:
+    #: ⚠ SINCE #2778 ``None`` HAS A SECOND CAUSE, and the invariant above still
+    #: holds. The scale gate can refuse this cohort, and ``ScaleBudgetExceeded``
+    #: is raised by ``SyntheticControlScaleBudget.reserve`` *before* the member
+    #: pool fans out — so a refused cohort has produced no member outcome and
+    #: there is still nothing lost to report. ``cohort_refusal`` says which of
+    #: the two ``None`` means; anything raised from INSIDE the fan-out is still
+    #: fatal, because that one WOULD be discarding computed work.
     cohort: CohortResult | None = None
+    #: Why ``cohort`` is ``None`` when the invocation asked for one, verbatim
+    #: from the gate. ⚠ ``None`` here means the control was never requested for
+    #: this arm — an operator reading ``synthetic_control_not_run`` on the stored
+    #: row cannot otherwise tell "this run did not ask for a control" from "the
+    #: gate refused to run one", and those want different next moves.
+    cohort_refusal: str | None = None
+
+    @property
+    def label(self) -> str:
+        return _arm_label(self.strategy_id, self.ambiguity_arm, self.quarantine_arm)
 
 
 @dataclass(frozen=True)
@@ -595,6 +626,18 @@ class BacktestRunReport:
     @property
     def rows_written(self) -> int:
         return len(self.rows)
+
+    @property
+    def control_refusals(self) -> Mapping[str, str]:
+        """Why §9's control is absent, per arm the scale gate refused (#2778).
+
+        ⚠ DERIVED FROM ``arms`` RATHER THAN CARRIED AS A FIELD, unlike
+        ``deflation_refusals``. A deflation group is not an arm and has nowhere
+        else to live; a control refusal belongs to exactly one arm, which is
+        already in this report — so a second copy could only ever disagree with
+        the first.
+        """
+        return {arm.label: arm.cohort_refusal for arm in self.arms if arm.cohort_refusal is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -1946,6 +1989,22 @@ def evaluate_arm(
         )
         if outcome is not None:
             measured[name] = outcome
+    # ⚠ PINNED BEFORE THE COHORT RUNS. ``elapsed_s`` is the ARM's evaluation
+    # time and the cohort reports its own ``elapsed_s`` separately; folding §9's
+    # thousand members into the arm figure would silently redefine it.
+    elapsed_s = time.monotonic() - started
+    cohort, cohort_refusal = _run_cohort_for(
+        collector,
+        measured=measured,
+        corpus=corpus,
+        cohort_size=cohort_size,
+        label=_arm_label(entry.strategy_id, ambiguity_arm, quarantine_arm),
+        progress=progress,
+        strategy_id=entry.strategy_id,
+        quarantine_arm=quarantine_arm,
+        ambiguity_arm=ambiguity_arm,
+        scale_budget=scale_budget,
+    )
     return ArmMeasurement(
         strategy_id=entry.strategy_id,
         strategy_version=identity.version,
@@ -1955,19 +2014,9 @@ def evaluate_arm(
         holdout_positions_discarded=discarded.get("hold_out", 0),
         close_sources=dict(close_sources),
         series_evaluated=evaluated,
-        elapsed_s=time.monotonic() - started,
-        cohort=_run_cohort_for(
-            collector,
-            measured=measured,
-            corpus=corpus,
-            cohort_size=cohort_size,
-            label=f"{entry.strategy_id}/{ambiguity_arm or 'shared'}/{quarantine_arm}",
-            progress=progress,
-            strategy_id=entry.strategy_id,
-            quarantine_arm=quarantine_arm,
-            ambiguity_arm=ambiguity_arm,
-            scale_budget=scale_budget,
-        ),
+        elapsed_s=elapsed_s,
+        cohort=cohort,
+        cohort_refusal=cohort_refusal,
     )
 
 
@@ -2002,7 +2051,7 @@ def _run_cohort_for(
     ambiguity_arm: AmbiguityArm | None = None,
     progress: ProgressCallback | None = None,
     scale_budget: SyntheticControlScaleBudget | None = None,
-) -> CohortResult | None:
+) -> tuple[CohortResult | None, str | None]:
     """§9's control for this arm, once the sleeve it is compared against exists.
 
     ⚠ THE STRATEGY-SIDE FIGURES COME FROM THE MEASUREMENT THIS RUN JUST MADE,
@@ -2010,9 +2059,26 @@ def _run_cohort_for(
     much as to the result — a Sharpe compared with a cohort built for a
     different arm is two measurements joined on nothing — and the measurement is
     already in hand here.
+
+    Returns ``(control, refusal)``: at most one is ever populated.
+
+    ⚠⚠ A SCALE REFUSAL COSTS THIS ARM'S CONTROL AND NOTHING ELSE (#2778). It
+    used to abort the whole invocation: on 2026-08-19 one cohort's *estimate*
+    came in 45 seconds over a threshold and discarded a completed 1,000-member
+    cohort plus about ninety minutes of compute, persisting nothing — and the
+    work it refused subsequently ran in less than half the threshold. The
+    projection is a 3-member extrapolation and swings by more than 2x in BOTH
+    directions, so a gate that aborts on it aborts at random.
+
+    ⚠ ONLY ``ScaleBudgetExceeded`` IS CAUGHT, AND THE NARROWNESS IS THE POINT.
+    ``reserve`` runs before the member pool fans out, so a refused cohort has
+    produced no member outcome and the arm's own measurement — already complete
+    by the time this is called — is intact. Anything raised from inside the
+    fan-out means members WERE computed, and swallowing that would report a
+    partial cohort's absence as a plain "not run"; it stays fatal.
     """
     if collector is None or cohort_size is None:
-        return None
+        return None, None
     outcome = measured.get(CONTROL_NAMESPACE)
     if outcome is None:
         raise RuntimeError(
@@ -2020,7 +2086,7 @@ def _run_cohort_for(
             "a cohort with no strategy Sharpe beside it is a null distribution nobody can read"
         )
     if outcome.metrics.trade_count == 0:
-        return None
+        return None, None
 
     def report_member(member_seen: int, member_total: int) -> None:
         _emit_progress(
@@ -2035,16 +2101,25 @@ def _run_cohort_for(
             ),
         )
 
-    result = run_cohort(
-        collector,
-        axis=outcome.axis_dates,
-        strategy_metrics=outcome.metrics,
-        benchmark=None,
-        cohort_size=cohort_size,
-        progress=report_member if progress is not None else None,
-        scale_budget=scale_budget,
-        label=label,
-    )
+    try:
+        result = run_cohort(
+            collector,
+            axis=outcome.axis_dates,
+            strategy_metrics=outcome.metrics,
+            benchmark=None,
+            cohort_size=cohort_size,
+            progress=report_member if progress is not None else None,
+            scale_budget=scale_budget,
+            label=label,
+        )
+    except ScaleBudgetExceeded as exc:
+        logger.warning(
+            "strategy_backtest_run: %s synthetic control REFUSED by the scale gate — %s; this arm's rows will "
+            "carry synthetic_control_not_run and the run continues",
+            label,
+            exc,
+        )
+        return None, str(exc)
     logger.info(
         "strategy_backtest_run: %s synthetic control completed — %d members over %d series in %.1fs "
         "(%.3fs/member); outcomes withheld pending structural completion audit",
@@ -2054,7 +2129,7 @@ def _run_cohort_for(
         result.elapsed_s,
         result.seconds_per_member,
     )
-    return result
+    return result, None
 
 
 def evaluate_level_arms(
@@ -2308,6 +2383,18 @@ def evaluate_level_arms(
             )
             if outcome is not None:
                 measured[name] = outcome
+        cohort, cohort_refusal = _run_cohort_for(
+            collectors[ambiguity],
+            measured=measured,
+            corpus=corpus,
+            cohort_size=cohort_size,
+            label=_arm_label(entry.strategy_id, ambiguity, quarantine_arm),
+            progress=progress,
+            strategy_id=entry.strategy_id,
+            quarantine_arm=quarantine_arm,
+            ambiguity_arm=ambiguity,
+            scale_budget=scale_budget,
+        )
         measurements.append(
             ArmMeasurement(
                 strategy_id=entry.strategy_id,
@@ -2319,18 +2406,8 @@ def evaluate_level_arms(
                 close_sources=dict(close_sources[ambiguity]),
                 series_evaluated=evaluated,
                 elapsed_s=elapsed,
-                cohort=_run_cohort_for(
-                    collectors[ambiguity],
-                    measured=measured,
-                    corpus=corpus,
-                    cohort_size=cohort_size,
-                    label=f"{entry.strategy_id}/{ambiguity}/{quarantine_arm}",
-                    progress=progress,
-                    strategy_id=entry.strategy_id,
-                    quarantine_arm=quarantine_arm,
-                    ambiguity_arm=ambiguity,
-                    scale_budget=scale_budget,
-                ),
+                cohort=cohort,
+                cohort_refusal=cohort_refusal,
             )
         )
     return tuple(measurements)
@@ -4107,6 +4184,11 @@ def log_report(report: BacktestRunReport) -> None:
                 cohort.elapsed_s,
                 cohort.seconds_per_member,
             )
+        elif measurement.cohort_refusal is not None:
+            # ⚠ WARNING AND NOT INFO. The arm's rows are complete and stored; what
+            # is missing is §9's evidence, so this is the line that stops a
+            # refused control looking like a control that was never asked for.
+            logger.warning("    synthetic control REFUSED: %s", measurement.cohort_refusal)
     for row in report.rows:
         logger.info(
             "    stored %s %s/%s/%s %s instruments=%d folds=%d; outcomes withheld",

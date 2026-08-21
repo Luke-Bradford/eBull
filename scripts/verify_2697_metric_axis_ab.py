@@ -465,9 +465,14 @@ def main() -> None:
             # got an unexpected keyword argument 'scale_budget'` ever since,
             # discoverable only by running it. Forwarded rather than swallowed
             # so the A/B honours the same launch gates production does.
+            #
+            # ⚠ Same rot, second instance: #2778 changed the RETURN to
+            # ``(control, refusal)`` so a refused cohort no longer aborts the
+            # invocation. Forward both halves — dropping the refusal here would
+            # make the A/B abort where production carries on.
             scale_budget: SyntheticControlScaleBudget | None = None,
-        ) -> CohortResult | None:
-            current_result = original_run_cohort_for(
+        ) -> tuple[CohortResult | None, str | None]:
+            current_result, cohort_refusal = original_run_cohort_for(
                 collector,
                 measured=measured,
                 scale_budget=scale_budget,
@@ -490,7 +495,7 @@ def main() -> None:
                     label=label,
                 )
             cohort_pairs.append((legacy_control, None if current_result is None else current_result.control))
-            return current_result
+            return current_result, cohort_refusal
 
         backtest_run._measure_namespace = capture  # type: ignore[assignment]
         backtest_run._run_cohort_for = capture_cohort  # type: ignore[assignment]
