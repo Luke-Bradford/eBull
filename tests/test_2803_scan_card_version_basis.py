@@ -23,6 +23,7 @@ from app.api.strategies import (
     _current_versions,
     get_strategy_overview,
 )
+from app.services import strategy_monitoring
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.strategy_manifest import STRATEGY_MANIFEST
@@ -30,7 +31,32 @@ from app.services.strategy_signal_scan import SCAN_UNIVERSE
 
 #: Every relation the live scan writes. A query naming one of these MUST be
 #: filtered on the scan basis.
-_SCAN_RELATIONS = ("strategy_scan_watermark", "strategy_signal_daily_counts")
+#:
+#: ⚠ ``strategy_signals`` joined the list with #2806, which found the #2803
+#: defect intact on the loaders in ``strategy_monitoring``. Substring matching is
+#: safe across these three: ``strategy_signal_daily_counts`` does not contain
+#: ``strategy_signals``.
+_SCAN_RELATIONS = ("strategy_scan_watermark", "strategy_signal_daily_counts", "strategy_signals")
+
+
+def _loaders_over_a_scan_relation() -> dict[str, str]:
+    """``strategy_monitoring`` loader name -> the scan relation its SQL filters.
+
+    DERIVED, never listed. A fourth loader added over a scan relation has to be
+    bound correctly or this guard fails on it without anyone remembering to
+    extend a literal — which is exactly how #2806 survived #2803.
+    """
+    found: dict[str, str] = {}
+    for name in dir(strategy_monitoring):
+        loader = getattr(strategy_monitoring, name)
+        if not name.startswith("load_") or not inspect.isfunction(loader):
+            continue
+        for const in re.findall(r"\b(_\w+_SQL)\b", inspect.getsource(loader)):
+            sql = getattr(strategy_monitoring, const, "")
+            relation = next((r for r in _SCAN_RELATIONS if r in sql), None)
+            if relation is not None:
+                found[name] = relation
+    return found
 
 
 def test_the_scan_basis_is_the_universe_the_scanner_actually_stamps() -> None:
@@ -76,3 +102,45 @@ def test_every_scan_relation_query_is_executed_on_the_scan_basis() -> None:
                 f"{name} reads {_SCAN_RELATIONS} but is executed with {params_name!r}; "
                 "live-scan relations are keyed by the scan identity basis (#2803)"
             )
+
+
+def test_every_loader_over_a_scan_relation_is_called_on_the_scan_basis() -> None:
+    """The #2806 half: a loader binds its versions through a KEYWORD ARGUMENT.
+
+    The guard above only sees ``cur.execute(_X_SQL, params)`` pairs inside this
+    file, so it could not see `load_fire_rate` / `load_attribution` /
+    `load_owned_pnl` — which live in another module and take ``versions=`` — and
+    all three were still called with the result basis after #2803 shipped. On dev
+    that made every strategy report ``share_unavailable_reason: never_scanned``
+    hours after a scan wrote 216 census rows for all ten of them.
+    """
+    source = inspect.getsource(get_strategy_overview)
+    loaders = _loaders_over_a_scan_relation()
+    assert loaders, "no loader reads a scan relation any more — retarget this guard rather than deleting it"
+    for name, relation in sorted(loaders.items()):
+        called_with = re.findall(rf"\b{name}\(\s*conn\s*,\s*versions=(\w+)", source)
+        assert called_with, f"{name} filters {relation} but get_strategy_overview does not call it"
+        for argument in called_with:
+            assert "scan" in argument, (
+                f"{name} filters {relation} but is called with {argument!r}; "
+                "live-scan relations are keyed by the scan identity basis (#2806)"
+            )
+
+
+def test_the_scan_basis_loaders_are_read_back_at_the_scan_key() -> None:
+    """Rebinding the query is only half the fix, and the halves fail identically.
+
+    Both a result-basis filter and a result-basis dict lookup produce an empty
+    card, so fixing one and not the other looks exactly like fixing neither.
+    """
+    source = inspect.getsource(get_strategy_overview)
+    for name in sorted(_loaders_over_a_scan_relation()):
+        assigned = re.findall(rf"(\w+)\s*=\s*{name}\(", source)
+        assert assigned, f"{name} result is not bound to a name in get_strategy_overview"
+        for holder in assigned:
+            lookups = re.findall(rf"\b{holder}\.get\(\s*(\w+)", source)
+            assert lookups, f"{holder} is never read back"
+            for lookup_key in lookups:
+                assert "scan" in lookup_key, (
+                    f"{holder} holds rows keyed by the scan basis but is read at {lookup_key!r} (#2806)"
+                )
