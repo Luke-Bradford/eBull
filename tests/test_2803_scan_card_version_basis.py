@@ -33,10 +33,11 @@ from app.services.strategy_signal_scan import SCAN_UNIVERSE
 #: filtered on the scan basis.
 #:
 #: ⚠ ``strategy_signals`` joined the list with #2806, which found the #2803
-#: defect intact on the loaders in ``strategy_monitoring``. Substring matching is
-#: safe across these three: ``strategy_signal_daily_counts`` does not contain
-#: ``strategy_signals``.
+#: defect intact on the loaders in ``strategy_monitoring``.
 _SCAN_RELATIONS = ("strategy_scan_watermark", "strategy_signal_daily_counts", "strategy_signals")
+
+#: Relations a query actually READS, as opposed to ones its comments mention.
+_READ_RELATION = re.compile(r"(?:FROM|JOIN)\s+(\w+)", re.IGNORECASE)
 
 
 def _loaders_over_a_scan_relation() -> dict[str, str]:
@@ -45,6 +46,16 @@ def _loaders_over_a_scan_relation() -> dict[str, str]:
     DERIVED, never listed. A fourth loader added over a scan relation has to be
     bound correctly or this guard fails on it without anyone remembering to
     extend a literal — which is exactly how #2806 survived #2803.
+
+    ⚠ Two narrowings, both from the PR #2808 review, and both guard against a
+    FALSE positive rather than a miss — a guard that fires on a loader which
+    legitimately reads the result basis would be read as noise and then muted:
+
+    1. The relation must appear after ``FROM``/``JOIN`` and match a table name
+       EXACTLY, so neither a comment mentioning a scan relation nor a longer
+       table name containing one can pull a loader in.
+    2. The SQL must bind ``%(versions)s`` at all. A query with no version
+       predicate has no basis to get wrong.
     """
     found: dict[str, str] = {}
     for name in dir(strategy_monitoring):
@@ -53,10 +64,27 @@ def _loaders_over_a_scan_relation() -> dict[str, str]:
             continue
         for const in re.findall(r"\b(_\w+_SQL)\b", inspect.getsource(loader)):
             sql = getattr(strategy_monitoring, const, "")
-            relation = next((r for r in _SCAN_RELATIONS if r in sql), None)
+            if "%(versions)s" not in sql:
+                continue
+            read = set(_READ_RELATION.findall(sql))
+            relation = next((r for r in _SCAN_RELATIONS if r in read), None)
             if relation is not None:
                 found[name] = relation
     return found
+
+
+def test_a_result_basis_loader_is_not_swept_into_the_scan_guard() -> None:
+    """`load_control_state` reads the RESULT basis and must stay out (PR #2808).
+
+    Asserted rather than reasoned about, because the cost of being wrong is
+    asymmetric: a false guard failure on a correct loader teaches the next reader
+    that this file cries wolf, which is how the #2803 guard's real coverage gap
+    would have been dismissed too.
+    """
+    assert "load_control_state" not in _loaders_over_a_scan_relation()
+    assert "strategy_results_store" in strategy_monitoring._CONTROL_SQL, (
+        "load_control_state no longer reads the result store — recheck which basis it belongs on"
+    )
 
 
 def test_the_scan_basis_is_the_universe_the_scanner_actually_stamps() -> None:
