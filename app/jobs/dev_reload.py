@@ -531,7 +531,7 @@ def _supervise() -> int:
                         #
                         # Deliberately NOT probing live_job() first. A dead
                         # child's own `running` rows stay inside the
-                        # staleness window for _LIVE_JOB_STALENESS_S, so a
+                        # staleness window for its own threshold, so a
                         # probe here would make a crash wait out a heartbeat
                         # that can never advance again.
                         logger.info(
