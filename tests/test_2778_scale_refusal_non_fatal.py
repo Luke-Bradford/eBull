@@ -144,3 +144,17 @@ def test_arm_label_is_the_string_the_gate_refuses_under() -> None:
 
     assert arm.label == "s1-time-series-momentum/worst_case/admitted"
     assert arm.label in _REFUSAL
+
+
+@pytest.mark.parametrize("ambiguity_arm", ["worst_case", "best_case", None])
+def test_arm_label_reproduces_the_f_string_it_replaced(ambiguity_arm: str | None) -> None:
+    """Both replaced sites, including the ``None`` branch neither test path hits.
+
+    ``evaluate_arm`` spelled this ``f"{sid}/{ambiguity_arm or 'shared'}/{q}"`` and
+    ``evaluate_level_arms`` spelled it ``f"{sid}/{ambiguity}/{q}"`` over a
+    never-``None`` loop variable. Pinned against the literal the gate's refusal
+    messages already contain, so the helper cannot drift from either.
+    """
+    expected = f"s1-time-series-momentum/{ambiguity_arm or 'shared'}/admitted"
+
+    assert _arm_label("s1-time-series-momentum", ambiguity_arm, "admitted") == expected  # type: ignore[arg-type]
