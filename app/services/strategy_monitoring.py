@@ -8,6 +8,7 @@ when its exact id is present in ``strategy_position_ownership``.
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -18,8 +19,11 @@ from typing import Any, Final, Literal
 import psycopg
 import psycopg.rows
 
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_signal_scan import SCAN_UNIVERSE
 from app.services.valuation import resolve_quote_price
+
+logger = logging.getLogger(__name__)
 
 #: Calendar days per week. Not a trading-day convention — the weekly rate divides
 #: by the measured CALENDAR span of the scanned-bar axis, exactly as
@@ -31,11 +35,38 @@ _RATE_PRECISION: Final = Decimal("0.01")
 #: Why `fired_share_of_evaluable` is null. `no_evaluable_decisions` means every bar
 #: was `not_evaluable`, so the strategy was never offered a decision — its propensity
 #: is unknown rather than zero.
-ShareUnavailableReason = Literal["never_scanned", "no_evaluable_decisions"]
+#:
+#: ⚠ `no_decision_date_scanned` is a THIRD, and it is not a variant of the second
+#: (#2811). A periodic strategy is `not_fired` on every bar that is not one of its
+#: rebalance dates — `strategy_registry` rule 3, and deliberately not
+#: `not_evaluable`, because those bars were judged perfectly well. So a version the
+#: scan has never carried to a decision date has a denominator in the THOUSANDS and
+#: a numerator of zero, and reports `0.0000` with no reason at all: a confident
+#: measured zero standing for a non-measurement. Measured on dev 2026-08-21: S-2 and
+#: S-10 both rebalance monthly, their only decision date in live coverage was
+#: 2026-08-03, and no scan run of any kind existed before 2026-08-09.
+#:
+#: ⚠ `invariant_violated` is a FOURTH, and it is the only one that describes US
+#: rather than the evidence. `derive_fire_rate` asserts the producer's invariants
+#: (a fire off the decision calendar, a numerator above its denominator) and
+#: raises — but it is called per version from an aggregate endpoint, so letting
+#: that propagate would blank all ten cards over one bad row. The failure is
+#: contained to the card it belongs to and NAMED there, because a corruption
+#: visible only in logs is one nobody sees.
+ShareUnavailableReason = Literal[
+    "never_scanned",
+    "no_decision_date_scanned",
+    "no_evaluable_decisions",
+    "invariant_violated",
+]
 
 #: Why `entries_per_calendar_week` is null. Independent of the share's reason: a
 #: multi-day all-`not_evaluable` version rates at 0.00/week and has no share at all.
-WeeklyRateUnavailableReason = Literal["never_scanned", "single_scan_day"]
+#: ⚠ It carries `invariant_violated` too, for the reason the invariant itself
+#: exists: a value is None if and only if its reason is not. Refusing the share on
+#: a corrupt version while leaving a confident weekly rate beside it would be the
+#: same defect one field over.
+WeeklyRateUnavailableReason = Literal["never_scanned", "single_scan_day", "invariant_violated"]
 
 
 @dataclass(frozen=True)
@@ -75,7 +106,16 @@ class StrategyFireRate:
     #: one — a universe change mints a new `strategy_version` (`strategy_signal_scan`),
     #: and this reads one version at a time, so every row was written under this label.
     universe: str = SCAN_UNIVERSE
+    #: Distinct census bar dates — COVERAGE, and deliberately not restricted to
+    #: decision days. "How much corpus this version saw" and "how many chances it
+    #: had" are different questions and the card answers both.
     scanned_days: int = 0
+    #: Scanned bar dates that this version could actually act on: in its published
+    #: decision calendar AND carrying at least `min_participants` evaluable entry
+    #: rows. ``None`` means NO CALENDAR IS KNOWN — the `DecisionCalendar` protocol's
+    #: own convention, where a per-series strategy acts on every bar it is evaluable
+    #: at. ``0`` means a calendar is known and the scan has covered none of it.
+    decision_days: int | None = None
     fired_days: int = 0
     fired_entry_signals: int = 0
     evaluable_entry_decisions: int = 0
@@ -274,22 +314,38 @@ def load_attribution(
 #: bucket. s2 has no fired bucket at all, so an uncoalesced numerator reports a
 #: scanned strategy as unmeasured. Coalesced here rather than at the call site so
 #: the pure derivation never has to distinguish "absent bucket" from "no rows".
+#: ⚠ PER BAR DATE, not per version (#2811). The caller must partition these rows
+#: by decision-date membership before it can sum anything, and a pre-summed
+#: version-level row cannot be partitioned afterwards. The aggregates themselves
+#: are unchanged; only the grain is.
 _FIRE_RATE_SQL = """
-    SELECT strategy_id, strategy_version,
-           COUNT(DISTINCT signal_bar_date) AS scanned_days,
-           COUNT(DISTINCT signal_bar_date) FILTER (WHERE verdict = 'fired')
-               AS fired_days,
+    SELECT strategy_id, strategy_version, signal_bar_date,
            COALESCE(SUM(row_count) FILTER (WHERE verdict = 'fired'), 0)
                AS fired_entry_signals,
            COALESCE(SUM(row_count) FILTER (WHERE verdict IN ('fired', 'not_fired')), 0)
                AS evaluable_entry_decisions,
            COALESCE(SUM(row_count) FILTER (WHERE verdict = 'not_evaluable'), 0)
-               AS not_evaluable_entry_decisions,
-           MIN(signal_bar_date) AS first_scanned_bar,
-           MAX(signal_bar_date) AS last_scanned_bar
+               AS not_evaluable_entry_decisions
     FROM strategy_signal_daily_counts
     WHERE signal_kind = 'entry' AND strategy_version = ANY(%(versions)s)
-    GROUP BY strategy_id, strategy_version
+    GROUP BY strategy_id, strategy_version, signal_bar_date
+"""
+
+#: The scan's OWN decision dates, republished by `publish_decision_calendar`. Read
+#: rather than recomputed for the reason that function's docstring gives at length:
+#: recomputing resolves a historical version against today's corpus.
+#:
+#: ⚠⚠ DRIVEN FROM THE PUBLICATION HEADER, LEFT-JOINED TO THE DATES — never from the
+#: dates alone. A rule that names no date in this corpus publishes a header and zero
+#: dates, and selecting only from the date table would make that byte-identical to a
+#: version that never published at all. The reader's whole contract is that those
+#: two are different answers (`0` refuses the share, `None` leaves it untouched).
+_DECISION_CALENDAR_SQL = """
+    SELECT p.strategy_id, p.strategy_version, p.frontier_date, c.decision_date
+    FROM strategy_decision_calendar_publications p
+    LEFT JOIN strategy_decision_calendar c
+           ON c.strategy_id = p.strategy_id AND c.strategy_version = p.strategy_version
+    WHERE p.strategy_version = ANY(%(versions)s)
 """
 
 
@@ -302,6 +358,7 @@ def derive_fire_rate(
     not_evaluable_entry_decisions: int,
     first_scanned_bar: date | None,
     last_scanned_bar: date | None,
+    decision_days: int | None = None,
 ) -> StrategyFireRate:
     """Turn one version's entry-census aggregates into the two rates.
 
@@ -357,13 +414,35 @@ def derive_fire_rate(
     """
     if scanned_days == 0:
         return StrategyFireRate(
+            decision_days=decision_days,
             share_unavailable_reason="never_scanned",
             weekly_rate_unavailable_reason="never_scanned",
         )
 
+    # The producer's invariants, asserted rather than trusted. A decision day is a
+    # scanned day by construction (it is drawn from the census's own dates), and a
+    # day on which the strategy fired is a decision day under registry rule 3.
+    if decision_days is not None and not fired_days <= decision_days <= scanned_days:
+        raise ValueError(
+            f"fired_days {fired_days} <= decision_days {decision_days} <= scanned_days {scanned_days} "
+            "is violated — a fire off the decision calendar, or a decision day the census never carried"
+        )
+    if fired_entry_signals > evaluable_entry_decisions:
+        raise ValueError(
+            f"fired_entry_signals {fired_entry_signals} exceeds evaluable_entry_decisions "
+            f"{evaluable_entry_decisions} — the share's numerator and denominator are not one population"
+        )
+
     share: Decimal | None = None
     share_reason: ShareUnavailableReason | None = None
-    if evaluable_entry_decisions > 0:
+    if decision_days == 0:
+        # ⚠ ORDERED BEFORE the evaluable test and NOT merged with it. With no
+        # decision date covered, `evaluable_entry_decisions` is zero because the
+        # partition is empty, not because every bar refused — and
+        # `no_evaluable_decisions` would assert the second. The two are
+        # distinguishable only here, in the order.
+        share_reason = "no_decision_date_scanned"
+    elif evaluable_entry_decisions > 0:
         share = (Decimal(fired_entry_signals) / Decimal(evaluable_entry_decisions)).quantize(_SHARE_PRECISION)
     else:
         share_reason = "no_evaluable_decisions"
@@ -384,6 +463,7 @@ def derive_fire_rate(
 
     return StrategyFireRate(
         scanned_days=scanned_days,
+        decision_days=decision_days,
         fired_days=fired_days,
         fired_entry_signals=fired_entry_signals,
         evaluable_entry_decisions=evaluable_entry_decisions,
@@ -397,6 +477,32 @@ def derive_fire_rate(
     )
 
 
+def _panel_floor(strategy_id: str) -> int:
+    """The smallest cross-section this strategy can act on — its OWN declaration.
+
+    Not a threshold chosen here. ``StrategyEntry.min_participants`` is the panel
+    floor the strategy refuses below (``MIN_CROSS_SECTION = 10`` for S-2, whose own
+    comment is *"below ten names, ``N // 10`` is zero and no name can be in the top
+    tenth of the panel"*), and a date carrying fewer evaluable rows than that is one
+    on which the strategy provably could not have fired.
+
+    ⚠ WITHOUT THIS THE FIX REPRODUCES ITS OWN ROOT CAUSE ONE LAYER UP. Census bar
+    dates are per INSTRUMENT: a cold start writes each instrument's last bar
+    strictly before the frontier, so a single sparse series lands a lone row on an
+    arbitrary date — which is exactly how 2026-07-31 and 2026-08-04 came to look
+    like scanned days (#2811). One such row falling on a rebalance date would set
+    ``decision_days = 1`` and re-enable the fake share this exists to remove.
+
+    ⚠ A strategy absent from the manifest floors at 1. It has no published calendar
+    either, so it never reaches the decision-day partition; this is the defensive
+    arm, not a live path.
+    """
+    entry = STRATEGY_MANIFEST.get(strategy_id)
+    if entry is None or entry.min_participants is None:
+        return 1
+    return entry.min_participants
+
+
 def load_fire_rate(
     conn: psycopg.Connection[Any], *, versions: Sequence[str]
 ) -> dict[tuple[str, str], StrategyFireRate]:
@@ -404,22 +510,144 @@ def load_fire_rate(
 
     A key absent from the result has never been scanned; the caller supplies
     ``StrategyFireRate()``, whose default ``rate_unavailable_reason`` says so.
+
+    ⚠⚠ THE SHARE IS MEASURED ON DECISION DAYS ONLY, WHICH IS NOT AN OPTIMISATION
+    (#2811). A periodic strategy is ``not_fired`` on every bar that is not one of
+    its rebalance dates — `strategy_registry` rule 3, correctly, since the data was
+    present and the calendar is what excluded it. Summing those into the
+    denominator makes the share a measurement of the CALENDAR rather than of the
+    strategy, and when no decision date has been covered at all it manufactures a
+    confident ``0.0000`` out of a non-measurement.
+
+    ⚠ `scanned_days` stays whole-coverage while the four decision counts do not, so
+    the two populations are named separately on the card rather than silently
+    averaged. Everything the SHARE is built from — numerator, denominator and the
+    reported not-evaluable exclusion — comes from the one decision-day population
+    (#2802's rule), so the ratio is the ratio of the two numbers rendered beside it.
+
+    ⚠ `entries_per_calendar_week` deliberately keeps the whole-COVERAGE span in its
+    divisor while its numerator is decision-day restricted, and the two do not
+    conflict: rule 3 makes a fire on a non-decision bar unrepresentable, so the
+    restriction removes nothing from the numerator, and the metric's own question is
+    "how many opportunities land per week of MARKET" — which is a coverage span by
+    definition, not a rebalance-date one.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(_FIRE_RATE_SQL, {"versions": list(versions)})
         rows = cur.fetchall()
-    return {
-        (str(row["strategy_id"]), str(row["strategy_version"])): derive_fire_rate(
-            scanned_days=int(row["scanned_days"]),
-            fired_days=int(row["fired_days"]),
-            fired_entry_signals=int(row["fired_entry_signals"]),
-            evaluable_entry_decisions=int(row["evaluable_entry_decisions"]),
-            not_evaluable_entry_decisions=int(row["not_evaluable_entry_decisions"]),
-            first_scanned_bar=row["first_scanned_bar"],
-            last_scanned_bar=row["last_scanned_bar"],
-        )
-        for row in rows
-    }
+        cur.execute(_DECISION_CALENDAR_SQL, {"versions": list(versions)})
+        calendar_rows = cur.fetchall()
+
+    # ⚠ The header creates the key; the LEFT JOIN's NULL date adds nothing to it. A
+    # published-but-empty calendar is therefore an EMPTY SET and an unpublished one
+    # is a MISSING KEY, which is the distinction the whole reader turns on.
+    calendars: dict[tuple[str, str], set[date]] = {}
+    calendar_frontiers: dict[tuple[str, str], date] = {}
+    for row in calendar_rows:
+        key = (str(row["strategy_id"]), str(row["strategy_version"]))
+        dates = calendars.setdefault(key, set())
+        calendar_frontiers[key] = row["frontier_date"]
+        if row["decision_date"] is not None:
+            dates.add(row["decision_date"])
+
+    per_version: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        per_version[(str(row["strategy_id"]), str(row["strategy_version"]))].append(row)
+
+    rates: dict[tuple[str, str], StrategyFireRate] = {}
+    for key, version_rows in per_version.items():
+        strategy_id, strategy_version = key
+        # Absent, not empty: a version that never published a calendar has an
+        # UNKNOWN cadence, and `None` is what carries that through to the card.
+        calendar = calendars.get(key)
+        floor = _panel_floor(strategy_id)
+
+        scanned_bars = {row["signal_bar_date"] for row in version_rows}
+        if calendar is None:
+            counted = version_rows
+            decision_days: int | None = None
+        else:
+            counted = [
+                row
+                for row in version_rows
+                if row["signal_bar_date"] in calendar and int(row["evaluable_entry_decisions"]) >= floor
+            ]
+            decision_days = len({row["signal_bar_date"] for row in counted})
+            off_calendar = sum(
+                int(row["fired_entry_signals"]) for row in version_rows if row["signal_bar_date"] not in calendar
+            )
+            if off_calendar:
+                # Unrepresentable under registry rule 3, so its appearance is a
+                # producer-invariant violation and not a rounding concern. Dropped
+                # silently is how a corruption stays invisible.
+                logger.warning(
+                    "load_fire_rate: %s/%s carries %d fired entry signals OFF its decision calendar — "
+                    "registry rule 3 makes a fire on a non-decision bar unrepresentable",
+                    strategy_id,
+                    strategy_version,
+                    off_calendar,
+                )
+            # ⚠ The calendar and the census can describe DIFFERENT corpus states, and
+            # the stamp is what makes that visible instead of silent. Publication is
+            # deliberately not tied to writing census rows (otherwise the card is
+            # inert on any run with nothing to write), so a historical backfill can
+            # move a month boundary under a stationary frontier. The direction is
+            # fail-safe — a calendar disagreeing with the census yields "no decision
+            # date scanned", never a wrong share — but a share refused for a reason
+            # nobody can see is the defect this whole ticket is about.
+            published_frontier = calendar_frontiers[key]
+            if scanned_bars and max(scanned_bars) > published_frontier:
+                logger.warning(
+                    "load_fire_rate: %s/%s has census bars to %s but its decision calendar was published "
+                    "at frontier %s — the two describe different corpus states",
+                    strategy_id,
+                    strategy_version,
+                    max(scanned_bars),
+                    published_frontier,
+                )
+
+        try:
+            rates[key] = derive_fire_rate(
+                scanned_days=len(scanned_bars),
+                decision_days=decision_days,
+                fired_days=len({row["signal_bar_date"] for row in counted if int(row["fired_entry_signals"]) > 0}),
+                fired_entry_signals=sum(int(row["fired_entry_signals"]) for row in counted),
+                evaluable_entry_decisions=sum(int(row["evaluable_entry_decisions"]) for row in counted),
+                not_evaluable_entry_decisions=sum(int(row["not_evaluable_entry_decisions"]) for row in counted),
+                first_scanned_bar=min(scanned_bars),
+                last_scanned_bar=max(scanned_bars),
+            )
+        except ValueError:
+            # ⚠ PER VERSION, which is the whole point. `derive_fire_rate` raises on a
+            # violated producer invariant and should — but this loop feeds an
+            # AGGREGATE endpoint, so an uncaught raise blanks all ten cards over one
+            # bad row. `_commit_strategy` already settles this shape for the writer:
+            # *"One strategy's failure does not stop the others."*
+            #
+            # ⚠ UNREACHABLE FROM THE FOLD ABOVE, and kept anyway. Every invariant
+            # holds by construction here: `fired_days` and `decision_days` are both
+            # counted over `counted`; `counted` is a subset of the version's rows;
+            # and `_FIRE_RATE_SQL` computes evaluable as `fired + not_fired`. The
+            # guard is for the fold this becomes later, which is precisely when
+            # nobody will be re-deriving those three facts.
+            #
+            # ⚠ And the card SAYS SO rather than falling back to a plausible number.
+            # A refusal nobody can see would leave the corruption exactly as
+            # invisible as the silent zero this ticket exists to remove.
+            logger.exception(
+                "load_fire_rate: %s/%s violates a producer invariant — refusing its rates, other strategies unaffected",
+                strategy_id,
+                strategy_version,
+            )
+            rates[key] = StrategyFireRate(
+                scanned_days=len(scanned_bars),
+                decision_days=decision_days,
+                first_scanned_bar=min(scanned_bars),
+                last_scanned_bar=max(scanned_bars),
+                share_unavailable_reason="invariant_violated",
+                weekly_rate_unavailable_reason="invariant_violated",
+            )
+    return rates
 
 
 _OWNED_LIFECYCLE_SQL = """

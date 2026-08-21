@@ -237,6 +237,8 @@ const OVERVIEW: StrategyOverviewResponse = {
     fire_rate: {
       universe: "validated_us_equity",
       scanned_days: 1,
+      // Per-series: no decision calendar, so every evaluable bar is a decision.
+      decision_days: null,
       fired_days: 1,
       fired_entry_signals: 1740,
       evaluable_entry_decisions: 3340,

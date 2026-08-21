@@ -184,3 +184,75 @@ class TestReportedCounts:
 
     def test_universe_is_labelled_per_2288(self) -> None:
         assert _derive().universe == "survivor_only"
+
+
+class TestDecisionDayPartition:
+    """#2811 — a periodic strategy's zero is only a measurement on a decision date.
+
+    ``strategy_registry`` rule 3 records a non-decision bar as ``not_fired``, and
+    correctly: the data was present and the CALENDAR is what excluded it. Summing
+    those into the share's denominator makes the share a measurement of the
+    calendar rather than of the strategy.
+    """
+
+    def test_no_decision_date_covered_refuses_the_share_instead_of_reporting_zero(self) -> None:
+        # The live shape on 2026-08-21: S-2 carried 3,277 evaluable entry
+        # decisions and fired none, because every one of them was a non-rebalance
+        # bar. The old code divided and reported a confident 0.0000.
+        rate = _derive(decision_days=0, fired_days=0, fired_entry_signals=0, evaluable_entry_decisions=0)
+        assert rate.share_unavailable_reason == "no_decision_date_scanned"
+        assert rate.fired_share_of_evaluable is None
+        assert rate.decision_days == 0
+
+    def test_no_calendar_is_not_no_decision_dates(self) -> None:
+        # `DecisionCalendar`'s own distinction. A per-series strategy acts on every
+        # bar it is evaluable at, so `None` must leave the share exactly as it was
+        # — this is the arm that keeps 8 of the 10 strategies byte-identical.
+        rate = _derive(decision_days=None)
+        assert rate.decision_days is None
+        assert rate.share_unavailable_reason is None
+        assert rate.fired_share_of_evaluable == Decimal("0.1000")
+
+    def test_a_covered_decision_date_with_no_evaluable_bar_keeps_its_own_reason(self) -> None:
+        # Ordering matters: `decision_days > 0` with an empty denominator is the
+        # pre-existing "offered a decision, every bar refused" state, which must
+        # NOT be relabelled as never having been offered one.
+        rate = _derive(
+            decision_days=1,
+            fired_days=0,
+            fired_entry_signals=0,
+            evaluable_entry_decisions=0,
+            not_evaluable_entry_decisions=2_438,
+        )
+        assert rate.share_unavailable_reason == "no_evaluable_decisions"
+
+    def test_never_scanned_outranks_the_decision_calendar(self) -> None:
+        rate = _derive(
+            scanned_days=0, decision_days=0, fired_days=0, fired_entry_signals=0, evaluable_entry_decisions=0
+        )
+        assert rate.share_unavailable_reason == "never_scanned"
+
+    def test_a_covered_decision_date_measures_normally(self) -> None:
+        rate = _derive(decision_days=2, fired_days=2, fired_entry_signals=40, evaluable_entry_decisions=400)
+        assert rate.fired_share_of_evaluable == Decimal("0.1000")
+        assert rate.share_unavailable_reason is None
+
+
+class TestProducerInvariantsAreAsserted:
+    """Rule 3 makes these unrepresentable, so their appearance is corruption.
+
+    Asserted rather than documented: a silently dropped off-calendar fire is how a
+    producer regression stays invisible behind a plausible-looking share.
+    """
+
+    def test_a_fire_off_the_decision_calendar_raises(self) -> None:
+        with pytest.raises(ValueError, match="decision_days"):
+            _derive(decision_days=0, fired_days=1, fired_entry_signals=0, evaluable_entry_decisions=0)
+
+    def test_more_decision_days_than_scanned_days_raises(self) -> None:
+        with pytest.raises(ValueError, match="scanned_days"):
+            _derive(scanned_days=2, decision_days=3, fired_days=1)
+
+    def test_a_numerator_above_its_denominator_raises(self) -> None:
+        with pytest.raises(ValueError, match="one population"):
+            _derive(fired_entry_signals=1_001, evaluable_entry_decisions=1_000)

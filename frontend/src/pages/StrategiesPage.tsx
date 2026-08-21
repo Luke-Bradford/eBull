@@ -162,7 +162,15 @@ const SHARE_UNAVAILABLE_LABELS: Record<
   string
 > = {
   never_scanned: "Not scanned yet",
+  // ⚠ NOT a variant of "no evaluable decisions" (#2811). A monthly strategy is
+  // `not_fired` on every bar that is not a rebalance date, so a version the scan
+  // has never carried to one reports a thousands-strong denominator and a zero
+  // numerator. The blank has to say "never asked", not "asked and declined".
+  no_decision_date_scanned: "No decision date scanned",
   no_evaluable_decisions: "No evaluable decisions",
+  // Describes US, not the evidence: the stored rows broke a producer invariant, so
+  // the card refuses rather than showing a number derived from them.
+  invariant_violated: "Evidence inconsistent — refused",
 };
 
 const WEEKLY_RATE_UNAVAILABLE_LABELS: Record<
@@ -171,6 +179,7 @@ const WEEKLY_RATE_UNAVAILABLE_LABELS: Record<
 > = {
   never_scanned: "Not scanned yet",
   single_scan_day: "1 scan day — needs a span",
+  invariant_violated: "Evidence inconsistent — refused",
 };
 
 function CatalogFact({ label, value, note }: { label: string; value: string; note: string }) {

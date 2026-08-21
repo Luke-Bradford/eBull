@@ -379,6 +379,12 @@ class StrategyFireRateView(BaseModel):
 
     universe: str
     scanned_days: int
+    #: ⚠ ``scanned_days`` is COVERAGE and ``decision_days`` is OPPORTUNITY, and the
+    #: four counts below are measured on the second (#2811). ``None`` means the
+    #: version has no published decision calendar — a per-series strategy acts on
+    #: every bar it is evaluable at — and is NOT the same as ``0``, which means it
+    #: has one and the scan has reached none of it.
+    decision_days: int | None
     fired_days: int
     fired_entry_signals: int
     evaluable_entry_decisions: int

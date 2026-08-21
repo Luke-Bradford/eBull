@@ -54,6 +54,7 @@ from app.services.indicator_series import BarSeries, Universe
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.price_masked_bars import (
     MASKED_REASON,
+    InstrumentBarSpan,
     load_bar_spans,
     load_masked_bars,
     load_union_calendar,
@@ -415,6 +416,129 @@ def advance_watermark(
         )
 
 
+#: ⚠ The CASCADE on `strategy_decision_calendar` is what makes this one statement a
+#: whole-calendar replacement. Deleting the dates without the header would leave a
+#: published-but-empty calendar behind; deleting the header takes both.
+_CLEAR_DECISION_CALENDAR = """
+    DELETE FROM strategy_decision_calendar_publications
+     WHERE strategy_id = %(strategy_id)s AND strategy_version = %(strategy_version)s
+"""
+
+_PUBLISH_DECISION_CALENDAR = """
+    INSERT INTO strategy_decision_calendar_publications
+        (strategy_id, strategy_version, frontier_date)
+    VALUES (%(strategy_id)s, %(strategy_version)s, %(frontier_date)s)
+"""
+
+_WRITE_DECISION_CALENDAR = """
+    INSERT INTO strategy_decision_calendar (strategy_id, strategy_version, decision_date)
+    SELECT %(strategy_id)s, %(strategy_version)s, unnest(%(decision_dates)s::date[])
+"""
+
+
+def publish_decision_calendar(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    frontier_date: date,
+    decision_dates: frozenset[date],
+) -> None:
+    """Republish the decision dates THIS run used, so a reader need not guess.
+
+    ⚠⚠ THE READER MUST NOT RECOMPUTE THIS, WHICH IS THE WHOLE POINT (#2811).
+    The calendar is ``entry.decision_calendar(load_union_calendar(...))``, a pure
+    function of the union calendar — so a reader recomputing it resolves a
+    HISTORICAL ``strategy_version`` against TODAY's universe, corpus and
+    quarantine state, none of which is what that version's census rows were
+    written under. A bar backfilled earlier in a month silently moves which date
+    was "first of the month" with no census row and no version changing. That is
+    #2809's shape exactly: the card recomputed a lookalike of a producer
+    statistic and disagreed with it, calling all ten strategies stale.
+
+    ⚠ REPLACE, not merge. The calendar is a function of the corpus, not an
+    accumulation over runs, so a date that stops qualifying must stop being
+    published. That is safe here in a way it would not be for a signal: this
+    table carries no verdict, no instrument and no fill — nothing is a decision
+    record, so nothing is being withdrawn.
+
+    ⚠⚠ THE HEADER ROW IS WRITTEN EVEN FOR AN EMPTY CALENDAR, and that is the whole
+    reason it exists. "This rule names no date in this corpus" and "no calendar is
+    known for this version" are both ZERO date rows, and the reader's contract
+    depends on separating them — ``decision_days = 0`` refuses the share, ``None``
+    leaves it exactly as it was. A distinction whose two sides are both an absence
+    cannot live in a row count.
+
+    ⚠ ``frontier_date`` stamps the corpus state this calendar describes. Publication
+    is deliberately NOT tied to writing census rows (see ``_publish_decision_calendars``),
+    so a purely-historical backfill can move a month boundary under a stationary
+    frontier and leave the published calendar describing a corpus the stored census
+    does not. The stamp is what lets ``load_fire_rate`` SEE that rather than
+    silently mixing the two; the skew's direction is fail-safe either way, because
+    a calendar that disagrees with the census yields "no decision date scanned"
+    (the share refused) and never a wrong share.
+    """
+    with conn.cursor() as cur:
+        params = {"strategy_id": strategy_id, "strategy_version": strategy_version}
+        cur.execute(_CLEAR_DECISION_CALENDAR, params)
+        cur.execute(_PUBLISH_DECISION_CALENDAR, {**params, "frontier_date": frontier_date})
+        if decision_dates:
+            cur.execute(_WRITE_DECISION_CALENDAR, {**params, "decision_dates": sorted(decision_dates)})
+
+
+def _publish_decision_calendars(
+    conn: psycopg.Connection[Any],
+    *,
+    manifest: Mapping[str, StrategyEntry],
+    current_versions: Mapping[str, str],
+    spans: Mapping[int, InstrumentBarSpan],
+    frontier: Frontier,
+) -> dict[str, frozenset[date]]:
+    """Compute every cross-sectional strategy's decision dates, and republish them.
+
+    Returns the dates by ``strategy_id`` so the scan itself uses the very rows it
+    published — one computation, not two that could drift.
+
+    ⚠ The union calendar spans every LOADABLE instrument, not only the
+    frontier-eligible ones: a name that stopped trading last year still contributed
+    the sessions on which the panel rebalanced.
+
+    ⚠ PER STRATEGY, not shared from the first one — S-2 and S-10 read the same
+    union calendar through different rules (S-10 drops weekend rows first), and one
+    strategy's calendar imposed on another would move every rebalance verdict
+    silently.
+
+    ⚠ Each publication is its OWN transaction, deliberately not the scan's. The
+    calendar describes the corpus, not this run, so a strategy whose row write later
+    fails has still published a true calendar — and one strategy's failure must not
+    withdraw another's, which is `_commit_strategy`'s isolation contract applied to
+    a second relation.
+    """
+    cross_sectional = [
+        strategy_id for strategy_id in sorted(manifest) if manifest[strategy_id].strategy_class == "cross_sectional"
+    ]
+    if not cross_sectional:
+        return {}
+
+    calendar = load_union_calendar(conn, sorted(spans))
+    published: dict[str, frozenset[date]] = {}
+    for strategy_id in cross_sectional:
+        entry = manifest[strategy_id]
+        dates = entry.decision_calendar(calendar)
+        if dates is None:  # pragma: no cover — the manifest guarantees one
+            raise RuntimeError(f"{strategy_id} is cross_sectional but returned no decision calendar")
+        published[strategy_id] = dates
+        with conn.transaction():
+            publish_decision_calendar(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=current_versions[strategy_id],
+                frontier_date=frontier.bar_date,
+                decision_dates=dates,
+            )
+    return published
+
+
 # ---------------------------------------------------------------------------
 # The scan
 # ---------------------------------------------------------------------------
@@ -531,10 +655,12 @@ def run_signal_scan(
     watermarks = read_watermarks(conn)
     plans: list[_Plan] = []
     results: list[StrategyScanResult] = []
+    current_versions: dict[str, str] = {}
     for strategy_id in sorted(manifest):
         entry = manifest[strategy_id]
         identity = entry.identity(universe=SCAN_UNIVERSE, cost_model_id=COST_MODEL_ID)
         version = identity.version
+        current_versions[strategy_id] = version
         watermark = watermarks.get((strategy_id, version))
         if watermark is not None and watermark >= frontier.bar_date:
             regressed = watermark > frontier.bar_date
@@ -563,6 +689,21 @@ def run_signal_scan(
             continue
         plans.append(_Plan(entry=entry, identity=identity, version=version, watermark=watermark))
 
+    # ⚠⚠ FOR EVERY CROSS-SECTIONAL STRATEGY AT ITS CURRENT IDENTITY, NOT ONLY THE
+    # ONES WITH WORK — and BEFORE the `not plans` return (#2811). A decision
+    # calendar is a function of the CORPUS, not of this run's coverage, so gating
+    # its publication on having bars to write is the wrong condition twice over:
+    # on the day this shipped every version was already `up_to_date` at frontier
+    # 2026-08-19, so the card would have gone on reading S-2's and S-10's
+    # never-measured zeros as measured ones until the corpus next advanced.
+    #
+    # ⚠ This is what makes a fully up-to-date run cost the union calendar (0.6s on
+    # the live corpus) rather than returning immediately. That is the price of the
+    # card being self-healing instead of one scan stale, on a job that runs daily.
+    panel_dates_by_plan = _publish_decision_calendars(
+        conn, manifest=manifest, current_versions=current_versions, spans=spans, frontier=frontier
+    )
+
     if not plans:
         logger.info(
             "strategy_signal_scan: frontier %s already covered by every strategy — nothing to do",
@@ -580,22 +721,6 @@ def run_signal_scan(
         )
 
     cross_sectional = [plan for plan in plans if plan.entry.strategy_class == "cross_sectional"]
-    panel_dates_by_plan: dict[str, frozenset[date]] = {}
-    if cross_sectional:
-        # ⚠ The union calendar spans every LOADABLE instrument, not only the
-        # frontier-eligible ones: a name that stopped trading last year still
-        # contributed the sessions on which the panel rebalanced.
-        #
-        # ⚠ PER PLAN, not shared from plans[0] — S-2 and S-10 read the same
-        # union calendar through different rules (S-10 drops weekend rows
-        # first), and one strategy's calendar imposed on another would move
-        # every rebalance verdict silently.
-        calendar = load_union_calendar(conn, sorted(spans))
-        for plan in cross_sectional:
-            plan_dates = plan.entry.decision_calendar(calendar)
-            if plan_dates is None:  # pragma: no cover — the manifest guarantees one
-                raise RuntimeError(f"{plan.entry.strategy_id} is cross_sectional but returned no decision calendar")
-            panel_dates_by_plan[plan.entry.strategy_id] = plan_dates
 
     rows: dict[str, list[LedgerRow]] = {plan.entry.strategy_id: [] for plan in plans}
     expected: dict[str, int] = {plan.entry.strategy_id: 0 for plan in plans}
