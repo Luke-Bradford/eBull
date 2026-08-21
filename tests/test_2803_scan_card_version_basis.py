@@ -144,7 +144,15 @@ def test_every_loader_over_a_scan_relation_is_called_on_the_scan_basis() -> None
     """
     source = inspect.getsource(get_strategy_overview)
     loaders = _loaders_over_a_scan_relation()
-    assert loaders, "no loader reads a scan relation any more — retarget this guard rather than deleting it"
+    # ⚠ A FLOOR, not a list — new loaders are still picked up automatically, but
+    # a known one dropping out has to be loud. Found by revert-probe: renaming the
+    # census table made `load_fire_rate` vanish from the derived set and every
+    # assertion below still passed, because the survivors satisfied them. Silent
+    # coverage loss is how the #2803 guard came to protect nothing here.
+    assert {"load_attribution", "load_fire_rate", "load_owned_pnl"} <= set(loaders), (
+        f"a known scan-basis loader dropped out of the derived set ({sorted(loaders)}) — "
+        "retarget this guard rather than letting it pass on the remainder"
+    )
     for name, relation in sorted(loaders.items()):
         called_with = re.findall(rf"\b{name}\(\s*conn\s*,\s*versions=(\w+)", source)
         assert called_with, f"{name} filters {relation} but get_strategy_overview does not call it"
