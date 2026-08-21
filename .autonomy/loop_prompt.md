@@ -23,6 +23,43 @@ Judge every candidate action by one question: *does this move a strategy closer 
 firing where the operator can see it?* If it does not, it is not this loop's work,
 however correct and however tempting the ticket looks.
 
+### ⚠⚠ THE STANDING ORDER CHANGED AGAIN on 2026-08-21 — READ #2827 FIRST
+
+All ten strategies now have hold-out evidence at their CURRENT versions (40 rows,
+`primary-2022-plus`, written 2026-08-21). **Every one of them loses money per trade,
+and every one trades above the cost-survival bar.**
+
+| strategy | turnover/month | cost drag %/yr | CAGR% | exp%/trade |
+| --- | ---: | ---: | ---: | ---: |
+| s2 | 44% | 2–8 | -17.2 | -7.52 |
+| s5 | 162% | 6–28 | **+28.7** | -1.12 |
+| s8 | 230% | 9–40 | **+45.0** | -0.96 |
+| s1 | 696% | 27–121 | -70.2 | -1.66 |
+
+Novy-Marx/Velikov's disqualifier is ~50%/month. The LOWEST of the ten is 44%.
+
+⚠ The per-trade expectancies cluster at roughly ONE ROUND-TRIP SPREAD (-0.83% to
+-1.76%). Ten structurally different strategies do not fail independently at the same
+magnitude — to first order these break even gross and lose the spread net.
+
+**THE OBJECTIVE IS NO LONGER "build more strategies". It is: make one strategy
+gross-positive and cheap enough to keep it.**
+
+1. **FIRST, and before building anything: measure gross vs net directly.** `sql/256`
+   carries `gross_return_pct` (see `cost_model.py:31`). The cost-drag figures above are
+   INFERRED from `turnover × band spread`, not read. If gross is flat, lower turnover
+   saves nothing and the whole direction is wrong — falsify it before investing in it.
+2. If gross is positive: **lower-turnover variants of s8 and s5**, the two with positive
+   CAGR and Sortino 4.2 / 5.5 surviving 9–40%/yr of drag. Halving turnover is worth more
+   than any new signal at these levels.
+3. Re-measure on hold-out and compare per-trade expectancy and profit factor, NOT CAGR
+   or annualised Sharpe — both flatter a skewed distribution. s8 posts +45% CAGR on a
+   NEGATIVE per-trade edge because skew is 36 and kurtosis 1,976.
+
+⚠ **Check turnover BEFORE a backtest, always.** `.claude/skills/quant/strategy-evidence.md`
+already said so. Ten strategies were built and the engine optimised 6.8x before anyone
+read the one column that disqualified all ten.
+
 ### The build queue — work it in this order
 
 Spec: `docs/proposals/ta/2026-08-14-strategy-set-s5-s10.md`. It is complete and
