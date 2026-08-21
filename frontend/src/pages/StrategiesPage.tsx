@@ -21,6 +21,7 @@ import type {
   StrategyOverview,
   StrategyOverviewResponse,
   StrategyOwnedPosition,
+  StrategyRegimeLabel,
   StrategyResultArm,
 } from "@/api/types";
 import { ApiError } from "@/api/client";
@@ -139,6 +140,110 @@ const PIN_LABELS: Record<string, string> = {
 
 function pinLabel(pin: string): string {
   return PIN_LABELS[pin] ?? pin.replace(/_/g, " ");
+}
+
+const REGIME_LABELS: Record<StrategyRegimeLabel, string> = {
+  bull_quiet: "Bull, quiet",
+  bull_volatile: "Bull, volatile",
+  bear_quiet: "Bear, quiet",
+  bear_volatile: "Bear, volatile",
+  unclassified: "Unclassified",
+};
+
+/** The per-regime split of the primary arm — the operator's own constraint that
+ *  walk-forward evidence is never one pooled number over the whole span.
+ *
+ *  Three states, deliberately worded apart, because collapsing any two of them
+ *  is how a card starts lying:
+ *
+ *  1. **Split present** — one row per regime that saw a trade. A regime with no
+ *     row saw none; the trailing line names those rather than leaving the reader
+ *     to diff five labels against the rows on screen.
+ *  2. **Empty with trades** — the result predates the cohort writer (#2726).
+ *     "Not measured for this result", never "no trades in any regime".
+ *  3. **Empty with no trades** — the arm realised nothing to split.
+ *
+ *  ⚠ A null `profit_factor` means the cohort has NO LOSING TRADE, so the ratio
+ *  has no denominator. Rendered as words; a dash would read as missing data on
+ *  the single best cohort in the table. */
+function RegimeBreakdown({ arm }: { arm: StrategyResultArm }) {
+  const cohorts = arm.regime_cohorts;
+  const covered = new Set<string>(cohorts.map((cohort) => cohort.regime));
+  const absent = (Object.keys(REGIME_LABELS) as StrategyRegimeLabel[]).filter((regime) => !covered.has(regime));
+  return (
+    <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
+      <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+        By market regime{" "}
+        <span className="font-normal normal-case tracking-normal">· classified on the entry signal date</span>
+      </h4>
+      {cohorts.length === 0 ? (
+        <p className="mt-2 text-xs text-slate-500">
+          {arm.trade_count > 0
+            ? "Not measured for this result — it was stored before the per-regime split existed, and re-running the backtest to fill it in would charge the experiment register."
+            : "This arm realised no trades, so there is nothing to split."}
+        </p>
+      ) : (
+        <>
+          <table className="mt-2 w-full text-xs tabular-nums">
+            <thead className="text-slate-500">
+              <tr className="text-left">
+                <th className="font-medium">Regime</th>
+                {/* NOT "Trades": the arm's own total already uses that exact
+                    label above, and two identical headings on one card make the
+                    reader ask which number is which. */}
+                <th className="font-medium">Realised trades</th>
+                <th className="font-medium">Expected / trade</th>
+                <th className="font-medium">Profit factor</th>
+                <th className="font-medium">Worst trade</th>
+              </tr>
+            </thead>
+            <tbody className="text-slate-700 dark:text-slate-200">
+              {cohorts.map((cohort) => (
+                <tr key={cohort.regime} className="border-t border-slate-100 dark:border-slate-800/60">
+                  <td className="py-1">{REGIME_LABELS[cohort.regime]}</td>
+                  <td className="py-1">
+                    {formatNumber(cohort.trade_count, 0)}
+                    {/* Names AND dates, because neither alone bounds the other:
+                        four trades on one date is one bet, and the block
+                        bootstrap clusters by date for exactly that reason. */}
+                    <span className="text-slate-500">
+                      {" "}
+                      · {formatNumber(cohort.instrument_count, 0)} names,{" "}
+                      {formatNumber(cohort.decision_date_count, 0)} dates
+                    </span>
+                  </td>
+                  <td className="py-1">
+                    {pctPoints(cohort.expectancy_pct)}
+                    <span className="block text-[10px] text-slate-500">
+                      {cohort.expectancy_ci_low_pct === null
+                        ? "not bootstrapped"
+                        : `${pctPoints(cohort.expectancy_ci_low_pct)} to ${pctPoints(cohort.expectancy_ci_high_pct)}` +
+                          (cohort.effective_sample_size === null
+                            ? ""
+                            : ` · n≈${formatNumber(number(cohort.effective_sample_size), 1)}`)}
+                    </span>
+                  </td>
+                  <td className="py-1">
+                    {cohort.profit_factor === null ? (
+                      <span className="text-slate-500">no losing trade</span>
+                    ) : (
+                      formatNumber(number(cohort.profit_factor), 2)
+                    )}
+                  </td>
+                  <td className="py-1">{pctPoints(cohort.worst_trade_pct)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {absent.length > 0 ? (
+            <p className="mt-2 text-xs text-slate-500">
+              No trades in {absent.map((regime) => REGIME_LABELS[regime].toLowerCase()).join(", ")}.
+            </p>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
 }
 
 function representativeArm(strategy: StrategyOverview): StrategyResultArm | null {
@@ -1403,6 +1508,7 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
           {failures.length > 4 ? <p className="mt-1 text-xs text-slate-500">+ {failures.length - 4} more checks</p> : null}
         </div>
       </div>
+      <RegimeBreakdown arm={arm} />
       <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
         <span>Evidence windows complete: <strong className="text-slate-700 dark:text-slate-200">{completed}/{strategy.evidence_windows.length}</strong></span>
         <span>Forward observations: <strong className="text-slate-700 dark:text-slate-200">{strategy.attribution.fired_entries}</strong></span>

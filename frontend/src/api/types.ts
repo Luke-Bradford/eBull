@@ -2399,6 +2399,43 @@ export interface BootstrapTimelineResponse {
 // /strategies (app/api/strategies.py, #2447)
 // ---------------------------------------------------------------------------
 
+export type StrategyRegimeLabel =
+  | "bull_quiet"
+  | "bull_volatile"
+  | "bear_quiet"
+  | "bear_volatile"
+  | "unclassified";
+
+/** One arm's realised trades split by the regime that held when they fired (#2437).
+ *
+ * ⚠ Explains the arm; NOT independently promotable. Drawdown and every other
+ * path statistic stay on the arm — filtering closed trades cannot reconstruct
+ * overlapping marked paths.
+ *
+ * Two absences that must render differently:
+ * - **A regime with no entry had no realised trade in this arm.** Every stored
+ *   cohort carries `trade_count >= 1`, so a short list is a measurement, not a
+ *   gap.
+ * - **`profit_factor` is null exactly when `losing_trade_count === 0`** — no
+ *   denominator. That is the strongest cohort there is; a blank cell says the
+ *   opposite.
+ */
+export interface StrategyRegimeCohort {
+  regime: StrategyRegimeLabel;
+  trade_count: number;
+  instrument_count: number;
+  decision_date_count: number;
+  losing_trade_count: number;
+  expectancy_pct: string;
+  expectancy_ci_low_pct: string | null;
+  expectancy_ci_high_pct: string | null;
+  profit_factor: string | null;
+  worst_trade_pct: string;
+  /** ⚠ Null as a GROUP with the two CI bounds — the writer refuses a partial
+   *  bootstrap — so all three null means "not bootstrapped", not a lost figure. */
+  effective_sample_size: string | null;
+}
+
 export interface StrategyResultArm {
   result_version: string;
   purpose: "harness_validation" | "capital_candidate";
@@ -2444,6 +2481,16 @@ export interface StrategyResultArm {
   hold_days_p25: string | null;
   hold_days_p75: string | null;
   promotion_refusals: string[];
+  /** Ordered bull→bear, quiet→volatile, `unclassified` last. Server-ordered;
+   *  do not re-sort.
+   *
+   *  ⚠ EMPTY IS TWO STATEMENTS, separated on `trade_count`: empty with
+   *  `trade_count === 0` means the arm realised no trade; empty with
+   *  `trade_count > 0` means the row predates the cohort writer (#2726) and was
+   *  never split — NOT "no trades in any regime". Backfilling would mean
+   *  re-running the backtest and charging the trial register, so those rows stay
+   *  empty permanently. */
+  regime_cohorts: StrategyRegimeCohort[];
 }
 
 export interface StrategyEvidenceWindow {

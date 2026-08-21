@@ -286,10 +286,10 @@ class ResultRegimeCohort(BaseModel):
     expectancy_ci_high_pct: Decimal | None
     profit_factor: Decimal | None
     worst_trade_pct: Decimal
+    # ⚠ NULL AS A GROUP, never singly: `RegimeCohort.__post_init__` refuses a
+    # partially-populated bootstrap, so a null CI and a null effective sample
+    # mean "this cohort was not bootstrapped", not "one number went missing".
     effective_sample_size: Decimal | None
-    # Ships with the interval it produced, so a null CI reads as "not
-    # bootstrapped" rather than as a missing number under an unnamed model.
-    bootstrap_model_id: str | None
 
 
 class ResultArm(BaseModel):
@@ -1360,8 +1360,7 @@ _REGIME_COHORTS_SQL = """
         expectancy_ci_high_pct,
         profit_factor,
         worst_trade_pct,
-        effective_sample_size,
-        bootstrap_model_id
+        effective_sample_size
     FROM strategy_result_regime_cohorts
     WHERE result_id = ANY(%(result_ids)s::bigint[])
 """
