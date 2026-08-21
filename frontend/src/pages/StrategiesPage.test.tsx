@@ -48,6 +48,38 @@ const ARM: StrategyResultArm = {
   hold_days_p25: null,
   hold_days_p75: null,
   promotion_refusals: [],
+  // Two of the four labels, deliberately: `bear_volatile` and `unclassified`
+  // are absent because they saw no trade, which is what the "No trades in …"
+  // line has to name. `bull_quiet` has no losing trade, so its profit factor is
+  // null — the strongest cohort, not a missing measurement.
+  regime_cohorts: [
+    {
+      regime: "bull_quiet",
+      trade_count: 8,
+      instrument_count: 6,
+      decision_date_count: 7,
+      losing_trade_count: 0,
+      expectancy_pct: "2.4",
+      expectancy_ci_low_pct: null,
+      expectancy_ci_high_pct: null,
+      profit_factor: null,
+      worst_trade_pct: "-0.4",
+      effective_sample_size: null,
+    },
+    {
+      regime: "bear_quiet",
+      trade_count: 4,
+      instrument_count: 4,
+      decision_date_count: 4,
+      losing_trade_count: 3,
+      expectancy_pct: "-1.1",
+      expectancy_ci_low_pct: null,
+      expectancy_ci_high_pct: null,
+      profit_factor: "0.6",
+      worst_trade_pct: "-6.2",
+      effective_sample_size: null,
+    },
+  ],
 };
 
 const OVERVIEW: StrategyOverviewResponse = {
@@ -699,6 +731,26 @@ describe("StrategiesPage", () => {
     expect(screen.getByText("• Recent evidence windows are incomplete")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Next" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Previous" })).not.toBeInTheDocument();
+  });
+
+  it("splits the primary arm by regime and names the regimes that saw no trade", async () => {
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    const bull = screen.getByText("Bull, quiet").closest("tr");
+    const bear = screen.getByText("Bear, quiet").closest("tr");
+    expect(bull).not.toBeNull();
+    expect(bear).not.toBeNull();
+    // A cohort with no losing trade has no profit-factor denominator. It must
+    // say so; a dash would read as a missing measurement on the best cohort.
+    expect(within(bull!).getByText("no losing trade")).toBeInTheDocument();
+    expect(within(bear!).getByText("0.6")).toBeInTheDocument();
+    // Server order is bull-before-bear, and the page must not re-sort it.
+    expect(bull!.compareDocumentPosition(bear!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      screen.getByText("No trades in bull, volatile, bear, volatile, unclassified."),
+    ).toBeInTheDocument();
   });
 
   it("queues the fixed recent-evidence denominator from the research header", async () => {
