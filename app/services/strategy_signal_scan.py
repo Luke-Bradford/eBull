@@ -221,9 +221,61 @@ def choose_frontier(last_bars: Mapping[int, date]) -> Frontier | None:
     """
     if not last_bars:
         return None
-    counts = Counter(last_bars.values())
-    bar_date, modal_count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    modal = modal_bar_date(Counter(last_bars.values()))
+    if modal is None:
+        return None
+    bar_date, modal_count = modal
     return Frontier(bar_date=bar_date, modal_count=modal_count, loadable=len(last_bars))
+
+
+def modal_bar_date(counts: Mapping[date, int]) -> tuple[date, int] | None:
+    """``(modal last bar, how many instruments sit on it)`` — the rule, alone.
+
+    Split out of ``choose_frontier`` so a reader that already holds the
+    distribution — the ``/strategies/overview`` freshness bar, which reads it
+    from ``load_recent_last_bar_counts`` rather than paying for every
+    instrument's span — applies the SAME tie-break instead of a second copy.
+
+    ⚠ That second copy is what #2809 was: the card compared this frontier against
+    ``MAX(research_price_series.last_bar)`` — a different table, a different
+    statistic and a different population — and reported all 10 strategies
+    ``stale`` while every one of them sat exactly on the frontier. A ``max`` is
+    forbidden HERE (module docstring item 2) and re-importing it through a
+    reader's own SQL is the same error at one remove.
+    """
+    if not counts:
+        return None
+    bar_date, modal_count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    return bar_date, modal_count
+
+
+def window_decides_the_mode(*, modal_count: int, seen: int, universe_size: int) -> bool:
+    """Can a reader that only looked at a RECENT window trust its mode?
+
+    A caller that bounds the last-bar query to a window — ``/strategies/overview``
+    does, because the unbounded distribution costs 0.60s on a 30-66ms endpoint —
+    is not computing the same statistic. The bound cannot corrupt an instrument's
+    last bar (a ``max`` over the tail of a series still equals the true max
+    whenever that max is inside the window), but it DROPS every instrument whose
+    last bar predates the window, and dropped instruments do not vote.
+
+    So the windowed mode differs from the true one exactly when the dropped set
+    could outvote it. ``universe_size - seen`` is an upper bound on that set, and
+    if it is no larger than ``modal_count`` then no date outside the window can
+    beat the mode even if every dropped instrument shares one. The comparison is
+    ``<=`` and not ``<`` because an exact tie breaks on the LATER date, which is
+    the in-window one — the same rule ``modal_bar_date`` applies.
+
+    ⚠ Caught by Codex at checkpoint 2 on #2809, not by any test: with most of the
+    universe stale and a minority freshly refreshed, the windowed mode is the
+    minority's date while a scan run now would choose the stale majority's — so
+    the card would call a scan sitting exactly on the frontier ``stale``, which
+    is the very defect #2809 fixed, reintroduced by its own optimisation.
+
+    False here is not an error. It says the cheap read is not decisive, so the
+    caller must pay for the full distribution.
+    """
+    return universe_size - seen <= modal_count
 
 
 def write_window_indices(dates: Sequence[date], *, watermark: date | None, frontier: date) -> range:
@@ -1021,7 +1073,9 @@ __all__ = [
     "assert_census_complete",
     "choose_frontier",
     "log_report",
+    "modal_bar_date",
     "read_watermarks",
     "run_signal_scan",
+    "window_decides_the_mode",
     "write_window_indices",
 ]

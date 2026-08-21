@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import psycopg
 import psycopg.rows
@@ -37,6 +37,7 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
+from app.services.price_masked_bars import load_bar_spans, load_recent_last_bar_counts
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import (
     RuntimeConfigCorrupt,
@@ -44,6 +45,7 @@ from app.services.runtime_config import (
     get_runtime_config,
     update_runtime_config,
 )
+from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
@@ -108,7 +110,12 @@ from app.services.strategy_result_ambiguity import (
     composed_holdout_ambiguity_refusals,
     record_sha256,
 )
-from app.services.strategy_signal_scan import SCAN_UNIVERSE
+from app.services.strategy_signal_scan import (
+    SCAN_UNIVERSE,
+    choose_frontier,
+    modal_bar_date,
+    window_decides_the_mode,
+)
 from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -1038,6 +1045,53 @@ def _current_scan_versions() -> dict[str, str]:
     }
 
 
+def _corpus_frontier(conn: psycopg.Connection[Any], *, as_of: date) -> date | None:
+    """The bar date a scan run RIGHT NOW would choose, i.e. what ``current`` means.
+
+    The scan card's freshness bar. Reads the same population the scanner reads
+    (the validated universe, through the quarantine-masked predicate) and applies
+    the scanner's own tie-break, ``modal_bar_date`` — so ``frontier >=
+    _corpus_frontier()`` says "the stored scan sits on the frontier a new run
+    would pick", which is the only claim the card can honestly make.
+
+    ⚠⚠ THIS REPLACED ``MAX(last_bar) FROM research_price_series`` (#2809), which
+    was wrong three ways at once and reported all 10 strategies ``stale`` while
+    every one of them sat exactly on the frontier:
+
+    1. **Wrong table.** ``research_price_series`` is the backtest archive; the
+       scan reads ``price_daily``. Its ``MAX`` was ONE row — CBOE VIX, refreshed
+       on its own path — against a corpus whose next-newest series ended six
+       weeks earlier.
+    2. **Wrong statistic.** ``strategy_signal_scan``'s module docstring item 2 is
+       explicit: *"The frontier is the MODAL last bar, never ``max(price_date)``"*,
+       because a max is set by whichever handful of series refreshed first. On
+       ``price_daily`` at the time of the fix that max was 2026-08-20, held by
+       1,563 rows of an in-flight ``daily_candle_refresh`` against ~11,000 on
+       each completed day.
+    3. **Wrong population.** The whole archive rather than the validated
+       universe the scan is scored on.
+
+    The old comment justified the choice as an optimisation — *"avoids a full
+    scan of the multi-million-row bar corpus on every Strategies page load"* —
+    and the cost was real: the honest statistic unbounded is 0.60s on a 30-66ms
+    endpoint. The windowed read buys it back at 0.036s, and
+    ``window_decides_the_mode`` is what keeps it from buying a different answer.
+    """
+    universe = load_validated_universe(conn)
+    counts = load_recent_last_bar_counts(conn, universe, since=as_of - _CORPUS_FRESHNESS_WINDOW)
+    modal = modal_bar_date(counts)
+    if modal is not None and window_decides_the_mode(
+        modal_count=modal[1], seen=sum(counts.values()), universe_size=len(universe)
+    ):
+        return modal[0]
+    # The window cannot settle it, so pay for the whole distribution rather than
+    # answer from the part of the corpus that happened to refresh recently.
+    frontier = choose_frontier(
+        {instrument_id: span.last_bar for instrument_id, span in load_bar_spans(conn, universe).items()}
+    )
+    return None if frontier is None else frontier.bar_date
+
+
 def _ambiguity_record_from_result_row(
     row: dict[str, object],
     *,
@@ -1289,10 +1343,17 @@ _EXCLUSIONS_SQL = """
     GROUP BY strategy_id, strategy_version, reason_code
 """
 
-# The ingest transaction maintains this census on every series. Reading its
-# ~one-row-per-symbol metadata avoids a full scan of the multi-million-row bar
-# corpus on every Strategies page load.
-_LATEST_CORPUS_SQL = "SELECT MAX(last_bar) FROM research_price_series"
+#: How far back ``_corpus_frontier`` looks for the corpus's modal last bar.
+#:
+#: BY CONSTRUCTION, no published rule: the window has to outlast the longest
+#: exchange closure, or a real holiday week empties it and the card reports a
+#: stale corpus that is merely shut. The longest modern NYSE closures are four
+#: sessions (9/11) and two (Sandy); with the weekends either side that is ~9
+#: calendar days, so 10 clears it with a session to spare while staying far
+#: short of the ~30 days at which a genuinely dead refresh would still look
+#: alive. Widening it costs latency (0.036s at 10d, 0.072s at 30d, measured on
+#: the 6,773-instrument corpus); narrowing it risks the holiday case.
+_CORPUS_FRESHNESS_WINDOW = timedelta(days=10)
 
 _LATEST_EVIDENCE_REFRESH_SQL = """
     SELECT p.request_id, p.status AS request_status, p.requested_at, p.error_msg AS request_error,
@@ -1530,9 +1591,11 @@ def get_strategy_overview(
         prior_result_rows = list(cur.fetchall())
         cur.execute(_PRIOR_VERSION_SCANS_SQL, prior_scan_params)
         prior_scan_rows = list(cur.fetchall())
-        cur.execute(_LATEST_CORPUS_SQL)
-        latest_row = cur.fetchone()
-        latest_corpus_date = None if latest_row is None else latest_row["max"]
+        # ⚠ The freshness bar is the frontier a scan run NOW would choose, not a
+        # MAX over a different corpus (#2809). `None` means no universe member
+        # carried a bar inside the window at all, which the status below reads as
+        # `stale` — a corpus nothing has refreshed in ten days IS stale.
+        latest_corpus_date = _corpus_frontier(conn, as_of=as_of.date())
         cur.execute(_LATEST_EVIDENCE_REFRESH_SQL, {"job_name": _STRATEGY_BACKTEST_JOB})
         refresh_row = cur.fetchone()
         cur.execute(
