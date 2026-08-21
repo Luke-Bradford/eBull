@@ -2549,8 +2549,13 @@ export interface StrategyFireRate {
     | "never_scanned"
     | "no_decision_date_scanned"
     | "no_evaluable_decisions"
+    | "invariant_violated"
     | null;
-  weekly_rate_unavailable_reason: "never_scanned" | "single_scan_day" | null;
+  weekly_rate_unavailable_reason:
+    | "never_scanned"
+    | "single_scan_day"
+    | "invariant_violated"
+    | null;
 }
 
 export interface StrategyAttribution {

@@ -14,7 +14,8 @@ from decimal import Decimal
 import psycopg
 import pytest
 
-from app.services.strategy_monitoring import load_fire_rate
+from app.services import strategy_monitoring
+from app.services.strategy_monitoring import StrategyFireRate, load_fire_rate
 from app.services.strategy_signal_scan import publish_decision_calendar
 
 
@@ -216,3 +217,80 @@ class TestDecisionCalendarPartition:
         assert rate.decision_days is None, "absent is UNKNOWN cadence, never an empty calendar"
         assert rate.fired_share_of_evaluable == Decimal("0.1000")
         assert rate.share_unavailable_reason is None
+
+
+@pytest.mark.db
+class TestOneCorruptVersionDoesNotBlankThePage:
+    """Review bot WARNING on PR #2812 — `derive_fire_rate` raises, by design.
+
+    That is right for the derivation and wrong to let escape: this loop feeds an
+    AGGREGATE endpoint, so an uncaught raise turns one bad row into ten empty
+    cards. `_commit_strategy` already settles the shape for the writer — *"One
+    strategy's failure does not stop the others."*
+
+    ⚠⚠ THE RAISE IS UNREACHABLE FROM `load_fire_rate` TODAY, and saying so is the
+    honest form. Every invariant holds by CONSTRUCTION in the current fold:
+    `fired_days` and `decision_days` are both counted over `counted`, so the first
+    cannot exceed the second; `counted` is a subset of the version's rows, so
+    `decision_days <= scanned_days`; and `_FIRE_RATE_SQL` computes evaluable as
+    `fired + not_fired`, so the numerator cannot exceed its denominator. The guard
+    is defence against a FUTURE fold, which is exactly when nobody will be looking.
+    That is why this patches the raise in rather than fabricating a row shape that
+    cannot occur — a test that manufactures an impossible input to reach a branch
+    proves the branch, not the isolation.
+    """
+
+    def test_a_violated_invariant_refuses_one_card_and_leaves_the_rest(
+        self, ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = ebull_test_conn
+        bad, good = "test-fire-rate-v1+corrupt", "test-fire-rate-v1+healthy"
+        bad_id = "s2-cross-sectional-momentum"
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO strategy_signal_daily_counts
+                    (strategy_id, strategy_version, signal_bar_date,
+                     signal_kind, verdict, reason_code, row_count)
+                VALUES (%s, %s, %s, 'entry', %s, '', %s)
+                """,
+                [
+                    (bad_id, bad, date(2026, 8, 17), "fired", 5),
+                    (bad_id, bad, date(2026, 8, 17), "not_fired", 95),
+                    ("s1-time-series-momentum", good, date(2026, 8, 17), "fired", 100),
+                    ("s1-time-series-momentum", good, date(2026, 8, 18), "not_fired", 900),
+                ],
+            )
+
+        real = strategy_monitoring.derive_fire_rate
+
+        def raise_for_the_corrupt_one(**kwargs: object) -> StrategyFireRate:
+            if kwargs["decision_days"] is not None:
+                raise ValueError("simulated producer-invariant violation")
+            return real(**kwargs)  # type: ignore[arg-type]
+
+        publish_decision_calendar(
+            conn,
+            strategy_id=bad_id,
+            strategy_version=bad,
+            frontier_date=date(2026, 8, 19),
+            decision_dates=frozenset({date(2026, 8, 17)}),
+        )
+        monkeypatch.setattr(strategy_monitoring, "derive_fire_rate", raise_for_the_corrupt_one)
+        rates = load_fire_rate(conn, versions=[bad, good])
+
+        corrupt = rates[(bad_id, bad)]
+        assert corrupt.share_unavailable_reason == "invariant_violated"
+        assert corrupt.weekly_rate_unavailable_reason == "invariant_violated", (
+            "a value is None iff its reason is not — refusing one and not the other is the same defect one field over"
+        )
+        assert corrupt.fired_share_of_evaluable is None
+        assert corrupt.entries_per_calendar_week is None
+        # Coverage is still reported: it came off the census, not the derivation.
+        assert corrupt.scanned_days == 1
+
+        # ⚠ The point of the test: the healthy sibling is still MEASURED. Before the
+        # per-version catch this call raised and the endpoint returned nothing.
+        healthy = rates[("s1-time-series-momentum", good)]
+        assert healthy.fired_share_of_evaluable == Decimal("0.1000")
+        assert healthy.share_unavailable_reason is None

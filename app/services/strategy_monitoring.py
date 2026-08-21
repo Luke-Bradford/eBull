@@ -45,11 +45,28 @@ _RATE_PRECISION: Final = Decimal("0.01")
 #: measured zero standing for a non-measurement. Measured on dev 2026-08-21: S-2 and
 #: S-10 both rebalance monthly, their only decision date in live coverage was
 #: 2026-08-03, and no scan run of any kind existed before 2026-08-09.
-ShareUnavailableReason = Literal["never_scanned", "no_decision_date_scanned", "no_evaluable_decisions"]
+#:
+#: ⚠ `invariant_violated` is a FOURTH, and it is the only one that describes US
+#: rather than the evidence. `derive_fire_rate` asserts the producer's invariants
+#: (a fire off the decision calendar, a numerator above its denominator) and
+#: raises — but it is called per version from an aggregate endpoint, so letting
+#: that propagate would blank all ten cards over one bad row. The failure is
+#: contained to the card it belongs to and NAMED there, because a corruption
+#: visible only in logs is one nobody sees.
+ShareUnavailableReason = Literal[
+    "never_scanned",
+    "no_decision_date_scanned",
+    "no_evaluable_decisions",
+    "invariant_violated",
+]
 
 #: Why `entries_per_calendar_week` is null. Independent of the share's reason: a
 #: multi-day all-`not_evaluable` version rates at 0.00/week and has no share at all.
-WeeklyRateUnavailableReason = Literal["never_scanned", "single_scan_day"]
+#: ⚠ It carries `invariant_violated` too, for the reason the invariant itself
+#: exists: a value is None if and only if its reason is not. Refusing the share on
+#: a corrupt version while leaving a confident weekly rate beside it would be the
+#: same defect one field over.
+WeeklyRateUnavailableReason = Literal["never_scanned", "single_scan_day", "invariant_violated"]
 
 
 @dataclass(frozen=True)
@@ -589,16 +606,47 @@ def load_fire_rate(
                     published_frontier,
                 )
 
-        rates[key] = derive_fire_rate(
-            scanned_days=len(scanned_bars),
-            decision_days=decision_days,
-            fired_days=len({row["signal_bar_date"] for row in counted if int(row["fired_entry_signals"]) > 0}),
-            fired_entry_signals=sum(int(row["fired_entry_signals"]) for row in counted),
-            evaluable_entry_decisions=sum(int(row["evaluable_entry_decisions"]) for row in counted),
-            not_evaluable_entry_decisions=sum(int(row["not_evaluable_entry_decisions"]) for row in counted),
-            first_scanned_bar=min(scanned_bars),
-            last_scanned_bar=max(scanned_bars),
-        )
+        try:
+            rates[key] = derive_fire_rate(
+                scanned_days=len(scanned_bars),
+                decision_days=decision_days,
+                fired_days=len({row["signal_bar_date"] for row in counted if int(row["fired_entry_signals"]) > 0}),
+                fired_entry_signals=sum(int(row["fired_entry_signals"]) for row in counted),
+                evaluable_entry_decisions=sum(int(row["evaluable_entry_decisions"]) for row in counted),
+                not_evaluable_entry_decisions=sum(int(row["not_evaluable_entry_decisions"]) for row in counted),
+                first_scanned_bar=min(scanned_bars),
+                last_scanned_bar=max(scanned_bars),
+            )
+        except ValueError:
+            # ⚠ PER VERSION, which is the whole point. `derive_fire_rate` raises on a
+            # violated producer invariant and should — but this loop feeds an
+            # AGGREGATE endpoint, so an uncaught raise blanks all ten cards over one
+            # bad row. `_commit_strategy` already settles this shape for the writer:
+            # *"One strategy's failure does not stop the others."*
+            #
+            # ⚠ UNREACHABLE FROM THE FOLD ABOVE, and kept anyway. Every invariant
+            # holds by construction here: `fired_days` and `decision_days` are both
+            # counted over `counted`; `counted` is a subset of the version's rows;
+            # and `_FIRE_RATE_SQL` computes evaluable as `fired + not_fired`. The
+            # guard is for the fold this becomes later, which is precisely when
+            # nobody will be re-deriving those three facts.
+            #
+            # ⚠ And the card SAYS SO rather than falling back to a plausible number.
+            # A refusal nobody can see would leave the corruption exactly as
+            # invisible as the silent zero this ticket exists to remove.
+            logger.exception(
+                "load_fire_rate: %s/%s violates a producer invariant — refusing its rates, other strategies unaffected",
+                strategy_id,
+                strategy_version,
+            )
+            rates[key] = StrategyFireRate(
+                scanned_days=len(scanned_bars),
+                decision_days=decision_days,
+                first_scanned_bar=min(scanned_bars),
+                last_scanned_bar=max(scanned_bars),
+                share_unavailable_reason="invariant_violated",
+                weekly_rate_unavailable_reason="invariant_violated",
+            )
     return rates
 
 
