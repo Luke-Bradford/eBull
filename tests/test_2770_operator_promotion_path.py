@@ -438,3 +438,19 @@ class TestTheEndpointCannotBeHandedADenominator:
         from app.api.strategies import StrategyAdvanceRequest
 
         assert field not in StrategyAdvanceRequest.model_fields
+
+    def test_a_whitespace_only_rationale_is_refused_at_the_boundary(self) -> None:
+        """`reason` is the promotion's audit rationale; `" "` is one character and no
+        rationale at all, so `min_length=1` alone would let it through."""
+        from pydantic import ValidationError
+
+        from app.api.strategies import StrategyAdvanceRequest
+
+        with pytest.raises(ValidationError):
+            StrategyAdvanceRequest(action="validate_historical", reason="   ")
+
+    def test_a_real_rationale_is_stored_stripped(self) -> None:
+        from app.api.strategies import StrategyAdvanceRequest
+
+        body = StrategyAdvanceRequest(action="validate_historical", reason="  all six windows landed  ")
+        assert body.reason == "all six windows landed"

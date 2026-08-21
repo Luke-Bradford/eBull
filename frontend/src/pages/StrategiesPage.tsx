@@ -1675,19 +1675,26 @@ const PROMOTION_STEP_LABELS: Record<StrategyOperatorAction, string> = {
 function PromotionStep({ strategy, onAdvanced }: { strategy: StrategyOverview; onAdvanced: () => void }) {
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
+  // ⚠ THE OPERATOR'S OWN WORDS, not a template. A promotion is an authorisation
+  // and `reason` is its audit rationale; sending a generated string would fill the
+  // audit column while recording nothing, which is worse than leaving it empty
+  // because it reads as a real justification forever after.
+  const [reason, setReason] = useState("");
   const action = strategy.next_operator_action;
   if (action === null) return null;
   const refusals = strategy.next_operator_action_refusals;
+  // Whitespace-only is not a rationale, and the server strips before validating —
+  // so the same string the button accepts is the one the endpoint accepts.
+  const reasonGiven = reason.trim().length > 0;
+  const blocked = saving || refusals.length > 0 || !reasonGiven;
 
   async function advance() {
-    if (action === null || saving || refusals.length) return;
+    if (action === null || blocked) return;
     setSaving(true);
     setFailed(null);
     try {
-      await advanceStrategyStage(strategy.strategy_id, {
-        action,
-        reason: `Operator advance from the strategies workspace: ${PROMOTION_STEP_LABELS[action]}`,
-      });
+      await advanceStrategyStage(strategy.strategy_id, { action, reason: reason.trim() });
+      setReason("");
       onAdvanced();
     } catch (error) {
       setFailed(error instanceof Error ? error.message : "The promotion was refused.");
@@ -1698,27 +1705,41 @@ function PromotionStep({ strategy, onAdvanced }: { strategy: StrategyOverview; o
 
   return (
     <div className="border-t border-slate-200 px-4 py-3 dark:border-slate-800">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <span className="text-xs font-semibold">Next step: {PROMOTION_STEP_LABELS[action]}</span>
-          <p className="mt-1 text-[11px] text-slate-500">
-            Evidence is selected by the server from every declared window and arm; it cannot be chosen here.
-          </p>
-        </div>
-        <button
-          type="button"
-          disabled={saving || refusals.length > 0}
-          onClick={() => void advance()}
-          className="min-h-11 cursor-pointer border border-blue-700 bg-blue-700 px-4 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {saving ? "Advancing…" : PROMOTION_STEP_LABELS[action]}
-        </button>
+      <div>
+        <span className="text-xs font-semibold">Next step: {PROMOTION_STEP_LABELS[action]}</span>
+        <p className="mt-1 text-[11px] text-slate-500">
+          Evidence is selected by the server from every declared window and arm; it cannot be chosen here.
+        </p>
       </div>
       {refusals.length ? (
         <ul className="mt-2 space-y-1 text-[11px] text-amber-700 dark:text-amber-300">
           {refusals.map((refusal) => <li key={refusal}>{refusal}</li>)}
         </ul>
       ) : null}
+      {/* Rendered even when refused, and disabled — the step stays visible so the
+          operator can see what is blocked rather than what is absent. */}
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <label className="min-w-[16rem] flex-1 text-[11px] font-medium text-slate-600 dark:text-slate-300">
+          Why are you advancing this strategy?
+          <input
+            type="text"
+            maxLength={500}
+            value={reason}
+            disabled={saving || refusals.length > 0}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Recorded on the promotion, permanently"
+            className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-xs disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950"
+          />
+        </label>
+        <button
+          type="button"
+          disabled={blocked}
+          onClick={() => void advance()}
+          className="min-h-11 cursor-pointer border border-blue-700 bg-blue-700 px-4 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {saving ? "Advancing…" : PROMOTION_STEP_LABELS[action]}
+        </button>
+      </div>
       {failed ? <p className="mt-2 text-[11px] text-red-700 dark:text-red-300">{failed}</p> : null}
     </div>
   );

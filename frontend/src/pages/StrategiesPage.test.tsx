@@ -716,12 +716,31 @@ describe("StrategiesPage", () => {
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     await userEvent.click(await screen.findByText("Research & validation"));
-    await userEvent.click(screen.getByRole("button", { name: "Validate historical evidence" }));
+    const button = screen.getByRole("button", { name: "Validate historical evidence" });
+    // A promotion is an authorisation; without a rationale there is nothing to record.
+    expect(button).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("Why are you advancing this strategy?"), "  all six windows landed  ");
+    await userEvent.click(button);
     await waitFor(() => expect(advance).toHaveBeenCalledTimes(1));
     const [, body] = advance.mock.calls[0]!;
     expect(body.action).toBe("validate_historical");
+    expect(body.reason).toBe("all six windows landed");
     // ⚠ The client must not be able to name its own evidence.
     expect(Object.keys(body).sort()).toEqual(["action", "reason"]);
+  });
+
+  it("will not advance on a whitespace-only rationale", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{ ...strategy, next_operator_action_refusals: [] }],
+    });
+    const advance = vi.spyOn(strategiesApi, "advanceStrategyStage");
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.type(screen.getByLabelText("Why are you advancing this strategy?"), "   ");
+    expect(screen.getByRole("button", { name: "Validate historical evidence" })).toBeDisabled();
+    expect(advance).not.toHaveBeenCalled();
   });
 
   it("renders a refused promotion verbatim rather than as a friendlier fiction", async () => {
@@ -735,6 +754,7 @@ describe("StrategiesPage", () => {
     );
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.type(screen.getByLabelText("Why are you advancing this strategy?"), "page was stale");
     await userEvent.click(screen.getByRole("button", { name: "Validate historical evidence" }));
     expect(
       await screen.findByText("action 'validate_historical' is not available from stage 'historical_validated'"),

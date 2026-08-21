@@ -7,13 +7,13 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Final, Literal, cast, get_args
+from typing import Annotated, Any, Final, Literal, cast, get_args
 
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from psycopg.pq import TransactionStatus
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from app.api.auth import require_session, require_session_or_service_token
 from app.api.portfolio import get_portfolio
@@ -1168,7 +1168,13 @@ class StrategyAdvanceRequest(BaseModel):
     """
 
     action: OperatorAction
-    reason: str = Field(min_length=1, max_length=500)
+    # ⚠ `strip_whitespace` BEFORE `min_length`, which is the order pydantic applies
+    # and the reason a bare `Field(min_length=1)` is not enough: `" "` is one
+    # character, so it validates, and the audit row then records a blank rationale
+    # for a promotion. `promote_strategy._require_text` also refuses it, but that
+    # surfaces as a 409 on a well-formed-looking request rather than a 422 on the
+    # input that is actually wrong.
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 
 
 class StrategyAdvanceResponse(BaseModel):
