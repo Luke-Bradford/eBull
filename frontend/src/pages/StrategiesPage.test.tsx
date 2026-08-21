@@ -739,8 +739,64 @@ describe("StrategiesPage", () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).not.toBeChecked();
+  });
+
+  it("performs the first automation enable from the default global-flag-false state", async () => {
+    // The repository ships `runtime_config.enable_auto_trading = false` and an
+    // unfunded, disabled pool. #2766: the page used to require that flag before
+    // it would call the endpoint that sets it, so this path was unreachable.
+    const ready = approvedOverview();
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...ready,
+      execution_enabled: false,
+      paper_pool: { ...ready.paper_pool, enabled: false },
+    });
+    const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({
+      ...ready.paper_pool,
+      enabled: true,
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
+    expect(master).not.toBeChecked();
+    expect(master).not.toBeDisabled();
+    await userEvent.click(master);
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      enabled: true,
+      capital_limit: "1000.000000",
+      risk_profile: "balanced",
+    })));
+  });
+
+  it("refuses the first enable while evidence readiness is false", async () => {
+    const ready = approvedOverview();
+    const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool");
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...ready,
+      execution_enabled: false,
+      paper_pool: { ...ready.paper_pool, enabled: false },
+      automation_readiness: { ...ready.automation_readiness, ready: false, state: "no_capital_candidates", blockers: ["no_capital_candidates"] },
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).toBeDisabled();
-    expect(screen.getByText("System-wide automatic trading is off. Enable that safety control before allowing new entries.")).toBeInTheDocument();
+    expect(screen.getByText("Automation stays off until at least one strategy passes validation.")).toBeInTheDocument();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("refuses the first enable on an account that can run neither demo nor live automation", async () => {
+    const ready = approvedOverview();
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...ready,
+      demo_connection: false,
+      live_strategy_activation_available: false,
+      execution_enabled: false,
+      paper_pool: { ...ready.paper_pool, enabled: false },
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
+    expect(master).toBeDisabled();
+    expect(screen.getByText("This account cannot run strategy automation. Connect the demo account, or complete real-money activation first.")).toBeInTheDocument();
   });
 
   it("shows compact prospective evidence when automation is ready", async () => {
