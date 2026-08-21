@@ -98,6 +98,15 @@ from app.services.strategy_monitoring import (
     pool_owned_pnl_by_strategy,
     realised_pnl_for_keys,
 )
+from app.services.strategy_operator_promotion import (
+    EvidenceRow,
+    OperatorAction,
+    advance_strategy,
+    evidence_refusal_summary,
+    next_operator_action_view,
+    recent_evidence_refusals,
+    select_latest_rows,
+)
 from app.services.strategy_position_manager import (
     StrategyPositionManagerError,
     manage_owned_position,
@@ -112,6 +121,7 @@ from app.services.strategy_result_ambiguity import (
     composed_holdout_ambiguity_refusals,
     record_sha256,
 )
+from app.services.strategy_result_identity import current_identity_pins, current_result_versions
 from app.services.strategy_signal_scan import (
     SCAN_UNIVERSE,
     choose_frontier,
@@ -484,6 +494,14 @@ class StrategyOverview(BaseModel):
     allocation: StrategyAllocationView
     allocation_ready: bool
     allocation_refusals: list[str]
+    #: The one ordered step `POST /{id}/advance` would take from this stage (#2770),
+    #: NAMED ALONGSIDE its refusals rather than nulled by them — an operator who
+    #: cannot act needs to know which step is blocked, not that there is no step.
+    #: `null` means a terminal stage with no forward edge.
+    #: ⚠ ADVISORY. A page cannot be transactionally coupled to a later request, so
+    #: the transaction stays authoritative and a stale page gets a 409 to render.
+    next_operator_action: OperatorAction | None
+    next_operator_action_refusals: list[str]
 
 
 class StrategyAttributionView(BaseModel):
@@ -1139,6 +1157,32 @@ class StrategyLifecycleResponse(BaseModel):
     promotion_id: int
 
 
+class StrategyAdvanceRequest(BaseModel):
+    """⚠ NO `strategy_version`, NO `to_stage`, NO `result_ids` — deliberately (#2770).
+
+    Those are the three inputs that would let a browser choose its own promotion
+    denominator. `promote_strategy` validates caller-supplied `result_ids`
+    INDIVIDUALLY, so a favourable subset passes every per-row check while the
+    promotion rests on a cherry-picked set. The version and evidence are resolved
+    inside the locked transaction instead.
+    """
+
+    action: OperatorAction
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class StrategyAdvanceResponse(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    from_stage: str | None
+    stage: str
+    promotion_id: int
+    evidence_ref: str | None
+    #: 24 for the two result-evidence stages; 0 for `research_candidate` (no evidence)
+    #: and for `paper_enabled`, which pins an assessment rather than results.
+    pinned_result_count: int
+
+
 def _live_gate_view(report: LiveGateReport) -> LiveGateResponse:
     return LiveGateResponse(
         strategy_id=report.strategy_id,
@@ -1162,15 +1206,12 @@ def _live_gate_view(report: LiveGateReport) -> LiveGateResponse:
     )
 
 
-def _current_versions() -> dict[str, str]:
-    """The identities STORED RESULTS carry — the backtest measurement basis.
-
-    ⚠ NOT the identities the live scan writes. See ``_current_scan_versions``.
-    """
-    return {
-        strategy_id: entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
-        for strategy_id, entry in STRATEGY_MANIFEST.items()
-    }
+# ⚠ MOVED TO `app.services.strategy_result_identity` (#2770) and aliased here, not
+# reimplemented. `strategy_operator_promotion` binds the same basis to assemble the
+# promotion denominator, and a service may not import an API module. The alias keeps
+# this module's own call sites and the tests that monkeypatch
+# `app.api.strategies._current_versions` working unchanged.
+_current_versions = current_result_versions
 
 
 def _current_scan_versions() -> dict[str, str]:
@@ -1710,27 +1751,11 @@ def _walk_forward_split_view(split: StrategyWalkForwardSplit) -> WalkForwardSpli
     )
 
 
-def _current_identity_pins() -> dict[str, str]:
-    """The pins a stored row must match to sit on today's measurement basis.
-
-    Exactly the equality predicates ``_RESULTS_SQL`` applies, named once so the
-    prior-version reader cannot drift from the current-version one. These ARE the
-    result identity — differing on any of them means the numbers are not
-    comparable, which is why the reader reports the difference instead of either
-    hiding the version or splicing its figures in.
-    """
-    return {
-        "namespace": "hold_out",
-        "corpus_version": corpus_version_for(BACKTEST_UNIVERSE),
-        "cost_model_id": COST_MODEL_ID,
-        "sizing_rule": SIZING_RULE_ID,
-        "benchmark_rule": BENCHMARK_RULE_ID,
-        "return_basis": TOTAL_RETURN_BASIS,
-        "ambiguity_rule_version": AMBIGUITY_RULE_VERSION,
-        "position_rule_set_version": POSITION_RULE_SET_VERSION,
-        "outcome_rule_set_version": OUTCOME_RULE_SET_VERSION,
-        "input_rule_set_version": QUARANTINE_RULE_SET_VERSION,
-    }
+# ⚠ MOVED TO `app.services.strategy_result_identity` (#2770), same reason as
+# `_current_versions` above. The docstring there carries the additional load this
+# dict now bears: it is also the cross-row coherence rule for a promotion
+# denominator, so a second copy would be a correctness defect and not just churn.
+_current_identity_pins = current_identity_pins
 
 
 def build_prior_versions(
@@ -2157,6 +2182,36 @@ def get_strategy_overview(
                     allocation_refusals.append("prospective_assessment_stale")
         remaining = max(control.capital_limit - control.reserved_capital, Decimal("0"))
         split = derive_walk_forward_split(walk_forward_by_strategy.get(strategy_id, []))
+        # ⚠ Built from `strategy_rows` — the SAME population `advance_strategy` loads,
+        # because `_RESULTS_SQL` binds `current_identity_pins()` and this filters the
+        # NULL `evidence_window_id` rows the loader's WHERE excludes. It then runs the
+        # SAME `select_latest_rows`, so the card and the transaction cannot disagree
+        # about which row is current. (`_RESULTS_SQL` itself does not de-duplicate:
+        # the `arm_keys` set above reads eight rows on four identities as `complete`.)
+        next_operator_action, next_operator_action_refusals = next_operator_action_view(
+            stage=control.stage,
+            purpose=entry.purpose,
+            evidence_refusals=evidence_refusal_summary(
+                recent_evidence_refusals(
+                    select_latest_rows(
+                        EvidenceRow(
+                            window_id=str(row["evidence_window_id"]),
+                            ambiguity_arm=str(row["ambiguity_arm"]),
+                            quarantine_arm=str(row["quarantine_arm"]),
+                            result_id=int(cast(int, row["result_id"])),
+                        )
+                        for row in strategy_rows
+                        if row["evidence_window_id"] is not None
+                    )
+                )
+            ),
+            # The assessment refusals this loop has already established, reused rather
+            # than recomputed — otherwise the paper step renders as available whenever
+            # a strategy reaches `forward_observation`, however stale its assessment.
+            assessment_refusals=[
+                refusal for refusal in allocation_refusals if refusal.startswith("prospective_assessment")
+            ],
+        )
         strategies.append(
             StrategyOverview(
                 strategy_id=strategy_id,
@@ -2215,6 +2270,8 @@ def get_strategy_overview(
                 ),
                 allocation_ready=not allocation_refusals,
                 allocation_refusals=allocation_refusals,
+                next_operator_action=next_operator_action,
+                next_operator_action_refusals=list(next_operator_action_refusals),
             )
         )
     reserved_total = sum((item.allocation.reserved_capital for item in strategies), Decimal("0"))
@@ -3416,6 +3473,58 @@ def attempt_live_promotion(
     except StrategyControlError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return LivePromotionAttemptResponse(assessment_id=assessment_id, report=_live_gate_view(report))
+
+
+@router.post("/{strategy_id}/advance", response_model=StrategyAdvanceResponse)
+def advance_strategy_stage(
+    strategy_id: str,
+    body: StrategyAdvanceRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyAdvanceResponse:
+    """Advance one strategy by one declared step, on evidence assembled server-side.
+
+    ⚠ ``require_session``, not the router's ``require_session_or_service_token``. A
+    promotion is an operator authorisation recorded with a named ``promoted_by``, and
+    a service token has no operator identity to attribute one to — the same reasoning
+    ``update_core_mandate`` gives.
+
+    ⚠ ``UniqueViolation`` is deliberately NOT caught. Two concurrent submissions
+    serialise on the per-version advisory lock ``advance_strategy`` takes, so the
+    second reads the advanced stage and refuses with an invalid-transition 409 before
+    reaching an INSERT. Catching the violation instead would need constraint-name
+    discrimination (``idx_strategy_promotions_one_initial`` and
+    ``..._one_successor`` mean different things) and a savepoint to avoid leaving the
+    transaction aborted — all to handle a race the lock already excludes. The indexes
+    stay the backstop they were designed to be (#2612).
+
+    So two identical submissions give one 200 and one 409. That is duplicate
+    PREVENTION, which is what is wanted here; it is not idempotent replay, which would
+    need a request key and is not offered.
+    """
+    if strategy_id not in STRATEGY_MANIFEST:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    try:
+        with conn.transaction():
+            outcome = advance_strategy(
+                conn,
+                strategy_id=strategy_id,
+                action=body.action,
+                advanced_by=session.username,
+                reason=body.reason,
+                as_of=datetime.now(UTC),
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return StrategyAdvanceResponse(
+        strategy_id=outcome.strategy_id,
+        strategy_version=outcome.strategy_version,
+        from_stage=outcome.from_stage,
+        stage=outcome.stage,
+        promotion_id=outcome.promotion.promotion_id,
+        evidence_ref=outcome.evidence_ref,
+        pinned_result_count=outcome.pinned_result_count,
+    )
 
 
 @router.post("/{strategy_id}/lifecycle", response_model=StrategyLifecycleResponse)

@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import {
+  advanceStrategyStage,
   closeStrategyOwnedPosition,
   fetchFiredSignals,
   fetchStrategyOverview,
@@ -17,6 +18,7 @@ import type {
   FiredSignal,
   FiredSignalsResponse,
   StrategyEvidenceWindow,
+  StrategyOperatorAction,
   StrategySplitUnavailableReason,
   StrategyFireRate,
   StrategyOverview,
@@ -1653,7 +1655,76 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
   );
 }
 
-function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
+const PROMOTION_STEP_LABELS: Record<StrategyOperatorAction, string> = {
+  register_research_candidate: "Register as research candidate",
+  validate_historical: "Validate historical evidence",
+  start_forward_observation: "Start forward observation",
+  enable_paper: "Approve for paper trading",
+};
+
+/** The one ordered promotion step, with the reasons it would refuse (#2770).
+ *
+ * ⚠ The button is DISABLED by refusals but the step is still NAMED, because
+ * "which step is blocked, and why" is the thing an operator needs. Hiding the
+ * step when it cannot run leaves the page saying nothing at all.
+ *
+ * ⚠ This is advisory. The transaction re-reads the stage under its own lock and
+ * re-assembles the evidence, so a stale page gets a 409 — which is why the error
+ * is rendered verbatim rather than mapped to a friendlier fiction.
+ */
+function PromotionStep({ strategy, onAdvanced }: { strategy: StrategyOverview; onAdvanced: () => void }) {
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const action = strategy.next_operator_action;
+  if (action === null) return null;
+  const refusals = strategy.next_operator_action_refusals;
+
+  async function advance() {
+    if (action === null || saving || refusals.length) return;
+    setSaving(true);
+    setFailed(null);
+    try {
+      await advanceStrategyStage(strategy.strategy_id, {
+        action,
+        reason: `Operator advance from the strategies workspace: ${PROMOTION_STEP_LABELS[action]}`,
+      });
+      onAdvanced();
+    } catch (error) {
+      setFailed(error instanceof Error ? error.message : "The promotion was refused.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="border-t border-slate-200 px-4 py-3 dark:border-slate-800">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <span className="text-xs font-semibold">Next step: {PROMOTION_STEP_LABELS[action]}</span>
+          <p className="mt-1 text-[11px] text-slate-500">
+            Evidence is selected by the server from every declared window and arm; it cannot be chosen here.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={saving || refusals.length > 0}
+          onClick={() => void advance()}
+          className="min-h-11 cursor-pointer border border-blue-700 bg-blue-700 px-4 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {saving ? "Advancing…" : PROMOTION_STEP_LABELS[action]}
+        </button>
+      </div>
+      {refusals.length ? (
+        <ul className="mt-2 space-y-1 text-[11px] text-amber-700 dark:text-amber-300">
+          {refusals.map((refusal) => <li key={refusal}>{refusal}</li>)}
+        </ul>
+      ) : null}
+      {failed ? <p className="mt-2 text-[11px] text-red-700 dark:text-red-300">{failed}</p> : null}
+    </div>
+  );
+}
+
+function ResearchCandidate({ strategy, onAdvanced }: { strategy: StrategyOverview; onAdvanced: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const arm = representativeArm(strategy);
   const validation = validationState(strategy);
@@ -1675,6 +1746,7 @@ function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
           {expanded ? "Hide evidence" : "View evidence"}
         </button>
       </div>
+      <PromotionStep strategy={strategy} onAdvanced={onAdvanced} />
       {expanded ? <EvidenceDetail strategy={strategy} /> : null}
     </article>
   );
@@ -1895,7 +1967,7 @@ export function StrategiesPage() {
                   ) : null}
                   <div className="space-y-2">
                     {researchCandidates.length
-                      ? researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} />)
+                      ? researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} onAdvanced={overview.refetch} />)
                       : <EmptyState title="No capital candidates" description="The current bounded research programme produced no strategy safe enough to allocate capital." />}
                   </div>
                 </section>
