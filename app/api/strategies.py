@@ -1568,10 +1568,20 @@ def get_strategy_overview(
     # Current versions only: a strategy_version is a rule set, so pooling two
     # would average two arithmetics into one rate (#2670's lesson).
     fire_rate_by_strategy = load_fire_rate(conn, versions=scan_version_values)
-    # ⚠ `strategy_deployments.strategy_version` is carried unchanged rather than
-    # rebased: a deployment is minted off a promotion, so which basis it holds is
-    # that path's contract and not this one's. It is inert today — 0 deployment
-    # rows — and widening the filter cannot hide a row, only admit one.
+    # ⚠⚠ THE DEPLOYMENT VERSIONS STAY IN THE FILTER — they are NOT dead weight
+    # behind the single-key card lookup below. `realised_pnl_for_keys` reads this
+    # same dict at `paper_deployment_keys` for the capital base, and its own
+    # docstring is why: *"Old strategy versions remain part of the shared pot
+    # after they are retired; limiting this calculation to the current manifest
+    # would make realised gains or losses disappear from the capital base."*
+    # Dropping them would not raise — a missing key defaults to `StrategyPnl()`,
+    # whose `reconciled_realised_pnl` is 0 with no incomplete reason, so a
+    # deployed strategy's realised P&L would read as a confident zero.
+    #
+    # ⚠ That the lookup succeeds at all also fixes the basis question here: the
+    # rows are keyed by `strategy_signals.strategy_version`, so a deployment key
+    # can only ever match when a deployment carries the version its SIGNALS
+    # carry — the scan basis. Untestable today at 0 deployment rows.
     scan_pnl_versions = sorted({*scan_version_values, *(version for _strategy_id, version in paper_deployment_keys)})
     pnl_by_strategy = load_owned_pnl(conn, versions=scan_pnl_versions)
     control_by_strategy = load_control_state(conn, versions=version_values)
@@ -1727,6 +1737,10 @@ def get_strategy_overview(
         # A key absent from the census has never been scanned, which the default
         # `rate_unavailable_reason` states rather than reading as a zero rate.
         fire_rate = fire_rate_by_strategy.get(scan_key, StrategyFireRate())
+        # ⚠ ONE key, so a deployment held at a PRIOR scan version shows no P&L on
+        # the card even though `scan_pnl_versions` loaded it and the capital base
+        # counts it. Pre-existing and unchanged here — summing `StrategyPnl`
+        # across versions is a definitional change, tracked separately.
         pnl = pnl_by_strategy.get(scan_key, StrategyPnl())
         control = control_by_strategy.get(key, StrategyControlState())
         allocation_refusals: list[str] = []
