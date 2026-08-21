@@ -16,6 +16,7 @@ import ast
 import inspect
 import re
 import textwrap
+from typing import get_type_hints
 
 from app.api import strategies as strategies_api
 from app.api.strategies import (
@@ -290,11 +291,57 @@ def test_every_loader_over_a_scan_relation_is_called_on_the_scan_basis() -> None
             )
 
 
+def _assert_read_through_a_version_collapsing_pool(
+    source: str,
+    holder: str,
+    scan_derived: frozenset[str],
+    result_derived: frozenset[str],
+) -> None:
+    """The second safe read shape: the version dimension is ERASED, not chosen (#2807).
+
+    ``load_owned_pnl``'s rows are no longer read one version at a time. A paper
+    deployment stays at the version it was deployed on while the live scan
+    rotates, so the card pools every version the strategy holds positions under —
+    there is then no version key to get wrong, which is a stronger property than
+    picking the right one.
+
+    That is only true while the pooling function really collapses the version, so
+    this asserts its RETURN TYPE rather than trusting its name: a bare ``str`` key
+    is a ``strategy_id``, and a tuple key would put the #2806 defect straight back
+    with a guard that no longer looks for it.
+    """
+    pooled = re.findall(rf"(\w+)\s*=\s*(\w+)\(\s*{holder}\s*\)", source)
+    assert pooled, (
+        f"{holder} is never read back — neither at a scan key nor through a pooling call that "
+        "takes it whole (#2806/#2807)"
+    )
+    for pooled_name, pooler_name in pooled:
+        pooler = getattr(strategy_monitoring, pooler_name, None)
+        assert pooler is not None, f"{pooler_name} is not a strategy_monitoring function"
+        returns = get_type_hints(pooler)["return"]
+        assert returns == dict[str, strategy_monitoring.StrategyPnl], (
+            f"{pooler_name} returns {returns!r}, so it does not collapse the version dimension — "
+            "a pooled read is only basis-safe while the key is a bare strategy_id (#2807)"
+        )
+        lookups = re.findall(rf"\b{pooled_name}\.get\(\s*(\w+)", source)
+        assert lookups, f"{pooled_name} is never read back"
+        for lookup_key in lookups:
+            assert lookup_key not in scan_derived and lookup_key not in result_derived, (
+                f"{pooled_name} holds one row per strategy but is read at {lookup_key!r}, which "
+                "carries a version basis — the pooled dict has no version key (#2807)"
+            )
+
+
 def test_the_scan_basis_loaders_are_read_back_at_the_scan_key() -> None:
     """Rebinding the query is only half the fix, and the halves fail identically.
 
     Both a result-basis filter and a result-basis dict lookup produce an empty
     card, so fixing one and not the other looks exactly like fixing neither.
+
+    Two read shapes are safe, and a loader must use one of them: per-version at a
+    scan-derived key, or pooled through a call that erases the version entirely
+    (#2807). Neither branch is an exemption — the pooled one carries its own
+    assertions in the helper above.
     """
     source = inspect.getsource(get_strategy_overview)
     scan_derived, result_derived = _the_two_bases_as_named_in(source)
@@ -303,7 +350,9 @@ def test_the_scan_basis_loaders_are_read_back_at_the_scan_key() -> None:
         assert assigned, f"{name} result is not bound to a name in get_strategy_overview"
         for holder in assigned:
             lookups = re.findall(rf"\b{holder}\.get\(\s*(\w+)", source)
-            assert lookups, f"{holder} is never read back"
+            if not lookups:
+                _assert_read_through_a_version_collapsing_pool(source, holder, scan_derived, result_derived)
+                continue
             for lookup_key in lookups:
                 assert lookup_key in scan_derived and lookup_key not in result_derived, (
                     f"{holder} holds rows keyed by the scan basis but is read at {lookup_key!r}, "

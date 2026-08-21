@@ -807,6 +807,70 @@ def load_owned_pnl(conn: psycopg.Connection[Any], *, versions: Sequence[str]) ->
     return result
 
 
+def _pooled_cash(values: Sequence[Decimal | None]) -> Decimal | None:
+    """Sum cash across versions, propagating a single unknown to the whole pool.
+
+    ``None`` on a ``StrategyPnl`` cash field means *unreconcilable*, never zero —
+    each one is set exactly when a named ``incomplete_reason`` makes that figure
+    unknown. Treating it as zero would report a confident total built on a hole,
+    so one unknown part makes the pooled figure unknown.
+    """
+    if any(value is None for value in values):
+        return None
+    return sum((value for value in values if value is not None), Decimal("0"))
+
+
+def pool_owned_pnl_by_strategy(
+    pnl_by_strategy: dict[tuple[str, str], StrategyPnl],
+) -> dict[str, StrategyPnl]:
+    """Pool each strategy's owned P&L across every version it holds positions under.
+
+    A paper deployment stays at the ``strategy_version`` it was deployed on while
+    the live scan rotates to a new one, so reading the per-version dict at the
+    CURRENT scan key alone drops that deployment's P&L off its card even though
+    ``load_paper_realised_pnl`` still counts it in the capital base — the
+    asymmetry #2807 records. Dollars pool across rule sets in a way rates do not
+    (#2670: pooling two rates averages two arithmetics), so the counts and cash
+    sums add; ``complete`` and ``incomplete_reasons`` combine FAIL-CLOSED, as
+    ``all()`` and a set union, because a hole in any version is a hole in the
+    pooled figure.
+
+    Only versions the caller loaded can appear here: the pool is exactly the set
+    ``load_owned_pnl`` was asked for, not every version that ever existed.
+    """
+    grouped: dict[str, list[StrategyPnl]] = defaultdict(list)
+    for (strategy_id, _version), pnl in pnl_by_strategy.items():
+        grouped[strategy_id].append(pnl)
+
+    pooled: dict[str, StrategyPnl] = {}
+    for strategy_id, parts in grouped.items():
+        realised = _pooled_cash([part.realised_pnl for part in parts])
+        unrealised = _pooled_cash([part.unrealised_pnl for part in parts])
+        reasons: set[str] = set()
+        for part in parts:
+            reasons.update(part.incomplete_reasons)
+        pooled[strategy_id] = StrategyPnl(
+            strategy_trade_count=sum(part.strategy_trade_count for part in parts),
+            owned_position_count=sum(part.owned_position_count for part in parts),
+            active_position_count=sum(part.active_position_count for part in parts),
+            close_event_count=sum(part.close_event_count for part in parts),
+            invested_capital=_pooled_cash([part.invested_capital for part in parts]),
+            realised_pnl=realised,
+            unrealised_pnl=unrealised,
+            # Recomputed rather than summed, so the pooled row keeps the same
+            # total == realised + unrealised invariant each part was built with.
+            total_pnl=(realised + unrealised if realised is not None and unrealised is not None else None),
+            observed_fees=_pooled_cash([part.observed_fees for part in parts]),
+            complete=all(part.complete for part in parts),
+            incomplete_reasons=tuple(sorted(reasons)),
+            reconciled_realised_pnl=sum(
+                (part.reconciled_realised_pnl for part in parts),
+                Decimal("0"),
+            ),
+        )
+    return pooled
+
+
 def realised_pnl_for_keys(
     pnl_by_strategy: dict[tuple[str, str], StrategyPnl],
     keys: Sequence[tuple[str, str]],
@@ -986,4 +1050,5 @@ __all__ = [
     "load_entry_block_state",
     "load_fire_rate",
     "load_owned_pnl",
+    "pool_owned_pnl_by_strategy",
 ]
