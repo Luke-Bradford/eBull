@@ -122,6 +122,13 @@ _KILL_REAP_TIMEOUT_S: Final[float] = 10.0
 # itself from "never started".
 _DRAIN_PROGRESS_S: Final[float] = 15.0
 
+# How much longer to wait when the drain budget expires but a job is
+# still provably alive (#2274, Codex checkpoint 2 round 4). Also the
+# re-probe cadence in that state, since each extension ends in another
+# probe. Bounded by liveness rather than wall-clock: the extension stops
+# the moment the heartbeat goes stale.
+_DRAIN_EXTENSION_S: Final[float] = 60.0
+
 # After a SIGKILL the fence connection is closed by the OS, not by the
 # daemon, so Postgres only drops the advisory lock once it notices the
 # dead session. Same one-second settle stack-restart.sh uses.
@@ -153,6 +160,19 @@ _CHILD_ARGV: Final[list[str]] = [sys.executable, "-m", "app.jobs"]
 # rows that are stale by their own 300s cut would mask an older but
 # still-live 1800s job and return "nothing to defer" — preempting
 # exactly the run this change protects (Codex checkpoint 2, round 3).
+#
+# ⚠ The registry is keyed by admin `process_id` and this query matches on
+# `job_runs.job_name`, which is NOT a bug: `process_id` is the
+# `ScheduledJob.name` verbatim for everything that owns a job_runs row.
+# The three keys that do not match (`bootstrap`, `sec_13f_sweep`,
+# `nport_sweep`) are exactly the three that are not scheduled jobs and so
+# can never produce one — the registry's own docstring says sweeps "have
+# no own active_run". Translating them to `sec_13f_quarterly_sweep` /
+# `sec_n_port_ingest` (Codex checkpoint 2, round 6) would add keys that
+# match nothing either. Reproduce with:
+#   python -c "from app.workers.scheduler import SCHEDULED_JOBS; \
+#   from app.services.processes.stale_thresholds import overridden_process_ids; \
+#   n={j.name for j in SCHEDULED_JOBS}; print({k: k in n for k in overridden_process_ids()})"
 _THRESHOLD_OVERRIDES_JSON: Final[str] = json.dumps(
     {process_id: get_threshold(process_id) for process_id in sorted(overridden_process_ids())}
 )
@@ -327,11 +347,43 @@ def _spawn_child() -> tuple[subprocess.Popen[bytes], float]:
     return subprocess.Popen(_CHILD_ARGV, cwd=_REPO_ROOT), spawn_time
 
 
-def _stop_child(proc: subprocess.Popen[bytes]) -> None:
+def _stop_child(
+    proc: subprocess.Popen[bytes],
+    *,
+    extend_while_live: bool = False,
+    stop_event: threading.Event | None = None,
+) -> None:
     """SIGTERM the child and WAIT for it to die, escalating if it hangs.
 
     Returns only once the process has been reaped, so the caller is safe
     to spawn a replacement (see the singleton-fence note above).
+
+    ``extend_while_live`` closes the gap between the supervisor's liveness
+    probe and this SIGTERM (Codex checkpoint 2, round 4). The scheduler can
+    start a long job in that window, and it would then be SIGKILLed at the
+    drain budget — the very loss this change exists to prevent. With the
+    flag set, expiry of the budget re-probes instead of escalating, and
+    extends by ``_DRAIN_EXTENSION_S`` for as long as a job is provably
+    alive. Bounded by liveness, not by wall-clock: a job that stops
+    heartbeating goes stale and the escalation proceeds.
+
+    It also fixes the original bug from the other side. A fixed 180s cap is
+    what turns a graceful shutdown into data loss, because the drain a
+    long job needs is longer than any constant that is safe to wait on
+    blindly — the heartbeat is what makes waiting safe.
+
+    Left OFF for the supervisor's own shutdown: an explicit stop drains
+    and kills on the budget, because deferral must not become a veto on
+    the operator stopping the stack.
+
+    ⚠ That is not enough on its own, which is why ``stop_event`` is also
+    threaded in (Codex checkpoint 2, round 5). A shutdown signal can
+    arrive while an AUTOMATIC reload is already inside this function, and
+    the handler that sets the event runs on the watcher's frame, not
+    this one — so without the event here the extension loop keeps
+    extending and the operator cannot stop the stack for as long as the
+    job keeps heartbeating. Once the event is set, extensions stop and
+    the escalation proceeds on the current budget.
     """
     if proc.poll() is not None:
         return
@@ -345,12 +397,31 @@ def _stop_child(proc: subprocess.Popen[bytes]) -> None:
     # Wait in _DRAIN_PROGRESS_S slices rather than one long block, so a slow
     # drain reports itself (#2666).  The deadline is computed once: slicing must
     # not extend the total budget, which is what a naive per-slice timeout would
-    # do.
+    # do.  The ONLY thing that may move it is a proven-live job, below.
     deadline = started + _DRAIN_TIMEOUT_S
     drained = False
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            shutting_down = stop_event is not None and stop_event.is_set()
+            if extend_while_live and shutting_down:
+                logger.info(
+                    "jobs dev-reload: shutdown requested mid-drain — no longer extending pid %d",
+                    proc.pid,
+                )
+            if extend_while_live and not shutting_down:
+                blocker = live_job()
+                if blocker is not None:
+                    logger.info(
+                        "jobs dev-reload: pid %d past its %.0fs drain budget but %s is live — "
+                        "extending %.0fs rather than escalating",
+                        proc.pid,
+                        _DRAIN_TIMEOUT_S,
+                        blocker,
+                        _DRAIN_EXTENSION_S,
+                    )
+                    deadline = time.monotonic() + _DRAIN_EXTENSION_S
+                    continue
             break
         try:
             proc.wait(timeout=min(_DRAIN_PROGRESS_S, remaining))
@@ -369,7 +440,7 @@ def _stop_child(proc: subprocess.Popen[bytes]) -> None:
     logger.warning(
         "jobs dev-reload: pid %d still draining after %.0fs — escalating to SIGKILL",
         proc.pid,
-        _DRAIN_TIMEOUT_S,
+        time.monotonic() - started,
     )
     proc.kill()
     try:
@@ -507,7 +578,10 @@ def _supervise() -> int:
                     now - deferred_since,
                 )
             logger.info("jobs dev-reload: %d change(s), e.g. %s — reloading", len(pending), next(iter(pending)))
-            _stop_child(child)
+            # extend_while_live closes the probe->SIGTERM race: the scheduler
+            # can start a long job in that window, and it must not be killed
+            # at the drain budget just for starting a moment too late.
+            _stop_child(child, extend_while_live=True, stop_event=stop_event)
             if stop_event.is_set():
                 return 0
             child, spawn_time = _spawn_child()

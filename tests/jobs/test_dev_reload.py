@@ -145,6 +145,76 @@ def test_slicing_the_wait_does_not_extend_the_drain_budget(monkeypatch: pytest.M
     assert elapsed < 5.0, f"drain budget was not bounded: {elapsed:.2f}s"
 
 
+def test_a_job_that_goes_live_during_the_drain_is_not_escalated(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Codex checkpoint 2, round 4 — the probe->SIGTERM race.
+
+    `live_job()` can return None and the scheduler start a long job before
+    SIGTERM lands. That job would then be SIGKILLed at the drain budget, which
+    is the exact loss this change exists to prevent. Expiry re-probes instead
+    of escalating, for as long as something is provably alive.
+    """
+    monkeypatch.setattr(dev_reload, "_DRAIN_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(dev_reload, "_DRAIN_PROGRESS_S", 0.01)
+    monkeypatch.setattr(dev_reload, "_DRAIN_EXTENSION_S", 0.05)
+    monkeypatch.setattr(dev_reload, "_POST_KILL_SETTLE_S", 0.0)
+    # Live for the first two budget expiries, then stale.
+    results = iter(["strategy_backtest_run run 1 (1/2 done, heartbeat 1s ago)"] * 2)
+    monkeypatch.setattr(dev_reload, "live_job", lambda: next(results, None))
+
+    proc = _FakeProc(hangs_for=10_000)  # never drains on its own
+    with caplog.at_level(logging.INFO, logger=dev_reload.__name__):
+        dev_reload._stop_child(cast(Any, proc), extend_while_live=True)
+
+    extensions = [r for r in caplog.records if "extending" in r.message]
+    assert len(extensions) == 2, f"expected 2 liveness extensions, got {len(extensions)}"
+    assert proc.killed, "escalation must still happen once the heartbeat goes stale"
+
+
+def test_a_shutdown_signal_mid_drain_stops_the_extensions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex checkpoint 2, round 5. The shutdown handler runs on the watcher's
+    frame, so without the event threaded in here an operator Ctrl-C arriving
+    during an automatic reload would be ignored for as long as the job kept
+    heartbeating — the stack would become unstoppable."""
+    import threading
+
+    monkeypatch.setattr(dev_reload, "_DRAIN_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(dev_reload, "_DRAIN_PROGRESS_S", 0.01)
+    monkeypatch.setattr(dev_reload, "_DRAIN_EXTENSION_S", 0.05)
+    monkeypatch.setattr(dev_reload, "_POST_KILL_SETTLE_S", 0.0)
+    # Always live: only the stop event can end this drain.
+    monkeypatch.setattr(dev_reload, "live_job", lambda: "strategy_backtest_run run 1 (1/2, heartbeat 1s ago)")
+
+    stop_event = threading.Event()
+    stop_event.set()
+    proc = _FakeProc(hangs_for=10_000)
+    dev_reload._stop_child(cast(Any, proc), extend_while_live=True, stop_event=stop_event)
+    assert proc.killed, "a set stop_event must end the drain even while a job is live"
+
+
+def test_the_shutdown_path_still_kills_on_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deferral withholds an AUTOMATIC reload; it is not a veto on the operator
+    stopping the stack. So the default (shutdown) path must not consult
+    `live_job` at all."""
+    monkeypatch.setattr(dev_reload, "_DRAIN_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(dev_reload, "_DRAIN_PROGRESS_S", 0.01)
+    monkeypatch.setattr(dev_reload, "_POST_KILL_SETTLE_S", 0.0)
+
+    probes = 0
+
+    def _counting_live_job() -> str | None:
+        nonlocal probes
+        probes += 1
+        return "strategy_backtest_run run 1 (1/2 done, heartbeat 1s ago)"
+
+    monkeypatch.setattr(dev_reload, "live_job", _counting_live_job)
+    proc = _FakeProc(hangs_for=10_000)
+    dev_reload._stop_child(cast(Any, proc))
+    assert proc.killed, "an explicit stop must still escalate on the budget"
+    assert probes == 0, "the shutdown path must not consult live_job"
+
+
 def test_running_commit_ignores_an_inherited_git_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     """A git hook exports GIT_DIR into everything it runs, so an unscrubbed call
     would resolve against the hook's repo rather than ours (#2658's trap)."""
@@ -299,7 +369,7 @@ def _drive_supervisor(
 
     stops: list[str] = []
     monkeypatch.setattr(dev_reload, "_spawn_child", _fake_spawn)
-    monkeypatch.setattr(dev_reload, "_stop_child", lambda proc: stops.append(str(proc.pid)))
+    monkeypatch.setattr(dev_reload, "_stop_child", lambda proc, **_kw: stops.append(str(proc.pid)))
     monkeypatch.setattr(dev_reload, "_LIVE_JOB_PROBE_PERIOD_S", 0.0)
 
     results = iter(live_job_results)
@@ -384,7 +454,7 @@ def test_a_child_that_dies_holding_changes_respawns_on_them(
         return cast(Any, proc), 0.0
 
     monkeypatch.setattr(dev_reload, "_spawn_child", _fake_spawn)
-    monkeypatch.setattr(dev_reload, "_stop_child", lambda _proc: None)
+    monkeypatch.setattr(dev_reload, "_stop_child", lambda _proc, **_kw: None)
     monkeypatch.setattr(dev_reload, "_LIVE_JOB_PROBE_PERIOD_S", 0.0)
     monkeypatch.setattr(dev_reload, "live_job", _counting_live_job)
 
