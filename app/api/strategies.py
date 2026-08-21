@@ -1489,7 +1489,8 @@ def get_strategy_overview(
     # scan relations are keyed by the scan basis and share no identity with the
     # result basis, so binding `version_values` to them matches nothing at all.
     scan_versions = _current_scan_versions()
-    scan_params = {"versions": list(scan_versions.values())}
+    scan_version_values = list(scan_versions.values())
+    scan_params = {"versions": scan_version_values}
     params = {
         "versions": version_values,
         "corpus_version": corpus_version_for(BACKTEST_UNIVERSE),
@@ -1549,17 +1550,40 @@ def get_strategy_overview(
         cur.execute("SELECT DISTINCT strategy_id,strategy_version FROM strategy_deployments WHERE mode='paper'")
         paper_deployment_keys = [(str(row["strategy_id"]), str(row["strategy_version"])) for row in cur.fetchall()]
 
+    # ⚠ SCAN BASIS, not the result basis (#2806). All three of these loaders
+    # filter a relation the LIVE SCAN writes — `load_attribution` and
+    # `load_owned_pnl` on `strategy_signals.strategy_version`, `load_fire_rate`
+    # on `strategy_signal_daily_counts` — so they are the same #2803 defect one
+    # module over. #2803 rebound the queries executed as `cur.execute(_X_SQL,
+    # scan_params)` inside this file and could not reach these, which take their
+    # versions as a keyword argument. Measured on dev before the fix: of 56,835
+    # `strategy_signals` rows, 0 matched the result basis and 33,655 the scan
+    # basis; of 428 `strategy_signal_daily_counts` rows, 0 and 216.
     attribution_by_strategy = load_attribution(
         conn,
-        versions=version_values,
+        versions=scan_version_values,
         outcome_version=OUTCOME_RULE_SET_VERSION,
         input_version=QUARANTINE_RULE_SET_VERSION,
     )
     # Current versions only: a strategy_version is a rule set, so pooling two
     # would average two arithmetics into one rate (#2670's lesson).
-    fire_rate_by_strategy = load_fire_rate(conn, versions=version_values)
-    pnl_versions = sorted({*version_values, *(version for _strategy_id, version in paper_deployment_keys)})
-    pnl_by_strategy = load_owned_pnl(conn, versions=pnl_versions)
+    fire_rate_by_strategy = load_fire_rate(conn, versions=scan_version_values)
+    # ⚠⚠ THE DEPLOYMENT VERSIONS STAY IN THE FILTER — they are NOT dead weight
+    # behind the single-key card lookup below. `realised_pnl_for_keys` reads this
+    # same dict at `paper_deployment_keys` for the capital base, and its own
+    # docstring is why: *"Old strategy versions remain part of the shared pot
+    # after they are retired; limiting this calculation to the current manifest
+    # would make realised gains or losses disappear from the capital base."*
+    # Dropping them would not raise — a missing key defaults to `StrategyPnl()`,
+    # whose `reconciled_realised_pnl` is 0 with no incomplete reason, so a
+    # deployed strategy's realised P&L would read as a confident zero.
+    #
+    # ⚠ That the lookup succeeds at all also fixes the basis question here: the
+    # rows are keyed by `strategy_signals.strategy_version`, so a deployment key
+    # can only ever match when a deployment carries the version its SIGNALS
+    # carry — the scan basis. Untestable today at 0 deployment rows.
+    scan_pnl_versions = sorted({*scan_version_values, *(version for _strategy_id, version in paper_deployment_keys)})
+    pnl_by_strategy = load_owned_pnl(conn, versions=scan_pnl_versions)
     control_by_strategy = load_control_state(conn, versions=version_values)
     entry_block = load_entry_block_state(conn)
     paper_pool = load_paper_pool(conn)
@@ -1704,11 +1728,20 @@ def get_strategy_overview(
             or not windows
         )
         key = (strategy_id, versions[strategy_id])
-        attribution = attribution_by_strategy.get(key, StrategyAttribution())
+        # ⚠ The three scan-basis loaders return dicts keyed by the version their
+        # OWN relation carries, so reading them at `key` would miss every row the
+        # rebinding above just made reachable — half a fix is indistinguishable
+        # from none here, because both halves fail closed to the same empty card.
+        scan_key = (strategy_id, scan_versions[strategy_id])
+        attribution = attribution_by_strategy.get(scan_key, StrategyAttribution())
         # A key absent from the census has never been scanned, which the default
         # `rate_unavailable_reason` states rather than reading as a zero rate.
-        fire_rate = fire_rate_by_strategy.get(key, StrategyFireRate())
-        pnl = pnl_by_strategy.get(key, StrategyPnl())
+        fire_rate = fire_rate_by_strategy.get(scan_key, StrategyFireRate())
+        # ⚠ ONE key, so a deployment held at a PRIOR scan version shows no P&L on
+        # the card even though `scan_pnl_versions` loaded it and the capital base
+        # counts it. Pre-existing and unchanged here — summing `StrategyPnl`
+        # across versions is a definitional change, tracked separately.
+        pnl = pnl_by_strategy.get(scan_key, StrategyPnl())
         control = control_by_strategy.get(key, StrategyControlState())
         allocation_refusals: list[str] = []
         if entry.purpose == "harness_validation":

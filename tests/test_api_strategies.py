@@ -538,6 +538,19 @@ def test_scan_health_reads_durable_daily_counts_after_detail_retention(
     strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
 
     assert strategy.scan.fired_entries == 17
+    # ⚠ The FIRE RATE off the same seeded row (#2806). #2803 moved this seeding to
+    # the scan basis and asserted only the scan card, so the fire-rate block —
+    # which reads the very same table through `load_fire_rate` — kept reporting
+    # `never_scanned` for every strategy with nothing failing.
+    assert strategy.fire_rate.scanned_days == 1
+    assert strategy.fire_rate.fired_days == 1
+    assert strategy.fire_rate.fired_entry_signals == 17
+    assert strategy.fire_rate.fired_share_of_evaluable == Decimal("1.0000")
+    assert strategy.fire_rate.share_unavailable_reason is None
+    # One bar date carries no span, so the throughput rate refuses rather than
+    # inventing a week — that refusal is the correct state here, not a gap.
+    assert strategy.fire_rate.entries_per_calendar_week is None
+    assert strategy.fire_rate.weekly_rate_unavailable_reason == "single_scan_day"
 
 
 def test_overview_maps_only_exact_current_holdout_provenance(
