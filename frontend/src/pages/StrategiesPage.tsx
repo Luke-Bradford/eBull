@@ -215,7 +215,13 @@ function RegimeBreakdown({ arm }: { arm: StrategyResultArm }) {
                   <td className="py-1">
                     {pctPoints(cohort.expectancy_pct)}
                     <span className="block text-[10px] text-slate-500">
-                      {cohort.expectancy_ci_low_pct === null
+                      {/* BOTH bounds narrowed, not just the low one. The writer
+                          nulls the bootstrap as a group, so testing one bound
+                          normally implies the other — but if that invariant ever
+                          breaks, a half-null interval must read "not
+                          bootstrapped" rather than print a bound against a dash
+                          and pass as a measured range. */}
+                      {cohort.expectancy_ci_low_pct === null || cohort.expectancy_ci_high_pct === null
                         ? "not bootstrapped"
                         : `${pctPoints(cohort.expectancy_ci_low_pct)} to ${pctPoints(cohort.expectancy_ci_high_pct)}` +
                           (cohort.effective_sample_size === null
