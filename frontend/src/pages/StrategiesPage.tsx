@@ -1267,7 +1267,17 @@ function AutomationControl({
     || parsed !== Number(pool.capital_limit)
     || capitalMode !== pool.capital_mode
     || riskProfile !== pool.mandate.risk_profile;
-  const canEnable = overview.automation_readiness.ready && overview.execution_enabled && riskProfile !== "unconfigured";
+  // ⚠ `overview.execution_enabled` is this form's OUTPUT, never its input
+  // (#2766). `PUT /strategies/paper-pool` writes `runtime_config
+  // .enable_auto_trading` and the pool's `enabled` to the SAME value in one
+  // transaction (`app/api/strategies.py::update_strategy_paper_pool`), and no
+  // other control in the app sets that flag. Requiring it here made the first
+  // enable unreachable from the repository's fail-closed default — the page
+  // demanded the flag be true before it would call the only endpoint that
+  // turns it true. The backend's own first-enable gate is `readiness.ready`,
+  // which is what this mirrors. `enable_live_trading` is untouched by the flow.
+  const accountEligible = overview.demo_connection || overview.live_strategy_activation_available;
+  const canEnable = overview.automation_readiness.ready && accountEligible && riskProfile !== "unconfigured";
   const selectedMandate = riskProfile === pool.mandate.risk_profile && pool.mandate.configured
     ? pool.mandate
     : pool.available_mandates.find((mandate) => mandate.risk_profile === riskProfile) ?? null;
@@ -1378,8 +1388,8 @@ function AutomationControl({
       </dl>
       {!canEnable ? (
         <p className="mt-4 text-xs text-amber-700 dark:text-amber-300">
-          {!overview.execution_enabled
-            ? "System-wide automatic trading is off. Enable that safety control before allowing new entries."
+          {!accountEligible
+            ? "This account cannot run strategy automation. Connect the demo account, or complete real-money activation first."
             : riskProfile === "unconfigured"
               ? "Choose a risk profile before allowing new entries."
             : "Automation stays off until at least one strategy passes validation."}
