@@ -93,6 +93,14 @@ jobs:
             [ -z "$f" ] && continue
             # Exclusions are tested FIRST and beat the doc patterns below,
             # matching safe_merge.sh::is_doc_only's precedence exactly.
+            # `*` inside `[[ ]]` is a pattern match, not pathname expansion,
+            # so it crosses `/` and `.autonomy/*` covers `.autonomy/a/b/c.md`
+            # — the same property the `docs/*` arm below already relies on
+            # (verified on both, plus `.autonomyfoo/x.md` which must NOT match).
+            # A bare file literally named `.autonomy` is not matched here, and
+            # is not matched by safe_merge's exclude either (its entry
+            # normalizes to `.autonomy/`), so the two still agree: both fall
+            # through and classify it not-doc-only for having no doc extension.
             if [[ "$f" == .autonomy/* ]]; then
               is_docs_only=false
               break
