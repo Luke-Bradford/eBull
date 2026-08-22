@@ -260,81 +260,13 @@ class MarketRegimeProvider:
         *,
         through_date: date | None = None,
     ) -> MarketRegimeProvider:
-        """The BACKTEST's benchmark: ``spy_chain_v1`` over the research corpus.
+        """The BACKTEST's benchmark: ``spy_chain_v1``, classified.
 
-        The live scan keeps ``load`` (``price_daily``); this constructor exists
-        because the backtest's bars come from the research corpus and its axis
-        reaches decades before ``price_daily``'s first SPY bar (2022-05-10) —
-        the benchmark must come from the same source universe as the bars it
-        contextualises (`backtest_run._signals_for`'s own prescription).
-
-        ⚠ Quarantine treatment, declared: reads ``research_price_daily.close``
-        without consulting ``research_bar_quarantine``. The regime is market
-        context, not a return computation, so the quarantine's ``return_usable``
-        / ``range_usable`` verdicts do not define "close usable". Verified on
-        the full population at freeze time: the only flagged rows on either
-        pinned series are 5 archive-tail ``provisional`` marks on the fallback
-        (2024-09-23→27, empty rule list, both flags true) — all AFTER the seam,
-        so the chain never reads them.
-
-        ⚠ Both segment reads happen on the one connection passed in, inside its
-        current transaction, so the two queries observe one corpus snapshot.
-        A sealed in-sample caller supplies ``through_date`` so post-boundary
-        benchmark observations are not even read; classification remains a
-        backward-looking prefix of the same frozen chain.
+        The chain itself is read by ``load_research_closes`` below; this
+        constructor is the classification half. See that function for the
+        source, quarantine and sealed-prefix contracts.
         """
-        segments: dict[str, list[tuple[date, float]]] = {}
-        for role, (vendor, vendor_symbol), expected_basis in (
-            ("primary", CHAIN_PRIMARY, CHAIN_PRIMARY_BASIS),
-            ("fallback", CHAIN_FALLBACK, CHAIN_FALLBACK_BASIS),
-        ):
-            series_rows = conn.execute(
-                """
-                SELECT series_id, adjustment_basis
-                FROM research_price_series
-                WHERE vendor = %s AND vendor_symbol = %s
-                """,
-                (vendor, vendor_symbol),
-            ).fetchall()
-            # ``(vendor, vendor_symbol)`` is DB-unique, so >1 cannot happen today;
-            # kept because this refusal message beats a downstream shape error.
-            if len(series_rows) != 1:
-                raise BenchmarkUnavailableError(
-                    f"chain {role} pin {(vendor, vendor_symbol)!r} resolved to {len(series_rows)} series; "
-                    "spy_chain_v1 requires exactly one"
-                )
-            series_id, basis = series_rows[0]
-            if basis != expected_basis:
-                raise BenchmarkUnavailableError(
-                    f"chain {role} {(vendor, vendor_symbol)!r} has adjustment_basis {basis!r}, "
-                    f"expected {expected_basis!r} — provenance drifted under an unchanged vendor name"
-                )
-            bar_rows = conn.execute(
-                """
-                SELECT bar_date, close
-                FROM research_price_daily
-                WHERE series_id = %s AND close IS NOT NULL
-                  AND (%s::date IS NULL OR bar_date <= %s::date)
-                ORDER BY bar_date
-                """,
-                (series_id, through_date, through_date),
-            ).fetchall()
-            segments[role] = [(row[0], float(row[1])) for row in bar_rows]
-        if through_date is not None and through_date < CHAIN_SEAM:
-            # A sealed prefix ending before the vendor seam must not read a
-            # later primary observation merely to satisfy the full-chain path.
-            chained = segments["fallback"]
-            if not chained:
-                raise BenchmarkUnavailableError(
-                    f"chain fallback has no bars through the sealed boundary {through_date}"
-                )
-            for index, (day, close) in enumerate(chained):
-                if index and day <= chained[index - 1][0]:
-                    raise BenchmarkUnavailableError(f"chain dates are not strictly increasing at {day}")
-                if not math.isfinite(close) or close <= 0:
-                    raise BenchmarkUnavailableError(f"chain close on {day} is {close!r} — not a positive finite price")
-        else:
-            chained = _chain_closes(segments["primary"], segments["fallback"])
+        chained = load_research_closes(conn, through_date=through_date)
         return cls._classify([day for day, _ in chained], [close for _, close in chained], label="spy_chain_v1")
 
     def for_dates(self, dates: tuple[date, ...]) -> RegimeSeries:
@@ -364,6 +296,103 @@ class MarketRegimeProvider:
         return sum(1 for value in self._by_date.values() if value is not None)
 
 
+def load_research_closes(
+    conn: psycopg.Connection[Any],
+    *,
+    through_date: date | None = None,
+) -> list[tuple[date, float]]:
+    """``spy_chain_v1``'s closes, in date order — the chain read, unclassified.
+
+    ⚠⚠ PUBLIC SO THERE IS STILL ONE CHAIN. #2837's overlay needs the closes
+    themselves rather than a regime verdict, and the alternative — a second
+    module re-reading both segments and re-applying the seam — is exactly the
+    drift this module's header exists to prevent. ``load_research`` classifies
+    whatever this returns, so the benchmark a strategy is measured against and
+    the regime it is contextualised by cannot disagree about what the chain is.
+
+    ⚠ The fetch MECHANICS stay outside ``RULE_SET_VERSION`` by that same header's
+    design; the source SEMANTICS this implements are what the version declares.
+    Extracting the read therefore does not move any strategy identity.
+
+    The backtest's bars come from the research corpus and its axis reaches
+    decades before ``price_daily``'s first SPY bar (2022-05-10) — the benchmark
+    must come from the same source universe as the bars it contextualises
+    (`backtest_run._signals_for`'s own prescription).
+
+    ⚠ Quarantine treatment, declared: reads ``research_price_daily.close``
+    without consulting ``research_bar_quarantine``. The regime is market
+    context, not a return computation, so the quarantine's ``return_usable`` /
+    ``range_usable`` verdicts do not define "close usable". Verified on the full
+    population at freeze time: the only flagged rows on either pinned series are
+    5 archive-tail ``provisional`` marks on the fallback (2024-09-23→27, empty
+    rule list, both flags true) — all AFTER the seam, so the chain never reads
+    them.
+
+    ⚠⚠ #2837 reads these closes as PRICES, which the quarantine paragraph above
+    does not license on its own — it argues only that a flagged bar is usable as
+    *market context*. It holds here for the narrower reason that the flagged rows
+    are all after the seam and therefore outside the chain either way; a future
+    quarantine mark on a PRE-seam fallback bar would need this decision re-taken
+    rather than inherited.
+
+    ⚠ Both segment reads happen on the one connection passed in, inside its
+    current transaction, so the two queries observe one corpus snapshot. A
+    sealed in-sample caller supplies ``through_date`` so post-boundary
+    observations are not even read; the result stays a backward-looking prefix
+    of the same frozen chain.
+    """
+    segments: dict[str, list[tuple[date, float]]] = {}
+    for role, (vendor, vendor_symbol), expected_basis in (
+        ("primary", CHAIN_PRIMARY, CHAIN_PRIMARY_BASIS),
+        ("fallback", CHAIN_FALLBACK, CHAIN_FALLBACK_BASIS),
+    ):
+        series_rows = conn.execute(
+            """
+            SELECT series_id, adjustment_basis
+            FROM research_price_series
+            WHERE vendor = %s AND vendor_symbol = %s
+            """,
+            (vendor, vendor_symbol),
+        ).fetchall()
+        # ``(vendor, vendor_symbol)`` is DB-unique, so >1 cannot happen today;
+        # kept because this refusal message beats a downstream shape error.
+        if len(series_rows) != 1:
+            raise BenchmarkUnavailableError(
+                f"chain {role} pin {(vendor, vendor_symbol)!r} resolved to {len(series_rows)} series; "
+                "spy_chain_v1 requires exactly one"
+            )
+        series_id, basis = series_rows[0]
+        if basis != expected_basis:
+            raise BenchmarkUnavailableError(
+                f"chain {role} {(vendor, vendor_symbol)!r} has adjustment_basis {basis!r}, "
+                f"expected {expected_basis!r} — provenance drifted under an unchanged vendor name"
+            )
+        bar_rows = conn.execute(
+            """
+            SELECT bar_date, close
+            FROM research_price_daily
+            WHERE series_id = %s AND close IS NOT NULL
+              AND (%s::date IS NULL OR bar_date <= %s::date)
+            ORDER BY bar_date
+            """,
+            (series_id, through_date, through_date),
+        ).fetchall()
+        segments[role] = [(row[0], float(row[1])) for row in bar_rows]
+    if through_date is not None and through_date < CHAIN_SEAM:
+        # A sealed prefix ending before the vendor seam must not read a
+        # later primary observation merely to satisfy the full-chain path.
+        chained = segments["fallback"]
+        if not chained:
+            raise BenchmarkUnavailableError(f"chain fallback has no bars through the sealed boundary {through_date}")
+        for index, (day, close) in enumerate(chained):
+            if index and day <= chained[index - 1][0]:
+                raise BenchmarkUnavailableError(f"chain dates are not strictly increasing at {day}")
+            if not math.isfinite(close) or close <= 0:
+                raise BenchmarkUnavailableError(f"chain close on {day} is {close!r} — not a positive finite price")
+        return chained
+    return _chain_closes(segments["primary"], segments["fallback"])
+
+
 __all__ = [
     "BENCHMARK_SYMBOL",
     "CHAIN_FALLBACK",
@@ -375,4 +404,5 @@ __all__ = [
     "RULE_SET_VERSION",
     "BenchmarkUnavailableError",
     "MarketRegimeProvider",
+    "load_research_closes",
 ]

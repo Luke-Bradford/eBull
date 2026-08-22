@@ -291,7 +291,11 @@ def test_every_freeze_script_calls_the_guard() -> None:
     under another name is not covered — recorded here rather than implied away.
     """
     scripts = sorted((_REPO_ROOT / "scripts").glob("freeze_*.py"))
-    assert len(scripts) == 3, f"a new freeze script appeared: {[p.name for p in scripts]}"
+    # ⚠ The pin is the point: it fires on a NEW freeze script and makes its
+    # author confirm the convention rather than discover it later. It did that
+    # for #2837's S-E declaration (the fourth), which calls the guard and
+    # freezes through the ledger like the other three.
+    assert len(scripts) == 4, f"a new freeze script appeared: {[p.name for p in scripts]}"
     for path in scripts:
         source = path.read_text()
         # ⚠ THE CALL, NOT THE NAME. A bare substring check is satisfied by the

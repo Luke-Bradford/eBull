@@ -118,7 +118,32 @@ from typing import Final
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-15-r7"
+#:
+#: ⚠⚠ ADDING A TRIAL *IS* THE SUPERSESSION — bumping this string only labels it.
+#: `deflation_promotion_refusals` fires `trial_register_superseded` on
+#: `deflated.declared_trials != TRIAL_REGISTER.declared_count`, so a new entry
+#: strands every stored deflation whether or not this constant moves. There is
+#: no way to count a new search without it, and `freeze_preregistration` refuses
+#: a declaration no trial claims — so "add the entry but don't bump" is not a
+#: state, and declining to add one to protect old rows is the flattering
+#: direction this module is built against.
+#:
+#: r8 (2026-08-22, #2837) is the first bump measured rather than argued. What it
+#: stranded, reproduce with:
+#:
+#:   PYTHONPATH=. uv run python -c "
+#:   import psycopg; from app.config import settings
+#:   with psycopg.connect(settings.database_url) as c:
+#:       c.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+#:       print(c.execute('select trial_register_version, purpose, count(*) from strategy_results_store "
+#:   "where deflated_sharpe is not null group by 1,2 order by 3 desc').fetchall()); c.rollback()"
+#:
+#: On dev at the bump every row with a DSR carried `purpose = harness_validation`
+#: — so `purpose_promotion_refusals` already returned a terminal
+#: `harness_validation_only` on all of them, and the bump added a second refusal
+#: code to rows that could not promote anyway. Four earlier versions appear in
+#: the same output, which is what a register that is doing its job looks like.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-22-r8"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -713,6 +738,21 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.EXACT,
             declared_for=("mt1-s8-capped-volatility-negative-control-v1", "strategy-registry-v1+b83c3e4fc997"),
+        ),
+        DeclaredTrial(
+            trial_id="se-ma-overlay-2026-08-22",
+            description=(
+                "S-E 10-month-SMA overlay on the passive core: ONE frozen rule (10-month lookback, no band, no "
+                "confirmation delay) measured at three evaluation offsets. ⚠ searches=1 and not 3 — the three "
+                "offsets are a fragility screen over one rule, not three variants selected between. Choosing the "
+                "best offset is forbidden by the pass bar, which requires all three."
+            ),
+            evidence=(
+                "docs/proposals/ta/2026-08-22-se-ma-overlay-preregistration.md §4 (frozen rule), §5 (fragility) "
+                "and §8 (pass bar); issue #2837"
+            ),
+            exactness=TrialExactness.EXACT,
+            declared_for=("se-ma-overlay-drawdown-insurance", "se-ma-overlay-drawdown-insurance-v1"),
         ),
     ),
 )
