@@ -76,6 +76,7 @@ from app.services.sync_orchestrator.types import OrchestratorFenceHeld
 from app.workers.scheduler import (
     JOB_ATTRIBUTION_SUMMARY,
     JOB_CBOE_VIX_REFRESH,
+    JOB_CORE_REBALANCE_OBSERVATION,
     JOB_CUSIP_EXTID_SWEEP,
     JOB_CUSIP_UNIVERSE_BACKFILL,
     JOB_DAILY_CANDLE_REFRESH,
@@ -148,6 +149,7 @@ from app.workers.scheduler import (
     attribution_summary_job,
     cboe_vix_refresh,
     compute_next_run,
+    core_rebalance_observation,
     cusip_extid_sweep,
     cusip_universe_backfill,
     daily_candle_refresh,
@@ -364,6 +366,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_STRATEGY_OUTCOME_RESOLUTION: _adapt_zero_arg(strategy_outcome_resolution),
     JOB_STRATEGY_OBSERVATION_RETENTION: _adapt_zero_arg(strategy_observation_retention),
     JOB_STRATEGY_PAPER_CYCLE: _adapt_zero_arg(strategy_paper_cycle),
+    JOB_CORE_REBALANCE_OBSERVATION: _adapt_zero_arg(core_rebalance_observation),
     # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
     # SCHEDULED_JOBS: criterion 5 requires a hold-out purpose no cron fire can
     # supply. ⚠ Registered NATIVELY, not through ``_adapt_zero_arg`` — the body
