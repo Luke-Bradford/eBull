@@ -160,11 +160,25 @@ EXPECTED, not observed: #1472's RCA saw ``credential_health`` LISTEN ×3
 (a duplicate-instance bug PR3 fixes). The budget models the intended
 topology so it never blesses that bug."""
 
-JOBS_NON_SEC_MAX_CONCURRENCY: Final[int] = 2
-"""Maximum scheduled/catch-up/manual executions outside the ``sec_rate``
-lane. ``JobRuntime`` enforces this before opening any job lock or body
-connection. Two lets a long LLM thesis run coexist with portfolio/strategy
-work without reopening the cadence herd."""
+JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY: Final[int] = 1
+"""Maximum general scheduled/catch-up/manual executions outside ``sec_rate``.
+
+Long research, LLM and backfill work shares this slot. Keeping it separate
+from the paper-lifecycle reserve prevents that work from consuming the
+capacity needed to reconcile and protect demo-owned positions."""
+
+JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY: Final[int] = 1
+"""Reserved execution capacity for ``strategy_paper_cycle`` only.
+
+The job remains independently serialised by APScheduler ``max_instances=1``,
+the manual in-flight lock and its source advisory lock. This reservation only
+prevents unrelated general work from starving its connection-budget entry."""
+
+JOBS_NON_SEC_MAX_CONCURRENCY: Final[int] = JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY + JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY
+"""Total modeled non-SEC execution concurrency.
+
+The split remains exactly the prior total of two, so reserving the lifecycle
+slot does not increase PostgreSQL connection demand."""
 
 JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION: Final[int] = 2
 """Worst-case connections held by one non-SEC execution: one session-scoped

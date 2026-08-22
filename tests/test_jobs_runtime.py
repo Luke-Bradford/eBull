@@ -233,8 +233,8 @@ class TestDistinctJobConcurrency:
 
 
 class TestConnectionBudgetExecutionGate:
-    def test_third_non_sec_execution_waits_without_opening_a_connection(self) -> None:
-        from app.jobs.runtime import _job_execution_slot
+    def test_paper_lifecycle_enters_while_general_work_waits(self) -> None:
+        from app.jobs.runtime import _job_execution_slot, execution_slot_wait_snapshot
 
         release = threading.Event()
         entered = [threading.Event() for _ in range(3)]
@@ -245,22 +245,58 @@ class TestConnectionBudgetExecutionGate:
                 release.wait(timeout=2.0)
 
         threads = [
-            threading.Thread(target=hold, args=("strategy_paper_cycle", entered[0]), daemon=True),
-            threading.Thread(target=hold, args=("thesis_refresh", entered[1]), daemon=True),
-            threading.Thread(target=hold, args=("pg_size_sample", entered[2]), daemon=True),
+            threading.Thread(target=hold, args=("thesis_refresh", entered[0]), daemon=True),
+            threading.Thread(target=hold, args=("pg_size_sample", entered[1]), daemon=True),
+            threading.Thread(target=hold, args=("strategy_paper_cycle", entered[2]), daemon=True),
         ]
         try:
             threads[0].start()
-            threads[1].start()
             assert entered[0].wait(timeout=1.0)
-            assert entered[1].wait(timeout=1.0)
+            threads[1].start()
+            assert not entered[1].wait(timeout=0.1), "second general job bypassed the one-slot budget"
+            snapshot = execution_slot_wait_snapshot()
+            assert snapshot["execution_slot_wait_count"] == 1
+            assert snapshot["execution_slot_waits"] == [
+                {
+                    "job_name": "pg_size_sample",
+                    "lane": "general_non_sec",
+                    "waiting_since": snapshot["execution_slot_waits"][0]["waiting_since"],
+                    "wait_age_seconds": snapshot["execution_slot_waits"][0]["wait_age_seconds"],
+                }
+            ]
+            assert snapshot["execution_slot_waits"][0]["wait_age_seconds"] >= 0
             threads[2].start()
-            assert not entered[2].wait(timeout=0.1)
+            assert entered[2].wait(timeout=1.0), "paper lifecycle was starved by general jobs"
+        finally:
+            release.set()
+            for thread in threads:
+                if thread.ident is not None:
+                    thread.join(timeout=1.0)
+        assert entered[1].is_set()
+        assert execution_slot_wait_snapshot()["execution_slot_waits"] == []
+
+    def test_second_paper_lifecycle_waits_for_reserved_slot(self) -> None:
+        from app.jobs.runtime import _job_execution_slot
+
+        release = threading.Event()
+        entered = [threading.Event(), threading.Event()]
+
+        def hold(marker: threading.Event) -> None:
+            with _job_execution_slot("strategy_paper_cycle"):
+                marker.set()
+                release.wait(timeout=2.0)
+
+        threads = [threading.Thread(target=hold, args=(marker,), daemon=True) for marker in entered]
+        try:
+            threads[0].start()
+            assert entered[0].wait(timeout=1.0)
+            threads[1].start()
+            assert not entered[1].wait(timeout=0.1)
         finally:
             release.set()
             for thread in threads:
                 thread.join(timeout=1.0)
-        assert entered[2].is_set()
+        assert entered[1].is_set()
 
     def test_fifth_sec_execution_waits_for_one_of_four_slots(self) -> None:
         from app.jobs.runtime import _job_execution_slot

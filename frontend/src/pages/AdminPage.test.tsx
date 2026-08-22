@@ -141,6 +141,18 @@ function recsEmpty(): RecommendationsListResponse {
 function jobsResponse(): JobsListResponse {
   return {
     checked_at: "2026-04-16T01:00:00Z",
+    jobs_process: {
+      state: "healthy",
+      subsystems: [
+        {
+          subsystem: "scheduler",
+          last_beat_at: "2026-04-16T00:59:59Z",
+          age_seconds: 1,
+          is_stale: false,
+          notes: { execution_slot_wait_count: 0, execution_slot_waits: [] },
+        },
+      ],
+    },
     jobs: [
       {
         name: "orchestrator_full_sync",
@@ -343,6 +355,27 @@ describe("AdminPage — Background tasks collapsible", () => {
     expect(
       screen.queryByRole("button", { name: "Run Orchestrator full sync now" }),
     ).toBeNull();
+  });
+
+  it("shows execution-budget waits with the job, lane and current age", async () => {
+    const response = jobsResponse();
+    response.jobs_process.subsystems[0]!.age_seconds = 2;
+    response.jobs_process.subsystems[0]!.notes = {
+      execution_slot_wait_count: 1,
+      execution_slot_waits: [{
+        job_name: "pg_size_sample",
+        lane: "general_non_sec",
+        waiting_since: "2026-04-16T00:59:50Z",
+        wait_age_seconds: 8.4,
+      }],
+    };
+    mockedJobs.mockResolvedValue(response);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /Background tasks/ }));
+    expect((await screen.findByText(/pg_size_sample \(10s, general_non_sec\)/)).closest("[role='status']")).toHaveTextContent(
+      "Waiting for execution capacity: pg_size_sample (10s, general_non_sec)",
+    );
   });
 
   it("Run-now happy path: POST + refetch + Queued badge", async () => {
