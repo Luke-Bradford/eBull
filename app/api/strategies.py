@@ -700,6 +700,12 @@ class AutomationReadinessView(BaseModel):
 
 class AccountEquityEvidenceView(BaseModel):
     status: Literal["unavailable", "collecting"]
+    #: ⚠ `difference` is measured against `official_comparand`, NOT against
+    #: `official_equity` — eToro folds copy-trader mirrors and pending orders into
+    #: `official_total_invested`, which the local book does not hold. What that folding
+    #: adds is reported separately as `residual_not_in_local_book` (#2602 item 4).
+    reconciliation_state: Literal["unavailable", "refused", "reconciled", "diverged"]
+    reconciliation_rule_version: str
     days_collected: int
     snapshot_date: date | None
     observed_at: datetime | None
@@ -709,12 +715,17 @@ class AccountEquityEvidenceView(BaseModel):
     official_available_cash: Decimal | None
     official_total_invested: Decimal | None
     official_unrealised_pnl: Decimal | None
+    official_direct_long_market_value: Decimal | None
+    official_comparand: Decimal | None
+    residual_not_in_local_book: Decimal | None
     local_eod_currency: str | None
     local_eod_value: Decimal | None
+    local_eod_value_in_account_currency: Decimal | None
     local_eod_positions_priced: int | None
     local_eod_stale_mark_positions: int | None
     difference: Decimal | None
-    comparable: Literal[False]
+    tolerance: Decimal | None
+    comparable: bool
     incomplete_reasons: list[str]
 
 
@@ -2407,6 +2418,8 @@ def get_strategy_overview(
         ),
         account_equity_evidence=AccountEquityEvidenceView(
             status=account_equity.status,
+            reconciliation_state=account_equity.reconciliation_state,
+            reconciliation_rule_version=account_equity.reconciliation_rule_version,
             days_collected=account_equity.days_collected,
             snapshot_date=account_equity.snapshot_date,
             observed_at=account_equity.observed_at,
@@ -2416,11 +2429,16 @@ def get_strategy_overview(
             official_available_cash=account_equity.official_available_cash,
             official_total_invested=account_equity.official_total_invested,
             official_unrealised_pnl=account_equity.official_unrealised_pnl,
+            official_direct_long_market_value=account_equity.official_direct_long_market_value,
+            official_comparand=account_equity.official_comparand,
+            residual_not_in_local_book=account_equity.residual_not_in_local_book,
             local_eod_currency=account_equity.local_eod_currency,
             local_eod_value=account_equity.local_eod_value,
+            local_eod_value_in_account_currency=account_equity.local_eod_value_in_account_currency,
             local_eod_positions_priced=account_equity.local_eod_positions_priced,
             local_eod_stale_mark_positions=account_equity.local_eod_stale_mark_positions,
             difference=account_equity.difference,
+            tolerance=account_equity.tolerance,
             comparable=account_equity.comparable,
             incomplete_reasons=list(account_equity.incomplete_reasons),
         ),

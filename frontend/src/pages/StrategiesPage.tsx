@@ -606,9 +606,48 @@ const ACCOUNT_EVIDENCE_REASON_LABELS: Record<string, string> = {
   account_currency_assumed_not_observed: "This snapshot predates observed broker account currency; its currency cannot be trusted.",
   account_currency_not_documented: "The broker reported an account currency that is not documented for this USD-only trading lane.",
   same_day_local_eod_snapshot_missing: "The same-day local end-of-day valuation is missing.",
+  // Retired as a refusal in #2602 item 4 — a display currency differing from the account
+  // currency is the ordinary configured state. The label stays so any row still carrying
+  // the slug renders rather than falling back to the raw text.
   local_eod_currency_mismatch: "The broker account and local valuation currencies do not match.",
   local_eod_valuation_incomplete: "The local valuation is missing at least one price or currency conversion.",
   local_eod_effective_time_unknown: "The effective dates of the local valuation marks were not recorded.",
+  account_currency_fx_rate_missing: "No exchange rate converts the local valuation into the broker account currency.",
+  official_direct_position_value_not_recorded:
+    "This broker snapshot predates the direct-position split, so it cannot be compared like for like.",
+  official_direct_short_positions_unvalued:
+    "The account holds direct short positions, which the official direct-holding value does not cover.",
+  official_pending_orders_outstanding:
+    "Orders are pending, so the broker's cash figure is already net of commitments the local ledger has not seen.",
+  direct_position_count_mismatch:
+    "The broker and the local book disagree on how many direct positions are open.",
+  mark_rounding_tolerance_not_recorded:
+    "This local valuation predates the recorded rounding allowance, so no tolerance can be applied to it.",
+  reconciliation_inputs_out_of_bounds:
+    "A stored reconciliation input is outside its safe range; the comparison is refused rather than reported.",
+};
+
+const RECONCILIATION_COPY: Record<
+  StrategyOverviewResponse["account_equity_evidence"]["reconciliation_state"],
+  string
+> = {
+  unavailable: "No official snapshot",
+  refused: "Reconciliation refused",
+  reconciled: "Reconciled within tolerance",
+  diverged: "Diverged beyond tolerance",
+};
+
+const RECONCILIATION_TONE: Record<
+  StrategyOverviewResponse["account_equity_evidence"]["reconciliation_state"],
+  string
+> = {
+  // Amber = the comparison could not run; the operator waits or repairs an input.
+  unavailable: "text-amber-700 dark:text-amber-300",
+  refused: "text-amber-700 dark:text-amber-300",
+  reconciled: "text-emerald-700 dark:text-emerald-300",
+  // Rose = it ran and the books disagree. That is a finding, and it is the only one of
+  // the four states that says something is wrong rather than something is missing.
+  diverged: "text-rose-700 dark:text-rose-300",
 };
 
 function accountEvidenceReasonLabel(
@@ -771,12 +810,34 @@ function AccountEvidence({ overview }: { overview: StrategyOverviewResponse }) {
               <strong>{formatMoney(Number(evidence.local_eod_value), evidence.local_eod_currency)}</strong>
             </div>
           ) : null}
-          <div className="self-end text-amber-700 dark:text-amber-300">
-            {evidence.incomplete_reasons.length > 0 ? "Reconciliation incomplete" : "Comparison tolerance not defined"}
+          {/* The residual is dominated by copy-trader mirrors and pending orders, but it
+              also absorbs any error on the official side — so it is described as what is
+              NOT in the local book, never asserted to BE the non-engine holdings. */}
+          {evidence.residual_not_in_local_book !== null && currency !== null ? (
+            <div>
+              <span className="block text-slate-500">Not in local book</span>
+              <strong>{formatMoney(Number(evidence.residual_not_in_local_book), currency)}</strong>
+            </div>
+          ) : null}
+          {/* Three tones, not two. `diverged` is a FINDING — the comparison ran and the
+              books disagree — while `refused` and `unavailable` mean it could not run at
+              all. Painting them the same amber makes the one state that demands action
+              look like the two that demand patience. */}
+          <div className={`self-end ${RECONCILIATION_TONE[evidence.reconciliation_state]}`}>
+            {RECONCILIATION_COPY[evidence.reconciliation_state]}
+            {evidence.difference !== null && evidence.tolerance !== null && currency !== null ? (
+              <span className="ml-1 tabular-nums text-slate-500">
+                {formatMoney(Number(evidence.difference), currency)} vs{" "}
+                {formatMoney(Number(evidence.tolerance), currency)}
+              </span>
+            ) : null}
           </div>
         </div>
       </div>
       <AccountEvidenceReasons evidence={evidence} />
+      <p className="mt-2 text-[10px] uppercase tracking-wider text-slate-400">
+        Rule {evidence.reconciliation_rule_version}
+      </p>
     </div>
   );
 }

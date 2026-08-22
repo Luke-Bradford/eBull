@@ -120,6 +120,8 @@ const OVERVIEW: StrategyOverviewResponse = {
   },
   account_equity_evidence: {
     status: "unavailable",
+    reconciliation_state: "unavailable",
+    reconciliation_rule_version: "f0-reconcile-v1",
     days_collected: 0,
     snapshot_date: null,
     observed_at: null,
@@ -129,10 +131,15 @@ const OVERVIEW: StrategyOverviewResponse = {
     official_available_cash: null,
     official_total_invested: null,
     official_unrealised_pnl: null,
+    official_direct_long_market_value: null,
+    official_comparand: null,
+    residual_not_in_local_book: null,
     local_eod_currency: null,
     local_eod_value: null,
+    local_eod_value_in_account_currency: null,
     local_eod_positions_priced: null,
     local_eod_stale_mark_positions: null,
+    tolerance: null,
     difference: null,
     comparable: false,
     incomplete_reasons: ["official_account_equity_missing"],
@@ -485,6 +492,8 @@ describe("StrategiesPage", () => {
       ...OVERVIEW,
       account_equity_evidence: {
         status: "collecting",
+        reconciliation_state: "refused",
+        reconciliation_rule_version: "f0-reconcile-v1",
         days_collected: 3,
         snapshot_date: "2026-08-11",
         observed_at: "2026-08-11T19:00:00Z",
@@ -494,11 +503,16 @@ describe("StrategiesPage", () => {
         official_available_cash: "525.00",
         official_total_invested: "400.00",
         official_unrealised_pnl: "100.00",
+        official_direct_long_market_value: "495.00",
+        official_comparand: "1020.00",
+        residual_not_in_local_book: "5.00",
         local_eod_currency: "USD",
         local_eod_value: "1020.00",
+        local_eod_value_in_account_currency: "1020.00",
         local_eod_positions_priced: 2,
         local_eod_stale_mark_positions: 0,
-        difference: "5.00",
+        difference: "0.00",
+        tolerance: null,
         comparable: false,
         incomplete_reasons: ["local_eod_effective_time_unknown"],
       },
@@ -507,7 +521,11 @@ describe("StrategiesPage", () => {
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("3 daily official snapshots")).toBeInTheDocument();
     expect(within(performance).getByText("US$1,025.00")).toBeInTheDocument();
-    expect(within(performance).getByText("Reconciliation incomplete")).toBeInTheDocument();
+    expect(within(performance).getByText("Reconciliation refused")).toBeInTheDocument();
+    // The residual is what the broker's equity carries beyond the comparand — mirrors
+    // and pending orders. It renders even on a refused row: the operator repairing the
+    // condition needs the size of what is not in the local book.
+    expect(within(performance).getByText("Not in local book")).toBeInTheDocument();
     expect(within(performance).getByText("The effective dates of the local valuation marks were not recorded.")).toBeInTheDocument();
     expect(within(performance).getByText("No automated P&L yet")).toBeInTheDocument();
   });
@@ -517,6 +535,8 @@ describe("StrategiesPage", () => {
       ...OVERVIEW,
       account_equity_evidence: {
         status: "collecting",
+        reconciliation_state: "refused",
+        reconciliation_rule_version: "f0-reconcile-v1",
         days_collected: 3,
         snapshot_date: "2026-08-11",
         observed_at: "2026-08-11T19:00:00Z",
@@ -526,11 +546,16 @@ describe("StrategiesPage", () => {
         official_available_cash: "525.00",
         official_total_invested: "400.00",
         official_unrealised_pnl: "100.00",
+        official_direct_long_market_value: "495.00",
+        official_comparand: "1020.00",
+        residual_not_in_local_book: "5.00",
         local_eod_currency: null,
         local_eod_value: null,
+        local_eod_value_in_account_currency: null,
         local_eod_positions_priced: null,
         local_eod_stale_mark_positions: null,
         difference: null,
+        tolerance: null,
         comparable: false,
         incomplete_reasons: ["account_currency_not_documented"],
       },
@@ -548,6 +573,8 @@ describe("StrategiesPage", () => {
       ...OVERVIEW,
       account_equity_evidence: {
         status: "collecting",
+        reconciliation_state: "refused",
+        reconciliation_rule_version: "f0-reconcile-v1",
         days_collected: 4,
         snapshot_date: "2026-08-12",
         observed_at: "2026-08-12T19:00:00Z",
@@ -557,11 +584,16 @@ describe("StrategiesPage", () => {
         official_available_cash: "525.00",
         official_total_invested: "400.00",
         official_unrealised_pnl: "100.00",
+        official_direct_long_market_value: "495.00",
+        official_comparand: "1020.00",
+        residual_not_in_local_book: "5.00",
         local_eod_currency: "USD",
         local_eod_value: "1020.00",
+        local_eod_value_in_account_currency: "1020.00",
         local_eod_positions_priced: 7,
         local_eod_stale_mark_positions: 3,
-        difference: "5.00",
+        difference: "0.00",
+        tolerance: null,
         comparable: false,
         incomplete_reasons: [
           "account_currency_assumed_not_observed",
@@ -584,26 +616,72 @@ describe("StrategiesPage", () => {
     expect(within(performance).getByText("future_account_reason")).toBeInTheDocument();
   });
 
-  it("states that reconciliation policy is missing when measurements have no named caveat", async () => {
+  it("renders the reconciliation verdict once the comparison can actually be decided", async () => {
+    // Was "Comparison tolerance not defined" — the panel's terminal state before #2602
+    // item 4, reached with every caveat cleared and still nothing to say.
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
       ...OVERVIEW,
       account_equity_evidence: {
         ...OVERVIEW.account_equity_evidence,
         status: "collecting",
+        reconciliation_state: "reconciled",
         days_collected: 4,
         currency: "USD",
         official_equity: "1025.00",
+        official_comparand: "1020.00",
+        residual_not_in_local_book: "5.00",
         local_eod_currency: "USD",
         local_eod_value: "1020.00",
+        local_eod_value_in_account_currency: "1020.00",
         local_eod_positions_priced: 2,
         local_eod_stale_mark_positions: 0,
+        difference: "0.00",
+        tolerance: "0.21",
+        comparable: true,
         incomplete_reasons: [],
       },
     });
 
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
-    expect(within(performance).getByText("Comparison tolerance not defined")).toBeInTheDocument();
+    expect(within(performance).getByText("Reconciled within tolerance")).toBeInTheDocument();
+    expect(within(performance).getByText("US$0.00 vs US$0.21")).toBeInTheDocument();
+    // The rule that produced the verdict travels with it — widening the tolerance is a
+    // version bump, so the operator must be able to see which version they are reading.
+    expect(within(performance).getByText("Rule f0-reconcile-v1")).toBeInTheDocument();
+  });
+
+  it("distinguishes a comparison that ran and disagreed from one that could not run", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      account_equity_evidence: {
+        ...OVERVIEW.account_equity_evidence,
+        status: "collecting",
+        reconciliation_state: "diverged",
+        days_collected: 4,
+        currency: "USD",
+        official_equity: "1025.00",
+        official_comparand: "1020.00",
+        residual_not_in_local_book: "5.00",
+        local_eod_currency: "USD",
+        local_eod_value: "900.00",
+        local_eod_value_in_account_currency: "900.00",
+        local_eod_positions_priced: 2,
+        local_eod_stale_mark_positions: 0,
+        difference: "120.00",
+        tolerance: "0.21",
+        comparable: true,
+        incomplete_reasons: [],
+      },
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
+    expect(within(performance).getByText("Diverged beyond tolerance")).toBeInTheDocument();
+    expect(within(performance).getByText("US$120.00 vs US$0.21")).toBeInTheDocument();
+    // An empty reason list with a divergence is NOT a clean panel — the divergence is
+    // the finding, and it must not read the same as "nothing to report".
+    expect(within(performance).queryByText("Reconciliation refused")).not.toBeInTheDocument();
   });
 
   it("separates unapproved research from selectable strategies", async () => {
