@@ -37,7 +37,7 @@ import { OperatorsPage } from "@/pages/OperatorsPage";
 import { CopyTradingPage } from "@/pages/CopyTradingPage";
 import { PortfolioPage } from "@/pages/PortfolioPage";
 import { CalendarPage } from "@/pages/CalendarPage";
-import { StrategiesPage } from "@/pages/StrategiesPage";
+import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 
 export function App() {
   return (
@@ -70,7 +70,7 @@ export function App() {
           <Route index element={<DashboardPage />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="calendar" element={<CalendarPage />} />
-          <Route path="strategies" element={<StrategiesPage />} />
+          <Route path="strategies" element={<StrategiesHubPage />} />
           {/* Legacy per-instrument routes redirect to the canonical
               `/instrument/:symbol` research page. Introduced in Slice 3
               of the per-stock research spec; Slice 5 deleted
