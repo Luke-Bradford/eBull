@@ -65,6 +65,7 @@ from app.services.strategy_control_plane import (
     lock_strategy_control,
     mandate_for_profile,
     promote_strategy,
+    resolve_approval_mode,
 )
 from app.services.strategy_core_eligibility import CoreEligibilityError
 from app.services.strategy_core_mandate import (
@@ -3130,8 +3131,9 @@ def update_strategy_paper_pool(
                 raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
             runtime = get_runtime_config(conn)
             # #2843: omitted means UNCHANGED, so the resolved value -- never the raw
-            # request field -- is what both the change test and the INSERT see.
-            approval_mode = body.approval_mode if body.approval_mode is not None else current_pool.approval_mode
+            # request field -- is what both the change test and the INSERT see. The
+            # rule is a named function so it has a test surface; see its docstring.
+            approval_mode = resolve_approval_mode(body.approval_mode, current_pool.approval_mode)
             pool_changed = (
                 current_pool.enabled != body.enabled
                 or current_pool.capital_limit != body.capital_limit

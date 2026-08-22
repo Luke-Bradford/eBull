@@ -26,6 +26,7 @@ from app.services.strategy_control_plane import (
     PaperPool,
     Stage,
     mandate_for_profile,
+    resolve_approval_mode,
 )
 from app.services.strategy_operator_promotion import _EVIDENCE_ACTIONS, _NEXT_STAGE
 
@@ -122,3 +123,20 @@ def test_the_approver_stamp_is_a_usable_promoted_by() -> None:
     assert AUTONOMOUS_APPROVER == f"policy@{AUTONOMY_POLICY_VERSION}"
     assert AUTONOMOUS_APPROVER.strip() == AUTONOMOUS_APPROVER
     assert AUTONOMOUS_APPROVER.strip() != ""
+
+
+@pytest.mark.parametrize(
+    ("requested", "current", "expected"),
+    [
+        # ⚠ THE ONE THAT MATTERS. Every existing client of PUT /strategies/paper-pool
+        # omits the field, so if omission meant "manual" the next capital-limit edit
+        # would silently revoke autonomy and return 200.
+        (None, "autonomous", "autonomous"),
+        (None, "manual", "manual"),
+        ("autonomous", "manual", "autonomous"),
+        ("manual", "autonomous", "manual"),
+        ("autonomous", "autonomous", "autonomous"),
+    ],
+)
+def test_resolve_approval_mode(requested: ApprovalMode | None, current: ApprovalMode, expected: ApprovalMode) -> None:
+    assert resolve_approval_mode(requested, current) == expected

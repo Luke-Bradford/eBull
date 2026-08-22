@@ -181,6 +181,20 @@ _MANDATE_PROFILES: dict[RiskProfile, PortfolioMandate] = {
 }
 
 
+def resolve_approval_mode(requested: ApprovalMode | None, current: ApprovalMode) -> ApprovalMode:
+    """What an update should WRITE, given what it asked for and what is stored (#2843).
+
+    ⚠⚠ ``None`` means UNCHANGED, never ``"manual"``, and the distinction is the whole
+    reason this is a named function rather than an inline ternary.  Omitting the field
+    is the common case for every existing client and for every edit that is not about
+    approval; reading omission as a reset would let an unrelated capital-limit change
+    silently revoke autonomy and report success.  A ternary spelled the other way is a
+    one-character difference with no test surface, so the rule gets a name, a docstring
+    and a table test.
+    """
+    return current if requested is None else requested
+
+
 def mandate_for_profile(risk_profile: RiskProfile) -> PortfolioMandate:
     """Resolve a presentation label to the exact immutable v1 limits.
 
@@ -1244,6 +1258,7 @@ __all__ = [
     "lock_strategy_control",
     "promote_strategy",
     "registered_strategy_purpose",
+    "resolve_approval_mode",
     "record_order_position_execution",
     "release_exact_position",
 ]
