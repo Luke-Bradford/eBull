@@ -48,9 +48,15 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
-#: Bumped when the ARITHMETIC changes, never when a caller is added. A stored
-#: refusal that cites a bound is only interpretable against the rule that produced it.
-SANDBOX_POLICY_VERSION = "sandbox-bound-v1"
+# ⚠ NO `SANDBOX_POLICY_VERSION` HERE, deliberately. The first draft defined one and
+# documented it as what a stored refusal is interpreted against — but nothing in this
+# module's blast radius persists it, so the claim was true of no row that exists. The
+# repo's other policy versions (`CORE_MANDATE_POLICY_VERSION`, `GOVERNANCE_GATE_VERSION`)
+# earn theirs by being written onto the event they stamp.
+#
+# When a `sandbox_exceeded` refusal is persisted with its bound — the point at which the
+# arithmetic that produced it becomes un-recoverable from the row — add the stamp AND the
+# column in that change, so the version and the thing it versions arrive together.
 
 CapitalMode = Literal["fixed", "compound"]
 
@@ -166,7 +172,6 @@ def sandbox_headroom(
 __all__ = [
     "OPERATOR_WORD_FOR_CAPITAL_MODE",
     "SANDBOX_EXCEEDED",
-    "SANDBOX_POLICY_VERSION",
     "CapitalMode",
     "SandboxHeadroom",
     "effective_realised_delta",
