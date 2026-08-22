@@ -5255,6 +5255,14 @@ def strategy_signal_scan() -> None:
         with connect_job(autocommit=True) as conn:
             report = run_signal_scan(conn)
             tracker.row_count = report.rows_written
+            # #2845 — say how many of the manifest actually ran. A row count alone
+            # cannot distinguish "ten strategies, quiet day" from "eight retired",
+            # and after the retirement that difference is most of the number.
+            retired = sum(1 for result in report.per_strategy if result.status == "refused_retired")
+            tracker.note = (
+                f"status={report.status} rows={report.rows_written} "
+                f"evaluated={len(report.per_strategy) - retired}/{len(report.per_strategy)} retired={retired}"
+            )
             failed = sorted(result.strategy_id for result in report.per_strategy if result.status == "failed")
         # ⚠ INSIDE the tracker, so a per-strategy failure fails the JOB — while
         # every healthy strategy's batch stays committed, which is the isolation

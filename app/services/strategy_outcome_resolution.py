@@ -252,6 +252,15 @@ def run_outcome_resolution(
     if batch_limit < 1:
         raise ValueError(f"batch_limit must be positive, got {batch_limit}")
 
+    # ⚠⚠ RETIRED STRATEGIES ARE **NOT** FILTERED OUT HERE (#2845), and that is the
+    # decision rather than an oversight — an unexamined omission and a deliberate
+    # one look identical in a diff, so it is written down.
+    #
+    # Retirement stops a strategy producing NEW evidence; it never stops the drain
+    # of old. s5/s6/s7/s9 are retired and level-based, and they hold already-fired
+    # signals whose outcomes are unresolved. Filtering them would strand those
+    # permanently — corrupting the very evidence record retirement exists to
+    # preserve, and doing it silently, because an unresolved fill has no alarm.
     level_entries = [(strategy_id, entry) for strategy_id, entry in sorted(manifest.items()) if entry.exit_levels]
     if len(level_entries) > batch_limit:
         raise ValueError(

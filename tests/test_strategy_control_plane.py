@@ -981,7 +981,12 @@ def test_harness_control_cannot_be_promoted_or_funded(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
     conn = ebull_test_conn
-    entry = next(iter(STRATEGY_MANIFEST.values()))
+    # ⚠ A LIVE control, not `next(iter(...))` (#2845). Eight of the ten are now
+    # retired, and the retirement guard fires ahead of the purpose guard — so the
+    # arbitrary first entry would refuse for the wrong reason and this test would
+    # pass while proving nothing about harness controls.
+    entry = next(item for item in STRATEGY_MANIFEST.values() if item.retired_reason is None)
+    assert entry.purpose == "harness_validation"
     version = entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
     promote_strategy(
         conn,

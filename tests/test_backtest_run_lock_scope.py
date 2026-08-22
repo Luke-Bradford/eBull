@@ -99,7 +99,10 @@ def _run_until_evaluation(
     monkeypatch.setattr(backtest_run, "evaluate_arm", _evaluate)
     monkeypatch.setattr(backtest_run, "evaluate_level_arms", _evaluate)
 
-    strategy_id = next(iter(sorted(STRATEGY_MANIFEST)))
+    # ⚠ A LIVE strategy (#2845). `sorted(...)[0]` is s1, which is now retired, so a
+    # one-entry manifest built from it has NO runnable strategy and the run refuses
+    # before reaching anything this test is about.
+    strategy_id = next(sid for sid in sorted(STRATEGY_MANIFEST) if STRATEGY_MANIFEST[sid].retired_reason is None)
     with pytest.raises(_StopAfterEvaluation):
         run_backtest(
             conn,
@@ -148,7 +151,10 @@ def _run_to_the_write_phase(
     monkeypatch.setattr(backtest_run, "evaluate_arm", evaluate)
     monkeypatch.setattr(backtest_run, "evaluate_level_arms", lambda *args, **kwargs: (evaluate(*args, **kwargs),))
 
-    strategy_id = next(iter(sorted(STRATEGY_MANIFEST)))
+    # ⚠ A LIVE strategy (#2845). `sorted(...)[0]` is s1, which is now retired, so a
+    # one-entry manifest built from it has NO runnable strategy and the run refuses
+    # before reaching anything this test is about.
+    strategy_id = next(sid for sid in sorted(STRATEGY_MANIFEST) if STRATEGY_MANIFEST[sid].retired_reason is None)
     call = partial(
         run_backtest,
         conn,

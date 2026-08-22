@@ -116,11 +116,31 @@ StrategyScanStatus = Literal[
     "written",
     "up_to_date",
     "refused_frontier_regressed",
+    #: #2845 — the manifest declares this strategy retired, so it produces no new
+    #: evidence. ⚠ A RECORDED result, never an absent one: a run reporting "2
+    #: strategies evaluated" with eight silently missing is the narrowing
+    #: criterion 9 forbids, and it is the whole reason retirement carries a named
+    #: reason rather than being a deletion.
+    "refused_retired",
     "failed",
 ]
 
 #: (signal_kind, verdict, not_evaluable_reason or "") -> count.
 CensusKey = tuple[SignalKind, Verdict, str]
+
+
+def retired_scan_ids(manifest: Mapping[str, StrategyEntry] = STRATEGY_MANIFEST) -> frozenset[str]:
+    """Which manifest entries produce NO new scan evidence (#2845).
+
+    ⚠ ONE predicate for BOTH call sites — the per-strategy loop and the
+    decision-calendar publication. Written twice they would drift, and the drift is
+    silent in the worse direction: a strategy skipped by the scan but still having
+    its calendar published looks healthy on the card while producing nothing.
+
+    Pure and manifest-derived, so it is table-testable without a database and
+    without the universe/bar fixture ``run_signal_scan`` needs.
+    """
+    return frozenset(strategy_id for strategy_id, entry in manifest.items() if entry.retired_reason is not None)
 
 
 @dataclass(frozen=True)
@@ -514,8 +534,17 @@ def _publish_decision_calendars(
     withdraw another's, which is `_commit_strategy`'s isolation contract applied to
     a second relation.
     """
+    # ⚠ RETIRED ENTRIES EXCLUDED (#2845). A decision calendar is an input to
+    # evidence production, and a retired strategy produces none — publishing one
+    # would keep paying the write while the card correctly shows the strategy as
+    # retired. NOT the #2811 mistake in reverse: that was gating publication on a
+    # fact about THIS RUN's coverage, which made never-measured zeros read as
+    # measured. Retirement is a declared property of the entry.
+    retired = retired_scan_ids(manifest)
     cross_sectional = [
-        strategy_id for strategy_id in sorted(manifest) if manifest[strategy_id].strategy_class == "cross_sectional"
+        strategy_id
+        for strategy_id in sorted(manifest)
+        if manifest[strategy_id].strategy_class == "cross_sectional" and strategy_id not in retired
     ]
     if not cross_sectional:
         return {}
@@ -653,6 +682,7 @@ def run_signal_scan(
     at_frontier = sum(1 for span in spans.values() if span.last_bar == frontier.bar_date)
 
     watermarks = read_watermarks(conn)
+    retired = retired_scan_ids(manifest)
     plans: list[_Plan] = []
     results: list[StrategyScanResult] = []
     current_versions: dict[str, str] = {}
@@ -660,7 +690,22 @@ def run_signal_scan(
         entry = manifest[strategy_id]
         identity = entry.identity(universe=SCAN_UNIVERSE, cost_model_id=COST_MODEL_ID)
         version = identity.version
+        # ⚠ Recorded BEFORE the retirement test, deliberately. `current_versions`
+        # is what `_publish_decision_calendars` and the census key on, and a
+        # retired strategy's stored rows must stay resolvable at its current
+        # version — retirement stops new evidence, it does not hide old.
         current_versions[strategy_id] = version
+        if strategy_id in retired:
+            # #2845. Not `continue` into silence: the result row is the record.
+            results.append(
+                StrategyScanResult(
+                    strategy_id=strategy_id,
+                    strategy_version=version,
+                    status="refused_retired",
+                    resumed_from=watermarks.get((strategy_id, version)),
+                )
+            )
+            continue
         watermark = watermarks.get((strategy_id, version))
         if watermark is not None and watermark >= frontier.bar_date:
             regressed = watermark > frontier.bar_date
@@ -1193,6 +1238,7 @@ __all__ = [
     "Frontier",
     "ScanReport",
     "ScanStatus",
+    "retired_scan_ids",
     "StrategyScanResult",
     "advance_watermark",
     "assert_census_complete",

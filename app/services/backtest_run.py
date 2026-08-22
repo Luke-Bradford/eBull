@@ -460,17 +460,29 @@ _EXISTING_RESULT_VERSIONS = """
 # ---------------------------------------------------------------------------
 
 
+#: Why an entry is excluded. ``capability`` = the builder cannot produce a result
+#: for it; ``retired`` = it could, and policy says it must not (#2845). A consumer
+#: that needs to tell them apart must not have to parse prose.
+ExclusionKind = Literal["capability", "retired"]
+
+
 @dataclass(frozen=True)
 class ExcludedStrategy:
-    """A manifest entry that cannot produce a result row, and the reason.
+    """A manifest entry that will not produce a result row, and the reason.
 
-    ⚠ The reason is the message ``build_positions`` RAISED, not a paraphrase of
-    it. §3: the entire exclusion of S-4 rests on that refusal, and a paraphrase
-    goes stale the day the builder's rule changes.
+    ⚠ For ``kind="capability"`` the reason is the message ``build_positions``
+    RAISED, not a paraphrase of it. §3: the entire exclusion of S-4 rests on that
+    refusal, and a paraphrase goes stale the day the builder's rule changes.
+
+    ⚠ For ``kind="retired"`` (#2845) the reason is the manifest's declared
+    ``retired_reason``. That is a POLICY statement rather than a builder refusal,
+    which is why the two carry a discriminator instead of one overloaded string —
+    the sentence above stays true of the arm it was written about.
     """
 
     strategy_id: str
     reason: str
+    kind: ExclusionKind = "capability"
 
 
 @dataclass(frozen=True)
@@ -719,31 +731,45 @@ def runnable_strategies(
     one state this function must not paper over: the exclusion is derived from
     the refusal, so a missing refusal means the derivation no longer holds and
     the honest answer is to stop rather than to guess which way it went.
+
+    ⚠⚠ CAPABILITY IS VALIDATED FOR EVERY ENTRY, INCLUDING RETIRED ONES (#2845),
+    AND THE RETIREMENT TEST COMES AFTER (Codex ckpt-1). Short-circuiting on
+    ``retired_reason`` first would make retirement **a way to conceal a malformed
+    declaration** — the two raises below are manifest-schema assertions, not
+    merely the derivation behind one exclusion, and eight of ten entries would
+    stop being checked in one change. The probe runs against a synthetic
+    ``_PROBE_CALENDAR``, so there is no cost argument for skipping it either.
+
+    ⚠ A capability exclusion OUTRANKS a retirement one in the reported reason:
+    "the builder cannot produce a result for this at all" is the stronger
+    statement, and a retired entry that is also broken should say so.
     """
     runnable: list[str] = []
     excluded: list[ExcludedStrategy] = []
     for strategy_id in sorted(manifest):
         entry = manifest[strategy_id]
         regime = _regime_for(entry, calendar)
+        capability_refusal: str | None = None
         if not regime.level_based:
             if entry.exit_levels is not None or entry.exit_levels_batch is not None:
                 raise RuntimeError(
                     f"{strategy_id} supplies scalar or batch exit levels for a non-level regime — the declared "
                     "close source and its consumer disagree"
                 )
+        elif entry.exit_levels is None:
+            capability_refusal = _demonstrate_level_refusal(entry, regime)
+            if capability_refusal is None:
+                raise RuntimeError(
+                    f"{strategy_id} is level_based but build_positions did NOT refuse an entry with no outcome — "
+                    "§3.2 excludes it BECAUSE of that refusal, so the exclusion can no longer be derived and the "
+                    "spec has to be re-measured rather than trusted"
+                )
+        if capability_refusal is not None:
+            excluded.append(ExcludedStrategy(strategy_id=strategy_id, reason=capability_refusal, kind="capability"))
+        elif entry.retired_reason is not None:
+            excluded.append(ExcludedStrategy(strategy_id=strategy_id, reason=entry.retired_reason, kind="retired"))
+        else:
             runnable.append(strategy_id)
-            continue
-        if entry.exit_levels is not None:
-            runnable.append(strategy_id)
-            continue
-        refusal = _demonstrate_level_refusal(entry, regime)
-        if refusal is None:
-            raise RuntimeError(
-                f"{strategy_id} is level_based but build_positions did NOT refuse an entry with no outcome — "
-                "§3.2 excludes it BECAUSE of that refusal, so the exclusion can no longer be derived and the "
-                "spec has to be re-measured rather than trusted"
-            )
-        excluded.append(ExcludedStrategy(strategy_id=strategy_id, reason=refusal))
     return tuple(runnable), tuple(excluded)
 
 
@@ -4269,5 +4295,6 @@ __all__ = [
     "load_corpus",
     "log_report",
     "run_backtest",
+    "ExclusionKind",
     "runnable_strategies",
 ]

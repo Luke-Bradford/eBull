@@ -213,27 +213,53 @@ def _measurement(
 class TestRunnableStrategies:
     """§3 — every declared close source must have its outcome producer."""
 
-    def test_all_four_are_runnable_once_s4_declares_causal_exit_levels(self) -> None:
+    def test_only_the_two_kept_strategies_are_runnable(self) -> None:
+        """#2845 retired eight of the ten; s4 and s8 are what is left.
+
+        ⚠ Every capability exclusion is still empty — all six `level_based` entries
+        declare `exit_levels`, so nothing here is excluded for being broken. The
+        eight are excluded on POLICY, which is why `kind` is asserted rather than
+        just the count: a capability refusal appearing in this list would mean a
+        builder regressed and retirement happened to hide it.
+        """
         runnable, excluded = runnable_strategies()
-        assert list(runnable) == [
+        assert list(runnable) == ["s4-volatility-compression-breakout", "s8-range-mean-reversion"]
+        assert [item.strategy_id for item in excluded] == [
             "s1-time-series-momentum",
             "s10-relative-strength-leader",
             "s2-cross-sectional-momentum",
             "s3-mean-reversion-in-trend",
-            "s4-volatility-compression-breakout",
             "s5-support-bounce",
             "s6-resistance-breakout",
             "s7-trend-pullback",
-            "s8-range-mean-reversion",
             "s9-squeeze-expansion",
         ]
-        assert excluded == ()
+        assert {item.kind for item in excluded} == {"retired"}
+        assert all("#2827" in item.reason for item in excluded)
 
-    def test_every_manifest_entry_is_accounted_for(self) -> None:
+    def test_every_manifest_entry_is_accounted_for_exactly_once(self) -> None:
         from app.services.strategy_manifest import STRATEGY_MANIFEST
 
         runnable, excluded = runnable_strategies()
-        assert set(runnable) | {entry.strategy_id for entry in excluded} == set(STRATEGY_MANIFEST)
+        excluded_ids = [entry.strategy_id for entry in excluded]
+        assert set(runnable) | set(excluded_ids) == set(STRATEGY_MANIFEST)
+        # ⚠ Membership alone does not prove EXACTLY-ONE classification: a
+        # strategy in both lists satisfies the union and is a real bug.
+        assert not set(runnable) & set(excluded_ids)
+        assert (
+            len(runnable) + len(excluded_ids) == len(STRATEGY_MANIFEST) == len(set(excluded_ids)) + len(set(runnable))
+        )
+
+    def test_at_least_one_strategy_remains_runnable(self) -> None:
+        """A general invariant, not this ticket's set.
+
+        Retiring everything leaves a system that cannot produce evidence at all,
+        and every downstream "no results" would read as a data problem rather than
+        as the manifest saying no. Cheap to assert, and the failure it catches is
+        one nobody would look for.
+        """
+        runnable, _excluded = runnable_strategies()
+        assert runnable
 
     def test_a_level_based_entry_that_stops_refusing_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The exclusion is DERIVED from the refusal, so a missing refusal stops the run.
