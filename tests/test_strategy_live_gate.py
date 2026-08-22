@@ -44,7 +44,13 @@ from app.services.strategy_live_gate import (
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION
 from tests.test_strategy_position_manager import _opened_trade
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
+# #2829 — freezes a synthetic identity while testing the live gate; see
+# `assume_trial_registered` in tests/conftest.py.
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("registered_strategy_test_candidates"),
+    pytest.mark.usefixtures("assume_trial_registered"),
+]
 
 _STRATEGY_ID = "S-LIVE-GATE"
 _VERSION = "live-gate-v1"

@@ -27,6 +27,10 @@ from app.services.result_ledger import (
 )
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION
 
+# #2829 — freezes synthetic or pre-mapped identities while testing a different
+# gate; see `assume_trial_registered` in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("assume_trial_registered")
+
 _STALE_POLICY = "structural-refusal-policy-2026-08-12-v1"
 _STRATEGY_ID = "S-2634"
 _STRATEGY_VERSION = "supersession-test-v1"

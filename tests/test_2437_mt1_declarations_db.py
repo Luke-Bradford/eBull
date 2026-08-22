@@ -5,9 +5,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 import psycopg
+import pytest
 
 from app.services.result_ledger import freeze_preregistration, load_preregistration
 from scripts.freeze_2437_mt1_declarations import _freeze_batch, build_declarations
+
+# #2829 — freezes synthetic or pre-mapped identities while testing a different
+# gate; see `assume_trial_registered` in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("assume_trial_registered")
 
 
 def test_both_declarations_freeze_atomically_and_identical_retry_is_safe(

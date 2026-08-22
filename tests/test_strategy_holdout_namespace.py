@@ -46,7 +46,6 @@ from app.services.strategy_result import (
     StrategyResult,
     check_promotable,
 )
-from app.services.trial_register import DeclaredTrial, TrialExactness
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
     build_control,
@@ -55,35 +54,9 @@ from tests.test_result_ledger import (
     build_result_with_dsr,
 )
 
-
-# ---------------------------------------------------------------------------
-# #2829 — assume criterion 6's M counts whatever this module freezes.
-#
-# ``freeze_preregistration`` now refuses a declaration no ``TRIAL_REGISTER``
-# trial claims, so that M cannot be an assertion. These tests are about a
-# DIFFERENT gate and freeze synthetic identities the production register has no
-# business naming — mapping their fixtures into it would put fake trials in the
-# artefact that feeds every Deflated Sharpe.
-#
-# ⚠ Blanket-permissive, so the #2829 gate is NOT exercised here. It has its own
-# tests in ``tests/test_2829_declaration_trial_binding.py``.
-# ---------------------------------------------------------------------------
-class _RegisterClaimingAnything:
-    version = "test-register-claims-anything"
-
-    def trial_for_declaration(self, strategy_id: str, strategy_version: str) -> DeclaredTrial:
-        return DeclaredTrial(
-            trial_id=f"{strategy_id}@{strategy_version}",
-            description="synthetic fixture trial (#2829 gate bypassed for this module)",
-            evidence="tests only",
-            exactness=TrialExactness.EXACT,
-            declares=((strategy_id, strategy_version),),
-        )
-
-
-@pytest.fixture(autouse=True)
-def _assume_the_trial_is_registered(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("app.services.result_ledger.TRIAL_REGISTER", _RegisterClaimingAnything())
+# #2829 — freezes synthetic or pre-mapped identities while testing a different
+# gate; see `assume_trial_registered` in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("assume_trial_registered")
 
 
 _ACTOR = "tests/test_strategy_holdout_namespace.py"

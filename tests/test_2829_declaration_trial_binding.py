@@ -49,13 +49,13 @@ _STORED_DECLARATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _trial(trial_id: str, declares: tuple[tuple[str, str], ...] = ()) -> DeclaredTrial:
+def _trial(trial_id: str, declared_for: tuple[str, str] | None = None) -> DeclaredTrial:
     return DeclaredTrial(
         trial_id=trial_id,
         description="d",
         evidence="e",
         exactness=TrialExactness.EXACT,
-        declares=declares,
+        declared_for=declared_for,
     )
 
 
@@ -69,13 +69,13 @@ class TestTheShippedMapping:
         assert trial.trial_id == trial_id
 
     def test_the_mapping_is_sparse_and_that_is_correct(self) -> None:
-        """⚠ Most trials claim nothing, and an empty ``declares`` is not an omission.
+        """⚠ Most trials claim nothing, and a ``None`` ``declared_for`` is not an omission.
 
         Many entries are research SESSIONS that no declaration corresponds to. A
         test that demanded a mapping on every trial would be demanding five rows'
         worth of declarations for thirty trials.
         """
-        claiming = [trial for trial in TRIAL_REGISTER.trials if trial.declares]
+        claiming = [trial for trial in TRIAL_REGISTER.trials if trial.declared_for is not None]
         assert len(claiming) == len(_STORED_DECLARATIONS)
         assert TRIAL_REGISTER.trial_for_declaration("short-horizon-search-session-2026-08-09", "whatever") is None
 
@@ -84,16 +84,30 @@ class TestTheInvariantsThatProtectM:
     def test_a_pair_claimed_by_two_trials_is_refused(self) -> None:
         """One declaration counted twice inflates ``M`` silently — the same
         failure shape as a duplicate ``trial_id``, one level down."""
-        pair = (("alpha", "v1"),)
+        pair = ("alpha", "v1")
         with pytest.raises(ValueError, match="claimed by both"):
             TrialRegister(version="v", trials=(_trial("one", pair), _trial("two", pair)))
 
-    def test_a_pair_repeated_inside_one_trial_is_refused(self) -> None:
-        """⚠ The cross-trial check builds a set, so a pair repeated INSIDE one
-        tuple would pass it while still leaving the register unable to say how
-        many times it counted that declaration."""
-        with pytest.raises(ValueError, match="declares .* twice"):
-            _trial("one", (("alpha", "v1"), ("alpha", "v1")))
+    def test_one_trial_can_claim_at_most_one_declaration(self) -> None:
+        """⚠⚠ THE INVARIANT CODEX CKPT-2 FORCED, and it is structural rather than
+        checked.
+
+        The first draft let a trial claim a TUPLE of pairs. A new search could
+        then be added to an existing trial's list -- which the freeze gate's own
+        error message suggested -- passing the gate while ``searches`` stayed put
+        and ``declared_count`` never moved. That is the exact under-count the gate
+        exists to prevent, sailing through it.
+
+        One trial to one declaration makes "this declaration has its own counted
+        trial" true by the type, so appending a claim necessarily appends a trial
+        and necessarily moves ``M``.
+        """
+        # Behavioural, not a type assertion: a list of pairs is what the first
+        # draft accepted, and `(("a", "v1"), ("b", "v2"))` even has len 2, so it
+        # slips past a shape check and is caught only because its elements are
+        # tuples rather than strings.
+        with pytest.raises(ValueError, match="must be a non-blank string"):
+            _trial("one", (("alpha", "v1"), ("beta", "v2")))  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("bad", ["", "   ", "x" * 201])
     def test_an_identity_the_declarations_table_could_not_hold_is_refused(self, bad: str) -> None:
@@ -101,7 +115,7 @@ class TestTheInvariantsThatProtectM:
         the table could never hold can never match a row, so it fails SILENT — as
         a declaration this register does not claim — rather than loudly."""
         with pytest.raises(ValueError, match="sql/333"):
-            _trial("one", ((bad, "v1"),))
+            _trial("one", (bad, "v1"))
 
     def test_a_malformed_pair_is_refused(self) -> None:
         with pytest.raises(ValueError, match="strategy_id, strategy_version"):
@@ -110,7 +124,7 @@ class TestTheInvariantsThatProtectM:
                 description="d",
                 evidence="e",
                 exactness=TrialExactness.EXACT,
-                declares=(("alpha",),),  # type: ignore[arg-type]
+                declared_for=("alpha",),  # type: ignore[arg-type]
             )
 
 
@@ -172,11 +186,7 @@ class TestTheFreezeGate:
         produces, which is exactly what distinguishes "admitted" from "refused"
         without a database.
         """
-        registered = TRIAL_REGISTER.trials[0]
-        assert not registered.declares  # a session trial; use a mapped one instead
-        strategy_id, strategy_version = next(
-            (sid, ver) for sid, ver, _ in ((d[0], d[1], d[2]) for d in _STORED_DECLARATIONS)
-        )
+        strategy_id, strategy_version, _ = _STORED_DECLARATIONS[0]
         with pytest.raises(AttributeError):
             freeze_preregistration(cast("Any", object()), self._declaration(strategy_id, strategy_version))
 

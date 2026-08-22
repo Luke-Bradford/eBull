@@ -489,3 +489,43 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             shutil.rmtree(base, ignore_errors=True)
     except Exception:  # pragma: no cover - best-effort
         pass
+
+
+# ---------------------------------------------------------------------------
+# #2829 — assume criterion 6's M counts whatever a module freezes.
+#
+# `freeze_preregistration` refuses a declaration no `TRIAL_REGISTER` trial
+# claims, so that M cannot be an assertion. Several test modules freeze
+# SYNTHETIC identities while testing a different gate entirely (immutability,
+# supersession, cost stamps, the live-gate policy). Mapping their fixtures into
+# the production register would put fake trials in the artefact that feeds every
+# Deflated Sharpe, so they opt into a permissive register instead:
+#
+#     pytestmark = pytest.mark.usefixtures("assume_trial_registered")
+#
+# ⚠ NOT autouse. A module that opts in is NOT exercising the #2829 gate, and
+# that has to be a visible line in the file rather than a global default —
+# otherwise the gate is off everywhere and only its own tests would notice.
+# Those live in `tests/test_2829_declaration_trial_binding.py`, which
+# deliberately does NOT opt in.
+# ---------------------------------------------------------------------------
+class _RegisterClaimingAnything:
+    """Stands in for `TRIAL_REGISTER` and claims every identity asked of it."""
+
+    version = "test-register-claims-anything"
+
+    def trial_for_declaration(self, strategy_id: str, strategy_version: str) -> Any:
+        from app.services.trial_register import DeclaredTrial, TrialExactness
+
+        return DeclaredTrial(
+            trial_id=f"{strategy_id}@{strategy_version}",
+            description="synthetic fixture trial (#2829 gate not under test here)",
+            evidence="tests only",
+            exactness=TrialExactness.EXACT,
+            declared_for=(strategy_id, strategy_version),
+        )
+
+
+@pytest.fixture
+def assume_trial_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.services.result_ledger.TRIAL_REGISTER", _RegisterClaimingAnything())

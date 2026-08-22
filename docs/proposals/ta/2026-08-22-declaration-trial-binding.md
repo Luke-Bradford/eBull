@@ -57,24 +57,43 @@ select trial_register_version, count(*) from strategy_results_store group by 1;
 
 ## Scope
 
-1. `DeclaredTrial` gains `declares: tuple[tuple[str, str], ...] = ()` — the
-   `(strategy_id, strategy_version)` pairs whose preregistration declaration this trial's
-   searches account for. Empty is legitimate and common: many of the thirty trials are
+1. `DeclaredTrial` gains `declared_for: tuple[str, str] | None = None` — the
+   `(strategy_id, strategy_version)` whose preregistration declaration this trial's
+   searches account for. `None` is legitimate and common: many of the thirty trials are
    research *sessions* (`short-horizon-search-session-2026-08-09`,
    `autocorrelation-term-structure-2026-08-09`, …) that no declaration corresponds to.
-2. **Cardinality, stated because it was not obvious:** one trial MAY claim MANY pairs (a
-   grouped family declared once); a pair is claimed by AT MOST ONE trial. Validated in
-   `__post_init__` — a pair on two trials would double-count that declaration's searches
-   in `M`, silently and in the flattering direction. A pair repeated *within* one trial's
-   tuple is refused too, or the naive cross-trial check would let it through.
-3. Each pair's elements are validated non-blank and ≤ 200 characters, mirroring
-   `sql/333`'s `strategy_preregistration_declaration_identity` CHECK — a pair the table
-   could never hold can never match a row, so it is a typo, not a mapping.
-4. `TrialRegister.trial_for_declaration(strategy_id, strategy_version) -> DeclaredTrial |
+2. ⚠⚠ **AT MOST ONE per trial, and that is the invariant rather than a simplification.**
+   The first draft allowed a *tuple* of pairs. Codex checkpoint 2 killed it with the
+   decisive objection: a trial could then claim a second declaration while `searches`
+   stayed where it was, so the freeze gate would admit a brand-new search that never moved
+   `declared_count` — the exact under-count the gate exists to prevent, passing the gate.
+   The gate's own error message even advertised the loophole ("or a `declares` entry on
+   the existing one"). One trial to one declaration makes *"this declaration has its own
+   counted trial"* true by the type, so claiming a declaration necessarily appends a trial
+   and necessarily moves `M`.
+   ⚠ It does not close every path: re-pointing an existing trial's `declared_for` at a new
+   pair passes construction without moving `M`. That leaves the PREVIOUS declaration
+   unclaimed, which is what
+   `TestTheShippedMapping::test_every_stored_declaration_is_claimed_by_its_trial` exists
+   to catch. Stated rather than implied, because it is the one remaining seam.
+3. A pair claimed by two trials is refused at `TrialRegister` construction — that would
+   double-count one declaration's searches in `M`, silently and in the flattering
+   direction.
+4. Each element is validated non-blank and ≤ 200 characters, mirroring `sql/333`'s
+   `strategy_preregistration_declaration_identity` CHECK — a pair the table could never
+   hold can never match a row, so it is a typo, not a mapping.
+5. `TrialRegister.trial_for_declaration(strategy_id, strategy_version) -> DeclaredTrial |
    None`.
-5. **`freeze_preregistration` refuses a declaration no trial claims** — freeze time only.
-6. The five existing declarations mapped onto their trials, and a test asserting every
+6. **`freeze_preregistration` refuses a declaration no trial claims** — freeze time only.
+7. The five existing declarations mapped onto their trials, and a test asserting every
    stored declaration's pair is claimed.
+8. **Every test module that freezes a synthetic identity opts into a permissive register**
+   via `pytestmark = pytest.mark.usefixtures("assume_trial_registered")`
+   (`tests/conftest.py`). Seven modules; `tests/test_strategy_live_gate.py` and
+   `tests/test_2634_prereg_supersession_db.py` among them, both found by Codex checkpoint
+   2 rather than by the fast tier, because they are `db`-marked and off the push gate.
+   ⚠ The fixture is deliberately NOT autouse: a module that opts in is not exercising this
+   gate, and that has to be a visible line in the file rather than a global default.
 
 ## Source rule
 
@@ -192,8 +211,8 @@ forces the bump conversation at the right moment.
   pair and pointing at the register.
 - Every one of the five stored declarations is claimed by exactly one trial, checked
   against the real register and the real rows.
-- A register declaring one pair on two trials, or the same pair twice within one trial,
-  raises at construction.
+- A register declaring one pair on two trials raises at construction, and a tuple-of-pairs
+  `declared_for` is refused by the identity validation.
 - `declaration_refusals` is byte-for-byte unchanged, and returns `()` for all five stored
   declarations exactly as before.
 - `TRIAL_REGISTER.declared_count == 274` and `len(TRIAL_REGISTER.trials) == 30`.
