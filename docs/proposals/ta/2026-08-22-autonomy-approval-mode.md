@@ -115,6 +115,12 @@ client and for every edit that is not about approval; it must mean *unchanged*, 
 *reset to manual*. The resolved value — not the request field — is what the
 material-change comparison and the INSERT see.
 
+The rule is `strategy_control_plane.resolve_approval_mode(requested, current)`, a named
+pure function rather than an inline ternary, because the wrong spelling is a
+one-character difference with no test surface. Table-tested; revert-probed by inverting
+it to `"manual" if requested is None`, which fails
+`test_resolve_approval_mode[None-autonomous-autonomous]`.
+
 ⚠ `require_session` stays. Flipping the flag to `autonomous` is itself an operator
 authorisation and is the last one the operator makes; a service token has no identity to
 attribute it to.

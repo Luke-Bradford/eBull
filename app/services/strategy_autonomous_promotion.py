@@ -42,6 +42,7 @@ from typing import Any, Final
 import psycopg
 
 from app.services.strategy_control_plane import (
+    PAPER_ALLOCATOR_ADVISORY_LOCK,
     PaperPool,
     Stage,
     StrategyControlError,
@@ -155,6 +156,18 @@ def _reason(pool: PaperPool) -> str:
     return f"autonomous advance under approval_mode=autonomous (pool event {pool.event_id}, {AUTONOMY_POLICY_VERSION})"
 
 
+class _AuthorityRevoked(Exception):
+    """The pool stopped authorising a policy approver part-way through a cycle.
+
+    Distinct from ``_Refused``: that is one strategy's evidence failing, this is the
+    authority itself going away, and it ends the cycle rather than the strategy.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class _Refused(Exception):
     """Carries one strategy's refusal out of its transaction block, rolling it back.
 
@@ -174,7 +187,6 @@ def _advance_one(
     *,
     strategy_id: str,
     strategy_version: str,
-    pool: PaperPool,
     as_of: datetime,
 ) -> tuple[AutonomousAdvance | None, str | None]:
     """One strategy, in its OWN transaction.
@@ -183,8 +195,26 @@ def _advance_one(
     unrelated failure on the last strategy roll back every promotion before it, and
     would make the iteration order decide who advances.  Committing per strategy is
     also what makes the report describe what is durably true.
+
+    ⚠⚠ THE AUTHORITY IS RE-READ HERE, UNDER THE ALLOCATOR LOCK, AND NOT INHERITED
+    FROM THE CYCLE (Codex ckpt-2, P1).  Per-strategy transactions are exactly what
+    creates the hole: an operator who switches the pool to ``manual`` mid-cycle
+    commits between two promotions, and a cycle-level snapshot would keep approving
+    on authority that no longer exists.  ``configure_paper_pool`` takes the same
+    ``PAPER_ALLOCATOR_ADVISORY_LOCK``, so taking it here is what makes a revocation
+    and an approval serialise rather than interleave.
+
+    ⚠ Lock ORDER is allocator-then-strategy, matching `strategy_paper_executor`
+    (`_allocator_lock`, then `decide_funding`'s `_lock_strategy`).  `advance_strategy`
+    takes the per-strategy lock below, so acquiring the pool lock first keeps one
+    global order and cannot invert against the executor.
     """
     with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
+        pool = load_paper_pool(conn)
+        revoked = cycle_precondition_refusal(pool)
+        if revoked is not None:
+            raise _AuthorityRevoked(revoked)
         action, skip = planned_action(current_stage(conn, strategy_id, strategy_version))
         if action is None:
             assert skip is not None
@@ -230,6 +260,12 @@ def run_autonomous_promotion_cycle(conn: psycopg.Connection[Any], *, as_of: date
 
     Strategies are visited in sorted id order so the report is stable, not because the
     order carries meaning -- each one commits independently.
+
+    ⚠ The read below is a CHEAP EXIT, not the control.  It answers "is there anything
+    to do" without taking a lock; ``_advance_one`` re-reads the authority under
+    ``PAPER_ALLOCATOR_ADVISORY_LOCK`` before every single promotion, and that is what
+    actually gates one.  Deleting this read would change nothing but the cost of a
+    manual-mode tick.
     """
     pool = load_paper_pool(conn)
     refusal = cycle_precondition_refusal(pool)
@@ -240,15 +276,21 @@ def run_autonomous_promotion_cycle(conn: psycopg.Connection[Any], *, as_of: date
 
     advanced: list[AutonomousAdvance] = []
     refusals: list[tuple[str, str]] = []
+    revoked: str | None = None
     for strategy_id, strategy_version in sorted(current_result_versions().items()):
         try:
             outcome, skip = _advance_one(
                 conn,
                 strategy_id=strategy_id,
                 strategy_version=strategy_version,
-                pool=pool,
                 as_of=as_of,
             )
+        except _AuthorityRevoked as exc:
+            # STOP, do not continue to the next strategy: the authority is gone for
+            # all of them, and the promotions already committed stay committed --
+            # each was approved while the authority still held.
+            revoked = exc.code
+            break
         except _Refused as exc:
             refusals.append((strategy_id, exc.detail))
             continue
@@ -256,6 +298,13 @@ def run_autonomous_promotion_cycle(conn: psycopg.Connection[Any], *, as_of: date
             advanced.append(outcome)
         elif skip is not None:
             refusals.append((strategy_id, skip))
+    if revoked is not None:
+        return AutonomousPromotionReport(
+            approval_mode=load_paper_pool(conn).approval_mode,
+            skipped_reason=revoked,
+            advanced=tuple(advanced),
+            refusals=tuple(refusals),
+        )
     return AutonomousPromotionReport(
         approval_mode=pool.approval_mode,
         skipped_reason=None,

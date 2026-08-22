@@ -12,6 +12,7 @@ except in WHO it stamps.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -318,3 +319,44 @@ def test_a_stale_assessment_still_refuses_under_autonomy(ebull_test_conn: psycop
 
     assert report.advanced == ()
     assert report.refusals == ((_STRATEGY_ID, "prospective_assessment_stale"),)
+
+
+def test_authority_revoked_mid_cycle_stops_the_cycle(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⚠ Codex ckpt-2 P1. Per-strategy transactions are what create this hole: an
+    operator switching the pool to `manual` commits BETWEEN two promotions, and a
+    cycle-level authority snapshot would keep approving on authority that no longer
+    exists.
+
+    The race is made deterministic by stubbing the READ, not the evidence: the first
+    call (the cycle's cheap exit) sees `autonomous`, the second (the per-strategy
+    re-read under `PAPER_ALLOCATOR_ADVISORY_LOCK`) sees `manual`. That is exactly the
+    interleaving a concurrent `configure_paper_pool` produces.
+    """
+    from app.services import strategy_autonomous_promotion
+    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
+
+    _seed_forward_observation(ebull_test_conn)
+    _seed_passing_assessment(ebull_test_conn)
+    _configure(ebull_test_conn, approval_mode="autonomous")
+    before = _stage_rows(ebull_test_conn)
+
+    real_load = strategy_autonomous_promotion.load_paper_pool
+    calls = {"n": 0}
+
+    def _revoke_after_first_read(conn: psycopg.Connection[Any]) -> Any:
+        pool = real_load(conn)
+        calls["n"] += 1
+        return pool if calls["n"] == 1 else replace(pool, approval_mode="manual")
+
+    monkeypatch.setattr(strategy_autonomous_promotion, "load_paper_pool", _revoke_after_first_read)
+
+    report = run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)
+
+    assert report.skipped_reason == "approval_mode_manual"
+    assert report.advanced == ()
+    # The whole point: nothing was promoted on revoked authority.
+    assert _stage_rows(ebull_test_conn) == before
+    # ⚠ The re-read must be a SECOND read. One read means the authority was inherited.
+    assert calls["n"] >= 2
