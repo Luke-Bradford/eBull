@@ -4,20 +4,12 @@
 -- rebalance EVALUATION -- the mandate-driven analogue of
 -- `strategy_entry_preflights`, which is signal-driven and cannot carry this.
 --
--- ⚠⚠ CORRECTED 2026-08-22 (#2603 step 3b-3).  This header used to read "no
--- table has a foreign key to it and no module reads it, so no code path can
--- turn a row into an action".  BOTH HALVES ARE NOW FALSE: sql/349 added
--- `strategy_trades.core_rebalance_intent_id`, and
--- `app/services/strategy_core_submission_gate.py` SELECTs from this table to
--- decide whether a stored verdict may become an order.  The reading side did
--- arrive as promised; the promise was not re-read when it did.
---
--- What holds instead, and it is weaker on purpose: a row here is submission-gate
--- INPUT, not authority.  The gate has no acting caller anywhere in `app/` or
--- `scripts/`, so no path runs from a row here to an order.  That is a fact about
--- today's call graph rather than a mechanical impossibility, which is exactly
--- why it is written this way -- the previous wording survived the change that
--- falsified it because it sounded structural.
+-- ⚠⚠ THIS TABLE AUTHORISES NOTHING, and that is mechanical rather than a
+-- promise: no table has a foreign key to it and no module reads it, so no code
+-- path can turn a row into an action.  The reading side arrives in the next
+-- slice together with the position-manager change that makes the resulting
+-- position visible -- deliberately in that order, because a writable core trade
+-- the manager cannot see is worse than no core trade at all.
 --
 -- Why not a synthetic `strategy_signals` row instead: #2603 scope clause 5 says
 -- the core path "reads mandate + current positions only; never reads
