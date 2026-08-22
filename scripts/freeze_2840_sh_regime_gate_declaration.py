@@ -36,6 +36,7 @@ from typing import Final
 import psycopg
 
 from app.config import settings
+from app.services.cost_model import CARRY_UNMODELLED, FX_UNMODELLED
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.result_ledger import PreregDeclarationRefused, freeze_preregistration, load_preregistration
 from app.services.strategy_manifest import STRATEGY_MANIFEST
@@ -120,20 +121,35 @@ _FORWARD_SHADOW_DERIVATION: Final = (
 def build_declaration() -> PreregDeclaration:
     """S-H arm 1's declaration. Every stamp is the run's actual state, read not chosen.
 
-    ⚠ ``survivorship_free`` is the honest basis and is nonetheless UNPROMOTABLE
-    here: ``carry_unmodelled`` because the cost model is
-    ``carry-fx-structural-zero-long-x1-real-usd`` — carry is stamped structurally
-    zero, not modelled — and ``fx_unmodelled`` because the corpus is USD against a
-    GBP account. Both are stamps the run will actually produce, not pessimistic
-    labels.
+    ⚠⚠ THE CARRY/FX STAMPS ARE READ FROM ``cost_model``, AND THE FIRST DRAFT GOT
+    THEM BACKWARDS FROM THE COST MODEL'S NAME. ``carry-fx-structural-zero`` reads
+    like "not modelled"; it is the opposite. ``cost_model.CARRY_CLOSURE`` is
+    ``structural_zero``, which is a CLOSURE state meaning the cost does not exist
+    for the declared lane — an unleveraged long on the underlying pays no
+    overnight financing, and USD in / USD held / USD out has no conversion event.
+    ``unmodelled`` is a different closure entirely, and #2720 flipped both markers
+    to ``False``. ``freeze_preregistration`` refuses a manifest strategy whose
+    declared stamps cannot match what ``backtest_run`` will write, which is what
+    caught the draft — no row was burned. Read, never pasted, so a future closure
+    change moves this declaration with it.
 
-    ⚠ ``falsification_only`` FOLLOWS from those stamps rather than being chosen: a
-    ``capital_candidate`` purpose over a non-empty recomputed refusal list is
-    exactly what ``ineligible_trial_not_declared_falsification`` refuses.
+    ⚠⚠ ``falsification_only`` IS THEREFORE A CHOICE, NOT A CONSEQUENCE. With those
+    stamps ``structural_promotion_refusals(survivorship_free, False, False)`` is
+    EMPTY, so ``ineligible_trial_not_declared_falsification`` does not fire and
+    ``capital_candidate`` would be accepted. It is still wrong, for a reason the
+    contract already establishes: NO stored corpus window can confirm this
+    hypothesis (every pinned window contains the cohorts that generated it), so
+    the run this declaration authorises can only KILL the candidate, never
+    promote it. Declaring ``capital_candidate`` would claim an outcome this
+    instrument cannot produce.
+
+    ⚠ And it forecloses nothing. The confirmatory instrument is forward shadow,
+    which runs under ``SCAN_UNIVERSE`` — a different ``strategy_version``, hence
+    its own declaration, made when that evidence exists.
     """
     universe_basis = BACKTEST_UNIVERSE
-    carry_unmodelled = True
-    fx_unmodelled = True
+    carry_unmodelled = CARRY_UNMODELLED
+    fx_unmodelled = FX_UNMODELLED
     return PreregDeclaration(
         strategy_id=STRATEGY_ID,
         strategy_version=STRATEGY_VERSION,

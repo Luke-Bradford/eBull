@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.services.prereg_contract import PREREG_PURPOSES
+from app.services.cost_model import CARRY_UNMODELLED, FX_UNMODELLED
+from app.services.prereg_contract import PREREG_PURPOSES, declaration_refusals
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import structural_promotion_refusals
 from app.services.strategy_result_identity import BACKTEST_UNIVERSE, COST_MODEL_ID
@@ -66,14 +67,39 @@ class TestTheRegisterEntry:
 
 
 class TestTheDeclaration:
-    def test_the_purpose_follows_from_the_stamps_rather_than_being_chosen(self) -> None:
+    def test_the_carry_and_fx_stamps_are_read_from_the_cost_model(self) -> None:
+        """⚠⚠ The draft declared ``(True, True)`` off the cost model's NAME.
+
+        ``carry-fx-structural-zero`` reads as "not modelled" and means the
+        opposite — ``structural_zero`` is a closure state saying the cost does
+        not exist for this lane. ``freeze_preregistration`` refuses a manifest
+        strategy whose stamps cannot match what ``backtest_run`` writes, which
+        is what caught it before a row was burned.
+        """
+        declaration = build_declaration()
+        assert (declaration.declared_carry_unmodelled, declaration.declared_fx_unmodelled) == (
+            CARRY_UNMODELLED,
+            FX_UNMODELLED,
+        )
+        assert (CARRY_UNMODELLED, FX_UNMODELLED) == (False, False)
+
+    def test_falsification_only_is_a_choice_and_the_test_says_which(self) -> None:
+        """⚠ NOT forced. With the real stamps the refusal list is EMPTY, so
+        ``ineligible_trial_not_declared_falsification`` does not fire and
+        ``capital_candidate`` would be accepted.
+
+        It is declared anyway because no stored corpus window can confirm this
+        hypothesis — every pinned window contains the cohorts that generated it
+        — so the authorised run can only kill the candidate.
+        """
         declaration = build_declaration()
         assert declaration.prereg_purpose in PREREG_PURPOSES
-        # A non-empty refusal list is exactly what
-        # `ineligible_trial_not_declared_falsification` refuses a
-        # `capital_candidate` for, so the purpose is forced, not picked.
-        assert declaration.expected_structural_refusals
+        assert declaration.expected_structural_refusals == ()
         assert declaration.prereg_purpose == "falsification_only"
+
+    def test_the_declaration_would_pass_the_freeze_time_stamp_gate(self) -> None:
+        """The gate that refused the draft, exercised without touching the DB."""
+        assert declaration_refusals(build_declaration()) == ()
 
     def test_the_expected_refusals_are_recomputed_not_transcribed(self) -> None:
         declaration = build_declaration()
