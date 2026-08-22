@@ -30,8 +30,34 @@ jobs:
         # A PR is "doc-only" when every changed file matches one of:
         #   - *.md / *.mdx / *.rst
         #   - anything under docs/ at any nesting depth
-        #   - LICENSE / CHANGELOG / NOTICE (no extension)
         # If even one code/test/config file changes, we review as normal.
+        #
+        # LICENSE / CHANGELOG / NOTICE were on this list and are NOT any more
+        # (#2849). `safe_merge.sh` cannot classify them doc-only even in
+        # principle: its `doc_only_paths` entries are normalized with
+        # `p="${p%/}/"`, so an extensionless FILE is inexpressible there — only
+        # the excludes list does exact-file matching. So this step said
+        # doc-only, `safe_merge.sh` said not, and a LICENSE-only PR would hit
+        # the same unmergeable trap #2848 hit. Converging on the STRICTER side
+        # is the safe direction for a gate pair: too lenient here costs a PR
+        # that can never merge, too strict costs one review nobody needed.
+        #
+        # ⚠ EXCLUSIONS BEAT BOTH TESTS (#2849). A path under `.autonomy/` is
+        # NEVER doc-only however it is spelled, because `.md` there is a
+        # format and not a guarantee of harmlessness — `.autonomy/loop_prompt.md`
+        # is the standing-order prompt an unattended loop executes, i.e.
+        # behaviour wearing a doc extension. This list MUST stay identical to
+        # `merge_gate.doc_only_excludes` in `.autonomy/config.yaml`, which is
+        # what the engine's `safe_merge.sh::is_doc_only` reads.
+        #
+        # This step and `safe_merge.sh::is_doc_only` are two implementations of
+        # one rule, and on 2026-08-22 they disagreed: this step skipped the
+        # review for PR #2848 (`.autonomy/loop_prompt.md` only) while
+        # `safe_merge.sh` refused to merge it for lacking that review. With no
+        # `workflow_dispatch` here, and only `pull_request` triggers, no re-push
+        # could produce the APPROVE — the PR was unmergeable by construction.
+        # #2849 tracks collapsing these two into one source; until it lands,
+        # a change to either list is a change to BOTH.
         #
         # Uses `git diff --name-only` against the PR base (checkout is
         # fetch-depth: 0) rather than `gh pr view --json files` because
@@ -65,9 +91,14 @@ jobs:
           is_docs_only=true
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # Exclusions are tested FIRST and beat the doc patterns below,
+            # matching safe_merge.sh::is_doc_only's precedence exactly.
+            if [[ "$f" == .autonomy/* ]]; then
+              is_docs_only=false
+              break
+            fi
             if [[ "$f" == *.md || "$f" == *.mdx || "$f" == *.rst \
-                  || "$f" == docs/* \
-                  || "$f" == LICENSE || "$f" == CHANGELOG || "$f" == NOTICE ]]; then
+                  || "$f" == docs/* ]]; then
               continue
             fi
             is_docs_only=false
