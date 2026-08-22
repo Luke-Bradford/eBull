@@ -75,8 +75,17 @@ class AccountEquityEvidence:
     non-engine holdings.
 
     ⚠ The money fields stay populated on a ``refused`` verdict wherever they are
-    computable -- the operator repairing the condition needs the numbers. ``comparable``
-    is the single load-bearing flag, and it is true only in the two decided states.
+    computable -- the operator repairing the condition needs the numbers, and today every
+    real row is refused, so blanking them would ship an empty panel. The invariant is
+    therefore an IMPLICATION and deliberately not a biconditional:
+
+        ``comparable`` is true ==> ``difference`` and ``tolerance`` are both non-NULL.
+
+    The converse does NOT hold. ``official_pending_orders_outstanding`` and
+    ``mark_rounding_tolerance_not_recorded`` can fire while ``difference`` is a perfectly
+    good number. ``comparable`` is the single load-bearing flag: a populated
+    ``difference`` beside ``comparable = False`` is a diagnostic, not a verdict, and no
+    consumer may read it as one.
     """
 
     status: Literal["unavailable", "collecting"]

@@ -162,9 +162,23 @@ at `convert()`, using that same rates dict, so it cannot raise where the value d
    depends on. One rule, no per-reason exemption list to fall out of date;
 3. otherwise `|difference| <= tolerance` → `reconciled`, else `diverged`.
 
-`difference`, `official_comparand`, `local_eod_value_in_account_currency` and `tolerance`
-are non-NULL exactly when `comparable` is true; a test asserts the biconditional rather
-than the implication, so a future reason that forgets to blank a field fails there.
+**The money fields are NOT gated on the verdict, and the implication runs one way only.**
+`difference`, `official_comparand`, `local_eod_value_in_account_currency` and
+`residual_not_in_local_book` are populated whenever their *inputs* are computable, refused
+or not — an operator repairing a refusal needs the numbers, and today every real row is
+refused, so blanking them would ship an empty panel. `official_pending_orders_outstanding`
+and `mark_rounding_tolerance_not_recorded` in particular can fire while `difference` is a
+perfectly good number.
+
+So the invariant is the **implication**, not a biconditional:
+
+> `comparable` is true ⟹ `difference` and `tolerance` are both non-NULL.
+
+`comparable` is the single load-bearing flag; a populated `difference` beside
+`comparable = false` is a diagnostic, not a verdict, and no consumer may read it as one.
+`test_a_populated_difference_never_implies_a_verdict` asserts both directions of that —
+that a refused row can still carry its numbers, and that a decided one can never be
+missing them.
 
 New refusal reasons, each naming one missing or incomparable input:
 

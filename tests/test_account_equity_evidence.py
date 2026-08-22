@@ -615,3 +615,75 @@ class TestOfficialDirectPositionReasons:
             pending_order_amount=Decimal("0"),
         )
         assert reasons.count("reconciliation_inputs_out_of_bounds") == 1
+
+
+def test_a_populated_difference_never_implies_a_verdict(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The money fields are diagnostics; only `comparable` is a verdict.
+
+    The invariant is an IMPLICATION and not a biconditional, which is easy to get
+    backwards because the natural reading of "not comparable" is "nothing to show". It is
+    the other way round: every row on the dev DB is refused today, so gating the numbers
+    on the verdict would ship an empty panel to the operator who has to repair it.
+    """
+    observed = datetime.now(UTC).replace(microsecond=0)
+    record_account_equity_snapshot(
+        ebull_test_conn,
+        environment="demo",
+        # An outstanding pending order refuses the CASH leg — while leaving the
+        # positions arithmetic entirely intact and worth showing.
+        snapshot=_snapshot(observed_at=observed, direct_long_positions=2, pending_order_amount="25"),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO portfolio_eod_snapshots (
+          snapshot_date,display_currency,total_value,positions_value,cash_value,
+          positions_total,positions_priced,oldest_mark_date,stale_mark_positions,
+          mark_rounding_tolerance,computed_at
+        ) VALUES (%(d)s,'USD',995,495,500,2,2,%(d)s,0,0.20,%(c)s)
+        """,
+        {"d": observed.date(), "c": observed + timedelta(minutes=1)},
+    )
+    evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
+
+    assert evidence.incomplete_reasons == ("official_pending_orders_outstanding",)
+    assert evidence.reconciliation_state == "refused"
+    assert not evidence.comparable
+    # ...and yet the numbers are all there. This is the direction the spec used to claim
+    # was impossible.
+    assert evidence.difference == Decimal("0.000000")
+    assert evidence.official_comparand == Decimal("995.000000")
+    assert evidence.local_eod_value_in_account_currency == Decimal("995.0000")
+    assert evidence.residual_not_in_local_book == Decimal("5.000000")
+
+    # The implication that DOES hold, asserted as a rule rather than on this one row.
+    if evidence.comparable:  # pragma: no cover - the assertion above fixes this branch
+        assert evidence.difference is not None
+        assert evidence.tolerance is not None
+
+
+def test_a_decided_verdict_always_carries_its_difference_and_tolerance(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The forward half of the implication, on a row that actually decides."""
+    observed = datetime.now(UTC).replace(microsecond=0)
+    record_account_equity_snapshot(
+        ebull_test_conn,
+        environment="demo",
+        snapshot=_snapshot(observed_at=observed, direct_long_positions=2),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO portfolio_eod_snapshots (
+          snapshot_date,display_currency,total_value,positions_value,cash_value,
+          positions_total,positions_priced,oldest_mark_date,stale_mark_positions,
+          mark_rounding_tolerance,computed_at
+        ) VALUES (%(d)s,'USD',995,495,500,2,2,%(d)s,0,0.20,%(c)s)
+        """,
+        {"d": observed.date(), "c": observed + timedelta(minutes=1)},
+    )
+    evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
+    assert evidence.comparable
+    assert evidence.difference is not None
+    assert evidence.tolerance is not None
