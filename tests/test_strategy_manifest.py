@@ -54,6 +54,11 @@ SPEC_S7 = "s7-trend-pullback"
 SPEC_S8 = "s8-range-mean-reversion"
 SPEC_S9 = "s9-squeeze-expansion"
 SPEC_S10 = "s10-relative-strength-leader"
+#: #2840's research seat (R5 candidate S-H): S-4's rule gated to the two volatile
+#: regimes. ⚠ NOT one of the ten — it landed after the #2845 retirement and is the
+#: reason every "ten" below reads eleven. Written out for the same reason as the
+#: rest: the bridge to the source is ``test_the_spec_ids_are_the_modules_ids``.
+SPEC_S11 = "s11-volatile-regime-gated-breakout"
 
 #: Spec §3's table, verbatim, as ``(signal_pair, level_based, max_hold_bars,
 #: has_rebalance_dates)``. ⚠ Written out for the reason in the module docstring:
@@ -76,6 +81,9 @@ SPEC_EXIT_REGIMES: dict[str, tuple[bool, bool, int | None, bool]] = {
     #: close is entry-set retention — declaring both would close
     #: band-surviving positions a month early (module docstring).
     SPEC_S10: (True, False, None, False),
+    #: S-11's exits ARE S-4's — the gate conditions entry only — so this row is a
+    #: deliberate duplicate of SPEC_S4's, not a copy-paste slip.
+    SPEC_S11: (False, True, 40, False),
 }
 
 #: The legs each strategy emits — §4: S-1 and S-3 have an exit rule, S-2 closes
@@ -91,6 +99,7 @@ SPEC_SIGNAL_KINDS: dict[str, frozenset[str]] = {
     SPEC_S8: frozenset({"entry"}),
     SPEC_S9: frozenset({"entry"}),
     SPEC_S10: frozenset({"entry", "exit"}),
+    SPEC_S11: frozenset({"entry"}),
 }
 
 SPEC_CLASSES: dict[str, str] = {
@@ -104,11 +113,24 @@ SPEC_CLASSES: dict[str, str] = {
     SPEC_S8: "per_series",
     SPEC_S9: "per_series",
     SPEC_S10: "cross_sectional",
+    SPEC_S11: "per_series",
 }
 
 SPEC_PURPOSES = {
     strategy_id: "harness_validation"
-    for strategy_id in (SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4, SPEC_S5, SPEC_S6, SPEC_S7, SPEC_S8, SPEC_S9, SPEC_S10)
+    for strategy_id in (
+        SPEC_S1,
+        SPEC_S2,
+        SPEC_S3,
+        SPEC_S4,
+        SPEC_S5,
+        SPEC_S6,
+        SPEC_S7,
+        SPEC_S8,
+        SPEC_S9,
+        SPEC_S10,
+        SPEC_S11,
+    )
 }
 
 
@@ -183,7 +205,7 @@ class TestManifestIsComplete:
         forever. Pin that it is actually reading the modules it claims to — the
         prevention-log lesson from a probe that matched nothing."""
         declared = self._declared_strategy_ids()
-        assert len(declared) == 10, f"expected the ten catalogue modules, walked {sorted(declared)}"
+        assert len(declared) == 11, f"expected the ten catalogue modules plus #2840's S-11, walked {sorted(declared)}"
         assert declared["s1_time_series_momentum.py"] == SPEC_S1
 
     def test_every_strategy_module_is_registered(self) -> None:
@@ -220,6 +242,7 @@ class TestManifestIsComplete:
             SPEC_S8,
             SPEC_S9,
             SPEC_S10,
+            SPEC_S11,
         }
 
 

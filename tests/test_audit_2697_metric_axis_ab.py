@@ -66,7 +66,11 @@ def _complete() -> list[dict[str, Any]]:
 def test_complete_exact_head_population_passes_without_reporting_values() -> None:
     report = audit_records(_complete(), candidate_head=_HEAD)
     assert report.failures == ()
-    assert report.comparison_count == 40
+    # ⚠ DERIVED, not the literal 40 it used to be. That figure was
+    # |manifest| x |ambiguity arms| x |quarantine arms| and went stale the moment
+    # #2840 added an eleventh strategy — a hand-written product of three sizes is
+    # exactly the derived statistic the instruction set says to compute or omit.
+    assert report.comparison_count == len(STRATEGY_MANIFEST) * len(AMBIGUITY_ARM_ORDER) * len(QUARANTINE_ARM_ORDER)
     assert report.as_dict()["performance_values_reported"] is False
 
 

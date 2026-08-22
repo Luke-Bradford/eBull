@@ -223,7 +223,13 @@ class TestRunnableStrategies:
         builder regressed and retirement happened to hide it.
         """
         runnable, excluded = runnable_strategies()
-        assert list(runnable) == ["s4-volatility-compression-breakout", "s8-range-mean-reversion"]
+        # ⚠ THREE. #2840's S-11 research seat is deliberately NOT retired — it
+        # exists to produce new evidence, which is what retirement forbids.
+        assert list(runnable) == [
+            "s11-volatile-regime-gated-breakout",
+            "s4-volatility-compression-breakout",
+            "s8-range-mean-reversion",
+        ]
         assert [item.strategy_id for item in excluded] == [
             "s1-time-series-momentum",
             "s10-relative-strength-leader",
