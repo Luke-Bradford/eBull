@@ -143,7 +143,13 @@ from typing import Final
 #: `harness_validation_only` on all of them, and the bump added a second refusal
 #: code to rows that could not promote anyway. Four earlier versions appear in
 #: the same output, which is what a register that is doing its job looks like.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-22-r8"
+#:
+#: r9 (2026-08-22, #2840) adds S-H arm 1 and was measured the same way. The
+#: command above returned the SAME five (version, purpose) groups — 488 rows,
+#: every one `harness_validation`, and r8 itself carrying none, because nothing
+#: has been backtested since it landed. So r9 strands nothing that could have
+#: promoted either.
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-22-r9"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -753,6 +759,28 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             exactness=TrialExactness.EXACT,
             declared_for=("se-ma-overlay-drawdown-insurance", "se-ma-overlay-drawdown-insurance-v1"),
+        ),
+        DeclaredTrial(
+            trial_id="sh-volatile-regime-gate-2026-08-22",
+            description=(
+                "S-H arm 1: S-4's compression breakout with entry gated to regime in {bear_volatile, "
+                "bull_volatile}. ONE frozen rule read across four cells ({bear,bull} x {masked,admitted}). "
+                "⚠ searches=1 and not 4 — the cells are a fragility screen the pass bar requires jointly "
+                "(bear_volatile positive in BOTH quarantine arms), so no favourable cell is selectable. "
+                "⚠ Narrowing permitted_regimes to bear_volatile after the look would be a DIFFERENT rule: "
+                "the set is hashed into S11_PARAMS, so it mints a new strategy_version and charges this "
+                "register a second time rather than re-reading this entry."
+            ),
+            evidence=(
+                "docs/proposals/ta/2026-08-22-sh-volatile-regime-gated-breakout.md §'The rule', "
+                "§'Readout and abort bar' and §'Sequencing'; issue #2840"
+            ),
+            exactness=TrialExactness.EXACT,
+            # ⚠ The `survivorship_free` identity, NOT the `survivor_only` one
+            # (`strategy-registry-v1+65274a70a40b`). They are two different
+            # trials: `BACKTEST_UNIVERSE` is `survivorship_free` and that is what
+            # the exploration measures; `survivor_only` is `SCAN_UNIVERSE`.
+            declared_for=("s11-volatile-regime-gated-breakout", "strategy-registry-v1+d5f25fd08376"),
         ),
     ),
 )

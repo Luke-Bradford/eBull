@@ -184,12 +184,35 @@ Frozen under this contract version, before any look:
 - **A pass needs bear_volatile positive in BOTH quarantine arms.** A result carried by
   bull_volatile-on-masked alone is a FAIL, because that cell is the one already known to
   flip sign under the sensitivity arm.
-- **Abort bar on cohort n: 508.** ⚠ This is the largest independent cohort the lead itself
-  rests on, i.e. an upper bound on the evidence available, NOT a power calculation — there
-  is no published floor to cite and inventing one would be the made-up constant the
-  instruction set forbids. It is fixed by construction: an exploration cohort smaller than
-  the cohort that generated the hypothesis cannot be more informative than the hypothesis,
-  so it is reported and NOT read as a verdict either way.
+- **Abort bar on cohort n: 508 trades — which are 14 DECISION DATES, and the dates are the
+  unit that binds.** ⚠⚠ Corrected before the freeze, from the cohort table's own
+  `decision_date_count` column, which the premise re-measurement above quoted `trade_count`
+  without reading:
+
+  | arm | regime | trade_count | decision_date_count | instrument_count |
+  | --- | --- | ---: | ---: | ---: |
+  | worst_case / masked | bear_volatile | 429 | **14** | 408 |
+  | worst_case / admitted | bear_volatile | 508 | **14** | 485 |
+  | worst_case / masked | bull_volatile | 555 | **18** | 509 |
+  | worst_case / admitted | bull_volatile | 811 | **18** | 739 |
+
+  The regime is a market-wide series, so one regime date fans out across hundreds of
+  instruments and `trade_count` counts the fan-out. `ForwardShadowFloor`'s own docstring
+  names this failure — *"DECISION DATES, NOT SIGNALS … cannot tell twenty signals on one
+  day from twenty days of evidence"*. It is the same defect class as the 4× arm-pooling
+  above, one level down.
+
+  ⚠ The 14 is NOT a property of the outcome: the benchmark chain carries exactly 14
+  `bear_volatile` and 18 `bull_volatile` days inside `primary-2022-plus`
+  (`MarketRegimeProvider.load_research`), so S-4 fired on every volatile date there was
+  and the cohort's date count is the REGIME's date supply, read without opening a result.
+
+  Neither number is a power calculation — there is no published floor to cite for a
+  per-trade expectancy claim and inventing one would be the made-up constant the
+  instruction set forbids. Both are fixed by construction as an upper bound on the
+  evidence available: an exploration cohort thinner than the one that generated the
+  hypothesis cannot be more informative than the hypothesis. They are reported, and NOT
+  read as a verdict either way.
 - **Decision metrics: `expectancy_per_trade_pct`, `profit_factor`, deflated Sharpe.**
   CAGR, Sharpe, Sortino and win rate are banned as decision metrics
   (`.claude/skills/quant/cost-aware-viability.md`).

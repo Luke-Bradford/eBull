@@ -256,9 +256,14 @@ class TestWhatThisChangeDeliberatelyDoesNotMove:
         ``purpose_promotion_refusals`` already returned a terminal
         ``harness_validation_only`` on all of them; the bump added a second
         refusal code to rows that could not promote regardless.
+
+        r9 (2026-08-22, #2840) added S-H arm 1 and had the same conversation on
+        the same command: the five stored ``(version, purpose)`` groups were
+        unchanged at 488 rows, all ``harness_validation``, and r8 itself carried
+        none because nothing has been backtested since it landed.
         """
-        assert TRIAL_REGISTER.declared_count == 275
-        assert len(TRIAL_REGISTER.trials) == 31
+        assert TRIAL_REGISTER.declared_count == 276
+        assert len(TRIAL_REGISTER.trials) == 32
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1

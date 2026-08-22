@@ -23,7 +23,7 @@ def _trial(trial_id: str, exactness: TrialExactness = TrialExactness.EXACT) -> D
 
 class TestTheShippedDeclaration:
     def test_the_register_is_stamped_with_its_version(self) -> None:
-        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-08-22-r8"
+        assert TRIAL_REGISTER.version == TRIAL_REGISTER_VERSION == "trial-register-2026-08-22-r9"
 
     def test_every_declared_trial_carries_its_evidence(self) -> None:
         """⚠ An entry nobody can trace is indistinguishable from one invented."""
@@ -70,10 +70,11 @@ class TestTheShippedDeclaration:
         """
         # ⚠ 259 (#2600's Gate D-0.1 reconstruction) + 7 (#2614's C-4 entry) +
         # 6 S-5..S-10 declarations + 2 MT-1 controlled pairs + 1 S-E overlay
-        # (#2837, r8). Moved deliberately, not loosened: the pin exists to catch
-        # a DROPPED entry, and an addition that raises M is the conservative
-        # direction — a larger M lowers the DSR.
-        assert TRIAL_REGISTER.declared_count == 275
+        # (#2837, r8) + 1 S-H arm 1 (#2840, r9). Moved deliberately, not
+        # loosened: the pin exists to catch a DROPPED entry, and an addition
+        # that raises M is the conservative direction — a larger M lowers the
+        # DSR.
+        assert TRIAL_REGISTER.declared_count == 276
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
 
     def test_the_two_mt1_controlled_pairs_are_charged_before_outcomes(self) -> None:
