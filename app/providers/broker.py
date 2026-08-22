@@ -479,6 +479,12 @@ class BrokerAccountRiskSnapshot:
     observed_at: datetime
     raw_payload: dict[str, Any]
     account_currency_id: int | None = None
+    #: Capital committed to orders that have not filled.  eToro SUBTRACTS this from
+    #: ``credit`` to reach ``available_cash`` and ADDS it to ``total_invested``, so a
+    #: non-zero value means the account's cash figure is already net of commitments
+    #: our ``cash_ledger`` has never seen.  ``None`` means the payload was parsed
+    #: before #2602 item 4 retained it -- an absence to refuse on, not a zero.
+    pending_order_amount: Decimal | None = None
 
 
 @dataclass(frozen=True)

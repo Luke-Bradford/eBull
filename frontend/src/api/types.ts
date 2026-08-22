@@ -2803,6 +2803,12 @@ export interface StrategyOverviewResponse {
   };
   account_equity_evidence: {
     status: "unavailable" | "collecting";
+    // `difference` is measured against `official_comparand`, not `official_equity`:
+    // eToro folds copy-trader mirrors and pending orders into the account totals and
+    // the local book does not hold them. `residual_not_in_local_book` is what that
+    // folding adds — a residual, never an attribution.
+    reconciliation_state: "unavailable" | "refused" | "reconciled" | "diverged";
+    reconciliation_rule_version: string;
     days_collected: number;
     snapshot_date: string | null;
     observed_at: string | null;
@@ -2812,12 +2818,17 @@ export interface StrategyOverviewResponse {
     official_available_cash: string | null;
     official_total_invested: string | null;
     official_unrealised_pnl: string | null;
+    official_direct_long_market_value: string | null;
+    official_comparand: string | null;
+    residual_not_in_local_book: string | null;
     local_eod_currency: string | null;
     local_eod_value: string | null;
+    local_eod_value_in_account_currency: string | null;
     local_eod_positions_priced: number | null;
     local_eod_stale_mark_positions: number | null;
     difference: string | null;
-    comparable: false;
+    tolerance: string | null;
+    comparable: boolean;
     incomplete_reasons: string[];
   };
   evidence_refresh: {

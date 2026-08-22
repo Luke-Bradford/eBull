@@ -1347,6 +1347,7 @@ def _parse_account_risk_snapshot(
             observed_at=observed_at,
             raw_payload=raw,
             account_currency_id=account_currency_id,
+            pending_order_amount=pending_amount,
         )
     except TradingPreflightParseError:
         raise

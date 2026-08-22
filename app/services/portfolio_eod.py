@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 import psycopg.rows
@@ -121,6 +121,28 @@ def summarise_marks(results: Sequence[PositionResult], snapshot_date: date) -> M
     )
 
 
+#: One cent of price per unit held — the rounding of the STORED mark, and the whole
+#: of the positions leg of the F-0 reconciliation tolerance (#2602 item 4).
+#:
+#: ⚠ No published rule fixes a broker-reconciliation tolerance; searched, none exists,
+#: and none is borrowed. An earlier draft derived this from SEC Reg NMS Rule 612's
+#: minimum pricing increments — withdrawn, because Rule 612 governs the increments on
+#: which NMS stocks may be QUOTED, which is a different question from how far two feeds
+#: valuing the same holding may legitimately differ, and it does not reach the CFD and
+#: non-US products this account can hold.
+#:
+#: So it is fixed BY CONSTRUCTION, at the tightest bound defensible without measurement:
+#: both sides mark the same units with the same formula from the same venue feed, so the
+#: irreducible term is the cent the mark is stored to. It deliberately does NOT absorb an
+#: extended-hours print, dividend cash we have not credited, or a corporate-action
+#: disagreement — those are meant to surface as `diverged`, not be swallowed.
+#:
+#: ⚠ Widening this requires a measured justification AND a new
+#: ``account_equity_evidence.RECONCILIATION_RULE_VERSION``. Editing the constant alone
+#: silently re-verdicts every past comparison.
+MARK_ROUNDING_PER_UNIT: Final[Decimal] = Decimal("0.01")
+
+
 @dataclass(frozen=True)
 class EodEquity:
     positions_value: Decimal
@@ -131,6 +153,11 @@ class EodEquity:
     positions_no_price: int
     positions_no_fx: int
     cash_no_fx_currencies: int
+    #: Display-currency allowance for mark rounding across the PRICED positions only.
+    #: A `no_price` or `no_fx` position contributed nothing to ``positions_value``, so
+    #: it cannot contribute an allowance to a total it is not in — the same rule
+    #: ``summarise_marks`` applies to the mark dates.
+    mark_rounding_tolerance: Decimal = Decimal("0")
     position_results: list[PositionResult] = field(default_factory=list)
 
 
@@ -156,6 +183,7 @@ def compute_eod_equity(
     invents a zero (mirrors value-history's skip-not-zero).
     """
     positions_value = Decimal("0")
+    mark_rounding_tolerance = Decimal("0")
     priced = no_price = no_fx = 0
     results: list[PositionResult] = []
 
@@ -228,6 +256,17 @@ def compute_eod_equity(
             )
             continue
         positions_value += value_display
+        # Same pair, same rates dict, immediately after the value conversion
+        # succeeded — so this cannot raise where the value did not, and the
+        # allowance is always denominated identically to the total it guards.
+        # `abs` because a short row's allowance is a magnitude too; `units > 0`
+        # is filtered upstream, and an allowance that could go negative would
+        # make the tolerance unsatisfiable rather than merely wrong.
+        mark_rounding_tolerance += (
+            abs(p.units) * MARK_ROUNDING_PER_UNIT
+            if p.native_ccy == display_ccy
+            else convert(abs(p.units) * MARK_ROUNDING_PER_UNIT, p.native_ccy, display_ccy, rates)
+        )
         priced += 1
         results.append(
             PositionResult(
@@ -263,6 +302,7 @@ def compute_eod_equity(
         positions_no_price=no_price,
         positions_no_fx=no_fx,
         cash_no_fx_currencies=cash_no_fx,
+        mark_rounding_tolerance=mark_rounding_tolerance,
         position_results=results,
     )
 
@@ -422,11 +462,11 @@ def _write_snapshot(
                 snapshot_date, display_currency, total_value, positions_value, cash_value,
                 fx_rate_date, positions_total, positions_priced, positions_no_price,
                 positions_no_fx, cash_no_fx_currencies, oldest_mark_date,
-                stale_mark_positions, computed_at
+                stale_mark_positions, mark_rounding_tolerance, computed_at
             ) VALUES (
                 %(d)s, %(ccy)s, %(total)s, %(pos)s, %(cash)s,
                 %(fxd)s, %(ptot)s, %(ppri)s, %(pnp)s, %(pnf)s, %(cnf)s, %(omd)s,
-                %(smp)s, NOW()
+                %(smp)s, %(mrt)s, NOW()
             )
             ON CONFLICT (snapshot_date) DO UPDATE SET
                 display_currency = EXCLUDED.display_currency,
@@ -445,6 +485,7 @@ def _write_snapshot(
                 -- having recorded one.
                 oldest_mark_date = EXCLUDED.oldest_mark_date,
                 stale_mark_positions = EXCLUDED.stale_mark_positions,
+                mark_rounding_tolerance = EXCLUDED.mark_rounding_tolerance,
                 computed_at = NOW()
             """,
             {
@@ -461,6 +502,7 @@ def _write_snapshot(
                 "cnf": equity.cash_no_fx_currencies,
                 "omd": marks.oldest_mark_date,
                 "smp": marks.stale_mark_positions,
+                "mrt": equity.mark_rounding_tolerance,
             },
         )
         # Per-position rows: replace wholesale for this date (re-run overwrites).
