@@ -191,9 +191,45 @@ class TestTheHappyPath:
     def test_the_provider_is_pinned_to_demo_rather_than_re_reading_the_setting(self) -> None:
         """Check/use gap: the guard reads ``settings.etoro_env`` and the
         construction must not read it a second time, or a mutation between the two
-        opens a real account under a demo verdict."""
-        calls = _Harness().run()
-        assert calls["provider"].call_args.kwargs["env"] == "demo"
+        opens a real account under a demo verdict.
+
+        ⚠ The obvious form of this test — run the harness, assert
+        ``env == "demo"`` — passes under BOTH spellings, because the harness has
+        already set ``settings.etoro_env`` to ``"demo"`` and the two are then
+        equal. Revert-probed: swapping the literal for ``settings.etoro_env``
+        left it green. So the setting is mutated *between* the guard and the
+        construction, in the one place that runs between them, and the assertion
+        is on the value that survives that mutation. (Prevention-log shape: a
+        test written against the one-member set cannot tell the two apart.)
+        """
+        from app.workers import scheduler
+
+        harness = _Harness()
+
+        def flip_env_then_answer(_job_name: str) -> tuple[str, str]:
+            scheduler.settings.etoro_env = "real"  # type: ignore[misc]
+            return ("key", "ukey")
+
+        with (
+            patch("app.workers.scheduler.settings.etoro_env", "demo"),
+            patch("app.workers.scheduler._load_etoro_credentials", side_effect=flip_env_then_answer),
+            patch("app.workers.scheduler._record_prereq_skip"),
+            patch("app.workers.scheduler._tracked_job", return_value=harness.tracker),
+            patch("app.workers.scheduler.connect_job", return_value=harness.conn),
+            patch(
+                "app.providers.implementations.etoro_broker.EtoroBrokerProvider",
+                return_value=harness.broker,
+            ) as provider,
+            patch("app.services.strategy_core_mandate.load_core_mandate", return_value=_mandate()),
+            patch("app.services.strategy_core_sleeve.observe_core_sleeve", return_value=_state()),
+            patch(
+                "app.services.strategy_core_rebalance_intent.record_core_rebalance_intent",
+                return_value=harness.intent,
+            ),
+        ):
+            core_rebalance_observation()
+
+        assert provider.call_args.kwargs["env"] == "demo"
 
     def test_no_db_connection_is_held_across_the_http_call(self) -> None:
         """#1593 — the mandate read and the intent write are separate short-lived
