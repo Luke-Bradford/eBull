@@ -24,7 +24,6 @@ from app.services.strategy_core_mandate import CoreMandate
 from app.services.strategy_core_sleeve import CoreSleeveObservationError
 from app.workers.scheduler import JOB_CORE_REBALANCE_OBSERVATION, core_rebalance_observation
 
-
 _UNSET: Any = object()
 
 
