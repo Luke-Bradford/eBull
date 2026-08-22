@@ -54,6 +54,11 @@ from tests.test_result_ledger import (
     build_result_with_dsr,
 )
 
+# #2829 — freezes synthetic or pre-mapped identities while testing a different
+# gate; see `assume_trial_registered` in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("assume_trial_registered")
+
+
 _ACTOR = "tests/test_strategy_holdout_namespace.py"
 _PURPOSE = "stage 5e-1 acceptance"
 

@@ -19,6 +19,10 @@ from scripts.freeze_2616_precutoff_declarations import build_pead_declaration
 from scripts.sealed_rerun_gate import RerunGateRefusal, require_outcome_gate
 from scripts.verify_2476_pead_outcomes import SEALED_TRIAL
 
+# #2829 — freezes synthetic or pre-mapped identities while testing a different
+# gate; see `assume_trial_registered` in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("assume_trial_registered")
+
 _RERUN_ID = "pead-historical-sue-net-income-v1-rerun-db-test"
 
 #: Synthetic on purpose: the real register holds no re-run entry yet, and that

@@ -25,6 +25,10 @@ from app.services.result_ledger import (
 from scripts.evaluate_2582_schedule13d_outcomes import STRATEGY_ID, STRATEGY_VERSION
 from scripts.freeze_2582_schedule13d_declaration import build_declaration
 
+# #2829 — freezes synthetic or pre-mapped identities while testing a different
+# gate; see `assume_trial_registered` in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("assume_trial_registered")
+
 _ACTOR = "tests/test_c4_declaration_gate_db.py"
 _PURPOSE = "exercise C-4's declaration gate"
 

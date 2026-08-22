@@ -82,6 +82,7 @@ from app.services.strategy_result import (
     synthetic_control_promotion_refusals,
 )
 from app.services.strategy_statistics import StrategyMetrics
+from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from app.services.walk_forward import (
     WALK_FORWARD_MODEL_ID,
     Fold,
@@ -1289,6 +1290,40 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
                 "burn an immutable trial on stamps its run cannot produce. Re-derive the declaration "
                 "from the current cost_model constants."
             )
+    # ⚠⚠ #2829 — M MUST ALREADY COUNT THE SEARCH THIS DECLARATION REPRESENTS.
+    #
+    # `TRIAL_REGISTER` (criterion 6's M, feeding the DSR) and this table were not
+    # joinable at all, so "search #275" was an assertion no code could check: a
+    # trial could freeze a declaration, run, and be deflated against an M that
+    # never counted it. `DeclaredTrial.declared_for` is the join, and this is where it
+    # is enforced.
+    #
+    # ⚠ FREEZE TIME ONLY, and NOT a `DeclarationRefusal` member — the same
+    # placement argument as the cost-model check directly above, plus three the
+    # refusal path would have broken. `declaration_refusals` is pure and is called
+    # with synthetic identities by most of the prereg/supersession/live-gate
+    # fixtures; `supersession_refusals` calls it on the successor, so a
+    # declaration stranded by a policy bump could no longer use the repair path
+    # that exists for exactly that case; and `strategy_live_gate` calls it on
+    # REASSESSMENT, so an immutable registered policy could stop working because
+    # current code lacks a mapping. `sql/333`'s header is titled "⚠ NO
+    # RETROACTIVE INVALIDATION" and a code edit must not become one.
+    #
+    # ⚠ What this does and does not buy. PROSPECTIVELY it is a ledger: from here
+    # on a declaration cannot be frozen unless M names its search. It proves
+    # nothing RETROSPECTIVELY — a mapping added after exposure is
+    # indistinguishable from one that was always there, so no past run's
+    # deflation is evidenced by it.
+    if TRIAL_REGISTER.trial_for_declaration(declaration.strategy_id, declaration.strategy_version) is None:
+        raise ValueError(
+            f"no trial in {TRIAL_REGISTER_VERSION} claims {declaration.strategy_id}@"
+            f"{declaration.strategy_version}, so criterion 6's M does not count the search this declaration "
+            "represents — freezing it would burn an immutable trial whose deflated Sharpe is computed against "
+            "a population that excludes it. Add a NEW DeclaredTrial carrying "
+            "declared_for=(strategy_id, strategy_version) in app/services/trial_register.py first — NEW, "
+            "because its own `searches` is what moves `declared_count`. ⚠ Re-pointing an existing trial's "
+            "`declared_for` would pass this gate without moving M, and would orphan whatever it claimed before."
+        )
     _lock_trial(conn, declaration.strategy_id, declaration.strategy_version)
     row = conn.execute(
         _FREEZE_DECLARATION,

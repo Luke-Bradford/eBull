@@ -28,6 +28,11 @@ from app.services.result_ledger import freeze_preregistration
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION
 
+# #2829 — freezes synthetic or pre-mapped identities while testing a different
+# gate; see `assume_trial_registered` in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("assume_trial_registered")
+
+
 #: A real manifest id — the check is scoped to the manifest, so the fixture
 #: must sit inside it for the refusal arm to be reachable.
 _MANIFEST_ID = "s1-time-series-momentum"
