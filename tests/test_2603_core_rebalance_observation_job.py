@@ -105,7 +105,7 @@ class _Harness:
 
         with (
             patch("app.workers.scheduler.settings.etoro_env", env),
-            patch("app.workers.scheduler._load_etoro_credentials", return_value=creds),
+            patch("app.workers.scheduler._load_etoro_credentials", return_value=creds) as load_creds,
             patch("app.workers.scheduler._record_prereq_skip") as skip,
             patch("app.workers.scheduler._tracked_job", return_value=self.tracker),
             patch("app.workers.scheduler.connect_job", return_value=self.conn),
@@ -119,7 +119,14 @@ class _Harness:
         ):
             core_rebalance_observation()
 
-        return {"skip": skip, "provider": prov, "load": load, "observe": obs, "record": record}
+        return {
+            "skip": skip,
+            "provider": prov,
+            "load": load,
+            "observe": obs,
+            "record": record,
+            "load_creds": load_creds,
+        }
 
 
 class TestRefusalsThatCostNoBrokerCall:
@@ -158,6 +165,20 @@ class TestRefusalsThatCostNoBrokerCall:
         calls["provider"].assert_not_called()
         calls["record"].assert_not_called()
         assert "no core instrument" in calls["skip"].call_args[0][1]
+
+    def test_a_no_mandate_tick_never_reaches_secrets_storage(self) -> None:
+        """The mandate check precedes the credential load, deliberately.
+
+        ``_load_etoro_credentials`` decrypts two secrets and writes a
+        credential-access audit row for each. Running it first makes every
+        no-mandate tick — which is EVERY tick until #2833 declares the sleeve —
+        touch secrets storage and append audit noise for a job that was always
+        going to skip. It also picks the better reason when both are true: "no
+        core mandate configured" is the actionable fact.
+        """
+        calls = _Harness().run(mandate=None, creds=None)
+        calls["load_creds"].assert_not_called()
+        assert "no core mandate" in calls["skip"].call_args[0][1]
 
 
 class TestTheDeliberateNonRefusal:

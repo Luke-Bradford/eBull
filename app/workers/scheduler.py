@@ -5437,13 +5437,18 @@ def core_rebalance_observation() -> None:
     if settings.etoro_env != "demo":
         _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, "core rebalance observation requires demo environment")
         return
-    creds = _load_etoro_credentials(JOB_CORE_REBALANCE_OBSERVATION)
-    if creds is None:
-        _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, "etoro credentials missing")
-        return
-
     # Mandate read on its own short-lived conn BEFORE the provider session — no
     # DB conn held across HTTP (#1593 spec PR-1 plan).
+    #
+    # ⚠ BEFORE the credential load, and that ordering is deliberate rather than
+    # incidental (review nitpick on PR #2853). `_load_etoro_credentials`
+    # decrypts two secrets and writes a credential-access audit row for each,
+    # so running it first makes every no-mandate tick — which is EVERY tick
+    # until #2833 declares the sleeve — touch secrets storage and append audit
+    # noise for a job that was always going to skip. It also picks the better
+    # reason when both are true: "no core mandate configured" is the actionable
+    # fact, where "etoro credentials missing" would send triage at the wrong
+    # thing.
     with connect_job() as mandate_conn:
         mandate = load_core_mandate(mandate_conn)
 
@@ -5464,6 +5469,11 @@ def core_rebalance_observation() -> None:
         # derivable from `strategy_core_mandate_events` without a broker call.
         detail = "no core mandate configured" if mandate is None else "core mandate has no core instrument"
         _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, detail)
+        return
+
+    creds = _load_etoro_credentials(JOB_CORE_REBALANCE_OBSERVATION)
+    if creds is None:
+        _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, "etoro credentials missing")
         return
 
     core_instrument_id = mandate.core_instrument_id
