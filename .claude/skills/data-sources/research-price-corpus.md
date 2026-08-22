@@ -12,6 +12,28 @@ This covers the **research corpus** (deep history, backtesting). It does not cov
 `.claude/skills/market-data/SKILL.md`. Keeping those two roles separate is the settled
 model; see `docs/proposals/ta/strategy-catalogue-and-backtest-validity.md` §0.
 
+## What we actually hold, and how to re-measure it
+
+```sql
+select count(*) from research_price_daily;    -- 75,972,649 bars   (2026-08-22)
+select count(*) from research_price_series;   -- 30,591 series
+select min(bar_date), max(bar_date) from research_price_daily;  -- 1962-01-02 .. 2026-08-21
+```
+
+⚠ **Run the queries; do not cite the numbers.** They are written down beside their own
+SQL precisely because they go stale — and they did: five skill files carried
+**25.9M bars / 7,727 series** until 2026-08-22, roughly a THIRD of the truth, and one of
+them had derived a percentage from the stale denominator (the pre-decimalisation share in
+`quant/strategy-evidence.md` §2.11a, which moved 20.3% → 16.2% when re-measured rather
+than re-denominated). A figure written by hand goes stale silently in the place a reader
+trusts most.
+
+⚠ #2841 named THIS file as the one holding the stale figure. It did not hold it at all —
+the copies were in `quant/strategy-evidence.md` (×3), `quant/data-capability.md` (×3),
+`data-sources/market-structure.md` and `data-sources/etoro-api.md`. When correcting a
+duplicated statistic, `grep` for the VALUE across the whole skill tree; the ticket telling
+you where it lives is a starting point, not the inventory.
+
 ## The one-line answer
 
 **Free FEEDS are Yahoo or downstream of it and have no delisting concept — but free

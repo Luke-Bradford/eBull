@@ -286,7 +286,7 @@ Amihud illiquidity = mean( |return| / dollar volume )
 
 ⚠ Daily data only, no tape. Proxies price impact per unit of order flow (the
 empirical cousin of Kyle's λ). **Not implemented yet** — but computable on all
-25.9M bars with nothing new ingested, and it is also the quantity behind
+75.97M bars with nothing new ingested, and it is also the quantity behind
 Wyckoff's "effort versus result".
 
 ---
