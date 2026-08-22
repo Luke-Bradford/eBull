@@ -217,13 +217,25 @@ revision that changes `core_target_pct`, `rebalance_band_pct`, `liquidity_reserv
 `min_rebalance_amount` while keeping the instrument is **not detected at all** — the
 observation is attributed to the new revision by `core_mandate_event_id`.
 
-That is accepted for this slice, with the reason: the attribution error is bounded by the
-duration of one HTTP call, the window requires an operator reconfiguring the mandate
-inside it, and the row records `core_mandate_event_id` so the pairing is at least legible
-after the fact. Holding `CORE_MANDATE_ADVISORY_LOCK` across a network round-trip is the
-alternative and is worse. **The freshness bound that actually closes this is the one
-`strategy_core_rebalance_intent.py` already declares as owed — the executor bounding
-`evaluated_at` inside one lock hold — and it belongs to the submission slice, not here.**
+⚠ The first draft accepted that as bounded-and-legible. Codex checkpoint 2 raised it as a
+P2 and it is **closed instead**, because the close is cheap: the recording connection takes
+`CORE_MANDATE_ADVISORY_LOCK` — the same lock `configure_core_mandate` takes
+(`strategy_core_mandate.py:365`) — re-reads the mandate under it, and drops the tick with a
+logged note if `event_id` moved.
+
+Two things about that shape are load-bearing:
+
+- **Re-reading without the lock is not a fix.** psycopg's default isolation is READ
+  COMMITTED, so each statement gets a fresh snapshot and a writer can still commit between
+  the re-read and the INSERT. The check-then-write window would just be narrower.
+- **The lock is never held across the HTTP call**, which is why the mandate is pre-read on
+  a separate short-lived connection rather than under it. It covers two fast reads and one
+  INSERT.
+
+Dropping the tick is the right loss: an operator reconfigured the mandate inside a
+round-trip, the next tick is correct, and a misattributed row would outlive the confusion
+that produced it. It records as a zero-row success with a note naming the moved event —
+a REPORTED skip, not the silent no-op the failure paths above refuse to become.
 
 Duplicate intents from repeated manual dispatch are likewise not a new problem:
 `strategy_core_submission_gate.py:150` supersedes any intent with a newer one before
