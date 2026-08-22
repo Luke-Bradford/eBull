@@ -4284,6 +4284,7 @@ __all__ = [
     "ArmMeasurement",
     "BacktestRunReport",
     "ExcludedStrategy",
+    "ExclusionKind",
     "NamespaceMeasurement",
     "WrittenRow",
     "assert_no_existing_results",
@@ -4295,6 +4296,5 @@ __all__ = [
     "load_corpus",
     "log_report",
     "run_backtest",
-    "ExclusionKind",
     "runnable_strategies",
 ]

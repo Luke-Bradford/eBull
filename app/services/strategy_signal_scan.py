@@ -702,7 +702,13 @@ def run_signal_scan(
                     strategy_id=strategy_id,
                     strategy_version=version,
                     status="refused_retired",
-                    resumed_from=watermarks.get((strategy_id, version)),
+                    # ⚠ None, not the frozen watermark (review nitpick on PR #2861).
+                    # `resumed_from` means "this run picked up from here"; a retired
+                    # strategy will never resume, so reporting a value there reads as
+                    # a resumption that is not going to happen. Where it froze is
+                    # answerable from `assess_scan_freshness`'s `retired` verdict,
+                    # which carries `frontier_date` for exactly that question.
+                    resumed_from=None,
                 )
             )
             continue
