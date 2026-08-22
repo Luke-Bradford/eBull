@@ -1295,7 +1295,7 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
     # `TRIAL_REGISTER` (criterion 6's M, feeding the DSR) and this table were not
     # joinable at all, so "search #275" was an assertion no code could check: a
     # trial could freeze a declaration, run, and be deflated against an M that
-    # never counted it. `DeclaredTrial.declares` is the join, and this is where it
+    # never counted it. `DeclaredTrial.declared_for` is the join, and this is where it
     # is enforced.
     #
     # ⚠ FREEZE TIME ONLY, and NOT a `DeclarationRefusal` member — the same
@@ -1319,8 +1319,10 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
             f"no trial in {TRIAL_REGISTER_VERSION} claims {declaration.strategy_id}@"
             f"{declaration.strategy_version}, so criterion 6's M does not count the search this declaration "
             "represents — freezing it would burn an immutable trial whose deflated Sharpe is computed against "
-            "a population that excludes it. Add a DeclaredTrial (or a `declares` entry on the existing one) in "
-            "app/services/trial_register.py first."
+            "a population that excludes it. Add a NEW DeclaredTrial carrying "
+            "declared_for=(strategy_id, strategy_version) in app/services/trial_register.py first — NEW, "
+            "because its own `searches` is what moves `declared_count`. ⚠ Re-pointing an existing trial's "
+            "`declared_for` would pass this gate without moving M, and would orphan whatever it claimed before."
         )
     _lock_trial(conn, declaration.strategy_id, declaration.strategy_version)
     row = conn.execute(
