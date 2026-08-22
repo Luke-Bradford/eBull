@@ -4257,20 +4257,67 @@ def _read_has_dei_cover_share_count(conn: psycopg.Connection[Any], instrument_id
     return bool(row[0])
 
 
+def count_additive_institutional_holders(slices: Sequence[OwnershipSlice]) -> int:
+    """How many distinct 13F managers hold at least one WHOLE share (#2232 arm 3)?
+
+    Arm 3's pigeonhole needs each counted holder to occupy a share no other counted
+    holder occupies. That is a property of the SOURCE, not of holders in general,
+    and exactly one of our channels has it:
+
+    * **13F — yes.** Form 13F is additive across filers by design. Special
+      Instruction 5 sends a manager whose holdings another reports to a 13F-NT
+      (5a) or to a COMBINATION report covering only its own disjoint subset (5c),
+      and Column 7 lists only the managers *"on whose behalf this Form 13F report
+      is being filed"* — the source rule #2226 established when it ruled
+      cross-filer double counting out as an explanation for the oversubscription
+      cohort. Column 5 reports a whole number of shares.
+    * **Section 16 and 13D/G — no, on BOTH counts.** Rule 13d-5(b)(1) deems every
+      member of a group to own all securities held by the group, so N distinct
+      reporting persons legitimately restate ONE block (that is #2230's entire
+      mechanism). And Form 4 holdings are genuinely fractional — full population
+      2026-08-20, ``ownership_insiders_current`` holds **13,017 of 170,941** rows
+      with a fractional share count, the smallest positive being **0.0015**. Both
+      break the pigeonhole, so neither channel is counted. Caught by the Codex
+      checkpoint-2 pass on the first version of this guard, which counted all three.
+
+    ``shares >= 1`` rather than ``> 0`` makes the whole-share premise hold BY
+    CONSTRUCTION instead of by today's data (the institutions table currently has 0
+    fractional rows and a minimum positive of exactly 1). :func:`_build_slice`
+    already drops zero-and-negative holders (#1916 Finding A); this is the stricter
+    bound the argument actually needs.
+
+    Two upstream passes make the count conservative in the safe direction:
+    :func:`_reconcile_institutional_families` has already collapsed each curated
+    manager family to ONE holder (I16), and :func:`_reconcile_owner_once` classifies
+    a filer that ALSO files Section 16 into ``insiders`` instead — so this
+    undercounts 13F managers rather than over-counting them."""
+    return sum(
+        1
+        for s in slices
+        if s.denominator_basis == "pie_wedge" and s.category in _INSTITUTIONAL_CATEGORIES
+        for h in s.holders
+        if h.shares >= 1
+    )
+
+
 def denominator_is_partial_class(
     *,
     has_dei_cover_share_count: bool,
     largest_single_holder_pct: Decimal,
     per_class_denominator_applied: bool,
+    additive_institutional_holders: int,
+    outstanding: Decimal,
 ) -> bool:
     """Pure fail-closed policy: is the operative denominator provably NOT the whole
     entity's share count (#2232)? Table-tested without a DB.
 
-    Both conditions are impossibility arguments, not thresholds — the issue's own
+    Every condition is an impossibility argument, not a threshold — the issue's own
     worked examples (``PKG`` 1,001x correction vs ``AVAL`` 1.08e9x error) show that
     magnitude cannot separate a bad denominator from a real reverse split, and the
     previous attempt's cross-check was ``unavailable`` for 24 of the 47 instruments
     in the cohort because those issuers file only ONE shares concept.
+
+    **Scope arm** (both required), for a denominator of unknown scope:
 
       1. **No cover-page count exists** — see :func:`_read_has_dei_cover_share_count`.
          Establishes that the figure we are dividing by is a balance-sheet
@@ -4282,15 +4329,56 @@ def denominator_is_partial_class(
          unpublishable either way (#1662: fail closed, never publish the
          structurally-wrong product).
 
-    This is :func:`_should_use_class_denominator` condition 3 — already worded in
+    **Pigeonhole arm** (sufficient on its own), for a denominator that IS the
+    cover-page count and is nonetheless wrong:
+
+      3. **More 13F managers than shares.** Each counted manager holds at least one
+         whole share that no other counted manager holds — see
+         :func:`count_additive_institutional_holders` for why that is true of 13F
+         and false of Section 16 / 13D-G — so a share count below the NUMBER of
+         them cannot be the whole company's. This reaches what arm 1 cannot: a
+         cover-page value that EXISTS and is wrong. ``AVAL``'s FY2025 20-F reports
+         ``7``, and SEC's own R1 rendering of ``0001104659-26-044493`` shows the
+         same ``7`` undimensioned — so it is the issuer's tag, not a §7.17
+         stripping artefact — while the SAME filing's equity note (``R297``) reports
+         23,743,475,754 shares outstanding and 88 managers file against it.
+
+         Arm 3 is a COUNT test, and that is the whole point: the three open
+         numerator defects (#2229 staleness, #2230 deemed attribution, #2231
+         unadjusted pre-split numerators) all inflate share AMOUNTS while leaving
+         the manager COUNT at its true value, so none of them can produce this.
+         Nor is it the falsified magnitude cut — the floor is per-instrument and
+         supplied by an independent observation (how many managers filed at all),
+         never chosen. Measured on the full population 2026-08-20 it fires on 3 of
+         4,451 live denominators (``AVAL`` 88/7, ``GLXY`` 493/100, ``MWH``
+         199/100, the last two already suppressed by arm 1); the closest non-firing
+         instrument arm 1 does not already take is ``NVR`` at
+         ``managers / shares = 0.000398``.
+
+         ⚠ It does NOT reach every known bad denominator, and the gap is named
+         rather than papered over: ``HQ`` (cover, balance-sheet issued and
+         balance-sheet outstanding all report ``1`` for a predecessor entity) has
+         ZERO 13F managers — its nine disclosed holders are all Section 16 / 13D-G,
+         the channels this arm must exclude. Reproduce with
+         ``scripts/audit_2232_denominator_residual.py``.
+
+    Arm 1+2 is :func:`_should_use_class_denominator` condition 3 — already worded in
     this file as "no resolved pie-wedge holder owns more shares than exist in the
     class (catches a mis-mapped too-small denominator, the %-inflating direction)"
     — applied to the denominator the rollup ACTUALLY divides by, instead of only to
     the FSDS per-class swap it was written for.
 
-    ``per_class_denominator_applied`` short-circuits to ``False``: that swap already
-    ran this exact plausibility guard against the class count before taking it, so a
-    verified per-class denominator is never the partial one."""
+    ``per_class_denominator_applied`` short-circuits the SCOPE arm to ``False``:
+    that swap already ran this exact plausibility guard against the class count
+    before taking it, so a verified per-class denominator is never the partial one.
+    It deliberately does NOT short-circuit the pigeonhole arm — the swap's guard is
+    a magnitude test and never ran a count test, so the claim behind the
+    short-circuit is not available here."""
+    # ``Decimal(...)`` on an int is exact, so this is a readability choice rather than a
+    # correctness one — but the comparison decides a fail-closed guard, and a reader
+    # should not have to reason about mixed-type ordering to trust it (review NITPICK).
+    if Decimal(additive_institutional_holders) > outstanding:
+        return True
     if per_class_denominator_applied:
         return False
     return not has_dei_cover_share_count and largest_single_holder_pct > 1
@@ -5086,16 +5174,27 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # largest holder, not a raw table max, so a control-group collapse or an NT
     # supersession cannot leave a phantom over-100% row behind to fire on.
     #
-    # The leading ``largest_single_holder_pct > 1`` is a pure PERFORMANCE pre-filter
-    # — it restates a condition :func:`denominator_is_partial_class` already owns, so
-    # that the ~94% of instruments with no over-100% holder skip the extra DB
-    # round-trip. It is redundant by construction and a revert-probe that removes it
-    # changes no output; the policy's enforcement point is the pure function, pinned
-    # by its own table tests (same shape as the sql/259 note on restated predicates).
-    if sanity.largest_single_holder_pct > 1 and denominator_is_partial_class(
+    # The leading disjunction is a pure PERFORMANCE pre-filter — it restates
+    # conditions :func:`denominator_is_partial_class` already owns, so that the ~94%
+    # of instruments satisfying neither skip the extra DB round-trip. It is redundant
+    # by construction and a revert-probe that removes it changes no output; the
+    # policy's enforcement point is the pure function, pinned by its own table tests
+    # (same shape as the sql/259 note on restated predicates).
+    #
+    # ⚠ It must stay a strict SUPERSET of the pure function's disjuncts. Arm 3 is NOT
+    # implied by ``largest_single_holder_pct > 1`` — N managers of one share each in a
+    # company reporting N-1 shares is arm 3 with a largest holder of 1/(N-1) — so the
+    # pre-filter carries its own term. Narrow this and the guard goes silently dark on
+    # exactly the cases arm 3 exists for.
+    additive_institutional_holders = count_additive_institutional_holders(slices)
+    if (
+        sanity.largest_single_holder_pct > 1 or Decimal(additive_institutional_holders) > effective_outstanding
+    ) and denominator_is_partial_class(
         has_dei_cover_share_count=_read_has_dei_cover_share_count(conn, instrument_id),
         largest_single_holder_pct=sanity.largest_single_holder_pct,
         per_class_denominator_applied=per_class_denominator is not None,
+        additive_institutional_holders=additive_institutional_holders,
+        outstanding=effective_outstanding,
     ):
         return OwnershipRollup.no_data(
             symbol=symbol,
