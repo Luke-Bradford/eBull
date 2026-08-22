@@ -380,3 +380,32 @@ def test_a_transactional_connection_is_refused(ebull_test_conn: psycopg.Connecti
     assert not ebull_test_conn.autocommit
     with pytest.raises(StrategyControlError, match="requires an autocommit connection"):
         run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)
+
+
+def test_downgrading_the_mandate_cannot_leave_a_carried_forward_autonomous(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The exact case the PR #2856 review nitpick names.
+
+    A request that OMITS `approval_mode` carries the stored `autonomous` forward, so a
+    Pydantic validator reading the literal field sees `None` and passes. The rule is
+    therefore enforced where it can see the RESOLVED value — here — and this asserts
+    that the path the validator cannot cover still refuses.
+    """
+    from app.services.strategy_control_plane import resolve_approval_mode
+
+    _configure(ebull_test_conn, approval_mode="autonomous")
+    carried = resolve_approval_mode(None, load_paper_pool(ebull_test_conn).approval_mode)
+    assert carried == "autonomous"
+
+    with pytest.raises(StrategyControlError, match="autonomous approval requires a configured"):
+        configure_paper_pool(
+            ebull_test_conn,
+            enabled=False,
+            capital_limit=Decimal("1000"),
+            capital_mode="fixed",
+            risk_profile="unconfigured",
+            approval_mode=carried,
+            changed_by="operator",
+            reason="downgrade the mandate while autonomy is on",
+        )

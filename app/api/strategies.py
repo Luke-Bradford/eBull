@@ -776,8 +776,15 @@ class StrategyPaperPoolUpdateRequest(BaseModel):
             raise ValueError("enabled paper pool requires positive capital")
         if self.enabled and self.risk_profile == "unconfigured":
             raise ValueError("enabled paper pool requires a configured portfolio risk mandate")
-        if self.approval_mode == "autonomous" and self.risk_profile == "unconfigured":
-            raise ValueError("autonomous approval requires a configured portfolio risk mandate")
+        # ⚠ NO autonomous-needs-a-mandate CHECK HERE, deliberately (review NITPICK on
+        # PR #2856). The rule cannot be stated completely at this layer: a request may
+        # OMIT `approval_mode` and carry an existing `autonomous` forward while setting
+        # `risk_profile="unconfigured"`, and a validator cannot see the stored value.
+        # A check that fires on the literal field only would enforce the rule on one
+        # path and not the other — worse than absent, because it reads as coverage.
+        # `configure_paper_pool` owns it in full, against the RESOLVED mode, and its
+        # StrategyControlError is already mapped to a 409 here. Same reasoning
+        # `CoreMandateUpdateRequest` gives for carrying shape and no invariants.
         return self
 
 
