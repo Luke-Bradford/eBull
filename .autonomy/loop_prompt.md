@@ -5,137 +5,156 @@ operator can watch working**. Each scheduled run is a fresh session; a later run
 resumes whatever is left, so always leave the repo in a clean state (no half-done
 branches, no unpushed WIP).
 
-## ⚠⚠ READ THIS FIRST — the standing order changed on 2026-08-14
+## ⚠⚠ READ THIS FIRST — the standing order changed on 2026-08-22 (cut-and-reset)
 
-**Operator, verbatim:** *"I want to see the trading app take shape, its been too
-long, feel like I'm having my time wasted on things I'm not seeing, just
-falsifications and time wasting exercises."*
+**The previous two standing orders were both pursued to their own falsification point
+and both returned NEGATIVE. This one replaces them; do not act on either.**
 
-The board is **no longer the target**. Draining tickets is what produced months of
-audits, falsifications, corrected inventories and instruction-set maintenance while
-the operator could not point at a single strategy firing in the demo account. All of
-that work was individually correct and collectively off-target.
+The 2026-08-14 order was "build a handful of genuinely different strategies, firing
+daily, visible in the demo account". All ten were built and measured.
 
-**THE ONE OBJECTIVE: a handful of genuinely different strategies, firing daily,
-visible in the app, running in the demo account.**
+The 2026-08-21 order was "make one strategy gross-positive and cheap enough to keep it",
+and its own step 1 was *"FIRST, before building anything: measure gross vs net directly
+— if gross is flat, lower turnover saves nothing and the whole direction is wrong;
+falsify it before investing in it."* **That measurement ran (#2831, `75304a06`) and the
+direction IS wrong:**
 
-Judge every candidate action by one question: *does this move a strategy closer to
-firing where the operator can see it?* If it does not, it is not this loop's work,
-however correct and however tempting the ticket looks.
+- At **ZERO cost**, all ten still fail the deflation gate **by a factor of 5 to 18**
+  (#2827, finding 2). Best gross trade Sharpe is 0.051 against a 0.244 bar — that 0.244
+  is the re-deflation of the trial set on GROSS returns, which is a different number
+  from the two stored per-window bars below (0.246 / 0.275); do not reconcile them, they
+  measure different things. The operator's own recorded conclusion: turnover is real but
+  **not the binding constraint**.
+- Four are gross-POSITIVE, all reversion (s4, s8, s5, s3); six are gross-NEGATIVE.
+- The two candidates are **s4 and s8** — NOT s8 and s5, which the superseded block named.
+  s5 is break-even at a realistic band; s3's edge is 8× wider between OHLC-ambiguity arms
+  than the others', so most of it is an assumption.
+- ⚠ Every backtest trade was charged the `<$5` **1.450%** band whatever its price
+  (`cost_band_for` refuses to let a split-adjusted price pick a nominal threshold). So
+  the band is a sensitivity, not a performance figure — and even at the friendlier
+  `$20-100` 0.509% band only s4 (+0.190, PF 1.036) and s8 (+0.164, PF 1.032) clear it,
+  barely.
+- ⚠ The window is 2.75 years in which the equal-weight survivorship-free benchmark
+  returned **−11.8%**. Reversion working and breakout failing is close to what that
+  regime alone predicts. Score any candidate against `strategy_result_regime_cohorts`
+  (surfaced by #2817), never pooled, or it inherits the regime and gets credited for it.
 
-### ⚠⚠ THE STANDING ORDER CHANGED AGAIN on 2026-08-21 — READ #2827 FIRST
+### The operator's cut-and-reset (2026-08-22, merged `1aa01e4f`)
 
-All ten strategies now have hold-out evidence at their CURRENT versions (40 rows,
-`primary-2022-plus`, written 2026-08-21). **Every one of them loses money per trade,
-and every one trades above the cost-survival bar.**
+- **The dead eight leave the manifest (#2845).** s4/s8 survive only as #2840's substrate.
+- **Price-only steer.** Every event-form family is CUT with recorded lessons — insider,
+  13D/activist, merger arb, PEAD, price-shock. Audited periodic accounts stay in scope
+  for #2842 only.
+- **Live-capital approval is a mandate FLAG (#2843), not a person-gate.** Under
+  `approval_mode: autonomous` the engine promotes and allocates on evidence alone. The
+  execution guard, the kill switch and the sandbox boundary stay fail-closed and are NOT
+  waivable by the flag. Operator alerts are refusal-surfaces; routine check-ins do not exist.
+- **The allocation boundary is the only safety net (#2844).** Exposure ≤ assigned capital,
+  capped or expanding. Guard-enforced, and a prerequisite for the flag.
 
-| strategy | turnover/month | cost drag %/yr | CAGR% | exp%/trade |
-| --- | ---: | ---: | ---: | ---: |
-| s2 | 44% | 2–8 | -17.2 | -7.52 |
-| s5 | 162% | 6–28 | **+28.7** | -1.12 |
-| s8 | 230% | 9–40 | **+45.0** | -0.96 |
-| s1 | 696% | 27–121 | -70.2 | -1.66 |
+**THE ONE OBJECTIVE: get real money working under a mandate the machine can run
+hands-off — starting with a boring, honest beta sleeve, not with an alpha claim.**
 
-Novy-Marx/Velikov's disqualifier is ~50%/month. The LOWEST of the ten is 44%.
+Judge every candidate action by: *does this move the machine closer to allocating capital
+it is allowed to allocate?* If it does not, it is not this loop's work, however correct
+the ticket looks.
 
-⚠ The per-trade expectancies cluster at roughly ONE ROUND-TRIP SPREAD (-0.83% to
--1.76%). Ten structurally different strategies do not fail independently at the same
-magnitude — to first order these break even gross and lose the spread net.
+### The build queue — the R5b comment on #2437, worked in STRICT PHASE ORDER
 
-**THE OBJECTIVE IS NO LONGER "build more strategies". It is: make one strategy
-gross-positive and cheap enough to keep it.**
+`gh issue view 2437 --comments | tail -60` is the live queue and it WINS over this list if
+the two ever disagree. Nothing in a later phase starts until its phase-0 dependencies have
+LANDED on `main`.
 
-1. **FIRST, and before building anything: measure gross vs net directly.** `sql/256`
-   carries `gross_return_pct` (see `cost_model.py:31`). The cost-drag figures above are
-   INFERRED from `turnover × band spread`, not read. If gross is flat, lower turnover
-   saves nothing and the whole direction is wrong — falsify it before investing in it.
-2. If gross is positive: **lower-turnover variants of s8 and s5**, the two with positive
-   CAGR and Sortino 4.2 / 5.5 surviving 9–40%/yr of drag. Halving turnover is worth more
-   than any new signal at these levels.
-3. Re-measure on hold-out and compare per-trade expectancy and profit factor, NOT CAGR
-   or annualised Sharpe — both flatter a skewed distribution. s8 posts +45% CAGR on a
-   NEGATIVE per-trade edge because skew is 36 and kurtosis 1,976.
+**Phase 0 — substrate (everything queues behind this):**
+`#2602` F-0 attribution/reconciliation → `#2844` sandbox invariant → `#2603` core/cash
+allocator → `#2829` preregistration register → `#2843` autonomy flag → `#2845` retire the
+dead eight → `#2846` worktree/loop reaping → `#2793` wrong-layer cleanup → `#2841`
+docs/kill-table.
 
-⚠ **Check turnover BEFORE a backtest, always.** `.claude/skills/quant/strategy-evidence.md`
-already said so. Ten strategies were built and the engine optimised 6.8x before anyone
-read the one column that disqualified all ten.
+**Phase 1 — the boring sleeve goes live-capable (no 12-month wait; NOT alpha claims):**
+`#2833` S-A beta sleeve (null model + net benchmark) → `#2834` ARM A (tilt ETFs) →
+`#2837` S-E crash-brake (insurance claim only).
 
-### The build queue — work it in this order
+**Phase 2 — research seats (paper, declared bars, 12-month verdicts):**
+`#2840` S-H regime/band-gated reversion (3 arms) · `#2842` S-I model-portfolio pot
+(2 arms; #2842 names the #2306 fix as a required guard — read it there) · `#2838` S-F
+stage-1 financing-fee measurement (2 days, stage 2 only on pass) · `#2834` ARM B
+(12-2 replication, needs PIT shares-outstanding assembly).
 
-Spec: `docs/proposals/ta/2026-08-14-strategy-set-s5-s10.md`. It is complete and
-signed off. Do not re-open its design decisions; implement it.
+**Phase 3 — hands-off live:**
+`#2525` mandate half B (batch allocation) → `#2500` decay-detection/auto-suspension (now
+essential: in autonomous mode the machine must bench its own strategies) → `#2501`
+sector/correlation limits → live enablement under #2843 inside #2844.
 
-⚠⚠ **CHECK `STRATEGY_MANIFEST` BEFORE STARTING ANY STRATEGY IN THIS QUEUE.** An
-attended session builds from the same queue, so an item listed below may already
-be on `main` by the time you read this. `python -c "from
-app.services.strategy_manifest import STRATEGY_MANIFEST; print(sorted(STRATEGY_MANIFEST))"`
-settles it in one command. A strategy already in the manifest is DONE — move to
-the next item, do not re-derive it.
+⚠ **Check `git worktree list` AND `git branch --list` for the ticket number before starting
+anything.** `gh pr list` is not enough — on 2026-08-21 unpushed local branches held 9 and 49
+commits of finished work and two tickets were rebuilt from scratch.
 
-Precedent, 2026-08-14: this prompt said "build S-6 first"; S-6 was merged
-attended (#2714) minutes later, and the loop spent an iteration re-doing the
-regime protocol change that was already on main. The queue is a priority order,
-not a claim about what is unbuilt.
+### Spike rules — binding on every phase-2 ticket, enforce them in your own review
 
-Shared foundation is **DONE and committed** (`16563dab`): `app/services/market_regime.py`
-and `app/services/price_levels.py`, both pure, versioned, validated on real data.
-
-**DONE and on `main` — do NOT rebuild:**
-- **S-6** resistance breakout (#2714) — 2.5 entries/name/yr, 37%/yr turnover.
-- **S-5** support bounce (#2714) — 10.0 entries/name/yr.
-- The regime is already threaded through `PerSeriesSignals`, `segmented_signals`,
-  the scan and both backtest arm passes. `MarketRegimeProvider` exists.
-- **S-9** squeeze expansion — IN FLIGHT attended (PR #2715). Do not touch.
-
-**Your next items:**
-1. **S-7** trend pullback. **S-8** range mean reversion. Follow
-   `app/services/strategies/s6_resistance_breakout.py` for the registry/manifest
-   contract and the regime-gated shape.
-3. **S-7** trend pullback. **S-8** range mean reversion.
-4. **S-10** relative-strength leader — ⚠ measure turnover FIRST; if it exceeds
-   ~50%/month it is disqualified before any backtest, exactly as S-1 was at 56×/yr.
-5. **Wire them to fire daily** on the live universe and render in `/strategies`.
-6. **Walk-forward validation on recent regime.** Per-year and per-regime blocks,
-   never one pooled number over the whole span — the operator's own point, and it
-   is a constraint, not a caveat.
-7. **#2720 — measure and CHARGE eToro carry + FX, new COST_MODEL_ID.** Gate 1 of 2
-   between firing strategies and funded paper trades. The four-step order in the
-   ticket is the cost-model guard's own prescription; charging without measuring,
-   or setting without charging, are the two forbidden shortcuts.
-8. **#2721 — position-termination rule + delisting_source coverage.** Gate 2 of 2
-   (the `survivorship_free` label). Its step 3 moves every StrategyIdentity —
-   read the ticket's hard bounds before starting, and do steps 1-2 first.
-
-⚠ Items 7-8 are what stop this queue from dead-ending: with them done, promotion
-stops being structurally refused and the S-5..S-10 evidence can actually gate
-capital. Without them, item 6's walk-forward produces numbers nothing can act on.
+- **Declaration freezes BEFORE first look (#2829).** No exceptions.
+- **Exploration NEVER touches `primary-2022-plus`** — one confirmatory shot per declared
+  hypothesis. Explore on anything else.
+- **Per-regime cohort readouts**, never one pooled number over the whole span.
+- **Decide on `expectancy_per_trade_pct` / `profit_factor` / deflated Sharpe.** CAGR,
+  Sharpe and Sortino are BANNED as decision metrics
+  (`.claude/skills/quant/cost-aware-viability.md`) — s8 posted +45% CAGR on a NEGATIVE
+  per-trade edge because skew is 36 and kurtosis 1,976. Win rate stays banned.
+- Viability check, **from THIS worktree** — `PYTHONPATH=. uv run python -m
+  scripts.check_strategy_viability`. ⚠⚠ Do NOT `cd ~/Dev/eBull` to run it. That is the
+  operator's main checkout, whose `.git` is a DIRECTORY, and
+  `app/security/unattended_guard.py` keys its broker-mutation refusal on the linked-
+  worktree layout (`.git` is a FILE). Running anything from there puts you in the one
+  checkout where the refusal does not fire. It is **window-partitioned** (#2828,
+  `6217dfad`) — two evidence windows exist for 2026-08-21 and their stored deflation
+  bars differ (0.246 vs 0.275). Pin one with `--evidence-window`; never blend them.
+- `.claude/skills/quant/strategy-evidence.md` before proposing or defending anything.
 
 ### ⚠ Do NOT do these, however actionable they look
 
-- **Do not work the M9 board top-down.** That instruction is retired. #2603 step 3,
-  #2602 and #2525 are all parked — the first is machinery for capital that does not
-  exist yet, the second is gated on data accrual, the third has zero inputs
-  (`capital_candidate` 0, `strategy_deployments` 0, `strategy_promotions` 0).
-- **Do not open new falsification, audit, inventory or prevention-log tickets.** If
-  you find a defect while building, fix it inline if it blocks you, or note it in
-  one line on the PR. Do not spawn a ticket and do not spawn an investigation.
-- **Do not touch the insider/Form 4 line.** The 20-year corpus is recovered
-  (`e8daa7e5`) and the measurement is blocked on `insider_transactions` not being
-  backfilled. It is parked deliberately. It is not the product path.
-- **Do not weaken a promotion gate, set `CARRY_BPS` without charging it, or flip
-  the kill switch.** Those are the three shortcuts that would look like progress and
-  destroy the trustworthiness the operator asked for first.
+- **Do NOT build another daily-bar TA strategy variant.** That family is measured dead at
+  zero cost. A new S-N momentum/breakout/pullback idea is the single most likely wrong
+  turn available to you.
+- **Do NOT work any event-form family.** Insider, 13D/activist, merger arb, PEAD,
+  price-shock: all CUT by the operator on 2026-08-22 with lessons recorded on #2701 #2835
+  #2836 #2839 #2493 #2484 #2485 #2507 #2769 #2266. Do not reopen them, do not "just
+  measure" them.
+- **Do NOT open new falsification, audit, inventory or prevention-log tickets.** If you
+  find a defect while building, fix it inline if it blocks you, or note it in one line on
+  the PR.
+- **Do NOT weaken a promotion gate, set a cost constant without charging it, or flip the
+  kill switch.** Those are the three shortcuts that look like progress and destroy the
+  only thing the operator asked for first.
+- **Do NOT reap `.ebull-2767` or `.ebull-2768` under #2846.** They hold unpushed
+  paper-lifecycle work the live path NEEDS. #2846 is an AUDIT that LANDS that work; it
+  deletes only the cut lines.
 
-### What "visible" means, concretely
+⚠⚠ **REVERSED on 2026-08-22 — the previous version of this section said "do not work the
+M9 board top-down; #2603 step 3, #2602 and #2525 are all parked".** That is now WRONG and
+inverted: **#2602 and #2603 are the head of phase 0, and #2525 half B is phase 3.** They
+were parked as machinery for capital that did not exist; the cut-and-reset makes the
+capital path the product. Work them.
 
-At the end of a run the operator should be able to load `/strategies` and see a
-strategy that scanned today, how many signals it fired, and on which instruments.
-A strategy that is implemented but does not appear there is not finished.
+⚠ **The Form 4 line is still parked EXCEPT for #2793.** #2793 is a data-integrity cleanup
+(4.5M pre-retention rows written to the operator-visible ownership layer by the #2701
+research override) and it sits in phase 0 independent of the strategy cut. Fixing the
+wrong-layer write is in scope. Resuming insider RESEARCH is not.
 
-⚠ Measured 2026-08-14 so you do not re-derive it: **93.7%** of instruments with
-≥400 bars carry a live level, averaging 3.9 each; **13.4%** sit near support and
-**14.1%** near resistance on any given day. The S-5/S-6 funnel is real. If your
-implementation fires far less than that, the bug is yours, not the market's.
+### What "done" means, concretely
+
+A phase-0 ticket is done when it is MERGED on `main` with CI green — not when a PR is open.
+A phase-1 ticket is done when the sleeve's allocation is visible in the app AND the sandbox
+invariant refuses an over-allocation in a test that would otherwise pass. A phase-2 ticket
+is done when a frozen declaration existed BEFORE any result and the readout is per-regime
+on the declared metrics.
+
+### Escalation — the ONLY reasons to page the operator (#2843's validity contract)
+
+Mandate-limit breach · broker or data-health verdict · sandbox refusal · kill-switch · a
+genuine settled-decision conflict. **Routine check-ins do not exist.** One sentence +
+complete evidence + a recommendation + the safe default, or do not send it. If you cannot
+state the question in one sentence AND name the evidence that would settle it, you have not
+researched it enough to escalate — research it first.
 
 ## Each iteration
 1. **Take the next item from the build queue above.**
@@ -144,8 +163,8 @@ implementation fires far less than that, the bug is yours, not the market's.
    `gh issue list --state open --limit 100`, preferring correctness bugs >
    operator-visible gaps > tech-debt.
 
-   **c. If the milestone is absent, renamed or `gh` cannot read it, do not halt.** Use
-   (b), and say in the run note that the milestone lookup failed. A missing milestone
+   **If #2437's R5b comment is unreadable, do not halt.** Fall back to the board order
+   above and say in the run note that the queue lookup failed. A missing queue comment
    is never a reason to end a run.
 
    Skip anything blocked, already in flight (open PR), or needing a genuine human
@@ -156,10 +175,10 @@ implementation fires far less than that, the bug is yours, not the market's.
    research trials while the three refusals #2437 had declared as gating *everything*
    moved not at all — so every trial run in that window was unpromotable before it
    started, and each one permanently raised the statistical bar for the next. The loop
-   optimised exactly what it was asked to. The milestone is the fix: it encodes which
-   work actually unblocks the product.
+   optimised exactly what it was asked to. The phase order is the fix: it encodes which
+   work actually unblocks the product, and phase 0 is where every refusal lives.
 
-   **d. `loop-ineligible` — recognise and skip, do not attempt.** Some tickets cannot be
+   **`loop-ineligible` — recognise and skip, do not attempt.** Some tickets cannot be
    finished unattended however actionable they look. Note why on the issue if it is not
    already stated, and move to the next queue item:
 
@@ -322,8 +341,14 @@ added — no code change. Until activated, the flow is In Review → Done direct
 - **NEVER execute, approve, or simulate a trade.** Do not POST to order
   endpoints (`/portfolio/orders`, `/positions/{id}/close`), do not approve
   recommendations, do not touch the kill-switch, do **not close any position** —
-  demo fills are still persisted writes. Trade execution is human-gated by
-  design. If a ticket's only path forward is executing a trade, skip it.
+  demo fills are still persisted writes. If a ticket's only path forward is
+  executing a trade, skip it.
+
+  ⚠⚠ **#2843 does NOT relax this line.** The autonomy flag governs the ENGINE —
+  the mandate/promotion/allocation path, running inside #2844's boundary with the
+  execution guard fail-closed. It is not a grant to this loop to POST an order
+  from a session, and BUILDING #2843 confers no permission to EXERCISE it. An
+  acceptance that mutates broker state stays `loop-ineligible`.
 
   ⚠ **This rule is the FIRST layer, not the second. There is no credential-absence
   layer beneath it.** An earlier version of this line claimed the loop runs with no
