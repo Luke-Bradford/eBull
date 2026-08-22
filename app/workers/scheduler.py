@@ -5568,10 +5568,12 @@ def strategy_autonomous_promotion() -> None:
     stage promotion, not whether anything trades.  The evidence bars all live inside
     ``advance_strategy`` and this job relaxes none of them.
 
-    ⚠ ``run_autonomous_promotion_cycle`` opens ONE TRANSACTION PER STRATEGY, so
-    ``connect_job()`` is passed a connection it commits repeatedly rather than one
-    transaction wrapping the cycle.  That is the point: an unexpected failure on the
-    last strategy must not roll back the promotions before it.
+    ⚠⚠ ``autocommit=True`` IS LOAD-BEARING, not a default copied from a neighbour.
+    ``run_autonomous_promotion_cycle`` opens one transaction per strategy, and on a
+    transactional connection psycopg would make each of those a SAVEPOINT inside one
+    outer transaction instead -- promotions would stop committing independently and
+    the per-strategy allocator lock would be held for the whole cycle.  The service
+    refuses a non-autocommit connection rather than trusting this call site.
 
     Failures other than a per-strategy ``StrategyControlError`` PROPAGATE.  The
     decision is the whole of the work here, so swallowing an error would make a
@@ -5580,7 +5582,7 @@ def strategy_autonomous_promotion() -> None:
     from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
 
     with _tracked_job(JOB_STRATEGY_AUTONOMOUS_PROMOTION) as tracker:
-        with connect_job() as conn:
+        with connect_job(autocommit=True) as conn:
             report = run_autonomous_promotion_cycle(conn, as_of=datetime.now(UTC))
         tracker.row_count = len(report.advanced)
         if report.skipped_reason is not None:

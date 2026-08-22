@@ -167,6 +167,23 @@ def _configure(conn: psycopg.Connection[Any], *, approval_mode: str, enabled: bo
     )
 
 
+def _run(conn: psycopg.Connection[Any], *, as_of: datetime = _NOW) -> Any:
+    """Commit the seed, then run the cycle on an AUTOCOMMIT connection.
+
+    ⚠ Not a fixture convenience. The service refuses a transactional connection,
+    because `conn.transaction()` degrades to a SAVEPOINT inside an open transaction
+    and both of the cycle's commit properties quietly stop holding. Exercising it any
+    other way would test a mode production never runs in. Safe here: every table
+    these tests touch is in `_PLANNER_TABLES`, which the fixture resets before and
+    after each test.
+    """
+    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
+
+    conn.commit()
+    conn.autocommit = True
+    return run_autonomous_promotion_cycle(conn, as_of=as_of)
+
+
 def _stage_rows(conn: psycopg.Connection[Any]) -> list[tuple[Any, ...]]:
     return conn.execute(
         "SELECT to_stage,promoted_by FROM strategy_promotions "
@@ -223,14 +240,12 @@ def test_the_cycle_skips_whole_and_writes_nothing(
     """Every precondition is exercised against a strategy that WOULD otherwise
     advance — the assessment is seeded and passing — so a skip here is the flag
     refusing, not the evidence."""
-    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
-
     _seed_forward_observation(ebull_test_conn)
     _seed_passing_assessment(ebull_test_conn)
     _configure(ebull_test_conn, approval_mode=approval_mode, enabled=enabled)
     before = _stage_rows(ebull_test_conn)
 
-    report = run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)
+    report = _run(ebull_test_conn)
 
     assert report.skipped_reason == expected
     assert report.advanced == ()
@@ -248,13 +263,13 @@ def test_an_autonomous_cycle_advances_one_stage_and_stamps_the_policy(
     path, so every gate those apply ran. What differs from an operator click is one
     column.
     """
-    from app.services.strategy_autonomous_promotion import AUTONOMOUS_APPROVER, run_autonomous_promotion_cycle
+    from app.services.strategy_autonomous_promotion import AUTONOMOUS_APPROVER
 
     _seed_forward_observation(ebull_test_conn)
     _seed_passing_assessment(ebull_test_conn)
     _configure(ebull_test_conn, approval_mode="autonomous")
 
-    report = run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)
+    report = _run(ebull_test_conn)
 
     assert report.skipped_reason is None
     assert [advance.stage for advance in report.advanced] == ["paper_enabled"]
@@ -269,15 +284,13 @@ def test_an_autonomous_cycle_advances_one_stage_and_stamps_the_policy(
 def test_a_second_cycle_takes_no_further_step(ebull_test_conn: psycopg.Connection[Any]) -> None:
     """At most one step per strategy per cycle, and `paper_enabled` is terminal for
     this approver -- `live_enabled` belongs to the measured live gate."""
-    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
-
     _seed_forward_observation(ebull_test_conn)
     _seed_passing_assessment(ebull_test_conn)
     _configure(ebull_test_conn, approval_mode="autonomous")
-    run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)
+    _run(ebull_test_conn)
     after_first = _stage_rows(ebull_test_conn)
 
-    report = run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW + timedelta(days=1))
+    report = _run(ebull_test_conn, as_of=_NOW + timedelta(days=1))
 
     assert report.advanced == ()
     assert report.refusals == ((_STRATEGY_ID, "stage_terminal"),)
@@ -289,13 +302,11 @@ def test_a_refused_strategy_is_recorded_not_raised_and_writes_nothing(
 ) -> None:
     """No assessment exists, so `enable_paper` refuses. A refusal is this job's
     normal output; it must neither raise nor leave a partial row behind."""
-    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
-
     _seed_forward_observation(ebull_test_conn)
     _configure(ebull_test_conn, approval_mode="autonomous")
     before = _stage_rows(ebull_test_conn)
 
-    report = run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)
+    report = _run(ebull_test_conn)
 
     assert report.skipped_reason is None
     assert report.advanced == ()
@@ -308,14 +319,12 @@ def test_a_stale_assessment_still_refuses_under_autonomy(ebull_test_conn: psycop
     """⚠ The load-bearing negative. The flag flips WHO approves, never WHAT
     qualifies: an assessment the operator path would be refused on must refuse the
     policy path identically."""
-    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
-
     _seed_forward_observation(ebull_test_conn)
     # max_assessment_age_days = 2 on the seeded policy.
     _seed_passing_assessment(ebull_test_conn, checked_at=_NOW - timedelta(days=5))
     _configure(ebull_test_conn, approval_mode="autonomous")
 
-    report = run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)
+    report = _run(ebull_test_conn)
 
     assert report.advanced == ()
     assert report.refusals == ((_STRATEGY_ID, "prospective_assessment_stale"),)
@@ -335,7 +344,6 @@ def test_authority_revoked_mid_cycle_stops_the_cycle(
     interleaving a concurrent `configure_paper_pool` produces.
     """
     from app.services import strategy_autonomous_promotion
-    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
 
     _seed_forward_observation(ebull_test_conn)
     _seed_passing_assessment(ebull_test_conn)
@@ -352,7 +360,7 @@ def test_authority_revoked_mid_cycle_stops_the_cycle(
 
     monkeypatch.setattr(strategy_autonomous_promotion, "load_paper_pool", _revoke_after_first_read)
 
-    report = run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)
+    report = _run(ebull_test_conn)
 
     assert report.skipped_reason == "approval_mode_manual"
     assert report.advanced == ()
@@ -360,3 +368,15 @@ def test_authority_revoked_mid_cycle_stops_the_cycle(
     assert _stage_rows(ebull_test_conn) == before
     # ⚠ The re-read must be a SECOND read. One read means the authority was inherited.
     assert calls["n"] >= 2
+
+
+def test_a_transactional_connection_is_refused(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    """⚠ Codex ckpt-2 P1, second round. The failure this guards is invisible in the
+    source: `conn.transaction()` reads as a transaction and silently becomes a
+    SAVEPOINT once one is open, so both commit properties stop holding with no
+    diagnostic. A caller that gets the connection mode wrong must be told."""
+    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
+
+    assert not ebull_test_conn.autocommit
+    with pytest.raises(StrategyControlError, match="requires an autocommit connection"):
+        run_autonomous_promotion_cycle(ebull_test_conn, as_of=_NOW)

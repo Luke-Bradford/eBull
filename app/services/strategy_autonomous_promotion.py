@@ -266,7 +266,24 @@ def run_autonomous_promotion_cycle(conn: psycopg.Connection[Any], *, as_of: date
     ``PAPER_ALLOCATOR_ADVISORY_LOCK`` before every single promotion, and that is what
     actually gates one.  Deleting this read would change nothing but the cost of a
     manual-mode tick.
+
+    ⚠⚠ REQUIRES AN AUTOCOMMIT CONNECTION, and refuses without one (Codex ckpt-2, P1).
+    On a transactional connection psycopg's ``conn.transaction()`` opens a SAVEPOINT
+    rather than a transaction, which silently breaks BOTH properties this function
+    claims: promotions stop committing independently (a late failure rolls back the
+    earlier ones this call already reported as advanced), and
+    ``pg_advisory_xact_lock`` is held for the whole cycle instead of one strategy --
+    so a mid-cycle operator revocation would block on the job rather than serialise
+    with it.  Neither is visible in the source shape; both are a property of the
+    CALLER's connection mode, which is why this is checked rather than documented.
     """
+    if not conn.autocommit:
+        raise StrategyControlError(
+            "run_autonomous_promotion_cycle requires an autocommit connection: on a "
+            "transactional one every per-strategy conn.transaction() is only a SAVEPOINT, "
+            "so promotions do not commit independently and the allocator lock is held "
+            "for the whole cycle"
+        )
     pool = load_paper_pool(conn)
     refusal = cycle_precondition_refusal(pool)
     if refusal is not None:
