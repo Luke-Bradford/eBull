@@ -149,6 +149,7 @@ const OVERVIEW: StrategyOverviewResponse = {
     enabled: false,
     capital_limit: "1000.000000",
     capital_mode: "fixed",
+    approval_mode: "manual",
     effective_capital: "1000.000000",
     currency: "USD",
     reserved_capital: "0.000000",
@@ -875,7 +876,7 @@ describe("StrategiesPage", () => {
     expect(input.parentElement).toHaveClass("w-48");
     fireEvent.change(input, { target: { value: "1500" } });
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", capital_mode: "fixed", risk_profile: "balanced", reason: "Automated strategy workspace update" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", capital_mode: "fixed", approval_mode: "manual", risk_profile: "balanced", reason: "Automated strategy workspace update" }));
   });
 
   it("shows exact mandate limits and submits a changed risk profile", async () => {

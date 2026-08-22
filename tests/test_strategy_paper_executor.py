@@ -157,6 +157,7 @@ def _seed(
             enabled=True,
             capital_limit=Decimal("2000"),
             risk_profile="balanced",
+            approval_mode="manual",
             changed_by="test",
             reason="shared paper pool fixture",
         )
@@ -971,6 +972,7 @@ def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
         enabled=True,
         capital_limit=Decimal("400"),
         risk_profile="balanced",
+        approval_mode="manual",
         changed_by="operator",
         reason="bounded shared pot",
     )
@@ -1299,6 +1301,7 @@ def test_shared_paper_pool_excludes_future_live_reservations(
         enabled=True,
         capital_limit=Decimal("400"),
         risk_profile="balanced",
+        approval_mode="manual",
         changed_by="operator",
         reason="paper-only shared pot",
     )
