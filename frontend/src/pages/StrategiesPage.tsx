@@ -637,6 +637,19 @@ const RECONCILIATION_COPY: Record<
   diverged: "Diverged beyond tolerance",
 };
 
+const RECONCILIATION_TONE: Record<
+  StrategyOverviewResponse["account_equity_evidence"]["reconciliation_state"],
+  string
+> = {
+  // Amber = the comparison could not run; the operator waits or repairs an input.
+  unavailable: "text-amber-700 dark:text-amber-300",
+  refused: "text-amber-700 dark:text-amber-300",
+  reconciled: "text-emerald-700 dark:text-emerald-300",
+  // Rose = it ran and the books disagree. That is a finding, and it is the only one of
+  // the four states that says something is wrong rather than something is missing.
+  diverged: "text-rose-700 dark:text-rose-300",
+};
+
 function accountEvidenceReasonLabel(
   reason: string,
   evidence: StrategyOverviewResponse["account_equity_evidence"],
@@ -806,9 +819,11 @@ function AccountEvidence({ overview }: { overview: StrategyOverviewResponse }) {
               <strong>{formatMoney(Number(evidence.residual_not_in_local_book), currency)}</strong>
             </div>
           ) : null}
-          <div
-            className={`self-end ${evidence.reconciliation_state === "reconciled" ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}`}
-          >
+          {/* Three tones, not two. `diverged` is a FINDING — the comparison ran and the
+              books disagree — while `refused` and `unavailable` mean it could not run at
+              all. Painting them the same amber makes the one state that demands action
+              look like the two that demand patience. */}
+          <div className={`self-end ${RECONCILIATION_TONE[evidence.reconciliation_state]}`}>
             {RECONCILIATION_COPY[evidence.reconciliation_state]}
             {evidence.difference !== null && evidence.tolerance !== null && currency !== null ? (
               <span className="ml-1 tabular-nums text-slate-500">
