@@ -51,6 +51,7 @@ from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
     SUPPORTED_DEPLOYMENT_CURRENCIES,
 )
+from app.services.strategy_capital_sandbox import sandbox_bound
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -2300,10 +2301,18 @@ def get_strategy_overview(
     )
     paper_realised = realised_pnl_for_keys(pnl_by_strategy, paper_deployment_keys)
     realised_delta = None if paper_realised is None else sum(paper_realised.values(), Decimal("0"))
-    if realised_delta is not None and paper_pool.capital_mode == "fixed":
-        realised_delta = min(realised_delta, Decimal("0"))
+    # One arithmetic with the executor and the withdrawal check (#2844). This figure
+    # is what the card promises the operator as headroom, so a private copy here
+    # could advertise capacity the executor refuses — with both internally
+    # consistent and nothing to fail on.
     effective_pool_capital = (
-        max(Decimal("0"), paper_pool.capital_limit + realised_delta) if realised_delta is not None else None
+        sandbox_bound(
+            capital_limit=paper_pool.capital_limit,
+            capital_mode=paper_pool.capital_mode,
+            realised_delta=realised_delta,
+        )
+        if realised_delta is not None
+        else None
     )
     completed_windows, partial_windows = _evidence_window_counts(strategies)
     refresh_status, refresh_error = _evidence_refresh_status(refresh_row)

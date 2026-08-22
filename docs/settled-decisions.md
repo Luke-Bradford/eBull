@@ -1178,6 +1178,28 @@ engine P&L from OUR ledger (`expanding`) — enforced at the execution guard wit
 refusal (`sandbox_exceeded`), reconciled against broker equity per #2602, never inferred
 from broker balance (the account is shared with non-engine holdings). #2844.
 
+⚠ **The operator's two words are already stored under different names, and no column was
+added for them** (#2844, implemented 2026-08-22). `strategy_paper_pool_events.capital_mode`
+predates this decision and its CHECK enumerates `('fixed', 'compound')`:
+
+| operator's word | stored value |
+| --- | --- |
+| `capped` | `fixed` |
+| `expanding` | `compound` |
+
+`assigned_capital` is `strategy_paper_pool_events.capital_limit`, append-only and versioned
+by the events table itself. Minting an `assigned_capital` / `capped|expanding` pair would
+have created a **fourth** capital-limit surface — alongside this pool,
+`strategy_deployments.capital_limit` and the core mandate's percentages — and a second
+vocabulary for one concept. The bound arithmetic now lives once, in
+`app/services/strategy_capital_sandbox.py::sandbox_bound`; it had been hand-written three
+times (control plane, `/strategies` card, paper executor), so the panel promising the
+operator headroom and the control enforcing it could drift apart with both internally
+consistent. ⚠ The enforcement point is `strategy_paper_executor`, NOT
+`execution_guard.evaluate_recommendation` — the latter serves the portfolio-manager path
+and creates no funding decisions, so a bound check there would be a second, unsynchronised
+opinion on a population it does not participate in.
+
 ## 2026-08-22 — Price-only steer: event-form strategy families are CUT (operator, twice affirmed)
 
 Insider/13D/merger/PEAD/shock-event families closed with lessons and revisit conditions

@@ -40,6 +40,11 @@ from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
     SUPPORTED_DEPLOYMENT_CURRENCIES,
 )
+from app.services.strategy_capital_sandbox import (
+    SANDBOX_EXCEEDED,
+    headroom_from_bound,
+    sandbox_bound,
+)
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -896,7 +901,23 @@ def _risk_and_amount(
     if drawdown >= intent.mandate_max_drawdown_pct:
         return "portfolio_drawdown_limit"
     deployment_remaining = max(Decimal("0"), deployment_base - intent.reserved)
-    pool_remaining = max(Decimal("0"), pool_base - intent.pool_reserved)
+    # `pool_base` IS the bound — `_effective_capital_bases` resolved it from the
+    # pool's realised P&L in the same pass that resolved the deployment one.
+    pool_headroom = headroom_from_bound(bound=pool_base, committed=intent.pool_reserved)
+    pool_remaining = pool_headroom.remaining
+    # ⚠ NAMED, and named BEFORE the nine other capacity terms fold into `min(...)`
+    # below (#2844). Reaching the assignment used to surface as
+    # `risk_capacity_exhausted` -- the shared outcome of ten unrelated limits -- so
+    # the operator could not tell "I have hit the boundary I set" from "this
+    # instrument is too concentrated". The settled decision names this refusal
+    # specifically, and a boundary refusal indistinguishable from nine others is not
+    # the visible safety net the operator asked for.
+    #
+    # ⚠ The per-DEPLOYMENT limit deliberately keeps the generic code. It is an
+    # allocation *inside* the sandbox, not the sandbox, and giving it this name would
+    # report a breach of the operator's assignment when one strategy's slice is full.
+    if pool_remaining.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
+        return SANDBOX_EXCEEDED
     portfolio_capacity = max(
         Decimal("0"),
         risk.equity * intent.max_portfolio_exposure_pct / Decimal("100") - risk.total_invested - pending_total,
@@ -960,12 +981,22 @@ def _effective_capital_bases(
 
     strategy_realised = realised_by_strategy.get((intent.strategy_id, intent.strategy_version), Decimal("0"))
     pool_realised = sum(realised_by_strategy.values(), Decimal("0"))
-    if intent.capital_mode == "fixed":
-        strategy_realised = min(strategy_realised, Decimal("0"))
-        pool_realised = min(pool_realised, Decimal("0"))
+    # ⚠ ONE arithmetic, shared with the withdrawal check and the /strategies card
+    # (#2844). This was three hand-written copies of `max(0, limit + realised)` with
+    # the `fixed`-floors-profit rule restated each time -- so the panel promising the
+    # operator headroom and the control enforcing it could drift apart with both
+    # internally consistent and nothing to fail on.
     return (
-        max(Decimal("0"), intent.deployment_limit + strategy_realised),
-        max(Decimal("0"), intent.pool_limit + pool_realised),
+        sandbox_bound(
+            capital_limit=intent.deployment_limit,
+            capital_mode=intent.capital_mode,
+            realised_delta=strategy_realised,
+        ),
+        sandbox_bound(
+            capital_limit=intent.pool_limit,
+            capital_mode=intent.capital_mode,
+            realised_delta=pool_realised,
+        ),
     )
 
 
