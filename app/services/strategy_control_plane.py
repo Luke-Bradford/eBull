@@ -527,6 +527,27 @@ def promote_strategy(
     if to_stage == "live_enabled":
         raise StrategyControlError("live_enabled requires the dedicated measured live-promotion gate")
     purpose = registered_strategy_purpose(strategy_id)
+    # #2845. A retired strategy produces no new evidence, so it must not advance on
+    # old evidence either. This is the chokepoint every promotion path passes: the
+    # API's `/advance`, #2770's `advance_strategy`, and #2843's autonomous approver.
+    # `strategy_paper_runtime` selects `capital_candidate` entries directly rather
+    # than through `runnable_strategies`, so a retired capital candidate would
+    # otherwise be paper-executable the day one exists.
+    #
+    # ⚠ FIRST, ahead of the two purpose checks, and that is deliberate rather than
+    # arbitrary. Placed after them it would be UNREACHABLE — every manifest entry is
+    # `harness_validation` today, so the first check always wins — and an
+    # unreachable guard cannot be proven to work, which is how a guard rots. It is
+    # also the strongest statement available about a strategy: "this is dead" says
+    # more than "this is not a capital candidate".
+    #
+    # ⚠ SCOPED TO THE EVIDENCE STAGES, like the two checks below. `paused` and
+    # `retired` must stay reachable for a retired entry, or the retired eight become
+    # unmanageable — a lifecycle that cannot be wound down is worse than one that
+    # can still move forward.
+    manifest_entry = STRATEGY_MANIFEST.get(strategy_id)
+    if to_stage in _EXTERNAL_EVIDENCE_STAGES and manifest_entry is not None and manifest_entry.retired_reason:
+        raise StrategyControlError(f"{strategy_id} is retired and cannot advance: {manifest_entry.retired_reason}")
     if to_stage in _EXTERNAL_EVIDENCE_STAGES and purpose == "harness_validation":
         raise StrategyControlError("harness-validation strategies are permanent controls and cannot be promoted")
     if to_stage in _EXTERNAL_EVIDENCE_STAGES and purpose != "capital_candidate":

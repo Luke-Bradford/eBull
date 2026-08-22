@@ -33,7 +33,7 @@ Spec: ``docs/proposals/ops/2026-08-13-strategy-scan-freshness.md``
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
@@ -44,6 +44,14 @@ logger = logging.getLogger(__name__)
 
 ScanFreshnessStatus = Literal[
     "ok",
+    #: #2845 — the manifest declares this strategy retired, so it is EXPECTED not
+    #: to scan. ⚠⚠ Non-alerting, and that is the whole point of the status. A
+    #: retired strategy's watermark freezes the day it retires, so without this
+    #: every poll of /system/status would report it `stale` for ever — the
+    #: prevention-log defect of an alarm with a documented "ignore this" attached,
+    #: which is strictly worse than no alarm because it still costs attention and
+    #: occupies the slot a working detector would have.
+    "retired",
     "stale",
     "rotated_awaiting_scan",
     "rotated_scan_overdue",
@@ -154,6 +162,7 @@ def assess_scan_freshness(
     current_versions: Mapping[str, str],
     watermarks: Mapping[tuple[str, str], date],
     trading_dates: Sequence[date],
+    retired_ids: Set[str] = frozenset(),
 ) -> list[StrategyScanFreshness]:
     """Pure verdict for every strategy in ``current_versions``.
 
@@ -161,7 +170,8 @@ def assess_scan_freshness(
     ``watermarks`` is ``read_watermarks``' shape, keyed ``(strategy_id, version)``.
 
     Returns one entry per strategy, always — a strategy with no verdict is a
-    strategy nothing reports on.
+    strategy nothing reports on. That includes retired ones (#2845): they get a
+    `retired` verdict rather than disappearing, for the same reason.
     """
     corpus_date = trading_dates[-1] if trading_dates else None
     newest_by_strategy: dict[str, date] = {}
@@ -200,6 +210,13 @@ def assess_scan_freshness(
                 detail=detail,
             )
 
+        if strategy_id in retired_ids:
+            # #2845. FIRST, ahead of every measurement: a retired strategy is
+            # expected not to scan, so its lag is not a defect and reporting one
+            # would be a permanent false alarm. The verdict still carries the
+            # watermark it froze at, so "when did it stop" stays answerable.
+            results.append(_verdict("retired", detail="retired in the strategy manifest"))
+            continue
         if basis_date is None:
             # No watermark under ANY version. One state, one meaning -- "no track
             # record at all" -- which also absorbs a renamed strategy_id and a
@@ -238,8 +255,13 @@ def assess_scan_freshness(
 
 def read_scan_freshness_inputs(
     conn: psycopg.Connection[Any],
-) -> tuple[dict[str, str], dict[tuple[str, str], date], list[date]]:
-    """The three measured inputs, so the verdict itself stays pure and testable."""
+) -> tuple[dict[str, str], dict[tuple[str, str], date], list[date], frozenset[str]]:
+    """The measured inputs, so the verdict itself stays pure and testable.
+
+    ``retired_ids`` is read from the manifest here rather than in the pure verdict,
+    for the same reason as the other three: the verdict must be table-testable
+    without importing the live catalogue (#2845).
+    """
     from app.services.cost_model import COST_MODEL_ID
     from app.services.strategy_manifest import STRATEGY_MANIFEST
     from app.services.strategy_signal_scan import SCAN_UNIVERSE, read_watermarks
@@ -248,9 +270,12 @@ def read_scan_freshness_inputs(
         strategy_id: entry.identity(universe=SCAN_UNIVERSE, cost_model_id=COST_MODEL_ID).version
         for strategy_id, entry in STRATEGY_MANIFEST.items()
     }
+    retired_ids = frozenset(
+        strategy_id for strategy_id, entry in STRATEGY_MANIFEST.items() if entry.retired_reason is not None
+    )
     watermarks = read_watermarks(conn)
     trading_dates = [row[0] for row in conn.execute(_RECENT_TRADING_DATES, {"window": _TRADING_DATE_WINDOW}).fetchall()]
-    return current_versions, watermarks, trading_dates
+    return current_versions, watermarks, trading_dates, retired_ids
 
 
 def check_scan_freshness(conn: psycopg.Connection[Any]) -> list[StrategyScanFreshness]:
@@ -271,7 +296,7 @@ def check_scan_freshness(conn: psycopg.Connection[Any]) -> list[StrategyScanFres
     """
     try:
         with conn.transaction():
-            current_versions, watermarks, trading_dates = read_scan_freshness_inputs(conn)
+            current_versions, watermarks, trading_dates, retired_ids = read_scan_freshness_inputs(conn)
     except Exception:
         logger.exception("check_scan_freshness: failed to read inputs")
         return [
@@ -288,7 +313,12 @@ def check_scan_freshness(conn: psycopg.Connection[Any]) -> list[StrategyScanFres
                 detail="scan freshness query failed (see server logs)",
             )
         ]
-    return assess_scan_freshness(current_versions=current_versions, watermarks=watermarks, trading_dates=trading_dates)
+    return assess_scan_freshness(
+        current_versions=current_versions,
+        watermarks=watermarks,
+        trading_dates=trading_dates,
+        retired_ids=retired_ids,
+    )
 
 
 __all__ = [

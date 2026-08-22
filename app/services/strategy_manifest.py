@@ -365,10 +365,30 @@ class StrategyEntry:
     #: Optional result-equivalent batch form. It may share immutable indicator
     #: work, never entry-specific prices or signal indices.
     exit_levels_batch: ExitLevelsBatchFactory | None = None
+    #: #2845. Set iff this strategy is retired: it produces NO new evidence, and
+    #: this string is the named reason every surface reports instead of a silent
+    #: skip. ``None`` is the live state.
+    #:
+    #: ⚠⚠ A retired entry STAYS IN THE MANIFEST. Membership is what keeps its
+    #: stored results resolvable -- ``registered_strategy_purpose``,
+    #: ``current_result_versions`` and the ``/strategies`` card all key on it, and
+    #: deleting the entry would strand immutable result rows at a version the code
+    #: no longer produces. Only RUNNABILITY changes.
+    #:
+    #: ⚠ Deliberately NOT part of the identity hash, which comes from the
+    #: ``identity`` factory rather than from this dataclass. If it ever entered,
+    #: retiring a strategy would rotate its version and falsify exactly the claim
+    #: above. Pinned by a test rather than left as a reading.
+    retired_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not self.strategy_id.strip():
             raise ValueError("strategy_id must be a non-empty declaration")
+        if self.retired_reason is not None and not self.retired_reason.strip():
+            # Blank and whitespace-only are the same defect: both render an empty
+            # exclusion in the UI and in a job note, which reads as "retired for no
+            # reason" -- the silent skip this field exists to prevent.
+            raise ValueError(f"{self.strategy_id} declares a blank retired_reason; retirement must name its reason")
         if self.purpose not in STRATEGY_PURPOSES:
             raise ValueError(f"unknown strategy purpose {self.purpose!r}; must be one of {sorted(STRATEGY_PURPOSES)}")
         if self.strategy_class not in STRATEGY_CLASSES:
@@ -847,6 +867,40 @@ def _s10_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
     return ExitRegime(signal_pair=True, level_based=False, max_hold_bars=None, rebalance_dates=None)
 
 
+# ---------------------------------------------------------------------------
+# Retirement reasons (#2845)
+# ---------------------------------------------------------------------------
+#
+# The operator's cut-and-reset (2026-08-22) retires eight of the ten on #2827's
+# measurement.  Three verdict classes, because #2827 measured three and a single
+# uniform string would throw that away.
+#
+# ⚠⚠ NO FIGURE FROM #2827 IS COPIED HERE.  A derived statistic written by hand
+# goes stale silently in the place a reader trusts most, so these name the
+# verdict CLASS and the ticket that holds the reproducible numbers.  Read them
+# there: `gh issue view 2827 --comments`.
+#
+# ⚠ Retirement stops NEW evidence.  It deletes nothing, and it does not stop
+# `run_outcome_resolution` draining already-fired signals -- see its own note.
+
+_RETIRED_GROSS_NEGATIVE = (
+    "retired 2026-08-22: measured gross-negative per trade at ZERO cost, so no cost "
+    "reduction can reach the deflation bar (#2827, #2832)"
+)
+
+_RETIRED_NOT_A_COST_PROBLEM = (
+    "retired 2026-08-22: measured gross-negative per trade at ZERO cost, and cost accounts "
+    "for a minority of the loss -- the band sensitivity is far narrower than the loss "
+    "itself, so this is not a cost problem in any arm (#2827, #2832)"
+)
+
+_RETIRED_SHORT_OF_THE_BAR = (
+    "retired 2026-08-22: gross-POSITIVE but its gross trade Sharpe is an order below the "
+    "deflation bar, and it is not one of the two candidates -- break-even at a realistic "
+    "cost band, or an edge that is mostly an ambiguity-arm assumption (#2827, #2832)"
+)
+
+
 #: Every strategy in the catalogue, keyed by ``strategy_id``.
 #:
 #: ⚠⚠ COMPLETENESS IS A TEST, NOT A CONVENTION.
@@ -867,6 +921,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             exit_regime=_s1_exit_regime,
             decision_calendar=_no_decision_calendar,
             signals=_s1_signals,
+            retired_reason=_RETIRED_GROSS_NEGATIVE,
         ),
         S2_STRATEGY_ID: StrategyEntry(
             strategy_id=S2_STRATEGY_ID,
@@ -879,6 +934,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             member=_s2_member,
             select=s2_select,
             min_participants=MIN_CROSS_SECTION,
+            retired_reason=_RETIRED_NOT_A_COST_PROBLEM,
         ),
         S3_STRATEGY_ID: StrategyEntry(
             strategy_id=S3_STRATEGY_ID,
@@ -889,6 +945,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             exit_regime=_s3_exit_regime,
             decision_calendar=_no_decision_calendar,
             signals=_s3_signals,
+            retired_reason=_RETIRED_SHORT_OF_THE_BAR,
         ),
         S4_STRATEGY_ID: StrategyEntry(
             strategy_id=S4_STRATEGY_ID,
@@ -913,6 +970,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             signals=_s5_signals,
             exit_levels=_s5_exit_levels,
             exit_levels_batch=s5_exit_levels_batch,
+            retired_reason=_RETIRED_SHORT_OF_THE_BAR,
         ),
         S6_STRATEGY_ID: StrategyEntry(
             strategy_id=S6_STRATEGY_ID,
@@ -925,6 +983,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             signals=_s6_signals,
             exit_levels=_s6_exit_levels,
             exit_levels_batch=s6_exit_levels_batch,
+            retired_reason=_RETIRED_GROSS_NEGATIVE,
         ),
         S7_STRATEGY_ID: StrategyEntry(
             strategy_id=S7_STRATEGY_ID,
@@ -937,6 +996,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             signals=_s7_signals,
             exit_levels=_s7_exit_levels,
             exit_levels_batch=s7_exit_levels_batch,
+            retired_reason=_RETIRED_GROSS_NEGATIVE,
         ),
         S8_STRATEGY_ID: StrategyEntry(
             strategy_id=S8_STRATEGY_ID,
@@ -961,6 +1021,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             signals=_s9_signals,
             exit_levels=_s9_exit_levels,
             exit_levels_batch=s9_exit_levels_batch,
+            retired_reason=_RETIRED_GROSS_NEGATIVE,
         ),
         S10_STRATEGY_ID: StrategyEntry(
             strategy_id=S10_STRATEGY_ID,
@@ -978,6 +1039,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
                 select=s10_exit_select,
                 min_participants=S10_MIN_CROSS_SECTION,
             ),
+            retired_reason=_RETIRED_NOT_A_COST_PROBLEM,
         ),
     }
 )

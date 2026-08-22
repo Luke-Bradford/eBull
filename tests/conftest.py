@@ -74,12 +74,18 @@ def registered_strategy_test_candidates(monkeypatch: pytest.MonkeyPatch) -> None
     Production has no capital candidates today.  Tests that exercise the
     post-admission lifecycle need explicit test-only candidates; treating an
     unknown ID as one would hide the fail-closed boundary those tests protect.
+
+    ⚠ This stands in for a ``StrategyEntry``, so it must carry EVERY field the
+    control plane reads off one.  ``retired_reason`` was added by #2845 and its
+    absence raised ``AttributeError`` from ``promote_strategy`` — a stub missing a
+    field the production type has fails in a way that looks like a code bug rather
+    than a fixture gap.  Add new fields here when the entry gains them.
     """
     from app.services import strategy_control_plane
 
     manifest = dict(strategy_control_plane.STRATEGY_MANIFEST)
     for strategy_id in ("S-ALLOC", "S-GOV", "S-LIVE-GATE", "S-OWN", "S-REC"):
-        manifest[strategy_id] = cast(Any, SimpleNamespace(purpose="capital_candidate"))
+        manifest[strategy_id] = cast(Any, SimpleNamespace(purpose="capital_candidate", retired_reason=None))
     monkeypatch.setattr(strategy_control_plane, "STRATEGY_MANIFEST", manifest)
 
 
