@@ -260,7 +260,7 @@ Reproduce: `curl -s "http://localhost:8000/_debug/etoro-candles-probe?instrument
 | --- | --- | --- |
 | REST intraday candles | OHLCV history, any instrument, on demand | 1000 bars, no date anchor; **120 market-data GET/min shared** |
 | WS rate stream | live bid/ask/last ticks, all instruments | no depth, no sizes; forward-only |
-| `research_price_daily` | 25.9M daily bars 1962-2026, survivorship-controlled | daily granularity only |
+| `research_price_daily` | 75.97M daily bars 1962-2026, survivorship-controlled | daily granularity only |
 
 ⚠ **Corpus arithmetic, because the rate limit binds hard.** The currently
 documented 120 market-data GET/min shared gives a full 6,700-instrument pull a

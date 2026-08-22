@@ -504,7 +504,8 @@ data, no order book.** It proxies price impact per unit of order flow (the
 empirical cousin of Kyle's λ) and is *"a relatively strong indicator of informed
 trading when trading is urgent."*
 
-Three uses, all available to us on 25.9M bars with nothing new ingested:
+Three uses, all available to us on the 75,972,649 bars / 30,591 series corpus with nothing new
+ingested (`select count(*), (select count(*) from research_price_series) from research_price_daily` → 75,972,649 / 30,591 (2026-08-22)):
 
 1. **A conditioner** — illiquid names are where limits to arbitrage bind, which
    is where §2.6's surviving anomalies survive.
@@ -720,7 +721,10 @@ once — not to root each and average.
 
 **Confound 2 — era mismatch.** `cost_model.BANDS` is calibrated on **modern**
 eToro spreads (p75, samples of 76-244). The research corpus runs 1962-2026, and
-**5,266,053 of 25,920,971 bars — 20.3% — predate decimalisation** (2001-04-09),
+**12,281,013 of 75,972,649 bars — 16.2% — predate decimalisation** (2001-04-09),
+⚠ re-measured 2026-08-22 after the corpus tripled;
+`select count(*) filter (where bar_date < date '2001-04-09'), count(*) from research_price_daily`.
+The share MOVED (was 20.3% on 25.9M bars), so this is not a denominator swap —
 when US equities traded in eighths and sixteenths. A 1/8 tick on a \$10 stock is
 **1.25%**, an order of magnitude above a modern spread. ⚠ So a large part of the
 "excess" may simply be that historical spreads were genuinely far wider than the
@@ -975,7 +979,7 @@ Wyckoff "ease of movement"   =  low volume, big move         ->  HIGH Amihud
 ```
 
 So the law Wyckoff rests on is a quantity that **does** have empirical support
-(§2.11) and is computable on our 25.9M bars with no new data. ⚠ Note what this
+(§2.11) and is computable on our 75.97M-bar corpus with no new data. ⚠ Note what this
 does NOT establish: that the *interpretation* (a composite operator accumulating)
 is correct. It establishes that the **observable** is real and measurable. Test
 the quantity, not the story attached to it.
@@ -1195,6 +1199,61 @@ insiders with >= 3 distinct PURCHASE years                  997 of 9,936 (10.0%)
 flag. Negligible as a share, material for this family specifically — a
 2,000-year gap wrecks the per-insider history the classification depends on.
 Filed as **#2441**.
+
+---
+
+## 3.2 ⚠⚠ THE R5 KILL TABLE — 32 candidates already examined and rejected (#2832, 2026-08-22)
+
+**Read this before proposing any strategy family.** After #2827 measured all ten TA
+strategies dead at ZERO cost, a 19-agent sweep asked the full-width question — *what can
+reliably make money programmatically for this account* — and examined **38 sub-strategies.
+Six survived as preregistered spikes; 32 were killed with reasons.** Those reasons are
+recorded here so no future session pays to re-derive them.
+
+Full per-verdict record: #2832 and its workflow journal `wf_f24998c8-93a`.
+
+| family | verdict | why |
+| --- | --- | --- |
+| **Flip the losers** (invert s2/s10) | KILLED | four independent reasons, any one sufficient — see below |
+| Intraday / overnight: overnight split, ORB, first-half-hour, gap plays, weekend | KILLED | die at our spreads. ORB was validated at **72–509× lower costs than ours** (§2.13) |
+| Crypto / FX systematic: momentum, carry, seasonality | KILLED | ~1%/side crypto spreads; weak or decayed OOS evidence |
+| Pairs / statistical arbitrage | KILLED | decayed post-2002; costs; borrow |
+| Options income (covered calls, put-writing) | KILLED | **no options on eToro UK** — 0 instruments, no API endpoints (VERIFIED-PORTAL). Packaged ETFs (QYLD, JEPI) demonstrably do not preserve the premium |
+| Index adds, spin-offs, buybacks, tenders, lockup expiries | KILLED | decayed post-publication and/or unexecutable at our order types |
+| PEAD, generic | KILLED as a family | decay. ⚠ **#2493's specific measured +2.676% long arm stands as its own evidence path** — reconciliation posted there |
+| Small/micro-cap "retail capacity" thesis | KILLED | the anomalies live in <\$5 names, where our own 1.45% cost band and the delisting tail eat them |
+| CEF discount capture | KILLED | **0 of 12 canonical CEF tickers in our universe** |
+| Convertible arbitrage | KILLED | no convertible instruments on the venue |
+| FINRA RegSHO daily | KILLED | it is short **VOLUME**, not short interest or borrow — it cannot price the published SI literature |
+| Spread-betting tax wrapper | KILLED | not offered on this venue |
+
+### Why "flip the losers" is dead, in full
+
+It is the most natural question to ask about a measured-negative strategy, so it gets the
+long answer once:
+
+1. **Inverting after observing the hold-out converts the hold-out into training data.** The
+   sign is a parameter like any other; choosing it on the evidence spends the confirmatory
+   shot.
+2. **Per-trade signal-to-noise is symmetric under a sign flip**, so it cannot close a 5–20×
+   deflation miss — the bar does not move when the sign does.
+3. **The short leg pays** 1.45% round trip + ~0.02%/day CFD financing over 60-day holds, and
+   a mandatory `stopLossRate` in exactly the gappiest names.
+4. **The magnitudes disagree with the literature by two orders.** Documented anti-momentum
+   is ~−0.4%/**month** (Cooper 2004); s2/s10 measured −3.8 to −6.0%/**trade**. That gap is a
+   regime artifact of a signal we ourselves measured as broken (#2797).
+
+**You cannot harvest the inverse of a bug.**
+
+### Deferred with a re-arm condition — NOT killed
+
+- **News / text strategies.** `news_events` is **forward-only from 2026-06-27**, and text
+  strategies additionally need filing BODIES — `filing_documents` holds 9.2M URLs and **no
+  bodies**. Re-arm condition: **≥24 months of accumulation** *and* a filing-body fetch
+  pipeline. Until both hold, any backtest here is measuring a corpus that did not exist.
+- **13F crowding / unwind.** `institutional_holdings` holds 8.46M rows over ~20 year-clusters
+  — the exact cluster depth the insider family is starved of, and §3 already rates the angle
+  viable-but-not-cloning. Deferred rather than killed; the deferral note is on #2832.
 
 ---
 

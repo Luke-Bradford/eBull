@@ -22,7 +22,7 @@ cannot be tested, and the discovery usually happens after the spec is written.
 ## 1. What we actually hold
 
 ```text
-research_price_daily        25,939,169 bars   7,727 series, 1962-2026, daily OHLC + adj_close
+research_price_daily        75,972,649 bars  30,591 series, 1962-2026, daily OHLC + adj_close
 price_daily                  6,724,254        the eToro-fed operational series
 filing_documents             9,243,776   ⚠ a MANIFEST of URLs -- NO document bodies
 ownership_institutions_*        ~7M      13F, quarterly partitions
@@ -102,7 +102,7 @@ call. A cross-sectional intraday study is a scheduled harvest, not an ad-hoc que
 | --- | --- | --- |
 | REST intraday candles | OHLCV history on demand | 1000 bars, no date anchor, 60 GET/min |
 | WS rate stream | live bid/ask/last, all instruments | **no depth, no sizes** — the real gap |
-| `research_price_daily` | 25.9M daily bars 1962-2026 | daily granularity |
+| `research_price_daily` | 75.97M daily bars 1962-2026 | daily granularity |
 
 Source of truth: `.claude/skills/data-sources/etoro-api.md` § "WE HAVE INTRADAY
 HISTORY". Probe before asserting:
@@ -132,7 +132,7 @@ HISTORY". Probe before asserting:
 | **observed** bid/ask spread over time | footprint charts, volume-at-price |
 | quote-update frequency as an activity proxy | cumulative delta, absorption, exhaustion |
 | realised intraday volatility | trade-side classification, tape reading |
-| Amihud illiquidity (`\|return\| / dollar volume`) on 25.9M bars | true session VWAP |
+| Amihud illiquidity (`\|return\| / dollar volume`) on 75.97M bars | true session VWAP |
 
 ⚠⚠ **The impossible column is a DATA constraint, not a verdict on whether those
 methods work.** Cont/Kukanov/Stoikov show OFI predicts short-horizon returns with
