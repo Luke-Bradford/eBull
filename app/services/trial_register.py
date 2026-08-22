@@ -132,6 +132,11 @@ TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-15-r7"
 #: constant exists so #2599 has a boundary to enforce from.
 TRIAL_REGISTER_CUTOFF: Final = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
 
+#: ``sql/333``'s identity CHECK bounds every declaration identity field at 200
+#: characters. Mirrored rather than imported because SQL cannot export it, in the
+#: same spirit as ``PreregDeclaration``'s deliberate duplication of those CHECKs.
+_IDENTITY_LIMIT: Final = 200
+
 
 class TrialExactness(StrEnum):
     """Whether a declaration's ``searches`` is the count or a lower bound on it.
@@ -185,11 +190,54 @@ class DeclaredTrial:
     exactness: TrialExactness
     #: Number of price-data searches represented by this traceable declaration.
     searches: int = 1
+    #: #2829 — the ``(strategy_id, strategy_version)`` pairs whose preregistration
+    #: declaration this trial's searches account for.
+    #:
+    #: ⚠ EMPTY IS LEGITIMATE AND COMMON, not an omission to fill in. Many entries
+    #: here are research SESSIONS (``short-horizon-search-session-2026-08-09``,
+    #: ``autocorrelation-term-structure-2026-08-09``) that no declaration
+    #: corresponds to; ``strategy_preregistration_declarations`` holds 5 rows
+    #: against 30 trials.
+    #:
+    #: ⚠ Identity is ``(strategy_id, strategy_version)`` because that is
+    #: ``sql/333``'s own ``strategy_preregistration_declaration_unique``.
+    #: ``contract_version`` is deliberately not part of it, for the same reason.
+    #:
+    #: ⚠ CARDINALITY: one trial MAY claim MANY pairs (a grouped family declared
+    #: once); a pair is claimed by AT MOST ONE trial (enforced on
+    #: ``TrialRegister``).
+    #:
+    #: ⚠ There is NO naming convention to infer this from, which is why it is
+    #: declared. Measured 2026-08-22 across the five stored declarations, the
+    #: matching ``trial_id`` was ``strategy_version`` twice, ``strategy_id``
+    #: twice, and ``strategy_id + "-v1"`` once.
+    declares: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in ("trial_id", "description", "evidence"):
             if not getattr(self, field_name):
                 raise ValueError(f"{field_name} is blank — a present-but-empty declaration declares nothing (#2286)")
+        seen_pairs: set[tuple[str, str]] = set()
+        for pair in self.declares:
+            if len(pair) != 2:
+                raise ValueError(f"{self.trial_id}: declares entries are (strategy_id, strategy_version), got {pair!r}")
+            for part in pair:
+                # Mirrors sql/333's `strategy_preregistration_declaration_identity`
+                # CHECK. A pair the table could never hold can never match a row,
+                # so it is a typo rather than a mapping — and it would fail SILENT,
+                # as a declaration this register does not claim.
+                if not isinstance(part, str) or not part.strip() or len(part) > _IDENTITY_LIMIT:
+                    raise ValueError(
+                        f"{self.trial_id}: declares identity {part!r} must be a non-blank string of at most "
+                        f"{_IDENTITY_LIMIT} characters (sql/333's identity CHECK)"
+                    )
+            # ⚠ Within ONE trial, not only across trials. The cross-trial check on
+            # `TrialRegister` builds a set, so a pair repeated inside a single
+            # tuple would pass it while still meaning the register cannot say how
+            # many times it counted that declaration.
+            if pair in seen_pairs:
+                raise ValueError(f"{self.trial_id}: declares {pair!r} twice")
+            seen_pairs.add(pair)
         if type(self.searches) is not int or self.searches < 1:
             raise ValueError(f"searches must be a positive integer, got {self.searches!r}")
         # ⚠ Rejected rather than coerced. A raw string here would pass every
@@ -213,6 +261,17 @@ class TrialRegister:
         ids = [trial.trial_id for trial in self.trials]
         if len(ids) != len(set(ids)):
             raise ValueError("trial ids are not distinct — one variant counted twice inflates M silently")
+        # #2829. Same failure shape as the id check above, one level down: a
+        # declaration claimed by two trials has its searches counted twice in M.
+        claimed: dict[tuple[str, str], str] = {}
+        for trial in self.trials:
+            for pair in trial.declares:
+                if pair in claimed:
+                    raise ValueError(
+                        f"declaration {pair[0]}@{pair[1]} is claimed by both {claimed[pair]!r} and "
+                        f"{trial.trial_id!r} — one declaration counted twice inflates M silently"
+                    )
+                claimed[pair] = trial.trial_id
 
     @property
     def declared_count(self) -> int:
@@ -232,6 +291,27 @@ class TrialRegister:
     @property
     def trial_ids(self) -> frozenset[str]:
         return frozenset(trial.trial_id for trial in self.trials)
+
+    def trial_for_declaration(self, strategy_id: str, strategy_version: str) -> DeclaredTrial | None:
+        """The trial whose searches account for this declaration, or ``None``.
+
+        ⚠ ``None`` means "``M`` does not count the search this declaration
+        represents", which is the under-count criterion 6 calls decorative. It is
+        NOT "no declaration exists" — this register knows nothing about which
+        declarations have been frozen.
+
+        ⚠ WHAT A MATCH PROVES, precisely: that the register and the declaration
+        agree TODAY. It cannot establish that the register counted this search at
+        the time a look occurred, because a mapping added after exposure is
+        indistinguishable from one that was always there. The prospective
+        guarantee comes from ``freeze_preregistration`` refusing an unclaimed
+        declaration, not from a lookup here.
+        """
+        pair = (strategy_id, strategy_version)
+        for trial in self.trials:
+            if pair in trial.declares:
+                return trial
+        return None
 
     def sharpe_variance(self, measured: Mapping[str, float]) -> float | None:
         """``V[{SR_n}]`` over the trials measured this run. ``None`` below two.
@@ -390,6 +470,7 @@ TRIAL_REGISTER: Final = TrialRegister(
             "§'Recency and horizon diagnostics'); issue #2476 comment 2026-08-10 (sealed outcome)",
             exactness=TrialExactness.EXACT,
             searches=8,
+            declares=(("pead-historical-sue-net-income", "pead-historical-sue-net-income-v1"),),
         ),
         DeclaredTrial(
             trial_id="short-horizon-search-session-2026-08-09",
@@ -432,6 +513,7 @@ TRIAL_REGISTER: Final = TrialRegister(
             "https://github.com/Luke-Bradford/eBull/issues/2480#issuecomment-5238836691",
             exactness=TrialExactness.EXACT,
             searches=7,
+            declares=(("form4-code-p-opportunistic-purchase", "form4-code-p-opportunistic-purchase-v1"),),
         ),
         # ⚠⚠ THE 2026-08-09 02:28 SCRIPTS (commit 61fb17da), ADDED BY #2600.
         # All three predate the plan-of-attack's §2b floor (03:13:41, dbe5107b),
@@ -566,6 +648,10 @@ TRIAL_REGISTER: Final = TrialRegister(
             "sha256 8f4424bea0581ba501d9779b93ff9268c65c6f0c899f1a66962bcb260cce895f. Issues #2614, #2582",
             exactness=TrialExactness.EXACT,
             searches=7,
+            # ⚠ The one mapping no naming rule would have produced: the trial id
+            # is the CONTRACT version, and the declaration's strategy_id drops
+            # the `-v1`. Measured against the stored row, not inferred.
+            declares=(("c4-schedule13d-public-catalyst", "schedule13d-public-catalyst-v1"),),
         ),
         # ⚠ DECLARED BEFORE THE FIRST BACKTEST. The four robustness rows
         # (ambiguity best/worst x quarantine admitted/masked), the eight pinned
@@ -610,6 +696,10 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "§'Arms and trial accounting' and §'Frozen primary estimand and inference'; issue #2437"
             ),
             exactness=TrialExactness.EXACT,
+            # ⚠ Here the declaration's strategy_id IS the trial id and the
+            # strategy_version is a registry hash — the opposite key from the
+            # three above. Measured against the stored row.
+            declares=(("mt1-capped-volatility-managed-relative-strength-v1", "strategy-registry-v1+32970feefa00"),),
         ),
         DeclaredTrial(
             trial_id="mt1-s8-capped-volatility-negative-control-v1",
@@ -622,6 +712,7 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "§'Arms and trial accounting' and §'Frozen primary estimand and inference'; issue #2437"
             ),
             exactness=TrialExactness.EXACT,
+            declares=(("mt1-s8-capped-volatility-negative-control-v1", "strategy-registry-v1+b83c3e4fc997"),),
         ),
     ),
 )
