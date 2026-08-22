@@ -167,7 +167,10 @@ def _census(args: argparse.Namespace) -> int:
             FROM instruments WHERE is_tradable ORDER BY instrument_id
             """
         ).fetchall()
-        type_names = dict(conn.execute("SELECT instrument_type_id, name FROM etoro_instrument_types").fetchall())
+        # ⚠ `description`, not `name` — the column has never been called `name`
+        # (#2833: `census` raised `UndefinedColumn` on its first run since #2603
+        # shipped, i.e. the mode had never been exercised end to end).
+        type_names = dict(conn.execute("SELECT instrument_type_id, description FROM etoro_instrument_types").fetchall())
         conn.commit()
 
     meta = {int(row[0]): row for row in universe}

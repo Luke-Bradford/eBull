@@ -86,6 +86,7 @@ from app.services.return_attribution import (
     persist_attribution_summary,
 )
 from app.services.scoring import _DEFAULT_MODEL_VERSION, compute_rankings
+from app.services.strategy_core_eligibility import CORE_ELIGIBILITY_PASS_VERDICT
 from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.sync_orchestrator.progress import report_progress
 from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
@@ -3228,6 +3229,77 @@ def daily_candle_refresh() -> None:
             )
 
 
+#: ``quotes_refresh``'s scope, at module level so the tests that pin each arm
+#: execute the SAME text the job does.  Until #2833 this lived inline and
+#: ``tests/test_2603_core_preflight_db.py`` carried a hand-copy plus a substring
+#: guard to catch the copy drifting; extracting it retires both.
+#:
+#: Params: ``benchmarks`` (``BENCHMARK_SYMBOLS``), ``pass_verdict``
+#: (``CORE_ELIGIBILITY_PASS_VERDICT``).
+QUOTES_REFRESH_SCOPE_SQL = """
+SELECT DISTINCT ON (i.instrument_id) i.instrument_id, i.symbol
+FROM instruments i
+LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
+LEFT JOIN positions p ON p.instrument_id = i.instrument_id AND p.current_units > 0
+WHERE p.instrument_id IS NOT NULL
+   OR (i.is_tradable = TRUE AND c.coverage_tier IN (1, 2))
+   OR (i.is_tradable = TRUE AND i.symbol = ANY(%(benchmarks)s))
+   -- #2603 step 3b-1: the ENABLED core mandate's instrument, which
+   -- none of the three arms above reaches on the first rebalance.
+   -- The first core buy is by definition not yet HELD, and a
+   -- mandate may name any tradable instrument -- measured on dev,
+   -- IVV / VTI / SPY.RTH are all Tier 3, unheld and absent from
+   -- BENCHMARK_SYMBOLS, so a mandate naming one of them would
+   -- never be quoted and `core_quote_missing` would be PERMANENT
+   -- rather than transient (strategy_core_preflight.py).
+   -- `ORDER BY revision DESC LIMIT 1` (no WHERE) matches
+   -- load_core_mandate: THE mandate is the latest revision, not the
+   -- latest enabled one. The CASE yields NULL when that revision is
+   -- disabled, and `instrument_id = NULL` is never true -- so a
+   -- disabled mandate drops out of scope without a second subquery.
+   OR (i.is_tradable = TRUE AND i.instrument_id = (
+          SELECT CASE WHEN m.enabled THEN m.core_instrument_id END
+          FROM strategy_core_mandate_events m
+          ORDER BY m.revision DESC
+          LIMIT 1
+       ))
+   -- #2833 step 1: a core CANDIDATE -- one with a recorded PASSING eligibility
+   -- proof (#2603 item 2).  Arm 4 covers the instrument a mandate already
+   -- NAMES; nothing covered the instrument being MEASURED for one, and the
+   -- sleeve's acceptance bar is a spread percentile over ~5 trading days of
+   -- stored quote snapshots.  So the measurement that decides the mandate
+   -- needed quotes that only began accruing once the mandate was enabled --
+   -- a cycle whose only exit was adopting the sleeve before evaluating its
+   -- pass bar, which is the shortcut #2833 exists to avoid.  Measured on dev
+   -- 2026-08-22: `select count(*) from quotes where instrument_id in
+   -- (3417, 3434, 3075)` returned 0 for all three proved candidates.
+   -- Membership is the LATEST proof per (instrument, environment), so
+   -- re-proving is also how a candidate LEAVES scope.  Bounded by deliberate
+   -- action: only `prove` writes proofs (`census` records nothing), so this
+   -- arm cannot widen to the universe on its own.
+   -- ⚠ `observed_at DESC, core_eligibility_proof_id DESC` is NOT belt-and-braces
+   -- and matches load_latest_core_eligibility_proof deliberately: `observed_at`
+   -- DEFAULTs to `now()`, which is the TRANSACTION timestamp, so two proofs
+   -- written in one transaction TIE and `observed_at DESC` alone picks either
+   -- one.  Two readers of "the latest proof" that break the tie differently are
+   -- two definitions, and the disagreement only shows up on the row that matters.
+   -- ⚠ Unkeyed on operator/provider, unlike that reader: quoting is an
+   -- app-wide side effect, not a per-account one, and `provider` is CHECK-pinned
+   -- to 'etoro'.  Any account's passing proof is enough to quote.
+   OR (i.is_tradable = TRUE AND EXISTS (
+          SELECT 1
+          FROM (
+              SELECT DISTINCT ON (e.environment) e.verdict
+              FROM strategy_core_eligibility_proofs e
+              WHERE e.instrument_id = i.instrument_id
+              ORDER BY e.environment, e.observed_at DESC, e.core_eligibility_proof_id DESC
+          ) latest
+          WHERE latest.verdict = %(pass_verdict)s
+       ))
+ORDER BY i.instrument_id, i.symbol
+"""
+
+
 def quotes_refresh() -> None:
     """Refresh the ``quotes`` table for every instrument read headlessly.
 
@@ -3253,11 +3325,18 @@ def quotes_refresh() -> None:
          ``daily_candle_refresh``).
       3. Tier 1/2 — the scored set; scoring reads ``spread_flag``/``last``/
          ``bid``/``ask`` per instrument.
+      4. The enabled core mandate's instrument (#2603) — the first core buy is
+         by definition not yet held.
+      5. Core CANDIDATES (#2833) — anything carrying a passing eligibility
+         proof, because the sleeve's pass bar is measured FROM these quotes.
 
     Tier 3 is deliberately excluded: nothing scores it, and it would take the
     fetch from ~28 to ~240 requests per fire for data no headless reader
     consumes. A T3 instrument the operator actually opens still gets live WS
     ticks, which is the visibility-driven path working as intended.
+
+    ⚠ Arms 4 and 5 are both Tier-3 exemptions and both exist because a GATE
+    reads a row this job is the only producer of. See ``QUOTES_REFRESH_SCOPE_SQL``.
     """
     creds = _load_etoro_credentials(JOB_QUOTES_REFRESH)
     if creds is None:
@@ -3276,36 +3355,11 @@ def quotes_refresh() -> None:
             connect_job(autocommit=True) as conn,
         ):
             rows = conn.execute(
-                """
-                SELECT DISTINCT ON (i.instrument_id) i.instrument_id, i.symbol
-                FROM instruments i
-                LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
-                LEFT JOIN positions p ON p.instrument_id = i.instrument_id AND p.current_units > 0
-                WHERE p.instrument_id IS NOT NULL
-                   OR (i.is_tradable = TRUE AND c.coverage_tier IN (1, 2))
-                   OR (i.is_tradable = TRUE AND i.symbol = ANY(%(benchmarks)s))
-                   -- #2603 step 3b-1: the ENABLED core mandate's instrument, which
-                   -- none of the three arms above reaches on the first rebalance.
-                   -- The first core buy is by definition not yet HELD, and a
-                   -- mandate may name any tradable instrument -- measured on dev,
-                   -- IVV / VTI / SPY.RTH are all Tier 3, unheld and absent from
-                   -- BENCHMARK_SYMBOLS, so a mandate naming one of them would
-                   -- never be quoted and `core_quote_missing` would be PERMANENT
-                   -- rather than transient (strategy_core_preflight.py).
-                   -- `ORDER BY revision DESC LIMIT 1` (no WHERE) matches
-                   -- load_core_mandate: THE mandate is the latest revision, not the
-                   -- latest enabled one. The CASE yields NULL when that revision is
-                   -- disabled, and `instrument_id = NULL` is never true -- so a
-                   -- disabled mandate drops out of scope without a second subquery.
-                   OR (i.is_tradable = TRUE AND i.instrument_id = (
-                          SELECT CASE WHEN m.enabled THEN m.core_instrument_id END
-                          FROM strategy_core_mandate_events m
-                          ORDER BY m.revision DESC
-                          LIMIT 1
-                       ))
-                ORDER BY i.instrument_id, i.symbol
-                """,
-                {"benchmarks": sorted(BENCHMARK_SYMBOLS)},
+                QUOTES_REFRESH_SCOPE_SQL,
+                {
+                    "benchmarks": sorted(BENCHMARK_SYMBOLS),
+                    "pass_verdict": CORE_ELIGIBILITY_PASS_VERDICT,
+                },
             ).fetchall()
 
             instruments = [(int(r[0]), str(r[1])) for r in rows]
