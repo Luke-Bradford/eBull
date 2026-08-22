@@ -128,6 +128,29 @@ class TestTheInvariantsThatProtectM:
             )
 
 
+def test_the_identity_limit_matches_the_migration_it_mirrors() -> None:
+    """``_IDENTITY_LIMIT`` restates a bound SQL cannot export, so bind the two.
+
+    A constant and its source in two files with nothing between them is two
+    constants — the same argument
+    ``test_the_migration_reason_codes_match_the_allocator_vocabulary`` makes for
+    the reason-code CHECK.
+
+    ⚠ Drift is SILENT in the direction that matters. If ``sql/333`` widened and
+    this did not, a legitimate identity would be rejected here as a typo; if the
+    migration narrowed, a pair this register happily stores could never match a
+    row, and the declaration would read as unclaimed rather than as malformed.
+    """
+    import re
+    from pathlib import Path
+
+    from app.services.trial_register import _IDENTITY_LIMIT
+
+    sql = (Path(__file__).resolve().parents[1] / "sql" / "333_strategy_preregistration_declarations.sql").read_text()
+    bounds = set(re.findall(r"char_length\((?:strategy_id|strategy_version)\) BETWEEN 1 AND (\d+)", sql))
+    assert bounds == {str(_IDENTITY_LIMIT)}, f"sql/333 bounds the identity at {bounds}, not {_IDENTITY_LIMIT}"
+
+
 class TestTheFreezeGate:
     """⚠ DB-free by design: the check fires before ``freeze_preregistration``
     touches its connection, which is what these lean on — the same property
