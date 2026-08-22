@@ -2564,7 +2564,7 @@ _FIRED_SIGNALS_SQL = """
         GROUP BY sto.strategy_trade_id
     ), entry_order AS (
         SELECT DISTINCT ON (sto.strategy_trade_id)
-               sto.strategy_trade_id, ord.status
+               sto.strategy_trade_id, sto.order_id, ord.status
         FROM strategy_trade_orders sto
         JOIN orders ord ON ord.order_id = sto.order_id
         WHERE sto.purpose = 'entry'
@@ -2668,7 +2668,7 @@ _FIRED_SIGNALS_SQL = """
       ON operation.strategy_trade_id = t.strategy_trade_id
      AND ownership.ownership_count = 1
     LEFT JOIN strategy_order_reconciliation_state reconciliation
-      ON reconciliation.order_id = operation.order_id
+      ON reconciliation.order_id = COALESCE(operation.order_id, eo.order_id)
     LEFT JOIN close_history history ON history.strategy_trade_id = t.strategy_trade_id
     WHERE s.verdict = 'fired'
       AND s.strategy_version = ANY(%(versions)s)
@@ -2714,6 +2714,7 @@ def _trade_lifecycle(row: Mapping[str, object]) -> StrategyTradeLifecycle | None
 
     operation_status = row["lifecycle_operation_status"]
     reconciliation_state = row["lifecycle_reconciliation_state"]
+    reconciliation_scope = "position_operation" if row["lifecycle_operation_order_id"] is not None else "entry_order"
     if operation_status == "rejected":
         reasons.append("position_operation_rejected")
     elif operation_status == "reconcile_required":
@@ -2721,13 +2722,13 @@ def _trade_lifecycle(row: Mapping[str, object]) -> StrategyTradeLifecycle | None
     if row["lifecycle_operation_error"] is not None:
         reasons.append("position_operation_error")
     if reconciliation_state in {"not_found", "ambiguous", "error", "rejected"}:
-        reasons.append(f"position_operation_reconciliation_{reconciliation_state}")
+        reasons.append(f"{reconciliation_scope}_reconciliation_{reconciliation_state}")
     if row["lifecycle_reconciliation_error"] is not None and reconciliation_state not in {
         "not_found",
         "ambiguous",
         "error",
     }:
-        reasons.append("position_operation_reconciliation_error")
+        reasons.append(f"{reconciliation_scope}_reconciliation_error")
     reasons.extend(history_reasons)
 
     if trade_status == "failed" and ownership_count == 0:
