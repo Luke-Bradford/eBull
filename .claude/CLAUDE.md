@@ -34,6 +34,16 @@ You are helping build **eBull**, a long-horizon AI-assisted investment engine fo
   success first"*). ⚠ Note a CFD short at x1 is unleveraged exposure and does not breach
   this; anything above x1 does.
 - No silent bypass of failed checks
+- **Live-capital approval is a mandate FLAG, not a person-gate** (operator decision,
+  2026-08-22, reversing the prior person-gated rule — see settled-decisions). Under
+  `approval_mode: autonomous` (#2843) the engine promotes and allocates on evidence
+  alone; the execution guard, kill switch and sandbox boundary (#2844: exposure ≤
+  assigned capital, capped or expanding — the operator's chosen and ONLY safety net)
+  remain fail-closed and are not waivable by the flag. Operator alerts are
+  refusal-surfaces meeting the #2843 validity contract; routine check-ins do not exist.
+- **Price-only steer (operator, 2026-08-22, twice affirmed):** event-form strategy
+  families (insider/13D/merger/PEAD/shock-event) are CUT with recorded lessons; audited
+  periodic accounts stay in scope for valuation. Queue = the R5b comment on #2437.
 
 ## Engineering discipline (non-negotiable)
 

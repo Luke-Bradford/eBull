@@ -1153,6 +1153,41 @@ decision.
 
 ---
 
+## 2026-08-22 — Live-capital approval is a mandate FLAG, not a person-gate (operator, reversing the prior settled decision)
+
+Operator, verbatim intent: *"I would want the 'check' on live capital to be a flag …
+I want this in a place where it can run on its own based on the evidence it has …
+I want a hands off system, not a regular check in."* Raised as a safety concern by the
+agent; operator reaffirmed. The reversal is theirs to make and is made.
+
+- Mandate field `approval_mode: manual | autonomous` (#2843). Default `manual`.
+- Under `autonomous`, promotion and allocation execute when **every evidence bar**
+  passes (frozen preregistration, deflation, forward-shadow floor, no structural
+  refusals, sandbox invariant). The flag flips WHO approves — never WHAT qualifies.
+- The execution guard is untouched: fail-closed, EXIT never blocked, kill switch live.
+  "No silent bypass of failed checks" stands in full.
+- Operator alerts become refusal-surfaces with a validity contract (one-sentence
+  decision + complete evidence + recommendation + safe default). No routine check-ins.
+
+## 2026-08-22 — The allocation boundary is the ONLY safety net (operator)
+
+*"This won't be on the total pot … either an expanding pot or always limited to the
+amount assigned. That is the only safety net I'm interested in."* Engine exposure is
+bounded by `assigned_capital` (`capped`) or `assigned_capital` + cumulative realised
+engine P&L from OUR ledger (`expanding`) — enforced at the execution guard with a named
+refusal (`sandbox_exceeded`), reconciled against broker equity per #2602, never inferred
+from broker balance (the account is shared with non-engine holdings). #2844.
+
+## 2026-08-22 — Price-only steer: event-form strategy families are CUT (operator, twice affirmed)
+
+Insider/13D/merger/PEAD/shock-event families closed with lessons and revisit conditions
+(#2701 #2835 #2836 #2839 #2493 #2484 #2485 #2507). AUDITED periodic accounts
+(10-K/10-Q fundamentals) remain in scope — the objection was event-TIMING forms, and
+the valuation engine is blind without accounts (assumption recorded on #2832; if the
+operator ever extends the steer to all filings data, #2842 dies honestly). The dead
+eight TA strategies leave the manifest (#2845); s4/s8 remain as the substrate of the one
+price-only research seat (#2840). The operative queue is the R5b comment on #2437.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
