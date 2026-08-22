@@ -4374,7 +4374,10 @@ def denominator_is_partial_class(
     It deliberately does NOT short-circuit the pigeonhole arm — the swap's guard is
     a magnitude test and never ran a count test, so the claim behind the
     short-circuit is not available here."""
-    if additive_institutional_holders > outstanding:
+    # ``Decimal(...)`` on an int is exact, so this is a readability choice rather than a
+    # correctness one — but the comparison decides a fail-closed guard, and a reader
+    # should not have to reason about mixed-type ordering to trust it (review NITPICK).
+    if Decimal(additive_institutional_holders) > outstanding:
         return True
     if per_class_denominator_applied:
         return False
@@ -5185,7 +5188,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # exactly the cases arm 3 exists for.
     additive_institutional_holders = count_additive_institutional_holders(slices)
     if (
-        sanity.largest_single_holder_pct > 1 or additive_institutional_holders > effective_outstanding
+        sanity.largest_single_holder_pct > 1 or Decimal(additive_institutional_holders) > effective_outstanding
     ) and denominator_is_partial_class(
         has_dei_cover_share_count=_read_has_dei_cover_share_count(conn, instrument_id),
         largest_single_holder_pct=sanity.largest_single_holder_pct,
