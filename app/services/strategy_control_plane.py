@@ -44,6 +44,11 @@ Stage = Literal[
 Mode = Literal["paper", "live"]
 CapitalMode = Literal["fixed", "compound"]
 RiskProfile = Literal["unconfigured", "cautious", "balanced", "growth"]
+#: Who may approve a stage promotion under the current mandate (#2843).  ``manual``
+#: is an authenticated operator only; ``autonomous`` additionally admits the policy
+#: approver in ``app.services.strategy_autonomous_promotion``.  The evidence bars are
+#: identical under both -- the flag flips WHO approves, never WHAT qualifies.
+ApprovalMode = Literal["manual", "autonomous"]
 TicketSizingMode = Literal["percent", "fixed"]
 
 GOVERNANCE_GATE_VERSION = "strategy-governance-v2+edge-evidence"
@@ -176,6 +181,20 @@ _MANDATE_PROFILES: dict[RiskProfile, PortfolioMandate] = {
 }
 
 
+def resolve_approval_mode(requested: ApprovalMode | None, current: ApprovalMode) -> ApprovalMode:
+    """What an update should WRITE, given what it asked for and what is stored (#2843).
+
+    ⚠⚠ ``None`` means UNCHANGED, never ``"manual"``, and the distinction is the whole
+    reason this is a named function rather than an inline ternary.  Omitting the field
+    is the common case for every existing client and for every edit that is not about
+    approval; reading omission as a reset would let an unrelated capital-limit change
+    silently revoke autonomy and report success.  A ternary spelled the other way is a
+    one-character difference with no test surface, so the rule gets a name, a docstring
+    and a table test.
+    """
+    return current if requested is None else requested
+
+
 def mandate_for_profile(risk_profile: RiskProfile) -> PortfolioMandate:
     """Resolve a presentation label to the exact immutable v1 limits.
 
@@ -197,6 +216,9 @@ class PaperPool:
     currency: str = "USD"
     capital_mode: CapitalMode = "fixed"
     mandate: PortfolioMandate = UNCONFIGURED_MANDATE
+    #: #2843.  Defaults to the safe value so a ``PaperPool`` constructed in a test or
+    #: an unconfigured install can never read as autonomous.
+    approval_mode: ApprovalMode = "manual"
 
 
 def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
@@ -206,7 +228,7 @@ def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
                mandate_policy_version,risk_profile,target_volatility_pct,
                max_portfolio_drawdown_pct,max_loss_per_position_pct,max_daily_loss_pct,
                active_risk_budget_pct,cash_reserve_pct,max_concurrent_positions,
-               shorts_allowed,leverage_allowed
+               shorts_allowed,leverage_allowed,approval_mode
         FROM strategy_paper_pool_events
         ORDER BY strategy_paper_pool_event_id DESC
         LIMIT 1
@@ -234,6 +256,7 @@ def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
         str(row[3]),
         cast(CapitalMode, row[4]),
         mandate,
+        cast(ApprovalMode, row[16]),
     )
 
 
@@ -244,19 +267,35 @@ def configure_paper_pool(
     capital_limit: Decimal,
     capital_mode: CapitalMode = "fixed",
     risk_profile: RiskProfile,
+    approval_mode: ApprovalMode,
     changed_by: str,
     reason: str,
 ) -> PaperPool:
-    """Append one material shared paper-capital authority revision."""
+    """Append one material shared paper-capital authority revision.
+
+    ⚠⚠ ``approval_mode`` is REQUIRED and has no default, unlike ``capital_mode``
+    beside it.  A default would make every unrelated capital or risk edit silently
+    revoke autonomy -- a caller that simply does not mention the field would write
+    ``manual`` over an operator's ``autonomous`` and report success.  Requiring it
+    forces each caller to resolve the value, and the type checker finds every one.
+    The API's own resolution is "omitted means unchanged", not "omitted means
+    manual"; see ``update_strategy_paper_pool``.
+    """
     _require_text(changed_by, "changed_by")
     _require_text(reason, "reason")
     if not capital_limit.is_finite() or capital_limit < 0 or (enabled and capital_limit <= 0):
         raise StrategyControlError("enabled paper pool requires a positive finite USD capital limit")
     if capital_mode not in {"fixed", "compound"}:
         raise StrategyControlError("capital_mode must be fixed or compound")
+    if approval_mode not in {"manual", "autonomous"}:
+        raise StrategyControlError("approval_mode must be manual or autonomous")
     mandate = mandate_for_profile(risk_profile)
     if enabled and not mandate.configured:
         raise StrategyControlError("enabled paper pool requires a configured portfolio risk mandate")
+    if approval_mode == "autonomous" and not mandate.configured:
+        # sql/365's CHECK is the backstop, not the mechanism: `PaperPool` is
+        # publicly constructible and this function is reachable without the API.
+        raise StrategyControlError("autonomous approval requires a configured portfolio risk mandate")
     # Conflict with the executor's session lock so a pause/lower cannot race an
     # already-sized order between its authority read and demo broker submit.
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
@@ -266,9 +305,10 @@ def configure_paper_pool(
         and current.capital_limit == capital_limit
         and current.capital_mode == capital_mode
         and current.mandate == mandate
+        and current.approval_mode == approval_mode
     ):
         raise StrategyControlError(
-            "paper pool change must alter enabled state, capital limit, capital mode, or mandate"
+            "paper pool change must alter enabled state, capital limit, capital mode, mandate, or approval mode"
         )
     if current.event_id is not None and capital_limit < current.capital_limit:
         # A lower principal is an external withdrawal from the virtual sleeve,
@@ -326,11 +366,15 @@ def configure_paper_pool(
             mandate_policy_version,risk_profile,target_volatility_pct,
             max_portfolio_drawdown_pct,max_loss_per_position_pct,max_daily_loss_pct,
             active_risk_budget_pct,cash_reserve_pct,max_concurrent_positions,
-            shorts_allowed,leverage_allowed
+            shorts_allowed,leverage_allowed,approval_mode
         )
-        VALUES (%s,%s,'USD',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,'USD',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING strategy_paper_pool_event_id
         """,
+        # ⚠ THREE positional lists that must stay aligned: the column list above,
+        # the placeholder count, and this tuple.  #2623 shipped a value into the
+        # wrong column by appending at a different ordinal in one of them.
+        # `approval_mode` is appended LAST in all three.
         (
             enabled,
             capital_limit,
@@ -348,10 +392,11 @@ def configure_paper_pool(
             mandate.max_concurrent_positions,
             mandate.shorts_allowed,
             mandate.leverage_allowed,
+            approval_mode,
         ),
     ).fetchone()
     assert row is not None
-    return PaperPool(int(row[0]), enabled, capital_limit, "USD", capital_mode, mandate)
+    return PaperPool(int(row[0]), enabled, capital_limit, "USD", capital_mode, mandate, approval_mode)
 
 
 @dataclass(frozen=True)
@@ -1190,6 +1235,7 @@ def release_exact_position(
 
 
 __all__ = [
+    "ApprovalMode",
     "Deployment",
     "ExecutionPolicy",
     "GOVERNANCE_GATE_VERSION",
@@ -1212,6 +1258,7 @@ __all__ = [
     "lock_strategy_control",
     "promote_strategy",
     "registered_strategy_purpose",
+    "resolve_approval_mode",
     "record_order_position_execution",
     "release_exact_position",
 ]

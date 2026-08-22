@@ -2857,6 +2857,8 @@ export interface StrategyPaperPool {
   enabled: boolean;
   capital_limit: string;
   capital_mode: "fixed" | "compound";
+  /** #2843. Who may approve a stage promotion under this authority. */
+  approval_mode: "manual" | "autonomous";
   effective_capital: string | null;
   currency: "USD";
   reserved_capital: string;

@@ -149,6 +149,7 @@ const OVERVIEW: StrategyOverviewResponse = {
     enabled: false,
     capital_limit: "1000.000000",
     capital_mode: "fixed",
+    approval_mode: "manual",
     effective_capital: "1000.000000",
     currency: "USD",
     reserved_capital: "0.000000",
@@ -875,7 +876,31 @@ describe("StrategiesPage", () => {
     expect(input.parentElement).toHaveClass("w-48");
     fireEvent.change(input, { target: { value: "1500" } });
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", capital_mode: "fixed", risk_profile: "balanced", reason: "Automated strategy workspace update" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", capital_mode: "fixed", approval_mode: "manual", risk_profile: "balanced", reason: "Automated strategy workspace update" }));
+  });
+
+  it("cannot submit autonomous approval against an unconfigured mandate", async () => {
+    // #2843, review NITPICK on PR #2856. The `autonomous` option is disabled while the
+    // profile is unconfigured, but that only guards the CHOICE — switching the profile
+    // afterwards left an already-chosen `autonomous` submittable, and the operator saw
+    // a raw 409 from the server rather than a form that would not offer the pair.
+    const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({
+      ...OVERVIEW.paper_pool,
+      approval_mode: "autonomous",
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const approval = await screen.findByLabelText("Promotion approval");
+    fireEvent.change(approval, { target: { value: "autonomous" } });
+    expect(approval).toHaveValue("autonomous");
+
+    fireEvent.change(screen.getByLabelText("Risk profile"), { target: { value: "unconfigured" } });
+
+    // The select itself follows the derived value, so the invalid pair is never shown.
+    expect(approval).toHaveValue("manual");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ approval_mode: "manual", risk_profile: "unconfigured" }),
+    ));
   });
 
   it("shows exact mandate limits and submits a changed risk profile", async () => {

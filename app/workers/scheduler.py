@@ -399,6 +399,10 @@ JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # verdict. Produces submission-gate INPUT, never authority: nothing invokes
 # the gate, and the only provider call is informational.
 JOB_CORE_REBALANCE_OBSERVATION = "core_rebalance_observation"
+# #2843 — the policy approver. Advances each eligible strategy by at most one
+# stage when the mandate carries approval_mode='autonomous'. Reads a flag and
+# calls the existing evidence-bound path; evaluates no evidence of its own.
+JOB_STRATEGY_AUTONOMOUS_PROMOTION = "strategy_autonomous_promotion"
 # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
 # expensive: half an hour is a scheduled job's workload. The reasons are
 # governance — criterion 5 requires a hold-out purpose a cron fire cannot
@@ -2130,6 +2134,27 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "daily counts are durable; quote outcomes retain their compact cost attribution."
         ),
         cadence=Cadence.daily(hour=7, minute=5),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_AUTONOMOUS_PROMOTION,
+        display_name="Autonomous stage promotion (#2843)",
+        # Lane `strategy_scan` and not `strategy_execution`: this is DB-only
+        # governance work with no broker call, and `strategy_execution` is held by
+        # strategy_paper_cycle every five minutes, so a daily job landing there is a
+        # daily job that skips. 07:20 puts it behind the 06:45 scan / 06:55 outcome /
+        # 07:05 retention passes rather than racing them.
+        source="strategy_scan",
+        description=(
+            "Daily 07:20 UTC — when the mandate carries approval_mode='autonomous', "
+            "advance each eligible strategy by at most one declared stage on the "
+            "evidence advance_strategy assembles, stamping promoted_by="
+            "policy@<autonomy version> instead of an operator username. Skips the "
+            "whole cycle under manual approval, an unconfigured mandate or a "
+            "disabled pool. Relaxes no evidence bar and never reaches live_enabled."
+        ),
+        cadence=Cadence.daily(hour=7, minute=20),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -5533,6 +5558,40 @@ def core_rebalance_observation() -> None:
             f"intent_id={intent.core_rebalance_intent_id} action={intent.decision.action} "
             f"reason={intent.decision.reason_code or '-'} instrument={core_instrument_id} "
             f"mandate_event={intent.core_mandate_event_id}"
+        )
+
+
+def strategy_autonomous_promotion() -> None:
+    """Advance eligible strategies on policy authority (#2843).
+
+    DB only.  No broker call and no external lane -- this decides WHO approved a
+    stage promotion, not whether anything trades.  The evidence bars all live inside
+    ``advance_strategy`` and this job relaxes none of them.
+
+    ⚠⚠ ``autocommit=True`` IS LOAD-BEARING, not a default copied from a neighbour.
+    ``run_autonomous_promotion_cycle`` opens one transaction per strategy, and on a
+    transactional connection psycopg would make each of those a SAVEPOINT inside one
+    outer transaction instead -- promotions would stop committing independently and
+    the per-strategy allocator lock would be held for the whole cycle.  The service
+    refuses a non-autocommit connection rather than trusting this call site.
+
+    Failures other than a per-strategy ``StrategyControlError`` PROPAGATE.  The
+    decision is the whole of the work here, so swallowing an error would make a
+    no-op indistinguishable from success.
+    """
+    from app.services.strategy_autonomous_promotion import run_autonomous_promotion_cycle
+
+    with _tracked_job(JOB_STRATEGY_AUTONOMOUS_PROMOTION) as tracker:
+        with connect_job(autocommit=True) as conn:
+            report = run_autonomous_promotion_cycle(conn, as_of=datetime.now(UTC))
+        tracker.row_count = len(report.advanced)
+        if report.skipped_reason is not None:
+            tracker.note = f"skipped={report.skipped_reason} approval_mode={report.approval_mode}"
+            return
+        # A cycle that advanced nothing must say WHY rather than report a bare zero.
+        tracker.note = (
+            f"advanced={len(report.advanced)} refused={len(report.refusals)} "
+            f"codes={','.join(report.refusal_codes) or '-'}"
         )
 
 

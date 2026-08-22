@@ -130,6 +130,7 @@ from app.workers.scheduler import (
     JOB_SEC_N_PORT_INGEST,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
+    JOB_STRATEGY_AUTONOMOUS_PROMOTION,
     JOB_STRATEGY_BACKTEST_RUN,
     JOB_STRATEGY_HALT_FEED_REFRESH,
     JOB_STRATEGY_INTRADAY_HARVEST,
@@ -203,6 +204,7 @@ from app.workers.scheduler import (
     sec_n_port_ingest,
     sec_nport_filer_directory_sync,
     seed_cost_models,
+    strategy_autonomous_promotion,
     strategy_backtest_run,
     strategy_halt_feed_refresh,
     strategy_intraday_harvest,
@@ -367,6 +369,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_STRATEGY_OBSERVATION_RETENTION: _adapt_zero_arg(strategy_observation_retention),
     JOB_STRATEGY_PAPER_CYCLE: _adapt_zero_arg(strategy_paper_cycle),
     JOB_CORE_REBALANCE_OBSERVATION: _adapt_zero_arg(core_rebalance_observation),
+    JOB_STRATEGY_AUTONOMOUS_PROMOTION: _adapt_zero_arg(strategy_autonomous_promotion),
     # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
     # SCHEDULED_JOBS: criterion 5 requires a hold-out purpose no cron fire can
     # supply. ⚠ Registered NATIVELY, not through ``_adapt_zero_arg`` — the body

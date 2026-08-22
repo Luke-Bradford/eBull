@@ -54,6 +54,9 @@ export function updateStrategyPaperPool(body: {
   capital_limit: string;
   capital_mode: "fixed" | "compound";
   risk_profile: "unconfigured" | "cautious" | "balanced" | "growth";
+  /** #2843. OMITTED MEANS UNCHANGED, not `"manual"` — the server carries the
+   * current value forward. Never send `"manual"` to mean "I have no opinion". */
+  approval_mode?: "manual" | "autonomous";
   reason: string;
 }): Promise<StrategyPaperPool> {
   return apiFetch("/strategies/paper-pool", {

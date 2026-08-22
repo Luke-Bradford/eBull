@@ -1099,6 +1099,7 @@ def test_paper_principal_cannot_be_withdrawn_below_committed_capital(
         enabled=True,
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
+        approval_mode="manual",
         changed_by="operator",
         reason="fund virtual sleeve",
     )
@@ -1109,6 +1110,7 @@ def test_paper_principal_cannot_be_withdrawn_below_committed_capital(
             enabled=False,
             capital_limit=Decimal("99"),
             risk_profile="balanced",
+            approval_mode="manual",
             changed_by="operator",
             reason="invalid withdrawal",
         )
@@ -1126,6 +1128,7 @@ def test_enabled_paper_pool_requires_and_persists_exact_versioned_mandate(
             enabled=True,
             capital_limit=Decimal("1000"),
             risk_profile="unconfigured",
+            approval_mode="manual",
             changed_by="operator",
             reason="missing mandate",
         )
@@ -1135,6 +1138,7 @@ def test_enabled_paper_pool_requires_and_persists_exact_versioned_mandate(
         enabled=True,
         capital_limit=Decimal("1000"),
         risk_profile="balanced",
+        approval_mode="manual",
         changed_by="operator",
         reason="balanced mandate",
     )

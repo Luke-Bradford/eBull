@@ -1169,6 +1169,39 @@ agent; operator reaffirmed. The reversal is theirs to make and is made.
 - Operator alerts become refusal-surfaces with a validity contract (one-sentence
   decision + complete evidence + recommendation + safe default). No routine check-ins.
 
+⚠ **Where the flag actually landed, and what the person-gate actually was** (#2843,
+implemented 2026-08-22). `approval_mode` is a column on `strategy_paper_pool_events`,
+beside `capital_mode` and the `sql/311` mandate columns — the same table #2844 declined
+to duplicate. Append-only, so the authority in force at any promotion is the latest
+event at or before it.
+
+The gate it replaces was **one place**: `advance_strategy` assembles all of its own
+evidence and its only production caller was `POST /strategies/{id}/advance`, behind
+`require_session`, stamping `advanced_by=session.username`. So the flag touches no gate.
+It supplies a second caller — `app/services/strategy_autonomous_promotion.py`, run daily
+by the `strategy_autonomous_promotion` job — which stamps
+`promoted_by = policy@autonomy-v1` instead of a username.
+
+| what | value |
+| --- | --- |
+| approver stamp | `AUTONOMOUS_APPROVER` = `policy@autonomy-v1` |
+| actions the policy may take | exactly `_EVIDENCE_ACTIONS`, asserted by equality so the two cannot drift. `register_research_candidate` carries no evidence and stays manual |
+| cycle-level refusals | `approval_mode_manual`, `mandate_unconfigured`, `paper_pool_disabled` |
+| furthest stage reachable | `paper_enabled`. `live_enabled` is refused by `promote_strategy` itself |
+
+⚠ **`approval_mode` omitted on `PUT /strategies/paper-pool` means UNCHANGED, not
+`manual`** (`resolve_approval_mode`). Reading omission as a reset would let an unrelated
+capital-limit edit silently revoke autonomy and return 200.
+
+⚠ **No minimum stage-dwell constant was introduced, deliberately.** A draft proposed
+one; it has no construction, because all six `RECENT_EVIDENCE_WINDOWS` end at or before
+`INTRADER_CAPTURE_DATE` (2024-09-27) and the historical matrix therefore cannot change
+with elapsed time. What bounds forward observation is
+`prospective_assessment_predates_forward_observation`, which already existed. ⚠ That
+rule permits an assessment computed one second after the promotion, so the effective
+floor is one assessment-job cadence — pre-existing, identical on the manual path, and
+noted on #2843 rather than fixed there.
+
 ## 2026-08-22 — The allocation boundary is the ONLY safety net (operator)
 
 *"This won't be on the total pot … either an expanding pot or always limited to the

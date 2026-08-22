@@ -65,6 +65,7 @@ from app.services.strategy_control_plane import (
     lock_strategy_control,
     mandate_for_profile,
     promote_strategy,
+    resolve_approval_mode,
 )
 from app.services.strategy_core_eligibility import CoreEligibilityError
 from app.services.strategy_core_mandate import (
@@ -624,6 +625,8 @@ class StrategyPaperPoolView(BaseModel):
     enabled: bool
     capital_limit: Decimal
     capital_mode: Literal["fixed", "compound"]
+    #: #2843. Who may approve a stage promotion under this authority.
+    approval_mode: Literal["manual", "autonomous"]
     effective_capital: Decimal | None
     currency: Literal["USD"] = "USD"
     reserved_capital: Decimal
@@ -759,6 +762,12 @@ class StrategyPaperPoolUpdateRequest(BaseModel):
     capital_limit: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
     capital_mode: Literal["fixed", "compound"] = "fixed"
     risk_profile: Literal["unconfigured", "cautious", "balanced", "growth"]
+    #: #2843. ⚠⚠ ``None`` means CARRY THE CURRENT VALUE FORWARD, resolved from
+    #: ``load_paper_pool`` inside the same locked transaction. It does NOT mean
+    #: ``"manual"``. Omission is the common case for every existing client and for
+    #: every edit that is not about approval; making it a reset would let an
+    #: unrelated capital-limit change silently revoke autonomy and report success.
+    approval_mode: Literal["manual", "autonomous"] | None = None
     reason: str = Field(min_length=1, max_length=1000)
 
     @model_validator(mode="after")
@@ -767,6 +776,15 @@ class StrategyPaperPoolUpdateRequest(BaseModel):
             raise ValueError("enabled paper pool requires positive capital")
         if self.enabled and self.risk_profile == "unconfigured":
             raise ValueError("enabled paper pool requires a configured portfolio risk mandate")
+        # ⚠ NO autonomous-needs-a-mandate CHECK HERE, deliberately (review NITPICK on
+        # PR #2856). The rule cannot be stated completely at this layer: a request may
+        # OMIT `approval_mode` and carry an existing `autonomous` forward while setting
+        # `risk_profile="unconfigured"`, and a validator cannot see the stored value.
+        # A check that fires on the literal field only would enforce the rule on one
+        # path and not the other — worse than absent, because it reads as coverage.
+        # `configure_paper_pool` owns it in full, against the RESOLVED mode, and its
+        # StrategyControlError is already mapped to a 409 here. Same reasoning
+        # `CoreMandateUpdateRequest` gives for carrying shape and no invariants.
         return self
 
 
@@ -2378,6 +2396,7 @@ def get_strategy_overview(
             enabled=paper_pool.enabled,
             capital_limit=paper_pool.capital_limit,
             capital_mode=paper_pool.capital_mode,
+            approval_mode=paper_pool.approval_mode,
             effective_capital=effective_pool_capital,
             reserved_capital=reserved_total,
             invested_capital=invested_total,
@@ -3118,16 +3137,21 @@ def update_strategy_paper_pool(
             if body.enabled and not current_pool.enabled and readiness is not None and not readiness.ready:
                 raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
             runtime = get_runtime_config(conn)
+            # #2843: omitted means UNCHANGED, so the resolved value -- never the raw
+            # request field -- is what both the change test and the INSERT see. The
+            # rule is a named function so it has a test surface; see its docstring.
+            approval_mode = resolve_approval_mode(body.approval_mode, current_pool.approval_mode)
             pool_changed = (
                 current_pool.enabled != body.enabled
                 or current_pool.capital_limit != body.capital_limit
                 or current_pool.capital_mode != body.capital_mode
                 or current_pool.mandate.risk_profile != body.risk_profile
+                or current_pool.approval_mode != approval_mode
             )
             automation_changed = runtime.enable_auto_trading != body.enabled
             if not pool_changed and not automation_changed:
                 raise StrategyControlError(
-                    "automation change must alter enabled state, capital limit, capital mode, or mandate"
+                    "automation change must alter enabled state, capital limit, capital mode, mandate, or approval mode"
                 )
             if pool_changed:
                 configure_paper_pool(
@@ -3136,6 +3160,7 @@ def update_strategy_paper_pool(
                     capital_limit=body.capital_limit,
                     capital_mode=body.capital_mode,
                     risk_profile=body.risk_profile,
+                    approval_mode=approval_mode,
                     changed_by=session.username,
                     reason=body.reason,
                 )

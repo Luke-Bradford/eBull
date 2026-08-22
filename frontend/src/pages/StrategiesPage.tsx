@@ -1314,6 +1314,7 @@ function AutomationControl({
   const [enabled, setEnabled] = useState(pool.enabled && overview.execution_enabled);
   const [limit, setLimit] = useState(pool.capital_limit);
   const [capitalMode, setCapitalMode] = useState(pool.capital_mode);
+  const [approvalMode, setApprovalMode] = useState(pool.approval_mode);
   const [riskProfile, setRiskProfile] = useState(pool.mandate.risk_profile);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -1321,14 +1322,31 @@ function AutomationControl({
     setEnabled(pool.enabled && overview.execution_enabled);
     setLimit(pool.capital_limit);
     setCapitalMode(pool.capital_mode);
+    setApprovalMode(pool.approval_mode);
     setRiskProfile(pool.mandate.risk_profile);
-  }, [pool.enabled, pool.capital_limit, pool.capital_mode, pool.mandate.risk_profile, overview.execution_enabled]);
+  }, [
+    pool.enabled,
+    pool.capital_limit,
+    pool.capital_mode,
+    pool.approval_mode,
+    pool.mandate.risk_profile,
+    overview.execution_enabled,
+  ]);
   const parsed = Number(limit);
   const valid = Number.isFinite(parsed) && parsed >= 0 && (!enabled || parsed > 0);
   const effectiveEnabled = pool.enabled && overview.execution_enabled;
+  // #2843. An unconfigured mandate cannot carry a policy approver, so an
+  // `unconfigured` selection means `manual` whatever the approval select last held.
+  // DERIVED, not reset in an effect: an effect rewriting `approvalMode` would
+  // clobber the operator's own selection the moment they picked a profile again,
+  // and it would need the previous value to undo itself. The server owns the rule
+  // (`configure_paper_pool`, mapped to a 409) — this only stops the form OFFERING
+  // an invalid pair and then surfacing a raw 409 for it.
+  const effectiveApprovalMode = riskProfile === "unconfigured" ? "manual" : approvalMode;
   const dirty = enabled !== effectiveEnabled
     || parsed !== Number(pool.capital_limit)
     || capitalMode !== pool.capital_mode
+    || effectiveApprovalMode !== pool.approval_mode
     || riskProfile !== pool.mandate.risk_profile;
   // ⚠ `overview.execution_enabled` is this form's OUTPUT, never its input
   // (#2766). `PUT /strategies/paper-pool` writes `runtime_config
@@ -1355,6 +1373,7 @@ function AutomationControl({
         enabled,
         capital_limit: parsed.toFixed(6),
         capital_mode: capitalMode,
+        approval_mode: effectiveApprovalMode,
         risk_profile: riskProfile,
         reason: "Automated strategy workspace update",
       });
@@ -1408,6 +1427,23 @@ function AutomationControl({
             >
               <option value="fixed">Keep principal limit fixed</option>
               <option value="compound">Reinvest realised P&amp;L</option>
+            </select>
+          </label>
+          {/* #2843. This selects WHO may approve a stage promotion, never WHAT
+              qualifies — every evidence bar is identical under both values.
+              `autonomous` needs a configured risk profile, mirroring the
+              server's own refusal rather than restating its reasoning. */}
+          <label className="w-56 text-xs font-medium text-slate-600 dark:text-slate-300">
+            Promotion approval
+            <select
+              value={effectiveApprovalMode}
+              onChange={(event) => setApprovalMode(event.target.value as "manual" | "autonomous")}
+              className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+            >
+              <option value="manual">Operator approves each stage</option>
+              <option value="autonomous" disabled={riskProfile === "unconfigured"}>
+                Approve on evidence, hands off
+              </option>
             </select>
           </label>
           <label className="w-48 text-xs font-medium text-slate-600 dark:text-slate-300">
