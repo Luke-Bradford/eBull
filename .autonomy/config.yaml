@@ -26,3 +26,11 @@ merge_gate:
   # (a PR whose every file is doc-only); non-doc PRs still require the
   # full bot-APPROVE-on-latest-commit gate.
   doc_only_paths: ["docs/"]
+  # #2849: declared rather than left to safe_merge.sh's hardcoded default, for
+  # the same reason doc_only_paths is above — a default that only exists in the
+  # engine is invisible to anything else that has to agree with it, and
+  # .github/workflows/claude-review.yml has to agree with it. Exclusions BEAT
+  # both the extension and the path test: a file under .autonomy/ is never
+  # doc-only, because loop_prompt.md is the standing order an unattended loop
+  # executes. Keep this list identical to the exclusion check in that workflow.
+  doc_only_excludes: [".autonomy/"]
