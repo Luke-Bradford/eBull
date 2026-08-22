@@ -59,6 +59,12 @@ CORE_ELIGIBILITY_REQUEST_CURRENCY = "USD"
 
 CoreEligibilityVerdict = Literal["underlying", "not_underlying", "unresolved"]
 
+# The one verdict that says "this instrument is the underlying product".  Named
+# because a second reader arrived in #2833: `quotes_refresh`'s candidate scope arm
+# is raw SQL, and a literal there would be a third copy of a vocabulary the CHECK
+# in sql/346 already owns.
+CORE_ELIGIBILITY_PASS_VERDICT: CoreEligibilityVerdict = "underlying"
+
 # Closed vocabulary, mirrored by the CHECK in sql/346.  `unresolved` means the
 # response did not answer the question; `not_underlying` means it answered and
 # the answer is no.  Only the second is a fact about the instrument.
@@ -424,7 +430,7 @@ def require_core_eligibility(
             f"instrument {instrument_id} has no {provider} {environment} eligibility proof; "
             "a core instrument must be proved to be the underlying product, not a CFD"
         )
-    if proof.verdict != "underlying":
+    if proof.verdict != CORE_ELIGIBILITY_PASS_VERDICT:
         raise CoreEligibilityError(
             f"instrument {instrument_id} eligibility proof {proof.proof_id} is {proof.verdict} ({proof.reason_code})"
         )
