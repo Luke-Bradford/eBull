@@ -81,6 +81,7 @@ class _Harness:
         env: str = "demo",
         creds: tuple[str, str] | None = ("key", "ukey"),
         mandate: CoreMandate | None | Any = _UNSET,
+        mandate_after: CoreMandate | None | Any = _UNSET,
         observe: Any = None,
         snapshot_error: Exception | None = None,
     ) -> dict[str, MagicMock]:
@@ -90,6 +91,13 @@ class _Harness:
             mandate = _mandate()
         if snapshot_error is not None:
             self.broker.get_account_risk_snapshot.side_effect = snapshot_error
+
+        # The job loads the mandate twice — once before the HTTP call to learn
+        # the instrument, once under the advisory lock to confirm it has not
+        # moved. ``mandate_after`` is the second answer.
+        load_kwargs: dict[str, Any] = (
+            {"return_value": mandate} if mandate_after is _UNSET else {"side_effect": [mandate, mandate_after]}
+        )
 
         observe_kwargs: dict[str, Any] = (
             {"side_effect": observe} if isinstance(observe, Exception) else {"return_value": observe or _state()}
@@ -102,7 +110,7 @@ class _Harness:
             patch("app.workers.scheduler._tracked_job", return_value=self.tracker),
             patch("app.workers.scheduler.connect_job", return_value=self.conn),
             patch("app.providers.implementations.etoro_broker.EtoroBrokerProvider", return_value=self.broker) as prov,
-            patch("app.services.strategy_core_mandate.load_core_mandate", return_value=mandate) as load,
+            patch("app.services.strategy_core_mandate.load_core_mandate", **load_kwargs) as load,
             patch("app.services.strategy_core_sleeve.observe_core_sleeve", **observe_kwargs) as obs,
             patch(
                 "app.services.strategy_core_rebalance_intent.record_core_rebalance_intent",
@@ -167,6 +175,55 @@ class TestTheDeliberateNonRefusal:
         harness.broker.get_account_risk_snapshot.assert_called_once()
         calls["record"].assert_called_once()
         calls["skip"].assert_not_called()
+
+
+class TestTheMandateRevisionRace:
+    """A revision landing during the broker round-trip.
+
+    ⚠ ``sleeve_instrument_mismatch`` catches only the instrument-changing case.
+    A revision that moves the target, band, reserve or floor while KEEPING the
+    instrument produces a verdict that looks entirely normal and describes a
+    sleeve nobody observed under it — which is why the event id is re-checked
+    under the same advisory lock ``configure_core_mandate`` takes.
+    """
+
+    def test_a_same_instrument_reconfiguration_drops_the_tick_rather_than_misattributing_it(self) -> None:
+        harness = _Harness()
+        moved = CoreMandate(
+            event_id=8,
+            revision=2,
+            enabled=True,
+            base_currency="USD",
+            core_instrument_id=3417,  # unchanged — the case the allocator cannot see
+            core_target_pct=Decimal("80"),
+            liquidity_reserve_pct=Decimal("5"),
+            rebalance_band_pct=Decimal("5"),
+            min_rebalance_amount=Decimal("50"),
+            policy_version="core-mandate-v1",
+        )
+        calls = harness.run(mandate_after=moved)
+        calls["record"].assert_not_called()
+        harness.conn.rollback.assert_called_once()
+        assert "skipped" in harness.tracker.note
+        assert harness.tracker.row_count == 0
+
+    def test_a_mandate_deleted_during_the_round_trip_drops_the_tick(self) -> None:
+        harness = _Harness()
+        calls = harness.run(mandate_after=None)
+        calls["record"].assert_not_called()
+        harness.conn.rollback.assert_called_once()
+
+    def test_the_recheck_holds_the_same_advisory_lock_configure_takes(self) -> None:
+        """Re-reading without the lock is a check-then-write window, not a fix:
+        READ COMMITTED gives each statement a fresh snapshot, so a writer can
+        still commit between the re-read and the INSERT."""
+        from app.services.strategy_core_mandate import CORE_MANDATE_ADVISORY_LOCK
+
+        harness = _Harness()
+        harness.run()
+        locks = [c for c in harness.conn.execute.call_args_list if "pg_advisory_xact_lock" in str(c.args[0])]
+        assert len(locks) == 1
+        assert locks[0].args[1] == CORE_MANDATE_ADVISORY_LOCK
 
 
 class TestTheHappyPath:

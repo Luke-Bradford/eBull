@@ -5425,7 +5425,7 @@ def core_rebalance_observation() -> None:
     Spec: ``docs/proposals/ta/2026-08-22-core-rebalance-observation-job.md``
     """
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
-    from app.services.strategy_core_mandate import load_core_mandate
+    from app.services.strategy_core_mandate import CORE_MANDATE_ADVISORY_LOCK, load_core_mandate
     from app.services.strategy_core_rebalance_intent import record_core_rebalance_intent
     from app.services.strategy_core_sleeve import observe_core_sleeve
 
@@ -5477,6 +5477,40 @@ def core_rebalance_observation() -> None:
         state = observe_core_sleeve(snapshot, core_instrument_id=core_instrument_id)
 
         with connect_job() as conn:
+            # ⚠⚠ The sleeve was observed for the mandate read BEFORE the HTTP
+            # call, and `record_core_rebalance_intent` loads the mandate again.
+            # A revision landing in between would be evaluated and ATTRIBUTED to
+            # the newer one -- and only the instrument-changing case is caught by
+            # `sleeve_instrument_mismatch`. A revision that moves the target, the
+            # band, the reserve or the floor while keeping the instrument would
+            # produce a verdict that looks entirely normal and describes a sleeve
+            # nobody observed under it.
+            #
+            # `configure_core_mandate` takes this same xact lock, so taking it
+            # here serialises the two. Re-reading WITHOUT it would not fix the
+            # race: READ COMMITTED gives each statement a fresh snapshot, so a
+            # writer can still commit between the re-read and the INSERT. Held
+            # for two fast reads and one INSERT, NEVER across the broker
+            # round-trip -- which is why the mandate is pre-read on a separate
+            # connection rather than under this lock.
+            conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_MANDATE_ADVISORY_LOCK)
+            current = load_core_mandate(conn)
+            if current is None or current.event_id != mandate.event_id:
+                # Not a fault, so nothing raises: the operator reconfigured the
+                # mandate during the round-trip and the next tick is correct.
+                # The tick is dropped rather than misattributed, and the note
+                # says which -- a zero-row success here is a REPORTED skip, not
+                # the silent no-op the failure paths above refuse to become.
+                conn.rollback()
+                was = "removed" if current is None else f"revision {current.revision}"
+                logger.warning(
+                    "%s: mandate moved to %s during the broker round-trip; dropping this observation",
+                    JOB_CORE_REBALANCE_OBSERVATION,
+                    was,
+                )
+                tracker.row_count = 0
+                tracker.note = f"skipped: mandate event {mandate.event_id} -> {was} during observation"
+                return
             intent = record_core_rebalance_intent(
                 conn,
                 state=state,
