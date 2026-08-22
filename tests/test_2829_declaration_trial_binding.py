@@ -10,8 +10,13 @@ Spec: ``docs/proposals/ta/2026-08-22-declaration-trial-binding.md``
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
+from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
+from app.services.result_ledger import freeze_preregistration
+from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION
 from app.services.trial_register import (
     TRIAL_REGISTER,
     DeclaredTrial,
@@ -107,6 +112,73 @@ class TestTheInvariantsThatProtectM:
                 exactness=TrialExactness.EXACT,
                 declares=(("alpha",),),  # type: ignore[arg-type]
             )
+
+
+class TestTheFreezeGate:
+    """⚠ DB-free by design: the check fires before ``freeze_preregistration``
+    touches its connection, which is what these lean on — the same property
+    ``tests/test_2720_freeze_stamp_validation.py`` documents for the cost-stamp
+    check directly above it."""
+
+    @staticmethod
+    def _declaration(strategy_id: str, strategy_version: str) -> PreregDeclaration:
+        # ⚠ A NON-manifest strategy_id on purpose: the cost-stamp check above
+        # this gate is scoped to STRATEGY_MANIFEST, and a manifest id would fail
+        # there first and never reach the gate under test.
+        return PreregDeclaration(
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            contract_version="test-contract-v1",
+            prereg_purpose="falsification_only",
+            structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
+            declared_universe_basis="survivor_only",
+            declared_carry_unmodelled=False,
+            declared_fx_unmodelled=False,
+            expected_structural_refusals=("universe_basis_not_survivorship_free",),
+            forward_shadow=ForwardShadowFloor(
+                min_independent_decision_dates=40,
+                min_calendar_weeks=12,
+                derivation="tests/test_2829_declaration_trial_binding.py",
+            ),
+            declared_by="tests/test_2829_declaration_trial_binding.py",
+        )
+
+    def test_a_declaration_no_trial_claims_cannot_be_frozen(self) -> None:
+        """The substantive rule: M must already count the search.
+
+        Without it a trial freezes, runs, and is deflated against a population
+        that excludes it — and the row is immutable, so the mistake costs a
+        supersession to even acknowledge.
+        """
+        declaration = self._declaration("some-unregistered-trial", "v1")
+        with pytest.raises(ValueError, match="does not count the search"):
+            freeze_preregistration(cast("Any", object()), declaration)
+
+    def test_the_refusal_names_the_pair_and_where_to_fix_it(self) -> None:
+        """A refusal a reader cannot act on sends them to read the gate's source."""
+        declaration = self._declaration("some-unregistered-trial", "v1")
+        with pytest.raises(ValueError) as excinfo:
+            freeze_preregistration(cast("Any", object()), declaration)
+        message = str(excinfo.value)
+        assert "some-unregistered-trial@v1" in message
+        assert "app/services/trial_register.py" in message
+
+    def test_a_claimed_declaration_reaches_the_connection(self) -> None:
+        """The positive arm, and it must be present or the test above passes for
+        a register that claims NOTHING.
+
+        A bare ``object()`` has no ``execute``, so getting past the gate raises
+        ``AttributeError`` — a different failure from the ``ValueError`` the gate
+        produces, which is exactly what distinguishes "admitted" from "refused"
+        without a database.
+        """
+        registered = TRIAL_REGISTER.trials[0]
+        assert not registered.declares  # a session trial; use a mapped one instead
+        strategy_id, strategy_version = next(
+            (sid, ver) for sid, ver, _ in ((d[0], d[1], d[2]) for d in _STORED_DECLARATIONS)
+        )
+        with pytest.raises(AttributeError):
+            freeze_preregistration(cast("Any", object()), self._declaration(strategy_id, strategy_version))
 
 
 class TestWhatThisChangeDeliberatelyDoesNotMove:
