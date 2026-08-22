@@ -1707,3 +1707,67 @@ def test_no_underlying_arm_is_reported_separately_from_a_genuinely_ambiguous_one
     else:
         assert result.verdict == "rejected"
         assert result.reason_code == expected
+
+
+def test_reaching_the_assigned_pot_refuses_by_name_not_as_generic_capacity(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2844 — the operator's boundary is the one refusal that must be attributable.
+
+    ⚠ MEASURED, by deleting the new check and re-running: this scenario previously
+    refused as ``portfolio_cash_reserve_limit``, not as the generic
+    ``risk_capacity_exhausted`` one might expect. Every pool-derived capacity term is
+    computed from ``pool_base``, so once the pot is committed to its bound SEVERAL of
+    them hit zero at once and the operator sees whichever is checked first. That is
+    worse than a generic code, not better: it names a mandate setting that is not the
+    cause, and an operator acting on it would tune ``cash_reserve_pct`` to fix a
+    boundary they had themselves assigned.
+
+    So the boundary is checked BEFORE the terms derived from it. The pot here is fully
+    committed to an existing allocated trade, so the assignment — and nothing else —
+    is what blocks the entry.
+    """
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("UPDATE strategy_paper_pool_events SET capital_limit=1000")
+    _existing_allocated_trade(conn, index=0, amount=Decimal("1000"))
+    conn.commit()
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: {("S-ALLOC", "v1"): Decimal("0")},
+    )
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "sandbox_exceeded"
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_a_capped_pot_does_not_let_realised_profit_reopen_the_boundary(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fixed`` IS the operator's *capped* pot, and this is what makes it one.
+
+    The same realised profit that would raise a ``compound`` bound must leave a
+    ``fixed`` one exactly where the operator set it — otherwise "capped" means
+    "capped until it wins", and the boundary widens fastest in the run-up that
+    precedes the drawdown it exists to bound.
+    """
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("UPDATE strategy_paper_pool_events SET capital_limit=1000,capital_mode='fixed'")
+    _existing_allocated_trade(conn, index=0, amount=Decimal("1000"))
+    conn.commit()
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: {("S-ALLOC", "v1"): Decimal("5000")},
+    )
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "sandbox_exceeded"
+    broker.place_demo_strategy_order.assert_not_called()

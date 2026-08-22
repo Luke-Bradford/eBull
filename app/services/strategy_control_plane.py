@@ -24,6 +24,7 @@ from app.services.strategy_base_currency import (
     canonical_currency_code,
     normalise_deployment_currency,
 )
+from app.services.strategy_capital_sandbox import sandbox_bound
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
 from app.services.strategy_promotion_evidence import evidence_refusals
 from app.services.strategy_promotion_evidence_store import load_promotion_evidences
@@ -307,10 +308,15 @@ def configure_paper_pool(
             realised = load_paper_realised_pnl(conn)
             if realised is None:
                 raise StrategyControlError("paper principal cannot be withdrawn while realised P&L is incomplete")
-            realised_delta = sum(realised.values(), Decimal("0"))
-            if capital_mode == "fixed":
-                realised_delta = min(realised_delta, Decimal("0"))
-            effective_after = max(Decimal("0"), capital_limit + realised_delta)
+            # One arithmetic with the executor and the /strategies card (#2844) —
+            # this check decides whether the operator may withdraw below what the
+            # executor has already committed, so a divergence here would authorise a
+            # withdrawal the executor's own bound has already spent against.
+            effective_after = sandbox_bound(
+                capital_limit=capital_limit,
+                capital_mode=capital_mode,
+                realised_delta=sum(realised.values(), Decimal("0")),
+            )
             if effective_after < committed:
                 raise StrategyControlError("paper principal cannot be withdrawn below committed strategy capital")
     row = conn.execute(
