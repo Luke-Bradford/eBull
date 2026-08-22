@@ -145,6 +145,57 @@ class TestTheBandIsKeyedOnTheEntryPrice:
         assert band_crossings(rows) == 0
 
 
+class TestTheGrossNetIdentity:
+    """#2827 — the one relation the gross-vs-net measurement's derivation rests on.
+
+    ``scripts/measure_2827_gross_vs_net.py`` prints a DERIVED mean beside the
+    MEASURED one and treats a gap above float noise as proof that the charge was
+    not single-valued. That check is only meaningful while this holds::
+
+        1 + net = (1 + gross) x (1 - h) / (1 + h)
+
+    ⚠ Pinned here because the failure mode is silent. A per-side band, a
+    quantisation rule, or an additive fee would each break the relation by a
+    SMALL amount — the script would report a plausible-looking gap rather than
+    an error, and every "the loss is one round trip" reading built on it would
+    be wrong by that much.
+
+    ⚠ NOT asserted with ``==``. Both sides are Decimal QUOTIENTS, and division
+    rounds at 28 significant digits, so two algebraically equal quotients can
+    differ in the last unit. The bound is 24 orders of magnitude below the
+    quantity, which no cost-model change could sneak under.
+    """
+
+    #: Algebraic equality, less Decimal's own division rounding.
+    TOLERANCE = Decimal("1e-24")
+
+    @pytest.mark.parametrize("entry", ["3.5", "100", "1234.56"])
+    @pytest.mark.parametrize("close", ["0.9", "100", "9999"])
+    def test_the_round_trip_scales_one_plus_the_return(self, entry: str, close: str) -> None:
+        row = _cost_position(
+            _position(entry_fill_price=Decimal(entry), close_price=Decimal(close)),
+            price_basis="split_adjusted",
+        )
+        assert row.gross_return_pct is not None and row.net_return_pct is not None
+        hundred = Decimal(100)
+        one = Decimal(1)
+        derived = (one + row.gross_return_pct / hundred) * (one - row.half_spread) / (one + row.half_spread)
+        assert abs((one + row.net_return_pct / hundred) - derived) < self.TOLERANCE
+
+    def test_a_split_adjusted_population_charges_exactly_one_half_spread(self) -> None:
+        """The census claim: ``h`` is single-valued across every entry price.
+
+        ⚠ This is what makes "the gap IS one round trip" a statement about the
+        run rather than about the code. Without it the gross/net difference
+        would be a blend of four bands and could not be read as one number.
+        """
+        rows = _cost_positions(
+            [_position(entry_fill_price=Decimal(price)) for price in ("0.01", "4.99", "19", "99", "100", "5000")],
+            price_basis="split_adjusted",
+        )
+        assert {row.half_spread for row in rows} == {UNKNOWN_NOMINAL_PRICE_BAND.half_spread}
+
+
 class TestSplitAdjustedPriceBasis:
     def test_it_uses_the_maximum_cost_band_regardless_of_adjusted_price(self) -> None:
         low = _cost_position(_position(entry_fill_price=Decimal("4")), price_basis="split_adjusted")

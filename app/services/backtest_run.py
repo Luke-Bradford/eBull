@@ -520,6 +520,12 @@ class NamespaceMeasurement:
     #: One causal signal-date cohort for every realised trade. The child rows
     #: explain this result; they are not separate promotion candidates.
     regime_cohorts: tuple[RegimeCohort, ...] = ()
+    #: #2827's diagnostic pair — see ``_NamespaceBook.gross_returns`` and
+    #: ``half_spreads``. ⚠ NEITHER REACHES A RESULT ROW. They are read by
+    #: ``scripts/measure_2827_gross_vs_net.py`` and by nothing else; a stored
+    #: uncosted metric is the number criterion 2 exists to forbid.
+    gross_returns: tuple[float, ...] = ()
+    half_spreads: frozenset[float] = frozenset()
 
     @property
     def evaluated_instrument_ids(self) -> frozenset[int]:
@@ -1085,6 +1091,21 @@ class _NamespaceBook:
 
     book: LegBook = field(default_factory=LegBook)
     returns: array[float] = field(default_factory=lambda: array("d"))
+    #: The SAME realised legs on the SAME total-return marks with NO half-spread
+    #: charged, positionally parallel to ``returns``. ⚠ A DIAGNOSTIC, never a
+    #: promotion metric: criterion 2 requires costs, and ``sql/256`` names its
+    #: own uncosted column GROSS precisely so nothing averages it as
+    #: performance. It exists to answer the one question the net figures cannot
+    #: — whether a losing strategy is losing its SIGNAL or losing its SPREAD
+    #: (#2827) — and it is carried in memory only.
+    gross_returns: array[float] = field(default_factory=lambda: array("d"))
+    #: Every distinct ``h`` this book charged. ⚠ A CENSUS AND NOT A SCALAR. The
+    #: gross-vs-net gap above reads as "one round trip" only if the charge is
+    #: single-valued, and on the research corpus it is — ``cost_band_for`` gives
+    #: every ``split_adjusted`` entry the maximum band, so no position selects a
+    #: nominal threshold. Measuring it is what turns that from an inference
+    #: about the code into a fact about the run.
+    half_spreads: set[float] = field(default_factory=set)
     entry_dates: list[date] = field(default_factory=list)
     #: Positionally parallel to `entry_dates`; `TradeReturns` enforces that.
     exit_dates: list[date] = field(default_factory=list)
@@ -1444,6 +1465,19 @@ def _absorb(
         if realised:
             assert close_bar_date is not None  # realised is set only where it is bound
             book.returns.append((exit_price - entry_price) / entry_price * 100.0)
+            # #2827 — the identical leg with no spread charged. ⚠ Built from the
+            # GROSS prices and the SAME total-return marks, never by adding a
+            # cost back onto the net figure: the half-spread is multiplicative
+            # in both the numerator and the denominator (``position_costing``'s
+            # header), so an additive reversal is a different number.
+            # ``exit_price_gross`` is non-None wherever ``exit_price_net`` is —
+            # ``CostedPosition`` counts all four costing fields together — and
+            # the branch above has already narrowed the net one.
+            assert row.exit_price_gross is not None
+            entry_gross = float(position.entry_fill_price) * entry_wealth_mark / entry_raw
+            exit_gross = float(row.exit_price_gross) * exit_wealth_mark / exit_raw
+            book.gross_returns.append((exit_gross - entry_gross) / entry_gross * 100.0)
+            book.half_spreads.add(float(row.half_spread))
             book.entry_dates.append(position.entry_fill_bar_date)
             # #2623 gap 1. The exit bar was never lost here — the namespace split
             # above already reads it — only never carried into the metric set.
@@ -1754,6 +1788,8 @@ def _measure_namespace(
         traded_notional_total=float(curve.traded_notional.sum()),
         termination_census=dict(book.terminations),
         regime_cohorts=regime_cohorts,
+        gross_returns=tuple(book.gross_returns),
+        half_spreads=frozenset(book.half_spreads),
     )
 
 
