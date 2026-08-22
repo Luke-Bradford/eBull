@@ -1335,10 +1335,18 @@ function AutomationControl({
   const parsed = Number(limit);
   const valid = Number.isFinite(parsed) && parsed >= 0 && (!enabled || parsed > 0);
   const effectiveEnabled = pool.enabled && overview.execution_enabled;
+  // #2843. An unconfigured mandate cannot carry a policy approver, so an
+  // `unconfigured` selection means `manual` whatever the approval select last held.
+  // DERIVED, not reset in an effect: an effect rewriting `approvalMode` would
+  // clobber the operator's own selection the moment they picked a profile again,
+  // and it would need the previous value to undo itself. The server owns the rule
+  // (`configure_paper_pool`, mapped to a 409) — this only stops the form OFFERING
+  // an invalid pair and then surfacing a raw 409 for it.
+  const effectiveApprovalMode = riskProfile === "unconfigured" ? "manual" : approvalMode;
   const dirty = enabled !== effectiveEnabled
     || parsed !== Number(pool.capital_limit)
     || capitalMode !== pool.capital_mode
-    || approvalMode !== pool.approval_mode
+    || effectiveApprovalMode !== pool.approval_mode
     || riskProfile !== pool.mandate.risk_profile;
   // ⚠ `overview.execution_enabled` is this form's OUTPUT, never its input
   // (#2766). `PUT /strategies/paper-pool` writes `runtime_config
@@ -1365,7 +1373,7 @@ function AutomationControl({
         enabled,
         capital_limit: parsed.toFixed(6),
         capital_mode: capitalMode,
-        approval_mode: approvalMode,
+        approval_mode: effectiveApprovalMode,
         risk_profile: riskProfile,
         reason: "Automated strategy workspace update",
       });
@@ -1428,7 +1436,7 @@ function AutomationControl({
           <label className="w-56 text-xs font-medium text-slate-600 dark:text-slate-300">
             Promotion approval
             <select
-              value={approvalMode}
+              value={effectiveApprovalMode}
               onChange={(event) => setApprovalMode(event.target.value as "manual" | "autonomous")}
               className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
             >
