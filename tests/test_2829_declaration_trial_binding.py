@@ -73,10 +73,26 @@ class TestTheShippedMapping:
 
         Many entries are research SESSIONS that no declaration corresponds to. A
         test that demanded a mapping on every trial would be demanding five rows'
-        worth of declarations for thirty trials.
+        worth of declarations for thirty-odd trials.
+
+        ⚠⚠ CLAIMS ⊇ STORED, NEVER ``==`` (corrected at r8, #2837). The equality
+        this replaced asserted that every claiming trial already had a frozen row,
+        which the freeze ORDERING makes false for a whole PR at a time: a new
+        trial must be MERGED to main before its declaration can be frozen, because
+        ``freeze_preregistration`` resolves the claim against the running tree and
+        ``_prereg_freeze_guard`` insists that tree agrees with main. So between
+        the register PR merging and the freeze script running there is always a
+        claim with no row — the correct state, which the equality read as a bug.
+
+        The stored side keeps its own coverage check: the parametrised test above
+        asserts every stored declaration IS claimed, which is the direction that
+        protects ``M``.
         """
         claiming = [trial for trial in TRIAL_REGISTER.trials if trial.declared_for is not None]
-        assert len(claiming) == len(_STORED_DECLARATIONS)
+        assert len(claiming) < len(TRIAL_REGISTER.trials), "a mapping on every trial would be the wrong shape"
+        claimed_pairs = {trial.declared_for for trial in claiming}
+        for strategy_id, strategy_version, _ in _STORED_DECLARATIONS:
+            assert (strategy_id, strategy_version) in claimed_pairs
         assert TRIAL_REGISTER.trial_for_declaration("short-horizon-search-session-2026-08-09", "whatever") is None
 
 
@@ -215,23 +231,34 @@ class TestTheFreezeGate:
 
 
 class TestWhatThisChangeDeliberatelyDoesNotMove:
-    def test_M_is_unchanged_so_the_register_version_is_not_bumped(self) -> None:
+    def test_M_moves_only_when_a_real_search_is_added(self) -> None:
         """⚠⚠ THE LOAD-BEARING CALL, pinned as literals on purpose.
 
         ``TRIAL_REGISTER_VERSION`` is stored beside every DSR to answer "which
         population was this deflated against", and ``strategy_result.py`` refuses
         ``trial_register_superseded`` when a stored version or ``declared_trials``
-        disagrees with today's. 220 stored results carry
-        ``trial-register-2026-08-15-r7``, so bumping is the DESTRUCTIVE option,
-        not the safe one — it would flip all 220 to refused for a change that
-        added no trial and moved no ``searches`` value.
+        disagrees with today's. #2829 itself added NO trial and moved no
+        ``searches`` value, so bumping for it would have stranded stored rows for
+        nothing — that was the original reading of this test and it stands.
 
-        These two literals are what keeps that argument checkable: an edit that
-        actually moves ``M`` fails here and forces the bump conversation at the
-        moment it is due.
+        ⚠ The name changed at r8 (2026-08-22, #2837) because the old one
+        (``..._so_the_register_version_is_not_bumped``) read as a standing
+        prohibition on ever bumping, which inverts the module's own argument. The
+        register EXISTS to grow: declining to count a search to protect stored
+        deflations is the flattering direction. What the literals below buy is
+        that the bump is never silent — an edit that moves ``M`` fails here and
+        forces the conversation at the moment it is due, which is exactly what
+        happened at r8.
+
+        r8's conversation, resolved by measurement rather than argument — the
+        command is in ``trial_register.TRIAL_REGISTER_VERSION``'s own note.
+        Every stored row with a DSR carried ``purpose = harness_validation``, so
+        ``purpose_promotion_refusals`` already returned a terminal
+        ``harness_validation_only`` on all of them; the bump added a second
+        refusal code to rows that could not promote regardless.
         """
-        assert TRIAL_REGISTER.declared_count == 274
-        assert len(TRIAL_REGISTER.trials) == 30
+        assert TRIAL_REGISTER.declared_count == 275
+        assert len(TRIAL_REGISTER.trials) == 31
 
     def test_the_declaration_refusal_vocabulary_is_untouched(self) -> None:
         """⚠ The first draft added ``trial_not_in_register`` here. Codex ckpt-1
