@@ -38,7 +38,18 @@ RETIRED = frozenset(
         "s10-relative-strength-leader",
     }
 )
-KEPT = frozenset({"s4-volatility-compression-breakout", "s8-range-mean-reversion"})
+#: ⚠ THREE, not two. s4 and s8 are the survivors of the measured ten (#2827);
+#: s11 is #2840's research seat — S-4's rule gated to the two volatile regimes —
+#: which landed AFTER this retirement and is not one of the ten. It is listed
+#: here rather than excused by loosening the assertion below, so "the manifest
+#: minus the retired eight" stays an exact statement.
+KEPT = frozenset(
+    {
+        "s4-volatility-compression-breakout",
+        "s8-range-mean-reversion",
+        "s11-volatile-regime-gated-breakout",
+    }
+)
 
 
 def _retired_ids() -> frozenset[str]:
@@ -83,7 +94,10 @@ def test_all_ten_stay_in_the_manifest_and_keep_resolving() -> None:
     resolving it, and `/strategies` loses it entirely — the "vanished" outcome the
     acceptance criteria forbid.
     """
-    assert len(STRATEGY_MANIFEST) == 10
+    # ⚠ ELEVEN. The ten stay; #2840's S-11 research seat was added afterwards.
+    # Derived from RETIRED | KEPT rather than restated, so the next addition
+    # updates one place.
+    assert len(STRATEGY_MANIFEST) == len(RETIRED | KEPT) == 11
     assert RETIRED | KEPT == set(STRATEGY_MANIFEST)
     assert set(current_result_versions()) == set(STRATEGY_MANIFEST)
 

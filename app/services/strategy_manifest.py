@@ -152,6 +152,12 @@ from app.services.strategies.s10_relative_strength_leader import (
     s10_identity,
     s10_rebalance_dates,
 )
+from app.services.strategies.s11_volatile_regime_gated_breakout import (
+    S11_STRATEGY_ID,
+    s11_exit_bracket,
+    s11_identity,
+    s11_signals,
+)
 from app.services.strategy_exit_levels_batch import (
     s4_exit_levels_batch,
     s5_exit_levels_batch,
@@ -618,6 +624,61 @@ def _s4_exit_levels(
     return scalar
 
 
+def _s11_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,
+) -> list[StrategySignal]:
+    """⚠ PASSES THE REGIME THROUGH. Copying ``_s4_signals`` — which drops it with
+    a ``noqa: ARG001`` because S-4 does not gate — would silently un-gate S-11 and
+    leave every test of the strategy module itself still passing.
+    ``test_2840_manifest_adapter_gates`` asserts this directly.
+    """
+    return s11_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
+
+
+def _s11_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
+    """S-11's exits are S-4's — the gate conditions entry only."""
+    _reject_decision_dates(S11_STRATEGY_ID, decision_dates)
+    return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=S4_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s11_exit_levels(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> ExitLevels | UnresolvedReason:
+    """S-11's bracket is S-4's, so the S-4 batch factory is its oracle too.
+
+    ⚠ ``s11_exit_bracket`` is called rather than ``s4_exit_bracket`` even though
+    it delegates: the comparison has to be against the factory the MANIFEST
+    registered for this strategy, or a future divergence in S-11's bracket would
+    pass a check that only ever looked at S-4's.
+    """
+    (batched,) = s4_exit_levels_batch(
+        series,
+        requests=((signal_index, entry_price),),
+        universe=universe,
+    )
+    if batched == "unorderable_exit_levels":
+        return batched
+
+    target, stop, max_hold = s11_exit_bracket(
+        series,
+        signal_index=signal_index,
+        entry_price=entry_price,
+        universe=universe,
+    )
+    scalar = ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+    if scalar != batched:
+        raise RuntimeError("S-11 scalar and batch exit-level factories disagree")
+    return scalar
+
+
 def _s9_signals(
     series: BarSeries,
     *,
@@ -1040,6 +1101,28 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
                 min_participants=S10_MIN_CROSS_SECTION,
             ),
             retired_reason=_RETIRED_NOT_A_COST_PROBLEM,
+        ),
+        #: #2840 (R5 candidate S-H). S-4's rule gated to the two volatile
+        #: regimes — a research seat, NOT one of the ten. ⚠ Not retired: it
+        #: exists precisely to produce new evidence, which is what retirement
+        #: forbids. Its bracket is S-4's, hence the shared batch factory.
+        S11_STRATEGY_ID: StrategyEntry(
+            strategy_id=S11_STRATEGY_ID,
+            #: ⚠ ``harness_validation`` like every other entry, and NOT
+            #: ``capital_candidate``. It runs on the survivor-only,
+            #: carry-unmodelled corpus, whose stamps make any result
+            #: structurally unpromotable — the matching preregistration is
+            #: ``falsification_only`` for the same reason
+            #: (``prereg_contract.declaration_refusals``).
+            purpose="harness_validation",
+            identity=s11_identity,
+            strategy_class="per_series",
+            signal_kinds=frozenset({"entry"}),
+            exit_regime=_s11_exit_regime,
+            decision_calendar=_no_decision_calendar,
+            signals=_s11_signals,
+            exit_levels=_s11_exit_levels,
+            exit_levels_batch=s4_exit_levels_batch,
         ),
     }
 )

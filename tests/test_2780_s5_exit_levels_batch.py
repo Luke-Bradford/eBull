@@ -55,6 +55,11 @@ BATCHED = (
     ("s7-trend-pullback", s7_exit_levels_batch, 40),
     ("s8-range-mean-reversion", s8_exit_levels_batch, 40),
     ("s9-squeeze-expansion", s9_exit_levels_batch, 40),
+    #: #2840's S-11 SHARES S-4's factory — its bracket is S-4's, unchanged. It is
+    #: listed separately anyway: the equivalence below runs against the MANIFEST's
+    #: registered adapter, so this row proves S-11's own `_s11_exit_levels` agrees
+    #: with the batch, which S-4's row cannot speak for.
+    ("s11-volatile-regime-gated-breakout", s4_exit_levels_batch, 40),
 )
 
 

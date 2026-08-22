@@ -160,6 +160,7 @@ _TITLES = {
     "s8-range-mean-reversion": "Range mean reversion",
     "s9-squeeze-expansion": "Squeeze expansion",
     "s10-relative-strength-leader": "Relative-strength leader",
+    "s11-volatile-regime-gated-breakout": "Volatility breakout (volatile markets only)",
 }
 
 _PRESENTATION = {
@@ -202,6 +203,11 @@ _PRESENTATION = {
     "s10-relative-strength-leader": (
         "Holds top-decile 63-day leaders above their 50-day average in quiet bull markets.",
         "Reviewed at each monthly rebalance",
+    ),
+    "s11-volatile-regime-gated-breakout": (
+        "The same volatility-compression breakout, but it only trades while the wider "
+        "market is volatile — the conditions where the rule has historically paid.",
+        "Up to 40 market days",
     ),
 }
 
