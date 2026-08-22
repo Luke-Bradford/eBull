@@ -4,13 +4,23 @@
 that caller: load the live mandate, evaluate against an observed sleeve, write one
 append-only row.
 
-⚠⚠ AUTHORISES NOTHING, and mechanically so rather than by promise: no table has a
-foreign key to ``strategy_core_rebalance_intents`` and no other module reads it, so
-no code path can turn a row here into an order.  ``tests/test_core_rebalance_intent_
-has_no_readers.py`` asserts both halves.  The reading side arrives with the slice
-that adds the trade linkage and the position-manager change together -- in that
-order deliberately, because a writable core trade the manager cannot see is worse
-than no core trade at all (#2437's standing pattern).
+⚠⚠ CORRECTED 2026-08-22 (#2603 step 3b-3).  This said "AUTHORISES NOTHING, and
+mechanically so rather than by promise: no table has a foreign key to
+``strategy_core_rebalance_intents`` and no other module reads it".  Both halves are
+now false -- ``sql/349`` added ``strategy_trades.core_rebalance_intent_id``, and
+``app/services/strategy_core_submission_gate.py`` reads the table.  The reading side
+arrived as promised; the promise was not re-read when it did.  ⚠ It also cited
+``tests/test_core_rebalance_intent_has_no_readers.py`` as asserting both halves --
+**that file does not exist** anywhere in the repo, so the claim was never enforced by
+anything.  A named enforcement is only as good as its existence.
+
+What holds instead, weaker on purpose: a row here is submission-gate INPUT, not
+authority.  The gate has no acting caller in ``app/`` or ``scripts/``, so no path runs
+from a row to an order.  That is a fact about today's call graph, not a mechanical
+impossibility -- and saying so is the point, because the previous wording survived the
+change that falsified it by sounding structural.
+
+The producer is ``app/workers/scheduler.py::core_rebalance_observation``.
 
 ⚠ What this does NOT provide, so it is an owed obligation rather than a silence:
 no in-flight suppression (the allocator is stateless and will re-recommend a trade

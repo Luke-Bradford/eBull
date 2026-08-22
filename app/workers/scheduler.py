@@ -395,6 +395,10 @@ JOB_STRATEGY_HALT_FEED_REFRESH = "strategy_halt_feed_refresh"
 JOB_CBOE_VIX_REFRESH = "cboe_vix_refresh"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
+# #2603 item 3 step 3b-3 — observe the core sleeve and store one rebalance
+# verdict. Produces submission-gate INPUT, never authority: nothing invokes
+# the gate, and the only provider call is informational.
+JOB_CORE_REBALANCE_OBSERVATION = "core_rebalance_observation"
 # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
 # expensive: half an hour is a scheduled job's workload. The reasons are
 # governance — criterion 5 requires a hold-out purpose a cron fire cannot
@@ -2168,6 +2172,32 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "polling updates five bounded rows rather than appending heartbeats."
         ),
         cadence=Cadence.every_n_minutes(interval=5),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_CORE_REBALANCE_OBSERVATION,
+        display_name="Core/cash rebalance observation (#2603)",
+        # Lane ``etoro`` and not ``strategy_execution``: the only external call
+        # is an eToro read, and ``etoro`` is the lane that owns that budget.
+        # ``strategy_execution`` is held by strategy_paper_cycle every five
+        # minutes, so a daily job landing there is a daily job that skips.
+        source="etoro",
+        description=(
+            "Daily — observe the core sleeve from one informational eToro "
+            "account-risk snapshot and store one append-only rebalance "
+            "verdict, including holds and refusals. Demo-only. Skips without "
+            "any broker call when no mandate carries a core instrument."
+        ),
+        # 22:45 UTC — after the US close (~21:00 UTC), the same anchor
+        # db_eod_snapshot records for its 22:30 slot, and 15 min after it.
+        # ⚠ The offset is scheduling hygiene, not an invariant: overrun,
+        # catch-up and manual dispatch can still overlap and the LANE is what
+        # serialises. ⚠ Daily means each CALENDAR day, so this also fires on
+        # weekends and holidays; those ticks record a true flat re-observation.
+        # Gating on us_market_status would be wrong — settled-decisions permits
+        # a non-US core instrument whose venue we have no calendar for.
+        cadence=Cadence.daily(hour=22, minute=45),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -5364,6 +5394,145 @@ def strategy_paper_cycle() -> None:
             f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
             f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
             f"halt_source_pub_at={halt_snapshot.source_pub_at.isoformat()}"
+        )
+
+
+def core_rebalance_observation() -> None:
+    """Observe the core sleeve and store one rebalance verdict (#2603 step 3b-3).
+
+    The chain ``get_account_risk_snapshot -> observe_core_sleeve ->
+    record_core_rebalance_intent`` was complete and had no caller; this is that
+    caller and the whole of it.  It sizes nothing, quotes no cost and submits
+    nothing.
+
+    ⚠ It produces submission-gate INPUT, not authority.
+    ``strategy_core_submission_gate`` reads ``strategy_core_rebalance_intents``
+    (that module's own SELECT, and ``sql/349``'s FK from ``strategy_trades``),
+    so the "no module reads it" line in ``sql/348`` is stale.  What holds is
+    that the gate has no acting caller, and that the one provider method used
+    here is informational -- ``refuse_broker_mutation_if_unattended`` is
+    deliberately not reached (#2645).
+
+    Failures PROPAGATE rather than being caught and noted.  An unobservable
+    sleeve and an unavailable broker are both genuine faults, and there is no
+    primary work here to protect by swallowing them -- the observation IS the
+    work.  A job that no-ops and reports success is invisible to every
+    automated check this repo has.  Consequence, so it is not later read as a
+    defect: those ticks are visible in ``job_runs`` and NOT in
+    ``strategy_core_rebalance_intents``, because no ``CoreSleeveState`` can be
+    constructed at all and the table requires an observed sleeve.
+
+    Spec: ``docs/proposals/ta/2026-08-22-core-rebalance-observation-job.md``
+    """
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.strategy_core_mandate import CORE_MANDATE_ADVISORY_LOCK, load_core_mandate
+    from app.services.strategy_core_rebalance_intent import record_core_rebalance_intent
+    from app.services.strategy_core_sleeve import observe_core_sleeve
+
+    # `strategy_core_mandate_events.mode` is CHECK-pinned to 'paper' (sql/349),
+    # so observing a REAL account would attribute a live book's drift to a
+    # paper policy. `get_account_risk_snapshot` already refuses a non-demo
+    # provider outright; this check exists so that case records a clean
+    # PREREQ_SKIP instead of an exception.
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, "core rebalance observation requires demo environment")
+        return
+    # Mandate read on its own short-lived conn BEFORE the provider session — no
+    # DB conn held across HTTP (#1593 spec PR-1 plan).
+    #
+    # ⚠ BEFORE the credential load, and that ordering is deliberate rather than
+    # incidental (review nitpick on PR #2853). `_load_etoro_credentials`
+    # decrypts two secrets and writes a credential-access audit row for each,
+    # so running it first makes every no-mandate tick — which is EVERY tick
+    # until #2833 declares the sleeve — touch secrets storage and append audit
+    # noise for a job that was always going to skip. It also picks the better
+    # reason when both are true: "no core mandate configured" is the actionable
+    # fact, where "etoro credentials missing" would send triage at the wrong
+    # thing.
+    with connect_job() as mandate_conn:
+        mandate = load_core_mandate(mandate_conn)
+
+    # ⚠ The skip is recorded from the BODY, not only via the registry
+    # `prerequisite`, because manual dispatch bypasses the registry path.
+    #
+    # ⚠ `enabled` is deliberately NOT part of this test. A disabled mandate
+    # still has an instrument, so the sleeve is observable, and the record that
+    # accumulates while a mandate is disabled is what an operator needs at the
+    # moment they re-enable it. Skipping here would also leave
+    # `core_mandate_disabled` producible by the allocator and reachable from no
+    # producer — the shape step 3b-2 item 1 already had to delete once.
+    if mandate is None or mandate.core_instrument_id is None:
+        # Reaching `core_mandate_absent` / `core_instrument_unset` would need a
+        # fabricated CoreSleeveState — an invented instrument id and two
+        # invented valuations — purely to hang a reason code on. It is the
+        # FABRICATION that is refused, not the recording: both facts are fully
+        # derivable from `strategy_core_mandate_events` without a broker call.
+        detail = "no core mandate configured" if mandate is None else "core mandate has no core instrument"
+        _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, detail)
+        return
+
+    creds = _load_etoro_credentials(JOB_CORE_REBALANCE_OBSERVATION)
+    if creds is None:
+        _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, "etoro credentials missing")
+        return
+
+    core_instrument_id = mandate.core_instrument_id
+    with _tracked_job(JOB_CORE_REBALANCE_OBSERVATION) as tracker:
+        # `env="demo"` literally, not `settings.etoro_env` again: re-reading a
+        # mutable setting between check and use is the gap strategy_paper_cycle
+        # closes the same way.
+        with EtoroBrokerProvider(api_key=creds[0], user_key=creds[1], env="demo") as broker:
+            snapshot = broker.get_account_risk_snapshot()
+
+        state = observe_core_sleeve(snapshot, core_instrument_id=core_instrument_id)
+
+        with connect_job() as conn:
+            # ⚠⚠ The sleeve was observed for the mandate read BEFORE the HTTP
+            # call, and `record_core_rebalance_intent` loads the mandate again.
+            # A revision landing in between would be evaluated and ATTRIBUTED to
+            # the newer one -- and only the instrument-changing case is caught by
+            # `sleeve_instrument_mismatch`. A revision that moves the target, the
+            # band, the reserve or the floor while keeping the instrument would
+            # produce a verdict that looks entirely normal and describes a sleeve
+            # nobody observed under it.
+            #
+            # `configure_core_mandate` takes this same xact lock, so taking it
+            # here serialises the two. Re-reading WITHOUT it would not fix the
+            # race: READ COMMITTED gives each statement a fresh snapshot, so a
+            # writer can still commit between the re-read and the INSERT. Held
+            # for two fast reads and one INSERT, NEVER across the broker
+            # round-trip -- which is why the mandate is pre-read on a separate
+            # connection rather than under this lock.
+            conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_MANDATE_ADVISORY_LOCK)
+            current = load_core_mandate(conn)
+            if current is None or current.event_id != mandate.event_id:
+                # Not a fault, so nothing raises: the operator reconfigured the
+                # mandate during the round-trip and the next tick is correct.
+                # The tick is dropped rather than misattributed, and the note
+                # says which -- a zero-row success here is a REPORTED skip, not
+                # the silent no-op the failure paths above refuse to become.
+                conn.rollback()
+                was = "removed" if current is None else f"revision {current.revision}"
+                logger.warning(
+                    "%s: mandate moved to %s during the broker round-trip; dropping this observation",
+                    JOB_CORE_REBALANCE_OBSERVATION,
+                    was,
+                )
+                tracker.row_count = 0
+                tracker.note = f"skipped: mandate event {mandate.event_id} -> {was} during observation"
+                return
+            intent = record_core_rebalance_intent(
+                conn,
+                state=state,
+                recorded_by=JOB_CORE_REBALANCE_OBSERVATION,
+            )
+            conn.commit()
+
+        tracker.row_count = 1
+        tracker.note = (
+            f"intent_id={intent.core_rebalance_intent_id} action={intent.decision.action} "
+            f"reason={intent.decision.reason_code or '-'} instrument={core_instrument_id} "
+            f"mandate_event={intent.core_mandate_event_id}"
         )
 
 
