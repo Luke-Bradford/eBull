@@ -143,6 +143,21 @@ def test_every_closing_verb_is_reported_inert_on_a_stacked_base() -> None:
     assert "2783" not in result.stdout
 
 
+def test_a_gerund_is_prose_to_github_so_the_inert_guard_ignores_it() -> None:
+    # GitHub's closing keywords are close/closes/closed, fix/fixes/fixed and
+    # resolve/resolves/resolved — no gerunds. So "Closing #N" registers nothing
+    # and is not inert. The negation guard DOES read gerunds (it matches an
+    # author's sentence), which is why the two alternations must stay distinct.
+    result = _run(
+        "fix(#2741): stacked",
+        "Closing #2741 is out of scope here.\n\nRefs #2741.",
+        base="fix/2697-metric-axis-integrity",
+        default_branch="main",
+    )
+    assert result.returncode == 0
+    assert _run("fix(#2741): guard links", "Land without closing #2741. Umbrella #2741.").returncode == 1
+
+
 def test_non_closing_references_on_a_stacked_base_pass() -> None:
     result = _run(
         "fix(#2779): stacked",
