@@ -8,8 +8,19 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_pr_issue_link.sh"
 
 
-def _run(title: str, body: str) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "PR_TITLE": title, "PR_BODY": body}
+def _run(
+    title: str,
+    body: str,
+    base: str = "",
+    default_branch: str = "",
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        **os.environ,
+        "PR_TITLE": title,
+        "PR_BODY": body,
+        "PR_BASE": base,
+        "DEFAULT_BRANCH": default_branch,
+    }
     return subprocess.run(
         ["bash", str(SCRIPT)],
         cwd=ROOT,
@@ -105,6 +116,51 @@ def test_missing_title_issue_reference_still_fails() -> None:
     result = _run("fix(#2741): guard links", "Refs #9999.")
     assert result.returncode == 1
     assert "no Closes/Fixes/Resolves" in result.stdout
+
+
+def test_exact_2782_inert_closing_reference_on_a_stacked_base_is_refused() -> None:
+    result = _run(
+        "fix(#2779): metric-axis integrity follow-up",
+        "Closes #2779.",
+        base="fix/2697-metric-axis-integrity",
+        default_branch="main",
+    )
+    assert result.returncode == 1
+    assert "INERT" in result.stdout
+    assert "2779" in result.stdout
+
+
+def test_every_closing_verb_is_reported_inert_on_a_stacked_base() -> None:
+    result = _run(
+        "fix(#2779): stacked",
+        "Fixes #2779. Resolves #2775. Refs #2783.",
+        base="fix/2697-metric-axis-integrity",
+        default_branch="main",
+    )
+    assert result.returncode == 1
+    # Sorted, de-duplicated, and Refs is not a closing verb so #2783 is absent.
+    assert "2775 2779" in result.stdout
+    assert "2783" not in result.stdout
+
+
+def test_non_closing_references_on_a_stacked_base_pass() -> None:
+    result = _run(
+        "fix(#2779): stacked",
+        "Refs #2779. Part of #2783.",
+        base="fix/2697-metric-axis-integrity",
+        default_branch="main",
+    )
+    assert result.returncode == 0
+
+
+def test_closing_reference_on_the_default_base_is_unaffected() -> None:
+    result = _run("fix(#2779): direct", "Closes #2779.", base="main", default_branch="main")
+    assert result.returncode == 0
+
+
+def test_stacked_base_check_is_disabled_when_the_workflow_supplies_no_base() -> None:
+    # A local invocation has neither variable; the gate must not guess a base.
+    assert _run("fix(#2779): local", "Closes #2779.").returncode == 0
 
 
 def test_examples_inside_comments_and_code_do_not_trigger_or_satisfy() -> None:

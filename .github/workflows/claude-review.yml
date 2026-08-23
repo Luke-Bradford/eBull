@@ -1,9 +1,12 @@
 name: Claude PR Review
 
 on:
+  # No ``branches:`` filter — see #2783. That filter matches the BASE, so a PR
+  # stacked on another branch never triggered this workflow, and safe_merge's
+  # ``bot_comment`` gate then waited forever for a comment that could not be
+  # posted. Four such PRs (#2773 #2776 #2777 #2782) were merged by hand.
   pull_request:
     types: [opened, synchronize, ready_for_review]
-    branches: [main]
 
 jobs:
   review:

@@ -5,6 +5,8 @@ set -euo pipefail
 
 pr_title=${PR_TITLE:-}
 pr_body=${PR_BODY:-}
+pr_base=${PR_BASE:-}
+default_branch=${DEFAULT_BRANCH:-}
 
 # Strip HTML comments + fenced code blocks + inline code so examples cannot
 # satisfy the link gate or trigger the negation incident guard.
@@ -40,6 +42,27 @@ if printf '%s\n' "$body_clean" | perl -ne '
   echo "::error::PR body closes an issue but describes only PART of it. GitHub reads 'KEYWORD #N' and closes the whole issue, ignoring the qualifier that follows."
   echo "Use 'Refs #N' or 'Part of #N' and describe the part in prose without a closing verb."
   exit 1
+fi
+
+# GitHub registers closing references only for PRs targeting the DEFAULT branch.
+# On a stacked PR "Closes #N" is inert: closingIssuesReferences comes back empty,
+# so safe_merge's done_everywhere closes nothing and boards nothing, silently.
+# Measured over the last 1000 merged PRs: 4 had a non-main base, 2 of those
+# declared a closing keyword (#2782 -> #2779, #2773 -> #2775) and both were
+# registered as closing NOTHING. See #2783.
+#
+# Both env vars absent (a local run) disables the check rather than guessing.
+if [ -n "$pr_base" ] && [ -n "$default_branch" ] && [ "$pr_base" != "$default_branch" ]; then
+  inert=$(printf '%s\n' "$body_clean" | perl -ne '
+    while (/(?:^|[^\w-])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t:]+#(\d+)(?![0-9])/ig) {
+      print "$1\n";
+    }
+  ' | sort -un | paste -sd' ' -)
+  if [ -n "$inert" ]; then
+    echo "::error::PR base is '${pr_base}', not the default branch '${default_branch}'. GitHub registers closing references only against the default branch, so these are INERT and will close nothing on merge: ${inert}"
+    echo "Retarget the PR at '${default_branch}', or use 'Refs #N' and close the issue by hand once the stack lands."
+    exit 1
+  fi
 fi
 
 # Pull every #N out of the title. Empty title means no required issue link.

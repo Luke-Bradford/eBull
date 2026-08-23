@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # No ``branches:`` filter on pull_request. That filter matches the BASE, so a
+  # PR stacked on another branch used to get no CI at all and ``gh pr checks``
+  # reported "no checks reported" — indistinguishable from "not finished yet".
+  # See #2783.
   pull_request:
-    branches: [main]
 
 jobs:
   lint:
