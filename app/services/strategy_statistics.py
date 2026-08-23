@@ -180,6 +180,13 @@ class StrategyMetrics:
     sortino: float | None
     max_drawdown_pct: float
     exposure_time_pct: float
+    #: ⚠ A RATIO OF POT-TURNOVERS PER YEAR, NOT A PERCENTAGE. Computed below as
+    #: ``traded / 2.0 / mean_equity / years`` and halved so ``1.0`` means "the
+    #: pot turned over once". The units matter because the viability bar this is
+    #: read against is quoted per MONTH: Novy-Marx/Velikov's ~50%/month is
+    #: ``turnover_annualised ~= 6.0`` here, so a value of 5.0 is INSIDE the bar,
+    #: not 100x over it. #2840 declined to compare s11's 1.267 against the bar
+    #: because "the units are not established"; they are established here.
     turnover_annualised: float
     trade_count: int
     effective_sample_size: float | None
