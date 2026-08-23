@@ -98,6 +98,22 @@ from app.services.strategies.s9_squeeze_expansion import (
     MAX_HOLD_BARS as S9_MAX_HOLD_BARS,
 )
 
+#: The two ways a bracket derivation refuses, as ONE name used by all six
+#: factories. ``ValueError`` is the bracket's own refusal (no ATR, no live
+#: level, an unusable entry price) and ``IndexError`` is an out-of-range index
+#: reaching ``atr.values[...]`` before any bracket-owned validation runs.
+#:
+#: ⚠ Written as a named tuple rather than inline, and the reason is mechanical
+#: rather than aesthetic. ``except (ValueError, IndexError):`` is NOT stable in
+#: this repo: ``ruff format`` rewrites it to the PEP 758 unparenthesized form
+#: ``except ValueError, IndexError:``, which is valid on Python 3.14 and which
+#: the review bot has now twice reported as a SyntaxError (PR #2715, PR #2885).
+#: The two gates demand opposite spellings and the formatter is the one that
+#: wins, so the parenthesized form cannot be shipped at all. A single identifier
+#: has nothing for the formatter to rewrite and nothing for a reviewer to
+#: misparse, and it says what the tuple MEANS, which neither spelling did.
+_BRACKET_REFUSALS = (ValueError, IndexError)
+
 
 def s4_exit_levels_batch(
     series: BarSeries,
@@ -110,19 +126,70 @@ def s4_exit_levels_batch(
     Each request keeps its scalar semantics: ATR is read at the causal signal
     index and the bracket is centred on that request's next-open entry price.
     Output is positional so duplicate requests remain distinct.
+
+    ⚠ Each request keeps its scalar semantics, including the failure modes, and
+    every one of them lands as ``unorderable_exit_levels`` rather than
+    propagating (#2781). This function used to RAISE for a bad index, a
+    non-finite or non-positive entry price, and a missing or non-positive ATR,
+    while its five siblings refused all three. An uncaught exception in an
+    exit-level factory aborts the WHOLE outcome batch for one bad bar instead of
+    recording one unresolved outcome — the failure mode
+    ``tests/test_2437_exit_level_refusal_surface.py`` exists to prevent, and
+    from which S-4 was excluded.
+
+    ⚠⚠ NO ``strategy_version`` MOVES, AND THE ARGUMENT FOR THAT IS THE WHOLE
+    RISK. ``_source_hash()`` hashes the DEFINING strategy module and this is not
+    one; nor is this module in ``INPUT_RULE_SETS``. Verified by computing all 11
+    identities against this file before and after — byte-identical. That means
+    rows from old and new code share a ledger key, which is exactly the defect
+    ``INPUT_RULE_SETS`` exists to close, so it is admissible ONLY because no
+    stored outcome can differ. Proved rather than asserted, in two independent
+    steps (Codex ckpt-3 pushed on the first version of this, which merely
+    claimed the inputs "cannot currently occur"):
+
+    1. **Same segmentation on both sides.** ``_exit_levels_for_entries`` slices
+       per ``series_segment_bounds`` and passes a LOCAL index, and so does
+       ``segmented_signals``. Both read the same ``corpus.unresolved_breaks``
+       entry, so a fired signal's local index is the one the registry already
+       judged evaluable. A globally-valid signal cannot land on local index 0 of
+       a segment the signal pass did not also see as local index 0.
+    2. **S-4's own setup requires the very ATR the bracket reads.** The entry is
+       ``atr_14(t)`` in the bottom quartile of its trailing 100 bars, so a bar
+       with no ``atr_14`` cannot produce a fired signal — 100 bars of ATR
+       history is a far longer warm-up than the bracket needs. S-11 gates S-4's
+       entry further (``s4_entry(t) and regime(t) in {bear_volatile,
+       bull_volatile}``), so its fills are a strict subset.
+
+    ⚠ If either property changes — a second breaks source, or an S-4 variant
+    whose setup does not read ATR — this needs a version bump, not a wider
+    ``except``.
+
+    ``_s4_exit_levels``'s docstring already states the intent this completes:
+    *"The batch adapter owns the typed refusal because changing the hashed S-4
+    module merely to add an exception class would mint a new strategy version."*
     """
     atr = atr_series(series, period=ATR_PERIOD, universe=universe)
     levels: list[ExitLevels | UnresolvedReason] = []
     for signal_index, entry_price in requests:
-        if not 0 <= signal_index < len(series):
-            raise ValueError(f"signal_index {signal_index} is outside the {len(series)}-bar series")
-        if not entry_price.is_finite():
-            raise ValueError(f"entry_price must be finite, got {entry_price}")
-        if entry_price <= 0:
-            raise ValueError(f"entry_price must be positive, got {entry_price}")
-        value = atr.values[signal_index]
-        if value is None or value <= 0:
-            raise ValueError(f"ATR{ATR_PERIOD} is unavailable or non-positive at signal index {signal_index}")
+        try:
+            if not 0 <= signal_index < len(series):
+                raise ValueError(f"signal_index {signal_index} is outside the {len(series)}-bar series")
+            if not entry_price.is_finite():
+                raise ValueError(f"entry_price must be finite, got {entry_price}")
+            if entry_price <= 0:
+                raise ValueError(f"entry_price must be positive, got {entry_price}")
+            value = atr.values[signal_index]
+            if value is None or value <= 0:
+                raise ValueError(f"ATR{ATR_PERIOD} is unavailable or non-positive at signal index {signal_index}")
+        except _BRACKET_REFUSALS:
+            levels.append("unorderable_exit_levels")
+            continue
+        # ⚠ `value` is bound ONLY on the non-exceptional path above, and the
+        # `continue` is what guarantees this line is unreachable otherwise —
+        # move that `continue` and `value` becomes possibly-unbound here.
+        # `pyright` enforces it rather than this comment (it reports the
+        # unbound read, which is why the file type-checks clean); the note is
+        # for the editor who is about to restructure the handler.
         if not isfinite(value):
             levels.append("unorderable_exit_levels")
             continue
@@ -178,7 +245,7 @@ def s5_exit_levels_batch(
                 raise ValueError(f"S-5 bracket needs the support level at index {signal_index}; none is live")
             stop = Decimal(str(level - S5_ATR_STOP_MULTIPLE * atr_at_signal))
             target = entry_price + Decimal(str(S5_ATR_TARGET_MULTIPLE * atr_at_signal))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
@@ -220,7 +287,7 @@ def s6_exit_levels_batch(
                 raise ValueError(f"S-6 bracket needs the resistance level at index {signal_index}; none is live")
             stop = Decimal(str(level - S6_ATR_STOP_MULTIPLE * atr_at_signal))
             target = entry_price + Decimal(str(S6_ATR_TARGET_MULTIPLE * atr_at_signal))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
@@ -252,7 +319,7 @@ def s7_exit_levels_batch(
             if atr_at_signal is None:
                 raise ValueError(f"S-7 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
             stop = entry_price - Decimal(str(S7_ATR_STOP_MULTIPLE * atr_at_signal))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=None, stop_loss=stop):
@@ -283,7 +350,7 @@ def s9_exit_levels_batch(
                 raise ValueError(f"S-9 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
             stop = entry_price - Decimal(str(S9_ATR_STOP_MULTIPLE * atr_at_signal))
             target = entry_price + Decimal(str(S9_ATR_TARGET_MULTIPLE * atr_at_signal))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
@@ -332,7 +399,7 @@ def s8_exit_levels_batch(
                 )
             stop = entry_price - Decimal(str(S8_ATR_STOP_MULTIPLE * atr_at_signal))
             target = Decimal(str(middle))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):

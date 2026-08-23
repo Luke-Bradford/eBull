@@ -39,10 +39,34 @@ from app.services.strategies.s6_resistance_breakout import s6_exit_bracket
 from app.services.strategies.s9_squeeze_expansion import s9_exit_bracket
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 
-#: The three level-based strategies of the S-5..S-10 set. S-4 is excluded: its
-#: adapter goes through `s4_exit_levels_batch` and has its own equivalence check.
-LEVEL_BASED = ("s5-support-bounce", "s6-resistance-breakout", "s9-squeeze-expansion")
+#: Every strategy with a level-based `exit_levels` factory, batched or not.
+#:
+#: ⚠⚠ S-4 was EXCLUDED here until #2781, on the grounds that "its adapter goes
+#: through `s4_exit_levels_batch` and has its own equivalence check". That check
+#: compares an ORDERABLE bracket against the scalar; it never covered a bad index
+#: or a missing ATR, and under it `s4_exit_levels_batch` raised where its five
+#: siblings refused. **An exclusion justified by another test's existence is only
+#: as good as that test's coverage.**
+#:
+#: ⚠⚠ The hand-written replacement was wrong too, and in the same shape: it named
+#: four, and SEVEN strategies carry an `exit_levels` factory. S-11 in particular
+#: shares `s4_exit_levels_batch` with S-4 (`_s11_exit_levels`), so the behaviour
+#: this ticket changes is S-11's as much as S-4's, and a curated tuple said
+#: nothing about it (Codex ckpt-3). Hence the derivation below.
+#: ⚠ Derived, not typed out. The ticket's acceptance is "covers EVERY strategy with
+#: an `exit_levels` factory, batched or not", and a hand-kept tuple is the same
+#: omission-shaped defect one level up: a new level-based strategy would join the
+#: manifest and silently not be swept. Reading the manifest means it cannot.
+LEVEL_BASED = tuple(sorted(sid for sid, entry in STRATEGY_MANIFEST.items() if entry.exit_levels is not None))
 
+#: The subset whose SCALAR bracket reaches `atr.values[signal_index]` before any
+#: range validation, and so raises `IndexError` rather than `ValueError`.
+#:
+#: ⚠ S-4 is absent by MEASUREMENT, not by assumption — it carries its own explicit
+#: `0 <= signal_index < len(series)` guard, so it raises `ValueError` first. That
+#: is asserted positively in `test_s4_raises_value_error_where_the_others_raise_index_error`
+#: rather than left as a silent omission, because a silent omission is what #2781
+#: was.
 _BRACKETS = {
     "s5-support-bounce": s5_exit_bracket,
     "s6-resistance-breakout": s6_exit_bracket,
@@ -85,6 +109,68 @@ def test_an_out_of_range_bar_is_refused_not_raised(strategy_id: str) -> None:
 
 
 @pytest.mark.parametrize("strategy_id", LEVEL_BASED)
+def test_a_bar_with_no_atr_is_refused_not_raised(strategy_id: str) -> None:
+    """#2781's measured case. Bar 0 has no prior close, so it has no ATR.
+
+    #2781 measured this on a shared fixture: the five sibling BATCH factories
+    (S-5..S-9) refused it and `s4_exit_levels_batch` raised. The sweep below is
+    wider than that measurement — it now runs every strategy carrying an
+    `exit_levels` factory, seven of them, S-11 included because it shares S-4's
+    batch.
+    """
+    entry = STRATEGY_MANIFEST[strategy_id]
+    assert entry.exit_levels is not None
+    result = entry.exit_levels(
+        _series(),
+        signal_index=0,
+        entry_price=Decimal("100"),
+        universe="survivor_only",
+    )
+    assert result == "unorderable_exit_levels"
+
+
+@pytest.mark.parametrize("strategy_id", LEVEL_BASED)
+@pytest.mark.parametrize("entry_price", [Decimal("NaN"), Decimal("-1"), Decimal("0")])
+def test_an_unusable_entry_price_is_refused_not_raised(strategy_id: str, entry_price: Decimal) -> None:
+    """The rest of what #2781 made S-4 swallow, which the ticket did not enumerate.
+
+    A non-finite, negative or zero entry price took the same `raise` path as a
+    bad index, so each is its own way to abort a whole outcome batch. Covered
+    here because "the four guards now refuse" is a claim about four guards, and
+    two of them had no test (Codex ckpt-3).
+    """
+    entry = STRATEGY_MANIFEST[strategy_id]
+    assert entry.exit_levels is not None
+    result = entry.exit_levels(
+        _series(),
+        signal_index=20,
+        entry_price=entry_price,
+        universe="survivor_only",
+    )
+    assert result == "unorderable_exit_levels"
+
+
+def test_s4_raises_value_error_where_the_others_raise_index_error() -> None:
+    """Evidences S-4's absence from `_BRACKETS` instead of leaving it implicit.
+
+    S-4's scalar validates the range itself, so an out-of-range index never
+    reaches the `atr.values[...]` lookup. The distinction matters to the adapter
+    contract: naming only one of the two exception classes would let the other
+    escape, which is why both are caught and why this asymmetry is pinned rather
+    than assumed.
+    """
+    from app.services.strategies.s4_volatility_compression_breakout import s4_exit_bracket
+
+    with pytest.raises(ValueError):
+        s4_exit_bracket(
+            _series(),
+            signal_index=999,
+            entry_price=Decimal("100"),
+            universe="survivor_only",
+        )
+
+
+@pytest.mark.parametrize("strategy_id", tuple(_BRACKETS))
 def test_index_error_is_reachable(strategy_id: str) -> None:
     """The refuted half of the review: ``IndexError`` is NOT dead code.
 

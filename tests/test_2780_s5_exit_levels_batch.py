@@ -172,19 +172,25 @@ class TestBatchEqualsTheScalarOracle:
         """⚠⚠ THE ASSERTION IS AGREEMENT, NOT UNIFORMITY, AND THAT DISTINCTION
         FOUND A REAL INCONSISTENCY.
 
-        Five of the six refuse an out-of-range index as
+        Five of the six refused an out-of-range index as
         ``unorderable_exit_levels`` — the property #2437's refusal-surface test
         exists for, since an uncaught exception aborts the WHOLE outcome batch
-        for one bad bar. **S-4 raises instead**, because ``s4_exit_levels_batch``
-        validates the index up front and ``_s4_exit_levels`` does not catch it.
-        S-4 is excluded from that refusal test on the grounds that it "has its
-        own equivalence check", and that check never covered a bad index.
+        for one bad bar — and **S-4 raised instead**, because
+        ``s4_exit_levels_batch`` validated the index up front and
+        ``_s4_exit_levels`` did not catch it. S-4 was excluded from that refusal
+        test on the grounds that it "has its own equivalence check", and that
+        check never covered a bad index.
 
-        Demanding uniformity here would have silently changed S-4's shipped
-        behaviour to make a test pass. So this asserts what the adapter contract
-        actually claims — the batch does whatever its oracle does — and the
-        divergence between S-4 and its siblings is reported separately rather
-        than papered over.
+        ✅ **Closed in #2781**: S-4 now refuses like its siblings, and the
+        refusal-surface test derives its sweep from the manifest instead of a
+        curated tuple, so all seven level-based strategies are covered.
+
+        Demanding uniformity HERE would still have been the wrong move, and that
+        is why this docstring survives the fix: it would have silently changed
+        S-4's shipped behaviour to make a test pass. So this asserts what the
+        adapter contract actually claims — the batch does whatever its oracle
+        does — and the divergence was reported separately rather than papered
+        over, which is what got it fixed on its own evidence.
         """
         series = _wavy()
         entry = STRATEGY_MANIFEST[strategy_id]
