@@ -51,6 +51,56 @@ def test_explicit_non_closing_and_closing_forms_pass() -> None:
     assert _run("fix(#2741): guard links", "Nothing unusual. Closes #2741.").returncode == 0
 
 
+def test_exact_2373_partial_close_incident_is_refused() -> None:
+    result = _run(
+        "fix(#2176): an Item 403 row must name a beneficial owner",
+        "## Issue reference\n\nRefs #2176.\n\n"
+        "Fixes #2176's class 4 (Total rows stored as beneficial owners) and the "
+        "residue of class 2. Classes 1 and 3 are untouched, so the issue stays open.",
+    )
+    assert result.returncode == 1
+    assert "describes only PART of it" in result.stdout
+
+
+def test_exact_1244_partial_close_incident_is_refused() -> None:
+    result = _run(
+        "feat(#1233): PR8 — N-CSR 730d retention cap",
+        "Per spec 6.3 no existing rows shift.\n\nCloses #1233's PR8 milestone.",
+    )
+    assert result.returncode == 1
+
+
+def test_partitive_qualifiers_after_a_closing_reference_are_refused() -> None:
+    for body in (
+        "Fixes #2741 item 3.",
+        "Closes #2741 step 2.",
+        "Resolves #2741 phase 1.",
+        "Fixes #2741 class 4.",
+        "Closes #2741 arm B.",
+        "Fixes #2741’s second half.",
+    ):
+        assert _run("fix(#2741): guard links", body).returncode == 1, body
+
+
+def test_partitive_guard_does_not_fire_across_a_line_break() -> None:
+    # PR #2875: "## What this fixes" heading, then "#2833 step 2's pass bar" on a
+    # later line. GitHub did not close #2833 and neither should the gate fire.
+    body = "## What this fixes\n\n#2833 step 2's pass bar moved.\n\nRefs #2833."
+    assert _run("fix(#2833): accumulate the spread sample", body).returncode == 0
+
+
+def test_partitive_guard_does_not_treat_a_hyphenated_word_as_a_keyword() -> None:
+    # PR #2361: "silently un-fixed #2169's own accession" is prose, not a link.
+    body = "Refs #2169.\n\nThe first draft silently un-fixed #2169's own accession."
+    assert _run("fix(#2169): block markup", body).returncode == 0
+
+
+def test_plain_closing_and_non_closing_forms_are_unaffected() -> None:
+    assert _run("fix(#2741): guard links", "Closes #2741.").returncode == 0
+    assert _run("fix(#2741): guard links", "Refs #2741. Part of #2832.").returncode == 0
+    assert _run("fix(#2741): guard links", "Closes #2741 and nothing else.").returncode == 0
+
+
 def test_missing_title_issue_reference_still_fails() -> None:
     result = _run("fix(#2741): guard links", "Refs #9999.")
     assert result.returncode == 1

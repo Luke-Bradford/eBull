@@ -23,6 +23,25 @@ if printf '%s\n' "$body_clean" | perl -ne '
   exit 1
 fi
 
+# GitHub reads only the two tokens "KEYWORD #N" and stops. A partitive
+# qualifier after the reference ("Fixes #2176's class 4", "Closes #1233's PR8
+# milestone") means the author is shipping PART of the issue, but GitHub closes
+# the whole thing on merge. PR #2373 closed #2176 this way while its own body
+# said "Refs #2176" and "classes 1 and 3 are untouched"; PR #1244 closed #1233,
+# which needed two reopens. Measured over the last 1000 merged PRs, this pattern
+# fires exactly twice and both are those incidents.
+#
+# \xe2\x80\x99 is a curly apostrophe. perl runs without -C here, so the body is
+# bytes and the literal character would trip shellcheck SC1112 besides.
+if printf '%s\n' "$body_clean" | perl -ne '
+  $found = 1 if /(?:^|[^\w-])(?:close[sd]?|closing|fix(?:e[sd]|ing)?|resolve[sd]?|resolving)[ \t:]+#\d+(?![0-9])[ \t]*(?:'"'"'s|\xe2\x80\x99s|(?:item|items|step|steps|class|classes|part|parts|phase|clause|arm|leg|half)\b)/i;
+  END { exit(!$found) }
+'; then
+  echo "::error::PR body closes an issue but describes only PART of it. GitHub reads 'KEYWORD #N' and closes the whole issue, ignoring the qualifier that follows."
+  echo "Use 'Refs #N' or 'Part of #N' and describe the part in prose without a closing verb."
+  exit 1
+fi
+
 # Pull every #N out of the title. Empty title means no required issue link.
 title_nums=()
 while IFS= read -r issue_number; do
