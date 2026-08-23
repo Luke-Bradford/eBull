@@ -76,6 +76,15 @@ _ALLOWED_PLACE_ORDER_ACTIONS = frozenset({"BUY", "ADD"})
 _ETORO_READ_INTERVAL_S = 1.1
 _ETORO_WRITE_INTERVAL_S = 3.5
 
+#: Per-phase HTTP timeout handed to ``httpx.Client``.
+#:
+#: ⚠ ``httpx`` applies this to connect, read, write and pool INDIVIDUALLY -- it is not a
+#: total wall-clock cap on one attempt.  Named rather than inline because
+#: ``strategy_core_broker_preflight`` derives its account-risk age bound from it, and a
+#: coupling test asserts the two agree; an unnamed literal makes that derivation
+#: unverifiable and lets a retune invalidate it silently.
+_ETORO_HTTP_TIMEOUT_S = 30.0
+
 _STATUS_MAP: dict[str, OrderStatus] = {
     "Executed": "filled",
     "Filled": "filled",
@@ -162,7 +171,7 @@ class EtoroBrokerProvider(BrokerProvider):
                 "x-user-key": user_key,
                 "Content-Type": "application/json",
             },
-            timeout=30.0,
+            timeout=_ETORO_HTTP_TIMEOUT_S,
         )
         # Separate throttle rates for reads (GET 60/min) and writes (POST 20/min).
         # Both share the same _last_request_at timestamp so interleaved
