@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Final, Literal
@@ -36,7 +36,7 @@ def turn_of_month_preference_window(
     target_year: int,
     target_month: int,
     venue_calendar_version: str,
-    is_venue_session: Callable[[date], bool],
+    venue_sessions_between: Callable[[date, date], tuple[date, ...]],
 ) -> tuple[date, ...]:
     """Return session offsets -3..+3 around the target month's last session.
 
@@ -52,13 +52,7 @@ def turn_of_month_preference_window(
         raise ValueError("session calendar cannot provide the complete -3..+3 window")
     if any(left >= right for left, right in zip(sessions, sessions[1:])):
         raise ValueError("session calendar must be strictly increasing and duplicate-free")
-    expected_sessions: list[date] = []
-    current = sessions[0]
-    while current <= sessions[-1]:
-        if is_venue_session(current):
-            expected_sessions.append(current)
-        current += timedelta(days=1)
-    if tuple(expected_sessions) != sessions:
+    if venue_sessions_between(sessions[0], sessions[-1]) != sessions:
         raise ValueError("session sequence is incomplete or disagrees with the declared venue calendar")
 
     target_indices = [

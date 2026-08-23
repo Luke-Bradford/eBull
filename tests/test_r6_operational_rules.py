@@ -19,11 +19,7 @@ def _nyse_sessions(start: date, end: date) -> tuple[date, ...]:
     return tuple(sessions)
 
 
-def _is_nyse_session(day: date) -> bool:
-    return us_market_status(day) != "closed"
-
-
-_CALENDAR_ARGS = {"venue_calendar_version": "nyse-test-v1", "is_venue_session": _is_nyse_session}
+_CALENDAR_ARGS = {"venue_calendar_version": "nyse-test-v1", "venue_sessions_between": _nyse_sessions}
 
 
 def test_turn_of_month_window_uses_session_offsets_across_month_boundary() -> None:

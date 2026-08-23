@@ -128,10 +128,14 @@ def _assert_declaration_ancestor(execution_commit: str) -> None:
     raise RuntimeError(f"declaration ancestry check failed with exit {result.returncode}: {detail}")
 
 
-def _must_refuse(call: Any, *, label: str) -> bool:
+def _must_refuse(call: Any, *, label: str, expected_message: str) -> bool:
     try:
         call()
-    except ValueError:
+    except ValueError as exc:
+        if expected_message not in str(exc):
+            raise RuntimeError(
+                f"operational rule refused {label} through the wrong branch: expected {expected_message!r}, got {exc!r}"
+            ) from exc
         return True
     raise RuntimeError(f"operational rule failed to refuse {label}")
 
@@ -147,14 +151,18 @@ def _verify_operational_rules() -> dict[str, bool]:
         date(2026, 2, 4),
     )
 
-    def is_nyse_session(day: date) -> bool:
-        return us_market_status(day) != "closed"
+    def nyse_sessions_between(start: date, end: date) -> tuple[date, ...]:
+        return tuple(
+            date.fromordinal(ordinal)
+            for ordinal in range(start.toordinal(), end.toordinal() + 1)
+            if us_market_status(date.fromordinal(ordinal)) != "closed"
+        )
 
     kwargs = {
         "target_year": 2026,
         "target_month": 1,
         "venue_calendar_version": NYSE_CALENDAR_VERSION,
-        "is_venue_session": is_nyse_session,
+        "venue_sessions_between": nyse_sessions_between,
     }
     if turn_of_month_preference_window(sessions, **kwargs) != sessions:
         raise RuntimeError("turn-of-month helper returned the wrong frozen -3..+3 window")
@@ -163,20 +171,26 @@ def _verify_operational_rules() -> dict[str, bool]:
         "duplicate_calendar_refused": _must_refuse(
             lambda: turn_of_month_preference_window((*sessions[:3], sessions[2], *sessions[4:]), **kwargs),
             label="duplicate session calendar",
+            expected_message="strictly increasing",
         ),
         "incomplete_calendar_refused": _must_refuse(
             lambda: turn_of_month_preference_window(sessions[:-1], **kwargs),
             label="incomplete session calendar",
+            expected_message="complete -3..+3 window",
         ),
         "missing_anchor_refused": _must_refuse(
-            lambda: turn_of_month_preference_window(tuple(date(2026, 2, day) for day in range(2, 9)), **kwargs),
+            lambda: turn_of_month_preference_window(
+                nyse_sessions_between(date(2026, 2, 2), date(2026, 2, 10)), **kwargs
+            ),
             label="missing target-month anchor",
+            expected_message="no target-month anchor",
         ),
         "internally_incomplete_calendar_refused": _must_refuse(
             lambda: turn_of_month_preference_window(
                 (*sessions[:2], *sessions[4:], date(2026, 2, 5), date(2026, 2, 6)), **kwargs
             ),
             label="internally incomplete venue calendar",
+            expected_message="incomplete or disagrees",
         ),
         "return_provenance_relabel_refused": _must_refuse(
             lambda: FactorValuationRecord(
@@ -196,6 +210,7 @@ def _verify_operational_rules() -> dict[str, bool]:
                 source_snapshot_sha256="a" * 64,
             ),
             label="return-series provenance relabel",
+            expected_message="not an admitted factor-valuation spread",
         ),
     }
     parameter_names = set(inspect.signature(turn_of_month_preference_window).parameters)
