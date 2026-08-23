@@ -1235,7 +1235,7 @@ describe("StrategiesPage", () => {
     expect(within(section).getByText("close · applied")).toBeInTheDocument();
     expect(within(section).getByText("Operation #88 · order #99")).toBeInTheDocument();
     expect(within(section).getByText("Reconciliation resolved · broker closed")).toBeInTheDocument();
-    expect(within(section).getByText("operator close")).toBeInTheDocument();
+    expect(within(section).getByText("Closed by the operator")).toBeInTheDocument();
     expect(within(section).getByText("1 close event")).toBeInTheDocument();
     expect(within(section).getByText("US$8.75 realised")).toBeInTheDocument();
     expect(within(section).getByText("US$1.25 fees")).toBeInTheDocument();
@@ -1247,7 +1247,7 @@ describe("StrategiesPage", () => {
     expect(within(section).getByText("target first")).toBeInTheDocument();
     expect(within(section).getByText("+10.00%")).toBeInTheDocument();
     expect(within(section).getByText("Outcome unresolved")).toBeInTheDocument();
-    expect(within(section).getByText("paper pool disabled")).toBeInTheDocument();
+    expect(within(section).getByText("The paper capital pool is disabled")).toBeInTheDocument();
   });
 
   it("surfaces missing and ambiguous broker lifecycle evidence instead of selecting a position", async () => {
@@ -1338,7 +1338,7 @@ describe("StrategiesPage", () => {
     const section = (await screen.findByText("Generated trade activity")).closest("section")!;
     expect(within(section).getByText("closing")).toBeInTheDocument();
     expect(within(section).getByText("close · submitted")).toBeInTheDocument();
-    expect(within(section).getByText("strategy exit")).toBeInTheDocument();
+    expect(within(section).getByText("The strategy's own exit rule fired")).toBeInTheDocument();
     expect(within(section).getByText("Reconciliation pending · broker pending")).toBeInTheDocument();
     expect(within(section).getByText("No broker close yet")).toBeInTheDocument();
     const row = within(section).getByText("ACME").closest("tr")!;
