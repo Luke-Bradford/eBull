@@ -1243,6 +1243,32 @@ operator ever extends the steer to all filings data, #2842 dies honestly). The d
 eight TA strategies leave the manifest (#2845); s4/s8 remain as the substrate of the one
 price-only research seat (#2840). The operative queue is the R5b comment on #2437.
 
+## 2026-08-23 — Fundamentals/ownership REOPENED for selection (operator, narrowing the price-only steer)
+
+The price-only steer of 2026-08-22 above still stands **for event-form trading** — buying the
+13D, the insider print, the merger, the shock. Those families remain cut with their lessons.
+
+What is reopened is a **different use of the same data: SELECTION**. Deciding which businesses to
+hold, then holding them for quarters, is not the family that was cut, and the steer had the side
+effect of fencing off the richest dataset we own right as the price-only approach ran out of road.
+
+Trigger for the reversal: eleven price-shape strategies measured on a survivorship-free corpus
+with costs charged are ALL net-negative per trade, while buy-and-hold over the same 1962→2024
+window returned +1,604%. The family is exhausted, and what survives replication is business
+characteristics rather than price timing.
+
+Programme is #2899 (arms #2900–#2904). Ordering: point-in-time spine first — ranking history on
+restated `*_current` data leaks the future and invents an edge — then quality, valuation,
+ownership-as-selection, then combination.
+
+⚠ The evidence bar is UNCHANGED: preregistration before the look, survivorship-free universe,
+costs and carry charged, deflated significance, full population, declared falsification. This
+widens the search, not the standard. The benchmark is net buy-and-hold on the same window and
+universe; a tilt that returns less than the market after costs is a failure.
+
+If arms 2–4 all fail on a PIT-correct spine, the honest conclusion is that we have no selection
+edge either, and the product is the low-cost market sleeve already queued as Phase 1 on #2437.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
