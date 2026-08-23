@@ -52,7 +52,14 @@ export function ThesisQuarantineBanner({
   return (
     <div
       className="rounded-md border px-3 py-2 text-xs border-red-200 bg-red-50 text-red-900 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-200"
-      role="status"
+      /* ⚠ `alert`, not `status`. The first draft copied `status` from
+         `OwnershipCoverageBanner`, which reports COVERAGE — a condition of the
+         data. This reports a REFUSAL: the figures beside it are ones the engine
+         will not act on. The repo's convention for that class is assertive —
+         `KillSwitchSection.tsx:203`, `ErrorBanner.tsx:4`, both order modals.
+         It also genuinely appears dynamically, when the async thesis resolves,
+         which is the case a live region is for. */
+      role="alert"
       data-testid="thesis-quarantine-banner"
       data-subject-state={state}
     >

@@ -387,6 +387,15 @@ describe("ThesisPane subject-identity quarantine (#2306)", () => {
     expect(screen.queryByText(zoneCopy)).not.toBeInTheDocument();
   });
 
+  it("announces assertively — a refusal, not a status (PR #2897 review)", () => {
+    // The repo's convention for a safety refusal is role="alert"
+    // (KillSwitchSection, ErrorBanner, both order modals). role="status" was
+    // copied from OwnershipCoverageBanner, which reports a condition of the
+    // DATA rather than a refusal of it.
+    render(<ThesisPane thesis={withVerdict(false)} errored={false} />);
+    expect(screen.getByTestId(BANNER)).toHaveAttribute("role", "alert");
+  });
+
   it("INVARIANT: never renders the memo without the banner", () => {
     // safety-state-ui.md's failure mode is a banner derived from a refetchable
     // value vanishing while the dangerous content stays. Structurally absent

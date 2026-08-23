@@ -66,6 +66,20 @@ describe("thesisQuarantine", () => {
       }
     });
 
+    it("does not enumerate the consumers, which cannot be kept in step from here", () => {
+      // Review NITPICK on PR #2897: the copy used to name "portfolio, scoring,
+      // entry timing, alerts and reporting" with no link to the Python modules
+      // it claimed, so a consumer change would leave operator-facing text
+      // quietly wrong. The census now lives in
+      // tests/test_thesis_subject_identity_consumers.py, where it is checkable.
+      for (const ok of [false, null] as const) {
+        const copy = thesisRefusalBody(ok);
+        for (const consumer of ["portfolio", "scoring", "entry timing", "reporting"]) {
+          expect(copy).not.toContain(consumer);
+        }
+      }
+    });
+
     it("keeps the tooltip a prefix of the banner body — one claim, two lengths", () => {
       // If these ever diverge, the same row says two different things
       // depending on which surface the operator happens to be looking at.

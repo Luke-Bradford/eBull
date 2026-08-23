@@ -61,10 +61,22 @@ export function isThesisQuarantined(ok: boolean | null | undefined): boolean {
  */
 export const THESIS_QUARANTINE_REASON = "thesis_quarantined";
 
-/** Who refuses the row — the verified consumer census, not a paraphrase. */
+/**
+ * Who refuses the row.
+ *
+ * ⚠ DELIBERATELY DOES NOT ENUMERATE THE CONSUMERS. The first draft listed
+ * "portfolio, scoring, entry timing, alerts and reporting" — accurate when
+ * written, and with no compile-time link to the Python modules it names, so
+ * adding or dropping a consumer would leave operator-facing copy quietly wrong
+ * (`.claude/CLAUDE.md`: never hardcode a derived fact into prose — compute it
+ * or omit it). The claim below is true by CONSTRUCTION instead: the guard lives
+ * in `is_thesis_usable`, and a consumer that skipped it would be the bug.
+ *
+ * The census itself is pinned where it can be checked —
+ * `tests/test_thesis_subject_identity_consumers.py`.
+ */
 const REFUSED_BY =
-  `The deterministic layer refuses it (${THESIS_QUARANTINE_REASON}) — ` +
-  "portfolio, scoring, entry timing, alerts and reporting.";
+  `The engine refuses it (${THESIS_QUARANTINE_REASON}) and no decision path will use it.`;
 
 /**
  * The claim a refusing state actually supports, in one sentence.

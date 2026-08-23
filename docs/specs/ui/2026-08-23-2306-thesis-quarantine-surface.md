@@ -133,22 +133,41 @@ library marker is therefore gated on `thesis_id !== null` as well; `ThesisPane` 
 
 ### 2. One banner component
 
-`frontend/src/components/theses/ThesisQuarantineBanner.tsx`, modelled on
-`OwnershipCoverageBanner.tsx` — `role="status"`, `data-subject-state`, glyph +
-headline + body, dark-mode pair per `design-system.md`.
+`frontend/src/components/theses/ThesisQuarantineBanner.tsx` — `data-subject-state`,
+glyph + headline + body, dark-mode pair per `design-system.md`.
 
 Copy names the machine-readable reason so the screen and the logs agree:
 
-> ⊘ **Thesis quarantined — subject identity failed.** This memo never names AAPL, so its
-> figures may describe a different company. The deterministic layer refuses it
-> (`thesis_quarantined`) — portfolio, scoring, entry timing, alerts and reporting; it is
-> shown for evidence only.
+> ⊘ **Thesis quarantined — subject identity failed.** This memo never names its own
+> instrument, so its figures may describe a different company. The engine refuses it
+> (`thesis_quarantined`) and no decision path will use it. It is shown here for evidence
+> only.
 
 ⚠ The copy claims exactly what the stored rule decided ("never names its subject") and
 hedges the consequence ("may describe a different company"). It must not be tightened to
-"is about a different company", which the verdict does not establish. The consumer list
-is the census verified above, not a paraphrase — if a consumer is added or drops the
-guard, this sentence is wrong and the census in this spec is where to correct it.
+"is about a different company", which the verdict does not establish.
+
+⚠ **`role="alert"`, not `role="status"`** (review NITPICK, PR #2897, and raised
+independently at Codex ckpt-1). The draft copied `status` from
+`OwnershipCoverageBanner`, which reports a condition of the DATA; this reports a REFUSAL
+of it, and the repo's convention for that class is assertive —
+`KillSwitchSection.tsx:203`, `ErrorBanner.tsx:4`, both order modals.
+
+⚠⚠ **The copy does NOT enumerate the consumers** (review NITPICK, PR #2897). The draft
+named "portfolio, scoring, entry timing, alerts and reporting" — accurate when written,
+with no compile-time link to the Python modules it named, so a consumer change would
+leave operator-facing text quietly wrong. That is the hardcoded-derived-fact-in-prose
+failure `.claude/CLAUDE.md` names. The sentence is now true by construction, and the
+census is pinned somewhere it can be checked instead:
+`tests/test_thesis_subject_identity_consumers.py` fails if a module reads
+`subject_identity_ok` without being declared either a guarded consumer (must call
+`is_thesis_usable`) or a documented mirror. It also pins `portfolio.py` specifically —
+that is the path `sql/332` records 14 wrong-company EXITs on.
+
+⚠ Writing the census surfaced that the five consumers do not use one mechanism:
+`portfolio.py` / `scoring.py` / `reporting.py` call `is_thesis_usable`, `entry_timing.py`
+mirrors the predicate in SQL, and `alerts.py` compares inline. All five refuse correctly;
+"they all call the helper" would have been the wrong claim.
 
 ### 3. Wiring (frontend only — no backend or schema change)
 
