@@ -279,6 +279,18 @@ class MarketRefreshSummary:
     # close mismatch (split/adjustment event) and were healed with an
     # in-run full-history re-fetch.
     adjustment_refetches: int = 0
+    # #2414 — the subset of ``candle_rows_upserted`` that OVERWROTE an
+    # existing bar's OHLCV with a different value, as opposed to appending a
+    # new one. Not a second count of the same thing: an insert extends the
+    # series, a revision destroys a value some ``strategy_signals`` row may
+    # already have decided on, and ``price_daily`` keeps no prior value or
+    # audit column, so this counter is the ONLY place a revision is ever
+    # visible. #2414 asked "how often is a bar revised, and by how much"; the
+    # honest answer before this field was that stored state cannot say,
+    # because the overwrite and the evidence of it happen in one statement.
+    # This makes the rate measurable going forward — it does NOT recover the
+    # history, and it does not fix the ledger collision #2414 is really about.
+    candle_rows_revised: int = 0
 
 
 @dataclass(frozen=True)
@@ -554,6 +566,7 @@ def refresh_market_data(
         )
 
     candle_rows_upserted = 0
+    candle_rows_revised = 0
     features_computed = 0
     quotes_updated = 0
     quotes_skipped = 0
@@ -595,6 +608,7 @@ def refresh_market_data(
         else:
             fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=freshness_target)
         upserted = 0
+        revised = 0
         computed = 0
         adjustment_detected = False
         try:
@@ -642,7 +656,8 @@ def refresh_market_data(
                         # only a heal if the series was actually rewritten.
                         adjustment_detected = bool(bars)
                 if bars:
-                    upserted = _upsert_candles(conn, instrument_id, bars)
+                    inserted, revised = _upsert_candles(conn, instrument_id, bars)
+                    upserted = inserted + revised
                     computed = _compute_and_store_features(conn, instrument_id)
             # Accumulate the running totals ONLY after the transaction has
             # committed cleanly (#1293 / Codex): incrementing inside the
@@ -650,6 +665,7 @@ def refresh_market_data(
             # feature-compute or commit later raised and rolled the write back
             # — and that same instrument is also counted in ``candles_failed``.
             candle_rows_upserted += upserted
+            candle_rows_revised += revised
             features_computed += computed
             # Counted only after a clean commit (same #1293 rule as the row
             # totals) — a heal whose re-fetch or write failed did NOT happen.
@@ -732,6 +748,7 @@ def refresh_market_data(
     return MarketRefreshSummary(
         instruments_refreshed=len(instruments),
         candle_rows_upserted=candle_rows_upserted,
+        candle_rows_revised=candle_rows_revised,
         features_computed=features_computed,
         quotes_updated=quotes_updated,
         quotes_skipped=quotes_skipped,
@@ -918,15 +935,44 @@ def _upsert_candles(
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instrument_id: int,
     bars: list[OHLCVBar],
-) -> int:
+) -> tuple[int, int]:
     """
     Upsert OHLCV bars into price_daily. Idempotent — re-running with the same
     data produces no changes (ON CONFLICT DO UPDATE with WHERE clause).
-    Returns the number of rows written (insert or update).
+    Returns ``(inserted, revised)`` — NEW bars and bars whose stored OHLCV was
+    OVERWRITTEN by a different value. Their sum is the old scalar return.
+
+    ⚠⚠ The split exists because these two are not the same event and the
+    caller could not tell them apart (#2414). A new bar extends the series; a
+    revision **destroys the value a strategy already made a decision on**, in
+    place, with no prior value retained anywhere — ``price_daily`` has no
+    audit column, so after this statement nothing can establish that the bar
+    ever held a different number. ``strategy_signals`` rows key on
+    ``(strategy_id, strategy_version, instrument_id, signal_bar_date,
+    signal_kind)`` and carry no corpus stamp, so a revised bar silently
+    invalidates any signal written against it and the corrected verdict cannot
+    even be re-recorded (it collides on that key). Same reasoning as #1293's
+    ``candles_skipped`` / ``candles_failed``: a caller that cannot distinguish
+    two very different outcomes reports both as one number.
+
+    ⚠ The revision surface is NOT the 3-bar correction buffer. ``_candles_fetch_count``
+    falls back to ``lookback_days`` (1000) whenever ``gap_days >
+    _INCREMENTAL_FETCH_BARS``, so any instrument stale by more than 3 days
+    re-observes — and may rewrite — roughly four years of its history in one
+    pass. Measured 2026-08-23: 1,183 of 12,230 instruments (9.7%) were in that
+    state, holding 544,799 bars. A multi-day jobs outage puts the whole
+    universe over that threshold at once.
+
+    ⚠ ``xmax = 0`` distinguishes the INSERT path from the DO UPDATE path;
+    verified empirically against this cluster rather than assumed (insert →
+    ``xmax = 0``; update → non-zero). A row blocked by the ``IS DISTINCT FROM``
+    guard returns NO row at all, so a genuine no-op counts as neither — which
+    is the same thing the previous ``rowcount`` accounting did.
     """
-    written = 0
+    inserted = 0
+    revised = 0
     for bar in bars:
-        result = conn.execute(
+        row = conn.execute(
             """
             INSERT INTO price_daily (
                 instrument_id, price_date, open, high, low, close, volume
@@ -948,6 +994,7 @@ def _upsert_candles(
                 price_daily.close  IS DISTINCT FROM EXCLUDED.close  OR
                 price_daily.volume IS DISTINCT FROM EXCLUDED.volume
             )
+            RETURNING (xmax = 0) AS was_insert
             """,
             {
                 "instrument_id": instrument_id,
@@ -958,9 +1005,14 @@ def _upsert_candles(
                 "close": bar.close,
                 "volume": bar.volume,
             },
-        )
-        written += result.rowcount
-    return written
+        ).fetchone()
+        if row is None:
+            continue
+        if row[0]:
+            inserted += 1
+        else:
+            revised += 1
+    return inserted, revised
 
 
 def _compute_and_store_features(

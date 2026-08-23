@@ -1245,7 +1245,8 @@ class TestRefreshMarketDataForceBackfill:
             patch("app.services.market_data._candles_are_fresh", return_value=False),
             patch("app.services.market_data._candles_fetch_count", return_value=3),
             patch("app.services.market_data._last_bar", return_value=None),
-            patch("app.services.market_data._upsert_candles", return_value=1) as upsert,
+            # (inserted, revised) since #2414 — a bare int unpacks to nothing.
+            patch("app.services.market_data._upsert_candles", return_value=(1, 0)) as upsert,
             patch("app.services.market_data._compute_and_store_features", return_value=0),
             patch("app.services.market_data._record_supply_outcome"),
         ):
@@ -1307,12 +1308,17 @@ class TestRefreshMarketDataForceBackfill:
         provider.get_daily_candles.return_value = [MagicMock()]  # non-empty bars
 
         with (
-            _patch.object(market_data, "_upsert_candles", return_value=5),
+            # (inserted, revised) since #2414. Deliberately BOTH non-zero: the
+            # #1293 accumulate-only-after-a-clean-commit rule binds the revision
+            # counter exactly as it binds the row total, and a (5, 0) fixture
+            # would leave that half of it unpinned.
+            _patch.object(market_data, "_upsert_candles", return_value=(3, 2)),
             _patch.object(market_data, "_compute_and_store_features", side_effect=RuntimeError("feature boom")),
         ):
             summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
 
-        assert summary.candle_rows_upserted == 0  # the 5 rolled back — not counted
+        assert summary.candle_rows_upserted == 0  # the 3 inserts rolled back — not counted
+        assert summary.candle_rows_revised == 0  # ...and neither are the 2 revisions
         assert summary.candles_failed == 1
 
 
