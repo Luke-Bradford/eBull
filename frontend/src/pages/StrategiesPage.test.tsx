@@ -1117,7 +1117,10 @@ describe("StrategiesPage", () => {
     expect(within(performance).getByText("US$50.00")).toBeInTheDocument();
     expect(within(performance).getByText("+1.25%")).toBeInTheDocument();
     expect(within(performance).getByText("+60.00%")).toBeInTheDocument();
-    expect(within(performance).getByText(/Daily realised plus open P&L from exact automated positions/)).toBeInTheDocument();
+    // The chart's explanatory paragraph was removed when the portfolio lens
+    // became a control panel (operator, 2026-08-23: "toggles and summaries…
+    // what can be configured, not narrated"). The figures it described are
+    // still asserted above.
 
     cleanup();
     renderStrategies();

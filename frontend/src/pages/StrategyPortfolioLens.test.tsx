@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as configApi from "@/api/config";
 import * as strategiesApi from "@/api/strategies";
 import type { StrategyOverviewResponse } from "@/api/types";
 import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
@@ -111,55 +112,61 @@ describe("StrategyPortfolioLens", () => {
     vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({ points: [] } as never);
   });
 
-  it("leads with the verdict and the ordered reasons, not the money", async () => {
+  it("states what is blocking as facts, and offers the control for the one that has one", async () => {
     renderLens();
-    expect(await screen.findByText("Not trading")).toBeInTheDocument();
-    const list = await screen.findByRole("list", { name: "Reasons the pot is not trading" });
-    const reasons = within(list).getAllByRole("listitem");
-    // Kill switch is the outermost gate and must be reason 1 — funding the pot
-    // underneath an active kill switch changes nothing.
-    expect(reasons[0]).toHaveTextContent("Kill switch is on");
-    expect(reasons[0]).toHaveTextContent("autonomy loop unattended");
-    expect(reasons.map((r) => r.textContent)).toHaveLength(5);
+    const blocking = await screen.findByLabelText("Blocking conditions");
+    // The kill switch is the only blocker the operator can act on from here, so
+    // it is the only one carrying a control. The rest are one line of fact —
+    // the narrated ordered lesson this replaced is what the operator objected to.
+    expect(blocking).toHaveTextContent("Kill switch on — autonomy loop unattended");
+    expect(within(blocking).getAllByRole("button")).toHaveLength(1);
+    expect(within(blocking).getByRole("button", { name: "Clear" })).toBeInTheDocument();
+    // Earned, not configured — so it belongs here, with its count.
+    expect(blocking).toHaveTextContent("No strategy has passed the evidence bar — 0 of 0");
+    // Capital, mandate and the on/off switch are fields in the Setup form
+    // below; repeating them here would narrate a control already on screen.
+    expect(blocking).not.toHaveTextContent("No capital is assigned");
+    expect(blocking).not.toHaveTextContent("No risk mandate is set");
+    expect(blocking).not.toHaveTextContent("Automatic trading is switched off");
   });
 
-  it("shows the mandate as unset rather than as blank limits", async () => {
+  it("clears the kill switch and re-reads the state", async () => {
+    const post = vi.spyOn(configApi, "postKillSwitch").mockResolvedValue({
+      active: false,
+      activated_at: null,
+      activated_by: null,
+      reason: null,
+    });
     renderLens();
-    expect(await screen.findByText(/No risk mandate set/)).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+    expect(post.mock.calls[0]?.[0]).toMatchObject({ active: false });
+    // A reason is mandatory on this endpoint; sending a blank one is a 422.
+    expect(post.mock.calls[0]?.[0].reason).not.toHaveLength(0);
+    await waitFor(() => expect(strategiesApi.fetchStrategyOverview).toHaveBeenCalledTimes(2));
+  });
+
+  it("summarises the pot in four numbers", async () => {
+    renderLens();
+    // Scoped to the state section: the setup form below carries its own
+    // "Available"/"Reserved" breakdown, so an unscoped query is ambiguous.
+    const state = (await screen.findByText("Not trading")).closest("section")!;
+    for (const label of ["Pot", "P&L", "Open", "Available"]) {
+      expect(within(state).getByText(label)).toBeInTheDocument();
+    }
   });
 
   it("renders a real empty state instead of a zeroed positions table", async () => {
     renderLens();
     expect(await screen.findByText("Nothing held")).toBeInTheDocument();
+    // Nothing to close, so the destructive control is absent rather than disabled.
+    expect(screen.queryByRole("button", { name: /Close all/ })).not.toBeInTheDocument();
   });
 
-  it("refreshes every read it owns after a close, the P&L chart included", async () => {
-    // Regression guard: the chart moved onto this lens with the split, so a
-    // close that refreshed only positions left it painting a stale valuation.
-    const position = {
-      strategy_trade_id: 1,
-      broker_position_id: "p-1",
-      instrument_id: 7,
-      symbol: "AAPL",
-      currency: "USD",
-      units: "1",
-      assigned_value: "100",
-      current_price: "110",
-    } as never;
-    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
-      positions: [position],
-      live_quote_instrument_ids: [7],
-    } as never);
-    vi.spyOn(strategiesApi, "closeStrategyOwnedPosition").mockResolvedValue({} as never);
-
+  it("reports the pot as halted", async () => {
     renderLens();
-    await userEvent.click(await screen.findByRole("button", { name: /close/i }));
-    await userEvent.click(await screen.findByRole("button", { name: /^Close position$/i }));
-
-    await waitFor(() => {
-      expect(strategiesApi.fetchStrategyPnlHistory).toHaveBeenCalledTimes(2);
-    });
-    expect(strategiesApi.fetchStrategyOwnedPositions).toHaveBeenCalledTimes(2);
+    const state = (await screen.findByText("Not trading")).closest("section")!;
+    expect(within(state).getByText("halted")).toBeInTheDocument();
   });
 
   it("never reports zero open positions while the positions request is failing", async () => {
@@ -170,24 +177,84 @@ describe("StrategyPortfolioLens", () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
       ...BLOCKED,
       strategies: [
-        // `aggregate` sums `pnl.active_position_count` — the field the tile
-        // actually reads. An earlier version of this fixture set a made-up
-        // `open_positions` key, so the sum was NaN and the assertion passed
-        // for the wrong reason.
         { pnl: { total_pnl: "0", active_position_count: 2 }, attribution: {}, allocation: {}, purpose: "capital_candidate" },
       ],
     } as unknown as StrategyOverviewResponse);
 
     renderLens();
-    // StatTile nests label and value in sibling divs, so step up to the tile root.
-    const tile = (await screen.findByText("Open positions")).parentElement!;
+    const tile = (await screen.findByText("Open")).parentElement!;
     expect(tile.textContent).toContain("2");
-    expect(tile.textContent).not.toMatch(/\b0\b/);
   });
 
-  it("reports the pot as halted", async () => {
-    renderLens();
-    expect(await screen.findByText("halted")).toBeInTheDocument();
+  describe("with open positions", () => {
+    const POSITION = {
+      strategy_trade_id: 1,
+      broker_position_id: "p-1",
+      instrument_id: 7,
+      symbol: "AAPL",
+      currency: "USD",
+      units: "1",
+      assigned_value: "100",
+      current_price: "110",
+    } as never;
+
+    beforeEach(() => {
+      vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+        positions: [POSITION],
+        live_quote_instrument_ids: [7],
+      } as never);
+    });
+
+    it("refreshes every read it owns after a close, the P&L chart included", async () => {
+      // The chart moved onto this lens with the split, so a close that refreshed
+      // only positions left it painting a stale valuation.
+      vi.spyOn(strategiesApi, "closeStrategyOwnedPosition").mockResolvedValue({} as never);
+      renderLens();
+      await userEvent.click(await screen.findByRole("button", { name: /^close$/i }));
+      await userEvent.click(await screen.findByRole("button", { name: /^Close position$/i }));
+      await waitFor(() => expect(strategiesApi.fetchStrategyPnlHistory).toHaveBeenCalledTimes(2));
+      expect(strategiesApi.fetchStrategyOwnedPositions).toHaveBeenCalledTimes(2);
+    });
+
+    it("requires confirmation before closing everything, and submits one at a time", async () => {
+      const close = vi.spyOn(strategiesApi, "closeStrategyOwnedPosition").mockResolvedValue({} as never);
+      renderLens();
+      await userEvent.click(await screen.findByRole("button", { name: /Close all 1 position/ }));
+      // Nothing is submitted on opening the dialog — the confirm is the trigger.
+      expect(close).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("button", { name: "Close 1" }));
+      await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+    });
+
+    it("leaves an already-closing trade out of the bulk action", async () => {
+      // Its own row disables Close; resubmitting it would be rejected and, since
+      // the loop stops on first failure, would strand the open ones behind it.
+      vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+        positions: [
+          { ...(POSITION as object), strategy_trade_id: 2, broker_position_id: "p-2", trade_status: "closing" },
+          POSITION,
+        ],
+        live_quote_instrument_ids: [7],
+      } as never);
+      const close = vi.spyOn(strategiesApi, "closeStrategyOwnedPosition").mockResolvedValue({} as never);
+
+      renderLens();
+      // One closable of two held.
+      await userEvent.click(await screen.findByRole("button", { name: /Close all 1 position/ }));
+      await userEvent.click(screen.getByRole("button", { name: "Close 1" }));
+      await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+      expect(close).toHaveBeenCalledWith(1, "p-1");
+    });
+
+    it("reports how many closed when a bulk close fails part-way", async () => {
+      vi.spyOn(strategiesApi, "closeStrategyOwnedPosition").mockRejectedValue(new Error("broker said no"));
+      renderLens();
+      await userEvent.click(await screen.findByRole("button", { name: /Close all 1 position/ }));
+      await userEvent.click(screen.getByRole("button", { name: "Close 1" }));
+      // The count matters: a bulk action that half-succeeded must not read as a
+      // clean failure, or the operator re-runs it against already-closed trades.
+      expect(await screen.findByRole("alert")).toHaveTextContent("0 of 1 closed");
+    });
   });
 });
 
