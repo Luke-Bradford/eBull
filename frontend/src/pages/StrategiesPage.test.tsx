@@ -1,11 +1,11 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as strategiesApi from "@/api/strategies";
 import type { FiredSignal, StrategyOverviewResponse, StrategyOwnedPosition, StrategyResultArm } from "@/api/types";
-import { StrategiesPage } from "@/pages/StrategiesPage";
+import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 
 const ARM: StrategyResultArm = {
   result_version: "result-v1",
@@ -458,6 +458,24 @@ function approvedOverview(): StrategyOverviewResponse {
   };
 }
 
+
+/**
+ * Render what the operator actually reaches at `/strategies` (#2868).
+ *
+ * The page split into two lenses, so a test that renders a lens component
+ * directly no longer asserts the operator's view. Rendering the hub at the
+ * lens under test keeps each test's original intent and proves the routing
+ * that puts the panel in front of them.
+ */
+function renderStrategies(view: "portfolio" | "research" = "research") {
+  const entry = view === "research" ? "/strategies?view=research" : "/strategies";
+  return render(
+    <MemoryRouter initialEntries={[entry]}>
+      <StrategiesHubPage />
+    </MemoryRouter>,
+  );
+}
+
 describe("StrategiesPage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -476,16 +494,26 @@ describe("StrategiesPage", () => {
   });
 
   it("keeps unapproved backtests out of portfolio performance", async () => {
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     expect(await screen.findByText("Portfolio performance")).toBeInTheDocument();
     const performance = screen.getByText("Portfolio performance").closest("section")!;
     expect(within(performance).getByText("US$0.00")).toBeInTheDocument();
+    // Three metrics here since #2868 (Total P&L, Average/trade, Success rate);
+    // "Open positions" moved to the pot's money row above. Measured, not assumed.
     expect(within(performance).getAllByText("—")).toHaveLength(2);
     expect(within(performance).queryByText("+1.50%")).not.toBeInTheDocument();
     expect(screen.getByText("No automated P&L yet")).toBeInTheDocument();
-    expect(screen.getAllByText("+1.50%")).toHaveLength(2);
-    expect(screen.getByText("Not proven")).toBeInTheDocument();
     expect(screen.getByText("Official account equity starts collecting with the next portfolio sync.")).toBeInTheDocument();
+
+    // The backtested figure and the candidate's "Not proven" state are excluded
+    // from performance but not suppressed — both read on the research lens,
+    // which is where a candidate's unapproved numbers belong after #2868.
+    // One occurrence on this lens, measured — the combined page showed two
+    // across both. Which panel held the second is not asserted here.
+    cleanup();
+    renderStrategies();
+    expect(await screen.findAllByText("+1.50%")).toHaveLength(1);
+    expect(screen.getByText("Not proven")).toBeInTheDocument();
   });
 
   it("shows broker account evidence without presenting it as automated return", async () => {
@@ -518,7 +546,7 @@ describe("StrategiesPage", () => {
         incomplete_reasons: ["local_eod_effective_time_unknown"],
       },
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("3 daily official snapshots")).toBeInTheDocument();
     expect(within(performance).getByText("US$1,025.00")).toBeInTheDocument();
@@ -561,7 +589,7 @@ describe("StrategiesPage", () => {
         incomplete_reasons: ["account_currency_not_documented"],
       },
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("Currency unverified")).toBeInTheDocument();
     expect(within(performance).queryByText("US$1,025.00")).not.toBeInTheDocument();
@@ -607,7 +635,7 @@ describe("StrategiesPage", () => {
       },
     });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("This snapshot predates observed broker account currency; its currency cannot be trusted.")).toBeInTheDocument();
     expect(within(performance).getByText("The same-day local end-of-day valuation is missing.")).toBeInTheDocument();
@@ -643,7 +671,7 @@ describe("StrategiesPage", () => {
       },
     });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("Reconciled within tolerance")).toBeInTheDocument();
     expect(within(performance).getByText("US$0.00 vs US$0.21")).toBeInTheDocument();
@@ -676,7 +704,7 @@ describe("StrategiesPage", () => {
       },
     });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("Diverged beyond tolerance")).toBeInTheDocument();
     expect(within(performance).getByText("US$120.00 vs US$0.21")).toBeInTheDocument();
@@ -686,7 +714,7 @@ describe("StrategiesPage", () => {
   });
 
   it("separates unapproved research from selectable strategies", async () => {
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     expect(await screen.findByText("Automation is not ready")).toBeInTheDocument();
     expect(screen.getByText("Candidate research has not cleared the recent after-cost validation gates.")).toBeInTheDocument();
     expect(screen.queryByText("Approved & managed strategies")).not.toBeInTheDocument();
@@ -696,7 +724,9 @@ describe("StrategiesPage", () => {
     await userEvent.click(within(research).getByText("Research & validation"));
     expect(screen.getByText("Time-series momentum")).toBeVisible();
     expect(screen.queryByRole("checkbox", { name: /Time-series momentum/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Allow new automated entries" })).toBeDisabled();
+    // The "Allow new automated entries" control moved to the portfolio lens
+    // (#2868); its disabled-while-guard-off behaviour is asserted there by
+    // "does not present automation as enabled while the system-wide guard is off".
   });
 
   it("renders harness rules as compact controls without allocation actions", async () => {
@@ -713,7 +743,7 @@ describe("StrategiesPage", () => {
         allocation_refusals: ["harness_validation_only"],
       }],
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const research = (await screen.findByText("Research & validation")).closest("details")!;
     expect(screen.getByText("0 candidates · 1 control")).toBeVisible();
     expect(screen.getByText("Validation controls")).not.toBeVisible();
@@ -761,7 +791,7 @@ describe("StrategiesPage", () => {
         },
       ],
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const validation = (await screen.findByText("Forward signal validation")).closest("section")!;
     expect(within(validation).getByText("106")).toBeInTheDocument();
     expect(within(validation).getByText("2")).toBeInTheDocument();
@@ -771,7 +801,7 @@ describe("StrategiesPage", () => {
   it("names the next promotion step and the reasons it would refuse", async () => {
     // #2770: the step stays NAMED when it is blocked — "which step, and why" is
     // the thing an operator needs; hiding it leaves the page saying nothing.
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     expect(screen.getByText("Next step: Validate historical evidence")).toBeInTheDocument();
     expect(screen.getByText("recent_evidence_window_missing x6")).toBeInTheDocument();
@@ -793,7 +823,7 @@ describe("StrategiesPage", () => {
       evidence_ref: `recent-evidence-v1+${"a".repeat(64)}`,
       pinned_result_count: 24,
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     const button = screen.getByRole("button", { name: "Validate historical evidence" });
     // A promotion is an authorisation; without a rationale there is nothing to record.
@@ -815,7 +845,7 @@ describe("StrategiesPage", () => {
       strategies: [{ ...strategy, next_operator_action_refusals: [] }],
     });
     const advance = vi.spyOn(strategiesApi, "advanceStrategyStage");
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.type(screen.getByLabelText("Why are you advancing this strategy?"), "   ");
     expect(screen.getByRole("button", { name: "Validate historical evidence" })).toBeDisabled();
@@ -831,7 +861,7 @@ describe("StrategiesPage", () => {
     vi.spyOn(strategiesApi, "advanceStrategyStage").mockRejectedValue(
       new Error("action 'validate_historical' is not available from stage 'historical_validated'"),
     );
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.type(screen.getByLabelText("Why are you advancing this strategy?"), "page was stale");
     await userEvent.click(screen.getByRole("button", { name: "Validate historical evidence" }));
@@ -846,7 +876,7 @@ describe("StrategiesPage", () => {
       ...OVERVIEW,
       strategies: [{ ...strategy, purpose: "harness_validation", next_operator_action: null, next_operator_action_refusals: [] }],
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     expect(screen.queryByText(/^Next step:/)).not.toBeInTheDocument();
   });
@@ -862,7 +892,7 @@ describe("StrategiesPage", () => {
         allocation_refusals: ["harness_validation_only"],
       }],
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const research = (await screen.findByText("Research & validation")).closest("details")!;
     expect(research).not.toHaveAttribute("open");
     expect(screen.queryByText("Approved & managed strategies")).not.toBeInTheDocument();
@@ -871,7 +901,7 @@ describe("StrategiesPage", () => {
 
   it("uses a compact capital control while still allowing the limit to be saved", async () => {
     const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({ ...OVERVIEW.paper_pool, capital_limit: "1500" });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const input = await screen.findByLabelText("Trading capital (USD)");
     expect(input.parentElement).toHaveClass("w-48");
     fireEvent.change(input, { target: { value: "1500" } });
@@ -888,7 +918,7 @@ describe("StrategiesPage", () => {
       ...OVERVIEW.paper_pool,
       approval_mode: "autonomous",
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const approval = await screen.findByLabelText("Promotion approval");
     fireEvent.change(approval, { target: { value: "autonomous" } });
     expect(approval).toHaveValue("autonomous");
@@ -908,7 +938,7 @@ describe("StrategiesPage", () => {
       ...OVERVIEW.paper_pool,
       mandate: { ...OVERVIEW.paper_pool.mandate, risk_profile: "growth" },
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     expect(await screen.findByText("Policy ceilings, not return forecasts. Long-only and unleveraged in this version.")).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText("Risk profile"), "growth");
     expect(screen.getByText("+18.00%")).toBeInTheDocument();
@@ -924,7 +954,7 @@ describe("StrategiesPage", () => {
       ...approvedOverview(),
       execution_enabled: false,
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).not.toBeChecked();
   });
@@ -943,7 +973,7 @@ describe("StrategiesPage", () => {
       ...ready.paper_pool,
       enabled: true,
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).not.toBeChecked();
     expect(master).not.toBeDisabled();
@@ -965,7 +995,7 @@ describe("StrategiesPage", () => {
       paper_pool: { ...ready.paper_pool, enabled: false },
       automation_readiness: { ...ready.automation_readiness, ready: false, state: "no_capital_candidates", blockers: ["no_capital_candidates"] },
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).toBeDisabled();
     expect(screen.getByText("Automation stays off until at least one strategy passes validation.")).toBeInTheDocument();
@@ -981,7 +1011,7 @@ describe("StrategiesPage", () => {
       execution_enabled: false,
       paper_pool: { ...ready.paper_pool, enabled: false },
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).toBeDisabled();
     expect(screen.getByText("This account cannot run strategy automation. Connect the demo account, or complete real-money activation first.")).toBeInTheDocument();
@@ -989,16 +1019,24 @@ describe("StrategiesPage", () => {
 
   it("shows compact prospective evidence when automation is ready", async () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
 
     const readiness = (await screen.findByText("Automation evidence is current")).closest("section")!;
     expect(within(readiness).getByText("30")).toBeInTheDocument();
     expect(within(readiness).getAllByText("1")).toHaveLength(2);
-    expect(screen.getByRole("checkbox", { name: "Allow new automated entries" })).not.toBeDisabled();
+  });
+
+  // The entries control moved to the portfolio lens in #2868, so the readiness
+  // display and the control it justifies are now asserted on their own lenses.
+  it("enables the entries control once automation is ready", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
+    renderStrategies("portfolio");
+
+    expect(await screen.findByRole("checkbox", { name: "Allow new automated entries" })).not.toBeDisabled();
   });
 
   it("shows stable primary evidence without paging through missing windows", async () => {
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
     expect(screen.getByText("Primary evidence")).toBeInTheDocument();
@@ -1010,7 +1048,7 @@ describe("StrategiesPage", () => {
   });
 
   it("splits the primary arm by regime and names the regimes that saw no trade", async () => {
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
 
@@ -1035,7 +1073,7 @@ describe("StrategiesPage", () => {
       status: "queued",
       already_active: false,
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
 
     await userEvent.click(await screen.findByText("Research & validation"));
     expect(await screen.findByText(/Evidence 1\/6/)).toHaveTextContent("frozen through 27 Sept 2024");
@@ -1045,8 +1083,10 @@ describe("StrategiesPage", () => {
   });
 
   it("omits forward activity when no capital candidate has a forward resolver", async () => {
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
-    expect(await screen.findByText("Portfolio performance")).toBeInTheDocument();
+    renderStrategies();
+    // Anchor on a research-lens heading: "Portfolio performance" moved to the
+    // portfolio lens in #2868 and is no longer rendered here.
+    expect(await screen.findByText("Research & validation")).toBeInTheDocument();
     expect(screen.queryByText("Forward signal validation")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Activity" })).not.toBeInTheDocument();
     expect(screen.queryByText("Instrument")).not.toBeInTheDocument();
@@ -1070,13 +1110,21 @@ describe("StrategiesPage", () => {
         incomplete_reasons: [],
       }],
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    // Split across the two lenses by #2868: the measures render on the
+    // portfolio, the per-strategy control on the research pipeline.
+    renderStrategies("portfolio");
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("US$50.00")).toBeInTheDocument();
     expect(within(performance).getByText("+1.25%")).toBeInTheDocument();
     expect(within(performance).getByText("+60.00%")).toBeInTheDocument();
-    expect(within(performance).getByText(/Daily realised plus open P&L from exact automated positions/)).toBeInTheDocument();
-    expect(screen.getByText("1 approved")).toBeInTheDocument();
+    // The chart's explanatory paragraph was removed when the portfolio lens
+    // became a control panel (operator, 2026-08-23: "toggles and summaries…
+    // what can be configured, not narrated"). The figures it described are
+    // still asserted above.
+
+    cleanup();
+    renderStrategies();
+    expect(await screen.findByText("1 approved")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Enabled" })).toBeEnabled();
   });
 
@@ -1091,7 +1139,7 @@ describe("StrategiesPage", () => {
       ticket_value: "75",
       max_ticket_amount: "100",
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
 
     await userEvent.click(await screen.findByText(/Per signal: 20%/));
     await userEvent.selectOptions(screen.getByLabelText("Method"), "fixed");
@@ -1116,7 +1164,7 @@ describe("StrategiesPage", () => {
       positions: [OWNED_POSITION],
       live_quote_instrument_ids: [101],
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     const section = (await screen.findByText("Open automated positions")).closest("section")!;
     expect(within(section).getByText("ACME")).toBeInTheDocument();
     expect(within(section).getByText("US$100.00")).toBeInTheDocument();
@@ -1139,12 +1187,15 @@ describe("StrategiesPage", () => {
       reason_code: "broker_close_accepted",
       operation_id: 88,
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies("portfolio");
     await userEvent.click(await screen.findByRole("button", { name: "Close" }));
     expect(screen.getByText("A separate manual position in ACME is not part of this request and will remain untouched.")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Close position" }));
     await waitFor(() => expect(close).toHaveBeenCalledWith(41, 7001));
-    await waitFor(() => expect(strategiesApi.fetchFiredSignals).toHaveBeenCalledTimes(2));
+    // The close now refreshes the portfolio lens's own reads. Fired-signal
+    // activity lives on the research lens (#2868) and is no longer refetched
+    // from here — it was never the evidence that the close landed.
+    await waitFor(() => expect(strategiesApi.fetchStrategyOwnedPositions).toHaveBeenCalledTimes(2));
   });
 
   it("shows funded and rejected decisions through execution and outcome without inventing orders", async () => {
@@ -1171,7 +1222,7 @@ describe("StrategiesPage", () => {
       next_cursor: null,
     });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const section = (await screen.findByText("Generated trade activity")).closest("section")!;
     expect(within(section).getByText("Funded")).toBeInTheDocument();
     expect(within(section).getByText("Not funded")).toBeInTheDocument();
@@ -1247,7 +1298,7 @@ describe("StrategiesPage", () => {
       next_cursor: null,
     });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const section = (await screen.findByText("Generated trade activity")).closest("section")!;
     expect(within(section).getByText("Close history incomplete")).toBeInTheDocument();
     expect(within(section).getByText("Released position is missing broker close history")).toBeInTheDocument();
@@ -1279,7 +1330,7 @@ describe("StrategiesPage", () => {
     };
     vi.mocked(strategiesApi.fetchFiredSignals).mockResolvedValue({ items: [closing], next_cursor: null });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const section = (await screen.findByText("Generated trade activity")).closest("section")!;
     expect(within(section).getByText("closing")).toBeInTheDocument();
     expect(within(section).getByText("close · submitted")).toBeInTheDocument();
@@ -1311,7 +1362,7 @@ describe("StrategiesPage", () => {
     };
     vi.mocked(strategiesApi.fetchFiredSignals).mockResolvedValue({ items: [ambiguousEntry], next_cursor: null });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const section = (await screen.findByText("Generated trade activity")).closest("section")!;
     expect(within(section).getByText("Entry order has ambiguous broker reconciliation")).toBeInTheDocument();
     expect(within(section).getByText("Reconciliation ambiguous · broker multiple matches")).toBeInTheDocument();
@@ -1343,7 +1394,7 @@ describe("StrategiesPage", () => {
       next_cursor: null,
     });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const section = (await screen.findByText("Generated trade activity")).closest("section")!;
     const failedBadge = within(within(section).getByText("FAIL").closest("tr")!).getByText("failed");
     const reconcileBadge = within(within(section).getByText("RECON").closest("tr")!).getByText("reconcile required");
@@ -1357,7 +1408,7 @@ describe("StrategiesPage", () => {
       .mockResolvedValueOnce({ items: [FUNDED_SIGNAL], next_cursor: 91 })
       .mockResolvedValueOnce({ items: [older], next_cursor: null });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
 
     expect(await screen.findByText("OLD")).toBeInTheDocument();
@@ -1374,7 +1425,7 @@ describe("StrategiesPage", () => {
       .mockRejectedValueOnce(new Error("older page unavailable"))
       .mockResolvedValueOnce({ items: [older], next_cursor: null });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Older activity could not be loaded");
@@ -1386,7 +1437,7 @@ describe("StrategiesPage", () => {
   });
 
   it("renders an honest empty activity state", async () => {
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     expect(await screen.findByText("No generated decisions yet")).toBeInTheDocument();
     expect(screen.getByText("Fired entry and exit signals will appear here after the daily strategy scan.")).toBeInTheDocument();
   });
@@ -1396,7 +1447,7 @@ describe("StrategiesPage", () => {
       .mockRejectedValueOnce(new Error("activity unavailable"))
       .mockResolvedValueOnce({ items: [], next_cursor: null });
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     const heading = await screen.findByText("Generated trade activity");
     const section = heading.closest("section")!;
     expect(within(section).getByRole("alert")).toHaveTextContent("Failed to load");
@@ -1407,7 +1458,7 @@ describe("StrategiesPage", () => {
   it("toggles an approved strategy for the next run", async () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
     const update = vi.spyOn(strategiesApi, "updateStrategyAllocation").mockResolvedValue({ strategy_id: "s1-time-series-momentum", strategy_version: "strategy-registry-v1+abc", deployment_id: 7, capital_limit: "1000", currency: "USD", enabled: false, revision: 3 });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByRole("checkbox", { name: "Enabled" }));
     await waitFor(() => expect(update).toHaveBeenCalledWith("s1-time-series-momentum", expect.objectContaining({ enabled: false, reason: "Paused from automated strategy workspace" })));
   });
@@ -1426,7 +1477,7 @@ describe("StrategiesPage", () => {
     ];
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(mixed);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
 
@@ -1456,7 +1507,7 @@ describe("StrategiesPage", () => {
     strategy.evidence_windows = strategy.evidence_windows.map((window) => ({ ...window, status: "missing", arms: [] }));
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(rotated);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
 
@@ -1481,7 +1532,7 @@ describe("StrategiesPage", () => {
     ];
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(withHistory);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
 
@@ -1510,7 +1561,7 @@ describe("StrategiesPage", () => {
     ];
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(control);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
 
     expect(await screen.findByText("Version rotated.")).toBeInTheDocument();
@@ -1527,7 +1578,7 @@ describe("StrategiesPage", () => {
     control.strategies[0]!.purpose = "harness_validation";
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(control);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
 
     // The share renders; the weekly rate names its own independent reason.
@@ -1547,7 +1598,7 @@ describe("StrategiesPage", () => {
     // contiguous blocks — `app/services/walk_forward.py` is explicit that it is
     // "not a strictly anchored walk-forward" — so the heading must not promise
     // one.
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
 
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
@@ -1581,7 +1632,7 @@ describe("StrategiesPage", () => {
     };
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(unsplit);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
 
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
@@ -1606,7 +1657,7 @@ describe("StrategiesPage", () => {
     strategy.fire_rate.share_unavailable_reason = "no_decision_date_scanned";
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(uncovered);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
 
     expect(await screen.findByText("No decision date scanned")).toBeInTheDocument();
@@ -1629,7 +1680,7 @@ describe("StrategiesPage", () => {
     arm.losing_trade_count = 0;
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(measured);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
 
     expect(await screen.findByText("No completed trades")).toBeInTheDocument();
@@ -1652,7 +1703,7 @@ describe("StrategiesPage", () => {
     arm.unpriced_trade_count = 2;
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(measured);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
 
     expect(await screen.findByText("6.5 days")).toBeInTheDocument();
@@ -1668,7 +1719,7 @@ describe("StrategiesPage", () => {
     control.strategies[0]!.purpose = "harness_validation";
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(control);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
 
     expect(await screen.findByText("Not lost")).toBeInTheDocument();
@@ -1688,7 +1739,7 @@ describe("StrategiesPage", () => {
     arm.unpriced_trade_count = 2;
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(censored);
 
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
 
@@ -1698,7 +1749,7 @@ describe("StrategiesPage", () => {
   });
 
   it("shows no previous-versions block when there is no history", async () => {
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
 
@@ -1713,7 +1764,7 @@ describe("StrategiesPage", () => {
       paper_pool: { ...approved.paper_pool, enabled: false, capital_limit: "0", remaining_capital: "0" },
       strategies: [{ ...strategy, allocation: { ...strategy.allocation, enabled: false, capital_limit: "0" } }],
     });
-    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    renderStrategies();
     expect(await screen.findByRole("checkbox", { name: "Paused" })).toBeDisabled();
   });
 });
