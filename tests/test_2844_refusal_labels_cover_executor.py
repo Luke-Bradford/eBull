@@ -52,7 +52,6 @@ _CODE_SHAPED = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 #: hatch, and a code silenced here is a code the operator never gets copy for.
 _NOT_REASON_CODES = frozenset(
     {
-        "broker_rejected",  # a PaperExecutionResult VERDICT; the paired reason is broker_submission_rejected
         "harness_validation",  # a deployment PURPOSE, compared against; the code is harness_validation_only
         "reason_code",  # the field name, passed to _require_text as its own label
         # `_component_amount` returns `(amount, basis)`, so the COST_BASIS_* constants
@@ -92,12 +91,14 @@ def _resolved_names() -> dict[str, str]:
     }
 
 
-def _executor_reason_codes() -> set[str]:
-    """Every string that can reach `strategy_funding_decisions.reason_code`.
+def _harvested_strings() -> set[str]:
+    """Every code-shaped string sitting in a position that can reach `reason_code`.
 
     Deliberately over-inclusive: within each position that matters, the WHOLE
     sub-expression is walked rather than shape-matched. A false positive costs one
-    label; a false negative ships a code the operator cannot read.
+    label; a false negative ships a code the operator cannot read. `_NOT_REASON_CODES`
+    is subtracted by `_executor_reason_codes`, and pinned by
+    `test_the_non_code_escape_hatch_stays_minimal`.
     """
     tree = ast.parse(_EXECUTOR.read_text())
     names = _resolved_names()
@@ -131,14 +132,45 @@ def _executor_reason_codes() -> set[str]:
         if isinstance(node, ast.Tuple) and len(node.elts) == 2 and isinstance(node.elts[1], (ast.Constant, ast.Name)):
             harvest(node.elts[1])
 
-    return found - _NOT_REASON_CODES
+    return found
+
+
+def _executor_reason_codes() -> set[str]:
+    return _harvested_strings() - _NOT_REASON_CODES
+
+
+def _assert_parse_is_plausible(body: str, labels: dict[str, str]) -> None:
+    """Every `key: "value"` line in the map was actually parsed.
+
+    Counting the entries the naive way -- lines that look like a map entry at ANY indent --
+    and comparing against what the strict regex captured turns a reformat from a quiet
+    under-count into a named failure.
+    """
+    entry_lines = len(re.findall(r'^\s*[a-z0-9_]+: "', body, re.M))
+    assert len(labels) == entry_lines, (
+        f"REFUSAL_LABELS parse is under-counting: {entry_lines} entry line(s) present, "
+        f"{len(labels)} captured. The map's formatting has moved away from what this "
+        "guard parses -- fix the regex, do not lower the expectation."
+    )
 
 
 def _frontend_labels() -> dict[str, str]:
+    """`REFUSAL_LABELS`, parsed out of the page.
+
+    ⚠ The per-entry regex assumes a 2-space indent, so a reformat of the map could make
+    it parse FEWER entries than exist. In the two coverage tests that direction is loud
+    -- fewer labels means a bigger `codes - labels` difference and a failure -- but it is
+    silent in `test_labels_are_sentences_not_restated_identifiers`, which only inspects
+    what it parsed. `_assert_parse_is_plausible` closes that gap for every caller at once
+    rather than each test re-checking.
+    """
     source = _PAGE.read_text()
     match = re.search(r"const REFUSAL_LABELS: Record<string, string> = \{(.*?)\n\};", source, re.S)
     assert match is not None, "REFUSAL_LABELS is no longer declared in the shape this guard parses"
-    return dict(re.findall(r'^\s{2}([a-z0-9_]+): "((?:[^"\\]|\\.)*)"', match.group(1), re.M))
+    body = match.group(1)
+    labels = dict(re.findall(r'^\s{2}([a-z0-9_]+): "((?:[^"\\]|\\.)*)"', body, re.M))
+    _assert_parse_is_plausible(body, labels)
+    return labels
 
 
 def test_extractor_finds_every_emission_shape() -> None:
@@ -150,6 +182,26 @@ def test_extractor_finds_every_emission_shape() -> None:
     codes = _executor_reason_codes()
     unfound = {code: shape for code, shape in _SHAPE_ANCHORS.items() if code not in codes}
     assert not unfound, f"the extractor stopped recognising an emission shape: {unfound}"
+
+
+def test_the_non_code_escape_hatch_stays_minimal() -> None:
+    """Every `_NOT_REASON_CODES` entry still suppresses something the walk finds.
+
+    The allow-list is the one way to silence a string the extractor picks up, so it is
+    also the one way to silence a real refusal code. Nothing keeps it honest by itself.
+    This asserts each entry is still EARNING its place: delete the executor string an
+    entry was written for and the entry fails here rather than lingering, ready to
+    swallow a future code that happens to reuse the name.
+
+    ⚠ It found one on its first run -- `broker_rejected`, which appears only in a
+    `Literal[...]` annotation and so was never harvested. It was suppressing nothing and
+    is removed.
+    """
+    stale = sorted(_NOT_REASON_CODES - _harvested_strings())
+    assert not stale, (
+        f"{len(stale)} entr(y/ies) in _NOT_REASON_CODES no longer match anything the extractor "
+        f"finds, so they only suppress future codes: {stale}. Remove them."
+    )
 
 
 def test_every_executor_refusal_has_operator_copy() -> None:
