@@ -6,6 +6,7 @@ import psycopg
 import pytest
 
 from scripts.verify_2900_point_in_time import (
+    _DATE_COLUMNS,
     POST_DOCUMENT,
     SENTINEL_CIK,
     SENTINEL_DOCUMENT,
@@ -18,6 +19,11 @@ from scripts.verify_2900_point_in_time import (
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 
 pytestmark = pytest.mark.integration
+
+
+def test_census_includes_both_system_version_bounds() -> None:
+    assert "known_from" in _DATE_COLUMNS
+    assert "known_to" in _DATE_COLUMNS
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple]) -> None:

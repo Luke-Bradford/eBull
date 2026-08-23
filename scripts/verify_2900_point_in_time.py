@@ -457,6 +457,7 @@ _DATE_COLUMNS: Final = (
     "period_end_date",
     "ingested_at",
     "known_from",
+    "known_to",
     "settlement_date",
     "bar_date",
     "first_bar",

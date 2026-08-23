@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -78,6 +78,14 @@ def test_every_identity_owns_a_nonempty_immutable_family_set() -> None:
         assert families, identity
         assert isinstance(families, frozenset)
         assert families <= set(RankingFamily)
+
+
+def test_request_rejects_datetime_subclass_as_a_decision_session() -> None:
+    with pytest.raises(ValueError, match="decision_session must be a date"):
+        R6RankingRequest(
+            identity=R6RankingIdentity.QUALITY,
+            decision_session=cast(Any, datetime(2020, 1, 15, tzinfo=UTC)),
+        )
 
 
 @pytest.mark.parametrize("identity", list(R6RankingIdentity))

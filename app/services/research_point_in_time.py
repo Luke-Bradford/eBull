@@ -262,7 +262,7 @@ class R6RankingRequest:
     def __post_init__(self) -> None:
         if not isinstance(self.identity, R6RankingIdentity):
             raise ValueError(f"unknown R6 ranking identity: {self.identity!r}")
-        if not isinstance(self.decision_session, date):
+        if type(self.decision_session) is not date:
             raise ValueError("decision_session must be a date")
 
 
