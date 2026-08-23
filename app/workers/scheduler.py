@@ -3216,15 +3216,25 @@ def daily_candle_refresh() -> None:
                 context={
                     **watermark_context,
                     "population_status": "partial" if summary.candles_failed or unavailable else "complete",
+                    # #2414 — bars whose stored OHLCV this run OVERWROTE with a
+                    # different value, as opposed to appended. Persisted here
+                    # rather than left in the summary because the counter is
+                    # transient and ``price_daily`` keeps no prior value: once
+                    # this function returns, nothing anywhere can establish that
+                    # a bar was ever revised. ⚠ In ``context`` and not
+                    # ``outcomes`` deliberately — every key there counts
+                    # INSTRUMENTS, and this counts BARS.
+                    "bars_revised": summary.candle_rows_revised,
                 },
             )
         tracker.row_count = summary.candle_rows_upserted
 
     logger.info(
-        "Market refresh complete: instruments=%d candles=%d features=%d quotes=%d "
+        "Market refresh complete: instruments=%d candles=%d bars_revised=%d features=%d quotes=%d "
         "quotes_skipped=%d spread_flags=%d candles_fresh_skipped=%d candles_failed=%d",
         summary.instruments_refreshed,
         summary.candle_rows_upserted,
+        summary.candle_rows_revised,
         summary.features_computed,
         summary.quotes_updated,
         summary.quotes_skipped,
