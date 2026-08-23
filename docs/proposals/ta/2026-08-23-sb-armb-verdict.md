@@ -236,44 +236,60 @@ as the promising one — which is the premise ARM B inherited.
 ### ⚠⚠ 8.1 — this section said "all five hold-out views" and that is itself wrong (re-measured 2026-08-23)
 
 Re-run under working-order 3c rather than inherited. Pinning every key of
-`current_identity_pins()` (which fixes `namespace = 'hold_out'`) returns **six** distinct
-windows for s2, not five — §3's table silently omits the 2022 calendar year, and that is
-the one window where the sign flips:
+`current_identity_pins()` (which fixes `namespace = 'hold_out'`,
+`benchmark_rule = 'equal_weight_buy_and_hold_v1'`,
+`return_basis = 'split-dividend-adjusted-wealth-v1'`) and counting **distinct
+`(window_start, window_end)`** returns **six** windows for s2, where §3's table shows
+five. Rows below are `quarantine_arm = 'admitted'`; `masked` does not move
+`return_vs_buy_and_hold_pct` on any of the six, only `ambiguity_arm` does.
 
-| window | `return_vs_buy_and_hold_pct` best / worst case | `expectancy_per_trade_pct` best / worst |
-| --- | ---: | ---: |
-| 2021-09-28 → 2024-09-27 | −26.55 / −37.25 | −6.46 / −8.59 |
-| 2022-01-01 → 2024-09-27 | −11.76 / −23.55 | −5.22 / −7.34 |
-| **2022-01-01 → 2022-12-31** | **+13.35 / +9.59** | **−7.02 / −8.60** |
-| 2022-09-28 → 2024-09-27 | −44.07 / −55.27 | −5.19 / −7.62 |
-| 2023-01-01 → 2023-12-31 | −38.84 / −42.99 | −12.39 / −14.23 |
-| 2024-01-01 → 2024-09-27 | −33.08 / −39.03 | −5.98 / −9.38 |
+| window | arm | `total_return_pct` | `buy_and_hold_return_pct` | `return_vs_bh_pct` | `expectancy_per_trade_pct` | `profit_factor` |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 2021-09-28 → 2024-09-27 | best / worst | −37.74 / −48.45 | −11.19 | −26.55 / −37.25 | −6.46 / −8.59 | 0.581 / 0.490 |
+| 2022-01-01 → 2024-09-27 | best / worst | −23.57 / −35.36 | −11.81 | −11.76 / −23.55 | −5.22 / −7.34 | 0.638 / 0.536 |
+| **2022-01-01 → 2022-12-31** | best / worst | **−12.07 / −15.84** | **−25.43** | **+13.35 / +9.59** | **−7.02 / −8.60** | **0.384 / 0.327** |
+| 2022-09-28 → 2024-09-27 | best / worst | −12.99 / −24.20 | +31.08 | −44.07 / −55.27 | −5.19 / −7.62 | 0.660 / 0.545 |
+| 2023-01-01 → 2023-12-31 | best / worst | −17.04 / −21.19 | +21.80 | −38.84 / −42.99 | −12.39 / −14.23 | 0.286 / 0.232 |
+| 2024-01-01 → 2024-09-27 | best / worst | −2.14 / −8.08 | +30.94 | −33.08 / −39.03 | −5.98 / −9.38 | 0.614 / 0.480 |
 
-`quarantine_arm` (`masked` / `admitted`) does not move
-`return_vs_buy_and_hold_pct` on any of the six; only `ambiguity_arm` does.
+⚠ **What is established and what is not.** The six-window pinned readout above is
+measured. That §3 *"omitted"* the 2022 calendar year is **not** established — §3 may have
+pinned a different namespace, a different code revision, or counted rows rather than
+distinct windows. The safe statement is: **§3 reported five under a selection this pass
+did not reproduce, and the pinned selection returns six.** Either way §8's repair
+sentence must not carry a second unmeasured quantifier; the repo rule binds the repair as
+much as the original — *"if a sentence contains 'most', 'usually', 'every', 'always' or
+'rarely' about source data, it is a measurement. Run it or delete the quantifier."*
 
-**The headline falsification survives — s2 is not "the only one beating buy-and-hold" —
-but the repair sentence must not carry a second unmeasured quantifier.** This file's own
-repo rule applies to itself: *"if a sentence contains 'most', 'usually', 'every',
-'always' or 'rarely' about source data, it is a measurement. Run it or delete the
-quantifier."*
+⚠⚠ **The 2022 row is the more useful finding, not a footnote — and "losing less" is
+measured, not inferred.** `total_return_pct` is **−12.07%** against a buy-and-hold of
+**−25.43%**: both negative, s2 merely less so. It is the bear year, and the +13.35 is
+entirely the benchmark falling further.
 
-⚠⚠ **And the 2022 row is the more useful finding, not a footnote.** It is the bear year;
-s2 beat buy-and-hold there by **losing less**, while still posting −7.0% / −8.6% per
-trade. `return_vs_buy_and_hold_pct` and `expectancy_per_trade_pct` **disagree in sign on
-that window**. Relative outperformance in a falling market is not edge, which is exactly
-why `cost-aware-viability.md` bans CAGR/Sharpe/Sortino as decision metrics — and
-buy-and-hold comparison belongs on that banned list for the same reason. It is a
-narrative metric that reads as a verdict.
+**The decisive detail is the last column.** The one window where s2 "beats buy-and-hold"
+is also the window where its `profit_factor` is the **worst of all six — 0.384 / 0.327**,
+against 0.286–0.660 elsewhere. The narrative metric is most flattering exactly where the
+decision metric is worst. ⚠ s2's `total_return_pct` is negative on **all six** pinned
+hold-out windows; it never made money on any of them.
+
+⚠ Stated precisely, because the arithmetic is not a contradiction:
+`return_vs_buy_and_hold_pct` is a **difference of two sleeve-level percentages**
+(`total_return - benchmark_return`, `strategy_statistics.py:530`), while
+`expectancy_per_trade_pct` is a **per-trade mean**. Overlapping positions, idle cash and
+compounding all stop one from reconstructing the other, so `+13.35` beside `−7.02` is
+perfectly consistent. The point is not that they contradict — it is that **only one of
+them answers "is there edge here", and it is not the one that reads like a verdict.**
+`cost-aware-viability.md` bans CAGR/Sortino for the same structural reason.
 
 ### Correction to apply when a session can write to `.claude/**`
 
 Strike *"and the only one beating buy-and-hold"*, and replace with:
 
-> *"s2 inside the turnover bar. ⚠ Its buy-and-hold comparison is NOT a decision metric —
-> negative on 5 of 6 pinned hold-out windows and positive on the 2022 calendar year
-> (+13.35 / +9.59) where per-trade expectancy is nonetheless −7.02% / −8.60%. Beating a
-> falling benchmark by losing less is not edge (#2834)."*
+> *"s2 inside the turnover bar. ⚠ Its buy-and-hold comparison is NOT a decision metric.
+> Pinned, s2's `total_return_pct` is negative on **all six** hold-out windows, and the
+> single window where it 'beats buy-and-hold' (2022: −12.07% against the benchmark's
+> −25.43%) is also its **worst** window on `profit_factor` (0.384). Beating a falling
+> benchmark by losing less is not edge (#2834)."*
 
 ⚠ **Still not corrected in the skill: `.claude/**` remains unwritable headless** — sixth
 occurrence. **The cause is now measured; see #2403** and the prevention-log entry
