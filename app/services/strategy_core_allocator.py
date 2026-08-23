@@ -248,9 +248,14 @@ def evaluate_core_rebalance(
 
     ``broker_minimum`` is optional and ``None`` means THE CALLER HAS NO APPLICABLE
     MINIMUM TO SUPPLY, not that the broker has none.  ⚠ Whether a given broker
-    minimum applies to an incremental buy or a partial sell is the caller's
-    determination: item 1's spec cited eToro's `min_position_amount`, which is an
-    entry-path field, and nothing here establishes it governs a rebalance leg.
+    minimum applies to a given leg remains the caller's determination, and for
+    eToro it is now half-settled by the portal's own field definitions
+    (``broker_settlement_arms.effective_open_minimum``, 2026-08-23): both
+    ``minPositionExposure`` and ``minPositionAmount`` are documented as required
+    to OPEN a position, and NEITHER is documented for a close or partial close.
+    So a ``buy_core`` leg has a sourced floor and a ``sell_core`` leg does not --
+    a caller that supplies the open-side number for a sell is applying OUR rule,
+    not eToro's.
 
     Returns a verdict for every input.  No refusal raises: a caller that must catch
     to learn the mandate is disabled will eventually catch too broadly.

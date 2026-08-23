@@ -31,7 +31,7 @@ from app.providers.broker import (
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
 )
-from app.services.broker_settlement_arms import select_underlying_long_arms
+from app.services.broker_settlement_arms import effective_open_minimum, select_underlying_long_arms
 from app.services.cost_model import COST_MODEL_ID
 from app.services.market_calendar import us_market_status
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
@@ -647,7 +647,18 @@ def _eligibility_reason(response: BrokerEligibilityResponse, intent: _Intent, am
     arm = next(iter(arms))
     if arm.allow_stop_loss_take_profit is not True:
         return "fixed_exit_not_allowed"
-    minimum = arm.min_position_amount or matches[0].min_position_exposure
+    # ⚠ `max` of the two, not `or`. They are DIFFERENT quantities -- `minPositionExposure`
+    # is an exposure and `minPositionAmount` a margin -- and both gate an open, so the
+    # first-present-wins precedence this replaced was fail-OPEN by the gap between them.
+    # The source rule, the x1 precondition and the open-only scope are all on
+    # `effective_open_minimum`; the currency equality it requires is the one asserted at
+    # the top of this function.
+    minimum = effective_open_minimum(
+        response_currency=response.currency,
+        min_position_exposure=matches[0].min_position_exposure,
+        min_position_amount=arm.min_position_amount,
+    )
+    # Unchanged: no quoted minimum fails CLOSED, and the floor is inclusive.
     if minimum is None or amount < minimum:
         return "below_broker_minimum"
     return None
