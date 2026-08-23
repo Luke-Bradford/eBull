@@ -3,7 +3,7 @@
   "declaration_commit": "5fbde41f924c29daafd56b56b2678e9a0d557bfb",
   "declaration_sha256": "1f81ceb1675e6636d52ec0de6d685643a810d56688b9d9c8b4c4786987338c50",
   "eligible_valuation_spread_series": 0,
-  "execution_commit": "5ad03381de7e14d47dcd1168fae99bc59d29c443",
+  "execution_commit": "228551704fce152e54ad238e15bfa01c0ec9556b",
   "factor_valuation_record": {
     "dataset_key": null,
     "factor_id": "all-r6-arms",
@@ -25,7 +25,7 @@
     "15pct": "N/A \u2014 operational rule, no return outcome",
     "58pct": "N/A \u2014 operational rule, no return outcome"
   },
-  "measured_at": "2026-08-23T21:53:07.551904+00:00",
+  "measured_at": "2026-08-23T22:00:51.191046+00:00",
   "observation_count": 38017,
   "observation_unit_counts": {
     "binary_indicator": 2060,
@@ -504,8 +504,8 @@
   ],
   "snapshot_series_count": 38,
   "source_sha256": {
-    "app/services/r6_operational_rules.py": "9d7e5b8cbe75be76add50e93e01f3dff81a4c0bbe33209bd3b044bef1b3799d3",
-    "scripts/verify_2914_operational_rules.py": "7bcf68d9f0bf37dde622c71eefe44bfd64a5a2e35962332431938f652cab904e"
+    "app/services/r6_operational_rules.py": "660e2f0aa0c917f75703d2d145183f27f88018e1cb6b2e45e4caf666da83be3c",
+    "scripts/verify_2914_operational_rules.py": "d7f862fe253d8a9bb7b5b1b780c43a1aa5d53569123af0f103674247bab44cd7"
   },
   "turn_of_month_offsets": [
     -3,
