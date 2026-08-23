@@ -36,6 +36,7 @@ class TestPct:
 def _coverage(**overrides: object) -> FormationCoverage:
     base: dict[str, object] = {
         "month_start": date(2015, 6, 1),
+        "formation_date": date(2015, 6, 30),
         "series_alive": 100,
         "series_any": 40,
         "series_fresh": 20,

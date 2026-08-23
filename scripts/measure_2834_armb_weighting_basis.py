@@ -16,7 +16,7 @@ message's scope note.)
 
 ⚠ IT DECIDES NOTHING #2834 DID NOT ALREADY DECIDE. The 80% bar, the fallback and
 "reported as such" are read off the ticket. What this script chooses — and says so
-in the output — is only the two things the ticket left unconstructed, below.
+in the output — is only the three things the ticket left unconstructed, below.
 
 Source rule
 -----------
@@ -24,11 +24,17 @@ Source rule
 **The share count.** ``share_count_history`` (``sql/273``) is this repo's settled
 point-in-time count: cover-page ``dei:EntityCommonStockSharesOutstanding``
 preferred, ``us-gaap:CommonStockSharesOutstanding`` as fallback, positive values
-only (#2232). It is not re-derived here. ⚠ The IFRS share concepts are
-CORROBORATION ONLY and are deliberately excluded — see the block comment at
-``app/providers/implementations/sec_fundamentals.py:364`` and its ``AFYA`` /
-``SLSR`` counter-examples, where adding them would have handed both gaining
-instruments a WRONG denominator.
+only (#2232). Its concept pair and positivity rule are adopted here unchanged.
+⚠ The IFRS share concepts are CORROBORATION ONLY and are deliberately excluded —
+see the block comment at ``app/providers/implementations/sec_fundamentals.py:364``
+and its ``AFYA`` / ``SLSR`` counter-examples, where adding them would have handed
+both gaining instruments a WRONG denominator.
+
+⚠⚠ But the AVAILABILITY test reads ``financial_facts_raw`` directly, not the view —
+see ``_PIT_SQL``. The view deduplicates to the newest filing of each fact, which
+erases the evidence that an earlier version was already public at a historical
+formation. That understates coverage; the raw fact rows are the faithful source for
+"was any acceptable count public by date D".
 
 **The as-of date is the FILED date, not ``period_end``.** A formation on date D may
 only use a count the market could already read on D. ``share_count_history`` exposes
@@ -38,8 +44,8 @@ concepts and would fail open. This is #2231's as-of rule pointed the other way:
 blast radius asks when a fact was TRUE (``period_end``), knowledge time asks when
 it became PUBLIC (``filed_date``).
 
-Two constructions, because no published rule fixes them
--------------------------------------------------------
+Three constructions, because no published rule fixes them
+---------------------------------------------------------
 
 1. **"80% of cap-weight" cannot be evaluated as stated** — cap-weight is exactly what
    an absent share count makes unknowable, so coverage cannot be expressed as a
@@ -83,7 +89,20 @@ Two constructions, because no published rule fixes them
    365 + one quarter + 5 days' slack, chosen to be loose enough that one late annual
    filing does not refuse an otherwise-current count. It is reported, not defended:
    both arms are printed at every granularity precisely so the reader can see that
-   the verdict does not turn on it.
+   the verdict does not turn on it. The predicate is ``>= D - 460``, so a count filed
+   exactly 460 days before the formation is INCLUDED (an earlier ``>`` made the bound
+   459 while the prose said 460 — Codex checkpoint 3).
+
+3. **"Alive at the formation."** ``_ALIVE_WINDOW_DAYS = 7``, also by construction. A
+   series counts in a month's cross-section only if its last bar that month sits within
+   7 calendar days of the formation date. Without the bound a series whose only bar was
+   on the 3rd would be counted in a month-end cross-section it had already left, which
+   inflates the denominator with names that are not investable at formation.
+
+   ⚠ Relatedly, the formation date is now **corpus-wide per month** (the last bar any
+   series printed that month), not each series' own last bar. Both were Codex
+   checkpoint-3 findings: per-series dates meant one reported cross-section applied a
+   different point-in-time cutoff to every name in it.
 
 Run::
 
@@ -122,8 +141,29 @@ COVERAGE_BAR_PCT: Final[float] = 80.0
 _FRESH_DAYS: Final[int] = 460
 
 #: ARM B's replication window, from the ticket: "(i) 2000-2026 replication window
-#: (~320 monthly formations)".
+#: (~320 monthly formations)". ⚠ BOUNDED AT BOTH ENDS. An open upper bound would let
+#: a run in 2027 silently measure a different experiment than the one reported here.
 _WINDOW_START: Final[date] = date(2000, 1, 1)
+_WINDOW_END: Final[date] = date(2027, 1, 1)  # exclusive
+
+#: How close to the common formation date a series' last bar must sit for the series
+#: to count as alive at that formation. ⚠ BY CONSTRUCTION (7 calendar days ~ one
+#: trading week). Without it a series whose only bar that month was on the 3rd would
+#: be counted in a month-end cross-section it had already left.
+_ALIVE_WINDOW_DAYS: Final[int] = 7
+
+#: ONE formation date per month, shared by every series — the corpus-wide last bar of
+#: that month. ⚠ An earlier version took each SERIES' own last bar, which gave one
+#: reported cross-section a different PIT cutoff per series and made "alive" true for
+#: a name that stopped trading on the 3rd. Caught at Codex checkpoint 3.
+_FORMATION_SQL = """
+    CREATE TEMP TABLE armb_formation ON COMMIT DROP AS
+    SELECT date_trunc('month', d.bar_date)::date AS month_start,
+           max(d.bar_date)                       AS formation_date
+    FROM research_price_daily d
+    WHERE d.bar_date >= %(window_start)s AND d.bar_date < %(window_end)s
+    GROUP BY 1
+"""
 
 #: Monthly close/volume aggregate per series. One pass over the 76M-bar corpus.
 #: ``close * volume`` is the dollar-volume proxy; a NULL volume contributes zero
@@ -133,25 +173,40 @@ _MONTHLY_SQL = """
     CREATE TEMP TABLE armb_month ON COMMIT DROP AS
     SELECT d.series_id,
            date_trunc('month', d.bar_date)::date AS month_start,
-           max(d.bar_date)                       AS formation_date,
+           max(d.bar_date)                       AS series_last_bar,
            sum(d.close * coalesce(d.volume, 0))  AS dollar_volume,
            count(*)                              AS bars
     FROM research_price_daily d
-    WHERE d.bar_date >= %(window_start)s
+    WHERE d.bar_date >= %(window_start)s AND d.bar_date < %(window_end)s
     GROUP BY 1, 2
 """
 
-#: Every positive point-in-time count with a filed date, flattened to the two
-#: columns the PIT test needs. Materialised because ``share_count_history`` is a
-#: view over the partitioned ``financial_facts_raw`` and the join below would
-#: otherwise re-evaluate it per formation month.
+#: Every FILING OCCURRENCE of a positive point-in-time share count, read from
+#: ``financial_facts_raw`` directly rather than through ``share_count_history``.
+#:
+#: ⚠⚠ THE VIEW IS THE WRONG SOURCE FOR AN AVAILABILITY TEST, and using it was a real
+#: defect (Codex checkpoint 3). ``sql/273``'s ``latest_fact`` CTE is
+#: ``DISTINCT ON (instrument_id, concept, period_end, period_start) ... ORDER BY
+#: filed_date DESC`` — it keeps only the NEWEST filing of each fact. So a count first
+#: filed in 2015 and amended in 2016 leaves only the 2016 row, and a 2015 formation
+#: then reads "no count was public" when one was. The error is a FALSE NEGATIVE, i.e.
+#: it understates coverage, which is the conservative direction for a FAIL verdict —
+#: but it is still wrong and the fix is free.
+#:
+#: The view remains the settled source for the count's VALUE (its DEI-before-us-gaap
+#: COALESCE, #2411's matching filed date). This query asks a different question — *was
+#: any acceptable count public by date D* — for which the un-deduplicated fact rows are
+#: the faithful source. The concept pair and the ``val > 0`` rule are taken from the
+#: view unchanged, and ``taxonomy`` is pinned so the IFRS concepts stay excluded per
+#: ``app/providers/implementations/sec_fundamentals.py:364``.
 _PIT_SQL = """
     CREATE TEMP TABLE armb_pit ON COMMIT DROP AS
-    SELECT h.instrument_id,
-           h.shares_outstanding_filed_date AS filed_date
-    FROM share_count_history h
-    WHERE h.shares_outstanding > 0
-      AND h.shares_outstanding_filed_date IS NOT NULL
+    SELECT DISTINCT f.instrument_id, f.filed_date
+    FROM financial_facts_raw f
+    WHERE f.taxonomy IN ('us-gaap', 'dei')
+      AND f.concept IN ('EntityCommonStockSharesOutstanding', 'CommonStockSharesOutstanding')
+      AND f.val > 0
+      AND f.filed_date IS NOT NULL
 """
 
 #: Per formation month: the cross-section alive that month, and how much of it —
@@ -161,31 +216,34 @@ _PIT_SQL = """
 #: no ``instrument_id`` at all can never be covered. That is the honest reading
 #: and not a join defect: no instrument row means no CIK route to SEC facts.
 _COVERAGE_SQL = """
-    SELECT m.month_start,
+    SELECT f.month_start,
+           f.formation_date,
            count(*)                                          AS series_alive,
            count(*) FILTER (WHERE cov.any_filed)             AS series_any,
            count(*) FILTER (WHERE cov.fresh_filed)           AS series_fresh,
-           coalesce(sum(m.dollar_volume), 0)                            AS dv_total,
+           coalesce(sum(m.dollar_volume), 0)                                AS dv_total,
            coalesce(sum(m.dollar_volume) FILTER (WHERE cov.any_filed), 0)   AS dv_any,
            coalesce(sum(m.dollar_volume) FILTER (WHERE cov.fresh_filed), 0) AS dv_fresh
     FROM armb_month m
+    JOIN armb_formation f ON f.month_start = m.month_start
     JOIN research_price_series s ON s.series_id = m.series_id
     CROSS JOIN LATERAL (
         SELECT
             EXISTS (
                 SELECT 1 FROM armb_pit p
                 WHERE p.instrument_id = s.instrument_id
-                  AND p.filed_date <= m.formation_date
+                  AND p.filed_date <= f.formation_date
             ) AS any_filed,
             EXISTS (
                 SELECT 1 FROM armb_pit p
                 WHERE p.instrument_id = s.instrument_id
-                  AND p.filed_date <= m.formation_date
-                  AND p.filed_date > m.formation_date - %(fresh_days)s::int
+                  AND p.filed_date <= f.formation_date
+                  AND p.filed_date >= f.formation_date - %(fresh_days)s::int
             ) AS fresh_filed
     ) cov
-    GROUP BY m.month_start
-    ORDER BY m.month_start
+    WHERE m.series_last_bar >= f.formation_date - %(alive_days)s::int
+    GROUP BY f.month_start, f.formation_date
+    ORDER BY f.month_start
 """
 
 #: Survivorship character of the corpus, which #2834 step 0 also asks for
@@ -217,6 +275,7 @@ class FormationCoverage:
     """One monthly formation's coverage under both staleness arms."""
 
     month_start: date
+    formation_date: date
     series_alive: int
     series_any: int
     series_fresh: int
@@ -238,27 +297,31 @@ class FormationCoverage:
 
 
 def _load(conn: psycopg.Connection[tuple[Any, ...]]) -> list[FormationCoverage]:
-    """Build the two temp tables and read the per-formation coverage.
+    """Build the three temp tables and read the per-formation coverage.
 
     ⚠ Deliberately NOT wrapped in ``app.db.snapshot.snapshot_read``. That helper's
     contract is read-only ("the caller MUST NOT issue writes inside the block") and
     ``CREATE TEMP TABLE`` is DDL. The caller opens one REPEATABLE READ transaction
     instead, which gives the same single-snapshot property the helper exists for.
     """
-    conn.execute(_MONTHLY_SQL, {"window_start": _WINDOW_START})
+    bounds = {"window_start": _WINDOW_START, "window_end": _WINDOW_END}
+    conn.execute(_FORMATION_SQL, bounds)
+    conn.execute("CREATE INDEX ON armb_formation (month_start)")
+    conn.execute(_MONTHLY_SQL, bounds)
     conn.execute("CREATE INDEX ON armb_month (month_start)")
     conn.execute(_PIT_SQL)
     conn.execute("CREATE INDEX ON armb_pit (instrument_id, filed_date)")
-    rows = conn.execute(_COVERAGE_SQL, {"fresh_days": _FRESH_DAYS}).fetchall()
+    rows = conn.execute(_COVERAGE_SQL, {"fresh_days": _FRESH_DAYS, "alive_days": _ALIVE_WINDOW_DAYS}).fetchall()
     return [
         FormationCoverage(
             month_start=r[0],
-            series_alive=int(r[1]),
-            series_any=int(r[2]),
-            series_fresh=int(r[3]),
-            dv_total=float(r[4]),
-            dv_any=float(r[5]),
-            dv_fresh=float(r[6]),
+            formation_date=r[1],
+            series_alive=int(r[2]),
+            series_any=int(r[3]),
+            series_fresh=int(r[4]),
+            dv_total=float(r[5]),
+            dv_any=float(r[6]),
+            dv_fresh=float(r[7]),
         )
         for r in rows
     ]
@@ -273,7 +336,7 @@ def _report_by_year(rows: list[FormationCoverage], out: TextIO) -> None:
     that were never the same measurement.
     """
     print(
-        f"\n{'year':>6} {'formations':>10} {'series':>8} "
+        f"\n{'year':>6} {'formations':>10} {'avg_series':>11} "
         f"{'ser_any%':>9} {'ser_fresh%':>11} {'dv_any%':>8} {'dv_fresh%':>10}",
         file=out,
     )
@@ -289,7 +352,7 @@ def _report_by_year(rows: list[FormationCoverage], out: TextIO) -> None:
         ser_any = sum(g.series_any for g in group)
         ser_fresh = sum(g.series_fresh for g in group)
         print(
-            f"{year:>6} {len(group):>10} {alive // max(len(group), 1):>8} "
+            f"{year:>6} {len(group):>10} {alive // max(len(group), 1):>11} "
             f"{pct(ser_any, alive):>9.1f} {pct(ser_fresh, alive):>11.1f} "
             f"{pct(dv_any, dv_total):>8.1f} {pct(dv_fresh, dv_total):>10.1f}",
             file=out,
@@ -380,7 +443,8 @@ def main() -> int:
         f"{pooled_dv_fresh:.1f}%. #2834's declared fallback BINDS: ARM B weights by dollar "
         f"volume and reports it as such.\n"
         f"⚠ SCOPE OF THIS FAIL — it says value weighting is not assemblable FROM THIS "
-        f"SOURCE (SEC XBRL via share_count_history), under THIS identity map "
+        f"SOURCE (SEC XBRL cover-page + balance-sheet counts in financial_facts_raw), "
+        f"under THIS identity map "
         f"(research_price_series.instrument_id), over THIS window. It does not say a "
         f"point-in-time shares table has no use: it says one must not be built for ARM B's "
         f"value weighting on the strength of this measurement.",
