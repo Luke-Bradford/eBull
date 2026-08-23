@@ -9,9 +9,9 @@ masquerading as a valuation spread.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Final, Literal
@@ -35,6 +35,8 @@ def turn_of_month_preference_window(
     *,
     target_year: int,
     target_month: int,
+    venue_calendar_version: str,
+    is_venue_session: Callable[[date], bool],
 ) -> tuple[date, ...]:
     """Return session offsets -3..+3 around the target month's last session.
 
@@ -44,10 +46,20 @@ def turn_of_month_preference_window(
     """
     if not 1 <= target_month <= 12:
         raise ValueError("target_month must be in 1..12")
+    if not venue_calendar_version.strip():
+        raise ValueError("venue_calendar_version must be non-empty")
     if len(sessions) < len(TURN_OF_MONTH_OFFSETS):
         raise ValueError("session calendar cannot provide the complete -3..+3 window")
     if any(left >= right for left, right in zip(sessions, sessions[1:])):
         raise ValueError("session calendar must be strictly increasing and duplicate-free")
+    expected_sessions: list[date] = []
+    current = sessions[0]
+    while current <= sessions[-1]:
+        if is_venue_session(current):
+            expected_sessions.append(current)
+        current += timedelta(days=1)
+    if tuple(expected_sessions) != sessions:
+        raise ValueError("session sequence is incomplete or disagrees with the declared venue calendar")
 
     target_indices = [
         index for index, session in enumerate(sessions) if session.year == target_year and session.month == target_month

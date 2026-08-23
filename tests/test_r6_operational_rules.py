@@ -19,9 +19,16 @@ def _nyse_sessions(start: date, end: date) -> tuple[date, ...]:
     return tuple(sessions)
 
 
+def _is_nyse_session(day: date) -> bool:
+    return us_market_status(day) != "closed"
+
+
+_CALENDAR_ARGS = {"venue_calendar_version": "nyse-test-v1", "is_venue_session": _is_nyse_session}
+
+
 def test_turn_of_month_window_uses_session_offsets_across_month_boundary() -> None:
     sessions = _nyse_sessions(date(2026, 1, 20), date(2026, 2, 10))
-    assert turn_of_month_preference_window(sessions, target_year=2026, target_month=1) == (
+    assert turn_of_month_preference_window(sessions, target_year=2026, target_month=1, **_CALENDAR_ARGS) == (
         date(2026, 1, 27),
         date(2026, 1, 28),
         date(2026, 1, 29),
@@ -52,7 +59,14 @@ def test_turn_of_month_window_refuses_malformed_or_incomplete_calendars(
     sessions: tuple[date, ...], message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        turn_of_month_preference_window(sessions, target_year=2026, target_month=1)
+        turn_of_month_preference_window(sessions, target_year=2026, target_month=1, **_CALENDAR_ARGS)
+
+
+def test_turn_of_month_window_refuses_an_internal_missing_venue_session() -> None:
+    sessions = _nyse_sessions(date(2026, 1, 20), date(2026, 2, 10))
+    incomplete = tuple(day for day in sessions if day not in {date(2026, 1, 29), date(2026, 1, 30)})
+    with pytest.raises(ValueError, match="incomplete"):
+        turn_of_month_preference_window(incomplete, target_year=2026, target_month=1, **_CALENDAR_ARGS)
 
 
 def test_unavailable_factor_valuation_carries_no_proxy_value() -> None:

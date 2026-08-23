@@ -18,6 +18,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.config import settings
+from app.services.market_calendar import RULE_SET_VERSION as NYSE_CALENDAR_VERSION
+from app.services.market_calendar import us_market_status
 from app.services.r6_operational_rules import (
     FACTOR_VALUATION_RULE_VERSION,
     REFERENCE_RETURN_UNITS,
@@ -144,25 +146,37 @@ def _verify_operational_rules() -> dict[str, bool]:
         date(2026, 2, 3),
         date(2026, 2, 4),
     )
-    if turn_of_month_preference_window(sessions, target_year=2026, target_month=1) != sessions:
+
+    def is_nyse_session(day: date) -> bool:
+        return us_market_status(day) != "closed"
+
+    kwargs = {
+        "target_year": 2026,
+        "target_month": 1,
+        "venue_calendar_version": NYSE_CALENDAR_VERSION,
+        "is_venue_session": is_nyse_session,
+    }
+    if turn_of_month_preference_window(sessions, **kwargs) != sessions:
         raise RuntimeError("turn-of-month helper returned the wrong frozen -3..+3 window")
     checks = {
         "exact_window": True,
         "duplicate_calendar_refused": _must_refuse(
-            lambda: turn_of_month_preference_window(
-                (*sessions[:3], sessions[2], *sessions[4:]), target_year=2026, target_month=1
-            ),
+            lambda: turn_of_month_preference_window((*sessions[:3], sessions[2], *sessions[4:]), **kwargs),
             label="duplicate session calendar",
         ),
         "incomplete_calendar_refused": _must_refuse(
-            lambda: turn_of_month_preference_window(sessions[:-1], target_year=2026, target_month=1),
+            lambda: turn_of_month_preference_window(sessions[:-1], **kwargs),
             label="incomplete session calendar",
         ),
         "missing_anchor_refused": _must_refuse(
-            lambda: turn_of_month_preference_window(
-                tuple(date(2026, 2, day) for day in range(2, 9)), target_year=2026, target_month=1
-            ),
+            lambda: turn_of_month_preference_window(tuple(date(2026, 2, day) for day in range(2, 9)), **kwargs),
             label="missing target-month anchor",
+        ),
+        "internally_incomplete_calendar_refused": _must_refuse(
+            lambda: turn_of_month_preference_window(
+                (*sessions[:2], *sessions[4:], date(2026, 2, 5), date(2026, 2, 6)), **kwargs
+            ),
+            label="internally incomplete venue calendar",
         ),
         "return_provenance_relabel_refused": _must_refuse(
             lambda: FactorValuationRecord(
