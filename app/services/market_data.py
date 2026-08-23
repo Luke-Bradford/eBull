@@ -11,13 +11,19 @@ import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import psycopg
 from psycopg.rows import dict_row
 
 from app.providers.market_data import MarketDataProvider, OHLCVBar, Quote
+from app.services.strategy_core_quote_observation import (
+    normalise_quote as normalise_core_quote,
+)
+from app.services.strategy_core_quote_observation import (
+    record_core_quote_observation,
+)
 from app.services.sync_orchestrator.exception_classifier import classify_exception
 from app.services.sync_orchestrator.layer_types import FailureCategory, UpstreamUnreachableError
 from app.services.sync_orchestrator.progress import report_progress
@@ -300,6 +306,11 @@ class QuoteRefreshSummary:
     # Swallowing it into a bare bool would force the job to either report
     # success or invent a category (#2271, Codex round 2).
     batch_error: Exception | None = None
+    # Rows written to ``strategy_core_quote_observations`` this tick (#2833
+    # step 2). Reported rather than left implicit so the lane cannot become a
+    # writer with no reader: a candidate cohort that silently stops accruing
+    # would otherwise look identical to one whose bar is still forming.
+    core_observations_written: int = 0
 
 
 def refresh_quotes(
@@ -308,6 +319,7 @@ def refresh_quotes(
     instruments: list[tuple[int, str]],
     *,
     max_spread_pct: Decimal = DEFAULT_MAX_SPREAD_PCT,
+    observe_instrument_ids: frozenset[int] | None = None,
 ) -> QuoteRefreshSummary:
     """Batch-fetch quotes for *instruments* and upsert each one.
 
@@ -326,6 +338,15 @@ def refresh_quotes(
     Per-instrument upsert failures are logged and skipped; a failure of the
     batch fetch itself aborts the whole set and is reported as
     ``batch_failed`` rather than silently reading as "no quotes available".
+
+    ``observe_instrument_ids`` additionally records each of those instruments
+    as an immutable hourly row in ``strategy_core_quote_observations`` (#2833
+    step 2).  The ``quotes`` table is one MUTABLE row per instrument, so it
+    can never accumulate the multi-day spread sample the core sleeve's pass
+    bar reads -- see sql/366.  The quotes are already in hand here, so the
+    lane costs no extra provider calls.  A missing quote is recorded too:
+    thinning the sample silently would bias the very percentile being
+    measured.
     """
     if not instruments:
         return QuoteRefreshSummary(0, 0, 0, 0)
@@ -349,8 +370,35 @@ def refresh_quotes(
         )
 
     quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
+    observed_ids = observe_instrument_ids or frozenset()
+    observed_at = datetime.now(tz=UTC)
+    core_observations_written = 0
     for instrument_id, symbol in instruments:
         quote = quote_map.get(instrument_id)
+        # Recorded BEFORE the missing-quote `continue` below: absence of a
+        # quote is itself coverage evidence, and dropping it would let a
+        # candidate's sample quietly shrink without the percentile moving.
+        if instrument_id in observed_ids:
+            try:
+                with conn.transaction():
+                    if record_core_quote_observation(
+                        conn,
+                        normalise_core_quote(
+                            instrument_id=instrument_id,
+                            quote=quote,
+                            observed_at=observed_at,
+                        ),
+                    ):
+                        core_observations_written += 1
+            except Exception:
+                # Never let the evidence lane break the quote refresh that
+                # eight headless services depend on (#2271).
+                logger.warning(
+                    "Failed to record core quote observation for %s (id=%d), skipping",
+                    symbol,
+                    instrument_id,
+                    exc_info=True,
+                )
         if quote is None:
             logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
             quotes_skipped += 1
@@ -374,6 +422,7 @@ def refresh_quotes(
         quotes_updated=quotes_updated,
         quotes_skipped=quotes_skipped,
         spread_flags_set=spread_flags_set,
+        core_observations_written=core_observations_written,
     )
 
 
