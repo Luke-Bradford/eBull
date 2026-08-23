@@ -24,6 +24,8 @@ function trade(overrides: Partial<NativeTradeItem> = {}): NativeTradeItem {
     is_tsl_enabled: false,
     leverage: 1,
     total_fees: 1.25,
+    investment_type: null,
+    is_underlying: null,
     ...overrides,
   };
 }
@@ -76,5 +78,74 @@ describe("InstrumentTradesTable", () => {
       <InstrumentTradesTable currency="USD" trades={[]} />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("InstrumentTradesTable — product identity (#2602 item 3)", () => {
+  it("labels a real-asset position with the broker's own wording", () => {
+    render(
+      <InstrumentTradesTable
+        currency="USD"
+        trades={[trade({ investment_type: "Real Asset", is_underlying: true })]}
+      />,
+    );
+    const badge = screen.getByText("Real Asset");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute("title", expect.stringContaining("you own the underlying"));
+  });
+
+  it("labels a CFD as not the real asset held outright", () => {
+    render(
+      <InstrumentTradesTable
+        currency="USD"
+        trades={[trade({ investment_type: "CFD", is_underlying: false })]}
+      />,
+    );
+    const badge = screen.getByText("CFD");
+    expect(badge).toHaveAttribute("title", expect.stringContaining("not the real asset held outright"));
+  });
+
+  it("does not call Crypto MarginTrade a contract with the broker", () => {
+    // Type 3 IS the real asset by eToro's own wording, held on margin — so it
+    // is not underlying (the no-leverage posture bars it) but it is also not a
+    // derivative, and the tooltip must not claim otherwise (Codex ckpt-2).
+    render(
+      <InstrumentTradesTable
+        currency="USD"
+        trades={[trade({ investment_type: "Crypto MarginTrade", is_underlying: false })]}
+      />,
+    );
+    const title = screen.getByText("Crypto MarginTrade").getAttribute("title") ?? "";
+    expect(title).toContain("not the real asset held outright");
+    expect(title).not.toContain("contract with the broker");
+  });
+
+  it("renders an unreported type as Unknown rather than guessing a product", () => {
+    // The distinction is load-bearing: "the broker told us nothing" must not
+    // render as "this is a derivative", or the panel asserts a product identity
+    // that was never observed.
+    render(
+      <InstrumentTradesTable
+        currency="USD"
+        trades={[trade({ investment_type: null, is_underlying: null })]}
+      />,
+    );
+    expect(screen.getByText("Unknown")).toBeInTheDocument();
+    expect(screen.queryByText("CFD")).not.toBeInTheDocument();
+    expect(screen.queryByText("Real Asset")).not.toBeInTheDocument();
+  });
+
+  it("shows a per-row product, since two trades on one instrument can differ", () => {
+    render(
+      <InstrumentTradesTable
+        currency="USD"
+        trades={[
+          trade({ position_id: 1, investment_type: "Real Asset", is_underlying: true }),
+          trade({ position_id: 2, investment_type: "CFD", is_underlying: false }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("Real Asset")).toBeInTheDocument();
+    expect(screen.getByText("CFD")).toBeInTheDocument();
   });
 });

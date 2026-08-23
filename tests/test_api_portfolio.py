@@ -1025,6 +1025,7 @@ def _make_broker_position_row(
     is_tsl_enabled: bool = False,
     leverage: int = 1,
     total_fees: float = 0.0,
+    settlement_type_id: int | None = None,
 ) -> dict[str, Any]:
     """Build a row matching the trades_sql shape in get_instrument_positions."""
     return {
@@ -1040,6 +1041,12 @@ def _make_broker_position_row(
         "is_tsl_enabled": is_tsl_enabled,
         "leverage": leverage,
         "total_fees": total_fees,
+        # #2602 item 3. The endpoint indexes this strictly (`tr[...]`), like
+        # every other trades_sql column: the SELECT guarantees the key, so a
+        # KeyError here means the fixture has drifted from the query — which is
+        # exactly what it should say, rather than `.get()` quietly rendering
+        # every position as "Unknown" forever.
+        "settlement_type_id": settlement_type_id,
     }
 
 

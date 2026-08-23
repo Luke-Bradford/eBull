@@ -39,6 +39,7 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.db.snapshot import snapshot_read
 from app.domain.positions import PositionSource
+from app.services.broker_settlement_arms import position_investment_type_label, position_is_underlying
 from app.services.fx import FxRateNotFound, convert, load_live_fx_rates_with_metadata
 from app.services.portfolio_value_history import (
     carry_forward_rate_map,
@@ -64,7 +65,31 @@ router = APIRouter(
 # ---------------------------------------------------------------------------
 
 
-class BrokerPositionItem(BaseModel):
+class PositionProductIdentity(BaseModel):
+    """What a position IS, from the broker's own field (#2602 item 3).
+
+    A mixin rather than two copies: `BrokerPositionItem` and `NativeTradeItem`
+    are both per-trade views of the same row, and "a contract field wired into
+    one model but not its sibling" is a recurring defect class in this repo
+    (#1955). Adding the next identity field here reaches both by construction.
+
+    Sourced from eToro's `settlementTypeID` on the open-positions response —
+    *"Position investment type. 0 - CFD, 1 - Real Asset, 2 - SWAP,
+    3 - Crypto MarginTrade, 4 - Future Contract"* (live portal 2026-08-23).
+    NOT from `strategy_core_eligibility_proofs`: that answers what this account
+    could open *today*, which is a different question from what an already-open
+    position is.
+    """
+
+    #: The provider's documented label, verbatim. `None` = the broker reported
+    #: no type we recognise — deliberately distinct from "it is a derivative",
+    #: so a panel can say "not observed" rather than assert the wrong product.
+    investment_type: str | None = None
+    #: `True` only for the real asset held outright; `None` when unobserved.
+    is_underlying: bool | None = None
+
+
+class BrokerPositionItem(PositionProductIdentity):
     """Individual eToro position (one trade) within a stock holding."""
 
     position_id: int
@@ -146,7 +171,7 @@ class PortfolioResponse(BaseModel):
     live_quote_instrument_ids: list[int] = []
 
 
-class NativeTradeItem(BaseModel):
+class NativeTradeItem(PositionProductIdentity):
     """Individual trade in the instrument's native currency."""
 
     position_id: int
@@ -330,6 +355,7 @@ def get_portfolio(
                bp.open_date_time,
                bp.stop_loss_rate, bp.take_profit_rate,
                bp.is_tsl_enabled, bp.leverage, bp.total_fees,
+               bp.settlement_type_id,
                i.currency
         FROM broker_positions bp
         JOIN instruments i USING (instrument_id)
@@ -434,6 +460,8 @@ def get_portfolio(
                 leverage=br["leverage"],
                 total_fees=float(br["total_fees"]),
                 currency=trade_currency,
+                investment_type=position_investment_type_label(br["settlement_type_id"]),
+                is_underlying=position_is_underlying(br["settlement_type_id"]),
             )
         )
 
@@ -554,7 +582,8 @@ def get_instrument_positions(
         SELECT bp.position_id, bp.is_buy, bp.units, bp.amount,
                bp.open_rate, bp.open_conversion_rate, bp.open_date_time,
                bp.stop_loss_rate, bp.take_profit_rate,
-               bp.is_tsl_enabled, bp.leverage, bp.total_fees
+               bp.is_tsl_enabled, bp.leverage, bp.total_fees,
+               bp.settlement_type_id
         FROM broker_positions bp
         WHERE bp.instrument_id = %(iid)s AND bp.units > 0
         ORDER BY bp.amount DESC
@@ -641,6 +670,8 @@ def get_instrument_positions(
                 is_tsl_enabled=tr["is_tsl_enabled"],
                 leverage=tr["leverage"],
                 total_fees=float(tr["total_fees"]),
+                investment_type=position_investment_type_label(tr["settlement_type_id"]),
+                is_underlying=position_is_underlying(tr["settlement_type_id"]),
             )
         )
 

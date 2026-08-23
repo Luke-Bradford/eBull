@@ -161,6 +161,7 @@ def _upsert_broker_positions(
                 stop_loss_rate, take_profit_rate,
                 is_no_stop_loss, is_no_take_profit,
                 leverage, is_tsl_enabled, total_fees,
+                settlement_type_id,
                 source, raw_payload, updated_at
             )
             VALUES (
@@ -170,6 +171,7 @@ def _upsert_broker_positions(
                 %(stop_loss_rate)s, %(take_profit_rate)s,
                 %(is_no_stop_loss)s, %(is_no_take_profit)s,
                 %(leverage)s, %(is_tsl_enabled)s, %(total_fees)s,
+                %(settlement_type_id)s,
                 %(source)s, %(raw_payload)s, %(now)s
             )
             ON CONFLICT (position_id) DO UPDATE SET
@@ -183,6 +185,15 @@ def _upsert_broker_positions(
                 leverage                 = EXCLUDED.leverage,
                 is_tsl_enabled           = EXCLUDED.is_tsl_enabled,
                 total_fees               = EXCLUDED.total_fees,
+                -- #2602 item 3: the broker restates the investment type on
+                -- every sync, so it refreshes like any other observed field.
+                -- COALESCE keeps a previously-observed identity when a later
+                -- payload omits the key -- losing the product identity of a
+                -- position we already classified is worse than a stale label,
+                -- and eToro documents no "type cleared" state.
+                settlement_type_id       = COALESCE(
+                    EXCLUDED.settlement_type_id, broker_positions.settlement_type_id
+                ),
                 -- Preserve source: if position was created by eBull, keep
                 -- 'ebull' even when sync refreshes it.
                 source                   = CASE
@@ -211,6 +222,7 @@ def _upsert_broker_positions(
                 "leverage": bp.leverage,
                 "is_tsl_enabled": bp.is_tsl_enabled,
                 "total_fees": bp.total_fees,
+                "settlement_type_id": bp.settlement_type_id,
                 "source": "broker_sync",
                 "raw_payload": psycopg.types.json.Jsonb(bp.raw_payload),
                 "now": now,
@@ -239,14 +251,14 @@ def _upsert_broker_positions(
              amount, initial_amount_in_dollars, open_rate,
              open_conversion_rate, open_date_time, stop_loss_rate,
              take_profit_rate, is_no_stop_loss, is_no_take_profit,
-             leverage, is_tsl_enabled, total_fees, source, raw_payload,
-             updated_at, closed_detected_at)
+             leverage, is_tsl_enabled, total_fees, settlement_type_id,
+             source, raw_payload, updated_at, closed_detected_at)
         SELECT position_id, instrument_id, is_buy, units, initial_units,
                amount, initial_amount_in_dollars, open_rate,
                open_conversion_rate, open_date_time, stop_loss_rate,
                take_profit_rate, is_no_stop_loss, is_no_take_profit,
-               leverage, is_tsl_enabled, total_fees, source, raw_payload,
-               updated_at, %(now)s
+               leverage, is_tsl_enabled, total_fees, settlement_type_id,
+               source, raw_payload, updated_at, %(now)s
         FROM broker_positions
         WHERE position_id >= 0
           AND position_id != ALL(%(ids)s::bigint[])
