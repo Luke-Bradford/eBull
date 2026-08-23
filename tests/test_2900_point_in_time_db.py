@@ -80,7 +80,7 @@ def test_renderers_share_one_typed_evidence_schema() -> None:
         registry_version="test-registry",
         registry={"family": {"status": "refused"}},
         probes=(ProbeResult("X", True, {"a": 1}, {"a": "d" * 64}, "ok"),),
-        censuses={"table": {"row_count": 0}},
+        censuses={"table": {"row_count": 0, "min_known_to": None, "max_known_to": None}},
         mutation=MutationEvidence(1, "f" * 64, "f" * 64, "0" * 64, 0, "shares", "100", "101", True),
         verdict="FAIL — NO ADMISSIBLE HISTORICAL FIELD",
     )
@@ -89,3 +89,4 @@ def test_renderers_share_one_typed_evidence_schema() -> None:
     markdown = render_markdown(evidence)
     assert "FAIL — NO ADMISSIBLE HISTORICAL FIELD" in markdown
     assert "`100` → `101`" in markdown
+    assert "`min_known_to`=None" in markdown

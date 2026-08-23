@@ -596,12 +596,8 @@ def render_markdown(evidence: Evidence) -> str:
     for table, raw_values in evidence.censuses.items():
         if not isinstance(raw_values, Mapping):
             raise TypeError(f"census {table} is not a mapping")
-        row_count = raw_values.get("row_count")
-        instruments = raw_values.get("distinct_instruments")
-        line = f"- `{table}`: {row_count} rows"
-        if instruments is not None:
-            line += f", {instruments} instruments"
-        census_lines.append(line)
+        details = ", ".join(f"`{key}`={value}" for key, value in raw_values.items())
+        census_lines.append(f"- `{table}`: {details}")
     return _lines(
         (
             "# R6 point-in-time spine result (#2900)",
