@@ -28,11 +28,16 @@ full eligibility rule.  The executor additionally requires exactly one matching
 row, an ``allowStopLossTakeProfit`` arm and a satisfied minimum; a core sleeve is
 a stop-less indefinite holding and must not inherit an entry rule.  Calling this
 does not make a caller eligible to trade.
+
+``effective_open_minimum`` lives here for the same shared-definition reason, and
+reads the same response: it is the second rule those two callers must not hold
+two copies of.  Spec: ``docs/proposals/ta/2026-08-23-broker-open-minimum.md``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Final
 
@@ -42,6 +47,12 @@ from app.providers.broker import BrokerInstrumentEligibility, BrokerLeverageConf
 UNDERLYING_SETTLEMENT_TYPE = "real"
 UNDERLYING_DIRECTION = "long"
 UNLEVERAGED_LEVERAGE = 1
+
+#: The only response currency in which the two open minimums are comparable.
+#: ``minPositionExposure`` is documented as "always calculated in USD" whatever the
+#: response says; ``minPositionAmount`` documents no currency at all.  See
+#: :func:`effective_open_minimum`.
+_MINIMUM_QUOTE_CURRENCY: Final[str] = "USD"
 
 # --- The OPEN-POSITION vocabulary (#2602 item 3) ---------------------------
 #
@@ -144,6 +155,92 @@ def position_is_underlying(settlement_type_id: int | None) -> bool | None:
     return settlement_type_id == UNDERLYING_POSITION_INVESTMENT_TYPE_ID
 
 
+def _quoted_or_none(value: Decimal | None) -> Decimal | None:
+    """Keep a broker-quoted threshold only when it is finite and positive.
+
+    The same rule ``strategy_core_eligibility._positive_or_none`` applies before
+    storing, and that ``sql/346`` enforces on the column.  Applied HERE so both
+    callers agree: the stored-proof path sanitises and the executor's live path
+    does not, so without this the two would reach different verdicts on identical
+    broker data.  A nonsense threshold means "not quoted", which is what it
+    actually tells us -- it is not a licence to trade any size.
+    """
+    if value is None or not value.is_finite() or value <= 0:
+        return None
+    return value
+
+
+def effective_open_minimum(
+    *,
+    response_currency: str,
+    min_position_exposure: Decimal | None,
+    min_position_amount: Decimal | None,
+) -> Decimal | None:
+    """The binding floor on the USD notional of an order that OPENS a position.
+
+    Source rule (live portal 2026-08-23,
+    ``trading--demo/check-instrument-trading-eligibility``):
+
+    * ``minPositionExposure``, on the eligibility ROW -- *"Minimum exposure value
+      required to open a position on this instrument.  The exposure is always
+      calculated in USD as the number of units times the rate times the conversion
+      rate to USD."*
+    * ``minPositionAmount``, on a ``leverageConfigs`` ARM -- *"Minimum margin
+      required to open a position under this leverage configuration."*
+
+    ⚠⚠ THEY ARE DIFFERENT QUANTITIES, which is why this is ``max`` and not ``or``.
+    Exposure is units x rate x FX; margin is exposure / leverage.  The precedence
+    this replaces (``arm.min_position_amount or row.min_position_exposure``) treats
+    them as two spellings of one number and takes whichever appears first, which is
+    fail-OPEN by the gap between them whenever the arm quotes the smaller.
+
+    ⚠ ``max`` IS A SAFE BOUND, NOT A REPRODUCTION OF THE BROKER'S RULE, and the
+    difference is stated rather than glossed.  Testing a notional against the larger
+    threshold can never admit an order the broker would refuse on either dimension;
+    at leverage > x1 it CAN refuse one the broker would accept, because the notional
+    exceeds the margin by the leverage multiple.  Over-restriction is the safe
+    direction for a floor -- the posture ``strategy_core_sizing.QuotedTradeCost``
+    already takes for cost.  ⚠ Unreachable through today's callers, and enforced
+    rather than assumed: both select their arm through
+    :func:`select_underlying_long_arms`, which requires x1, and at x1 margin equals
+    exposure so ``max`` is exact.
+
+    ⚠⚠ OPEN ONLY.  The portal states both fields for opening and says nothing about
+    closing or partial-closing, so no close-side floor is derived here.  That is
+    UNKNOWN, not "no constraint": ``allowPartialClosePosition`` proves permission,
+    not unrestricted sizing.  A rebalance sell carries no broker floor from this
+    source, and if eToro constrains partial-close size we do not currently know it.
+
+    ``None`` means the broker quoted no usable threshold -- NOT that any size is
+    permitted.  Both callers fail closed on it.
+
+    :raises ValueError: when ``response_currency`` is not USD.  ``minPositionAmount``
+        carries NO documented currency, so rather than infer one, the two are
+        combined only where no non-USD denomination is in play.  A raise rather than
+        a returned refusal because both callers already refuse a mismatch first
+        (``strategy_paper_executor._eligibility_reason``,
+        ``strategy_core_eligibility.evaluate_core_eligibility``), so arriving here
+        with anything else is a caller bug -- the distinction
+        ``strategy_core_preflight._require_known_action`` draws on a public entry
+        point.  ⚠ #2603 scope item 4 (non-USD deployment) is the change that must
+        revisit this, and a loud failure there is the intended outcome.  Concretely
+        it becomes reachable when ``strategy_base_currency`` widens
+        ``SUPPORTED_DEPLOYMENT_CURRENCIES``, today the singleton ``{"USD"}``.
+    """
+    if response_currency.strip().upper() != _MINIMUM_QUOTE_CURRENCY:
+        raise ValueError(
+            f"open minimums are only combinable in {_MINIMUM_QUOTE_CURRENCY}: minPositionExposure is "
+            f"documented as always USD while minPositionAmount documents no currency, so a "
+            f"{response_currency!r} response cannot be compared (#2603 scope item 4)"
+        )
+    quoted = [
+        value
+        for value in (_quoted_or_none(min_position_exposure), _quoted_or_none(min_position_amount))
+        if value is not None
+    ]
+    return max(quoted) if quoted else None
+
+
 def select_underlying_long_arms(
     row: BrokerInstrumentEligibility,
 ) -> tuple[BrokerLeverageConfig, ...]:
@@ -161,6 +258,7 @@ __all__ = [
     "UNDERLYING_POSITION_INVESTMENT_TYPE_ID",
     "UNDERLYING_SETTLEMENT_TYPE",
     "UNLEVERAGED_LEVERAGE",
+    "effective_open_minimum",
     "is_underlying_long_arm",
     "offers_unleveraged",
     "position_investment_type_label",

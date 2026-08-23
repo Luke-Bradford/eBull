@@ -174,12 +174,18 @@ def record_core_rebalance_intent(
     ⚠ ``broker_minimum`` is deliberately not a parameter, though
     ``evaluate_core_rebalance`` accepts one.  This slice performs no broker I/O and
     so cannot SOURCE a minimum; accepting one would store a caller assertion with
-    no provenance and no record of which provider rule was applied -- and whether
-    eToro's ``min_position_amount`` even governs an incremental buy or a partial
-    sell is unsettled (the allocator's docstring flags it).  The executor holds the
-    eligibility response and can answer it with evidence.  Consequence, so it is
-    not later read as a defect: ``floor_source`` can only be ``mandate`` here, and
-    ``broker_minimum_invalid`` is unreachable.
+    no provenance and no record of which provider rule was applied.  The executor
+    holds the eligibility response and can answer it with evidence.  Consequence,
+    so it is not later read as a defect: ``floor_source`` can only be ``mandate``
+    here, and ``broker_minimum_invalid`` is unreachable.
+
+    ⚠ The RULE the executor will apply is now settled and cited --
+    ``broker_settlement_arms.effective_open_minimum`` (portal, 2026-08-23) -- but
+    only for a ``buy_core`` leg: eToro documents both minimums for OPENING a
+    position and neither for a close, so a ``sell_core`` still has no sourced
+    floor.  That does not move this function, which cannot reach a broker either
+    way; it means the executor supplies a minimum on one leg and ``None`` on the
+    other, and ``None`` there will mean "undocumented", not "none exists".
     """
     mandate = load_core_mandate(conn)
     decision = evaluate_core_rebalance(mandate, state)

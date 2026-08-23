@@ -16,11 +16,17 @@ exists, is tested, and sits on a path the decision does not take* nine times ove
 so the boundary is named here rather than left to be inferred.
 
 ⚠ Sizing is recorded, not decided.  ``min_position_amount`` /
-``min_position_exposure`` / ``max_units_per_order`` are stored as observed facts
-and no effective minimum is derived: the executor's
-``arm.min_position_amount or row.min_position_exposure`` precedence has no
-citation in the provider's documentation, and a missing floor is an order-sizing
-gap rather than evidence about what the product IS.
+``min_position_exposure`` / ``max_units_per_order`` are stored as observed FACTS
+and this module derives no floor from them, because a missing floor is an
+order-sizing gap rather than evidence about what the product IS.
+
+⚠ The rule for combining the two minimums IS now settled and cited --
+``broker_settlement_arms.effective_open_minimum``, from the portal's own field
+definitions (2026-08-23).  What it settles is narrow and worth reading there
+before relying on it: an OPEN only, at x1, in a USD response, and as a safe upper
+bound rather than an exact reproduction of the broker's rule.  It settles NOTHING
+about a close or partial close, which the portal does not document at all -- so a
+rebalance sell still has no broker floor from this source.
 
 Spec: ``docs/proposals/ta/2026-08-13-core-eligibility-proof.md``
 """
