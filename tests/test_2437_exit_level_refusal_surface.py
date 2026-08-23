@@ -46,14 +46,18 @@ from app.services.strategy_manifest import STRATEGY_MANIFEST
 #: compares an ORDERABLE bracket against the scalar; it never covered a bad index
 #: or a missing ATR, and under it `s4_exit_levels_batch` raised where its five
 #: siblings refused. **An exclusion justified by another test's existence is only
-#: as good as that test's coverage** — which is the reason this list must now name
-#: every level-based strategy rather than a curated three.
-LEVEL_BASED = (
-    "s4-volatility-compression-breakout",
-    "s5-support-bounce",
-    "s6-resistance-breakout",
-    "s9-squeeze-expansion",
-)
+#: as good as that test's coverage.**
+#:
+#: ⚠⚠ The hand-written replacement was wrong too, and in the same shape: it named
+#: four, and SEVEN strategies carry an `exit_levels` factory. S-11 in particular
+#: shares `s4_exit_levels_batch` with S-4 (`_s11_exit_levels`), so the behaviour
+#: this ticket changes is S-11's as much as S-4's, and a curated tuple said
+#: nothing about it (Codex ckpt-3). Hence the derivation below.
+#: ⚠ Derived, not typed out. The ticket's acceptance is "covers EVERY strategy with
+#: an `exit_levels` factory, batched or not", and a hand-kept tuple is the same
+#: omission-shaped defect one level up: a new level-based strategy would join the
+#: manifest and silently not be swept. Reading the manifest means it cannot.
+LEVEL_BASED = tuple(sorted(sid for sid, entry in STRATEGY_MANIFEST.items() if entry.exit_levels is not None))
 
 #: The subset whose SCALAR bracket reaches `atr.values[signal_index]` before any
 #: range validation, and so raises `IndexError` rather than `ValueError`.
@@ -108,10 +112,11 @@ def test_an_out_of_range_bar_is_refused_not_raised(strategy_id: str) -> None:
 def test_a_bar_with_no_atr_is_refused_not_raised(strategy_id: str) -> None:
     """#2781's measured case. Bar 0 has no prior close, so it has no ATR.
 
-    Five strategies refused this bar and S-4 raised. It is one masked bar from
-    being live: `_exit_levels_for_entries` only asks for indices where an entry
-    fired and the registry will not fire on an unevaluable bar, but the
-    quarantine `masked` arm exists precisely to remove bars.
+    #2781 measured this on a shared fixture: the five sibling BATCH factories
+    (S-5..S-9) refused it and `s4_exit_levels_batch` raised. The sweep below is
+    wider than that measurement — it now runs every strategy carrying an
+    `exit_levels` factory, seven of them, S-11 included because it shares S-4's
+    batch.
     """
     entry = STRATEGY_MANIFEST[strategy_id]
     assert entry.exit_levels is not None
@@ -119,6 +124,27 @@ def test_a_bar_with_no_atr_is_refused_not_raised(strategy_id: str) -> None:
         _series(),
         signal_index=0,
         entry_price=Decimal("100"),
+        universe="survivor_only",
+    )
+    assert result == "unorderable_exit_levels"
+
+
+@pytest.mark.parametrize("strategy_id", LEVEL_BASED)
+@pytest.mark.parametrize("entry_price", [Decimal("NaN"), Decimal("-1"), Decimal("0")])
+def test_an_unusable_entry_price_is_refused_not_raised(strategy_id: str, entry_price: Decimal) -> None:
+    """The rest of what #2781 made S-4 swallow, which the ticket did not enumerate.
+
+    A non-finite, negative or zero entry price took the same `raise` path as a
+    bad index, so each is its own way to abort a whole outcome batch. Covered
+    here because "the four guards now refuse" is a claim about four guards, and
+    two of them had no test (Codex ckpt-3).
+    """
+    entry = STRATEGY_MANIFEST[strategy_id]
+    assert entry.exit_levels is not None
+    result = entry.exit_levels(
+        _series(),
+        signal_index=20,
+        entry_price=entry_price,
         universe="survivor_only",
     )
     assert result == "unorderable_exit_levels"

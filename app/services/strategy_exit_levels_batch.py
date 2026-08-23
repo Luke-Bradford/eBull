@@ -121,22 +121,36 @@ def s4_exit_levels_batch(
     ``tests/test_2437_exit_level_refusal_surface.py`` exists to prevent, and
     from which S-4 was excluded.
 
-    ⚠ Latent, not live, and that is why it survived: ``_exit_levels_for_entries``
-    only asks for indices where an entry fired, and the registry refuses to fire
-    on an unevaluable bar, so a fired signal has a valid ATR in practice. One
-    masked bar from being live — the quarantine ``masked`` arm exists precisely
-    to remove bars.
+    ⚠⚠ NO ``strategy_version`` MOVES, AND THE ARGUMENT FOR THAT IS THE WHOLE
+    RISK. ``_source_hash()`` hashes the DEFINING strategy module and this is not
+    one; nor is this module in ``INPUT_RULE_SETS``. Verified by computing all 11
+    identities against this file before and after — byte-identical. That means
+    rows from old and new code share a ledger key, which is exactly the defect
+    ``INPUT_RULE_SETS`` exists to close, so it is admissible ONLY because no
+    stored outcome can differ. Proved rather than asserted, in two independent
+    steps (Codex ckpt-3 pushed on the first version of this, which merely
+    claimed the inputs "cannot currently occur"):
 
-    ⚠⚠ NO ``strategy_version`` MOVES, and that is load-bearing rather than
-    convenient. ``_source_hash()`` hashes the DEFINING strategy module, and this
-    is not one; nor is it in ``INPUT_RULE_SETS``. A behaviour change that does
-    not move the version means rows from old and new code share a ledger key, so
-    it is only admissible because the delta is confined to inputs the registry
-    cannot currently produce. If that ever stops being true, this needs a
-    version bump, not a wider ``except``. ``_s4_exit_levels``'s docstring
-    already states the intent this completes: *"The batch adapter owns the typed
-    refusal because changing the hashed S-4 module merely to add an exception
-    class would mint a new strategy version."*
+    1. **Same segmentation on both sides.** ``_exit_levels_for_entries`` slices
+       per ``series_segment_bounds`` and passes a LOCAL index, and so does
+       ``segmented_signals``. Both read the same ``corpus.unresolved_breaks``
+       entry, so a fired signal's local index is the one the registry already
+       judged evaluable. A globally-valid signal cannot land on local index 0 of
+       a segment the signal pass did not also see as local index 0.
+    2. **S-4's own setup requires the very ATR the bracket reads.** The entry is
+       ``atr_14(t)`` in the bottom quartile of its trailing 100 bars, so a bar
+       with no ``atr_14`` cannot produce a fired signal — 100 bars of ATR
+       history is a far longer warm-up than the bracket needs. S-11 gates S-4's
+       entry further (``s4_entry(t) and regime(t) in {bear_volatile,
+       bull_volatile}``), so its fills are a strict subset.
+
+    ⚠ If either property changes — a second breaks source, or an S-4 variant
+    whose setup does not read ATR — this needs a version bump, not a wider
+    ``except``.
+
+    ``_s4_exit_levels``'s docstring already states the intent this completes:
+    *"The batch adapter owns the typed refusal because changing the hashed S-4
+    module merely to add an exception class would mint a new strategy version."*
     """
     atr = atr_series(series, period=ATR_PERIOD, universe=universe)
     levels: list[ExitLevels | UnresolvedReason] = []
