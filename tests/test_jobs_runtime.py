@@ -1945,6 +1945,42 @@ class TestMisfireVisibilityAndGrace:
         # where the fire belonged or it says nothing about which slot was lost.
         assert now == scheduled_for
 
+    def test_missed_fire_without_a_scheduled_time_still_records(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The defensive branch: APScheduler always supplies
+        ``scheduled_run_time`` on ``EVENT_JOB_MISSED``, so this path exists only
+        so a malformed event degrades to a row rather than to nothing. The row
+        must still land — losing the fire silently is the defect being fixed —
+        and ``now=None`` lets ``record_job_skip`` stamp its own clock, because
+        there is no lost slot to point at.
+        """
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        from app.services.ops_monitor import MISFIRE_SKIP_PREFIX
+
+        recorded: list[tuple[str, str, datetime | None]] = []
+
+        @contextmanager
+        def fake_conn() -> Iterator[object]:
+            yield object()
+
+        monkeypatch.setattr("app.jobs.runtime.background_write_connection", fake_conn)
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, name, reason, **kw: recorded.append((name, reason, kw.get("now"))) or 1,
+        )
+
+        rt = _make_runtime({})
+        rt._on_job_missed(JobExecutionEvent(EVENT_JOB_MISSED, "recurring:portfolio_eod_snapshot", "default", None))
+
+        assert len(recorded) == 1
+        name, reason, now = recorded[0]
+        assert name == "portfolio_eod_snapshot"
+        assert reason.startswith(MISFIRE_SKIP_PREFIX)
+        assert "no scheduled_run_time" in reason
+        assert now is None
+
     def test_missed_listener_ignores_manual_job_ids(
         self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
