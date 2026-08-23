@@ -312,8 +312,11 @@ when one overruns). Scheduled-only, so NOT added to the
 
 * ``llm_thesis`` — ``thesis_refresh`` (#1919 PR-B) only. Hourly LLM
   thesis generation: a batch of ≤5 local-LLM generations holds the lane
-  ~20+ min (≈260s/thesis on a local 14B) — on any shared lane that hold
-  is the #1526/#1527 starvation class. Write set (``theses`` /
+  for most of the hour — on any shared lane that hold is the
+  #1526/#1527 starvation class. ⚠ The hold is far longer than the
+  ``~20+ min (≈260s/thesis)`` this comment claimed until #2855; measure
+  it, never quote that figure from here (the query is in
+  ``scheduler.thesis_refresh``'s docstring). Write set (``theses`` /
   ``thesis_runs`` / ``coverage.last_reviewed_at`` / the rankings
   retry-queue demote) is shared only with the filing cascade (``db``
   lane, inside ``fundamentals_sync``) and the manual

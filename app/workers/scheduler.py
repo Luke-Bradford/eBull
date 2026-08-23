@@ -944,8 +944,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         name=JOB_THESIS_REFRESH,
         display_name="Thesis refresh (LLM writer + critic)",
         # #1919 PR-B — own single-job lane (#1526/#1527 class): a batch of
-        # ≤5 local-LLM generations holds the lane ~20+ min (≈260s/thesis on
-        # a local 14B), which would starve any lanemate. Its write set
+        # ≤5 local-LLM generations holds the lane for most of the hour,
+        # which would starve any lanemate. ⚠ Do not quote the per-thesis
+        # seconds from here — it was wrong by a factor of ~2.5 until
+        # #2855; the reproducing query is in thesis_refresh's docstring.
+        # Its write set
         # (theses / thesis_runs / coverage.last_reviewed_at / rankings
         # retry-queue demote) is shared only with the filing cascade and
         # the manual POST path — all three serialise per-instrument via
@@ -3986,10 +3989,58 @@ def thesis_refresh() -> None:
     Scope: held positions ∪ top-N ranked, intersected with the existing
     staleness predicate (``find_stale_instruments``: no thesis /
     review_frequency elapsed / superseding 10-K, 10-Q, 8-K per #273),
-    bounded to ≤5 generations per run, serial, per-instrument
-    advisory-locked (K.3). The hourly cadence × batch bound IS the
-    bounded bootstrap drain — a 25-name first load drains in <1 day
-    with no separate bulk job.
+    bounded to ``_THESIS_REFRESH_BATCH_LIMIT`` generations per run,
+    serial, per-instrument advisory-locked (K.3). The hourly cadence ×
+    batch bound IS the bounded bootstrap drain — there is no separate
+    bulk job.
+
+    ⚠ **Do not quote a throughput or residency figure from this
+    docstring — run the query.** Until #2855 this paragraph asserted
+    "a 25-name first load drains in <1 day", sized against a candidate
+    set that has since grown by more than an order of magnitude, and
+    ``app/jobs/sources.py`` asserted "≈260s/thesis". Both went stale
+    silently, and two sessions then reasoned from them to opposite
+    wrong conclusions — #2855 treated the model residency as an
+    intermittent spike, #2842 treated throughput as a hard blocker on
+    a monthly rebalance. The measurement is one query::
+
+        with instrumented as (
+          select row_count, started_at, finished_at,
+                 (regexp_match(error_msg, 'writer_loaded_s=(\\d+)'))[1]::numeric
+                   as loaded_s
+          from job_runs
+          where job_name='thesis_refresh' and status='success'
+            and error_msg like '%writer_loaded_s=%'
+            and started_at > now() - interval '14 days')
+        select count(*) as runs,
+               sum(row_count) as memos,
+               round(sum(loaded_s) / nullif(sum(row_count), 0)) as s_per_memo,
+               round(100.0 * sum(loaded_s)
+                     / extract(epoch from (max(finished_at)-min(started_at))), 1)
+                 as loaded_pct,
+               round(sum(row_count)::numeric
+                     / (extract(epoch from (max(finished_at)-min(started_at)))
+                        / 86400.0), 1) as memos_per_day
+        from instrumented;
+
+    ``loaded_pct`` is the operative number and the one nothing else
+    reports: the share of wall-clock time this job held a writer model
+    loaded. A batch bound caps work per run, not load time — the two are
+    only related through the cadence, which is why raising the batch
+    bound cannot fix a memory problem and lowering it cannot fix a
+    throughput one.
+
+    ⚠ The ``like`` filter is load-bearing, not tidiness. Rows written
+    before #2855 carry no ``writer_loaded_s``, and coalescing them to 0
+    returns a confident, wrong, LOW duty cycle for any window spanning
+    the change — the reassuring direction, on the exact question this
+    instrumentation exists to answer. Filtered, an uninstrumented window
+    returns ``runs=0`` and nulls, which is unmistakable.
+
+    ⚠ ``writer_loaded_s`` is *residency* only when the writer is local,
+    which is why the note records ``provider=`` beside it: a cloud writer
+    holds no weights on this box, and the same integer then means request
+    time.
 
     Gate: configured LLM provider resolvable via ``make_llm_clients`` —
     no longer ANTHROPIC_API_KEY-gated; the local-first default needs no
@@ -4028,6 +4079,21 @@ def thesis_refresh() -> None:
                 len(candidates),
             )
             tracker.row_count = 0
+            # Explicit zeros, not absent fields: the duty-cycle query
+            # divides by wall-clock time, so a run that legitimately loaded
+            # nothing must still be visible as a run. Leaving `writer_loaded_s`
+            # off would make "no stale work" indistinguishable from a
+            # pre-#2855 row. The remaining counters are zero by construction
+            # on this branch — nothing ran, so nothing failed, was locked or
+            # was deferred — and are emitted anyway so both notes carry the
+            # SAME field set and no reader needs a special case for this
+            # branch (review bot, round 2).
+            tracker.note = (
+                f"candidates={len(candidates)} stale={len(stale)} "
+                f"generated=0 failed=0 "
+                f"locked_skipped=0 deferred={deferred} "
+                f"provider={clients.writer.provider_name} writer_loaded_s=0"
+            )
             return
 
         # No silent caps: everything past the batch bound is counted in
@@ -4061,6 +4127,20 @@ def thesis_refresh() -> None:
         # local model — an unconditional release would de-warm it
         # (Codex ckpt-2).
         load_attempted = False
+        # #2855: the LOAD WINDOW, not the run duration. They are not the
+        # same — the candidate and staleness queries above run before any
+        # model is pulled into memory, and a batch that is entirely
+        # LOCKED_BY_SIBLING never loads one at all. Recorded per run so the
+        # duty cycle is derivable from ``job_runs`` alone: nothing else
+        # reports how long a 10 GB local writer was held, which is the
+        # quantity that decides whether this job is safe to leave scheduled.
+        #
+        # ⚠ Named for what it measures. It is *residency* only when the
+        # writer is local, so the note carries ``provider=`` beside it —
+        # a cloud writer holds no weights on this box and the same integer
+        # then means request time (Codex ckpt-2).
+        loaded_start: float | None = None
+        loaded_s = 0
         try:
             for idx, item in enumerate(batch, start=1):
                 try:
@@ -4074,6 +4154,8 @@ def thesis_refresh() -> None:
                                 )
                                 locked_skipped += 1
                             else:
+                                if not load_attempted:
+                                    loaded_start = time.monotonic()
                                 load_attempted = True
                                 generate_thesis(
                                     instrument_id=item.instrument_id,
@@ -4098,23 +4180,43 @@ def thesis_refresh() -> None:
                     skipped += 1
                 report_progress(idx, total)
         finally:
-            if load_attempted:
-                release_local_models(clients)
+            # Nested so the measurement survives BOTH the batch loop and
+            # the release itself. `release_local_models` is documented as
+            # never raising — but that is a promise in another module's
+            # docstring, and this ticket exists because such promises go
+            # stale silently. Recorded in its own `finally`, the
+            # instrumentation does not depend on it staying true (review
+            # bot, round 1).
+            try:
+                if load_attempted:
+                    release_local_models(clients)
+            finally:
+                # Taken AFTER the release, so the window spans the whole
+                # time the weights were held. Survives an exception out of
+                # the batch loop — the run that dies mid-batch is the one
+                # whose load time matters most, and computing this below
+                # the try would lose exactly that case (Codex ckpt-2).
+                # Stays 0 when nothing loaded: an honest zero, not a
+                # missing value.
+                if loaded_start is not None:
+                    loaded_s = round(time.monotonic() - loaded_start)
+                tracker.note = (
+                    f"candidates={len(candidates)} stale={len(stale)} "
+                    f"generated={generated} failed={skipped} "
+                    f"locked_skipped={locked_skipped} deferred={deferred} "
+                    f"provider={clients.writer.provider_name} writer_loaded_s={loaded_s}"
+                )
 
         report_progress(total, total, force=True)
         tracker.row_count = generated
-        tracker.note = (
-            f"candidates={len(candidates)} stale={len(stale)} "
-            f"generated={generated} failed={skipped} "
-            f"locked_skipped={locked_skipped} deferred={deferred}"
-        )
 
     logger.info(
-        "thesis_refresh complete: generated=%d failed=%d locked_skipped=%d deferred=%d",
+        "thesis_refresh complete: generated=%d failed=%d locked_skipped=%d deferred=%d writer_loaded_s=%d",
         generated,
         skipped,
         locked_skipped,
         deferred,
+        loaded_s,
     )
 
 
