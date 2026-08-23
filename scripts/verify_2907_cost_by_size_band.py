@@ -66,10 +66,13 @@ _SEVERITY: Final[Mapping[CostVerdict, int]] = {
 
 _CENSUS_SQL: Final = """
     SELECT universe.instrument_id,
+           instrument.currency,
            valuation.market_cap_live,
            quote.last,
            quote.quoted_at
     FROM unnest(%(instrument_ids)s::bigint[]) AS universe(instrument_id)
+    JOIN instruments instrument
+      ON instrument.instrument_id = universe.instrument_id
     LEFT JOIN instrument_valuation valuation
       ON valuation.instrument_id = universe.instrument_id
     LEFT JOIN quotes quote
@@ -81,6 +84,7 @@ _CENSUS_SQL: Final = """
 @dataclass(frozen=True)
 class PopulationRow:
     instrument_id: int
+    currency: str | None
     market_cap_live: Decimal | None
     last: Decimal | None
     quoted_at: datetime | None
@@ -141,6 +145,7 @@ class Evidence:
     universe_version: str
     cost_model_id: str
     cost_lane: Mapping[str, object]
+    instrument_currency_counts: Mapping[str, int]
     carry_closure: str
     fx_closure: str
     universe_size: int
@@ -285,6 +290,7 @@ def _load_rows(conn: psycopg.Connection[Any], instrument_ids: Sequence[int]) -> 
     rows = tuple(
         PopulationRow(
             instrument_id=int(row["instrument_id"]),
+            currency=row["currency"],
             market_cap_live=row["market_cap_live"],
             last=row["last"],
             quoted_at=row["quoted_at"],
@@ -345,6 +351,10 @@ def build_evidence(
     distinct_ids = len({row.instrument_id for row in rows})
     if distinct_ids != len(rows):
         raise RuntimeError(f"population contains duplicate IDs: rows={len(rows)}, distinct={distinct_ids}")
+    currency_counts = Counter(row.currency if row.currency is not None else "<NULL>" for row in rows)
+    out_of_lane = {currency: count for currency, count in currency_counts.items() if currency.upper() != "USD"}
+    if out_of_lane:
+        raise RuntimeError(f"validated universe contains instruments outside the frozen USD cost lane: {out_of_lane}")
 
     cells = Counter(f"{classify_market_cap(row.market_cap_live)}|{classify_price(row.last)}" for row in rows)
     complete_cells = {
@@ -421,6 +431,7 @@ def build_evidence(
         universe_version=VALIDATED_UNIVERSE_RULE_VERSION,
         cost_model_id=COST_MODEL_ID,
         cost_lane=asdict(STRUCTURAL_ZERO_LANE),
+        instrument_currency_counts=dict(sorted(currency_counts.items())),
         carry_closure=CARRY_CLOSURE,
         fx_closure=FX_CLOSURE,
         universe_size=len(rows),
@@ -510,6 +521,7 @@ def render_markdown(evidence: Evidence) -> str:
         "## Population and coverage",
         "",
         f"- Full population: {evidence.universe_size}; distinct IDs: {evidence.distinct_ids}.",
+        f"- Instrument currencies: `{dict(evidence.instrument_currency_counts)}`.",
         f"- Market-cap coverage: {_metric(evidence.market_cap_coverage_pct)}%.",
         f"- Latest-stored nominal-price coverage: {_metric(evidence.nominal_price_coverage_pct)}%.",
         f"- Unavailable cap reasons: `{dict(evidence.market_cap_unavailable_reasons)}`.",

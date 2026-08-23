@@ -67,9 +67,16 @@ def test_tail_warning_means_p95_has_a_worse_classification() -> None:
     assert verdict == "COST-SURVIVES-ROBUST — TAIL-WARNING"
 
 
-def _row(instrument_id: int, cap: str | None, price: str | None) -> PopulationRow:
+def _row(
+    instrument_id: int,
+    cap: str | None,
+    price: str | None,
+    *,
+    currency: str = "USD",
+) -> PopulationRow:
     return PopulationRow(
         instrument_id=instrument_id,
+        currency=currency,
         market_cap_live=Decimal(cap) if cap is not None else None,
         last=Decimal(price) if price is not None else None,
         quoted_at=datetime(2026, 8, 23, tzinfo=UTC) if price is not None else None,
@@ -107,3 +114,13 @@ def test_no_priced_microcap_is_data_fail() -> None:
     )
     assert evidence.verdict == "DATA-FAIL"
     assert evidence.p75_classification is None
+
+
+def test_non_usd_instrument_refuses_the_structural_zero_fx_lane() -> None:
+    with pytest.raises(RuntimeError, match="outside the frozen USD cost lane"):
+        build_evidence(
+            (_row(1, "100000000", "4", currency="GBP"),),
+            measured_at=datetime(2026, 8, 24, tzinfo=UTC),
+            execution_commit="a" * 40,
+            source_sha256={"test": "b" * 64},
+        )
