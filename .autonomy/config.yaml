@@ -32,5 +32,10 @@ merge_gate:
   # .github/workflows/claude-review.yml has to agree with it. Exclusions BEAT
   # both the extension and the path test: a file under .autonomy/ is never
   # doc-only, because loop_prompt.md is the standing order an unattended loop
-  # executes. Keep this list identical to the exclusion check in that workflow.
+  # executes.
+  # ⚠ All three lists above are bound to that workflow's inline patterns by
+  # tests/test_doc_only_classification_agreement.py — editing either side alone
+  # fails it. The earlier "keep this list identical" instruction did not hold:
+  # the excludes were reconciled and doc_only_extensions was not, leaving an
+  # .rst-only PR unmergeable by construction until #2849's second pass.
   doc_only_excludes: [".autonomy/"]
