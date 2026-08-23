@@ -66,6 +66,20 @@ from typing import Literal, get_args
 #: are UNCHANGED from v2 — what changed is what the model claims about carry
 #: and FX, and the module rule (a change to what is charged is a new model)
 #: applies to a claim exactly as it does to a number.
+#:
+#: ⚠ #2833 DELIBERATELY DID NOT MOVE THIS, and the reasoning is recorded here
+#: because it is the obvious objection. That change added
+#: ``CostLane.instrument_denomination`` and an import guard, so a reviewer can
+#: fairly say "the same id now admits a narrower set of lanes". It does — but
+#: the set of PRICED POSITIONS is identical, because the docstring above
+#: already named the lane as a "USD-quoted universe" and ``FX_EVIDENCE`` leg 2
+#: already asserted it full-population. Nothing was charged differently, no
+#: stored result changes meaning, and the lane is a module constant no caller
+#: constructs, so the domain that narrowed is the space of future SOURCE EDITS
+#: rather than of runs. Moving the id would rehash every strategy version to
+#: announce a change that did not happen, which is its own false signal.
+#: The line: a claim moves the id (#2720); ENFORCING a claim already made does
+#: not.
 COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max+carry-fx-structural-zero-long-x1-real-usd"
 
 #: Whether a price can honestly select a nominal-price spread band.  The
@@ -132,7 +146,9 @@ CALIBRATION_LIMITS: tuple[str, ...] = (
     "carry is structurally zero for the declared lane ONLY (long x1 real-settlement USD); any other lane"
     " — short, leveraged, CFD-resolved, non-USD — is UNPRICED, not free",
     "FX is structurally zero for the same lane; the account currency is measured on the configured demo"
-    " account (account_equity_evidence), not proven for any other account",
+    " account (account_equity_evidence), not proven for any other account, and the lane's"
+    " instrument_denomination is USD — a non-USD-denominated instrument converts on unit sizing and is"
+    " outside this model however small the fee",
     "the backtest ASSUMES real-settlement fills: eToro resolves some non-leveraged buys as CFDs,"
     " historical resolution is unobservable, and the order path closes this only forward"
     " (settlementType is an assertion the platform rejects on mismatch)",
@@ -168,6 +184,14 @@ class CostLane:
     settlement: str
     order_currency: str
     account_currency: str
+    #: The currency the INSTRUMENT ITSELF is denominated in — a third currency,
+    #: not implied by the other two. #2833 is the case that needed it: an eToro
+    #: order for a GBP-denominated LSE UCITS ETF is still placed with
+    #: ``orderCurrency: usd`` from a USD account, so ``order_currency`` and
+    #: ``account_currency`` are both USD while a conversion event DOES occur.
+    #: Without this field the lane cannot state the difference and a non-USD
+    #: sleeve would inherit an FX closure measured on an all-USD path.
+    instrument_denomination: str
 
 
 #: Matches, field for field, what ``EtoroBrokerProvider.place_demo_strategy_order``
@@ -175,12 +199,20 @@ class CostLane:
 #: ``settlementType: real``, ``orderCurrency: usd``) and what
 #: ``BrokerStrategyOrder`` refuses at type level (``settlement_type`` is
 #: ``Literal["real"]``). Held together by test, not by import.
+#:
+#: ⚠ ``instrument_denomination`` is the one field with NO counterpart on the
+#: wire — the order payload never states it. It comes from the calibration
+#: population instead (``FX_EVIDENCE`` leg 2: the validated universe is
+#: uniformly USD-quoted), which is exactly why it has to be written down here:
+#: an unstated property of the population is the one a later consumer silently
+#: assumes still holds.
 STRUCTURAL_ZERO_LANE = CostLane(
     direction="long",
     leverage=1,
     settlement="real",
     order_currency="USD",
     account_currency="USD",
+    instrument_denomination="USD",
 )
 
 #: ⚠ The evidence a structural-zero claim stands on, DATED, one tuple per
@@ -269,7 +301,21 @@ def _check_closures() -> None:
     - the single lane is unleveraged and long: leverage above x1 is a CFD and a
       short accrues financing by construction (risk posture,
       ``.claude/CLAUDE.md``), so EITHER edit needs a new model, not this one
-      relabelled.
+      relabelled;
+    - an FX ``structural_zero`` names ONE currency in all three positions.
+      ``FX_CLOSURE`` says no conversion event OCCURS, which is a claim about
+      three currencies and not two: order, account AND the instrument's own
+      denomination. #2833's beta-sleeve candidates are the case that separates
+      them — CSPX.L / IUSA.L / IUMO.L / IUQA.L / R1VL.L are stored
+      ``instruments.currency = 'GBP'`` yet their eligibility proofs answer
+      ``response_currency = 'usd'`` from a USD account, so order and account
+      currency alone read exactly as an all-USD path does and cannot tell the
+      two apart. eToro's Cost & Charges worked examples size a non-USD
+      instrument through the GBP→USD rate, so on that lane a conversion is part
+      of the arithmetic; whether it carries a cost is a SEPARATE and open
+      question, and "structurally zero" is the one answer it cannot have. The
+      honest closure there is ``unmodelled`` — which this guard leaves
+      available and only refuses to let anyone skip.
 
     The guard is at IMPORT for the reason ``_check_bands_are_total`` is: these
     are edits somebody makes to the literals above, so the check belongs beside
@@ -298,6 +344,19 @@ def _check_closures() -> None:
             "and leverage above x1 is a CFD, both accrue financing by construction; that lane needs a NEW "
             "cost model, never this one relabelled."
         )
+    if FX_CLOSURE == "structural_zero":
+        currencies = {
+            "order_currency": STRUCTURAL_ZERO_LANE.order_currency,
+            "account_currency": STRUCTURAL_ZERO_LANE.account_currency,
+            "instrument_denomination": STRUCTURAL_ZERO_LANE.instrument_denomination,
+        }
+        if len(set(currencies.values())) != 1:
+            raise ValueError(
+                f"FX_CLOSURE is structural_zero but the lane names more than one currency ({currencies}) — "
+                "'no conversion event occurs' is a claim about all three, and a differing instrument "
+                "denomination means the event happens whatever it costs. That lane needs a NEW cost model "
+                "with a measured or documented FX component and a new COST_MODEL_ID, never this one relabelled."
+            )
 
 
 _check_closures()

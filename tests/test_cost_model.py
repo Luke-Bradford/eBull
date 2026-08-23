@@ -68,7 +68,7 @@ SPEC_COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max+carry-fx-struct
 #: ``test_the_order_payload_is_the_cost_model_lane`` captures that payload
 #: independently, so an executor change that leaves the lane fails there and a
 #: lane change that leaves the executor fails here.
-SPEC_LANE = ("long", 1, "real", "USD", "USD")
+SPEC_LANE = ("long", 1, "real", "USD", "USD", "USD")
 
 
 class TestTheFrozenTable:
@@ -293,6 +293,7 @@ class TestTheStructuralClosure:
             lane.settlement,
             lane.order_currency,
             lane.account_currency,
+            lane.instrument_denomination,
         ) == SPEC_LANE
 
     def test_the_lane_account_currency_matches_the_deployment_currency(self) -> None:
@@ -356,12 +357,40 @@ class TestTheStructuralClosure:
         needs a NEW cost model, never this one relabelled."""
         with pytest.raises(ValueError, match="must be long and unleveraged"):
             with mock.patch.object(
-                cost_model, "STRUCTURAL_ZERO_LANE", cost_model.CostLane("short", 1, "cfd", "USD", "USD")
+                cost_model, "STRUCTURAL_ZERO_LANE", cost_model.CostLane("short", 1, "cfd", "USD", "USD", "USD")
             ):
                 cost_model._check_closures()
         with pytest.raises(ValueError, match="must be long and unleveraged"):
             with mock.patch.object(
-                cost_model, "STRUCTURAL_ZERO_LANE", cost_model.CostLane("long", 2, "cfd", "USD", "USD")
+                cost_model, "STRUCTURAL_ZERO_LANE", cost_model.CostLane("long", 2, "cfd", "USD", "USD", "USD")
+            ):
+                cost_model._check_closures()
+
+    def test_the_closure_guard_refuses_a_non_usd_instrument_on_a_usd_path(self) -> None:
+        """⚠⚠ THE #2833 HOLE. The beta-sleeve candidates (CSPX.L, IUSA.L,
+        IUMO.L, IUQA.L, R1VL.L) are stored ``instruments.currency = 'GBP'`` and
+        their eligibility proofs answer ``response_currency = 'usd'`` from a USD
+        account — so order and account currency BOTH read USD while a
+        conversion event happens on unit sizing. Under the pre-#2833 lane
+        (order + account only) that sleeve inherits an FX ``structural_zero``
+        measured on an all-USD universe, silently and with every test green.
+
+        The discriminating case is the mixed one: same order and account
+        currency, different instrument denomination."""
+        with pytest.raises(ValueError, match="names more than one currency"):
+            with mock.patch.object(
+                cost_model, "STRUCTURAL_ZERO_LANE", cost_model.CostLane("long", 1, "real", "USD", "USD", "GBP")
+            ):
+                cost_model._check_closures()
+
+    def test_the_currency_guard_is_scoped_to_a_structural_zero_claim(self) -> None:
+        """An ``unmodelled`` FX closure claims nothing about conversion, so a
+        mixed-currency lane is not a contradiction there — it is the honest
+        state. Guarding it regardless would refuse the very lane a non-USD
+        sleeve has to declare on its way to measuring the fee."""
+        with mock.patch.object(cost_model, "FX_CLOSURE", "unmodelled"):
+            with mock.patch.object(
+                cost_model, "STRUCTURAL_ZERO_LANE", cost_model.CostLane("long", 1, "real", "USD", "USD", "GBP")
             ):
                 cost_model._check_closures()
 
@@ -456,6 +485,22 @@ class TestTheImportTimeGuardsActuallyRun:
 
         assert result.returncode != 0
         assert "must be long and unleveraged" in result.stderr
+
+    def test_a_non_usd_instrument_denomination_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
+        """⚠ #2833's half, and the reason it needs the subprocess arm too: the
+        edit this guards is somebody pointing the lane at a GBP-denominated
+        UCITS ETF because its eligibility proof answered ``usd``. Order and
+        account currency both still read USD, so nothing else in the module
+        objects — only the three-way comparison does, and only the module-level
+        call reaches it."""
+        result = self._run_with_substitution(
+            tmp_path,
+            '    instrument_denomination="USD",',
+            '    instrument_denomination="GBP",',
+        )
+
+        assert result.returncode != 0
+        assert "names more than one currency" in result.stderr
 
     def test_empty_carry_evidence_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
         """The evidence half, same reasoning: only the module-level call sees it."""
