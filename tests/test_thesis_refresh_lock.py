@@ -218,6 +218,10 @@ def _loaded_s(note: str) -> int:
     return int(note.split("writer_loaded_s=")[1].split()[0])
 
 
+def _note_fields(note: str) -> set[str]:
+    return {part.split("=")[0] for part in note.split()}
+
+
 def test_note_records_the_load_window_on_a_controlled_clock(mocked_env) -> None:  # type: ignore[no-untyped-def]
     """The window is measured, not merely present.
 
@@ -300,12 +304,25 @@ def test_empty_batch_still_records_a_zero_window(mocked_env) -> None:  # type: i
     the field would make "no stale work" indistinguishable from a
     pre-#2855 row, which coalesces to zero for a different reason.
     """
-    mocked_env["candidates"].return_value = []
 
+    # The reference field set is taken from a real full run in this same
+    # test rather than hand-listed, so a field added to one branch and not
+    # the other fails here instead of drifting silently.
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield True
+
+    with patch.object(scheduler, "instrument_lock", fake_lock):
+        scheduler.thesis_refresh()
+    full_run_fields = _note_fields(mocked_env["tracker"].note)
+
+    mocked_env["candidates"].return_value = []
     scheduler.thesis_refresh()
 
     assert _loaded_s(mocked_env["tracker"].note) == 0
     assert mocked_env["tracker"].row_count == 0
+    # Same field set on both branches, so no reader needs a special case.
+    assert _note_fields(mocked_env["tracker"].note) == full_run_fields
 
 
 def test_load_window_survives_an_exception_out_of_the_batch(mocked_env) -> None:  # type: ignore[no-untyped-def]

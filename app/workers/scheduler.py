@@ -4079,12 +4079,19 @@ def thesis_refresh() -> None:
                 len(candidates),
             )
             tracker.row_count = 0
-            # An explicit zero, not an absent field: the duty-cycle query
+            # Explicit zeros, not absent fields: the duty-cycle query
             # divides by wall-clock time, so a run that legitimately loaded
-            # nothing must still be visible as a run. Leaving it off would
-            # make "no stale work" indistinguishable from a pre-#2855 row.
+            # nothing must still be visible as a run. Leaving `writer_loaded_s`
+            # off would make "no stale work" indistinguishable from a
+            # pre-#2855 row. The remaining counters are zero by construction
+            # on this branch — nothing ran, so nothing failed, was locked or
+            # was deferred — and are emitted anyway so both notes carry the
+            # SAME field set and no reader needs a special case for this
+            # branch (review bot, round 2).
             tracker.note = (
-                f"candidates={len(candidates)} stale={len(stale)} generated=0 "
+                f"candidates={len(candidates)} stale={len(stale)} "
+                f"generated=0 failed=0 "
+                f"locked_skipped=0 deferred={deferred} "
                 f"provider={clients.writer.provider_name} writer_loaded_s=0"
             )
             return
