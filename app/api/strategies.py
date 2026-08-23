@@ -3136,6 +3136,21 @@ def update_strategy_paper_pool(
 ) -> StrategyPaperPoolView:
     """Set the shared strategy ceiling and its higher-level automation flag."""
     try:
+        # #2859 — the live/paper AUTHORITY boundary, restored from the unpushed
+        # 2026-08-15 branch. ⚠ Both refusals fire ONLY on enable: disabling is
+        # risk reduction and is never blocked, the same asymmetry the execution
+        # guard applies to EXIT.
+        #
+        # ⚠ These are DEFENCE IN DEPTH, not the layer that stops a real order.
+        # `EtoroBrokerProvider.place_demo_strategy_order` already refuses when
+        # `self._env != "demo"`, hardcodes the demo endpoint, and runs
+        # `refuse_broker_mutation_if_unattended` first. What was missing is
+        # honesty at the CONTROL PLANE: without these, the operator can switch
+        # automation to "enabled" in a real environment, or alongside
+        # system-wide live trading, and every resulting order fails at the
+        # broker instead of the state being refused where it is set.
+        if body.enabled and settings.etoro_env != "demo":
+            raise StrategyControlError("paper automation can only be enabled in the demo environment")
         readiness = get_strategy_overview(conn).automation_readiness if body.enabled else None
         conn.rollback()
         with conn.transaction():
@@ -3144,6 +3159,16 @@ def update_strategy_paper_pool(
             if body.enabled and not current_pool.enabled and readiness is not None and not readiness.ready:
                 raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
             runtime = get_runtime_config(conn)
+            # ⚠ Read INSIDE the advisory lock, and that only closes the race
+            # because `app.api.config.patch_config` takes the SAME lock to
+            # enforce the inverse rule (refuse live enable while paper is on).
+            # One-sided, this check is bypassed by enabling paper first and live
+            # second — Codex caught exactly that at checkpoint 2. The two halves
+            # are one invariant; do not remove either without the other.
+            if body.enabled and runtime.enable_live_trading:
+                raise StrategyControlError(
+                    "paper automation cannot be enabled while system-wide live trading is enabled"
+                )
             # #2843: omitted means UNCHANGED, so the resolved value -- never the raw
             # request field -- is what both the change test and the INSERT see. The
             # rule is a named function so it has a test surface; see its docstring.

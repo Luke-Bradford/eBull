@@ -221,6 +221,29 @@ class PaperPool:
     approval_mode: ApprovalMode = "manual"
 
 
+def paper_automation_enabled(conn: psycopg.Connection[Any]) -> bool:
+    """Just the enabled flag of the latest pool revision. #2859.
+
+    ⚠ Deliberately NOT ``load_paper_pool(conn).enabled``. That builds the whole
+    ``PortfolioMandate``, parsing eight optional Decimals, and a caller that
+    needs one boolean should not fail on a mandate column it never reads. The
+    exclusivity guard in ``app.api.config.patch_config`` is on the live-enable
+    path, so widening its failure surface to the mandate parser would be a way
+    to make enabling live trading fail for an unrelated reason.
+
+    No row at all means no pool was ever configured, which is not enabled.
+    """
+    row = conn.execute(
+        """
+        SELECT enabled
+        FROM strategy_paper_pool_events
+        ORDER BY strategy_paper_pool_event_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return False if row is None else bool(row[0])
+
+
 def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
     row = conn.execute(
         """
@@ -1262,6 +1285,7 @@ __all__ = [
     "GOVERNANCE_GATE_VERSION",
     "PaperPool",
     "PAPER_ALLOCATOR_ADVISORY_LOCK",
+    "paper_automation_enabled",
     "Promotion",
     "StrategyControlError",
     "StrategyOwnershipError",
