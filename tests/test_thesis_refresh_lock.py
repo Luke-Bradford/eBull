@@ -345,6 +345,32 @@ def test_load_window_survives_an_exception_out_of_the_batch(mocked_env) -> None:
     assert "failed=1" in mocked_env["tracker"].note
 
 
+def test_load_window_survives_a_raising_release(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """The measurement must not depend on another module's promise.
+
+    ``release_local_models`` is documented as never raising, and today it
+    does not. But this ticket exists because a docstring promise went
+    stale silently, so the instrumentation is nested in its own
+    ``finally`` rather than trusting that one — a release that started
+    raising would otherwise send every failing run back to the
+    indistinguishable-from-uninstrumented state (review bot, round 1).
+    """
+
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield True
+
+    with (
+        patch.object(scheduler, "instrument_lock", fake_lock),
+        patch.object(scheduler, "release_local_models", side_effect=RuntimeError("unload route gone")),
+        patch.object(scheduler.time, "monotonic", side_effect=[1000.0, 1031.0]),
+        pytest.raises(RuntimeError, match="unload route gone"),
+    ):
+        scheduler.thesis_refresh()
+
+    assert _loaded_s(mocked_env["tracker"].note) == 31
+
+
 # ---------------------------------------------------------------------------
 # _select_thesis_batch — pure scope/batch selection (spec §6)
 # ---------------------------------------------------------------------------

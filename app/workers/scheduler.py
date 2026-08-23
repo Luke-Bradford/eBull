@@ -4173,23 +4173,32 @@ def thesis_refresh() -> None:
                     skipped += 1
                 report_progress(idx, total)
         finally:
-            if load_attempted:
-                release_local_models(clients)
-            # Measured inside the finally, AFTER the release, so it spans
-            # the whole window the weights were held and survives an
-            # exception propagating out of the batch loop — the run that
-            # dies mid-batch is the one whose load time matters most, and
-            # computing this below the try would lose exactly that case
-            # (Codex ckpt-2). Stays 0 when nothing loaded: an honest zero,
-            # not a missing value.
-            if loaded_start is not None:
-                loaded_s = round(time.monotonic() - loaded_start)
-            tracker.note = (
-                f"candidates={len(candidates)} stale={len(stale)} "
-                f"generated={generated} failed={skipped} "
-                f"locked_skipped={locked_skipped} deferred={deferred} "
-                f"provider={clients.writer.provider_name} writer_loaded_s={loaded_s}"
-            )
+            # Nested so the measurement survives BOTH the batch loop and
+            # the release itself. `release_local_models` is documented as
+            # never raising — but that is a promise in another module's
+            # docstring, and this ticket exists because such promises go
+            # stale silently. Recorded in its own `finally`, the
+            # instrumentation does not depend on it staying true (review
+            # bot, round 1).
+            try:
+                if load_attempted:
+                    release_local_models(clients)
+            finally:
+                # Taken AFTER the release, so the window spans the whole
+                # time the weights were held. Survives an exception out of
+                # the batch loop — the run that dies mid-batch is the one
+                # whose load time matters most, and computing this below
+                # the try would lose exactly that case (Codex ckpt-2).
+                # Stays 0 when nothing loaded: an honest zero, not a
+                # missing value.
+                if loaded_start is not None:
+                    loaded_s = round(time.monotonic() - loaded_start)
+                tracker.note = (
+                    f"candidates={len(candidates)} stale={len(stale)} "
+                    f"generated={generated} failed={skipped} "
+                    f"locked_skipped={locked_skipped} deferred={deferred} "
+                    f"provider={clients.writer.provider_name} writer_loaded_s={loaded_s}"
+                )
 
         report_progress(total, total, force=True)
         tracker.row_count = generated
