@@ -138,13 +138,48 @@ def _opens_sealed_outcome(tree: ast.Module) -> bool:
     return False
 
 
+def _is_blank_literal(node: ast.expr) -> bool:
+    """A literal that `_check_holdout_pairing` reads as NOT SUPPLIED.
+
+    ⚠ `None` AND whitespace-only strings both count. `backtest_run.py:3506` uses
+    `.strip()` and not bare truthiness, because `"   "` is truthy and would
+    otherwise land in `strategy_holdout_accesses.purpose` as an audit record
+    that records nothing — the #2286 shape. Mirroring it here keeps this guard's
+    reading of "supplied" identical to the engine's.
+    """
+    if not isinstance(node, ast.Constant):
+        return False
+    if node.value is None:
+        return True
+    return isinstance(node.value, str) and not node.value.strip()
+
+
 def _passes_holdout_audit_fields(tree: ast.Module) -> bool:
-    """Both audit fields supplied to one backtest entry point — the engine gate."""
-    return any(
-        _AUDIT_FIELDS <= {keyword.arg for keyword in node.keywords if keyword.arg is not None}
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _callee_name(node) in _BACKTEST_ENTRY_POINTS
-    )
+    """Both audit fields supplied NON-BLANK to one backtest entry point.
+
+    ⚠ The VALUES are checked, not just the keyword names. Review caught the
+    name-only version: `run_backtest(..., holdout_purpose=None,
+    holdout_accessed_by=None)` would have read as gated here.
+
+    ⚠ In practice that combination cannot open anything — `_check_holdout_pairing`
+    reads two blanks as "neither supplied", and `_resolve_invocation_window` then
+    raises on an `evidence_window_id` without the pair, so such a script crashes
+    rather than opening the withheld side. This is therefore hardening of the
+    static rule rather than a live hole. It is still worth having: a guard that
+    accepts a spelling the engine rejects is a guard that has stopped modelling
+    the engine, and the next reader would take its acceptance as proof.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _callee_name(node) not in _BACKTEST_ENTRY_POINTS:
+            continue
+        supplied = {
+            keyword.arg
+            for keyword in node.keywords
+            if keyword.arg in _AUDIT_FIELDS and not _is_blank_literal(keyword.value)
+        }
+        if _AUDIT_FIELDS <= supplied:
+            return True
+    return False
 
 
 def _sealed_outcome_scripts() -> list[Path]:
@@ -265,6 +300,32 @@ def test_the_engine_audit_pair_counts_as_a_gate() -> None:
         )
         assert _passes_holdout_audit_fields(ast.parse(source)), name
         assert _is_gated(source), name
+
+
+def test_blank_audit_fields_do_not_count_as_a_gate() -> None:
+    """Review WARNING on #2830: the pair must be non-blank, not merely present.
+
+    ⚠ `_check_holdout_pairing` reads `None` and whitespace-only alike as NOT
+    SUPPLIED (`backtest_run.py:3506` strips before testing), so a guard that
+    accepted them would model the engine wrongly.
+    """
+    blank_none = ast.parse("run_backtest(conn, holdout_purpose=None, holdout_accessed_by=None)\n")
+    blank_space = ast.parse("run_backtest(conn, holdout_purpose='   ', holdout_accessed_by='x')\n")
+    real = ast.parse("run_backtest(conn, holdout_purpose='issue #2830', holdout_accessed_by='scripts/x.py')\n")
+
+    assert not _passes_holdout_audit_fields(blank_none)
+    assert not _passes_holdout_audit_fields(blank_space)
+    assert _passes_holdout_audit_fields(real)
+
+
+def test_a_blank_paired_opener_is_reported_ungated() -> None:
+    """End to end: selected as an opener, and NOT excused by a blank pair."""
+    source = (
+        "run_backtest(conn, evidence_window_id='primary-2022-plus', holdout_purpose=None, holdout_accessed_by=None)\n"
+    )
+
+    assert _opens_sealed_outcome(ast.parse(source))
+    assert not _is_gated(source)
 
 
 def test_an_explicit_in_sample_call_is_not_selected() -> None:
