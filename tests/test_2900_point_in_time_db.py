@@ -38,7 +38,8 @@ def test_source_probe_text_excludes_comments_docstrings_and_dead_blocks(tmp_path
     assert "COMMENT_NEEDLE" not in text
     assert "DEAD_NEEDLE" not in text
     assert "LIVE_NEEDLE" in text
-    assert _semantic_anchor_count(text, 'LIVE_NEEDLE   =\n"reachable"') == 1
+    assert _semantic_anchor_count(text, 'LIVE_NEEDLE   =   "reachable"') == 1
+    assert _semantic_anchor_count("LEFT_HALF = 1\nRIGHT_HALF = 2\n", "LEFT_HALF = 1 RIGHT_HALF") == 0
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple]) -> None:

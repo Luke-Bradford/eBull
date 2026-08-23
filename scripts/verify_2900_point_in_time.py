@@ -291,8 +291,13 @@ def _semantic_text(path: str) -> str:
 
 def _semantic_anchor_count(text: str, needle: str) -> int:
     """Count an executable anchor without coupling it to source formatting."""
-    normalized_text = re.sub(r"\s+", " ", text)
-    normalized_needle = re.sub(r"\s+", " ", needle)
+
+    def normalize(value: str) -> str:
+        lines = (re.sub(r"[^\S\n]+", " ", line).strip() for line in value.splitlines())
+        return "\n".join(line for line in lines if line)
+
+    normalized_text = normalize(text)
+    normalized_needle = normalize(needle)
     return normalized_text.count(normalized_needle)
 
 
