@@ -19,10 +19,11 @@ from psycopg.rows import dict_row
 
 from app.providers.market_data import MarketDataProvider, OHLCVBar, Quote
 from app.services.strategy_core_quote_observation import (
-    normalise_quote as normalise_core_quote,
+    CoreQuoteObservation,
+    record_core_quote_observations,
 )
 from app.services.strategy_core_quote_observation import (
-    record_core_quote_observation,
+    normalise_quote as normalise_core_quote,
 )
 from app.services.sync_orchestrator.exception_classifier import classify_exception
 from app.services.sync_orchestrator.layer_types import FailureCategory, UpstreamUnreachableError
@@ -379,40 +380,85 @@ def refresh_quotes(
     observed_at = datetime.now(tz=UTC)
     core_observations_written = 0
     core_observation_failures = 0
+    # Normalised in the same pass as the quote upserts but WRITTEN ONCE
+    # below.  ``quotes_refresh`` opens its connection with autocommit=True,
+    # so a ``conn.transaction()`` per candidate is a real BEGIN/COMMIT round
+    # trip each -- not a savepoint, which is what an earlier version of this
+    # comment claimed (Codex ckpt-3).  Batching removes that per-candidate
+    # cost without giving up per-instrument coverage: ``refusal_reason`` is
+    # ordinary row data and survives batching, and every row normalise_quote
+    # returns is shape-valid by construction, so a failure here is systemic
+    # (missing table, bad column) and would have failed each isolated insert
+    # anyway.
+    #
+    # ⚠ The candidate cohort is fetched SEPARATELY, and that is not
+    # redundancy.  ``get_quotes`` chunks internally and, on a partial chunk
+    # failure, logs it and returns only the chunks that SUCCEEDED -- so a
+    # candidate sitting in a failed chunk comes back as ``None``, exactly
+    # like an instrument eToro genuinely has no quote for.  Writing that as
+    # ``provider_omitted_quote`` would record a transport failure as broker
+    # evidence, which is the error `prove_2603_core_eligibility` names in its
+    # own docstring: "a transport failure records NOTHING" (Codex ckpt-3).
+    # The cohort is small (one chunk today), so its fetch either succeeds
+    # wholly -- making every remaining ``None`` a genuine omission -- or
+    # raises, and we record nothing at all for the tick.
+    candidate_ids = sorted(observed_ids)
+    pending_observations: list[CoreQuoteObservation] = []
+    if candidate_ids:
+        try:
+            # Split by the provider's own batch size so each call is exactly
+            # ONE upstream request: it then either returns or raises, and no
+            # id can go missing to a swallowed chunk. Fetching the cohort in
+            # one call would reintroduce the ambiguity as soon as it outgrew
+            # a single chunk (Codex ckpt-3, second round).
+            stride = max(provider.quote_batch_size, 1)
+            candidate_quotes: dict[int, Quote] = {}
+            for start in range(0, len(candidate_ids), stride):
+                chunk = candidate_ids[start : start + stride]
+                candidate_quotes.update({q.instrument_id: q for q in provider.get_quotes(chunk)})
+        except Exception:
+            core_observation_failures = len(candidate_ids)
+            logger.warning(
+                "Core candidate quote fetch FAILED for %d instrument(s); recording no observations "
+                "rather than storing a transport failure as absence of a quote",
+                len(candidate_ids),
+                exc_info=True,
+            )
+        else:
+            pending_observations = [
+                normalise_core_quote(
+                    instrument_id=instrument_id,
+                    quote=candidate_quotes.get(instrument_id),
+                    observed_at=observed_at,
+                )
+                # Includes candidates with NO quote: against a determinate
+                # fetch that absence is real coverage evidence, and dropping
+                # it would let the sample quietly shrink without the
+                # percentile moving.
+                for instrument_id in candidate_ids
+            ]
+    if pending_observations:
+        try:
+            with conn.transaction():
+                core_observations_written = record_core_quote_observations(conn, pending_observations)
+        except Exception:
+            # Never let the evidence lane break the quote refresh that eight
+            # headless services depend on (#2271) -- but do not let it fail
+            # SILENTLY either.  A bad column or bad SQL here would otherwise
+            # log once an hour forever while the candidate's sample never
+            # grows, which is this repo's "job that no-ops and reports
+            # success" class.  The counter is the detector: `quotes_refresh`
+            # logs it every tick, so a broken lane reads as written=0
+            # failures=N rather than being inferred from absence.
+            core_observation_failures = len(pending_observations)
+            logger.warning(
+                "Failed to record %d core quote observation(s); the candidate spread sample is not accruing this tick",
+                len(pending_observations),
+                exc_info=True,
+            )
+
     for instrument_id, symbol in instruments:
         quote = quote_map.get(instrument_id)
-        # Recorded BEFORE the missing-quote `continue` below: absence of a
-        # quote is itself coverage evidence, and dropping it would let a
-        # candidate's sample quietly shrink without the percentile moving.
-        if instrument_id in observed_ids:
-            try:
-                with conn.transaction():
-                    if record_core_quote_observation(
-                        conn,
-                        normalise_core_quote(
-                            instrument_id=instrument_id,
-                            quote=quote,
-                            observed_at=observed_at,
-                        ),
-                    ):
-                        core_observations_written += 1
-            except Exception:
-                # Never let the evidence lane break the quote refresh that
-                # eight headless services depend on (#2271) -- but do not let
-                # it fail SILENTLY either.  A bad column or bad SQL here is a
-                # programming error that would otherwise log once an hour
-                # forever while the candidate's sample never grows, which is
-                # this repo's "job that no-ops and reports success" class.
-                # The counter below is the detector: `quotes_refresh` logs it
-                # every tick, so a permanently broken lane is visible as
-                # written=0 failures=N rather than inferred from absence.
-                core_observation_failures += 1
-                logger.warning(
-                    "Failed to record core quote observation for %s (id=%d), skipping",
-                    symbol,
-                    instrument_id,
-                    exc_info=True,
-                )
         if quote is None:
             logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
             quotes_skipped += 1

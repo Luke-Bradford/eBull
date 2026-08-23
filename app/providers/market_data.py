@@ -177,6 +177,21 @@ class MarketDataProvider(ABC):
     v1 implementation: EtoroMarketDataProvider
     """
 
+    #: Largest id list ``get_quotes`` sends in ONE upstream request.
+    #:
+    #: ⚠ This exists so a caller can make ``get_quotes`` all-or-nothing.
+    #: Implementations chunk internally and may return the chunks that
+    #: SUCCEEDED while dropping one that failed, so a missing id is
+    #: ambiguous — genuinely unquoted, or lost to a transport fault. A
+    #: caller that needs the difference (evidence lanes, where recording a
+    #: transport failure as "no quote" is a false observation) must split
+    #: its own ids by this value: one call is then exactly one upstream
+    #: request, which either returns or raises.
+    #:
+    #: Default 1 is the safe floor for any implementation that does not
+    #: document its batching — one id per request is trivially determinate.
+    quote_batch_size: int = 1
+
     @abstractmethod
     def get_tradable_instruments(self) -> list[InstrumentRecord]:
         """Return the full list of currently tradable instruments."""

@@ -22,6 +22,7 @@ without any new information arriving.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -176,35 +177,51 @@ _INSERT_OBSERVATION = """
 """
 
 
-def record_core_quote_observation(
-    conn: psycopg.Connection[Any],
-    observation: CoreQuoteObservation,
-) -> bool:
-    """Insert *observation*, keeping the first row already in its bucket.
+def _params(observation: CoreQuoteObservation) -> dict[str, Any]:
+    return {
+        "instrument_id": observation.instrument_id,
+        "sample_bucket": observation.sample_bucket,
+        "observed_at": observation.observed_at,
+        "quote_at": observation.quote_at,
+        "bid": observation.bid,
+        "ask": observation.ask,
+        "last": observation.last,
+        "spread_bps": observation.spread_bps,
+        "conversion_rate": observation.conversion_rate,
+        "observation_status": observation.observation_status,
+        "refusal_reason": observation.refusal_reason,
+        "source": observation.source,
+    }
 
-    Returns ``True`` when a row was written.  ``DO NOTHING`` rather than an
-    upsert because the first observation in a bucket is the evidence -- a
-    later manual dispatch must not replace it with a quote that knows more of
-    the bucket (sql/366's immutability trigger enforces the same rule).
+
+def record_core_quote_observations(
+    conn: psycopg.Connection[Any],
+    observations: Sequence[CoreQuoteObservation],
+) -> int:
+    """Insert *observations*, keeping any row already in its bucket.
+
+    Returns the number of rows written.  ``DO NOTHING`` rather than an upsert
+    because the first observation in a bucket is the evidence -- a later
+    manual dispatch must not replace it with a quote that knows more of the
+    bucket (sql/366's immutability trigger enforces the same rule).
+
+    One statement for the whole tick.  The caller owns the transaction: the
+    connection runs autocommit, so a per-observation transaction would be a
+    real BEGIN/COMMIT round trip each.  Every row is shape-valid by
+    construction (``normalise_quote`` guarantees the sql/366 CHECK is
+    satisfiable for observed AND refused rows alike), so the failure mode
+    that would lose a batch is systemic -- and a systemic failure would have
+    failed each isolated insert too.
     """
-    cursor = conn.execute(
-        _INSERT_OBSERVATION,
-        {
-            "instrument_id": observation.instrument_id,
-            "sample_bucket": observation.sample_bucket,
-            "observed_at": observation.observed_at,
-            "quote_at": observation.quote_at,
-            "bid": observation.bid,
-            "ask": observation.ask,
-            "last": observation.last,
-            "spread_bps": observation.spread_bps,
-            "conversion_rate": observation.conversion_rate,
-            "observation_status": observation.observation_status,
-            "refusal_reason": observation.refusal_reason,
-            "source": observation.source,
-        },
-    )
-    return cursor.rowcount > 0
+    if not observations:
+        return 0
+    with conn.cursor() as cursor:
+        cursor.executemany(_INSERT_OBSERVATION, [_params(o) for o in observations])
+        # psycopg3 accumulates affected rows across an executemany batch, so
+        # this is the count actually inserted -- bucket collisions (the
+        # idempotent re-run case) contribute zero rather than being counted
+        # as fresh evidence.
+        return max(cursor.rowcount, 0)
 
 
 __all__ = [
@@ -214,6 +231,6 @@ __all__ = [
     "CoreQuoteObservation",
     "ObservationStatus",
     "normalise_quote",
-    "record_core_quote_observation",
+    "record_core_quote_observations",
     "sample_bucket",
 ]

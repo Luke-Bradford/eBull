@@ -97,6 +97,10 @@ class EtoroMarketDataProvider(MarketDataProvider):
             bars = provider.get_daily_candles(12345, lookback_days=400)
     """
 
+    #: One upstream rates request per this many ids — see the base class.
+    #: Callers that need get_quotes to be all-or-nothing split by this.
+    quote_batch_size = _RATES_BATCH_SIZE
+
     def __init__(self, api_key: str, user_key: str, env: str = "demo") -> None:
         self._api_key = api_key
         self._user_key = user_key
