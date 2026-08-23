@@ -1,5 +1,5 @@
 {
-  "observed_at": "2026-08-23T00:28:44.457587+00:00",
+  "observed_at": "2026-08-23T00:37:22.046635+00:00",
   "environment": "demo",
   "requested": [
     "SVXY",
@@ -8,6 +8,7 @@
     "UVXY"
   ],
   "not_found_by_broker": [],
+  "unanswered": [],
   "with_underlying_long_x1_arm": [],
   "cfd_only": [
     "SVXY",

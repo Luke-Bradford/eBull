@@ -173,17 +173,29 @@ def main(argv: list[str] | None = None) -> int:
 
     measured: list[dict[str, object]] = []
     not_found: list[str] = []
-    for symbol in symbols:
-        instrument_id = found[symbol]
-        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=args.environment) as broker:
+    unanswered: list[str] = []
+    # One provider for the whole sweep.  The requests stay one-instrument-each --
+    # that is the part which matters, because a response is only about the ids it
+    # was asked for -- but the HTTP client is not per-request state and rebuilding
+    # it each time discards connection reuse for nothing.
+    with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=args.environment) as broker:
+        for symbol in symbols:
+            instrument_id = found[symbol]
             response = broker.check_instrument_eligibility([instrument_id])
-        if response.not_found_instrument_ids:
-            # The broker not knowing an instrument our universe lists is a real
-            # observation about the shelf, and is NOT the same as "no arms".
-            not_found.append(symbol)
-        for row in response.eligibilities:
-            measured.append({"requested_symbol": symbol, **_describe(row)})
-        time.sleep(REQUEST_INTERVAL_S)
+            if response.not_found_instrument_ids:
+                # The broker not knowing an instrument our universe lists is a real
+                # observation about the shelf, and is NOT the same as "no arms".
+                not_found.append(symbol)
+            elif not response.eligibilities:
+                # Neither answered nor declined.  Left unreported this would drop
+                # the symbol out of `measured` silently, and a shorter table reads
+                # as "we asked about these" rather than "one request went nowhere"
+                # -- the failure mode where absent evidence looks like evidence.
+                logger.error("no eligibility row and no not-found id for %s (%d)", symbol, instrument_id)
+                unanswered.append(symbol)
+            for row in response.eligibilities:
+                measured.append({"requested_symbol": symbol, **_describe(row)})
+            time.sleep(REQUEST_INTERVAL_S)
 
     underlying = [row["requested_symbol"] for row in measured if row["has_underlying_long_x1_arm"]]
     cfd_only = [row["requested_symbol"] for row in measured if row["cfd_only"]]
@@ -197,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
                 "environment": args.environment,
                 "requested": symbols,
                 "not_found_by_broker": not_found,
+                "unanswered": unanswered,
                 # The leg-1 readout, in the ticket's own terms.
                 "with_underlying_long_x1_arm": underlying,
                 "cfd_only": cfd_only,
