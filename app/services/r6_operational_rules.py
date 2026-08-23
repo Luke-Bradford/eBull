@@ -9,15 +9,22 @@ masquerading as a valuation spread.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Final, Literal
 
 TURN_OF_MONTH_RULE_VERSION: Final = "r6-2914-turn-of-month-preference-v1"
 FACTOR_VALUATION_RULE_VERSION: Final = "r6-2914-factor-valuation-record-v1"
 TURN_OF_MONTH_OFFSETS: Final = (-3, -2, -1, 0, 1, 2, 3)
 REFERENCE_RETURN_UNITS: Final = frozenset({"decimal_return", "percent_per_annum", "binary_indicator"})
+# source/dataset/series -> canonical spread unit. Empty under the frozen v1
+# contract because #2912 contains no valuation-spread series. A genuine future
+# source requires an explicit versioned admission; callers cannot self-certify
+# provenance by changing the unit string.
+ADMITTED_VALUATION_SERIES: Final[Mapping[tuple[str, str, str], str]] = MappingProxyType({})
 
 FactorValuationStatus = Literal["recorded", "unavailable"]
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -101,6 +108,9 @@ class FactorValuationRecord:
         assert self.history_end is not None
         assert self.historical_percentile is not None
         assert self.source_snapshot_sha256 is not None
+        assert self.source is not None
+        assert self.dataset_key is not None
+        assert self.series_key is not None
         if not self.spread_value.is_finite():
             raise ValueError("spread_value must be finite")
         canonical_unit = self.spread_unit.strip()
@@ -108,6 +118,12 @@ class FactorValuationRecord:
             raise ValueError("factor return/context units cannot be recorded as a valuation spread")
         if self.spread_unit != canonical_unit:
             raise ValueError("spread_unit must not contain surrounding whitespace")
+        provenance = (self.source, self.dataset_key, self.series_key)
+        admitted_unit = ADMITTED_VALUATION_SERIES.get(provenance)
+        if admitted_unit is None:
+            raise ValueError("source/dataset/series is not an admitted factor-valuation spread")
+        if canonical_unit != admitted_unit:
+            raise ValueError(f"spread_unit must match admitted provenance unit {admitted_unit!r}")
         if not Decimal(0) <= self.historical_percentile <= Decimal(1):
             raise ValueError("historical_percentile must be in [0, 1]")
         if not self.history_start <= self.history_end <= self.observation_date:
@@ -121,6 +137,7 @@ class FactorValuationRecord:
 
 
 __all__ = [
+    "ADMITTED_VALUATION_SERIES",
     "FACTOR_VALUATION_RULE_VERSION",
     "REFERENCE_RETURN_UNITS",
     "TURN_OF_MONTH_OFFSETS",

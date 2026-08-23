@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
@@ -22,6 +24,7 @@ from app.services.r6_operational_rules import (
     TURN_OF_MONTH_OFFSETS,
     TURN_OF_MONTH_RULE_VERSION,
     FactorValuationRecord,
+    turn_of_month_preference_window,
 )
 from scripts._dev_guard import assert_dev_environment
 
@@ -95,6 +98,7 @@ class Evidence:
     observation_unit_counts: dict[str, int]
     eligible_valuation_spread_series: int
     factor_valuation_record: dict[str, object]
+    operational_checks: dict[str, bool]
     series: tuple[SeriesCensus, ...]
     haircuts: dict[str, str]
     return_vs_buy_and_hold: str
@@ -120,6 +124,72 @@ def _assert_declaration_ancestor(execution_commit: str) -> None:
         return
     detail = result.stderr.strip() or "declaration commit is not an ancestor"
     raise RuntimeError(f"declaration ancestry check failed with exit {result.returncode}: {detail}")
+
+
+def _must_refuse(call: Any, *, label: str) -> bool:
+    try:
+        call()
+    except ValueError:
+        return True
+    raise RuntimeError(f"operational rule failed to refuse {label}")
+
+
+def _verify_operational_rules() -> dict[str, bool]:
+    sessions = (
+        date(2026, 1, 27),
+        date(2026, 1, 28),
+        date(2026, 1, 29),
+        date(2026, 1, 30),
+        date(2026, 2, 2),
+        date(2026, 2, 3),
+        date(2026, 2, 4),
+    )
+    if turn_of_month_preference_window(sessions, target_year=2026, target_month=1) != sessions:
+        raise RuntimeError("turn-of-month helper returned the wrong frozen -3..+3 window")
+    checks = {
+        "exact_window": True,
+        "duplicate_calendar_refused": _must_refuse(
+            lambda: turn_of_month_preference_window(
+                (*sessions[:3], sessions[2], *sessions[4:]), target_year=2026, target_month=1
+            ),
+            label="duplicate session calendar",
+        ),
+        "incomplete_calendar_refused": _must_refuse(
+            lambda: turn_of_month_preference_window(sessions[:-1], target_year=2026, target_month=1),
+            label="incomplete session calendar",
+        ),
+        "missing_anchor_refused": _must_refuse(
+            lambda: turn_of_month_preference_window(
+                tuple(date(2026, 2, day) for day in range(2, 9)), target_year=2026, target_month=1
+            ),
+            label="missing target-month anchor",
+        ),
+        "return_provenance_relabel_refused": _must_refuse(
+            lambda: FactorValuationRecord(
+                factor_id="momentum",
+                status="recorded",
+                reason="adversarial relabel check",
+                spread_measure="claimed valuation spread",
+                spread_value=Decimal("0.2"),
+                spread_unit="book_to_market_ratio",
+                observation_date=date(2026, 8, 23),
+                history_start=date(2000, 1, 1),
+                history_end=date(2026, 8, 23),
+                historical_percentile=Decimal("0.8"),
+                source="aqr",
+                dataset_key="aqr_vme_monthly",
+                series_key="MOM",
+                source_snapshot_sha256="a" * 64,
+            ),
+            label="return-series provenance relabel",
+        ),
+    }
+    parameter_names = set(inspect.signature(turn_of_month_preference_window).parameters)
+    forbidden_authority_inputs = {"order", "position", "amount", "quantity", "instrument_id"}
+    if parameter_names & forbidden_authority_inputs:
+        raise RuntimeError("turn-of-month preference accepts an execution-authority input")
+    checks["authority_inputs_absent"] = True
+    return checks
 
 
 def _build_evidence(rows: list[dict[str, Any]], *, measured_at: datetime, execution_commit: str) -> Evidence:
@@ -173,6 +243,7 @@ def _build_evidence(rows: list[dict[str, Any]], *, measured_at: datetime, execut
         status="unavailable",
         reason="#2912 accepted corpus contains factor returns and macro context, not valuation-spread levels",
     )
+    operational_checks = _verify_operational_rules()
     source_paths = (
         Path("app/services/r6_operational_rules.py"),
         Path("scripts/verify_2914_operational_rules.py"),
@@ -194,6 +265,7 @@ def _build_evidence(rows: list[dict[str, Any]], *, measured_at: datetime, execut
         observation_unit_counts=dict(sorted(unit_counts.items())),
         eligible_valuation_spread_series=eligible,
         factor_valuation_record=asdict(unavailable),
+        operational_checks=operational_checks,
         series=tuple(series),
         haircuts={
             "15pct": "N/A — operational rule, no return outcome",
@@ -247,6 +319,7 @@ def render_markdown(evidence: Evidence) -> str:
         f"- Turn of month: `{evidence.turn_of_month_rule_version}`, offsets `{list(evidence.turn_of_month_offsets)}`.",
         f"- Factor valuation: `{evidence.factor_valuation_rule_version}`; status `unavailable`.",
         f"- Unavailability reason: {evidence.factor_valuation_record['reason']}.",
+        f"- Deterministic checks: `{evidence.operational_checks}`.",
         "- The preference creates no order, holding, amount, turnover or execution authority.",
         "- Recent factor returns are explicitly ineligible as a valuation-spread proxy.",
         "",

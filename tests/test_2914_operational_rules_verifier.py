@@ -31,6 +31,7 @@ def test_census_records_returns_as_ineligible_for_factor_valuation() -> None:
     )
     assert evidence.observation_count == 2
     assert evidence.eligible_valuation_spread_series == 0
+    assert evidence.operational_checks and all(evidence.operational_checks.values())
     assert evidence.factor_valuation_record["status"] == "unavailable"
     assert evidence.haircuts["15pct"].startswith("N/A")
     assert evidence.haircuts["58pct"].startswith("N/A")

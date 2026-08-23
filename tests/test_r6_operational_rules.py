@@ -95,21 +95,21 @@ def test_factor_return_or_context_unit_cannot_masquerade_as_valuation_spread(uni
         )
 
 
-def test_recorded_factor_valuation_requires_as_of_safe_history_and_provenance() -> None:
-    record = FactorValuationRecord(
-        factor_id="value",
-        status="recorded",
-        reason="deployment context only",
-        spread_measure="book-to-market long-minus-short spread",
-        spread_value=Decimal("0.42"),
-        spread_unit="book_to_market_ratio",
-        observation_date=date(2026, 8, 23),
-        history_start=date(2000, 1, 1),
-        history_end=date(2026, 8, 22),
-        historical_percentile=Decimal("0.77"),
-        source="future_free_reference_source",
-        dataset_key="factor_valuation",
-        series_key="VALUE_SPREAD",
-        source_snapshot_sha256="b" * 64,
-    )
-    assert record.status == "recorded"
+def test_recorded_factor_valuation_refuses_unadmitted_provenance() -> None:
+    with pytest.raises(ValueError, match="not an admitted factor-valuation spread"):
+        FactorValuationRecord(
+            factor_id="value",
+            status="recorded",
+            reason="deployment context only",
+            spread_measure="book-to-market long-minus-short spread",
+            spread_value=Decimal("0.42"),
+            spread_unit="book_to_market_ratio",
+            observation_date=date(2026, 8, 23),
+            history_start=date(2000, 1, 1),
+            history_end=date(2026, 8, 22),
+            historical_percentile=Decimal("0.77"),
+            source="aqr",
+            dataset_key="aqr_vme_monthly",
+            series_key="MOM",
+            source_snapshot_sha256="b" * 64,
+        )
