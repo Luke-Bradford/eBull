@@ -44,9 +44,14 @@ from typing import Final
 from app.providers.broker import BrokerInstrumentEligibility, BrokerLeverageConfig
 
 # The one settlement type that means ownership at full value.
-UNDERLYING_SETTLEMENT_TYPE = "real"
-UNDERLYING_DIRECTION = "long"
-UNLEVERAGED_LEVERAGE = 1
+#
+# ⚠ ``Final`` is load-bearing, not decoration: without it pyright widens the value to
+# ``str``, and a caller passing it to ``BrokerWhatIfOrder.settlement_type`` (a
+# ``Literal``) fails to typecheck -- which pushes that caller into re-typing ``"real"``
+# inline, i.e. back into the second copy this module exists to prevent.
+UNDERLYING_SETTLEMENT_TYPE: Final = "real"
+UNDERLYING_DIRECTION: Final = "long"
+UNLEVERAGED_LEVERAGE: Final = 1
 
 #: The only response currency in which the two open minimums are comparable.
 #: ``minPositionExposure`` is documented as "always calculated in USD" whatever the
