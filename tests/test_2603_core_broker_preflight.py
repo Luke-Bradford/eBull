@@ -382,6 +382,50 @@ def test_a_cost_quote_older_than_the_sleeve_valuation_is_passed_through_as_stale
     assert verdict.reason_code == "cost_quote_stale"
 
 
+def test_a_sizing_refusal_with_no_code_raises_rather_than_returning_an_unnamed_one() -> None:
+    """`python -O` strips asserts, and the stripped form of the guard this replaces would
+    return `admitted=False` with `reason_code=None` -- an unnamed refusal, which is the one
+    thing the closed vocabulary exists to prevent."""
+    from app.services import strategy_core_broker_preflight as module
+    from app.services.strategy_core_sizing import CoreSizingResult
+
+    codeless = CoreSizingResult(
+        sized=False,
+        refusal_code=None,
+        amount=Decimal("0"),
+        pre_cost_amount=_EXPECTED_BUY,
+        cost_rate=None,
+        resulting_core_pct_at_bound=None,
+        resulting_core_pct_at_zero_cost=None,
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(module, "resolve_core_trade_size", lambda *_args, **_kwargs: codeless)
+
+        with pytest.raises(StrategyCoreBrokerPreflightError, match="sizing contract is broken"):
+            assess(FakeBroker())
+
+
+@pytest.mark.parametrize(
+    ("broker_kwargs", "message"),
+    [
+        ({"snapshot_result": RuntimeError("503")}, "account risk snapshot unavailable"),
+        ({"cost_result": RuntimeError("timeout")}, "what-if cost quote unavailable"),
+    ],
+)
+def test_a_swallowed_broker_exception_still_reaches_the_log_with_its_traceback(
+    broker_kwargs: dict[str, Any], message: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The refusal code cannot carry the cause -- a 503 and a TypeError in our own parse
+    collapse to one code -- so a programming bug would otherwise be indistinguishable from
+    a broker outage in production."""
+    caplog.set_level("WARNING")
+
+    assess(FakeBroker(**broker_kwargs))
+
+    record = next(r for r in caplog.records if message in r.getMessage())
+    assert record.exc_info is not None
+
+
 # --- the derivation the age bound rests on ----------------------------------
 
 

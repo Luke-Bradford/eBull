@@ -35,6 +35,7 @@ Spec: ``docs/proposals/ta/2026-08-23-core-broker-preflight.md``
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -64,6 +65,8 @@ from app.services.strategy_core_sizing import (
     resolve_core_trade_size,
 )
 from app.services.strategy_core_sleeve import CoreSleeveObservationError, observe_core_sleeve
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CORE_BROKER_PREFLIGHT_POLICY_VERSION",
@@ -292,6 +295,12 @@ def assess_core_broker_preflight(
     except Exception:
         # Broad on purpose: transport, auth, parse and shape failures are one condition
         # to a submission -- the broker's view of the account is not available.
+        #
+        # ⚠ Logged with the traceback because the verdict deliberately cannot carry it: a
+        # 503 and a TypeError in our own parse collapse to one refusal code, and without
+        # this line a programming bug is indistinguishable from a broker outage in
+        # production -- which is the shape that keeps a real defect looking like weather.
+        logger.warning("core broker preflight: account risk snapshot unavailable", exc_info=True)
         return _refused("core_account_risk_unavailable")
 
     if snapshot.observed_at.tzinfo is None:
@@ -347,6 +356,9 @@ def assess_core_broker_preflight(
             )
         )
     except Exception:
+        # Same reason as the snapshot fetch above: the code cannot carry the cause, so the
+        # log must.
+        logger.warning("core broker preflight: what-if cost quote unavailable", exc_info=True)
         return _refused("core_cost_assessment_unavailable", snapshot_observed_at=snapshot.observed_at)
 
     if not _age_within_bound(snapshot.observed_at, now=clock()):
@@ -370,7 +382,13 @@ def assess_core_broker_preflight(
 
     sized = resolve_core_trade_size(mandate, state, fresh, cost)
     if not sized.sized:
-        assert sized.refusal_code is not None
+        if sized.refusal_code is None:
+            # NOT an `assert`: `python -O` strips those, and the stripped form would
+            # return `admitted=False` with `reason_code=None` -- an unnamed refusal, which
+            # is the one thing this module's whole closed vocabulary exists to prevent.
+            raise StrategyCoreBrokerPreflightError(
+                "resolve_core_trade_size refused without a refusal code; the sizing contract is broken"
+            )
         return _refused(sized.refusal_code, snapshot_observed_at=snapshot.observed_at)
 
     return CoreBrokerPreflightVerdict(
