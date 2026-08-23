@@ -3441,13 +3441,24 @@ def quotes_refresh() -> None:
         # eToro returned with a wide spread, which is not the same as rows now
         # flagged in the table — a stale snapshot rejected by the monotonicity
         # guard still counts here (review NITPICK on #2275).
-        "quotes_refresh complete: requested=%d updated=%d no_quote=%d wide_spreads_fetched=%d core_observations=%d",
+        "quotes_refresh complete: requested=%d updated=%d no_quote=%d wide_spreads_fetched=%d "
+        "core_observations=%d core_observation_failures=%d",
         summary.instruments_requested,
         summary.quotes_updated,
         summary.quotes_skipped,
         summary.spread_flags_set,
         summary.core_observations_written,
+        summary.core_observation_failures,
     )
+    if summary.core_observation_failures:
+        # Escalated above the per-instrument log line: the evidence lane is
+        # deliberately isolated from the quote refresh, so a fault here is
+        # invisible in the job's own success state (#2833).
+        logger.warning(
+            "quotes_refresh: %d core quote observation write(s) FAILED — the candidate spread "
+            "sample is not accruing; #2833's pass bar cannot be measured until this is fixed",
+            summary.core_observation_failures,
+        )
 
 
 def _cik_destination_is_empty(conn: psycopg.Connection) -> bool:  # type: ignore[type-arg]

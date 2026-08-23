@@ -145,8 +145,8 @@ def normalise_quote(
     # ⚠ A non-positive rate is dropped to NULL rather than stored: it would
     # read as a denomination we cannot honour, and NULL already means "the
     # provider did not tell us" (never "USD" -- see sql/366).
-    rate = quote.conversion_rate
-    conversion_rate = Decimal(rate) if rate is not None and Decimal(rate) > 0 else None
+    rate = None if quote.conversion_rate is None else Decimal(quote.conversion_rate)
+    conversion_rate = rate if rate is not None and rate > 0 else None
     return CoreQuoteObservation(
         instrument_id=instrument_id,
         sample_bucket=bucket,

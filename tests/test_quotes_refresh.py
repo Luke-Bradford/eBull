@@ -62,6 +62,71 @@ class TestRefreshQuotes:
         assert summary.quotes_skipped == 1
         assert summary.batch_failed is False
 
+    def test_a_broken_observation_lane_is_counted_not_silently_swallowed(self) -> None:
+        """#2833 — the lane is isolated from the quote refresh, so a bad
+        column or bad SQL would otherwise log once an hour forever while the
+        candidate sample never grows. The count is the detector."""
+        provider = MagicMock()
+        provider.get_quotes.return_value = [_quote(1)]
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch(
+                "app.services.market_data.record_core_quote_observation",
+                side_effect=RuntimeError("relation does not exist"),
+            ),
+        ):
+            summary = refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA")],
+                observe_instrument_ids=frozenset({1}),
+            )
+
+        assert summary.core_observation_failures == 1
+        assert summary.core_observations_written == 0
+        # The quote refresh eight headless services depend on still ran.
+        assert summary.quotes_updated == 1
+        assert summary.batch_failed is False
+
+    def test_observations_are_only_written_for_named_candidates(self) -> None:
+        provider = MagicMock()
+        provider.get_quotes.return_value = [_quote(1), _quote(2)]
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch("app.services.market_data.record_core_quote_observation", return_value=True) as record,
+        ):
+            summary = refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA"), (2, "BBB")],
+                observe_instrument_ids=frozenset({2}),
+            )
+
+        assert summary.core_observations_written == 1
+        assert [c.args[1].instrument_id for c in record.call_args_list] == [2]
+
+    def test_a_missing_quote_still_records_coverage_for_a_candidate(self) -> None:
+        """Absence is evidence: dropping it would shrink the sample silently."""
+        provider = MagicMock()
+        provider.get_quotes.return_value = []
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch("app.services.market_data.record_core_quote_observation", return_value=True) as record,
+        ):
+            summary = refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA")],
+                observe_instrument_ids=frozenset({1}),
+            )
+
+        assert summary.quotes_skipped == 1
+        assert summary.core_observations_written == 1
+        assert record.call_args_list[0].args[1].observation_status == "missing"
+
     def test_batch_fetch_failure_is_distinguishable_from_no_quotes(self) -> None:
         """#2218 shape — a total upstream outage and a universe of untraded
         instruments both write zero quotes. The caller must be able to tell

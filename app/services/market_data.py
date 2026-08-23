@@ -311,6 +311,11 @@ class QuoteRefreshSummary:
     # writer with no reader: a candidate cohort that silently stops accruing
     # would otherwise look identical to one whose bar is still forming.
     core_observations_written: int = 0
+    # Observation writes that raised. Isolated from the quote refresh (the
+    # lane must never break eight headless readers) but NOT swallowed: a
+    # persistent non-zero count is how a broken lane — bad SQL, missing
+    # column — surfaces instead of logging once an hour forever.
+    core_observation_failures: int = 0
 
 
 def refresh_quotes(
@@ -373,6 +378,7 @@ def refresh_quotes(
     observed_ids = observe_instrument_ids or frozenset()
     observed_at = datetime.now(tz=UTC)
     core_observations_written = 0
+    core_observation_failures = 0
     for instrument_id, symbol in instruments:
         quote = quote_map.get(instrument_id)
         # Recorded BEFORE the missing-quote `continue` below: absence of a
@@ -392,7 +398,15 @@ def refresh_quotes(
                         core_observations_written += 1
             except Exception:
                 # Never let the evidence lane break the quote refresh that
-                # eight headless services depend on (#2271).
+                # eight headless services depend on (#2271) -- but do not let
+                # it fail SILENTLY either.  A bad column or bad SQL here is a
+                # programming error that would otherwise log once an hour
+                # forever while the candidate's sample never grows, which is
+                # this repo's "job that no-ops and reports success" class.
+                # The counter below is the detector: `quotes_refresh` logs it
+                # every tick, so a permanently broken lane is visible as
+                # written=0 failures=N rather than inferred from absence.
+                core_observation_failures += 1
                 logger.warning(
                     "Failed to record core quote observation for %s (id=%d), skipping",
                     symbol,
@@ -423,6 +437,7 @@ def refresh_quotes(
         quotes_skipped=quotes_skipped,
         spread_flags_set=spread_flags_set,
         core_observations_written=core_observations_written,
+        core_observation_failures=core_observation_failures,
     )
 
 
