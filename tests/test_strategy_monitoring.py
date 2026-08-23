@@ -32,7 +32,6 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import get_runtime_config, update_runtime_config
-from app.services.strategies.validated_universe import STOCKS_TYPE_DESCRIPTION
 from app.services.strategy_control_plane import configure_paper_pool, load_paper_pool
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_monitoring import (
@@ -43,6 +42,7 @@ from app.services.strategy_monitoring import (
 )
 from app.services.strategy_position_manager import PositionManagerResult
 from app.services.strategy_signal_scan import SCAN_UNIVERSE
+from tests.fixtures.ebull_test_db import seed_universe_anchor
 
 
 def _scan_version(strategy_id: str) -> str:
@@ -1240,7 +1240,7 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = ebull_test_conn
-    _seed_universe_anchor(conn)
+    seed_universe_anchor(conn)
     actual_overview = get_strategy_overview
 
     def ready_overview(connection: psycopg.Connection[object]):
@@ -1326,7 +1326,7 @@ def test_shared_paper_pool_refuses_activation_without_a_ready_candidate(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     conn = ebull_test_conn
-    _seed_universe_anchor(conn)
+    seed_universe_anchor(conn)
     if get_runtime_config(conn).enable_auto_trading:
         update_runtime_config(
             conn,
@@ -1352,34 +1352,6 @@ def test_shared_paper_pool_refuses_activation_without_a_ready_candidate(
     assert exc_info.value.status_code == 409
     assert "no_capital_candidates" in str(exc_info.value.detail)
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (0,)
-
-
-#: `etoro_instrument_types` is created empty by `sql/070` and filled by the
-#: nightly eToro universe sync, so a test DB never has it. Since #2809 the
-#: overview reads the scan freshness bar through `load_validated_universe`,
-#: which resolves the §4.0 `Stocks` anchor and REFUSES on zero rows. Every
-#: paper-pool test here calls `get_strategy_overview`, so all of them raise
-#: `RuntimeError` without this seed.
-#:
-#: ⚠ Same shape as `tests/test_api_strategies.py::_seed_universe_anchor`, and
-#: deliberately only the ANCHOR — seeding instruments too would hand these tests
-#: a non-empty universe none of them asked for.
-_STOCKS_TYPE_ID = 5
-
-
-def _seed_universe_anchor(conn: psycopg.Connection[Any]) -> None:
-    conn.execute(
-        """
-        INSERT INTO etoro_instrument_types (instrument_type_id, description)
-        VALUES (%(stocks)s, %(description)s)
-        ON CONFLICT (instrument_type_id) DO NOTHING
-        """,
-        {"stocks": _STOCKS_TYPE_ID, "description": STOCKS_TYPE_DESCRIPTION},
-    )
-    # ⚠ MUST commit. `update_strategy_paper_pool` calls `conn.rollback()` before
-    # opening its own transaction, so an uncommitted anchor is discarded and the
-    # overview it returns at the end raises on zero rows again.
-    conn.commit()
 
 
 def _ready_overview_patch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1412,7 +1384,7 @@ def test_shared_paper_pool_refuses_activation_outside_demo(
     order it produces dies at the broker.
     """
     conn = ebull_test_conn
-    _seed_universe_anchor(conn)
+    seed_universe_anchor(conn)
     _ready_overview_patch(monkeypatch)
     monkeypatch.setattr("app.api.strategies.settings.etoro_env", "real")
     runtime_before = get_runtime_config(conn)
@@ -1448,7 +1420,7 @@ def test_paper_pool_disable_is_not_blocked_outside_demo(
     having no guard. Same asymmetry the execution guard applies to EXIT.
     """
     conn = ebull_test_conn
-    _seed_universe_anchor(conn)
+    seed_universe_anchor(conn)
     monkeypatch.setattr("app.api.strategies.settings.etoro_env", "real")
 
     response = update_strategy_paper_pool(
@@ -1476,7 +1448,7 @@ def test_shared_paper_pool_refuses_activation_while_live_trading_is_enabled(
     concurrent live enable cannot land between the check and the write.
     """
     conn = ebull_test_conn
-    _seed_universe_anchor(conn)
+    seed_universe_anchor(conn)
     _ready_overview_patch(monkeypatch)
     runtime_before = get_runtime_config(conn)
     update_runtime_config(
@@ -1531,7 +1503,7 @@ def test_live_trading_enable_is_refused_while_paper_automation_is_enabled(
     The two refusals are one invariant and are tested as a pair.
     """
     conn = ebull_test_conn
-    _seed_universe_anchor(conn)
+    seed_universe_anchor(conn)
     _ready_overview_patch(monkeypatch)
     runtime_before = get_runtime_config(conn)
     configure_paper_pool(
@@ -1610,7 +1582,7 @@ def test_evidence_refresh_queues_one_fixed_pinned_request(
 def test_missing_evidence_refuses_new_allocation_without_writing_audit(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     strategy_id = "s1-time-series-momentum"
     version = _current_versions()[strategy_id]
     ebull_test_conn.commit()
@@ -1640,7 +1612,7 @@ def test_missing_evidence_refuses_new_allocation_without_writing_audit(
 def test_evidence_invalid_enabled_allocation_can_reduce_without_disabling(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     strategy_id = "s1-time-series-momentum"
     version = _current_versions()[strategy_id]
     deployment_id = _deployment(ebull_test_conn, strategy_id, version)
@@ -1720,7 +1692,7 @@ def test_disabled_automatic_trading_is_visible_as_an_entry_block(
 def test_operator_allocation_uses_session_identity_and_immutable_event(
     ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     from app.services import strategy_control_plane
 
     strategy_id = "s1-time-series-momentum"

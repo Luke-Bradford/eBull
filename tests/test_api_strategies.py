@@ -26,7 +26,6 @@ from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_V
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.result_ledger import store_holdout_result, store_in_sample_result
-from app.services.strategies.validated_universe import STOCKS_TYPE_DESCRIPTION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_regime_evidence import (
@@ -37,6 +36,7 @@ from app.services.strategy_regime_evidence import (
 from app.services.strategy_result import LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS
 from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION, AmbiguityRecord, record_sha256
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
+from tests.fixtures.ebull_test_db import seed_universe_anchor
 from tests.test_result_ledger import build_metrics, build_result
 
 _IMMATERIAL_AMBIGUITY: dict[str, object] = {
@@ -46,30 +46,6 @@ _IMMATERIAL_AMBIGUITY: dict[str, object] = {
     "ambiguity_worst_case_sharpe": None,
     "ambiguity_cohort_gap_threshold": None,
 }
-
-#: `etoro_instrument_types` is created empty by `sql/070` and filled by the
-#: nightly eToro universe sync, so a test DB never has it. Since #2809 the
-#: overview reads the scan freshness bar through `load_validated_universe`,
-#: which resolves the §4.0 `Stocks` anchor and REFUSES on zero rows — so every
-#: DB test here raises `RuntimeError` without this seed. That refusal is the
-#: right behaviour for an unbootstrapped system; what is missing is the
-#: bootstrap, which is what this supplies.
-#:
-#: Deliberately only the anchor. The tests that follow assert on scan status and
-#: result provenance, and seeding instruments too would give them a non-empty
-#: universe none of them asked for.
-_STOCKS_TYPE_ID = 5
-
-
-def _seed_universe_anchor(conn: psycopg.Connection[tuple]) -> None:
-    conn.execute(
-        """
-        INSERT INTO etoro_instrument_types (instrument_type_id, description)
-        VALUES (%(stocks)s, %(description)s)
-        ON CONFLICT (instrument_type_id) DO NOTHING
-        """,
-        {"stocks": _STOCKS_TYPE_ID, "description": STOCKS_TYPE_DESCRIPTION},
-    )
 
 
 def test_operator_ambiguity_payloads_are_hash_verified_when_loaded_from_sql() -> None:
@@ -473,7 +449,7 @@ def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:
 def test_empty_ledgers_still_return_all_manifest_strategies(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     overview = get_strategy_overview(ebull_test_conn)
     assert [item.strategy_id for item in overview.strategies] == sorted(STRATEGY_MANIFEST)
     assert all(item.scan.status == "never_run" for item in overview.strategies)
@@ -493,7 +469,7 @@ def test_empty_ledgers_still_return_all_manifest_strategies(
 def test_completed_zero_signal_scan_uses_its_watermark(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     strategy_id = "s2-cross-sectional-momentum"
     version = _current_scan_versions()[strategy_id]
     frontier = date(2026, 7, 8)
@@ -530,7 +506,7 @@ def test_completed_zero_signal_scan_uses_its_watermark(
 def test_scan_health_reads_durable_daily_counts_after_detail_retention(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     strategy_id = "s1-time-series-momentum"
     version = _current_scan_versions()[strategy_id]
     ebull_test_conn.execute(
@@ -572,7 +548,7 @@ def test_scan_health_reads_durable_daily_counts_after_detail_retention(
 def test_overview_maps_only_exact_current_holdout_provenance(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     strategy_id = "s1-time-series-momentum"
     strategy_version = _current_versions()[strategy_id]
     window = RECENT_EVIDENCE_WINDOWS["primary-2022-plus"].window
@@ -660,7 +636,7 @@ def test_overview_regime_cohorts_follow_the_result_ids_not_a_second_pin_predicat
     `bull_quiet` — which is what `build_regime_cohorts` writes, since it sorts
     alphabetically — and must READ back bull-before-bear.
     """
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     strategy_id = "s1-time-series-momentum"
     strategy_version = _current_versions()[strategy_id]
     window = RECENT_EVIDENCE_WINDOWS["primary-2022-plus"].window
@@ -774,7 +750,7 @@ def test_overview_leaves_regime_cohorts_empty_for_a_result_written_before_the_wr
     what lets the reader say "not measured for this result version" instead of
     "no trades in any regime".
     """
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     strategy_id = "s1-time-series-momentum"
     window = RECENT_EVIDENCE_WINDOWS["primary-2022-plus"].window
     store_holdout_result(
@@ -822,7 +798,7 @@ def test_regime_cohort_display_order_covers_every_label_the_producer_can_write()
 def test_overview_declares_exactly_the_manifest_strategies_with_exit_adapters_as_forward_resolvable(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    _seed_universe_anchor(ebull_test_conn)
+    seed_universe_anchor(ebull_test_conn)
     overview = get_strategy_overview(ebull_test_conn)
     support = {item.strategy_id: item.forward_outcome_supported for item in overview.strategies}
 

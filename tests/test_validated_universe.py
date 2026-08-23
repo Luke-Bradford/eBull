@@ -32,10 +32,15 @@ from app.services.strategies.validated_universe import (
     load_validated_universe,
     resolve_stocks_type_id,
 )
-from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
+from tests.fixtures.ebull_test_db import (
+    STOCKS_TYPE_ID,
+    ebull_test_conn,  # noqa: F401 — fixture re-export
+)
 
 #: eToro's own ids, so the fixture cannot accidentally agree with a hardcoded 5.
-_STOCKS_TYPE_ID = 5
+#: ⚠ Imported, not redeclared (#2859) — `tests/fixtures/ebull_test_db` is the
+#: single source for the §4.0 anchor id.
+_STOCKS_TYPE_ID = STOCKS_TYPE_ID
 _ETF_TYPE_ID = 6
 
 #: One instrument per exclusion reason, plus the two that must survive.
