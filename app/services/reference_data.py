@@ -546,11 +546,22 @@ def refresh_reference_group(
     client: httpx.Client,
     dataset_keys: Sequence[str],
 ) -> tuple[ReferenceRefreshReport, ...]:
-    """Refresh one declared source group; an unknown key fails before I/O."""
+    """Refresh every member of one source group, then surface any failures."""
     unknown = [key for key in dataset_keys if key not in REFERENCE_DATASETS]
     if unknown:
         raise ValueError(f"unknown reference dataset key(s): {unknown}")
-    return tuple(refresh_reference_dataset(conn, client=client, spec=REFERENCE_DATASETS[key]) for key in dataset_keys)
+    reports: list[ReferenceRefreshReport] = []
+    failures: list[Exception] = []
+    for key in dataset_keys:
+        try:
+            reports.append(refresh_reference_dataset(conn, client=client, spec=REFERENCE_DATASETS[key]))
+        except Exception as exc:
+            exc.add_note(f"reference dataset: {key}")
+            failures.append(exc)
+    if failures:
+        keys = ", ".join(dataset_keys)
+        raise ExceptionGroup(f"one or more reference refreshes failed in group [{keys}]", failures)
+    return tuple(reports)
 
 
 __all__ = [

@@ -20,6 +20,7 @@ from app.services.reference_data import (
     parse_fred_csv,
     parse_french_monthly_zip,
     refresh_reference_dataset,
+    refresh_reference_group,
 )
 
 
@@ -133,6 +134,28 @@ def test_fred_parser_preserves_blank_as_missing_and_checks_binary_unit() -> None
             series_key="USREC",
             unit="binary_indicator",
         )
+
+
+def test_group_refresh_attempts_every_dataset_before_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def refresh_stub(conn: Any, *, client: httpx.Client, spec: ReferenceDatasetSpec) -> Any:
+        del conn, client
+        calls.append(spec.dataset_key)
+        if spec.dataset_key == "fred_dgs3mo":
+            raise ReferenceDataSourceError("deliberate first-source failure")
+        return object()
+
+    monkeypatch.setattr("app.services.reference_data.refresh_reference_dataset", refresh_stub)
+    with httpx.Client() as client:
+        with pytest.raises(ExceptionGroup, match="one or more reference refreshes failed"):
+            refresh_reference_group(
+                None,  # type: ignore[arg-type]
+                client=client,
+                dataset_keys=("fred_dgs3mo", "fred_usrec"),
+            )
+
+    assert calls == ["fred_dgs3mo", "fred_usrec"]
 
 
 @pytest.mark.integration

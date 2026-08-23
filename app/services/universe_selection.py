@@ -123,6 +123,10 @@ EXCHANGE_TEST_ISSUE_SYMBOLS: Final[frozenset[str]] = frozenset(
 )
 
 
+def _is_exchange_test_issue(symbol: object) -> bool:
+    return str(symbol).strip().upper() in EXCHANGE_TEST_ISSUE_SYMBOLS
+
+
 def vendor_for(universe: Universe) -> str:
     if universe == "survivor_only":
         return SURVIVOR_ONLY_VENDOR
@@ -244,7 +248,7 @@ def load_universe_selection(
     if universe == "survivor_only":
         capture = None
         for series_id, symbol, instrument_id, _last_bar, _source, _provision in rows:
-            if str(symbol).strip().upper() in EXCHANGE_TEST_ISSUE_SYMBOLS:
+            if _is_exchange_test_issue(symbol):
                 exchange_test_issues += 1
                 continue
             if instrument_id is None or int(instrument_id) not in validated_ids:
@@ -263,7 +267,7 @@ def load_universe_selection(
         _assert_capture(conn, vendor=vendor, declared=capture)
         alive_floor = capture - timedelta(days=ALIVE_CUT_DAYS)
         for series_id, symbol, instrument_id, last_bar, source, provision in rows:
-            if str(symbol).strip().upper() in EXCHANGE_TEST_ISSUE_SYMBOLS:
+            if _is_exchange_test_issue(symbol):
                 exchange_test_issues += 1
                 continue
             linked_instrument = int(instrument_id) if instrument_id is not None else None
