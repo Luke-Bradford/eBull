@@ -74,7 +74,7 @@ PROBE_MATRIX: Final[Mapping[RankingFamily, Mapping[Condition, ConditionEvidence]
     {
         RankingFamily.RESEARCH_PRICES: MappingProxyType(
             {
-                "public_clock": _cell("fail", "P1"),
+                "public_clock": _cell("pass", "P0"),
                 "system_versions": _cell("fail", "P1"),
                 "historical_population": _cell("fail", "P2", "P5"),
                 "causal_transform": _cell("fail", "P3", "P4"),
@@ -90,13 +90,10 @@ PROBE_MATRIX: Final[Mapping[RankingFamily, Mapping[Condition, ConditionEvidence]
         ),
         RankingFamily.DERIVED_FUNDAMENTALS: MappingProxyType(
             {
-                condition: _cell("fail", "D1")
-                for condition in (
-                    "public_clock",
-                    "system_versions",
-                    "historical_population",
-                    "causal_transform",
-                )
+                "public_clock": _cell("pass", "D0"),
+                "system_versions": _cell("fail", "D1"),
+                "historical_population": _cell("fail", "D1"),
+                "causal_transform": _cell("fail", "D1"),
             }
         ),
         RankingFamily.DIMENSIONAL_XBRL: MappingProxyType(
@@ -112,7 +109,7 @@ PROBE_MATRIX: Final[Mapping[RankingFamily, Mapping[Condition, ConditionEvidence]
         ),
         RankingFamily.OWNERSHIP_OBSERVATIONS: MappingProxyType(
             {
-                "public_clock": _cell("fail", "O2"),
+                "public_clock": _cell("pass", "O0", qualification="filing-based families; DEF 14A fails O2"),
                 "system_versions": _cell("fail", "O1", "O2", "O3"),
                 "historical_population": _cell("fail", "H2", "H3"),
                 "causal_transform": _cell("fail", "O3"),
@@ -144,7 +141,7 @@ PROBE_MATRIX: Final[Mapping[RankingFamily, Mapping[Condition, ConditionEvidence]
         ),
         RankingFamily.HISTORICAL_POPULATION: MappingProxyType(
             {
-                "public_clock": _cell("fail", "H1"),
+                "public_clock": _cell("pass", "H2", qualification="prospective coverage only"),
                 "system_versions": _cell("pass", "H2", qualification="prospective coverage only"),
                 "historical_population": _cell("fail", "H1", "H2", "H3"),
                 "causal_transform": _cell("pass", "H2", qualification="prospective coverage only"),

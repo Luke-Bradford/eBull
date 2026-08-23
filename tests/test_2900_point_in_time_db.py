@@ -33,7 +33,7 @@ def test_declared_probes_are_non_vacuous_and_derive_fail_verdict(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
     probes = run_source_probes(ebull_test_conn)
-    assert len(probes) == 22
+    assert len(probes) == 25
     assert all(probe.passed and probe.anchor_counts and probe.source_sha256 for probe in probes)
     assert derive_verdict(probes) == "FAIL — NO ADMISSIBLE HISTORICAL FIELD"
 
@@ -68,6 +68,8 @@ def test_renderers_share_one_typed_evidence_schema() -> None:
         declaration_sha256="c" * 64,
         correction_commit="d" * 40,
         correction_sha256="e" * 64,
+        correction_2_commit="1" * 40,
+        correction_2_sha256="2" * 64,
         decision_date="2020-01-15",
         registry_version="test-registry",
         registry={"family": {"status": "refused"}},

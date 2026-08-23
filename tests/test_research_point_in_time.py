@@ -33,12 +33,14 @@ EXPECTED_FAMILIES = {
     "historical_population",
 }
 EXPECTED_PROBES = {
+    "D0",
     "F0",
     "F1",
     "F2",
     "D1",
     "X1",
     "O1",
+    "O0",
     "O2",
     "O3",
     "R0",
@@ -51,6 +53,7 @@ EXPECTED_PROBES = {
     "H2",
     "H3",
     "P1",
+    "P0",
     "P2",
     "P3",
     "P4",

@@ -35,6 +35,9 @@ DECLARATION_COMMIT: Final = "51e55d58823a5ebe98e5eea6473895b9d05abc1d"
 CORRECTION_PATH: Final = Path("docs/proposals/ta/2026-08-23-r6-point-in-time-spine-correction-1.md")
 CORRECTION_SHA256: Final = "b101123c59183b8204a70b98a9c40b25e350a4fc58a9c114d8ea76735157cff6"
 CORRECTION_COMMIT: Final = "fe67f100e565fd52db8201ac6ad8f1758c2b163f"
+CORRECTION_2_PATH: Final = Path("docs/proposals/ta/2026-08-23-r6-point-in-time-spine-correction-2.md")
+CORRECTION_2_SHA256: Final = "a330ed170d39da3c201e2bd8e1ce5f80566209a356faa75bb899090e5e2b4f32"
+CORRECTION_2_COMMIT: Final = "055056a5c3b1aa3bc5971de4a6085b0f7bd72206"
 DECISION_DATE: Final = date(2020, 1, 15)
 SENTINEL_CIK: Final = "0000002900"
 SENTINEL_DOCUMENT: Final = "0000002900-20-002900"
@@ -106,6 +109,8 @@ class Evidence:
     declaration_sha256: str
     correction_commit: str
     correction_sha256: str
+    correction_2_commit: str
+    correction_2_sha256: str
     decision_date: str
     registry_version: str
     registry: Mapping[str, object]
@@ -116,6 +121,7 @@ class Evidence:
 
 
 _PROBE_ANCHORS: Final[Mapping[str, tuple[SourceAnchor, ...]]] = {
+    "D0": (SourceAnchor("sql/032_financial_data_enrichment_p1.sql", "filed_date           DATE,", minimum=2),),
     "F0": (
         SourceAnchor("app/services/fundamentals/__init__.py", '"filed_date",', minimum=1),
         SourceAnchor("sql/032_financial_data_enrichment_p1.sql", "filed_date           DATE NOT NULL", maximum=1),
@@ -144,6 +150,11 @@ _PROBE_ANCHORS: Final[Mapping[str, tuple[SourceAnchor, ...]]] = {
         SourceAnchor("app/services/ownership_observations.py", "def record_", minimum=7),
         SourceAnchor("app/services/ownership_observations.py", "ON CONFLICT (", minimum=22, maximum=22),
         SourceAnchor("app/services/ownership_observations.py", "ingested_at = clock_timestamp()", minimum=7),
+    ),
+    "O0": (
+        SourceAnchor(
+            "sql/114_ownership_institutions_observations.sql", "filed_at                TIMESTAMPTZ NOT NULL", minimum=2
+        ),
     ),
     "O2": (
         SourceAnchor("app/services/def14a_ingest.py", "fetched_at = datetime.now(tz=UTC)", minimum=2),
@@ -196,6 +207,7 @@ _PROBE_ANCHORS: Final[Mapping[str, tuple[SourceAnchor, ...]]] = {
         SourceAnchor("sql/103_instrument_symbol_history.sql", "only the current symbol is seeded", maximum=1),
         SourceAnchor("sql/003_external_identifiers.sql", "last_verified_at", maximum=1),
     ),
+    "P0": (SourceAnchor("sql/249_research_price_corpus.sql", "bar_date    DATE NOT NULL", maximum=1),),
     "P1": (
         SourceAnchor("sql/249_research_price_corpus.sql", "CREATE TABLE IF NOT EXISTS research_price_daily", maximum=1),
     ),
@@ -518,6 +530,9 @@ def collect_evidence() -> Evidence:
     measured_correction = hashlib.sha256(CORRECTION_PATH.read_bytes()).hexdigest()
     if measured_correction != CORRECTION_SHA256:
         raise RuntimeError(f"correction hash moved: expected {CORRECTION_SHA256}, measured {measured_correction}")
+    measured_correction_2 = hashlib.sha256(CORRECTION_2_PATH.read_bytes()).hexdigest()
+    if measured_correction_2 != CORRECTION_2_SHA256:
+        raise RuntimeError(f"correction-2 hash moved: expected {CORRECTION_2_SHA256}, measured {measured_correction_2}")
     if _git("status", "--porcelain"):
         raise RuntimeError("verifier requires a clean worktree")
     execution_commit = _git("rev-parse", "HEAD")
@@ -554,6 +569,8 @@ def collect_evidence() -> Evidence:
         declaration_sha256=DECLARATION_SHA256,
         correction_commit=CORRECTION_COMMIT,
         correction_sha256=CORRECTION_SHA256,
+        correction_2_commit=CORRECTION_2_COMMIT,
+        correction_2_sha256=CORRECTION_2_SHA256,
         decision_date=DECISION_DATE.isoformat(),
         registry_version=REGISTRY_VERSION,
         registry=_registry_json(),
@@ -574,6 +591,16 @@ def _lines(items: Iterable[str]) -> str:
 
 def render_markdown(evidence: Evidence) -> str:
     mutation = evidence.mutation
+    census_lines: list[str] = []
+    for table, raw_values in evidence.censuses.items():
+        if not isinstance(raw_values, Mapping):
+            raise TypeError(f"census {table} is not a mapping")
+        row_count = raw_values.get("row_count")
+        instruments = raw_values.get("distinct_instruments")
+        line = f"- `{table}`: {row_count} rows"
+        if instruments is not None:
+            line += f", {instruments} instruments"
+        census_lines.append(line)
     return _lines(
         (
             "# R6 point-in-time spine result (#2900)",
@@ -582,6 +609,7 @@ def render_markdown(evidence: Evidence) -> str:
             "",
             f"Declaration SHA-256: `{evidence.declaration_sha256}` at commit `{evidence.declaration_commit}`.",
             f"Correction-1 SHA-256: `{evidence.correction_sha256}` at commit `{evidence.correction_commit}`.",
+            f"Correction-2 SHA-256: `{evidence.correction_2_sha256}` at commit `{evidence.correction_2_commit}`.",
             f"Execution commit: `{evidence.execution_commit}`. Registry: `{evidence.registry_version}`.",
             "Reproduce: `PYTHONPATH=. uv run python -m scripts.verify_2900_point_in_time --format markdown`",
             "",
@@ -603,6 +631,10 @@ def render_markdown(evidence: Evidence) -> str:
             f"- Refused registry families: {', '.join(sorted(evidence.registry))}.",
             f"- Exact census tables: {', '.join(evidence.censuses)}.",
             "- Full probe anchors, source hashes, registry matrix and census values are emitted by `--format json`.",
+            "",
+            "## Population census",
+            "",
+            *census_lines,
             "",
             "## Consequence",
             "",
