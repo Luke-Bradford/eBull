@@ -135,6 +135,31 @@ class TestCboeVixRegistration:
         assert scheduler.JOB_CBOE_VIX_REFRESH in _INVOKERS
 
 
+class TestReferenceDataRegistration:
+    def test_three_source_groups_have_pinned_staggered_cadences(self) -> None:
+        jobs = {item.name: item for item in SCHEDULED_JOBS}
+        expected = {
+            scheduler.JOB_FRENCH_REFERENCE_REFRESH: Cadence.monthly(day=10, hour=3, minute=5),
+            scheduler.JOB_AQR_REFERENCE_REFRESH: Cadence.monthly(day=10, hour=3, minute=15),
+            scheduler.JOB_FRED_REFERENCE_REFRESH: Cadence.daily(hour=3, minute=25),
+        }
+        for name, cadence in expected.items():
+            job = jobs[name]
+            assert job.source == "reference_data"
+            assert job.cadence == cadence
+            assert job.catch_up_on_boot is True
+            assert job.prerequisite is scheduler._bootstrap_complete
+
+    def test_manual_invokers_are_registered(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+
+        assert {
+            scheduler.JOB_FRENCH_REFERENCE_REFRESH,
+            scheduler.JOB_AQR_REFERENCE_REFRESH,
+            scheduler.JOB_FRED_REFERENCE_REFRESH,
+        } <= _INVOKERS.keys()
+
+
 # ---------------------------------------------------------------------------
 # Daily candle job registration
 # ---------------------------------------------------------------------------

@@ -177,6 +177,7 @@ TERMINATION_CENSUS_STRATA: Final[frozenset[str]] = frozenset(
         "universe_admitted_total",
         "universe_unlinked_alive_excluded",
         "universe_linked_early_reuse_suspect",
+        "universe_exchange_test_issues_excluded",
         "universe_unharvested_excluded",
         "universe_vendor_series_total",
     }
@@ -188,6 +189,7 @@ TERMINATION_CENSUS_STRATA: Final[frozenset[str]] = frozenset(
 _TERMINATION_CENSUS_RECONCILIATION_TERMS: Final[tuple[str, ...]] = (
     "universe_admitted_total",
     "universe_unlinked_alive_excluded",
+    "universe_exchange_test_issues_excluded",
     "universe_unharvested_excluded",
     "universe_vendor_series_total",
 )
@@ -215,13 +217,15 @@ def store_termination_census(conn: psycopg.Connection[Any], *, result_id: int, c
         raise ValueError(f"termination census is missing reconciliation terms: {sorted(missing)}")
     admitted = census["universe_admitted_total"]
     unlinked_alive = census["universe_unlinked_alive_excluded"]
+    exchange_test_issues = census["universe_exchange_test_issues_excluded"]
     unharvested = census["universe_unharvested_excluded"]
     vendor_total = census["universe_vendor_series_total"]
-    reconciled = admitted + unlinked_alive + unharvested
+    reconciled = admitted + unlinked_alive + exchange_test_issues + unharvested
     if reconciled != vendor_total:
         raise ValueError(
             "termination census does not reconcile to the vendor series total: "
-            f"admitted {admitted} + unlinked-alive {unlinked_alive} + unharvested {unharvested} "
+            f"admitted {admitted} + unlinked-alive {unlinked_alive} + "
+            f"exchange-test-issues {exchange_test_issues} + unharvested {unharvested} "
             f"= {reconciled}, vendor total {vendor_total}"
         )
     reuse_suspects = census.get("universe_linked_early_reuse_suspect", 0)

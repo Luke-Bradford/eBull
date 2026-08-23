@@ -89,6 +89,7 @@ from app.services.processes.param_metadata import (
 )
 from app.services.sync_orchestrator.types import OrchestratorFenceHeld
 from app.workers.scheduler import (
+    JOB_AQR_REFERENCE_REFRESH,
     JOB_ATTRIBUTION_SUMMARY,
     JOB_CBOE_VIX_REFRESH,
     JOB_CORE_REBALANCE_OBSERVATION,
@@ -107,6 +108,8 @@ from app.workers.scheduler import (
     JOB_EXECUTE_APPROVED_ORDERS,
     JOB_FAIR_VALUE_BAND_REFRESH,
     JOB_FINANCIAL_FACTS_RETENTION_SWEEP,
+    JOB_FRED_REFERENCE_REFRESH,
+    JOB_FRENCH_REFERENCE_REFRESH,
     JOB_FUNDAMENTALS_SYNC,
     JOB_FX_HISTORY_BACKFILL,
     JOB_FX_RATES_REFRESH,
@@ -162,6 +165,7 @@ from app.workers.scheduler import (
     Cadence,
     CadenceKind,
     ScheduledJob,
+    aqr_reference_refresh,
     attribution_summary_job,
     cboe_vix_refresh,
     compute_next_run,
@@ -181,6 +185,8 @@ from app.workers.scheduler import (
     execute_approved_orders,
     fair_value_band_refresh,
     financial_facts_retention_sweep,
+    fred_reference_refresh,
+    french_reference_refresh,
     fundamentals_sync,
     fx_history_backfill_job,
     fx_rates_refresh,
@@ -377,7 +383,10 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # the frontier watermark rather than by a DAG edge. Own "strategy_scan" lane,
     # resolved from SCHEDULED_JOBS, so no MANUAL_TRIGGER_JOB_SOURCES entry.
     JOB_STRATEGY_SIGNAL_SCAN: _adapt_zero_arg(strategy_signal_scan),
+    JOB_AQR_REFERENCE_REFRESH: _adapt_zero_arg(aqr_reference_refresh),
     JOB_CBOE_VIX_REFRESH: _adapt_zero_arg(cboe_vix_refresh),
+    JOB_FRED_REFERENCE_REFRESH: _adapt_zero_arg(fred_reference_refresh),
+    JOB_FRENCH_REFERENCE_REFRESH: _adapt_zero_arg(french_reference_refresh),
     JOB_STRATEGY_HALT_FEED_REFRESH: _adapt_zero_arg(strategy_halt_feed_refresh),
     JOB_STRATEGY_INTRADAY_HARVEST: _adapt_zero_arg(strategy_intraday_harvest),
     JOB_STRATEGY_OUTCOME_RESOLUTION: _adapt_zero_arg(strategy_outcome_resolution),

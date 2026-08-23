@@ -79,6 +79,53 @@ INTRADER_CAPTURE_DATE: Final = date(2024, 9, 27)
 #: see the module docstring for the measured cliff.
 ALIVE_CUT_DAYS: Final = 7
 
+# Nasdaq Symbol Directory ``Test Issue=Y`` on the two official directory
+# responses frozen in #2912 correction 1 (capture 2026-08-23).  These are
+# synthetic production-feed instruments, not companies.  Keeping the identity
+# rule here (rather than filtering extreme returns) prevents test traffic from
+# entering any strategy population and moves the hashed universe rule version.
+EXCHANGE_TEST_ISSUE_SYMBOLS: Final[frozenset[str]] = frozenset(
+    {
+        "ATEST",
+        "ATEST.A",
+        "ATEST.B",
+        "ATEST.C",
+        "CBO",
+        "CBX",
+        "CTEST",
+        "CTEST.E",
+        "CTEST.G",
+        "CTEST.L",
+        "CTEST.O",
+        "CTEST.S",
+        "CTEST.V",
+        "IGZ",
+        "MTEST",
+        "NTEST",
+        "NTEST.A",
+        "NTEST.B",
+        "NTEST.C",
+        "ZAZZT",
+        "ZBZX",
+        "ZBZZT",
+        "ZCZZT",
+        "ZEXIT",
+        "ZIEXT",
+        "ZJZZT",
+        "ZTEST",
+        "ZVV",
+        "ZVZZT",
+        "ZWZZT",
+        "ZXIET",
+        "ZXYZ.A",
+        "ZXZZT",
+    }
+)
+
+
+def _is_exchange_test_issue(symbol: object) -> bool:
+    return str(symbol).strip().upper() in EXCHANGE_TEST_ISSUE_SYMBOLS
+
 
 def vendor_for(universe: Universe) -> str:
     if universe == "survivor_only":
@@ -133,6 +180,8 @@ class UniverseSelection:
     #: Of the admitted terminating series, how many carry a (suspect) link to
     #: a live instrument. A stratum of ``admitted``, not an exclusion.
     linked_early_reuse_suspect: int
+    #: Official exchange test issues — synthetic feed traffic, not equities.
+    exchange_test_issues_excluded: int
     #: Vendor rows with no harvested bars (``bar_count IS NULL``) — outside
     #: the admission query by construction, counted so the strata reconcile to
     #: the vendor's full series count.
@@ -194,10 +243,14 @@ def load_universe_selection(
     admitted: list[AdmittedSeries] = []
     unlinked_alive = 0
     reuse_suspects = 0
+    exchange_test_issues = 0
 
     if universe == "survivor_only":
         capture = None
-        for series_id, _symbol, instrument_id, _last_bar, _source, _provision in rows:
+        for series_id, symbol, instrument_id, _last_bar, _source, _provision in rows:
+            if _is_exchange_test_issue(symbol):
+                exchange_test_issues += 1
+                continue
             if instrument_id is None or int(instrument_id) not in validated_ids:
                 continue
             admitted.append(
@@ -214,6 +267,9 @@ def load_universe_selection(
         _assert_capture(conn, vendor=vendor, declared=capture)
         alive_floor = capture - timedelta(days=ALIVE_CUT_DAYS)
         for series_id, symbol, instrument_id, last_bar, source, provision in rows:
+            if _is_exchange_test_issue(symbol):
+                exchange_test_issues += 1
+                continue
             linked_instrument = int(instrument_id) if instrument_id is not None else None
             alive = last_bar is not None and last_bar > alive_floor
             if alive:
@@ -271,6 +327,7 @@ def load_universe_selection(
         admitted=tuple(admitted),
         unlinked_alive_excluded=unlinked_alive,
         linked_early_reuse_suspect=reuse_suspects,
+        exchange_test_issues_excluded=exchange_test_issues,
         unharvested_excluded=unharvested,
         vendor_series_total=vendor_total,
     )
@@ -278,6 +335,7 @@ def load_universe_selection(
 
 __all__ = [
     "ALIVE_CUT_DAYS",
+    "EXCHANGE_TEST_ISSUE_SYMBOLS",
     "INTRADER_CAPTURE_DATE",
     "SURVIVOR_ONLY_VENDOR",
     "SURVIVORSHIP_FREE_VENDOR",

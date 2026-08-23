@@ -36,6 +36,7 @@ import psycopg.sql
 from psycopg.types.json import Jsonb
 
 if TYPE_CHECKING:
+    from app.services.reference_data import ReferenceRefreshReport
     from app.services.strategy_halts import HaltSnapshot
 
 from app.config import settings
@@ -411,6 +412,12 @@ JOB_STRATEGY_INTRADAY_HARVEST = "strategy_intraday_harvest"
 JOB_STRATEGY_HALT_FEED_REFRESH = "strategy_halt_feed_refresh"
 # #2574 — one bounded official daily Cboe VIX context refresh.
 JOB_CBOE_VIX_REFRESH = "cboe_vix_refresh"
+# #2912 — immutable public reference datasets used to validate factor
+# construction and supply macro context. Separate invokers preserve each
+# source's refresh receipt; one shared low-volume lane serialises their jobs.
+JOB_FRENCH_REFERENCE_REFRESH = "french_reference_refresh"
+JOB_AQR_REFERENCE_REFRESH = "aqr_reference_refresh"
+JOB_FRED_REFERENCE_REFRESH = "fred_reference_refresh"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2603 item 3 step 3b-3 — observe the core sleeve and store one rebalance
@@ -2228,6 +2235,44 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "a close from an earlier New York date; no rolling indicators are stored."
         ),
         cadence=Cadence.daily(hour=2, minute=12),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_FRENCH_REFERENCE_REFRESH,
+        display_name="Kenneth French factor references (#2912)",
+        source="reference_data",
+        description=(
+            "Monthly day 10 at 03:05 UTC — conditionally fetches the official "
+            "French monthly five-factor and momentum ZIPs, retains exact raw "
+            "responses, and normalizes percent returns to decimal returns."
+        ),
+        cadence=Cadence.monthly(day=10, hour=3, minute=5),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_AQR_REFERENCE_REFRESH,
+        display_name="AQR VME factor references (#2912)",
+        source="reference_data",
+        description=(
+            "Monthly day 10 at 03:15 UTC — conditionally fetches AQR's official "
+            "Value and Momentum Everywhere monthly workbook, retaining the raw "
+            "XLSX and its typed factor observations."
+        ),
+        cadence=Cadence.monthly(day=10, hour=3, minute=15),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_FRED_REFERENCE_REFRESH,
+        display_name="FRED macro references (#2912)",
+        source="reference_data",
+        description=(
+            "Daily 03:25 UTC — conditionally fetches official no-key FRED CSVs "
+            "for DGS3MO and USREC, retaining exact responses with explicit units."
+        ),
+        cadence=Cadence.daily(hour=3, minute=25),
         catch_up_on_boot=True,
         prerequisite=_bootstrap_complete,
     ),
@@ -5638,6 +5683,51 @@ def cboe_vix_refresh() -> None:
             f"status={report.status} retained={report.retained_bars} "
             f"range={report.first_bar or '-'}..{report.last_bar or '-'}"
         )
+
+
+def _reference_data_refresh(dataset_keys: tuple[str, ...]) -> tuple[ReferenceRefreshReport, ...]:
+    """Fetch one bounded #2912 source group through its shared service path."""
+    import httpx
+
+    from app.services.reference_data import refresh_reference_group
+
+    with (
+        httpx.Client(timeout=30.0, follow_redirects=True) as client,
+        connect_job(autocommit=True) as conn,
+    ):
+        return refresh_reference_group(conn, client=client, dataset_keys=dataset_keys)
+
+
+def _record_reference_reports(tracker: _JobTracker, reports: tuple[ReferenceRefreshReport, ...]) -> None:
+    """Attach the bounded source receipts to the owning job run."""
+    tracker.row_count = sum(report.row_count for report in reports if report.status == "accepted")
+    tracker.note = "; ".join(
+        f"{report.dataset_key}={report.status}:{report.row_count}:{report.response_sha256[:12]}" for report in reports
+    )
+
+
+def french_reference_refresh() -> None:
+    """Refresh official Kenneth French monthly factors (#2912)."""
+    from app.services.reference_data import FRENCH_DATASET_KEYS
+
+    with _tracked_job(JOB_FRENCH_REFERENCE_REFRESH) as tracker:
+        _record_reference_reports(tracker, _reference_data_refresh(FRENCH_DATASET_KEYS))
+
+
+def aqr_reference_refresh() -> None:
+    """Refresh official AQR VME monthly factors (#2912)."""
+    from app.services.reference_data import AQR_DATASET_KEYS
+
+    with _tracked_job(JOB_AQR_REFERENCE_REFRESH) as tracker:
+        _record_reference_reports(tracker, _reference_data_refresh(AQR_DATASET_KEYS))
+
+
+def fred_reference_refresh() -> None:
+    """Refresh official FRED macro references (#2912)."""
+    from app.services.reference_data import FRED_DATASET_KEYS
+
+    with _tracked_job(JOB_FRED_REFERENCE_REFRESH) as tracker:
+        _record_reference_reports(tracker, _reference_data_refresh(FRED_DATASET_KEYS))
 
 
 def strategy_paper_cycle() -> None:

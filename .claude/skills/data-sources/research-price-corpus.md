@@ -351,3 +351,22 @@ The search that worked was `filename:<TICKER>.csv` for a name known to be delist
 is a search over *artefacts* rather than over *sources*. Generalises past prices: when a
 sweep over providers returns uniform zero, the next question is not "which provider did I
 miss" but "who has a frozen copy".
+
+## Exchange test issues are not outliers — exclude them by identity
+
+Added 2026-08-23 (#2912). The Intrader corpus contains official exchange test
+securities. `ZBZZT` moved from 14 to 199,999.99 in March 2019 and destroyed a
+published-factor correlation, but filtering that return by magnitude would be
+post-result tuning. Nasdaq's Symbol Directory carries the structured source rule:
+`Test Issue=Y` means a test security.
+
+Before treating any extreme corpus return as a market observation, intersect the
+vendor symbols with the official Nasdaq-listed and other-listed directory rows whose
+test flag is `Y`. Exclude those identities before alive/terminated classification,
+count the exclusion in the universe reconciliation, and move the hashed universe-rule
+version. Freeze the response SHA-256 and normalized symbol set when historical
+reproducibility matters; the live directory is not itself a point-in-time archive.
+
+Do not replace this with a `Z*` symbol rule or a return cap. Legitimate issuers can
+begin with Z, while exchange test traffic can use other prefixes (`ATEST`, `CTEST`,
+`MTEST`, `NTEST`). The source identity, not the observed price path, is the rule.

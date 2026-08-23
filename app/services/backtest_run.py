@@ -4020,6 +4020,7 @@ def _termination_census_for(
                     census["universe_admitted_total"] = len(selection.admitted)
                     census["universe_unlinked_alive_excluded"] = selection.unlinked_alive_excluded
                     census["universe_linked_early_reuse_suspect"] = selection.linked_early_reuse_suspect
+                    census["universe_exchange_test_issues_excluded"] = selection.exchange_test_issues_excluded
                     census["universe_unharvested_excluded"] = selection.unharvested_excluded
                     census["universe_vendor_series_total"] = selection.vendor_series_total
                 return census
