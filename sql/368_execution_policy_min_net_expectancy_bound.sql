@@ -36,7 +36,15 @@
 --     select count(*) from strategy_execution_policies;                        -- 0
 --     select count(*) from strategy_execution_policies
 --      where min_net_expectancy_pct < 0
---         or min_net_expectancy_pct <> min_net_expectancy_pct;                 -- 0
+--         or min_net_expectancy_pct = 'NaN'::numeric;                          -- 0
+--
+-- ⚠ The NaN half of that query is written as `= 'NaN'::numeric` and NOT as the
+-- IEEE self-inequality `col <> col`, which is the natural thing to reach for and
+-- is WRONG here for the same reason this CHECK needs its own clause: Postgres
+-- makes `NaN = NaN` TRUE, so `col <> col` is FALSE for a NaN row and the query
+-- would report zero offending rows while NaNs sat in the table. Caught by a
+-- second-opinion pass, after the correct semantics had already been measured
+-- three lines above -- knowing the rule is not the same as applying it.
 --
 -- ⚠ No CHECK on `strategy_execution_policy_events`, matching that table's
 -- existing shape: it is the append-only revision log and carries no numeric
@@ -51,7 +59,10 @@ ALTER TABLE strategy_execution_policies
     CHECK (min_net_expectancy_pct >= 0 AND min_net_expectancy_pct <> 'NaN'::numeric);
 
 COMMENT ON COLUMN strategy_execution_policies.min_net_expectancy_pct IS
-    'Minimum stress-adjusted net expectancy, in percent, a fired signal must clear '
-    'before strategy_paper_executor will submit it. Non-negative and never NaN. '
-    'Zero is admissible: it means "refuse anything negative", and an operator who '
-    'wants strictly-positive expectancy sets a positive floor.';
+    'Inclusive floor on stress-adjusted net expectancy, in percent. '
+    'strategy_paper_executor refuses a fired signal on '
+    '"net_expectancy < min_net_expectancy_pct", so a signal EQUAL to the floor is '
+    'admitted -- the comparison is strict, and the floor is a minimum rather than '
+    'a threshold to exceed. Non-negative and never NaN. Zero is admissible and '
+    'means "refuse anything negative"; an operator wanting strictly-positive '
+    'expectancy sets a positive floor.';

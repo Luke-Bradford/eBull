@@ -449,6 +449,20 @@ def _require_text(value: str, field: str) -> None:
         raise StrategyControlError(f"{field} must be non-empty")
 
 
+def _is_finite_decimal(value: object) -> bool:
+    """True only for a real, comparable ``Decimal``.
+
+    #2859 — the type check is not redundant with the annotation. Every caller of
+    ``configure_execution_policy`` supplies an execution limit that decides
+    whether a paper order is authorised, and the failure mode being closed here
+    is that a value which is not an ordered finite number reaches an ordered
+    comparison: ``None`` raises ``TypeError``, a ``str`` raises ``TypeError``,
+    and ``Decimal("NaN")`` raises ``InvalidOperation``. All three are a 500 with
+    no refusal recorded, where the contract is one named ``StrategyControlError``.
+    """
+    return isinstance(value, Decimal) and value.is_finite()
+
+
 def _lock_strategy(conn: psycopg.Connection[Any], strategy_id: str, strategy_version: str) -> None:
     conn.execute(
         "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
@@ -923,9 +937,22 @@ def configure_execution_policy(
     # and then only by accident of their upper bound. ``NUMERIC(12,8)`` does
     # reject Infinity (field overflow), so NaN is the whole non-finite risk at
     # rest — but the refusal belongs here, where it can be named.
-    for value, field in (
+    #
+    # ⚠ The two lists are split by whether the limit is OPTIONAL, not for tidiness.
+    # `ticket_fraction` and `fixed_ticket_amount` are genuinely `Decimal | None` —
+    # exactly one of them is `None` in each `ticket_sizing_mode` arm — so a `None`
+    # escape is correct for those two and only those two. Every other limit is a
+    # required `Decimal`, and asserting that here rather than trusting the
+    # annotation is what keeps a dynamic caller's `None` (or a `float`, or a
+    # `str`) a NAMED refusal instead of the `TypeError` / `AttributeError` it
+    # would otherwise become at the first comparison.
+    for optional_value, field in (
         (ticket_fraction, "ticket_fraction"),
         (fixed_ticket_amount, "fixed_ticket_amount"),
+    ):
+        if optional_value is not None and not _is_finite_decimal(optional_value):
+            raise StrategyControlError(f"{field} must be a finite number")
+    for value, field in (
         (max_ticket_amount, "max_ticket_amount"),
         (stop_loss_pct, "stop_loss_pct"),
         (take_profit_pct, "take_profit_pct"),
@@ -935,8 +962,8 @@ def configure_execution_policy(
         (min_net_expectancy_pct, "min_net_expectancy_pct"),
         (cost_stress_multiplier, "cost_stress_multiplier"),
     ):
-        if value is not None and not value.is_finite():
-            raise StrategyControlError(f"{field} must be finite")
+        if not _is_finite_decimal(value):
+            raise StrategyControlError(f"{field} must be a finite number")
     if ticket_sizing_mode == "percent":
         if ticket_fraction is None or not (Decimal("0") < ticket_fraction <= Decimal("1")):
             raise StrategyControlError("percent ticket_fraction must be in (0, 1]")

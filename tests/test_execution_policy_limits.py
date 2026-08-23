@@ -82,7 +82,7 @@ def test_a_non_finite_limit_is_one_named_refusal_and_never_an_invalid_operation(
     per field is what pins the sweep to the full set rather than to the one case
     a regression test happened to use.
     """
-    with pytest.raises(StrategyControlError, match=f"{field} must be finite"):
+    with pytest.raises(StrategyControlError, match=f"{field} must be a finite number"):
         _configure(**{field: Decimal("NaN")})
 
 
@@ -92,12 +92,31 @@ def test_a_non_finite_fixed_ticket_amount_is_still_refused_under_fixed_sizing() 
     ``fixed_ticket_amount`` is ``None`` under percent sizing, so the sweep skips
     it there; this is the arm where it carries a value.
     """
-    with pytest.raises(StrategyControlError, match="fixed_ticket_amount must be finite"):
+    with pytest.raises(StrategyControlError, match="fixed_ticket_amount must be a finite number"):
         _configure(
             ticket_sizing_mode="fixed",
             ticket_fraction=None,
             fixed_ticket_amount=Decimal("NaN"),
         )
+
+
+@pytest.mark.parametrize("bad", [None, "0.5", 0.5], ids=["none", "str", "float"])
+def test_a_required_limit_that_is_not_a_decimal_is_also_one_named_refusal(bad: object) -> None:
+    """The annotation is not the enforcement, and the failure it hides is a 500.
+
+    Raised at review: the finiteness sweep guards ``is not None`` for the two
+    genuinely optional limits, so a reader reasonably asks what happens when a
+    REQUIRED one arrives as ``None``. Before this, ``None < 0`` raised
+    ``TypeError`` and a ``str`` raised ``TypeError`` at the first comparison —
+    both unhandled, both a 500 with no refusal recorded, which is the same
+    contract break as the NaN case and not a different one.
+
+    ⚠ A ``float`` is included deliberately and is the one that would slip past a
+    ``None``-only guard: ``0.5 < 0`` is perfectly legal, so it reaches the
+    database and stores a limit that never went through ``Decimal``.
+    """
+    with pytest.raises(StrategyControlError, match="min_net_expectancy_pct must be a finite number"):
+        _configure(min_net_expectancy_pct=bad)
 
 
 def test_a_negative_net_expectancy_floor_is_refused() -> None:
