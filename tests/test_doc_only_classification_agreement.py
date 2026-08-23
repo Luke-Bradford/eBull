@@ -49,7 +49,12 @@ CLASSIFIER_STEP_ID = "docs_only"
 #: Matches a bash `[[ ... ]]` conditional and the body up to its `fi`. Single-bracket
 #: `[ ... ]` tests in the same script (the base-ref and empty-file guards) are
 #: deliberately not matched — they are not part of the classification.
-_IF_BLOCK = re.compile(r"if \[\[(?P<cond>.*?)\]\]; then(?P<body>.*?)fi", re.DOTALL)
+#:
+#: ⚠ The terminator is `fi` ALONE ON A LINE, not the substring. A bare `fi` would
+#: also match inside `file` or `config`, truncating the body at a comment word and
+#: silently mis-splitting the blocks — which would make this parser fail in the
+#: same latent way the classifier it guards did (review NITPICK on PR #2884).
+_IF_BLOCK = re.compile(r"if \[\[(?P<cond>.*?)\]\]; then(?P<body>.*?)\n\s*fi\b", re.DOTALL)
 
 #: Every `"$f" == <pattern>` comparison inside a condition.
 _COMPARISON = re.compile(r'"\$f"\s*==\s*(?P<pattern>\S+)')
