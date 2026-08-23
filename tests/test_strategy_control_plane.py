@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, cast
+from uuid import uuid4
 
 import psycopg
 import psycopg.sql
 import pytest
+from fastapi import HTTPException
 
-from app.api.strategies import get_strategy_overview
+from app.api.strategies import (
+    StrategyInitialPaperSetupRequest,
+    create_strategy_paper_setup,
+    get_strategy_overview,
+)
+from app.security.sessions import SessionRow
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.result_ledger import (
@@ -1481,6 +1489,243 @@ def test_an_unsupported_currency_is_unrepresentable_at_rest(
                 (deployment.deployment_id,),
             )
     assert excinfo.value.diag.constraint_name == constraint
+
+
+def _operator_session() -> SessionRow:
+    now = datetime.now(UTC)
+    return SessionRow("paper-setup-session", uuid4(), "operator", now + timedelta(hours=1), now)
+
+
+def _setup_request(**overrides: Any) -> StrategyInitialPaperSetupRequest:
+    fields: dict[str, Any] = {
+        "strategy_version": "v1",
+        "capital_limit": Decimal("100"),
+        "ticket_sizing_mode": "percent",
+        "ticket_value": Decimal("10"),
+        "max_ticket_amount": Decimal("25"),
+        "stop_loss_pct": Decimal("5"),
+        "take_profit_pct": Decimal("10"),
+        "max_quote_age_seconds": 30,
+        "max_scan_age_seconds": 300,
+        "max_halt_feed_age_seconds": 300,
+        "max_cost_age_seconds": 3600,
+        "max_reconciliation_age_seconds": 60,
+        "max_instrument_exposure_pct": Decimal("20"),
+        "max_portfolio_exposure_pct": Decimal("50"),
+        "max_drawdown_pct": Decimal("10"),
+        "min_net_expectancy_pct": Decimal("0"),
+        "cost_stress_multiplier": Decimal("2"),
+        "reason": "explicit first paper limits",
+    }
+    fields.update(overrides)
+    return StrategyInitialPaperSetupRequest(**fields)
+
+
+def _stub_overview(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    refusals: list[str],
+    policy_configured: bool = False,
+) -> None:
+    """Stand in for the real overview so the route's OWN rules are what is tested.
+
+    ⚠ Stated rather than hidden: assembling a genuinely allocation-ready overview
+    needs the full 24-cell evidence matrix, which is `strategy_operator_promotion`'s
+    subject and is tested there. Stubbing it here keeps this test about the two
+    things only this route decides — which refusal codes block setup, and whether
+    the deployment and the policy land together.
+    """
+    monkeypatch.setattr("app.api.strategies._current_versions", lambda: {"S-OWN": "v1"})
+    monkeypatch.setattr(
+        "app.api.strategies.get_strategy_overview",
+        lambda _conn: SimpleNamespace(
+            strategies=[
+                SimpleNamespace(
+                    strategy_id="S-OWN",
+                    allocation=SimpleNamespace(policy_configured=policy_configured),
+                    allocation_refusals=refusals,
+                )
+            ]
+        ),
+    )
+
+
+def test_first_paper_setup_creates_a_disabled_deployment_and_its_policy_atomically(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2859 — the only way into the paper lane, and it must not enable anything.
+
+    Before this route, `configure_execution_policy` held the repo's one INSERT
+    into `strategy_execution_policies`, reachable only from `PUT /{id}/sizing`,
+    which SELECTs the policy it is about to revise; and `PUT /{id}/allocation`
+    refuses unless `allocation_ready`, which is false while
+    `execution_policy_missing` is a refusal. Each route needed the other's
+    output, so neither row could ever be created.
+    """
+    conn = ebull_test_conn
+    seed_universe_anchor(conn)
+    _paper_stage(conn)
+    configure_paper_pool(
+        conn,
+        enabled=False,
+        capital_limit=Decimal("1000"),
+        risk_profile="balanced",
+        approval_mode="manual",
+        changed_by="operator",
+        reason="bound the demo pool",
+    )
+    _stub_overview(monkeypatch, refusals=["execution_policy_missing"])
+
+    response = create_strategy_paper_setup("S-OWN", _setup_request(), _operator_session(), conn)
+
+    assert response.enabled is False, "setup is not an enable — that is PUT /strategies/paper-pool"
+    assert response.capital_limit == Decimal("100")
+    assert conn.execute(
+        "SELECT capital_limit, enabled FROM strategy_deployments WHERE deployment_id = %s",
+        (response.deployment_id,),
+    ).fetchone() == (Decimal("100"), False)
+    # 10% expressed as a fraction, and the hard maximum carried through unscaled.
+    assert conn.execute(
+        "SELECT ticket_fraction, max_ticket_amount, cost_stress_multiplier "
+        "FROM strategy_execution_policies WHERE deployment_id = %s",
+        (response.deployment_id,),
+    ).fetchone() == (Decimal("0.1"), Decimal("25"), Decimal("2"))
+
+
+def test_a_refused_policy_leaves_no_orphan_deployment_behind(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Atomically" is the load-bearing word in the route's name.
+
+    The deployment is written first, so a policy refused after it must take the
+    deployment with it. A half-completed setup is worse than none: the strategy
+    would show an allocation with no limits, and `PUT /{id}/sizing` would then
+    happily revise a policy that was never authorised.
+
+    ⚠ Driven by making ``configure_execution_policy`` itself raise, rather than
+    by a bad limit value. A bad value cannot reach it: every bound on the
+    request model mirrors the service's own, so pydantic refuses first and the
+    route is never entered — which is correct behaviour and useless for testing
+    a rollback. What is under test is the transaction boundary, not which
+    validation fires.
+    """
+    conn = ebull_test_conn
+    seed_universe_anchor(conn)
+    _paper_stage(conn)
+    configure_paper_pool(
+        conn,
+        enabled=False,
+        capital_limit=Decimal("1000"),
+        risk_profile="balanced",
+        approval_mode="manual",
+        changed_by="operator",
+        reason="bound the demo pool",
+    )
+    _stub_overview(monkeypatch, refusals=["execution_policy_missing"])
+    before = conn.execute("SELECT count(*) FROM strategy_deployments").fetchone()
+
+    def _refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise StrategyControlError("policy refused after the deployment landed")
+
+    monkeypatch.setattr("app.api.strategies.configure_execution_policy", _refuse)
+
+    with pytest.raises(HTTPException) as excinfo:
+        create_strategy_paper_setup("S-OWN", _setup_request(), _operator_session(), conn)
+
+    assert excinfo.value.status_code == 409
+    assert "policy refused after the deployment landed" in str(excinfo.value.detail)
+    assert conn.execute("SELECT count(*) FROM strategy_deployments").fetchone() == before
+    assert conn.execute("SELECT count(*) FROM strategy_execution_policies").fetchone() == (0,)
+
+
+def test_setup_clears_only_the_missing_policy_refusal_and_no_other(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`execution_policy_missing` is the one code this route exists to clear.
+
+    Every other refusal is a real prerequisite, and a setup route that ignored
+    them would be a way to give a strategy an allocation its evidence does not
+    support — quietly, because nothing downstream re-checks at setup time.
+    """
+    conn = ebull_test_conn
+    seed_universe_anchor(conn)
+    _paper_stage(conn)
+    configure_paper_pool(
+        conn,
+        enabled=False,
+        capital_limit=Decimal("1000"),
+        risk_profile="balanced",
+        approval_mode="manual",
+        changed_by="operator",
+        reason="bound the demo pool",
+    )
+    _stub_overview(monkeypatch, refusals=["execution_policy_missing", "recent_evidence_incomplete"])
+
+    with pytest.raises(HTTPException) as excinfo:
+        create_strategy_paper_setup("S-OWN", _setup_request(), _operator_session(), conn)
+
+    assert excinfo.value.status_code == 409
+    assert "recent_evidence_incomplete" in str(excinfo.value.detail)
+    assert conn.execute("SELECT count(*) FROM strategy_execution_policies").fetchone() == (0,)
+
+
+def test_setup_refuses_a_capital_limit_above_the_shared_paper_pool(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An early refusal, not the enforcement — and worth having anyway.
+
+    ``strategy_paper_executor`` reads ``pool.capital_limit`` as the hard cap at
+    execution time and that remains the authority. Refusing here only moves the
+    discovery from the first fired signal to the setup call.
+    """
+    conn = ebull_test_conn
+    seed_universe_anchor(conn)
+    _paper_stage(conn)
+    configure_paper_pool(
+        conn,
+        enabled=False,
+        capital_limit=Decimal("50"),
+        risk_profile="balanced",
+        approval_mode="manual",
+        changed_by="operator",
+        reason="bound the demo pool small",
+    )
+    _stub_overview(monkeypatch, refusals=["execution_policy_missing"])
+
+    with pytest.raises(HTTPException) as excinfo:
+        create_strategy_paper_setup("S-OWN", _setup_request(), _operator_session(), conn)
+
+    assert excinfo.value.status_code == 409
+    assert "cannot exceed the paper pool limit" in str(excinfo.value.detail)
+
+
+def test_setup_refuses_before_the_strategy_is_paper_approved(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No promotion chain seeded, so the stage is not ``paper_enabled``.
+
+    ⚠ The stage is read AFTER ``lock_strategy_control``, deliberately: the other
+    order decides against a stage a concurrent request may already have moved.
+    """
+    conn = ebull_test_conn
+    seed_universe_anchor(conn)
+    configure_paper_pool(
+        conn,
+        enabled=False,
+        capital_limit=Decimal("1000"),
+        risk_profile="balanced",
+        approval_mode="manual",
+        changed_by="operator",
+        reason="bound the demo pool",
+    )
+    _stub_overview(monkeypatch, refusals=["execution_policy_missing"])
+
+    with pytest.raises(HTTPException) as excinfo:
+        create_strategy_paper_setup("S-OWN", _setup_request(), _operator_session(), conn)
+
+    assert excinfo.value.status_code == 409
+    assert "must be paper-approved" in str(excinfo.value.detail)
+    assert conn.execute("SELECT count(*) FROM strategy_deployments").fetchone() == (0,)
 
 
 def test_the_net_expectancy_floor_check_excludes_nan_and_not_only_negatives(

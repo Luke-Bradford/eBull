@@ -1152,6 +1152,56 @@ class AllocationUpdateResponse(BaseModel):
     revision: int
 
 
+class StrategyInitialPaperSetupRequest(BaseModel):
+    """#2859 — every limit on the first paper policy, supplied explicitly.
+
+    ⚠ No defaults, deliberately, matching ``configure_execution_policy``'s own
+    rule: every number here can authorise or refuse capital, so it has to be an
+    operator decision that appears in the audit stream rather than a constant
+    nobody chose. That is why this model is long.
+    """
+
+    strategy_version: str = Field(min_length=1, max_length=200)
+    capital_limit: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    ticket_sizing_mode: Literal["percent", "fixed"]
+    ticket_value: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    max_ticket_amount: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    stop_loss_pct: Decimal = Field(gt=0, lt=100)
+    take_profit_pct: Decimal = Field(gt=0)
+    max_quote_age_seconds: int = Field(gt=0)
+    max_scan_age_seconds: int = Field(gt=0)
+    max_halt_feed_age_seconds: int = Field(gt=0)
+    max_cost_age_seconds: int = Field(gt=0)
+    max_reconciliation_age_seconds: int = Field(gt=0)
+    max_instrument_exposure_pct: Decimal = Field(gt=0, le=100)
+    max_portfolio_exposure_pct: Decimal = Field(gt=0, le=100)
+    max_drawdown_pct: Decimal = Field(gt=0, lt=100)
+    min_net_expectancy_pct: Decimal = Field(ge=0)
+    cost_stress_multiplier: Decimal = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def valid_ticket_shape(self) -> StrategyInitialPaperSetupRequest:
+        if self.ticket_sizing_mode == "percent" and self.ticket_value > 100:
+            raise ValueError("percent ticket value must be in (0, 100]")
+        if self.ticket_sizing_mode == "fixed" and self.ticket_value > self.max_ticket_amount:
+            raise ValueError("fixed ticket value cannot exceed its hard maximum")
+        if self.max_ticket_amount > self.capital_limit:
+            raise ValueError("hard ticket maximum cannot exceed the strategy capital limit")
+        return self
+
+
+class StrategyInitialPaperSetupResponse(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    deployment_id: int
+    deployment_revision: int
+    policy_revision: int
+    capital_limit: Decimal
+    #: Never anything else. Setup is not an enable — see the route's docstring.
+    enabled: Literal[False]
+
+
 class StrategySizingUpdateRequest(BaseModel):
     strategy_version: str = Field(min_length=1, max_length=200)
     ticket_sizing_mode: Literal["percent", "fixed"]
@@ -3408,6 +3458,114 @@ def update_core_mandate(
     except (CoreMandateError, CoreEligibilityError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _core_mandate_response(mandate)
+
+
+@router.post(
+    "/{strategy_id}/paper-setup",
+    response_model=StrategyInitialPaperSetupResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_strategy_paper_setup(
+    strategy_id: str,
+    body: StrategyInitialPaperSetupRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyInitialPaperSetupResponse:
+    """Create the first disabled paper deployment and its explicit risk policy.
+
+    #2859 — recovered from ``feature/2770-operator-promotion``, which the 08-21
+    rebuild lost. Without it the paper lane is unreachable, and not merely
+    awkward: ``configure_execution_policy`` holds the only INSERT into
+    ``strategy_execution_policies``, its sole caller ``PUT /{id}/sizing`` first
+    SELECTs the policy it is about to revise, and ``PUT /{id}/allocation``
+    refuses unless ``allocation_ready``, which is ``not allocation_refusals`` and
+    so is false while ``execution_policy_missing`` is one of them. Each route
+    requires the other's output. This is the only way in.
+
+    ⚠⚠ Setup is NOT an enable, and the ``enabled=False`` is the load-bearing
+    part rather than a conservative default. Enabling paper automation is
+    ``PUT /strategies/paper-pool``, which carries the demo-environment and
+    live-trading exclusivity guards added in #2859's first half — both taken
+    under ``PAPER_ALLOCATOR_ADVISORY_LOCK``. A setup route that could enable
+    would be a second door into the same authority with none of those checks on
+    it, which is exactly the "one-sided guard is decorative" shape that half
+    already had to fix once.
+
+    ⚠ The pool-ceiling comparison below is an EARLY refusal, not the
+    authoritative one. ``strategy_paper_executor`` reads ``pool.capital_limit``
+    as the hard cap at execution time and that stays the enforcement; refusing
+    here only means an operator finds out at setup instead of at the first
+    fired signal.
+    """
+    _require_current_strategy_version(strategy_id, body.strategy_version)
+    try:
+        with conn.transaction():
+            # Lock first, then read — the other order decides against a stage a
+            # concurrent request may already have moved, the same ordering
+            # `advance_strategy` documents.
+            lock_strategy_control(conn, strategy_id, body.strategy_version)
+            if current_stage(conn, strategy_id, body.strategy_version) != "paper_enabled":
+                raise StrategyControlError("strategy must be paper-approved before initial setup")
+            overview = get_strategy_overview(conn)
+            strategy = next((item for item in overview.strategies if item.strategy_id == strategy_id), None)
+            if strategy is None:
+                raise StrategyControlError("strategy overview changed; refresh required")
+            if strategy.allocation.policy_configured:
+                raise StrategyControlError("paper execution policy is already configured")
+            # `execution_policy_missing` is the refusal this route exists to
+            # clear, so it is the one code that must not block it. Every other
+            # refusal is a real prerequisite and still applies.
+            blocking = [code for code in strategy.allocation_refusals if code != "execution_policy_missing"]
+            if blocking:
+                raise StrategyControlError(f"paper setup prerequisites failed: {', '.join(blocking)}")
+            pool = load_paper_pool(conn)
+            if pool.capital_limit <= 0:
+                raise StrategyControlError("paper pool capital limit must be configured first")
+            if body.capital_limit > pool.capital_limit:
+                raise StrategyControlError("strategy capital limit cannot exceed the paper pool limit")
+            deployment = configure_deployment(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=body.strategy_version,
+                mode="paper",
+                capital_limit=body.capital_limit,
+                enabled=False,
+                changed_by=session.username,
+                reason=body.reason,
+            )
+            policy = configure_execution_policy(
+                conn,
+                deployment_id=deployment.deployment_id,
+                ticket_sizing_mode=body.ticket_sizing_mode,
+                ticket_fraction=(body.ticket_value / Decimal("100") if body.ticket_sizing_mode == "percent" else None),
+                fixed_ticket_amount=(body.ticket_value if body.ticket_sizing_mode == "fixed" else None),
+                max_ticket_amount=body.max_ticket_amount,
+                stop_loss_pct=body.stop_loss_pct,
+                take_profit_pct=body.take_profit_pct,
+                max_quote_age_seconds=body.max_quote_age_seconds,
+                max_scan_age_seconds=body.max_scan_age_seconds,
+                max_halt_feed_age_seconds=body.max_halt_feed_age_seconds,
+                max_cost_age_seconds=body.max_cost_age_seconds,
+                max_reconciliation_age_seconds=body.max_reconciliation_age_seconds,
+                max_instrument_exposure_pct=body.max_instrument_exposure_pct,
+                max_portfolio_exposure_pct=body.max_portfolio_exposure_pct,
+                max_drawdown_pct=body.max_drawdown_pct,
+                min_net_expectancy_pct=body.min_net_expectancy_pct,
+                cost_stress_multiplier=body.cost_stress_multiplier,
+                changed_by=session.username,
+                reason=body.reason,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return StrategyInitialPaperSetupResponse(
+        strategy_id=strategy_id,
+        strategy_version=body.strategy_version,
+        deployment_id=deployment.deployment_id,
+        deployment_revision=deployment.revision,
+        policy_revision=policy.revision,
+        capital_limit=deployment.capital_limit,
+        enabled=False,
+    )
 
 
 @router.put(
