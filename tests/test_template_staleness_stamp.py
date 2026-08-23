@@ -47,7 +47,11 @@ class _StubCursor:
         return False
 
     def execute(self, statement: object, *args: object, **kwargs: object) -> None:
-        self._row = (1,) if "pg_locks" in str(statement) else self._conn.stamp_row
+        if "pg_locks" in str(statement):
+            # The real query returns no row when this session holds no lock.
+            self._row = (1,) if self._conn.holds_lock else None
+        else:
+            self._row = self._conn.stamp_row
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self._row
@@ -62,20 +66,6 @@ class _StubConn:
 
     def cursor(self) -> _StubCursor:
         return _StubCursor(self)
-
-
-class _StubConnWithoutLock(_StubConn):
-    def cursor(self) -> _StubCursor:
-        cursor = _StubCursor(self)
-        original = cursor.execute
-
-        def execute(statement: object, *args: object, **kwargs: object) -> None:
-            original(statement, *args, **kwargs)
-            if "pg_locks" in str(statement):
-                cursor._row = None
-
-        cursor.execute = execute  # type: ignore[method-assign]
-        return cursor
 
 
 def _stamped(migration_hash: str, built_from: str = SIBLING) -> _StubConn:
@@ -127,7 +117,8 @@ def test_the_stamp_check_refuses_to_run_without_the_template_lock() -> None:
     # The check is a read-then-act. Without the lock a sibling can rebuild the
     # template between the read and the CREATE, so a stamp that matched no
     # longer describes what gets copied — silently.
-    conn = _StubConnWithoutLock((json.dumps({"migration_hash": _migration_hash(), "built_from": "x"}),))
+    payload = json.dumps({"migration_hash": _migration_hash(), "built_from": SIBLING})
+    conn = _StubConn((payload,), holds_lock=False)
     with pytest.raises(RuntimeError, match="EBULL_TEMPLATE_LOCK"):
         _assert_template_matches_this_worktree(conn)  # type: ignore[arg-type]
 
