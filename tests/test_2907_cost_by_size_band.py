@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 import pytest
 
 from scripts.verify_2907_cost_by_size_band import (
     PopulationRow,
+    assert_commit_is_ancestor,
     build_evidence,
     classify_cost,
     classify_market_cap,
@@ -14,6 +17,36 @@ from scripts.verify_2907_cost_by_size_band import (
     nearest_rank,
     spread_losses,
 )
+
+
+def test_ancestor_guard_accepts_git_exit_zero() -> None:
+    with patch(
+        "scripts.verify_2907_cost_by_size_band.subprocess.run",
+        return_value=CompletedProcess(args=(), returncode=0, stdout="", stderr=""),
+    ):
+        assert_commit_is_ancestor("declaration", "execution")
+
+
+def test_ancestor_guard_rejects_git_exit_one_with_domain_error() -> None:
+    with (
+        patch(
+            "scripts.verify_2907_cost_by_size_band.subprocess.run",
+            return_value=CompletedProcess(args=(), returncode=1, stdout="", stderr=""),
+        ),
+        pytest.raises(RuntimeError, match="declaration commit is not an ancestor"),
+    ):
+        assert_commit_is_ancestor("declaration", "execution")
+
+
+def test_ancestor_guard_surfaces_git_failures() -> None:
+    with (
+        patch(
+            "scripts.verify_2907_cost_by_size_band.subprocess.run",
+            return_value=CompletedProcess(args=(), returncode=128, stdout="", stderr="bad object"),
+        ),
+        pytest.raises(RuntimeError, match="exit 128: bad object"),
+    ):
+        assert_commit_is_ancestor("declaration", "execution")
 
 
 @pytest.mark.parametrize(

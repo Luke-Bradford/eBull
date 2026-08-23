@@ -168,6 +168,21 @@ def _git(*args: str) -> str:
     return subprocess.run(("git", *args), check=True, text=True, capture_output=True).stdout.strip()
 
 
+def assert_commit_is_ancestor(ancestor: str, descendant: str) -> None:
+    result = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", ancestor, descendant),
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise RuntimeError("declaration commit is not an ancestor of the execution commit")
+    detail = result.stderr.strip() or "no diagnostic"
+    raise RuntimeError(f"git merge-base failed with exit {result.returncode}: {detail}")
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -456,8 +471,7 @@ def collect_evidence() -> Evidence:
     if _git("status", "--porcelain"):
         raise RuntimeError("verifier requires a clean worktree")
     execution_commit = _git("rev-parse", "HEAD")
-    if _git("merge-base", "--is-ancestor", DECLARATION_COMMIT, execution_commit):
-        raise RuntimeError("declaration commit is not an ancestor of the execution commit")
+    assert_commit_is_ancestor(DECLARATION_COMMIT, execution_commit)
     measured_declaration = _sha256(DECLARATION_PATH)
     if measured_declaration != DECLARATION_SHA256:
         raise RuntimeError(f"declaration hash moved: expected {DECLARATION_SHA256}, measured {measured_declaration}")
