@@ -57,6 +57,13 @@ def mocked_env():  # type: ignore[no-untyped-def]
         client = MagicMock()
         client.provider_name = "openai_compatible"
         client.model = "qwen3:14b"
+        # ⚠ The scheduler reads ``clients.writer.provider_name``, not
+        # ``clients.provider_name`` — setting only the latter left the
+        # attributes the job actually logs as auto-generated MagicMocks,
+        # so nothing here constrained them until #2855 asserted on one.
+        client.writer.provider_name = "openai_compatible"
+        client.writer.model = "qwen3:14b"
+        client.critic.model = "qwen3:14b"
         make_client.return_value = client
 
         conn_mock = MagicMock()
@@ -193,6 +200,149 @@ def test_all_locked_batch_does_not_release(mocked_env) -> None:  # type: ignore[
 
     mocked_env["generate_thesis"].assert_not_called()
     mocked_env["release"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# writer_loaded_s — the model load window (#2855)
+# ---------------------------------------------------------------------------
+#
+# The duty cycle must be derivable from ``job_runs`` alone. ``row_count``
+# already gives memos per run, but nothing recorded how long the 10 GB local
+# writer was HELD — and run duration is not a substitute, because the
+# candidate and staleness queries run before anything loads. Two sessions
+# reasoned about this job's memory cost from stale docstring figures
+# precisely because no measurement was stored.
+
+
+def _loaded_s(note: str) -> int:
+    return int(note.split("writer_loaded_s=")[1].split()[0])
+
+
+def test_note_records_the_load_window_on_a_controlled_clock(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """The window is measured, not merely present.
+
+    A stubbed generation is instant, so asserting ``>= 0`` would pass
+    against an implementation that hard-coded zero. Pinning the clock is
+    what proves the start is placed at the first ACQUIRED item and the
+    end after ``release_local_models``.
+    """
+
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield True
+
+    with (
+        patch.object(scheduler, "instrument_lock", fake_lock),
+        patch.object(scheduler.time, "monotonic", side_effect=[1000.0, 1042.0]),
+    ):
+        scheduler.thesis_refresh()
+
+    assert _loaded_s(mocked_env["tracker"].note) == 42
+    # The provider travels with the number: writer_loaded_s is residency
+    # only when the writer is local, and the note is read out of
+    # job_runs.error_msg with no other context.
+    assert "provider=openai_compatible" in mocked_env["tracker"].note
+
+
+def test_load_window_starts_at_the_first_acquired_item_not_the_first_item(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """A LOCKED_BY_SIBLING prefix must not be billed as load time.
+
+    Nothing is pulled into memory while the sibling holds the lock, so a
+    clock started at the top of the batch would inflate the duty cycle by
+    however long the contended items took to skip.
+    """
+    first, second = _stale(101, "AAPL"), _stale(202, "MSFT")
+    mocked_env["candidates"].return_value = [101, 202]
+    with patch.object(scheduler, "find_stale_instruments", return_value=[first, second]):
+        acquired = iter([False, True])
+
+        @contextmanager
+        def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+            yield next(acquired)
+
+        with (
+            patch.object(scheduler, "instrument_lock", fake_lock),
+            # Only two readings are consumed — if the implementation
+            # started the clock on the locked item this would raise
+            # StopIteration rather than silently pass.
+            patch.object(scheduler.time, "monotonic", side_effect=[1000.0, 1007.0]),
+        ):
+            scheduler.thesis_refresh()
+
+    assert _loaded_s(mocked_env["tracker"].note) == 7
+    assert mocked_env["generate_thesis"].call_count == 1
+
+
+def test_load_window_is_zero_when_nothing_loaded(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """An honest zero, not a missing value.
+
+    A batch that is entirely LOCKED_BY_SIBLING never pulls weights into
+    memory here, so this run's contribution to the duty cycle really is
+    nil — and it must not be conflated with the run's wall-clock time,
+    which is non-zero.
+    """
+
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield False
+
+    with patch.object(scheduler, "instrument_lock", fake_lock):
+        scheduler.thesis_refresh()
+
+    assert _loaded_s(mocked_env["tracker"].note) == 0
+
+
+def test_empty_batch_still_records_a_zero_window(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """The no-stale-work early return is still a run.
+
+    ``loaded_pct`` divides summed load time by wall-clock time, so a run
+    that legitimately loaded nothing must be visible as a run. Omitting
+    the field would make "no stale work" indistinguishable from a
+    pre-#2855 row, which coalesces to zero for a different reason.
+    """
+    mocked_env["candidates"].return_value = []
+
+    scheduler.thesis_refresh()
+
+    assert _loaded_s(mocked_env["tracker"].note) == 0
+    assert mocked_env["tracker"].row_count == 0
+
+
+def test_load_window_survives_an_exception_out_of_the_batch(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """The run that dies mid-batch is the one whose load time matters most.
+
+    ``generate_thesis`` raising is caught per-item, so force the failure
+    past that guard — ``instrument_lock`` itself blowing up — and assert
+    the window is still recorded. Computing it below the ``try`` instead
+    of inside the ``finally`` would lose exactly this case.
+    """
+
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield True
+
+    calls = {"n": 0}
+
+    def exploding_lock(conn, iid):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("connection died mid-batch")
+        return fake_lock(conn, iid)
+
+    first, second = _stale(101, "AAPL"), _stale(202, "MSFT")
+    mocked_env["candidates"].return_value = [101, 202]
+    with patch.object(scheduler, "find_stale_instruments", return_value=[first, second]):
+        with (
+            patch.object(scheduler, "instrument_lock", exploding_lock),
+            patch.object(scheduler.time, "monotonic", side_effect=[1000.0, 1013.0]),
+        ):
+            scheduler.thesis_refresh()
+
+    # The per-item guard catches it and counts it as failed, so the run
+    # completes — the assertion is that the window covers the work done
+    # before the failure rather than collapsing to zero.
+    assert _loaded_s(mocked_env["tracker"].note) == 13
+    assert "failed=1" in mocked_env["tracker"].note
 
 
 # ---------------------------------------------------------------------------
