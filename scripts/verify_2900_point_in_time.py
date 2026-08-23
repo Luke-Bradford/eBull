@@ -289,6 +289,13 @@ def _semantic_text(path: str) -> str:
     return re.sub(r"--[^\n]*", "", without_blocks)
 
 
+def _semantic_anchor_count(text: str, needle: str) -> int:
+    """Count an executable anchor without coupling it to source formatting."""
+    normalized_text = re.sub(r"\s+", " ", text)
+    normalized_needle = re.sub(r"\s+", " ", needle)
+    return normalized_text.count(normalized_needle)
+
+
 def run_source_probes(conn: psycopg.Connection[Any]) -> tuple[ProbeResult, ...]:
     """Execute every declared source/schema probe; fail on vacuous anchors."""
     declared = {probe for cells in PROBE_MATRIX.values() for cell in cells.values() for probe in cell.probes}
@@ -301,7 +308,7 @@ def run_source_probes(conn: psycopg.Connection[Any]) -> tuple[ProbeResult, ...]:
         hashes: dict[str, str] = {}
         for index, anchor in enumerate(_PROBE_ANCHORS[probe_id]):
             text = _semantic_text(anchor.path)
-            count = text.count(anchor.needle)
+            count = _semantic_anchor_count(text, anchor.needle)
             key = f"{anchor.path}:{index}"
             counts[key] = count
             hashes[anchor.path] = _file_sha(anchor.path)
