@@ -190,6 +190,25 @@ class LegBook:
     structure that is read once, in index order. The flat ``marks`` array with
     per-leg offsets is the same data at ~186 MB.
 
+    ⚠⚠ THERE IS NO WEIGHT, SIZE OR QUANTITY COLUMN, AND THAT IS A HARD LIMIT ON
+    WHAT ANY STRATEGY HERE CAN BE. Every builder over this book allocates
+    ``equity_ref / basket`` (see ``_build_realised_shared_curve_kernel``), so
+    equal weight is arithmetic inside the compiled kernel rather than a policy
+    above it. ``build_capped_target_exposure_curve`` is not an exception — it
+    scales the AGGREGATE sleeve to a scalar exposure in ``[0, 1]``, uniformly.
+
+    So a value-weighted, cap-weighted, dollar-volume-weighted or score-weighted
+    portfolio is **not expressible** without a weight column here, a weight
+    vector through the kernel, and a new sizing-rule id. Checked and recorded on
+    #2834 ARM B, whose replication needed exactly that; the capability was
+    deliberately NOT built because the arm had no measurement behind it yet.
+
+    ⚠ THIS BLOCKS THE BUILD, NOT THE TEST. A weighted cross-sectional portfolio
+    can be evaluated as monthly portfolio returns outside this engine entirely
+    (formation ranks x a weight vector), touching no book, no kernel, no fills
+    and no half-spreads. Cost the prototype before costing a change in here.
+    ``docs/proposals/ta/2026-08-23-sb-armb-verdict.md`` §2 and §5.
+
     ⚠ ``marks`` HOLDS ONE CLOSE PER BAR OF THE LEG'S LIFE, INCLUSIVE AT BOTH
     ENDS, and ``nan`` for a date on which the instrument's own series has no
     bar. Spec §3.3: a halted name *"stays open to the next date on which its own
