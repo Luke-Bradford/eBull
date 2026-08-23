@@ -697,6 +697,20 @@ def reap_orphaned_job_runs(
 # must NOT reset the schedule-missed clock.
 LANE_BUSY_SKIP_PREFIX: Final[str] = "lane_busy: "
 
+# #2880 — machine-checkable reason prefix for a scheduled fire APScheduler
+# DISCARDED as too late (``EVENT_JOB_MISSED``: the worker thread reached
+# ``run_job`` more than ``misfire_grace_time`` after the scheduled run time).
+# Same classification as ``lane_busy``: work was due and could not start, so it
+# must NOT reset the ``expected_fire_at`` schedule-missed clock — but a separate
+# prefix because the cause is different and ``lane_busy`` would be untrue.
+# Written by ``app/jobs/runtime.py``'s ``EVENT_JOB_MISSED`` listener; excluded
+# from the anchor in ``app/services/processes/scheduled_adapter.py``.
+#
+# ⚠ This is telemetry, not recovery. The fire is already gone when the event is
+# emitted; the row exists so the loss is visible rather than silent. Recovery,
+# where a job can tolerate it, is ``ScheduledJob.misfire_grace_seconds``.
+MISFIRE_SKIP_PREFIX: Final[str] = "misfire: "
+
 
 def record_job_skip(
     conn: psycopg.Connection[Any],
