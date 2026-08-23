@@ -103,8 +103,11 @@ class FactorValuationRecord:
         assert self.source_snapshot_sha256 is not None
         if not self.spread_value.is_finite():
             raise ValueError("spread_value must be finite")
-        if not self.spread_unit.strip() or self.spread_unit in REFERENCE_RETURN_UNITS:
+        canonical_unit = self.spread_unit.strip()
+        if not canonical_unit or canonical_unit in REFERENCE_RETURN_UNITS:
             raise ValueError("factor return/context units cannot be recorded as a valuation spread")
+        if self.spread_unit != canonical_unit:
+            raise ValueError("spread_unit must not contain surrounding whitespace")
         if not Decimal(0) <= self.historical_percentile <= Decimal(1):
             raise ValueError("historical_percentile must be in [0, 1]")
         if not self.history_start <= self.history_end <= self.observation_date:

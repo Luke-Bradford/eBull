@@ -246,6 +246,7 @@ def render_markdown(evidence: Evidence) -> str:
         "",
         f"- Turn of month: `{evidence.turn_of_month_rule_version}`, offsets `{list(evidence.turn_of_month_offsets)}`.",
         f"- Factor valuation: `{evidence.factor_valuation_rule_version}`; status `unavailable`.",
+        f"- Unavailability reason: {evidence.factor_valuation_record['reason']}.",
         "- The preference creates no order, holding, amount, turnover or execution authority.",
         "- Recent factor returns are explicitly ineligible as a valuation-spread proxy.",
         "",

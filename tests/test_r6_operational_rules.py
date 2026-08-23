@@ -74,7 +74,7 @@ def test_unavailable_factor_valuation_refuses_hidden_values() -> None:
         )
 
 
-@pytest.mark.parametrize("unit", ["decimal_return", "percent_per_annum", "binary_indicator"])
+@pytest.mark.parametrize("unit", ["decimal_return", "decimal_return ", "percent_per_annum", "binary_indicator"])
 def test_factor_return_or_context_unit_cannot_masquerade_as_valuation_spread(unit: str) -> None:
     with pytest.raises(ValueError, match="cannot be recorded as a valuation spread"):
         FactorValuationRecord(

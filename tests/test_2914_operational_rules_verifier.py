@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from scripts.verify_2914_operational_rules import _build_evidence
+from scripts.verify_2914_operational_rules import _build_evidence, render_markdown
 
 
 def _row(*, declared: int = 2, observed: int = 2) -> dict[str, object]:
@@ -34,6 +34,7 @@ def test_census_records_returns_as_ineligible_for_factor_valuation() -> None:
     assert evidence.factor_valuation_record["status"] == "unavailable"
     assert evidence.haircuts["15pct"].startswith("N/A")
     assert evidence.haircuts["58pct"].startswith("N/A")
+    assert str(evidence.factor_valuation_record["reason"]) in render_markdown(evidence)
 
 
 def test_census_refuses_snapshot_row_count_mismatch() -> None:
