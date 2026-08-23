@@ -81,6 +81,7 @@ from app.services.strategy_result_universe import (
 )
 from app.services.strategy_statistics import periods_per_year
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
+from tests.fixtures.ebull_test_db import seed_universe_anchor
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
     build_control,
@@ -1536,6 +1537,11 @@ def test_the_deployment_currency_refusal_and_its_constraint_agree(
     # to reach it from a test, because the state it refuses is unrepresentable
     # at rest by the very constraint just asserted.
     monkeypatch.setattr("app.api.strategies.SUPPORTED_DEPLOYMENT_CURRENCIES", frozenset({"CHF"}))
+    # #2891 — the overview reaches ``load_validated_universe``, which since #2809
+    # refuses on a missing §4.0 anchor before any refusal this test is about can
+    # be computed. Seeding it is what lets the assertion below read the branch
+    # rather than the fixture's empty ``etoro_instrument_types``.
+    seed_universe_anchor(conn)
     overview = get_strategy_overview(conn)
     assert overview.strategies, "no strategies in the overview — the assertion below would be vacuous"
     assert all(DEPLOYMENT_CURRENCY_UNSUPPORTED in row.allocation_refusals for row in overview.strategies)
