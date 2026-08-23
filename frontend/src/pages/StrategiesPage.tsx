@@ -537,6 +537,14 @@ function validationState(strategy: StrategyOverview): {
   };
 }
 
+// Two vocabularies land here, and they used to be one of them.
+//
+// ALLOCATION READINESS (below) is computed by the /strategies endpoint and says why a
+// strategy may not receive capital at all. PAPER ENTRY PREFLIGHT (further down) is
+// written by `strategy_paper_executor` into `strategy_funding_decisions.reason_code`
+// and says why one particular fired signal was not funded. Both reach the operator
+// through `refusalLabel`, and until #2844 only the first was described: 73 of the
+// executor's 76 codes had no entry and fell through the fallback.
 const REFUSAL_LABELS: Record<string, string> = {
   harness_validation_only: "Validation control; permanently barred from capital",
   strategy_not_capital_candidate: "Strategy has not been admitted as a capital candidate",
@@ -575,10 +583,137 @@ const REFUSAL_LABELS: Record<string, string> = {
   entry_order_reconciliation_ambiguous: "Entry order has ambiguous broker reconciliation",
   entry_order_reconciliation_rejected: "Entry order was rejected by the broker",
   entry_order_reconciliation_error: "Entry order reconciliation failed",
+
+  // ── PAPER ENTRY PREFLIGHT (`strategy_paper_executor`) ───────────────────────
+  // Ordered by the stage that emits them, not alphabetically, so a reader can
+  // triage by reading down: config → deployment → forecast → market data →
+  // eligibility → costs → mandate risk → capital boundary → submission.
+
+  // Runtime config and global stops
+  runtime_config_corrupt: "Runtime configuration could not be read",
+  auto_trading_disabled: "Automatic trading is switched off",
+  kill_switch_active_or_missing: "Kill switch is engaged, or its record is missing",
+  reconciliation_overdue: "Unreconciled broker orders are older than policy allows",
+  execution_block_active: "An execution block is in force for this strategy",
+
+  // Signal and instrument
+  signal_not_fired_entry: "No fired entry signal exists for this decision",
+  instrument_not_tradable: "Instrument is not marked tradable in the universe",
+  unsupported_market_session: "Instrument is not a US equity, so session rules do not apply",
+  market_session_closed: "The US equity session was closed at decision time",
+  instrument_halted: "Instrument was halted at decision time",
+
+  // Paper deployment and pool
+  paper_deployment_missing: "No paper deployment exists for this strategy",
+  paper_deployment_disabled: "The paper deployment is disabled",
+  paper_pool_unconfigured: "The paper capital pool has no limit set",
+  paper_pool_disabled: "The paper capital pool is disabled",
+  deployment_currency_unsupported: "Deployment currency is not supported (USD only)",
+  execution_policy_invalid: "Execution policy values are missing or out of range",
+
+  // Portfolio mandate
+  portfolio_mandate_unconfigured: "No portfolio mandate risk profile is configured",
+  portfolio_mandate_incomplete: "The portfolio mandate is missing one or more risk limits",
+
+  // Opportunity forecast and ranking
+  opportunity_forecast_missing: "No opportunity forecast exists for this signal",
+  opportunity_forecast_policy_stale: "The forecast was made under a superseded policy version",
+  opportunity_forecast_cost_model_stale: "The forecast was priced with a superseded cost model",
+  opportunity_forecast_not_current: "The forecast is not valid at decision time",
+  opportunity_forecast_target_barrier_missing: "The forecast has no usable profit target",
+  opportunity_forecast_stop_barrier_missing: "The forecast has no usable stop barrier",
+  opportunity_forecast_stop_exceeds_policy: "The forecast stop is wider than the execution policy allows",
+  opportunity_forecast_expectancy_not_positive: "The forecast's conservative expectancy is not positive",
+  opportunity_calibration_not_passed: "Forecast calibration has not passed",
+  opportunity_calibration_knowledge_time_invalid: "Calibration hold-out ended on or after the forecast date",
+  opportunity_assessment_policy_missing: "Prospective forecast acceptance limits are missing",
+  opportunity_assessment_missing: "No prospective forecast assessment exists",
+  opportunity_assessment_not_passed: "The prospective forecast assessment did not pass",
+  opportunity_assessment_stale: "The prospective forecast assessment is out of date",
+  opportunity_ranking_member_missing: "This signal was not ranked in an opportunity batch",
+  opportunity_ranking_member_not_selected: "Ranked, but not selected by the opportunity batch",
+  opportunity_ranking_policy_stale: "The ranking used a superseded policy version",
+  opportunity_ranking_mandate_stale: "The ranking predates the current capital pool event",
+  expectancy_evidence_missing: "Backtest evidence is incomplete or has no lower confidence bound",
+
+  // Market data freshness
+  quote_missing: "No quote was available for this instrument",
+  quote_ask_invalid: "The quoted ask is zero, negative or not a finite number",
+  quote_spread_flagged: "The quote is flagged for an abnormal spread",
+  quote_stale: "The quote was older than policy allows",
+  scan_watermark_missing: "No scan watermark exists",
+  scan_stale: "The last scan was older than policy allows",
+  halt_feed_missing: "No halt-feed observation exists",
+  halt_feed_stale: "The halt feed was older than policy allows",
+
+  // Broker eligibility
+  eligibility_unavailable: "The broker eligibility check could not be reached",
+  eligibility_unresolved: "The broker returned a different currency, or did not know this instrument",
+  instrument_ineligible: "The broker will not allow a position to be opened",
+  no_underlying_arm: "The broker offers no unleveraged holding of the underlying (CFD only)",
+  eligibility_arm_ambiguous: "The broker's eligibility response could not be read unambiguously",
+  fixed_exit_not_allowed: "The broker will not accept a stop loss and take profit on this position",
+  below_broker_minimum: "The ticket is below the broker's minimum for opening a position",
+
+  // Broker cost preflight
+  costs_unavailable: "The broker cost preflight could not be reached",
+  costs_stale_or_mismatched: "The cost preflight was stale, or quoted a different instrument",
+  costs_missing: "The broker returned no cost components",
+  cost_unit_undocumented: "A cost component's monetary field could not be identified",
+  cost_currency_or_value_invalid: "A cost component was negative, or in a different currency",
+  recurring_cost_horizon_unmodelled: "A recurring cost is charged that our holding horizon does not model",
+  net_expectancy_below_policy: "Expectancy after stressed costs is below the policy floor",
+
+  // Account and mandate risk
+  account_risk_unavailable: "The broker account risk snapshot could not be reached",
+  account_risk_stale: "The account risk snapshot was older than policy allows",
+  account_drawdown_limit: "The account is beyond its drawdown limit",
+  portfolio_drawdown_limit: "The portfolio is beyond the mandate's drawdown limit",
+  portfolio_concurrency_limit: "The mandate's concurrent-position limit is reached",
+  portfolio_daily_loss_limit: "The mandate's daily loss limit is reached",
+  portfolio_cash_reserve_limit: "The mandate's cash reserve leaves no room to open",
+  portfolio_active_risk_limit: "The mandate's active risk budget is fully committed",
+  portfolio_position_loss_limit: "Loss at the stop would exceed the mandate's per-position limit",
+  realised_pnl_incomplete: "Realised P&L could not be resolved, so the boundary cannot be computed",
+  risk_capacity_exhausted: "Every sizing limit together leaves nothing to commit",
+
+  // The capital sandbox boundary (#2844) — the operator's assigned-capital safety net
+  sandbox_exceeded: "Engine exposure has reached the assigned capital boundary",
+
+  // Submission
+  preflight_unavailable: "The entry preflight could not be completed",
+  all_paper_entry_gates_passed: "Every entry gate passed; capital was assigned",
+  broker_submission_rejected: "The broker rejected the order",
+  submission_uncertain: "The order's fate at the broker is unresolved",
 };
 
+// ⚠ An UNKNOWN code is returned verbatim, on purpose. This used to be
+// `refusal.replaceAll("_", " ")`, which rendered `sandbox_exceeded` as
+// "sandbox exceeded" — indistinguishable, in the same slot and the same type, from
+// the 37 sentences above that someone actually wrote. That is the #2306 defect in
+// miniature: prettifying an identifier presents it as a claim the product never made.
+// Left as an identifier it reads as one, and the missing entry is visible rather than
+// disguised.
 function refusalLabel(refusal: string): string {
-  return REFUSAL_LABELS[refusal] ?? refusal.replaceAll("_", " ");
+  return REFUSAL_LABELS[refusal] ?? refusal;
+}
+
+// A TRIGGER is not a refusal — it says why a position operation was raised, and every
+// one of these is a normal outcome. They were being rendered through `refusalLabel`,
+// which only read as sensible because the old fallback de-underscored anything it did
+// not know. The vocabulary is closed and declared by
+// `strategy_position_operations_trigger_code_check` (sql/292).
+const TRIGGER_LABELS: Record<string, string> = {
+  entry_exit_gap: "Entry and exit levels converged",
+  causal_resistance_break: "Price broke the resistance level the thesis rested on",
+  timeout: "Maximum holding period reached",
+  strategy_exit: "The strategy's own exit rule fired",
+  emergency_risk: "Emergency risk control",
+  operator_close: "Closed by the operator",
+};
+
+function triggerLabel(trigger: string): string {
+  return TRIGGER_LABELS[trigger] ?? trigger;
 }
 
 
@@ -775,7 +910,7 @@ function StrategyActivity({
                                 </span>
                               </>
                             ) : null}
-                            {signal.trade_lifecycle.latest_operation_trigger ? <span className="block text-slate-500">{refusalLabel(signal.trade_lifecycle.latest_operation_trigger)}</span> : null}
+                            {signal.trade_lifecycle.latest_operation_trigger ? <span className="block text-slate-500">{triggerLabel(signal.trade_lifecycle.latest_operation_trigger)}</span> : null}
                             {signal.trade_lifecycle.latest_operation_error ? <span className="block text-red-700 dark:text-red-300">{refusalLabel(signal.trade_lifecycle.latest_operation_error)}</span> : null}
                             {signal.trade_lifecycle.latest_reconciliation_state ? (
                               <span className="block text-slate-500 capitalize">
