@@ -2879,7 +2879,26 @@ export interface StrategyOverviewResponse {
     last_error: string | null;
     progress: Record<string, unknown> | null;
   };
+  benchmark_refusals: BenchmarkRefusal[];
   strategies: StrategyOverview[];
+}
+
+/**
+ * #2602 item 5. Why a benchmark field carries no number.
+ *
+ * ⚠ `detail` is server-supplied and must be RENDERED, never re-authored here:
+ * it carries a claim about a third party's licence terms, and a client-side
+ * `code -> sentence` map is a second copy of that claim that nobody re-reads.
+ */
+export interface BenchmarkRefusalReason {
+  code: "benchmark_source_unlicensed" | "benchmark_identity_unverified" | "benchmark_series_not_ingested";
+  detail: string;
+}
+
+export interface BenchmarkRefusal {
+  benchmark: string;
+  label: string;
+  reasons: BenchmarkRefusalReason[];
 }
 
 export interface StrategyEvidenceRefreshResponse {
@@ -2941,10 +2960,18 @@ export interface StrategyPnlHistoryPoint {
   incomplete_reasons: string[];
 }
 
+/**
+ * ⚠ Named "Pnl" but mirrors the `/strategies/wealth-history` payload, which is
+ * what `fetchStrategyPnlHistory` actually calls. The SHAPE is right (basis,
+ * principal, pot_value); only the name is stale. Do not "fix" it by editing the
+ * fields to match `/pnl-history` — that endpoint returns a different point type.
+ */
 export interface StrategyPnlHistoryResponse {
   basis: "exact_owned_mark_to_market_nav";
   total_return_available: false;
   benchmark_comparison_available: false;
+  /** #2602 item 5 — the flag above says there is no benchmark; this says why. */
+  benchmark_refusals: BenchmarkRefusal[];
   points: StrategyPnlHistoryPoint[];
 }
 

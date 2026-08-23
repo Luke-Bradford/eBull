@@ -13,7 +13,7 @@ import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from psycopg.pq import TransactionStatus
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.api.auth import require_session, require_session_or_service_token
 from app.api.portfolio import get_portfolio
@@ -739,6 +739,117 @@ class AccountEquityEvidenceView(BaseModel):
     incomplete_reasons: list[str]
 
 
+#: #2602 item 5.  Named refusal states for the two benchmark fields F-0 owes the
+#: operator — S&P 500 total return in base currency, and CPIH real return.  The
+#: rendering IS the v1 deliverable for those fields: no splice, and no price-only
+#: substitution labelled as total return.
+#:
+#: ⚠ A refusal code can itself be a false claim, which is the same dishonesty
+#: read backwards.  The two codes the ticket names are attached only where they
+#: are TRUE; where neither is, the third code below says what is actually the
+#: case.  See ``BENCHMARK_REFUSALS`` for the per-benchmark reasoning.
+#:
+#: ⚠⚠ Each code's meaning is its DEFINITION here, not its English connotation —
+#: a consumer acting on the token alone must be acting on the line beneath it.
+#: This block is the contract; ``detail`` is the evidence for one application of
+#: it (Codex ckpt-2 P2, which read ``unlicensed`` as a finding about a licensor).
+
+#: NOT "this source's licence forbids us". It asserts OUR review state: no free
+#: total-return source has been reviewed and found legally usable. #2602's own
+#: wording defines it that way — *"until a legal free source passes review"*.
+BENCHMARK_SOURCE_UNLICENSED: Final = "benchmark_source_unlicensed"
+#: A candidate series exists but is not the thing the field names.
+BENCHMARK_IDENTITY_UNVERIFIED: Final = "benchmark_identity_unverified"
+#: Neither of the above applies: nothing is ingested, so there is no candidate
+#: series whose licence or identity could be at issue. A fact about our schema.
+BENCHMARK_SERIES_NOT_INGESTED: Final = "benchmark_series_not_ingested"
+
+BENCHMARK_REFUSAL_CODES: Final = (
+    BENCHMARK_SOURCE_UNLICENSED,
+    BENCHMARK_IDENTITY_UNVERIFIED,
+    BENCHMARK_SERIES_NOT_INGESTED,
+)
+
+
+class BenchmarkRefusalReason(BaseModel):
+    """One named reason a benchmark comparison is refused, with its evidence.
+
+    ``detail`` travels with the code deliberately.  The alternative — the client
+    mapping code to sentence — puts a claim about a third party's licence terms
+    in two places, and the copy nobody re-reads is the one that goes stale.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    detail: str
+
+
+class BenchmarkRefusal(BaseModel):
+    """Why one benchmark field carries no number.
+
+    Shape follows the codebase's existing capability idiom —
+    ``live_strategy_activation_available: Literal[False]`` paired with
+    ``live_strategy_activation_blocker`` on :class:`StrategyOverviewResponse` —
+    generalised to N benchmarks with N reasons, because more than one blocker
+    genuinely applies to the S&P field.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    benchmark: str
+    label: str
+    reasons: tuple[BenchmarkRefusalReason, ...]
+
+
+BENCHMARK_REFUSALS: Final = (
+    BenchmarkRefusal(
+        benchmark="sp500_total_return",
+        label="S&P 500 total return",
+        reasons=(
+            BenchmarkRefusalReason(
+                code=BENCHMARK_SOURCE_UNLICENSED,
+                detail=(
+                    "We have reviewed no free S&P 500 total-return source and found it "
+                    "legally usable. This states our review status, not a finding about "
+                    "any licensor's terms — the index licensor's terms page refuses "
+                    "automated fetches and has not been read here."
+                ),
+            ),
+            BenchmarkRefusalReason(
+                code=BENCHMARK_IDENTITY_UNVERIFIED,
+                detail=(
+                    "Every S&P series we hold is a tracking ETF's PRICE (SPY, IVV, VOO) "
+                    "or eToro's SPX500 price index, not the index's total return. "
+                    "Substituting one is the mislabelling this refusal exists to prevent."
+                ),
+            ),
+        ),
+    ),
+    BenchmarkRefusal(
+        benchmark="cpih_real_return",
+        label="CPIH real return",
+        # ⚠ NOT `benchmark_source_unlicensed`.  ONS publishes most of its website
+        # content under the Open Government Licence, which permits commercial
+        # reuse with attribution — so "unlicensed" is not established, and a code
+        # asserting it would be the mirror image of a price-only splice.  We also
+        # cannot claim the converse: "most content" is not the same as "this
+        # series".  What IS verifiable is a fact about our own system, and that is
+        # what the code states.
+        reasons=(
+            BenchmarkRefusalReason(
+                code=BENCHMARK_SERIES_NOT_INGESTED,
+                detail=(
+                    "No CPI/CPIH series is ingested — no inflation table exists in "
+                    "the schema. This is an unbuilt ingest, not a licensing or "
+                    "identity blocker."
+                ),
+            ),
+        ),
+    ),
+)
+
+
 class StrategyOverviewResponse(BaseModel):
     as_of: datetime
     demo_connection: bool
@@ -754,6 +865,12 @@ class StrategyOverviewResponse(BaseModel):
     automation_readiness: AutomationReadinessView
     account_equity_evidence: AccountEquityEvidenceView
     evidence_refresh: EvidenceRefreshView
+    #: #2602 item 5.  Page-level, not per-series: the operator must learn why
+    #: there is no benchmark even when the P&L history request is the one that
+    #: failed, and this payload is the one the Strategies workspace cannot render
+    #: without.  The two history responses carry the same constant so a client
+    #: reading either alone still gets the reason next to the flag.
+    benchmark_refusals: tuple[BenchmarkRefusal, ...] = BENCHMARK_REFUSALS
     strategies: list[StrategyOverview]
 
 
@@ -874,6 +991,8 @@ class StrategyPnlHistoryResponse(BaseModel):
     basis: Literal["exact_owned_realised_pnl_only"] = "exact_owned_realised_pnl_only"
     total_return_available: Literal[False] = False
     benchmark_comparison_available: Literal[False] = False
+    #: #2602 item 5 — the flag above says there is no benchmark; this says why.
+    benchmark_refusals: tuple[BenchmarkRefusal, ...] = BENCHMARK_REFUSALS
     points: list[StrategyPnlHistoryPoint]
 
 
@@ -893,6 +1012,8 @@ class StrategyWealthHistoryResponse(BaseModel):
     basis: Literal["exact_owned_mark_to_market_nav"] = "exact_owned_mark_to_market_nav"
     total_return_available: Literal[False] = False
     benchmark_comparison_available: Literal[False] = False
+    #: #2602 item 5 — the flag above says there is no benchmark; this says why.
+    benchmark_refusals: tuple[BenchmarkRefusal, ...] = BENCHMARK_REFUSALS
     points: list[StrategyWealthHistoryPoint]
 
 
