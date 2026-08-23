@@ -26,7 +26,14 @@ _NOW = datetime(2026, 4, 7, 12, 0, 0, tzinfo=UTC)
 
 
 def _mock_conn() -> MagicMock:
-    return MagicMock()
+    conn = MagicMock()
+    # #2859 — enabling live trading now reads the paper pool under the shared
+    # advisory lock and refuses if paper automation is on. A bare MagicMock
+    # returns a truthy row for that read, which would refuse every live-enable
+    # test here for the wrong reason. `None` is "no pool ever configured", the
+    # honest default for a config test that is not about the strategy lane.
+    conn.execute.return_value.fetchone.return_value = None
+    return conn
 
 
 def _override_conn(conn: MagicMock) -> None:

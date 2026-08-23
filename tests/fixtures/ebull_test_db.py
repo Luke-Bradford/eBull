@@ -48,6 +48,7 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import psycopg
@@ -69,6 +70,48 @@ from app.db.dev_test_db_reaper import (
 
 TEMPLATE_DB_NAME = "ebull_test_template"
 _SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
+
+#: The §4.0 validated-universe anchor. `etoro_instrument_types` is created empty
+#: by `sql/070` and filled by the nightly eToro universe sync, so a test DB never
+#: has it, and since #2809 anything reading the scan freshness bar through
+#: `load_validated_universe` REFUSES on zero rows.
+#:
+#: ⚠ ONE source of truth (#2859). This literal was copied into three test modules
+#: — `test_validated_universe`, `test_api_strategies` and `test_strategy_monitoring`
+#: — so a change to the anchor id would have had to be found by grepping the VALUE.
+#: The review bot flagged one of the three; the other two were only visible by
+#: grepping `5`, which is the recurring shape behind this repo's "extract once"
+#: rule.
+#:
+#: ⚠ `tests/test_validated_universe.py` deliberately does NOT import this and
+#: keeps its own literal. It is the test OF `resolve_stocks_type_id`, so sharing
+#: the constant would let fixture and assertion drift together — the one place
+#: where duplicating the value is the point.
+STOCKS_TYPE_ID = 5
+
+
+def seed_universe_anchor(conn: psycopg.Connection[Any]) -> None:
+    """Insert the §4.0 `Stocks` anchor and COMMIT it.
+
+    ⚠ The commit is load-bearing. `update_strategy_paper_pool` calls
+    `conn.rollback()` before opening its own transaction, so an uncommitted
+    anchor is discarded and the overview it returns at the end raises again.
+
+    Deliberately only the ANCHOR — seeding instruments too would hand a caller a
+    non-empty validated universe it never asked for.
+    """
+    from app.services.strategies.validated_universe import STOCKS_TYPE_DESCRIPTION
+
+    conn.execute(
+        """
+        INSERT INTO etoro_instrument_types (instrument_type_id, description)
+        VALUES (%(stocks)s, %(description)s)
+        ON CONFLICT (instrument_type_id) DO NOTHING
+        """,
+        {"stocks": STOCKS_TYPE_ID, "description": STOCKS_TYPE_DESCRIPTION},
+    )
+    conn.commit()
+
 
 # #1208 Phase 2 / #1444 — the orphan-sweep safety rails (name regex +
 # ``_NEVER_DROP`` protect-set) now live in ``app/db/dev_test_db_reaper.py``
