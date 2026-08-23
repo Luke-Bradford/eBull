@@ -6,15 +6,15 @@ Declaration SHA-256: `369b397e17694f2a54b07897b4d68a8728bf0624e35d00ced8a6ce833b
 Correction-1 SHA-256: `b101123c59183b8204a70b98a9c40b25e350a4fc58a9c114d8ea76735157cff6` at commit `fe67f100e565fd52db8201ac6ad8f1758c2b163f`.
 Correction-2 SHA-256: `a330ed170d39da3c201e2bd8e1ce5f80566209a356faa75bb899090e5e2b4f32` at commit `055056a5c3b1aa3bc5971de4a6085b0f7bd72206`.
 Correction-3 SHA-256: `3186b8573a2bd66dbe04eb0cf378e520dad8e9deaccae4dc92800c696708445d` at commit `4fc9c397dd5c31835856d948137fc0cab3318841`.
-Execution commit: `9f4aa232c0274a2fd1409568aa6a0e863a9fc034`. Registry: `r6-pit-registry-v1+bc337f13bf00`.
+Execution commit: `76397c281f6cc57046f326462a90e514041f0ec0`. Registry: `r6-pit-registry-v1+bc337f13bf00`.
 Reproduce: `PYTHONPATH=. uv run python -m scripts.verify_2900_point_in_time --format markdown`
 
 ## Adversarial leak test
 
 - Decision date: `2020-01-15` (NYSE session).
-- Baseline hash: `74f00d3be202356fad69c1b18afa9a4fe8b12f6cd367c96aac633b5e48121dbb`.
-- Post-decision insert hash: `74f00d3be202356fad69c1b18afa9a4fe8b12f6cd367c96aac633b5e48121dbb` (unchanged).
-- Same-key pre-decision overwrite hash: `ece1c09a47bd6be448bdb15597bcf5e8dad5d4ddf9711ed8d683d97cf2313072` (changed).
+- Baseline hash: `f1d7469066740918f5102df79e374cdeb3c40f15f73bc97656bbecf0e10cec7d`.
+- Post-decision insert hash: `f1d7469066740918f5102df79e374cdeb3c40f15f73bc97656bbecf0e10cec7d` (unchanged).
+- Same-key pre-decision overwrite hash: `6eb77456146f2514e8bf800e034aee5477028e1f40ad3e329fcb8ed275875d50` (changed).
 - First unequal field: `ingest_run_id`: `00000000-0000-0000-0000-000000002900` → `00000000-0000-0000-0000-000000002902`.
 - Rows recoverable at the old `ingested_at` after overwrite: 0.
 - Rollback proved on a new connection: `true`.
