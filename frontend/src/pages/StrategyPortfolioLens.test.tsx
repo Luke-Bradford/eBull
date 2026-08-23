@@ -6,25 +6,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as configApi from "@/api/config";
 import * as strategiesApi from "@/api/strategies";
 import type { StrategyOverviewResponse } from "@/api/types";
+import { BENCHMARK_REFUSALS } from "@/components/strategies/__fixtures__/benchmarkRefusals";
 import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 import { StrategyPortfolioLens } from "@/pages/StrategyPortfolioLens";
-
-/** #2602 item 5 — mirrors `app/api/strategies.py::BENCHMARK_REFUSALS`. */
-const BENCHMARK_REFUSALS = [
-  {
-    benchmark: "sp500_total_return",
-    label: "S&P 500 total return",
-    reasons: [
-      { code: "benchmark_source_unlicensed", detail: "No legal free S&P 500 total-return series has passed review." },
-      { code: "benchmark_identity_unverified", detail: "Every S&P series we hold is a tracking ETF's PRICE." },
-    ],
-  },
-  {
-    benchmark: "cpih_real_return",
-    label: "CPIH real return",
-    reasons: [{ code: "benchmark_series_not_ingested", detail: "No CPI/CPIH series is ingested." }],
-  },
-];
 
 /** The state the operator actually has today: kill switch on, nothing funded. */
 const BLOCKED = {

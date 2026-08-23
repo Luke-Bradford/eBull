@@ -4,13 +4,8 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as strategiesApi from "@/api/strategies";
-import type {
-  BenchmarkRefusal,
-  FiredSignal,
-  StrategyOverviewResponse,
-  StrategyOwnedPosition,
-  StrategyResultArm,
-} from "@/api/types";
+import type { FiredSignal, StrategyOverviewResponse, StrategyOwnedPosition, StrategyResultArm } from "@/api/types";
+import { BENCHMARK_REFUSALS } from "@/components/strategies/__fixtures__/benchmarkRefusals";
 import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 
 const ARM: StrategyResultArm = {
@@ -87,23 +82,6 @@ const ARM: StrategyResultArm = {
     },
   ],
 };
-
-/** #2602 item 5 — mirrors `app/api/strategies.py::BENCHMARK_REFUSALS`. */
-const BENCHMARK_REFUSALS: BenchmarkRefusal[] = [
-  {
-    benchmark: "sp500_total_return",
-    label: "S&P 500 total return",
-    reasons: [
-      { code: "benchmark_source_unlicensed", detail: "No legal free S&P 500 total-return series has passed review." },
-      { code: "benchmark_identity_unverified", detail: "Every S&P series we hold is a tracking ETF's PRICE." },
-    ],
-  },
-  {
-    benchmark: "cpih_real_return",
-    label: "CPIH real return",
-    reasons: [{ code: "benchmark_series_not_ingested", detail: "No CPI/CPIH series is ingested." }],
-  },
-];
 
 const OVERVIEW: StrategyOverviewResponse = {
   as_of: "2026-08-09T12:00:00Z",
