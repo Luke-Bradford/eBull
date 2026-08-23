@@ -92,6 +92,7 @@ function freshThesis(): ThesisDetail {
     memo_markdown: "Fresh thesis memo.",
     critic_json: null,
     created_at: now.toISOString(),
+    subject_identity_ok: true,
     is_stale: false,
     stale_reason: null,
   };
@@ -767,5 +768,56 @@ describe("SummaryStrip — live-tick currency sourcing (#1906)", () => {
     expect(screen.getByTestId("price-companion")).toHaveTextContent(
       "≈ GBP 86.00",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2306 — the always-visible stance chip must not present a REFUSED thesis in
+// the same tone as a live one. This chip is the surface an operator glances at
+// before opening anything, so a quarantined `buy` rendering green is the exact
+// shape that let a wrong-company valuation band read as actionable.
+// ---------------------------------------------------------------------------
+describe("SummaryStrip — thesis subject-identity quarantine (#2306)", () => {
+  it("marks a refused thesis on the chip without dropping the stance", () => {
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={{ ...freshThesis(), subject_identity_ok: false }}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    const badge = screen.getByTestId("thesis-badge");
+    expect(badge).toHaveAttribute("data-refused", "true");
+    expect(badge.textContent).toContain("(refused)");
+    // The operator still needs to know what the memo claimed.
+    expect(badge.textContent).toContain("BUY");
+    expect(badge).toHaveAttribute("title", expect.stringContaining("thesis_quarantined"));
+  });
+
+  it("treats an UNCHECKED verdict as refused too (null is not passed)", () => {
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={{ ...freshThesis(), subject_identity_ok: null }}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    expect(screen.getByTestId("thesis-badge")).toHaveAttribute("data-refused", "true");
+  });
+
+  it("leaves a passing thesis chip untouched", () => {
+    render(
+      <SummaryStrip
+        summary={summary()}
+        thesis={freshThesis()}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+    const badge = screen.getByTestId("thesis-badge");
+    expect(badge).not.toHaveAttribute("data-refused");
+    expect(badge.textContent).not.toContain("(refused)");
   });
 });

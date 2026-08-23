@@ -1393,6 +1393,14 @@ export interface ThesisDetail {
   prompt_version?: string | null;
   model?: string | null;
   provider?: string | null;
+  /** #2436 stored subject-identity verdict; surfaced by #2306. NOT a filter —
+   *  the row stays visible as the truthful record. `false` = the memo never
+   *  names its own instrument, so its figures may belong to another company;
+   *  `null` = never checked. Both are refused by portfolio / scoring /
+   *  entry-timing / alerts / reporting. Read it via
+   *  `@/lib/thesisQuarantine`, never by comparing to `false` — NULL refuses
+   *  too. */
+  subject_identity_ok: boolean | null;
   /** Server-computed staleness (#1902 single source: find_stale_instruments).
    *  Populated only on the latest-thesis GET; null on history/POST payloads. */
   is_stale?: boolean | null;
@@ -1445,6 +1453,11 @@ export interface ThesisLibraryItem {
    *  null/false on v1 rows, gap rows, or an unchanged regen. */
   last_change_summary: string | null;
   last_change_material: boolean;
+  /** #2436 verdict; see `ThesisDetail.subject_identity_ok`.
+   *  ⚠ null ALSO on the held-but-unthesised rows this list deliberately
+   *  includes, where `thesis_id` is null too — gate any marker on
+   *  `thesis_id !== null` or "no thesis yet" renders as "quarantined". */
+  subject_identity_ok: boolean | null;
 }
 
 export interface ThesisLibraryResponse {

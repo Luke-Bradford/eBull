@@ -81,6 +81,7 @@ const THESIS: ThesisDetail = {
   memo_markdown: "The bull case rests on services.",
   critic_json: null,
   created_at: "2026-06-29T09:00:00Z",
+  subject_identity_ok: true,
 };
 
 function mockHistoryEmpty() {

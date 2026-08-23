@@ -23,6 +23,7 @@ import type {
 } from "@/api/types";
 import { Term } from "@/components/Term";
 import { formatCloseDate } from "@/lib/format";
+import { isThesisQuarantined, thesisRefusalTooltip } from "@/lib/thesisQuarantine";
 import {
   liveTickDisplayCompanion,
   liveTickNativePrice,
@@ -182,6 +183,9 @@ export function SummaryStrip({
     position !== null &&
     position.trades.length === 1;
   const thesisStale = isThesisStale(thesis);
+  // #2306 — null thesis is handled by the badge branches below, so this is
+  // only consulted where a thesis exists.
+  const thesisQuarantined = thesis !== null && isThesisQuarantined(thesis.subject_identity_ok);
   // Still offer Generate thesis on errored thesis state — gives the
   // operator a retry affordance instead of silent lockout.
   const showGenerateThesis = (thesisLoaded && thesisStale) || thesisError;
@@ -271,12 +275,34 @@ export function SummaryStrip({
         {thesis !== null ? (
           <span
             data-testid="thesis-badge"
-            className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${thesisTone(thesis.stance)}`}
+            data-refused={thesisQuarantined ? "true" : undefined}
+            title={
+              thesis !== null && thesisQuarantined
+                ? thesisRefusalTooltip(thesis.subject_identity_ok)
+                : undefined
+            }
+            /* #2306 — a quarantined thesis loses the stance TONE, not the
+               stance. The chip is the always-visible surface, so a refused
+               `buy` rendering in the same green as a live one is the exact
+               thing that let a wrong-company band read as actionable. The
+               stance itself stays: the operator still needs to know what the
+               memo claimed. */
+            className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${
+              thesisQuarantined
+                ? "border-red-300 bg-red-50 text-red-700 dark:border-red-700 dark:bg-red-950/40 dark:text-red-300"
+                : thesisTone(thesis.stance)
+            }`}
           >
+            {thesisQuarantined ? (
+              <span aria-hidden="true" className="mr-1">
+                ⊘
+              </span>
+            ) : null}
             Thesis: {thesis.stance.toUpperCase()}
             {thesis.confidence_score !== null
               ? ` ${Math.round(Number(thesis.confidence_score) * 100)}%`
               : ""}
+            {thesisQuarantined ? <span className="ml-1.5">(refused)</span> : null}
             {thesisStale ? (
               <span className="ml-1.5 text-amber-600">(stale)</span>
             ) : null}

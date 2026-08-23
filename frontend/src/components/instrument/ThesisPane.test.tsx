@@ -23,6 +23,12 @@ const FIXTURE = {
   prompt_version: "v2",
   model: "qwen3:14b",
   provider: "openai_compatible",
+  // #2306 — the verdict is REQUIRED on the wire, so the fixture carries it
+  // rather than leaning on the `as unknown as` cast this file used to end
+  // with. A cast here would have hidden the very drift the required type is
+  // for, and `undefined` reads as quarantined, so the omission would have
+  // silently flipped every assertion below into the refused branch.
+  subject_identity_ok: true,
 } as unknown as ThesisDetail;
 
 describe("ThesisPane", () => {
@@ -302,5 +308,108 @@ describe("ThesisPane — break predicate rows (#2051)", () => {
     } as unknown as ThesisDetail;
     render(<ThesisPane thesis={bare} errored={false} />);
     expect(screen.getByText("Lose 50% market share")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2306 — the subject-identity verdict on the screen.
+//
+// The deterministic layer has refused these rows since #2431/#2436; until this
+// ticket the pane rendered them as fact. On the dev corpus that was 78 of 482
+// latest-per-instrument theses.
+// ---------------------------------------------------------------------------
+describe("ThesisPane subject-identity quarantine (#2306)", () => {
+  const BANNER = "thesis-quarantine-banner";
+
+  function withVerdict(ok: boolean | null | undefined): ThesisDetail {
+    return { ...FIXTURE, subject_identity_ok: ok } as unknown as ThesisDetail;
+  }
+
+  it("shows no banner when the verdict passed", () => {
+    render(<ThesisPane thesis={withVerdict(true)} errored={false} />);
+    expect(screen.queryByTestId(BANNER)).not.toBeInTheDocument();
+    expect(screen.getByTestId("thesis-band")).not.toHaveAttribute("data-refused");
+  });
+
+  it.each([
+    [false, "unnamed_subject", "never names its own instrument"],
+    [null, "unchecked", "has not been checked"],
+    [undefined, "unchecked", "has not been checked"],
+  ] as const)("banners a %s verdict as %s", (ok, state, copy) => {
+    render(<ThesisPane thesis={withVerdict(ok)} errored={false} />);
+    const banner = screen.getByTestId(BANNER);
+    expect(banner).toHaveAttribute("data-subject-state", state);
+    expect(banner).toHaveTextContent(copy);
+    // The refusal must name the machine-readable reason the engine logs, so
+    // the screen and the logs are greppable by the same word.
+    expect(banner).toHaveTextContent("thesis_quarantined");
+  });
+
+  it("marks the valuation band refused but still renders the stored targets", () => {
+    render(<ThesisPane thesis={withVerdict(false)} errored={false} />);
+    // Annotate, do not hide: the band is the writer's actual output and the
+    // evidence base for the verdict (docs/settled-decisions.md:147).
+    expect(screen.getByTestId("thesis-band")).toHaveAttribute("data-refused", "true");
+    expect(screen.getByText("Bear")).toBeInTheDocument();
+    expect(screen.getByText("Base")).toBeInTheDocument();
+    expect(screen.getByText("Bull")).toBeInTheDocument();
+  });
+
+  it("suppresses the upside-to-base conclusion, which is not part of the record", () => {
+    // base 20 against a price of 10 is +100%; a quarantined band must not
+    // render that as live analysis.
+    const { rerender } = render(
+      <ThesisPane thesis={withVerdict(true)} errored={false} currentPrice="10" />,
+    );
+    expect(screen.getByText("+100.0%")).toBeInTheDocument();
+
+    rerender(<ThesisPane thesis={withVerdict(false)} errored={false} currentPrice="10" />);
+    expect(screen.queryByText("+100.0%")).not.toBeInTheDocument();
+  });
+
+  it("suppresses the outside-buy-zone conclusion", () => {
+    const buyable = (ok: boolean): ThesisDetail =>
+      ({
+        ...FIXTURE,
+        stance: "buy",
+        buy_zone_low: 100,
+        buy_zone_high: 120,
+        subject_identity_ok: ok,
+      }) as unknown as ThesisDetail;
+    const zoneCopy = /entry conditions not met at market/;
+
+    const { rerender } = render(
+      <ThesisPane thesis={buyable(true)} errored={false} currentPrice="500" />,
+    );
+    expect(screen.getByText(zoneCopy)).toBeInTheDocument();
+
+    rerender(<ThesisPane thesis={buyable(false)} errored={false} currentPrice="500" />);
+    expect(screen.queryByText(zoneCopy)).not.toBeInTheDocument();
+  });
+
+  it("announces assertively — a refusal, not a status (PR #2897 review)", () => {
+    // The repo's convention for a safety refusal is role="alert"
+    // (KillSwitchSection, ErrorBanner, both order modals). role="status" was
+    // copied from OwnershipCoverageBanner, which reports a condition of the
+    // DATA rather than a refusal of it.
+    render(<ThesisPane thesis={withVerdict(false)} errored={false} />);
+    expect(screen.getByTestId(BANNER)).toHaveAttribute("role", "alert");
+  });
+
+  it("INVARIANT: never renders the memo without the banner", () => {
+    // safety-state-ui.md's failure mode is a banner derived from a refetchable
+    // value vanishing while the dangerous content stays. Structurally absent
+    // here because both are read off the SAME thesis object and the pane
+    // early-returns on a null one — asserted rather than assumed.
+    for (const ok of [false, null, undefined] as const) {
+      const { unmount } = render(<ThesisPane thesis={withVerdict(ok)} errored={false} />);
+      expect(screen.getByText("Buy on weakness.")).toBeInTheDocument();
+      expect(screen.getByTestId(BANNER)).toBeInTheDocument();
+      unmount();
+    }
+    // The other half of the invariant: no memo on screen at all when there is
+    // no thesis object to carry a verdict.
+    const { container } = render(<ThesisPane thesis={null} errored={false} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });

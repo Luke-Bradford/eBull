@@ -2,6 +2,8 @@ import { Pane } from "@/components/instrument/Pane";
 import { CriticVerdictBadge } from "@/components/theses/CriticVerdictBadge";
 import { MemoMarkdown } from "@/components/theses/MemoMarkdown";
 import { StanceBadge } from "@/components/theses/StanceBadge";
+import { ThesisQuarantineBanner } from "@/components/theses/ThesisQuarantineBanner";
+import { isThesisQuarantined } from "@/lib/thesisQuarantine";
 import { EmptyState } from "@/components/states/EmptyState";
 import type { ThesisBreakPredicate, ThesisDetail, ThesisDiff } from "@/api/types";
 import { Badge } from "@/components/ui/Badge";
@@ -206,13 +208,25 @@ function ThesisBody({ thesis, currentPrice, currency }: BodyProps): JSX.Element 
     thesis.bear_value !== null ||
     hasBuyZone;
 
+  // #2306 — the stored subject-identity verdict (#2436). The row still
+  // renders; what changes is that the screen stops asserting it as a verdict
+  // the way the deterministic layer already stopped reading it.
+  const quarantined = isThesisQuarantined(thesis.subject_identity_ok);
+
   const price = currentPrice !== null && currentPrice !== "" ? Number(currentPrice) : null;
   const priceValid = price !== null && Number.isFinite(price) && price > 0;
+  // ⚠ #2306 — DERIVED CONCLUSIONS are suppressed on a quarantined thesis; the
+  // stored numbers are not. "Annotate, do not hide" protects the RECORD — the
+  // bear/base/bull the writer actually produced, which is the evidence this
+  // surface exists to show. `upsideToBase` and `outsideZone` were never in
+  // that record: they are this component computing live analysis on top of a
+  // band the engine refuses, and they read as conclusions, not as evidence.
   const upsideToBase =
-    priceValid && thesis.base_value !== null
+    !quarantined && priceValid && thesis.base_value !== null
       ? ((thesis.base_value - (price as number)) / (price as number)) * 100
       : null;
   const outsideZone =
+    !quarantined &&
     priceValid &&
     thesis.stance === "buy" &&
     thesis.buy_zone_low !== null &&
@@ -230,6 +244,13 @@ function ThesisBody({ thesis, currentPrice, currency }: BodyProps): JSX.Element 
 
   return (
     <div className="space-y-3 text-sm">
+      {/* #2306 — FIRST in the body, and mounted unconditionally: it renders
+          null when the verdict is `true`. Mounting it here rather than at the
+          page level is what makes the warning inseparable from the memo — both
+          are read off the same `thesis` object, and `ThesisPane` early-returns
+          when that object is null, so a refetch cannot leave the memo on screen
+          without the banner (`safety-state-ui.md`). */}
+      <ThesisQuarantineBanner subjectIdentityOk={thesis.subject_identity_ok} />
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <StanceBadge stance={thesis.stance} />
         <span className="text-xs capitalize text-slate-600 dark:text-slate-400">
@@ -267,7 +288,21 @@ function ThesisBody({ thesis, currentPrice, currency }: BodyProps): JSX.Element 
       {thesis.diff !== null && thesis.diff !== undefined && <DiffBlock diff={thesis.diff} />}
 
       {hasBand && (
-        <div className="rounded bg-slate-50 dark:bg-slate-900/40 p-3">
+        <div
+          className={
+            quarantined
+              ? "rounded border border-dashed p-3 opacity-70 border-red-300 bg-slate-50 dark:border-red-800 dark:bg-slate-900/40"
+              : "rounded bg-slate-50 dark:bg-slate-900/40 p-3"
+          }
+          data-testid="thesis-band"
+          data-refused={quarantined ? "true" : undefined}
+        >
+          {quarantined && (
+            <p className="mb-2 text-[11px] font-medium text-red-700 dark:text-red-300">
+              Refused — these targets are shown as the writer produced them, not as a
+              valuation the engine will act on.
+            </p>
+          )}
           <dl className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
             <div>
               <dt className="text-slate-500">Bear</dt>
