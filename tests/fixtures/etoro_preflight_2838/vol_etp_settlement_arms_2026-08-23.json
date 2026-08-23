@@ -1,0 +1,217 @@
+{
+  "observed_at": "2026-08-23T00:37:22.046635+00:00",
+  "environment": "demo",
+  "requested": [
+    "SVXY",
+    "SVOL",
+    "VXX",
+    "UVXY"
+  ],
+  "not_found_by_broker": [],
+  "unanswered": [],
+  "with_underlying_long_x1_arm": [],
+  "cfd_only": [
+    "SVXY",
+    "SVOL",
+    "VXX",
+    "UVXY"
+  ],
+  "instruments": [
+    {
+      "requested_symbol": "SVXY",
+      "instrument_id": 3236,
+      "symbol": "SVXY",
+      "allow_open_position": true,
+      "allow_close_position": true,
+      "min_position_exposure": "10.0",
+      "settlement_types_offered": [
+        "cfd"
+      ],
+      "has_underlying_long_x1_arm": false,
+      "cfd_only": true,
+      "arms": [
+        {
+          "settlement_type": "cfd",
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        },
+        {
+          "settlement_type": "cfd",
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        },
+        {
+          "settlement_type": "cfd",
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        }
+      ]
+    },
+    {
+      "requested_symbol": "SVOL",
+      "instrument_id": 10783,
+      "symbol": "SVOL",
+      "allow_open_position": true,
+      "allow_close_position": true,
+      "min_position_exposure": "10.0",
+      "settlement_types_offered": [
+        "cfd"
+      ],
+      "has_underlying_long_x1_arm": false,
+      "cfd_only": true,
+      "arms": [
+        {
+          "settlement_type": "cfd",
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        },
+        {
+          "settlement_type": "cfd",
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        },
+        {
+          "settlement_type": "cfd",
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        }
+      ]
+    },
+    {
+      "requested_symbol": "VXX",
+      "instrument_id": 3163,
+      "symbol": "VXX",
+      "allow_open_position": true,
+      "allow_close_position": true,
+      "min_position_exposure": "10.0",
+      "settlement_types_offered": [
+        "cfd"
+      ],
+      "has_underlying_long_x1_arm": false,
+      "cfd_only": true,
+      "arms": [
+        {
+          "settlement_type": "cfd",
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        },
+        {
+          "settlement_type": "cfd",
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        },
+        {
+          "settlement_type": "cfd",
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        }
+      ]
+    },
+    {
+      "requested_symbol": "UVXY",
+      "instrument_id": 3246,
+      "symbol": "UVXY",
+      "allow_open_position": true,
+      "allow_close_position": true,
+      "min_position_exposure": "10.0",
+      "settlement_types_offered": [
+        "cfd"
+      ],
+      "has_underlying_long_x1_arm": false,
+      "cfd_only": true,
+      "arms": [
+        {
+          "settlement_type": "cfd",
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        },
+        {
+          "settlement_type": "cfd",
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        },
+        {
+          "settlement_type": "cfd",
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "is_underlying_long_x1": false
+        }
+      ]
+    }
+  ]
+}
