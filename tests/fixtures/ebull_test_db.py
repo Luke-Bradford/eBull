@@ -82,6 +82,11 @@ _SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
 #: The review bot flagged one of the three; the other two were only visible by
 #: grepping `5`, which is the recurring shape behind this repo's "extract once"
 #: rule.
+#:
+#: ⚠ `tests/test_validated_universe.py` deliberately does NOT import this and
+#: keeps its own literal. It is the test OF `resolve_stocks_type_id`, so sharing
+#: the constant would let fixture and assertion drift together — the one place
+#: where duplicating the value is the point.
 STOCKS_TYPE_ID = 5
 
 

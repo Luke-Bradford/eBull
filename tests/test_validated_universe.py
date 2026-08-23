@@ -33,14 +33,18 @@ from app.services.strategies.validated_universe import (
     resolve_stocks_type_id,
 )
 from tests.fixtures.ebull_test_db import (
-    STOCKS_TYPE_ID,
     ebull_test_conn,  # noqa: F401 — fixture re-export
 )
 
 #: eToro's own ids, so the fixture cannot accidentally agree with a hardcoded 5.
-#: ⚠ Imported, not redeclared (#2859) — `tests/fixtures/ebull_test_db` is the
-#: single source for the §4.0 anchor id.
-_STOCKS_TYPE_ID = STOCKS_TYPE_ID
+#: ⚠⚠ DELIBERATELY NOT `tests.fixtures.ebull_test_db.STOCKS_TYPE_ID`, and #2859
+#: briefly made it so before review caught it. This module is the test OF
+#: `resolve_stocks_type_id`; deriving its expected value from the shared
+#: constant would mean the fixture and the assertion move together and the test
+#: can no longer detect drift. "Single source of truth for constants" governs
+#: production values and fixture HELPERS — it is the wrong rule for the one
+#: value a test exists to pin independently.
+_STOCKS_TYPE_ID = 5
 _ETF_TYPE_ID = 6
 
 #: One instrument per exclusion reason, plus the two that must survive.
