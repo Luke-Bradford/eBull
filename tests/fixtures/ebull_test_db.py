@@ -41,6 +41,7 @@ database, never ``ebull``.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 import warnings
@@ -69,7 +70,12 @@ from app.db.dev_test_db_reaper import (
 )
 
 TEMPLATE_DB_NAME = "ebull_test_template"
-_SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
+
+#: Repo root of the checkout that invoked pytest. Stamped into the template
+#: alongside the migration hash so a mismatch can NAME the sibling worktree that
+#: last rebuilt it, rather than reporting an anonymous schema drift (#2342).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SQL_DIR = _REPO_ROOT / "sql"
 
 #: The §4.0 validated-universe anchor. `etoro_instrument_types` is created empty
 #: by `sql/070` and filled by the nightly eToro universe sync, so a test DB never
@@ -156,19 +162,6 @@ _TEST_CLUSTER_PORT = os.environ.get("POSTGRES_TEST_PORT", "5433")
 # test_sync_orchestrator_dispatcher). Module import happens at collection time,
 # which always precedes per-test fixtures, so this captures the genuine dev URL.
 _DEV_DATABASE_URL: str = settings.database_url
-
-
-# Path to the migration-hash cache file. Lives under the user's cache
-# dir so the value survives across pytest invocations.
-def _hash_cache_path() -> Path:
-    try:
-        from platformdirs import user_cache_dir
-    except ImportError:  # pragma: no cover
-        cache_root = Path.home() / ".cache" / "ebull"
-    else:
-        cache_root = Path(user_cache_dir("ebull"))
-    cache_root.mkdir(parents=True, exist_ok=True)
-    return cache_root / "test_template_hash"
 
 
 # ROOTS of the per-test wipe set. The set actually emptied is this list plus
@@ -600,16 +593,52 @@ def _migration_hash() -> str:
     return h.hexdigest()
 
 
-def _read_stored_hash() -> str | None:
-    cache_path = _hash_cache_path()
+def _read_template_stamp(admin: psycopg.Connection[Any]) -> tuple[str, str] | None:
+    """``(migration_hash, built_from)`` recorded on the template, or ``None``.
+
+    The stamp lives in the template's DATABASE COMMENT, not in a file. That
+    matters for two measured reasons (#2342):
+
+    * A machine-global cache file under ``user_cache_dir("ebull")`` is shared by
+      every worktree on the box, so a sibling loop with different pending
+      migrations wrote ITS hash and the next run here saw a match and SKIPPED
+      the rebuild — testing against a schema without its own migration. The
+      failure is silent and directional: tests assert the OLD behaviour and fail,
+      which reads exactly like "your migration is wrong".
+    * ``pg_shdescription`` is a shared catalog keyed by database OID, so
+      ``CREATE DATABASE ... TEMPLATE`` does NOT copy the comment. Verified
+      against the test cluster before adopting it — every per-worker clone comes
+      out with a NULL stamp, so this leaves no residue in the DBs tests run on.
+    """
+    with admin.cursor() as cur:
+        cur.execute(
+            "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = %s",
+            (TEMPLATE_DB_NAME,),
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
     try:
-        return cache_path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
+        stamp = json.loads(row[0])
+        return str(stamp["migration_hash"]), str(stamp["built_from"])
+    except ValueError, KeyError, TypeError:
+        # A comment we did not write (or an older format) means "unknown", which
+        # forces a rebuild. Never treat an unparseable stamp as a match.
         return None
 
 
-def _write_stored_hash(value: str) -> None:
-    _hash_cache_path().write_text(value, encoding="utf-8")
+def _write_template_stamp(admin: psycopg.Connection[Any], migration_hash: str) -> None:
+    """Record this worktree's migration hash on the template we just built.
+
+    ``COMMENT ON DATABASE`` takes no bound parameters, so the value is rendered
+    as a ``sql.Literal``. It runs on the admin connection (a different database),
+    which is permitted and was verified against the cluster.
+    """
+    payload = json.dumps({"migration_hash": migration_hash, "built_from": str(_REPO_ROOT)})
+    with admin.cursor() as cur:
+        cur.execute(
+            sql.SQL("COMMENT ON DATABASE {} IS {}").format(sql.Identifier(TEMPLATE_DB_NAME), sql.Literal(payload))
+        )
 
 
 def _ensure_database(admin: psycopg.Connection[object], db_name: str) -> bool:
@@ -788,7 +817,6 @@ def build_template_if_stale() -> None:
         )
 
     current = _migration_hash()
-    cached = _read_stored_hash()
 
     with psycopg.connect(_admin_database_url(), autocommit=True) as admin:
         with admin.cursor() as cur:
@@ -809,8 +837,14 @@ def build_template_if_stale() -> None:
             _force_drop_invalid_test_dbs()
 
             template_exists = _ensure_database(admin, TEMPLATE_DB_NAME)
-            if template_exists and cached == current:
-                return
+            # Read the stamp INSIDE the lock and after the existence check: a
+            # sibling worktree may have rebuilt the template since this process
+            # started, and its hash is the only thing that says whose schema the
+            # template currently holds.
+            if template_exists:
+                stamp = _read_template_stamp(admin)
+                if stamp is not None and stamp[0] == current:
+                    return
 
             if template_exists:
                 _drop_database_force(admin, TEMPLATE_DB_NAME)
@@ -825,7 +859,7 @@ def build_template_if_stale() -> None:
                 with tpl_conn.cursor() as cur:
                     cur.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
                 tpl_conn.commit()
-            _write_stored_hash(current)
+            _write_template_stamp(admin, current)
         finally:
             with admin.cursor() as cur:
                 cur.execute("SELECT pg_advisory_unlock(%s)", (EBULL_TEMPLATE_LOCK,))
@@ -841,6 +875,79 @@ def _worker_lock_key() -> int:
     payload = f"{_run_id()}:{_worker_id()}".encode()
     digest = hashlib.blake2b(payload, digest_size=8).digest()
     return int.from_bytes(digest, "big", signed=True)
+
+
+def _assert_holds_template_lock(admin: psycopg.Connection[Any]) -> None:
+    """Fail if this session does not hold ``EBULL_TEMPLATE_LOCK``.
+
+    The stamp check below is a read-then-act, so without the lock a sibling can
+    drop and rebuild the template between the read and the CREATE — the guard
+    would pass on a stamp that no longer describes the template being copied.
+    The precondition was documented but unenforced (review bot), which is worth
+    a query here specifically because the failure it admits is SILENT.
+
+    A bigint advisory key is stored split across ``classid`` (high 32 bits) and
+    ``objid`` (low 32). Verified against the cluster: the reconstruction below
+    returns EBULL_TEMPLATE_LOCK exactly while held, and no row after unlock.
+    """
+    with admin.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM pg_locks
+             WHERE locktype = 'advisory'
+               AND granted
+               AND pid = pg_backend_pid()
+               AND ((classid::bigint << 32) | objid::bigint) = %s
+            """,
+            (EBULL_TEMPLATE_LOCK,),
+        )
+        if cur.fetchone() is None:
+            raise RuntimeError(
+                "_assert_template_matches_this_worktree() ran without holding "
+                "EBULL_TEMPLATE_LOCK on this connection. The stamp it reads could "
+                "then be replaced before the template is copied, which is the "
+                "silent wrong-schema clone this check exists to prevent."
+            )
+
+
+class TemplateWorktreeMismatch(RuntimeError):
+    """The template on the cluster was built from a different checkout's ``sql/``.
+
+    A distinct type, not a bare ``RuntimeError``, because ``test_db_available``
+    catches ``Exception`` and converts it into a warning + skip. Swallowed there,
+    this condition would silently skip the whole db tier and let the run pass —
+    which is #2342's defect wearing a different hat. It is re-raised by name.
+    """
+
+
+def _assert_template_matches_this_worktree(admin: psycopg.Connection[Any]) -> None:
+    """Refuse to clone a template built from a different checkout's ``sql/``.
+
+    ``build_template_if_stale`` runs in the controller and RELEASES the template
+    lock before the workers clone, so a sibling pytest controller in another
+    worktree can rebuild the template in that gap. This is the only window the
+    lock does not cover, and without this check it is silent: the clone succeeds
+    and the tests assert against the sibling's schema.
+
+    Deliberately raises rather than rebuilding — a worker must never rebuild the
+    template (it would invalidate the DBs sibling workers already cloned), which
+    ``build_template_if_stale`` enforces at its own entry.
+
+    Must be called while holding ``EBULL_TEMPLATE_LOCK``.
+    """
+    _assert_holds_template_lock(admin)
+    stamp = _read_template_stamp(admin)
+    current = _migration_hash()
+    if stamp is not None and stamp[0] == current:
+        return
+    built_from = "an unknown checkout (no readable stamp)" if stamp is None else stamp[1]
+    raise TemplateWorktreeMismatch(
+        f"{TEMPLATE_DB_NAME!r} was built from {built_from}, whose migrations differ "
+        f"from this checkout's ({_REPO_ROOT}). Cloning it would run these tests "
+        "against the wrong schema, which fails as if the migration under test were "
+        "wrong. A sibling pytest run rebuilt the template after this one started — "
+        "re-run pytest, and avoid running the db tier in two worktrees at once."
+    )
 
 
 def ensure_worker_database() -> None:
@@ -881,6 +988,7 @@ def ensure_worker_database() -> None:
             with admin.cursor() as cur:
                 cur.execute("SELECT pg_advisory_lock(%s)", (EBULL_TEMPLATE_LOCK,))
             try:
+                _assert_template_matches_this_worktree(admin)
                 _create_database_from_template(admin, db_name, TEMPLATE_DB_NAME)
             finally:
                 # Unlock on a connection that may be in an error
@@ -959,6 +1067,13 @@ def test_db_available() -> bool:  # noqa: D401 — `test_*` here is the legacy p
                 cur.execute("SELECT 1")
         _TEST_DB_AVAILABLE.add(test_db_name())
         return True
+    except TemplateWorktreeMismatch:
+        # ⚠ NOT "unavailable". The cluster is fine and the template is fine —
+        # it just belongs to another checkout. Letting this fall into the skip
+        # path below would reinstate #2342's actual defect one layer up: the db
+        # tier would be silently skipped and the run would go GREEN having
+        # exercised no database at all. Must stay fatal (Codex checkpoint 2).
+        raise
     except Exception as exc:
         warnings.warn(
             f"ebull_test DB unavailable -- {type(exc).__name__}: {exc}. "
@@ -1447,6 +1562,7 @@ __all__ = [
     "EBULL_SMOKE_LIFESPAN_LOCK",
     "EBULL_TEMPLATE_LOCK",
     "TEMPLATE_DB_NAME",
+    "TemplateWorktreeMismatch",
     "_drop_orphan_workers_older_than",
     "_force_drop_invalid_test_dbs",
     "_worker_db_keepalive",
