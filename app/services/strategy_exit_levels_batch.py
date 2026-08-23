@@ -98,6 +98,22 @@ from app.services.strategies.s9_squeeze_expansion import (
     MAX_HOLD_BARS as S9_MAX_HOLD_BARS,
 )
 
+#: The two ways a bracket derivation refuses, as ONE name used by all six
+#: factories. ``ValueError`` is the bracket's own refusal (no ATR, no live
+#: level, an unusable entry price) and ``IndexError`` is an out-of-range index
+#: reaching ``atr.values[...]`` before any bracket-owned validation runs.
+#:
+#: ⚠ Written as a named tuple rather than inline, and the reason is mechanical
+#: rather than aesthetic. ``except (ValueError, IndexError):`` is NOT stable in
+#: this repo: ``ruff format`` rewrites it to the PEP 758 unparenthesized form
+#: ``except ValueError, IndexError:``, which is valid on Python 3.14 and which
+#: the review bot has now twice reported as a SyntaxError (PR #2715, PR #2885).
+#: The two gates demand opposite spellings and the formatter is the one that
+#: wins, so the parenthesized form cannot be shipped at all. A single identifier
+#: has nothing for the formatter to rewrite and nothing for a reviewer to
+#: misparse, and it says what the tuple MEANS, which neither spelling did.
+_BRACKET_REFUSALS = (ValueError, IndexError)
+
 
 def s4_exit_levels_batch(
     series: BarSeries,
@@ -165,7 +181,7 @@ def s4_exit_levels_batch(
             value = atr.values[signal_index]
             if value is None or value <= 0:
                 raise ValueError(f"ATR{ATR_PERIOD} is unavailable or non-positive at signal index {signal_index}")
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not isfinite(value):
@@ -223,7 +239,7 @@ def s5_exit_levels_batch(
                 raise ValueError(f"S-5 bracket needs the support level at index {signal_index}; none is live")
             stop = Decimal(str(level - S5_ATR_STOP_MULTIPLE * atr_at_signal))
             target = entry_price + Decimal(str(S5_ATR_TARGET_MULTIPLE * atr_at_signal))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
@@ -265,7 +281,7 @@ def s6_exit_levels_batch(
                 raise ValueError(f"S-6 bracket needs the resistance level at index {signal_index}; none is live")
             stop = Decimal(str(level - S6_ATR_STOP_MULTIPLE * atr_at_signal))
             target = entry_price + Decimal(str(S6_ATR_TARGET_MULTIPLE * atr_at_signal))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
@@ -297,7 +313,7 @@ def s7_exit_levels_batch(
             if atr_at_signal is None:
                 raise ValueError(f"S-7 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
             stop = entry_price - Decimal(str(S7_ATR_STOP_MULTIPLE * atr_at_signal))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=None, stop_loss=stop):
@@ -328,7 +344,7 @@ def s9_exit_levels_batch(
                 raise ValueError(f"S-9 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
             stop = entry_price - Decimal(str(S9_ATR_STOP_MULTIPLE * atr_at_signal))
             target = entry_price + Decimal(str(S9_ATR_TARGET_MULTIPLE * atr_at_signal))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
@@ -377,7 +393,7 @@ def s8_exit_levels_batch(
                 )
             stop = entry_price - Decimal(str(S8_ATR_STOP_MULTIPLE * atr_at_signal))
             target = Decimal(str(middle))
-        except ValueError, IndexError:
+        except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
         if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
