@@ -39,6 +39,7 @@ function makeItem(overrides: Partial<ThesisLibraryItem> = {}): ThesisLibraryItem
     run_error: null,
     run_trigger: "manual",
     run_started_at: null,
+    subject_identity_ok: true,
     last_change_summary: null,
     last_change_material: false,
     ...overrides,
@@ -211,5 +212,64 @@ describe("ThesesPage", () => {
     expect(mockedFetch).toHaveBeenLastCalledWith(
       expect.objectContaining({ offset: 0 }),
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // #2306 — the subject-identity verdict on the library row.
+  // -------------------------------------------------------------------------
+  it("marks a row whose thesis failed the subject-identity check", async () => {
+    mockedFetch.mockResolvedValue(
+      respond([makeItem({ subject_identity_ok: false })]),
+    );
+    renderPage();
+    const marker = await screen.findByTestId("thesis-quarantine-marker");
+    expect(marker).toHaveAttribute(
+      "title",
+      expect.stringContaining("thesis_quarantined"),
+    );
+    // The glyph is aria-hidden, so the accessible name must come from text.
+    expect(marker).toHaveTextContent("quarantined");
+  });
+
+  it("treats an UNCHECKED verdict as refused (null is not passed)", async () => {
+    mockedFetch.mockResolvedValue(
+      respond([makeItem({ subject_identity_ok: null })]),
+    );
+    renderPage();
+    expect(await screen.findByTestId("thesis-quarantine-marker")).toBeInTheDocument();
+  });
+
+  it("does NOT mark a passing row", async () => {
+    mockedFetch.mockResolvedValue(respond([makeItem()]));
+    renderPage();
+    expect(await screen.findByText("AAPL")).toBeInTheDocument();
+    expect(screen.queryByTestId("thesis-quarantine-marker")).not.toBeInTheDocument();
+  });
+
+  it("does NOT mark a HELD row that has no thesis at all", async () => {
+    // The library deliberately includes held-but-unthesised instruments
+    // (app/api/theses.py:235). Their verdict is null for the trivial reason
+    // that there is nothing to check — the bare `ok !== true` predicate gets
+    // this wrong, which is why the marker is gated on thesis_id too.
+    mockedFetch.mockResolvedValue(
+      respond([
+        makeItem({
+          thesis_id: null,
+          thesis_version: null,
+          thesis_type: null,
+          stance: null,
+          confidence_score: null,
+          buy_zone_low: null,
+          buy_zone_high: null,
+          created_at: null,
+          critic_verdict: null,
+          subject_identity_ok: null,
+          stale_reason: "no_thesis",
+        }),
+      ]),
+    );
+    renderPage();
+    expect(await screen.findByText("AAPL")).toBeInTheDocument();
+    expect(screen.queryByTestId("thesis-quarantine-marker")).not.toBeInTheDocument();
   });
 });
