@@ -910,6 +910,33 @@ def configure_execution_policy(
     """
     for value, field in ((changed_by, "changed_by"), (reason, "reason")):
         _require_text(value, field)
+    # #2859 — every ordered comparison below is unsafe on a non-finite Decimal:
+    # ``Decimal("NaN") <= 0`` raises ``InvalidOperation``, so a NaN limit escaped
+    # this function as an unhandled exception (a 500) instead of one named
+    # refusal, and it escaped from whichever comparison happened to reach it
+    # first. Sweeping finiteness up front is what makes the checks that follow
+    # total. ⚠ Must stay ABOVE them — moving it down restores the crash.
+    #
+    # ⚠⚠ The database cannot be relied on as the backstop here. Measured against
+    # Postgres: ``'NaN'::numeric >= 0`` is TRUE and ``NaN = NaN`` is TRUE, so a
+    # one-sided CHECK admits NaN; only the two-sided sibling CHECKs exclude it,
+    # and then only by accident of their upper bound. ``NUMERIC(12,8)`` does
+    # reject Infinity (field overflow), so NaN is the whole non-finite risk at
+    # rest — but the refusal belongs here, where it can be named.
+    for value, field in (
+        (ticket_fraction, "ticket_fraction"),
+        (fixed_ticket_amount, "fixed_ticket_amount"),
+        (max_ticket_amount, "max_ticket_amount"),
+        (stop_loss_pct, "stop_loss_pct"),
+        (take_profit_pct, "take_profit_pct"),
+        (max_instrument_exposure_pct, "max_instrument_exposure_pct"),
+        (max_portfolio_exposure_pct, "max_portfolio_exposure_pct"),
+        (max_drawdown_pct, "max_drawdown_pct"),
+        (min_net_expectancy_pct, "min_net_expectancy_pct"),
+        (cost_stress_multiplier, "cost_stress_multiplier"),
+    ):
+        if value is not None and not value.is_finite():
+            raise StrategyControlError(f"{field} must be finite")
     if ticket_sizing_mode == "percent":
         if ticket_fraction is None or not (Decimal("0") < ticket_fraction <= Decimal("1")):
             raise StrategyControlError("percent ticket_fraction must be in (0, 1]")
@@ -943,6 +970,18 @@ def configure_execution_policy(
         raise StrategyControlError("max_drawdown_pct must be in (0, 100)")
     if cost_stress_multiplier < 1:
         raise StrategyControlError("cost_stress_multiplier must be at least 1")
+    # #2859 — the one limit on this table that had neither a bound here nor a
+    # schema CHECK, while every numeric sibling has both. It is not decoration:
+    # `strategy_paper_executor` refuses a signal on
+    # ``net_expectancy < intent.min_net_expectancy_pct``, so a NEGATIVE floor
+    # turns the gate that stops a losing paper order into one that admits it,
+    # silently and with no refusal row to read afterwards.
+    #
+    # Zero stays admissible on purpose. An operator who wants strictly-positive
+    # expectancy expresses it as a positive floor; that is the whole point of
+    # the value being a policy rather than the hardcoded ``<= 0`` it replaced.
+    if min_net_expectancy_pct < 0:
+        raise StrategyControlError("min_net_expectancy_pct must be non-negative")
 
     deployment = conn.execute(
         "SELECT mode FROM strategy_deployments WHERE deployment_id = %s FOR UPDATE",
