@@ -1483,6 +1483,46 @@ def test_an_unsupported_currency_is_unrepresentable_at_rest(
     assert excinfo.value.diag.constraint_name == constraint
 
 
+def test_the_net_expectancy_floor_check_excludes_nan_and_not_only_negatives(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2859/sql/368 — the NaN clause is the half a "tidy-up" would delete.
+
+    ⚠ Asserted against the server, not against the migration text: a bare
+    ``min_net_expectancy_pct >= 0`` looks complete and is not. Measured on this
+    Postgres, ``'NaN'::numeric >= 0`` is TRUE — NaN sorts above every non-NaN
+    value — so the one-sided bound admits the exact value the service-side
+    finiteness sweep exists to refuse, and ``NUMERIC(12,8)`` stores it happily
+    (only Infinity overflows the declaration).
+
+    The two-sided sibling CHECKs on this table exclude NaN as an accident of
+    their upper bound. This column has no upper bound, so the exclusion has to
+    be written down.
+    """
+    conn = ebull_test_conn
+    row = conn.execute(
+        """
+        SELECT pg_get_constraintdef(c.oid)
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        WHERE t.relname = 'strategy_execution_policies'
+          AND c.conname = 'strategy_execution_policies_min_net_expectancy_bounded'
+        """
+    ).fetchone()
+    assert row is not None, "sql/368 did not apply"
+
+    definition = str(row[0])
+    assert ">= (0)" in definition.replace("::numeric", ""), definition
+    assert "NaN" in definition, (
+        f"{definition} bounds the floor below but not against NaN; "
+        "'NaN'::numeric >= 0 is TRUE in Postgres, so this admits NaN"
+    )
+
+    # And the server agrees with the reading above, rather than only the text.
+    assert conn.execute("SELECT 'NaN'::numeric >= 0").fetchone() == (True,)
+    assert conn.execute("SELECT 'NaN'::numeric <> 'NaN'::numeric").fetchone() == (False,)
+
+
 @pytest.mark.parametrize(
     ("table", "constraint"),
     [
