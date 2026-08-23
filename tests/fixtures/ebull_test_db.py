@@ -877,6 +877,16 @@ def _worker_lock_key() -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
+class TemplateWorktreeMismatch(RuntimeError):
+    """The template on the cluster was built from a different checkout's ``sql/``.
+
+    A distinct type, not a bare ``RuntimeError``, because ``test_db_available``
+    catches ``Exception`` and converts it into a warning + skip. Swallowed there,
+    this condition would silently skip the whole db tier and let the run pass —
+    which is #2342's defect wearing a different hat. It is re-raised by name.
+    """
+
+
 def _assert_template_matches_this_worktree(admin: psycopg.Connection[Any]) -> None:
     """Refuse to clone a template built from a different checkout's ``sql/``.
 
@@ -897,7 +907,7 @@ def _assert_template_matches_this_worktree(admin: psycopg.Connection[Any]) -> No
     if stamp is not None and stamp[0] == current:
         return
     built_from = "an unknown checkout (no readable stamp)" if stamp is None else stamp[1]
-    raise RuntimeError(
+    raise TemplateWorktreeMismatch(
         f"{TEMPLATE_DB_NAME!r} was built from {built_from}, whose migrations differ "
         f"from this checkout's ({_REPO_ROOT}). Cloning it would run these tests "
         "against the wrong schema, which fails as if the migration under test were "
@@ -1023,6 +1033,13 @@ def test_db_available() -> bool:  # noqa: D401 — `test_*` here is the legacy p
                 cur.execute("SELECT 1")
         _TEST_DB_AVAILABLE.add(test_db_name())
         return True
+    except TemplateWorktreeMismatch:
+        # ⚠ NOT "unavailable". The cluster is fine and the template is fine —
+        # it just belongs to another checkout. Letting this fall into the skip
+        # path below would reinstate #2342's actual defect one layer up: the db
+        # tier would be silently skipped and the run would go GREEN having
+        # exercised no database at all. Must stay fatal (Codex checkpoint 2).
+        raise
     except Exception as exc:
         warnings.warn(
             f"ebull_test DB unavailable -- {type(exc).__name__}: {exc}. "
@@ -1511,6 +1528,7 @@ __all__ = [
     "EBULL_SMOKE_LIFESPAN_LOCK",
     "EBULL_TEMPLATE_LOCK",
     "TEMPLATE_DB_NAME",
+    "TemplateWorktreeMismatch",
     "_drop_orphan_workers_older_than",
     "_force_drop_invalid_test_dbs",
     "_worker_db_keepalive",

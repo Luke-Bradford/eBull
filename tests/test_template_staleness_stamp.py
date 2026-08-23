@@ -13,11 +13,13 @@ and evict it from the pre-push gate.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from tests.fixtures.ebull_test_db import (
+    TemplateWorktreeMismatch,
     _assert_template_matches_this_worktree,
     _migration_hash,
     _read_template_stamp,
@@ -87,12 +89,29 @@ def test_a_matching_stamp_lets_the_clone_proceed() -> None:
 
 def test_a_sibling_worktrees_stamp_refuses_the_clone_and_names_the_sibling() -> None:
     conn = _stamped("deadbeef" * 8, built_from=SIBLING)
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(TemplateWorktreeMismatch) as excinfo:
         _assert_template_matches_this_worktree(conn)  # type: ignore[arg-type]
     assert SIBLING in str(excinfo.value)
 
 
 def test_an_unstamped_template_refuses_rather_than_assuming_it_is_ours() -> None:
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(TemplateWorktreeMismatch) as excinfo:
         _assert_template_matches_this_worktree(_StubConn((None,)))  # type: ignore[arg-type]
     assert "unknown checkout" in str(excinfo.value)
+
+
+def test_the_mismatch_is_a_distinct_type_so_the_availability_probe_cannot_eat_it() -> None:
+    """The probe catches ``Exception`` and turns it into a warning + skip.
+
+    If this mismatch fell into that path the db tier would be silently skipped
+    and the run would go green having exercised no database — #2342's defect one
+    layer up. `test_db_available` re-raises this type by name, so it must stay a
+    distinct class and must NOT be widened to a bare RuntimeError.
+    """
+    assert issubclass(TemplateWorktreeMismatch, RuntimeError)
+    assert TemplateWorktreeMismatch is not RuntimeError
+
+    source = (Path(__file__).resolve().parents[0] / "fixtures" / "ebull_test_db.py").read_text(encoding="utf-8")
+    assert "except TemplateWorktreeMismatch:" in source, (
+        "test_db_available must re-raise the mismatch instead of skipping"
+    )
