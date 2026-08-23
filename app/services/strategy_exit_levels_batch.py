@@ -110,19 +110,50 @@ def s4_exit_levels_batch(
     Each request keeps its scalar semantics: ATR is read at the causal signal
     index and the bracket is centred on that request's next-open entry price.
     Output is positional so duplicate requests remain distinct.
+
+    ⚠ Each request keeps its scalar semantics, including the failure modes, and
+    every one of them lands as ``unorderable_exit_levels`` rather than
+    propagating (#2781). This function used to RAISE for a bad index, a
+    non-finite or non-positive entry price, and a missing or non-positive ATR,
+    while its five siblings refused all three. An uncaught exception in an
+    exit-level factory aborts the WHOLE outcome batch for one bad bar instead of
+    recording one unresolved outcome — the failure mode
+    ``tests/test_2437_exit_level_refusal_surface.py`` exists to prevent, and
+    from which S-4 was excluded.
+
+    ⚠ Latent, not live, and that is why it survived: ``_exit_levels_for_entries``
+    only asks for indices where an entry fired, and the registry refuses to fire
+    on an unevaluable bar, so a fired signal has a valid ATR in practice. One
+    masked bar from being live — the quarantine ``masked`` arm exists precisely
+    to remove bars.
+
+    ⚠⚠ NO ``strategy_version`` MOVES, and that is load-bearing rather than
+    convenient. ``_source_hash()`` hashes the DEFINING strategy module, and this
+    is not one; nor is it in ``INPUT_RULE_SETS``. A behaviour change that does
+    not move the version means rows from old and new code share a ledger key, so
+    it is only admissible because the delta is confined to inputs the registry
+    cannot currently produce. If that ever stops being true, this needs a
+    version bump, not a wider ``except``. ``_s4_exit_levels``'s docstring
+    already states the intent this completes: *"The batch adapter owns the typed
+    refusal because changing the hashed S-4 module merely to add an exception
+    class would mint a new strategy version."*
     """
     atr = atr_series(series, period=ATR_PERIOD, universe=universe)
     levels: list[ExitLevels | UnresolvedReason] = []
     for signal_index, entry_price in requests:
-        if not 0 <= signal_index < len(series):
-            raise ValueError(f"signal_index {signal_index} is outside the {len(series)}-bar series")
-        if not entry_price.is_finite():
-            raise ValueError(f"entry_price must be finite, got {entry_price}")
-        if entry_price <= 0:
-            raise ValueError(f"entry_price must be positive, got {entry_price}")
-        value = atr.values[signal_index]
-        if value is None or value <= 0:
-            raise ValueError(f"ATR{ATR_PERIOD} is unavailable or non-positive at signal index {signal_index}")
+        try:
+            if not 0 <= signal_index < len(series):
+                raise ValueError(f"signal_index {signal_index} is outside the {len(series)}-bar series")
+            if not entry_price.is_finite():
+                raise ValueError(f"entry_price must be finite, got {entry_price}")
+            if entry_price <= 0:
+                raise ValueError(f"entry_price must be positive, got {entry_price}")
+            value = atr.values[signal_index]
+            if value is None or value <= 0:
+                raise ValueError(f"ATR{ATR_PERIOD} is unavailable or non-positive at signal index {signal_index}")
+        except ValueError, IndexError:
+            levels.append("unorderable_exit_levels")
+            continue
         if not isfinite(value):
             levels.append("unorderable_exit_levels")
             continue
