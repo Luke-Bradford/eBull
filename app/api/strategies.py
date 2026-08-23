@@ -3495,7 +3495,10 @@ def create_strategy_paper_setup(
     authoritative one. ``strategy_paper_executor`` reads ``pool.capital_limit``
     as the hard cap at execution time and that stays the enforcement; refusing
     here only means an operator finds out at setup instead of at the first
-    fired signal.
+    fired signal. The same caveat applies to the whole pre-flight: the control
+    lock is per strategy-version, so the overview and the pool it reads are not
+    frozen against a concurrent ``configure_paper_pool``. Nothing here is the
+    last line of defence, and none of it is written as if it were.
     """
     _require_current_strategy_version(strategy_id, body.strategy_version)
     try:
@@ -3512,6 +3515,20 @@ def create_strategy_paper_setup(
                 raise StrategyControlError("strategy overview changed; refresh required")
             if strategy.allocation.policy_configured:
                 raise StrategyControlError("paper execution policy is already configured")
+            # ⚠⚠ FIRST setup, asserted rather than assumed. `configure_deployment`
+            # UPSERTs on (strategy_id, strategy_version, mode), so without this an
+            # existing deployment that happens to have no policy would be silently
+            # revised here — taking `body.capital_limit` with it. That is a bypass,
+            # not a cosmetic one: `PUT /{id}/allocation` requires `allocation_ready`
+            # (no refusals at all) to move a ceiling, whereas this route deliberately
+            # tolerates `execution_policy_missing`. A strategy in exactly that state
+            # could therefore have its capital ceiling RAISED through the setup door
+            # with the allocation gate never consulted. Refusing keeps the route's
+            # name true and leaves ceiling changes to the route that gates them.
+            if strategy.allocation.deployment_id is not None:
+                raise StrategyControlError(
+                    "a paper deployment already exists; revise it via the allocation and sizing routes"
+                )
             # `execution_policy_missing` is the refusal this route exists to
             # clear, so it is the one code that must not block it. Every other
             # refusal is a real prerequisite and still applies.

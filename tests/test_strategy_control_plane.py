@@ -1526,6 +1526,7 @@ def _stub_overview(
     *,
     refusals: list[str],
     policy_configured: bool = False,
+    deployment_id: int | None = None,
 ) -> None:
     """Stand in for the real overview so the route's OWN rules are what is tested.
 
@@ -1542,7 +1543,10 @@ def _stub_overview(
             strategies=[
                 SimpleNamespace(
                     strategy_id="S-OWN",
-                    allocation=SimpleNamespace(policy_configured=policy_configured),
+                    allocation=SimpleNamespace(
+                        policy_configured=policy_configured,
+                        deployment_id=deployment_id,
+                    ),
                     allocation_refusals=refusals,
                 )
             ]
@@ -1666,6 +1670,64 @@ def test_setup_clears_only_the_missing_policy_refusal_and_no_other(
 
     assert excinfo.value.status_code == 409
     assert "recent_evidence_incomplete" in str(excinfo.value.detail)
+    assert conn.execute("SELECT count(*) FROM strategy_execution_policies").fetchone() == (0,)
+
+
+def test_setup_refuses_when_a_deployment_already_exists_even_without_a_policy(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIRST setup, asserted rather than assumed — and the bypass it closes is real.
+
+    ``configure_deployment`` UPSERTs on ``(strategy_id, strategy_version, mode)``,
+    so a deployment that exists without a policy would otherwise be silently
+    revised here, carrying ``body.capital_limit`` with it. ``PUT /{id}/allocation``
+    requires ``allocation_ready`` — no refusals at all — to move a ceiling, while
+    this route deliberately tolerates ``execution_policy_missing``. A strategy in
+    exactly that state could have had its ceiling RAISED through the setup door
+    with the allocation gate never consulted.
+
+    ⚠ Found by Codex checkpoint 3, on a round the review bot had already
+    APPROVED — and it was a false claim of mine ("no path writes one without the
+    other") rather than a flagged line, which is why neither diff review saw it.
+    """
+    conn = ebull_test_conn
+    seed_universe_anchor(conn)
+    _paper_stage(conn)
+    configure_paper_pool(
+        conn,
+        enabled=False,
+        capital_limit=Decimal("1000"),
+        risk_profile="balanced",
+        approval_mode="manual",
+        changed_by="operator",
+        reason="bound the demo pool",
+    )
+    existing = configure_deployment(
+        conn,
+        strategy_id="S-OWN",
+        strategy_version="v1",
+        mode="paper",
+        capital_limit=Decimal("10"),
+        enabled=False,
+        changed_by="operator",
+        reason="a deployment that never got a policy",
+    )
+    _stub_overview(
+        monkeypatch,
+        refusals=["execution_policy_missing"],
+        deployment_id=existing.deployment_id,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        create_strategy_paper_setup("S-OWN", _setup_request(capital_limit=Decimal("900")), _operator_session(), conn)
+
+    assert excinfo.value.status_code == 409
+    assert "already exists" in str(excinfo.value.detail)
+    # The ceiling is untouched — the whole point of the refusal.
+    assert conn.execute(
+        "SELECT capital_limit FROM strategy_deployments WHERE deployment_id = %s",
+        (existing.deployment_id,),
+    ).fetchone() == (Decimal("10"),)
     assert conn.execute("SELECT count(*) FROM strategy_execution_policies").fetchone() == (0,)
 
 
