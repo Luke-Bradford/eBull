@@ -28,9 +28,25 @@ jobs:
         # Doc-only PRs (plan docs, README, etc.) don't benefit from an
         # engineering review — skip the API call entirely.
         # A PR is "doc-only" when every changed file matches one of:
-        #   - *.md / *.mdx / *.rst
+        #   - *.md
         #   - anything under docs/ at any nesting depth
         # If even one code/test/config file changes, we review as normal.
+        #
+        # ⚠ `.mdx` and `.rst` were on this list and are NOT any more (#2849,
+        # second pass). `merge_gate.doc_only_extensions` in
+        # `.autonomy/config.yaml` is `[".md"]` alone, so an `.rst`-only PR was
+        # skipped here and refused by `safe_merge.sh` — the SAME unmergeable
+        # trap #2848 hit, on a different extension. Latent rather than live
+        # (0 `.mdx`/`.rst` files in the repo at the time), which is exactly why
+        # it survived the first pass: nothing exercised it. Converged on the
+        # stricter side, per the LICENSE/CHANGELOG reasoning below.
+        #
+        # ⚠⚠ The three lists here are bound to their `.autonomy/config.yaml`
+        # counterparts by `tests/test_doc_only_classification_agreement.py`.
+        # Editing either side alone fails that test. The two prior "keep this
+        # list identical" comments did not stop this divergence, because an
+        # obligation written where it cannot be enforced is the weakest form of
+        # a rule there is.
         #
         # LICENSE / CHANGELOG / NOTICE were on this list and are NOT any more
         # (#2849). `safe_merge.sh` cannot classify them doc-only even in
@@ -56,8 +72,11 @@ jobs:
         # `safe_merge.sh` refused to merge it for lacking that review. With no
         # `workflow_dispatch` here, and only `pull_request` triggers, no re-push
         # could produce the APPROVE — the PR was unmergeable by construction.
-        # #2849 tracks collapsing these two into one source; until it lands,
-        # a change to either list is a change to BOTH.
+        # They remain two implementations — the engine is a separate repo, so a
+        # GitHub runner cannot source its bash without a second checkout. What
+        # is no longer left to a comment is that their LISTS agree: that is
+        # pinned by `tests/test_doc_only_classification_agreement.py`, which
+        # reads both this step and `.autonomy/config.yaml` and fails on drift.
         #
         # Uses `git diff --name-only` against the PR base (checkout is
         # fetch-depth: 0) rather than `gh pr view --json files` because
@@ -105,8 +124,7 @@ jobs:
               is_docs_only=false
               break
             fi
-            if [[ "$f" == *.md || "$f" == *.mdx || "$f" == *.rst \
-                  || "$f" == docs/* ]]; then
+            if [[ "$f" == *.md || "$f" == docs/* ]]; then
               continue
             fi
             is_docs_only=false
