@@ -34,7 +34,7 @@ import psycopg.rows
 
 from app.services.data_freshness import cadence_for
 from app.services.job_liveness import cadence_period
-from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, TERMINAL_STATUS_SQL
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, MISFIRE_SKIP_PREFIX, TERMINAL_STATUS_SQL
 from app.services.processes import (
     ActiveRunSummary,
     ErrorClassSummary,
@@ -311,30 +311,34 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
     return row
 
 
-def _is_lane_busy_skip(row: dict[str, Any] | None) -> bool:
-    """True when *row* is a ``lane_busy`` skip (#2052).
+# Skip reasons that mean "work was due, couldn't start" — unlike a benign
+# prereq/gate skip these must NOT anchor the ``expected_fire_at`` clock, or a
+# permanently-starved job would read green forever (each nightly skip row
+# resetting the schedule-missed threshold). ``lane_busy`` (#2052) is the lane
+# advisory lock staying held; ``misfire`` (#2880) is APScheduler discarding the
+# fire as later than its grace window.
+_NON_ANCHORING_SKIP_PREFIXES: Final[tuple[str, ...]] = (LANE_BUSY_SKIP_PREFIX, MISFIRE_SKIP_PREFIX)
 
-    A lane-busy skip means "work was due, couldn't start" — unlike a benign
-    prereq/gate skip it must NOT anchor the ``expected_fire_at`` clock, or a
-    permanently-starved job would read green forever (each nightly skip row
-    resetting the schedule-missed threshold).
-    """
+
+def _is_non_anchoring_skip(row: dict[str, Any] | None) -> bool:
+    """True when *row* is a work-was-due-couldn't-start skip (#2052, #2880)."""
     return (
         row is not None
         and row.get("status") == "skipped"
-        and str(row.get("error_msg") or "").startswith(LANE_BUSY_SKIP_PREFIX)
+        and str(row.get("error_msg") or "").startswith(_NON_ANCHORING_SKIP_PREFIXES)
     )
 
 
 def _read_latest_anchor_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
     """Latest terminal run eligible to anchor ``expected_fire_at`` (#2052).
 
-    Same population as ``_read_latest_terminal_run`` MINUS ``lane_busy`` skip
-    rows. Deliberately a SECOND resolver: the unfiltered latest terminal keeps
-    driving ``last_run`` / the status pill / the retry+cancel look-throughs,
-    and this one is only consulted when the latest terminal IS a lane-busy
-    skip (the rare starved path), so the extra query costs nothing on the
-    steady-state path. Only the columns the anchor math reads are selected.
+    Same population as ``_read_latest_terminal_run`` MINUS the non-anchoring
+    skip rows (``lane_busy`` #2052, ``misfire`` #2880). Deliberately a SECOND
+    resolver: the unfiltered latest terminal keeps driving ``last_run`` / the
+    status pill / the retry+cancel look-throughs, and this one is only
+    consulted when the latest terminal IS one of those (the rare starved path),
+    so the extra query costs nothing on the steady-state path. Only the columns
+    the anchor math reads are selected.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -343,11 +347,14 @@ def _read_latest_anchor_terminal_run(conn: psycopg.Connection[Any], *, job_name:
               FROM job_runs
              WHERE job_name = %(name)s
                AND status   IN {TERMINAL_STATUS_SQL}
-               AND NOT (status = 'skipped' AND error_msg LIKE %(lane_busy_pat)s)
+               AND NOT (
+                     status = 'skipped'
+                     AND error_msg LIKE ANY (%(non_anchoring_pats)s::text[])
+                   )
              ORDER BY started_at DESC
              LIMIT 1
             """,
-            {"name": job_name, "lane_busy_pat": LANE_BUSY_SKIP_PREFIX + "%"},
+            {"name": job_name, "non_anchoring_pats": [p + "%" for p in _NON_ANCHORING_SKIP_PREFIXES]},
         )
         return cur.fetchone()
 
@@ -906,16 +913,20 @@ def _build_row(
     # next fire from compute_next_run(cadence, now), so it could never
     # satisfy ``< now - threshold`` and the rule was unreachable.
     expected_fire_at: datetime | None = None
-    # #2052 — a ``lane_busy`` skip must not anchor the overdue clock ("work
-    # was due, couldn't start" is not a completed cycle). When the latest
-    # terminal is one, re-resolve the anchor from the latest NON-lane-busy
-    # terminal; when the ENTIRE history is lane-busy skips, fall back to the
-    # persisted ``job_first_seen`` anchor (#1508 C6 — the ``terminal_row is
-    # None`` never-started path below cannot arm here because the skip rows
-    # make ``terminal_row`` non-null). Benign skips (prereq/gate) still
-    # anchor exactly as before.
+    # #2052 / #2880 — a ``lane_busy`` or ``misfire`` skip must not anchor the
+    # overdue clock ("work was due, couldn't start" is not a completed cycle).
+    # When the latest terminal is one, re-resolve the anchor from the latest
+    # non-anchoring-free terminal; when the ENTIRE history is such skips, fall
+    # back to the persisted ``job_first_seen`` anchor (#1508 C6 — the
+    # ``terminal_row is None`` never-started path below cannot arm here because
+    # the skip rows make ``terminal_row`` non-null). Benign skips (prereq/gate)
+    # still anchor exactly as before.
     anchor_row = terminal_row
-    if _is_lane_busy_skip(terminal_row) and terminal_row is not None and terminal_row.get("terminal_kind") == "job_run":
+    if (
+        _is_non_anchoring_skip(terminal_row)
+        and terminal_row is not None
+        and terminal_row.get("terminal_kind") == "job_run"
+    ):
         anchor_row = _read_latest_anchor_terminal_run(conn, job_name=job.name)
         if anchor_row is None:
             first_seen = _job_first_seen(conn, job_name=job.name)

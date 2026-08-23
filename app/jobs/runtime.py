@@ -52,9 +52,15 @@ from typing import Any, Final, TypedDict
 
 import psycopg
 import psycopg.sql
-from apscheduler.events import EVENT_JOB_MAX_INSTANCES, JobSubmissionEvent
+from apscheduler.events import (
+    EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_MISSED,
+    JobExecutionEvent,
+    JobSubmissionEvent,
+)
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.util import undefined
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
@@ -68,7 +74,12 @@ from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
 from app.jobs.sources import JobInvoker, source_for
-from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, fetch_latest_successful_runs, record_job_skip
+from app.services.ops_monitor import (
+    LANE_BUSY_SKIP_PREFIX,
+    MISFIRE_SKIP_PREFIX,
+    fetch_latest_successful_runs,
+    record_job_skip,
+)
 from app.services.process_stop import acquire_prelude_lock
 from app.services.processes.bootstrap_gate import check_bootstrap_state_gate
 from app.services.processes.param_metadata import (
@@ -1457,8 +1468,21 @@ class JobRuntime:
                 # integer APScheduler accepts (0 raises TypeError).
                 # Combined with the absence of a persistent jobstore,
                 # a fire that is more than 1 second late is dropped.
-                # Catch-up is driven by ``_catch_up()`` reading
-                # ``job_runs``, not by APScheduler grace windows.
+                # BOOT catch-up is driven by ``_catch_up()`` reading
+                # ``job_runs``, not by APScheduler grace windows, and
+                # raising the grace cannot change that: with the default
+                # ``MemoryJobStore`` there is no pre-boot ``run_time`` for
+                # the executor to test — ``scheduler.start()`` computes
+                # ``next_run_time`` from ``now`` (APScheduler 3.11.2,
+                # ``BaseScheduler._real_add_job``).
+                #
+                # ⚠ #2880 — this default is right for the FREQUENT jobs it
+                # was chosen for and lossy for the daily ones: a 5-minute
+                # producer that loses a fire runs again in 5 minutes, while
+                # a daily one loses its whole slot with no row to show it.
+                # A job that can tolerate a late fire opts in per-job via
+                # ``ScheduledJob.misfire_grace_seconds``; see the field's
+                # docstring for why this is NOT derived from cadence kind.
                 "misfire_grace_time": 1,
                 # One concurrent instance per job. The per-job
                 # advisory lock is the source of truth for
@@ -1475,6 +1499,19 @@ class JobRuntime:
         # ALERT/MARK-ONLY: it cannot decrement ``_instances`` or un-wedge (that
         # is PR0's connect-timeout + a jobs restart).
         self._scheduler.add_listener(self._on_job_max_instances, EVENT_JOB_MAX_INSTANCES)
+        # #2880 — the THIRD way a fire can be declined, and the only one that
+        # was invisible. ``EVENT_JOB_MAX_INSTANCES`` above covers "a prior
+        # instance is still active"; ``_record_lane_busy_skip`` covers "the lane
+        # advisory lock stayed held". Neither covers ``EVENT_JOB_MISSED``, which
+        # APScheduler raises from ``executors/base.py::run_job`` when the WORKER
+        # finally reaches the fire more than ``misfire_grace_time`` after its
+        # scheduled run time — the whole batch queued behind saturated executor
+        # threads. That path wrote no ``job_runs`` row at all, so a once-daily
+        # job lost its whole day while the schedule still read green off
+        # yesterday's success. Measured: ``portfolio_eod_snapshot`` has no row
+        # for 2026-08-12 / 08-15 / 08-21 22:30 UTC, in windows where nine other
+        # jobs DID record ``max_instances_active`` at the same instant.
+        self._scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
         # Manual-trigger executor sized so that distinct jobs do NOT
         # queue behind each other -- one slot per wired invoker means
         # every wired job can be in flight simultaneously without
@@ -1519,6 +1556,14 @@ class JobRuntime:
                 id=f"recurring:{job.name}",
                 name=job.name,
                 replace_existing=True,
+                # #2880 — per-job override of the 1-second ``job_defaults``
+                # grace, for the jobs that can afford a late fire more than
+                # they can afford a lost one. ``undefined`` is APScheduler's
+                # own "inherit the default" sentinel: ``add_job`` strips every
+                # ``undefined`` kwarg before applying ``job_defaults``, so this
+                # is not the same as passing ``None`` (which would mean "never
+                # misfire" and disable the check entirely).
+                misfire_grace_time=(job.misfire_grace_seconds if job.misfire_grace_seconds is not None else undefined),
             )
             registered += 1
         self._scheduler.start()
@@ -1594,6 +1639,57 @@ class JobRuntime:
         except Exception:
             logger.exception(
                 "max-instances listener failed for event job_id=%r",
+                getattr(event, "job_id", "?"),
+            )
+
+    def _on_job_missed(self, event: JobExecutionEvent) -> None:
+        """APScheduler ``EVENT_JOB_MISSED`` handler (#2880).
+
+        Runs on the executor's callback thread (``run_job`` returns the event
+        and ``_run_job_success`` dispatches it) whenever a worker reached a fire
+        later than its ``misfire_grace_time`` and therefore did NOT run the
+        body. Records a ``job_runs`` 'skipped' row so the loss is visible.
+
+        The row is stamped at ``event.scheduled_run_time``, not at detection
+        time: the fact worth keeping is WHICH slot was lost, and a
+        detection-time stamp would put the row wherever the pool happened to
+        drain. The reason carries ``MISFIRE_SKIP_PREFIX`` so
+        ``scheduled_adapter`` excludes it from the ``expected_fire_at`` anchor —
+        a misfire is "work was due, couldn't start", so it must not reset the
+        schedule-missed clock the way a benign prereq skip does.
+
+        Kept short and fully fail-safe for the same reason as
+        ``_on_job_max_instances``: a listener that raised would break
+        APScheduler's event dispatch. ⚠ The write happens on a pool thread
+        during exactly the congestion that caused the misfire, so it uses the
+        bounded background-write seam and swallows its own failure — losing the
+        telemetry row is strictly better than turning it into a second fault.
+        """
+        try:
+            job_id = getattr(event, "job_id", None)
+            if not isinstance(job_id, str) or not job_id.startswith(_RECURRING_JOB_ID_PREFIX):
+                # Manual / non-recurring add_job ids are not scheduled fires.
+                return
+            job_name = job_id.removeprefix(_RECURRING_JOB_ID_PREFIX)
+            scheduled_for = getattr(event, "scheduled_run_time", None)
+            lateness = (datetime.now(UTC) - scheduled_for).total_seconds() if scheduled_for is not None else None
+            reason = MISFIRE_SKIP_PREFIX + (
+                f"fire due {scheduled_for.isoformat()} discarded by APScheduler; "
+                f"worker reached it {lateness:.1f}s late, past misfire_grace_time"
+                if scheduled_for is not None and lateness is not None
+                else "fire discarded by APScheduler past misfire_grace_time (no scheduled_run_time on event)"
+            )
+            with background_write_connection() as conn:
+                record_job_skip(conn, job_name, reason, now=scheduled_for)
+            logger.warning(
+                "scheduled job %s: fire due %s MISSED (%.1fs late) — recorded 'skipped' job_runs row",
+                job_name,
+                scheduled_for,
+                lateness if lateness is not None else float("nan"),
+            )
+        except Exception:
+            logger.exception(
+                "misfire listener failed for event job_id=%r",
                 getattr(event, "job_id", "?"),
             )
 

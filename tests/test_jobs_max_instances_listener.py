@@ -143,3 +143,75 @@ def _job_runs_count(url: str) -> int:
         row = conn.execute("SELECT count(*) FROM job_runs").fetchone()
     assert row is not None
     return int(row[0])
+
+
+# ---------------------------------------------------------------------------
+# #2880 — the sibling EVENT_JOB_MISSED listener.
+#
+# Same shape, different cause: APScheduler discards a fire whose worker reached
+# ``run_job`` later than ``misfire_grace_time``. That path wrote NO row at all,
+# so a once-daily job lost its whole slot while the console read green off
+# yesterday's success. Only the genuinely-new mechanism is exercised against the
+# DB here — stamping the row at the LOST SLOT rather than at detection time.
+# The reason text, the non-recurring-id guard and the never-raise contract are
+# pure-logic tests in ``tests/test_jobs_runtime.py``.
+# ---------------------------------------------------------------------------
+
+
+def _missed_event(job_id: str | None, scheduled_run_time: object) -> object:
+    from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+    return JobExecutionEvent(EVENT_JOB_MISSED, job_id, "default", scheduled_run_time)
+
+
+def test_listener_registered_for_missed_event() -> None:
+    from apscheduler.events import EVENT_JOB_MISSED
+
+    rt = _runtime()
+    listeners = rt._scheduler._listeners
+    assert any(cb == rt._on_job_missed and (mask & EVENT_JOB_MISSED) for cb, mask in listeners), (
+        "misfire listener not registered"
+    )
+
+
+@pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
+def test_missed_handler_stamps_the_row_at_the_lost_slot(settings_use_test_db: str) -> None:
+    from datetime import UTC, datetime
+
+    from app.services.ops_monitor import MISFIRE_SKIP_PREFIX
+
+    rt = _runtime()
+    job_name = "nightly_universe_sync"
+    scheduled_for = datetime(2026, 8, 21, 22, 30, tzinfo=UTC)
+
+    with psycopg.connect(settings_use_test_db, autocommit=True) as setup:
+        setup.execute(
+            "DELETE FROM job_runs WHERE job_name = %s AND error_msg LIKE %s",
+            (job_name, MISFIRE_SKIP_PREFIX + "%"),
+        )
+
+    rt._on_job_missed(_missed_event(f"recurring:{job_name}", scheduled_for))  # type: ignore[arg-type]
+
+    try:
+        with psycopg.connect(settings_use_test_db, autocommit=True) as verify:
+            row = verify.execute(
+                "SELECT status, started_at, finished_at, error_msg FROM job_runs "
+                " WHERE job_name = %s AND error_msg LIKE %s "
+                " ORDER BY run_id DESC LIMIT 1",
+                (job_name, MISFIRE_SKIP_PREFIX + "%"),
+            ).fetchone()
+        assert row is not None
+        assert row[0] == "skipped"
+        # The row sits where the fire belonged. A detection-time stamp would put
+        # it wherever the executor pool happened to drain, which says nothing
+        # about which slot was lost.
+        assert row[1] == scheduled_for
+        assert row[2] == scheduled_for
+        assert str(row[3]).startswith(MISFIRE_SKIP_PREFIX)
+        assert scheduled_for.isoformat() in str(row[3])
+    finally:
+        with psycopg.connect(settings_use_test_db, autocommit=True) as cleanup:
+            cleanup.execute(
+                "DELETE FROM job_runs WHERE job_name = %s AND error_msg LIKE %s",
+                (job_name, MISFIRE_SKIP_PREFIX + "%"),
+            )

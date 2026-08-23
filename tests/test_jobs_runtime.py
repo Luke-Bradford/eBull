@@ -1866,3 +1866,157 @@ class TestFundStageInvokerRegistration:
         # Both names reached the runtime — neither rejected at the listener gate.
         assert sorted(accepted_calls) == ["mf_directory_sync", "sec_n_csr_bootstrap_drain"]
         assert rejected_calls == []
+
+
+class TestMisfireVisibilityAndGrace:
+    """#2880 — an APScheduler ``EVENT_JOB_MISSED`` must leave a row behind.
+
+    Before this, a fire the executor reached later than ``misfire_grace_time``
+    was discarded with no ``job_runs`` row, no retry candidate and no reset of
+    the schedule-missed clock — so a once-daily job lost its whole slot while
+    the console still read green off yesterday's success.
+    """
+
+    def test_per_job_grace_reaches_add_job_only_when_set(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``misfire_grace_seconds`` is an opt-in override, not a default."""
+        from app.workers.scheduler import JOB_ORCHESTRATOR_FULL_SYNC, JOB_PORTFOLIO_EOD_SNAPSHOT
+
+        kwargs_by_id: dict[str, dict[str, object]] = {}
+
+        rt = _make_runtime(
+            {
+                JOB_ORCHESTRATOR_FULL_SYNC: lambda: None,
+                JOB_PORTFOLIO_EOD_SNAPSHOT: lambda: None,
+            }
+        )
+
+        def fake_add_job(*args: object, **kwargs: object) -> None:
+            kwargs_by_id[str(kwargs.get("id", ""))] = dict(kwargs)
+
+        monkeypatch.setattr(rt._scheduler, "add_job", fake_add_job)
+        monkeypatch.setattr(rt._scheduler, "start", lambda: None)
+        monkeypatch.setattr(rt, "_catch_up", lambda: None)
+
+        rt.start()
+
+        from apscheduler.util import undefined
+
+        eod = kwargs_by_id[f"recurring:{JOB_PORTFOLIO_EOD_SNAPSHOT}"]
+        assert eod["misfire_grace_time"] == 4 * 60 * 60
+        # Every other job inherits the 1-second ``job_defaults`` value.
+        # ``undefined`` is the sentinel ``add_job`` strips before applying
+        # ``job_defaults``; ``None`` would mean "never misfire" and is a
+        # different, much worse, thing to pass by accident.
+        assert kwargs_by_id[f"recurring:{JOB_ORCHESTRATOR_FULL_SYNC}"]["misfire_grace_time"] is undefined
+
+    def test_missed_fire_records_skip_stamped_at_the_lost_slot(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        from app.services.ops_monitor import MISFIRE_SKIP_PREFIX
+
+        scheduled_for = datetime(2026, 8, 21, 22, 30, tzinfo=UTC)
+        recorded: list[tuple[str, str, datetime | None]] = []
+
+        @contextmanager
+        def fake_conn() -> Iterator[object]:
+            yield object()
+
+        monkeypatch.setattr("app.jobs.runtime.background_write_connection", fake_conn)
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, name, reason, **kw: recorded.append((name, reason, kw.get("now"))) or 1,
+        )
+
+        rt = _make_runtime({})
+        rt._on_job_missed(
+            JobExecutionEvent(EVENT_JOB_MISSED, "recurring:portfolio_eod_snapshot", "default", scheduled_for)
+        )
+
+        assert len(recorded) == 1
+        name, reason, now = recorded[0]
+        assert name == "portfolio_eod_snapshot"
+        assert reason.startswith(MISFIRE_SKIP_PREFIX)
+        assert scheduled_for.isoformat() in reason
+        # Stamped at the LOST slot, not at detection time — the row has to sit
+        # where the fire belonged or it says nothing about which slot was lost.
+        assert now == scheduled_for
+
+    def test_missed_listener_ignores_manual_job_ids(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        recorded: list[str] = []
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, name, _reason, **_kw: recorded.append(name) or 1,
+        )
+
+        rt = _make_runtime({})
+        rt._on_job_missed(JobExecutionEvent(EVENT_JOB_MISSED, "manual:whatever", "default", datetime.now(UTC)))
+
+        assert recorded == []
+
+    def test_missed_listener_never_raises_into_event_dispatch(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A listener that raised would break APScheduler's dispatch loop.
+
+        The write runs on a pool thread during exactly the congestion that
+        caused the misfire, so its failure must stay contained.
+        """
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        @contextmanager
+        def exploding_conn() -> Iterator[object]:
+            raise RuntimeError("pool exhausted")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr("app.jobs.runtime.background_write_connection", exploding_conn)
+
+        rt = _make_runtime({})
+        rt._on_job_missed(
+            JobExecutionEvent(EVENT_JOB_MISSED, "recurring:portfolio_eod_snapshot", "default", datetime.now(UTC))
+        )
+
+    def test_grace_opt_in_is_an_explicit_allow_list(self) -> None:
+        """A late fire is only safe for a job indifferent to its own fire time.
+
+        ``execute_approved_orders`` is the counter-example the policy exists
+        for: its contract is that execution happens at the scheduled time, not
+        as a surprise catch-up hours later. Adding a name here is a deliberate
+        act — assert the set so one cannot be opted in silently.
+        """
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        opted_in = {j.name for j in SCHEDULED_JOBS if j.misfire_grace_seconds is not None}
+        assert opted_in == {"portfolio_eod_snapshot"}
+
+    def test_grace_cannot_reach_the_next_frontier_advance(self) -> None:
+        """The EOD grace must expire before the sweep that moves its anchor.
+
+        ``portfolio_eod_snapshot`` stamps ``MAX(price_daily.price_date)`` over
+        held instruments. ``orchestrator_full_sync`` is what advances that
+        frontier, so a grace window reaching past it would let a late fire
+        write the FOLLOWING session under the previous slot's identity.
+        """
+        from app.workers.scheduler import (
+            JOB_ORCHESTRATOR_FULL_SYNC,
+            JOB_PORTFOLIO_EOD_SNAPSHOT,
+            SCHEDULED_JOBS,
+            compute_next_run,
+        )
+
+        by_name = {j.name: j for j in SCHEDULED_JOBS}
+        eod = by_name[JOB_PORTFOLIO_EOD_SNAPSHOT]
+        full_sync = by_name[JOB_ORCHESTRATOR_FULL_SYNC]
+        assert eod.misfire_grace_seconds is not None
+
+        anchor = datetime(2026, 1, 1, tzinfo=UTC)
+        eod_fire = compute_next_run(eod.cadence, anchor)
+        next_sweep = compute_next_run(full_sync.cadence, eod_fire)
+        assert eod.misfire_grace_seconds < (next_sweep - eod_fire).total_seconds()

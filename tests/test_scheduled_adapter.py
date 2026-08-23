@@ -11,7 +11,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, MISFIRE_SKIP_PREFIX
 from app.services.processes import scheduled_adapter
 from app.services.processes.param_metadata import ParamMetadata
 from app.workers.scheduler import JOB_FUNDAMENTALS_SYNC, JOB_RETRY_DEFERRED
@@ -1014,6 +1014,38 @@ def test_all_lane_busy_history_falls_back_to_first_seen_anchor(
     row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
     assert row is not None
     assert "schedule_missed" in row.stale_reasons
+
+
+def test_misfire_skip_does_not_reset_schedule_missed_anchor(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2880 — a ``misfire`` skip is the same class as ``lane_busy``.
+
+    APScheduler discarded the fire as later than its grace window, so the work
+    was due and never started. Anchoring on it would let a job that misfires
+    every cadence read green forever — which is precisely the invisible state
+    this row was added to end.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, finished_at, status)
+        VALUES (%s, now() - interval '2 hours',
+                now() - interval '2 hours' + interval '30 seconds', 'success')
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    _insert_skip(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        error_msg=MISFIRE_SKIP_PREFIX + "fire due 2026-08-21T22:30:00+00:00 discarded by APScheduler",
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "schedule_missed" in row.stale_reasons
+    assert row.status == "idle"  # pill still reflects the true latest terminal
 
 
 def test_prereq_skip_still_resets_schedule_missed_anchor(

@@ -325,6 +325,23 @@ class ScheduledJob:
     # so are unbounded — the desired exemption for the heavy operator-initiated
     # jobs. See docs/specs/infra/job-statement-timeout.md.
     statement_timeout_ms: int | None = _DEFAULT_JOB_STATEMENT_TIMEOUT_MS
+    # #2880 — per-job APScheduler ``misfire_grace_time`` (seconds). ``None``
+    # keeps the global ``job_defaults`` value of 1 second, which is correct for
+    # the frequent jobs it was chosen for: a 5-minute producer that loses a fire
+    # runs again in 5 minutes.
+    #
+    # ⚠ Deliberately OPT-IN per job, NOT derived from ``cadence.kind``. A
+    # cadence-wide rule looks principled and is unsafe, because ``coalesce=True``
+    # does NOT collapse a fire that has already been handed to the executor:
+    # APScheduler advances ``next_run_time`` at SUBMISSION
+    # (``BaseExecutor.submit_job`` increments ``_instances`` before the body
+    # runs), so a long grace lets a stale fire execute hours later while its
+    # successor is suppressed with ``max_instances_active``. For
+    # ``execute_approved_orders`` — whose contract is that execution happens at
+    # its scheduled time, never as a surprise catch-up — that is a defect, not a
+    # recovery. Only a job that is idempotent, side-effect-bounded and
+    # indifferent to its own fire time may set this.
+    misfire_grace_seconds: int | None = None
 
 
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
@@ -1057,9 +1074,33 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # db_eod_snapshot runs concurrently with ingest with no write race.
         source="db_eod_snapshot",
         description="Persist daily portfolio equity (value, cash, per-position) + dated FX.",
-        # 22:30 UTC — after US market close (~21:00 UTC) so today's price_daily
-        # closes are in. snapshot_date is data-anchored, not this fire time.
+        # 22:30 UTC — after US market close (~21:00 UTC). snapshot_date is
+        # data-anchored, not this fire time. ⚠ The bars for the session that just
+        # closed frequently are NOT in yet: the sweep that advances
+        # ``MAX(price_daily.price_date)`` for held instruments is
+        # ``orchestrator_full_sync`` at 03:00 UTC, so this fire routinely stamps
+        # the PREVIOUS session and the current one is captured by tomorrow's
+        # fire. Measured on ``portfolio_eod_snapshots`` (#2880): 32 rows at
+        # lag 0, 6 at lag 1, 9 at lag 2, 1 at lag 3 —
+        #   select (computed_at at time zone 'UTC')::date - snapshot_date,
+        #          count(*) from portfolio_eod_snapshots group by 1;
         cadence=Cadence.daily(hour=22, minute=30),
+        # #2880 — this job is the one registered job that is genuinely
+        # indifferent to WHEN it runs, so it opts in to a late fire rather than
+        # losing the session. Losing one is permanent: ``snapshot_date`` is
+        # ``MAX(price_daily.price_date)`` over held instruments, so the next
+        # night's fire writes a LATER date and nothing ever backfills the gap.
+        # Two of the nine weekday sessions carrying a demo broker snapshot had
+        # no local row for exactly this reason (2026-08-12, 2026-08-20), and
+        # #2844's last acceptance clause needs five CONSECUTIVE reconciled days.
+        #
+        # 4h by construction, not by taste: the fire is due 22:30 and the next
+        # frontier-advancing sweep (``orchestrator_full_sync``) is due 03:00, so
+        # a window expiring 02:30 is the largest one that cannot let a late fire
+        # leap onto the following session. The body is ON CONFLICT-idempotent
+        # and mutates no broker state, so running it late is a strictly better
+        # outcome than not running it.
+        misfire_grace_seconds=4 * 60 * 60,
         prerequisite=_bootstrap_complete,
         catch_up_on_boot=False,
     ),
