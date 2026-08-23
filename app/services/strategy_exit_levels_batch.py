@@ -184,6 +184,12 @@ def s4_exit_levels_batch(
         except _BRACKET_REFUSALS:
             levels.append("unorderable_exit_levels")
             continue
+        # ⚠ `value` is bound ONLY on the non-exceptional path above, and the
+        # `continue` is what guarantees this line is unreachable otherwise —
+        # move that `continue` and `value` becomes possibly-unbound here.
+        # `pyright` enforces it rather than this comment (it reports the
+        # unbound read, which is why the file type-checks clean); the note is
+        # for the editor who is about to restructure the handler.
         if not isfinite(value):
             levels.append("unorderable_exit_levels")
             continue
