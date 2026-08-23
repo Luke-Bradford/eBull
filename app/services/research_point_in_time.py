@@ -92,19 +92,16 @@ PROBE_MATRIX: Final[Mapping[RankingFamily, Mapping[Condition, ConditionEvidence]
             {
                 "public_clock": _cell("pass", "D0"),
                 "system_versions": _cell("fail", "D1"),
-                "historical_population": _cell("fail", "D1"),
+                "historical_population": _cell("fail", "P2", "P5"),
                 "causal_transform": _cell("fail", "D1"),
             }
         ),
         RankingFamily.DIMENSIONAL_XBRL: MappingProxyType(
             {
-                condition: _cell("fail", "X1")
-                for condition in (
-                    "public_clock",
-                    "system_versions",
-                    "historical_population",
-                    "causal_transform",
-                )
+                "public_clock": _cell("fail", "X1"),
+                "system_versions": _cell("fail", "X1"),
+                "historical_population": _cell("fail", "P2", "P5"),
+                "causal_transform": _cell("fail", "X1"),
             }
         ),
         RankingFamily.OWNERSHIP_OBSERVATIONS: MappingProxyType(

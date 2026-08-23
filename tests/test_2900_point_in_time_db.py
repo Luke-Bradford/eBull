@@ -10,6 +10,7 @@ from scripts.verify_2900_point_in_time import (
     POST_DOCUMENT,
     SENTINEL_CIK,
     SENTINEL_DOCUMENT,
+    _semantic_text,
     derive_verdict,
     render_json,
     render_markdown,
@@ -24,6 +25,18 @@ pytestmark = pytest.mark.integration
 def test_census_includes_both_system_version_bounds() -> None:
     assert "known_from" in _DATE_COLUMNS
     assert "known_to" in _DATE_COLUMNS
+
+
+def test_source_probe_text_excludes_comments_docstrings_and_dead_blocks(tmp_path) -> None:
+    specimen = tmp_path / "probe_specimen.py"
+    specimen.write_text(
+        '"""DOCSTRING_NEEDLE"""\n# COMMENT_NEEDLE\nif False:\n    DEAD_NEEDLE = True\nLIVE_NEEDLE = "reachable"\n'
+    )
+    text = _semantic_text(str(specimen))
+    assert "DOCSTRING_NEEDLE" not in text
+    assert "COMMENT_NEEDLE" not in text
+    assert "DEAD_NEEDLE" not in text
+    assert "LIVE_NEEDLE" in text
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple]) -> None:
@@ -76,6 +89,8 @@ def test_renderers_share_one_typed_evidence_schema() -> None:
         correction_sha256="e" * 64,
         correction_2_commit="1" * 40,
         correction_2_sha256="2" * 64,
+        correction_3_commit="3" * 40,
+        correction_3_sha256="4" * 64,
         decision_date="2020-01-15",
         registry_version="test-registry",
         registry={"family": {"status": "refused"}},

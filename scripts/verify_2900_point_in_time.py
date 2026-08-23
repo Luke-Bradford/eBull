@@ -9,9 +9,14 @@ Run only after the implementation commit is clean:
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
+import importlib.util
+import io
 import json
+import re
 import subprocess
+import tokenize
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
@@ -38,6 +43,9 @@ CORRECTION_COMMIT: Final = "fe67f100e565fd52db8201ac6ad8f1758c2b163f"
 CORRECTION_2_PATH: Final = Path("docs/proposals/ta/2026-08-23-r6-point-in-time-spine-correction-2.md")
 CORRECTION_2_SHA256: Final = "a330ed170d39da3c201e2bd8e1ce5f80566209a356faa75bb899090e5e2b4f32"
 CORRECTION_2_COMMIT: Final = "055056a5c3b1aa3bc5971de4a6085b0f7bd72206"
+CORRECTION_3_PATH: Final = Path("docs/proposals/ta/2026-08-23-r6-point-in-time-spine-correction-3.md")
+CORRECTION_3_SHA256: Final = "3186b8573a2bd66dbe04eb0cf378e520dad8e9deaccae4dc92800c696708445d"
+CORRECTION_3_COMMIT: Final = "4fc9c397dd5c31835856d948137fc0cab3318841"
 DECISION_DATE: Final = date(2020, 1, 15)
 SENTINEL_CIK: Final = "0000002900"
 SENTINEL_DOCUMENT: Final = "0000002900-20-002900"
@@ -111,6 +119,8 @@ class Evidence:
     correction_sha256: str
     correction_2_commit: str
     correction_2_sha256: str
+    correction_3_commit: str
+    correction_3_sha256: str
     decision_date: str
     registry_version: str
     registry: Mapping[str, object]
@@ -200,11 +210,15 @@ _PROBE_ANCHORS: Final[Mapping[str, tuple[SourceAnchor, ...]]] = {
         SourceAnchor("app/services/universe_selection.py", "if alive:", maximum=1),
     ),
     "H2": (
-        SourceAnchor("sql/271_instrument_universe_membership.sql", "NO BACKFILL", maximum=1),
-        SourceAnchor("sql/271_instrument_universe_membership.sql", "'imported'", minimum=2),
+        SourceAnchor(
+            "sql/271_instrument_universe_membership.sql",
+            "source_event IN ('imported', 'listing', 'relisting')",
+            maximum=1,
+        ),
+        SourceAnchor("sql/271_instrument_universe_membership.sql", "true start unknown and truncated here", maximum=1),
     ),
     "H3": (
-        SourceAnchor("sql/103_instrument_symbol_history.sql", "only the current symbol is seeded", maximum=1),
+        SourceAnchor("sql/103_instrument_symbol_history.sql", "Synthetic backfill from former_names", maximum=1),
         SourceAnchor("sql/003_external_identifiers.sql", "last_verified_at", maximum=1),
     ),
     "P0": (SourceAnchor("sql/249_research_price_corpus.sql", "bar_date    DATE NOT NULL", maximum=1),),
@@ -221,17 +235,58 @@ _PROBE_ANCHORS: Final[Mapping[str, tuple[SourceAnchor, ...]]] = {
     ),
     "P4": (
         SourceAnchor("app/services/research_corpus_ingest.py", 'ADJUSTMENT_BASIS = "split_adjusted"', maximum=1),
-        SourceAnchor("app/services/backtest_run.py", "has no point-in-time split", maximum=1),
+        SourceAnchor("app/services/backtest_run.py", 'price_basis="split_adjusted"', minimum=2, maximum=2),
     ),
     "P5": (
-        SourceAnchor("app/services/universe_selection.py", "capture 2026-08-23", maximum=1),
-        SourceAnchor("app/services/universe_selection.py", "EXCHANGE_TEST_ISSUE_SYMBOLS", minimum=3),
+        SourceAnchor(
+            "app/services/universe_selection.py",
+            "INTRADER_CAPTURE_DATE: Final = date(2024, 9, 27)",
+            maximum=1,
+        ),
+        SourceAnchor("app/services/universe_selection.py", "EXCHANGE_TEST_ISSUE_SYMBOLS", minimum=3, maximum=3),
     ),
 }
 
 
 def _file_sha(path: str) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _python_semantic_text(path: str) -> str:
+    source = Path(path).read_text()
+    tree = ast.parse(source, filename=path)
+    path_obj = Path(path)
+    if not path_obj.is_absolute():
+        module_name = path.removesuffix(".py").replace("/", ".")
+        if importlib.util.find_spec(module_name) is None:
+            raise RuntimeError(f"Python probe module does not resolve: {module_name}")
+
+    excluded: set[int] = set()
+    owners = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in ast.walk(tree):
+        if isinstance(node, owners) and node.body:
+            first = node.body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                excluded.update(range(first.lineno, (first.end_lineno or first.lineno) + 1))
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Constant) and not bool(node.test.value):
+            for child in node.body:
+                excluded.update(range(child.lineno, (child.end_lineno or child.lineno) + 1))
+
+    masked = "".join("\n" if number in excluded else line for number, line in enumerate(source.splitlines(True), 1))
+    tokens = tokenize.generate_tokens(io.StringIO(masked).readline)
+    return tokenize.untokenize(token for token in tokens if token.type != tokenize.COMMENT)
+
+
+def _semantic_text(path: str) -> str:
+    if path.endswith(".py"):
+        return _python_semantic_text(path)
+    source = Path(path).read_text()
+    without_blocks = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", "", without_blocks)
 
 
 def run_source_probes(conn: psycopg.Connection[Any]) -> tuple[ProbeResult, ...]:
@@ -245,7 +300,7 @@ def run_source_probes(conn: psycopg.Connection[Any]) -> tuple[ProbeResult, ...]:
         counts: dict[str, int] = {}
         hashes: dict[str, str] = {}
         for index, anchor in enumerate(_PROBE_ANCHORS[probe_id]):
-            text = Path(anchor.path).read_text()
+            text = _semantic_text(anchor.path)
             count = text.count(anchor.needle)
             key = f"{anchor.path}:{index}"
             counts[key] = count
@@ -258,17 +313,33 @@ def run_source_probes(conn: psycopg.Connection[Any]) -> tuple[ProbeResult, ...]:
                 )
         results.append(ProbeResult(probe_id, True, counts, hashes, "source anchors non-vacuous"))
 
-    # X1 and P1 are absence claims: bind them to the live schema as well as DDL text.
-    for table, forbidden, probe_id in (
-        ("financial_facts_raw", {"dimension", "member", "dimensions"}, "X1"),
-        ("research_price_daily", {"observed_at", "published_at", "source_public_at", "source_version"}, "P1"),
+    # Bind positive and negative DDL claims to the live schema.
+    for table, required, forbidden, probe_id in (
+        ("financial_periods_raw", {"filed_date"}, set(), "D0"),
+        ("financial_facts_raw", {"filed_date"}, {"dimension", "member", "dimensions"}, "F0/X1"),
+        (
+            "ownership_institutions_observations",
+            {"filed_at", "ingested_at", "known_from", "known_to"},
+            set(),
+            "O0/O1",
+        ),
+        (
+            "research_price_daily",
+            {"bar_date"},
+            {"observed_at", "published_at", "source_public_at", "source_version"},
+            "P0/P1",
+        ),
+        ("finra_short_interest_observations", {"settlement_date", "filed_at", "known_from"}, set(), "N0/N1"),
+        ("instrument_universe_membership", {"effective_from", "effective_to"}, set(), "H2"),
+        ("instrument_symbol_history", {"effective_from", "effective_to"}, set(), "H3"),
+        ("external_identifiers", {"last_verified_at"}, set(), "H3"),
     ):
         rows = conn.execute(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=%s",
             (table,),
         ).fetchall()
         columns = {str(row[0]) for row in rows}
-        if not columns or columns & forbidden:
+        if not required <= columns or columns & forbidden:
             raise RuntimeError(f"probe {probe_id} schema failure for {table}: columns={sorted(columns)}")
 
     return tuple(results)
@@ -534,6 +605,9 @@ def collect_evidence() -> Evidence:
     measured_correction_2 = hashlib.sha256(CORRECTION_2_PATH.read_bytes()).hexdigest()
     if measured_correction_2 != CORRECTION_2_SHA256:
         raise RuntimeError(f"correction-2 hash moved: expected {CORRECTION_2_SHA256}, measured {measured_correction_2}")
+    measured_correction_3 = hashlib.sha256(CORRECTION_3_PATH.read_bytes()).hexdigest()
+    if measured_correction_3 != CORRECTION_3_SHA256:
+        raise RuntimeError(f"correction-3 hash moved: expected {CORRECTION_3_SHA256}, measured {measured_correction_3}")
     if _git("status", "--porcelain"):
         raise RuntimeError("verifier requires a clean worktree")
     execution_commit = _git("rev-parse", "HEAD")
@@ -572,6 +646,8 @@ def collect_evidence() -> Evidence:
         correction_sha256=CORRECTION_SHA256,
         correction_2_commit=CORRECTION_2_COMMIT,
         correction_2_sha256=CORRECTION_2_SHA256,
+        correction_3_commit=CORRECTION_3_COMMIT,
+        correction_3_sha256=CORRECTION_3_SHA256,
         decision_date=DECISION_DATE.isoformat(),
         registry_version=REGISTRY_VERSION,
         registry=_registry_json(),
@@ -607,6 +683,7 @@ def render_markdown(evidence: Evidence) -> str:
             f"Declaration SHA-256: `{evidence.declaration_sha256}` at commit `{evidence.declaration_commit}`.",
             f"Correction-1 SHA-256: `{evidence.correction_sha256}` at commit `{evidence.correction_commit}`.",
             f"Correction-2 SHA-256: `{evidence.correction_2_sha256}` at commit `{evidence.correction_2_commit}`.",
+            f"Correction-3 SHA-256: `{evidence.correction_3_sha256}` at commit `{evidence.correction_3_commit}`.",
             f"Execution commit: `{evidence.execution_commit}`. Registry: `{evidence.registry_version}`.",
             "Reproduce: `PYTHONPATH=. uv run python -m scripts.verify_2900_point_in_time --format markdown`",
             "",
