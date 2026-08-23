@@ -29,8 +29,16 @@ SIBLING = "/Users/lukebradford/Dev/.ebull-ownership"
 
 
 class _StubCursor:
-    def __init__(self, row: tuple[Any, ...] | None) -> None:
-        self._row = row
+    """Answers the two queries these functions issue, told apart by their SQL.
+
+    Deliberately NOT one canned row for both: the lock probe and the stamp read
+    have opposite meanings, and a stub that returns the same thing for each
+    would pass whichever check ran first for the wrong reason.
+    """
+
+    def __init__(self, conn: _StubConn) -> None:
+        self._conn = conn
+        self._row: tuple[Any, ...] | None = None
 
     def __enter__(self) -> _StubCursor:
         return self
@@ -38,21 +46,36 @@ class _StubCursor:
     def __exit__(self, *exc: object) -> bool:
         return False
 
-    def execute(self, *args: object, **kwargs: object) -> None:
-        return None
+    def execute(self, statement: object, *args: object, **kwargs: object) -> None:
+        self._row = (1,) if "pg_locks" in str(statement) else self._conn.stamp_row
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self._row
 
 
 class _StubConn:
-    """Just enough of a connection for the two functions under test."""
+    """Just enough of a connection for the functions under test."""
 
-    def __init__(self, row: tuple[Any, ...] | None) -> None:
-        self._row = row
+    def __init__(self, stamp_row: tuple[Any, ...] | None, *, holds_lock: bool = True) -> None:
+        self.stamp_row = stamp_row
+        self.holds_lock = holds_lock
 
     def cursor(self) -> _StubCursor:
-        return _StubCursor(self._row)
+        return _StubCursor(self)
+
+
+class _StubConnWithoutLock(_StubConn):
+    def cursor(self) -> _StubCursor:
+        cursor = _StubCursor(self)
+        original = cursor.execute
+
+        def execute(statement: object, *args: object, **kwargs: object) -> None:
+            original(statement, *args, **kwargs)
+            if "pg_locks" in str(statement):
+                cursor._row = None
+
+        cursor.execute = execute  # type: ignore[method-assign]
+        return cursor
 
 
 def _stamped(migration_hash: str, built_from: str = SIBLING) -> _StubConn:
@@ -98,6 +121,15 @@ def test_an_unstamped_template_refuses_rather_than_assuming_it_is_ours() -> None
     with pytest.raises(TemplateWorktreeMismatch) as excinfo:
         _assert_template_matches_this_worktree(_StubConn((None,)))  # type: ignore[arg-type]
     assert "unknown checkout" in str(excinfo.value)
+
+
+def test_the_stamp_check_refuses_to_run_without_the_template_lock() -> None:
+    # The check is a read-then-act. Without the lock a sibling can rebuild the
+    # template between the read and the CREATE, so a stamp that matched no
+    # longer describes what gets copied — silently.
+    conn = _StubConnWithoutLock((json.dumps({"migration_hash": _migration_hash(), "built_from": "x"}),))
+    with pytest.raises(RuntimeError, match="EBULL_TEMPLATE_LOCK"):
+        _assert_template_matches_this_worktree(conn)  # type: ignore[arg-type]
 
 
 def test_the_mismatch_is_a_distinct_type_so_the_availability_probe_cannot_eat_it() -> None:

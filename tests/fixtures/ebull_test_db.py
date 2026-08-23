@@ -877,6 +877,39 @@ def _worker_lock_key() -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
+def _assert_holds_template_lock(admin: psycopg.Connection[Any]) -> None:
+    """Fail if this session does not hold ``EBULL_TEMPLATE_LOCK``.
+
+    The stamp check below is a read-then-act, so without the lock a sibling can
+    drop and rebuild the template between the read and the CREATE — the guard
+    would pass on a stamp that no longer describes the template being copied.
+    The precondition was documented but unenforced (review bot), which is worth
+    a query here specifically because the failure it admits is SILENT.
+
+    A bigint advisory key is stored split across ``classid`` (high 32 bits) and
+    ``objid`` (low 32). Verified against the cluster: the reconstruction below
+    returns EBULL_TEMPLATE_LOCK exactly while held, and no row after unlock.
+    """
+    with admin.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM pg_locks
+             WHERE locktype = 'advisory'
+               AND granted
+               AND pid = pg_backend_pid()
+               AND ((classid::bigint << 32) | objid::bigint) = %s
+            """,
+            (EBULL_TEMPLATE_LOCK,),
+        )
+        if cur.fetchone() is None:
+            raise RuntimeError(
+                "_assert_template_matches_this_worktree() ran without holding "
+                "EBULL_TEMPLATE_LOCK on this connection. The stamp it reads could "
+                "then be replaced before the template is copied, which is the "
+                "silent wrong-schema clone this check exists to prevent."
+            )
+
+
 class TemplateWorktreeMismatch(RuntimeError):
     """The template on the cluster was built from a different checkout's ``sql/``.
 
@@ -902,6 +935,7 @@ def _assert_template_matches_this_worktree(admin: psycopg.Connection[Any]) -> No
 
     Must be called while holding ``EBULL_TEMPLATE_LOCK``.
     """
+    _assert_holds_template_lock(admin)
     stamp = _read_template_stamp(admin)
     current = _migration_hash()
     if stamp is not None and stamp[0] == current:
