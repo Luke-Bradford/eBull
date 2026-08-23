@@ -92,6 +92,8 @@ function trade(
     is_tsl_enabled: false,
     leverage: 1,
     total_fees: 0,
+    investment_type: null,
+    is_underlying: null,
     currency: "GBP",
     ...overrides,
   };
@@ -227,6 +229,8 @@ beforeEach(() => {
         is_tsl_enabled: false,
         leverage: 1,
         total_fees: 0,
+        investment_type: null,
+        is_underlying: null,
       },
     ],
   });

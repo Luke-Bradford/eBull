@@ -759,6 +759,15 @@ export interface BrokerPositionItem {
   is_tsl_enabled: boolean;
   leverage: number;
   total_fees: number;
+  /** #2602 item 3 — what this position IS, from eToro's own `settlementTypeID`
+   *  ("Position investment type. 0 - CFD, 1 - Real Asset, 2 - SWAP,
+   *  3 - Crypto MarginTrade, 4 - Future Contract"). The provider's label,
+   *  verbatim. `null` = the broker reported no type we recognise, which is a
+   *  different fact from "it is a derivative" — render it as unknown, never as
+   *  a product. */
+  investment_type: string | null;
+  /** `true` only for the real asset held outright; `null` when unobserved. */
+  is_underlying: boolean | null;
   /** Currency the money fields above are actually in (#2129): the display
    *  currency normally, or the native currency on an FX-rate-missing degrade. */
   currency: string;
@@ -915,6 +924,15 @@ export interface NativeTradeItem {
   is_tsl_enabled: boolean;
   leverage: number;
   total_fees: number;
+  /** #2602 item 3 — what this position IS, from eToro's own `settlementTypeID`
+   *  ("Position investment type. 0 - CFD, 1 - Real Asset, 2 - SWAP,
+   *  3 - Crypto MarginTrade, 4 - Future Contract"). The provider's label,
+   *  verbatim. `null` = the broker reported no type we recognise, which is a
+   *  different fact from "it is a derivative" — render it as unknown, never as
+   *  a product. */
+  investment_type: string | null;
+  /** `true` only for the real asset held outright; `null` when unobserved. */
+  is_underlying: boolean | null;
 }
 
 export interface InstrumentPositionDetail {

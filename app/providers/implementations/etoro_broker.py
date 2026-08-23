@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import decimal
 import logging
+import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1407,7 +1408,60 @@ def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:
         leverage=int(payload.get("leverage", 1)),
         is_tsl_enabled=bool(payload.get("isTslEnabled", False)),
         total_fees=Decimal(str(payload.get("totalFees", 0))),
+        settlement_type_id=_opt_settlement_type_id(payload),
     )
+
+
+#: An integral decimal string, with optional sign and no fractional part.
+#: `settlementTypeID` is an enumeration, so "1.5" is malformed input, not a
+#: value to round (Codex ckpt-2, #2602 item 3).
+_INTEGRAL_STRING = re.compile(r"-?\d+")
+
+#: Range of `broker_positions.settlement_type_id` (SMALLINT, `sql/367`). Mirrored
+#: here because the parser is the only writer on the live path, and handing the
+#: upsert an out-of-range value trades one unreadable label for the entire sync.
+_SMALLINT_MIN = -32768
+_SMALLINT_MAX = 32767
+
+
+def _opt_settlement_type_id(payload: dict[str, Any]) -> int | None:
+    """``settlementTypeID`` as an int, or ``None`` if absent/unreadable (#2602 item 3).
+
+    Never raises. This is evidence about the position, not a field the position
+    depends on: refusing to parse the whole position because its investment type
+    is malformed would lose the holding itself over a label. ``bool`` is excluded
+    explicitly — it is an ``int`` subclass in Python, so ``isinstance(True, int)``
+    would quietly store ``1`` ("Real Asset") for a payload that sent ``true``.
+
+    ⚠ Only INTEGRAL values are accepted, because this is an enumeration and
+    ``int()`` truncates. A payload sending ``1.5`` is malformed, and coercing it
+    would present it to the operator as ``1`` — "Real Asset", an ownership claim
+    the broker never made. Unreadable must stay unreadable (Codex ckpt-2).
+    ``1.0`` is admitted: JSON has one number type, so a whole value can legally
+    arrive as a float.
+
+    ⚠⚠ Values outside ``SMALLINT`` are dropped, because the storage column is
+    ``SMALLINT`` (``sql/367``). Returning one would push the overflow down into
+    ``_upsert_broker_positions``, where it aborts the WHOLE portfolio sync — every
+    position lost over one unreadable label, which is precisely the outcome the
+    first paragraph promises not to have. The migration's backfill already
+    range-guards for the same reason; this is its runtime twin (Codex ckpt-2).
+    """
+    value = payload.get("settlementTypeID")
+    if value is None or isinstance(value, bool):
+        return None
+    parsed: int | None
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        parsed = int(value) if value.is_integer() else None
+    elif isinstance(value, str) and _INTEGRAL_STRING.fullmatch(value.strip()):
+        parsed = int(value)
+    else:
+        parsed = None
+    if parsed is None or not (_SMALLINT_MIN <= parsed <= _SMALLINT_MAX):
+        return None
+    return parsed
 
 
 def _parse_closed_trade(payload: dict[str, Any]) -> BrokerClosedTrade:

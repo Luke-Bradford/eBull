@@ -347,6 +347,13 @@ class BrokerPosition:
     leverage: int = 1
     is_tsl_enabled: bool = False
     total_fees: Decimal = Decimal("0")
+    # #2602 item 3 — the broker's own per-position product identity.
+    # eToro ``settlementTypeID``: "Position investment type. 0 - CFD,
+    # 1 - Real Asset, 2 - SWAP, 3 - Crypto MarginTrade, 4 - Future Contract"
+    # (live portal 2026-08-23, get-account-pnl-and-portfolio-details).
+    # ``None`` = the payload did not carry it; see
+    # ``app.services.broker_settlement_arms.position_investment_type_label``.
+    settlement_type_id: int | None = None
 
 
 @dataclass(frozen=True)

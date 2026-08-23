@@ -82,6 +82,8 @@ function tradeFor(
     is_tsl_enabled: false,
     leverage: 1,
     total_fees: 0,
+    investment_type: null,
+    is_underlying: null,
     ...overrides,
   };
 }

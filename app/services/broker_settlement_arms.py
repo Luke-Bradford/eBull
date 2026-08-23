@@ -32,7 +32,9 @@ does not make a caller eligible to trade.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
+from typing import Final
 
 from app.providers.broker import BrokerInstrumentEligibility, BrokerLeverageConfig
 
@@ -40,6 +42,24 @@ from app.providers.broker import BrokerInstrumentEligibility, BrokerLeverageConf
 UNDERLYING_SETTLEMENT_TYPE = "real"
 UNDERLYING_DIRECTION = "long"
 UNLEVERAGED_LEVERAGE = 1
+
+# --- The OPEN-POSITION vocabulary (#2602 item 3) ---------------------------
+#
+# A second, separate enumeration the provider publishes on a different endpoint.
+# See ``position_investment_type_label`` for the citation and for why it is NOT
+# mapped onto the four-value eligibility vocabulary above.
+_POSITION_INVESTMENT_TYPES: Final[Mapping[int, str]] = MappingProxyType(
+    {
+        0: "CFD",
+        1: "Real Asset",
+        2: "SWAP",
+        3: "Crypto MarginTrade",
+        4: "Future Contract",
+    }
+)
+
+#: The one investment type that means ownership at full value, unleveraged.
+UNDERLYING_POSITION_INVESTMENT_TYPE_ID: Final[int] = 1
 
 
 def offers_unleveraged(leverage_values: Iterable[object]) -> bool:
@@ -80,6 +100,50 @@ def is_underlying_long_arm(arm: BrokerLeverageConfig) -> bool:
     )
 
 
+def position_investment_type_label(settlement_type_id: int | None) -> str | None:
+    """The provider's own label for an OPEN POSITION's ``settlementTypeID``.
+
+    Source rule (live portal 2026-08-23,
+    ``trading--demo/get-account-pnl-and-portfolio-details``): the open-positions
+    response documents the field as *"Position investment type. 0 - CFD,
+    1 - Real Asset, 2 - SWAP, 3 - Crypto MarginTrade, 4 - Future Contract"*.
+
+    ⚠⚠ **This is a DIFFERENT vocabulary from the eligibility one above** — five
+    numeric values against four strings, and ``SWAP`` has no counterpart there.
+    The two are deliberately not mapped onto each other: eToro publishes them as
+    separate enumerations on separate endpoints, so an equivalence table would be
+    ours, not theirs. The labels are returned verbatim as documented rather than
+    normalised into ``real``/``cfd``/… for the same reason.
+
+    They also answer different questions. The eligibility vocabulary answers
+    *"can this account open the underlying today"*; this one answers *"what is
+    the position that already exists"*. A position opened as a CFD stays a CFD
+    after the underlying becomes available, so #2602 item 3's identity cannot be
+    read off ``strategy_core_eligibility_proofs``.
+
+    Returns ``None`` for an unrecognised or absent id — an unknown investment
+    type must read as "not observed", never as one of the known ones.
+    """
+    return _POSITION_INVESTMENT_TYPES.get(settlement_type_id) if settlement_type_id is not None else None
+
+
+def position_is_underlying(settlement_type_id: int | None) -> bool | None:
+    """True when the position is the real asset held outright.
+
+    Tri-state on purpose: ``None`` means the broker did not report an id we
+    recognise, which is a different fact from "this is a derivative" and must not
+    collapse into ``False`` on an operator-facing panel.
+
+    ⚠ ``2 - SWAP`` and ``4 - Future Contract`` are derivatives by the provider's
+    own wording, and ``3 - Crypto MarginTrade`` is the real asset but leveraged,
+    which the standing no-leverage posture bars — so exactly one id qualifies,
+    mirroring ``UNDERLYING_SETTLEMENT_TYPE`` on the eligibility side.
+    """
+    if settlement_type_id is None or settlement_type_id not in _POSITION_INVESTMENT_TYPES:
+        return None
+    return settlement_type_id == UNDERLYING_POSITION_INVESTMENT_TYPE_ID
+
+
 def select_underlying_long_arms(
     row: BrokerInstrumentEligibility,
 ) -> tuple[BrokerLeverageConfig, ...]:
@@ -94,9 +158,12 @@ def select_underlying_long_arms(
 
 __all__ = [
     "UNDERLYING_DIRECTION",
+    "UNDERLYING_POSITION_INVESTMENT_TYPE_ID",
     "UNDERLYING_SETTLEMENT_TYPE",
     "UNLEVERAGED_LEVERAGE",
     "is_underlying_long_arm",
     "offers_unleveraged",
+    "position_investment_type_label",
+    "position_is_underlying",
     "select_underlying_long_arms",
 ]

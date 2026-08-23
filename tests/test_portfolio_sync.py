@@ -680,6 +680,7 @@ def _detailed_pos(
     current_price: Decimal = Decimal("110"),
     stop_loss_rate: Decimal | None = None,
     take_profit_rate: Decimal | None = None,
+    settlement_type_id: int | None = None,
 ) -> BrokerPosition:
     """BrokerPosition with per-position fields populated (for broker_positions tests)."""
     return BrokerPosition(
@@ -694,6 +695,7 @@ def _detailed_pos(
         initial_amount_in_dollars=open_price * units,
         stop_loss_rate=stop_loss_rate,
         take_profit_rate=take_profit_rate,
+        settlement_type_id=settlement_type_id,
     )
 
 
@@ -755,6 +757,43 @@ class TestUpsertBrokerPositions:
         params = upsert_calls[0].args[1]
         # Must fall back to `now`, not pass None (which would violate NOT NULL)
         assert params["open_date_time"] == _NOW
+
+    def test_persists_the_position_investment_type(self) -> None:
+        """#2602 item 3 — the broker's ``settlementTypeID`` reaches storage.
+
+        It was being received and dropped: `raw_payload` retained it verbatim on
+        every position ever synced while no column carried it, so "what product
+        is this position" could only be answered by re-parsing JSON.
+        """
+        conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([]))
+        conn.cursor.return_value = mock_cursor
+
+        bp = _detailed_pos(position_id=5001, instrument_id=42, settlement_type_id=0)
+        _upsert_broker_positions(conn, [bp], _NOW)
+
+        upsert_calls = [c for c in conn.execute.call_args_list if _is_broker_positions_upsert(c.args[0])]
+        assert upsert_calls[0].args[1]["settlement_type_id"] == 0
+
+    def test_an_unreported_investment_type_is_passed_as_null(self) -> None:
+        """Not defaulted to 0 ("CFD"). A missing type is unobserved, and the
+        ON CONFLICT COALESCE relies on NULL to mean "keep what we already knew"."""
+        conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.__iter__ = MagicMock(return_value=iter([]))
+        conn.cursor.return_value = mock_cursor
+
+        bp = _detailed_pos(position_id=5001, instrument_id=42)
+        assert bp.settlement_type_id is None
+        _upsert_broker_positions(conn, [bp], _NOW)
+
+        upsert_calls = [c for c in conn.execute.call_args_list if _is_broker_positions_upsert(c.args[0])]
+        assert upsert_calls[0].args[1]["settlement_type_id"] is None
 
     def test_skips_position_without_id(self) -> None:
         """Legacy BrokerPosition fixtures (position_id=None) are skipped.
