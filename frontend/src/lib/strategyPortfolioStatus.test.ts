@@ -82,7 +82,7 @@ describe("strategyPortfolioStatus", () => {
     expect(status.tone).toBe("risk");
     expect(status.blockers.map((b) => b.key)).toEqual([
       "global_kill",
-      "automatic_trading_disabled",
+      "entries_blocked",
       "no_capital",
       "no_mandate",
       "no_approved_strategies",
@@ -152,5 +152,86 @@ describe("strategyPortfolioStatus", () => {
       (b) => b.key === "no_mandate",
     );
     expect(mandate?.detail).toBe("3 available: cautious, balanced, growth");
+  });
+});
+
+describe("strategyPortfolioStatus — entry blocks independent of the kill switch", () => {
+  it("does not report trading when an execution block is active with the kill switch off", () => {
+    // The regression Codex ckpt-2 caught: `execution_block_reasons` is populated
+    // by `strategy_execution_blocks` independently of the kill switch and of the
+    // auto-trading flag, so keying only off `execution_enabled` reported
+    // "Trading" while the backend refused every entry.
+    const status = strategyPortfolioStatus(
+      overview({
+        execution_enabled: true,
+        entry_block: {
+          new_entries_blocked: true,
+          global_kill_active: false,
+          global_kill_reason: null,
+          global_kill_activated_at: null,
+          global_kill_activated_by: null,
+          execution_block_reasons: ["broker contract unverified"],
+        },
+      }),
+    );
+    expect(status.trading).toBe(false);
+    // Unmapped reasons pass through verbatim rather than being swallowed.
+    expect(status.blockers.map((b) => b.label)).toContain("broker contract unverified");
+  });
+
+  it("gives the backend's auto-trading block its friendlier wording", () => {
+    const status = strategyPortfolioStatus(
+      overview({
+        execution_enabled: false,
+        entry_block: {
+          new_entries_blocked: true,
+          global_kill_active: false,
+          global_kill_reason: null,
+          global_kill_activated_at: null,
+          global_kill_activated_by: null,
+          execution_block_reasons: ["automatic trading disabled"],
+        },
+      }),
+    );
+    expect(status.blockers.map((b) => b.label)).toContain("Automatic trading is switched off");
+  });
+
+  it("fails closed when entries are blocked for an unenumerated reason", () => {
+    const status = strategyPortfolioStatus(
+      overview({
+        entry_block: {
+          new_entries_blocked: true,
+          global_kill_active: false,
+          global_kill_reason: null,
+          global_kill_activated_at: null,
+          global_kill_activated_by: null,
+          execution_block_reasons: [],
+        },
+      }),
+    );
+    expect(status.trading).toBe(false);
+    expect(status.blockers.map((b) => b.label)).toContain("New entries are blocked");
+  });
+});
+
+describe("strategyPortfolioStatus — blocker identity", () => {
+  it("keeps every execution-block reason distinguishable when several are active", () => {
+    // These share the `entries_blocked` kind, so the kind alone cannot identify
+    // a row. The label is what separates them (Codex ckpt-2 on the React keys).
+    const status = strategyPortfolioStatus(
+      overview({
+        entry_block: {
+          new_entries_blocked: true,
+          global_kill_active: false,
+          global_kill_reason: null,
+          global_kill_activated_at: null,
+          global_kill_activated_by: null,
+          execution_block_reasons: ["automatic trading disabled", "runtime configuration unavailable"],
+        },
+      }),
+    );
+    const entryBlockers = status.blockers.filter((b) => b.key === "entries_blocked");
+    expect(entryBlockers).toHaveLength(2);
+    expect(new Set(entryBlockers.map((b) => `${b.key}:${b.label}`)).size).toBe(2);
   });
 });

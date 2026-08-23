@@ -19,10 +19,21 @@ import type { StrategyOverviewResponse } from "@/api/types";
  */
 export type StrategyBlockerKey =
   | "global_kill"
-  | "automatic_trading_disabled"
+  | "entries_blocked"
   | "no_capital"
   | "no_mandate"
   | "no_approved_strategies";
+
+/**
+ * Friendlier wording for the block reasons the backend emits today. Anything
+ * unmapped is passed through verbatim rather than swallowed — a new backend
+ * reason must still reach the operator, even if it reads like an enum.
+ */
+const BLOCK_REASON_LABELS: Record<string, string> = {
+  "automatic trading disabled": "Automatic trading is switched off",
+  "runtime configuration unavailable": "Runtime configuration is unavailable",
+  "kill switch state unavailable": "Kill-switch state is unavailable",
+};
 
 export interface StrategyBlocker {
   readonly key: StrategyBlockerKey;
@@ -58,12 +69,23 @@ export function strategyPortfolioStatus(overview: StrategyOverviewResponse): Str
     });
   }
 
-  if (!overview.execution_enabled) {
+  // ⚠ Do NOT re-derive "can entries happen" here. The backend owns that rule
+  // (`StrategyEntryBlockState.new_entries_blocked` = kill OR any execution block
+  // OR auto-trading off), and `execution_block_reasons` carries blocks that come
+  // from `strategy_execution_blocks` independently of the kill switch and of the
+  // auto-trading flag. An earlier version of this function keyed only off
+  // `execution_enabled` and could therefore report "Trading" while the backend
+  // was refusing every entry (Codex ckpt-2). Surface the backend's own reasons.
+  for (const reason of entryBlock.execution_block_reasons) {
     blockers.push({
-      key: "automatic_trading_disabled",
-      label: "Automatic trading is switched off",
+      key: "entries_blocked",
+      label: BLOCK_REASON_LABELS[reason] ?? reason,
       detail: null,
     });
+  }
+  // Fail closed: entries are blocked for a reason the payload did not enumerate.
+  if (entryBlock.new_entries_blocked && blockers.length === 0) {
+    blockers.push({ key: "entries_blocked", label: "New entries are blocked", detail: null });
   }
 
   // `configured` and a positive limit are separate failures upstream but one

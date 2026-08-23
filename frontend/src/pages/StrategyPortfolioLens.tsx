@@ -1,15 +1,23 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-import { fetchStrategyOverview, fetchStrategyOwnedPositions } from "@/api/strategies";
+import { fetchStrategyOverview, fetchStrategyOwnedPositions, fetchStrategyPnlHistory } from "@/api/strategies";
 import type { StrategyOwnedPosition, StrategyPortfolioMandate } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { StatTile } from "@/components/dashboard/StatTile";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { EmptyState } from "@/components/states/EmptyState";
 import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategies/StrategyPositions";
+import {
+  AccountEvidence,
+  aggregate,
+  AutomationControl,
+  EmptyPnlChart,
+  Metric,
+  PnlChart,
+} from "@/components/strategies/StrategyPortfolioPanels";
 import { Badge } from "@/components/ui/Badge";
-import { formatMoney, formatNumber } from "@/lib/format";
+import { formatMoney, formatNumber, formatPct } from "@/lib/format";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
 import { useAsync } from "@/lib/useAsync";
 
@@ -56,6 +64,7 @@ function MandateLine({ mandate }: { mandate: StrategyPortfolioMandate }) {
 export function StrategyPortfolioLens() {
   const overview = useAsync(fetchStrategyOverview, []);
   const ownedPositions = useAsync(fetchStrategyOwnedPositions, []);
+  const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
 
   if (overview.loading) return <SectionSkeleton rows={6} />;
@@ -63,13 +72,9 @@ export function StrategyPortfolioLens() {
 
   const data = overview.data;
   const status = strategyPortfolioStatus(data);
+  const summary = aggregate(data);
   const pool = data.paper_pool;
   const positions = ownedPositions.data?.positions ?? [];
-  const totalPnl = data.strategies.reduce<number | null>((sum, strategy) => {
-    const value = number(strategy.pnl.total_pnl);
-    if (sum === null || value === null) return sum === null && value === null ? null : (sum ?? 0) + (value ?? 0);
-    return sum + value;
-  }, null);
 
   return (
     <div className="space-y-8">
@@ -85,9 +90,12 @@ export function StrategyPortfolioLens() {
             <p className="mt-2 text-sm text-slate-500">
               Each step below is only reachable once the one above it is cleared.
             </p>
-            <ol className="mt-3 space-y-2">
+            <ol aria-label="Reasons the pot is not trading" className="mt-3 space-y-2">
               {status.blockers.map((blocker, index) => (
-                <li key={blocker.key} className="flex gap-3 border-t border-slate-200 pt-2 text-sm dark:border-slate-800">
+                // The key pairs kind with label: `entries_blocked` is emitted once per
+                // backend reason, so several blockers can share a key and React would
+                // then reuse or drop a row on the next payload (Codex ckpt-2).
+                <li key={`${blocker.key}:${blocker.label}`} className="flex gap-3 border-t border-slate-200 pt-2 text-sm dark:border-slate-800">
                   <span className="tabular-nums text-slate-400">{index + 1}</span>
                   <span>
                     <span className="text-slate-800 dark:text-slate-100">{blocker.label}</span>
@@ -111,8 +119,12 @@ export function StrategyPortfolioLens() {
         <div className="grid grid-cols-2 gap-x-6 lg:grid-cols-4">
           <StatTile label="Assigned" value={formatMoney(number(pool.effective_capital), pool.currency)} hint={pool.capital_mode === "compound" ? "Expanding" : "Fixed"} />
           <StatTile label="Invested" value={formatMoney(number(pool.invested_capital), pool.currency)} />
-          <StatTile label="Open positions" value={formatNumber(positions.length, 0)} />
-          <StatTile label="Total P&L" value={formatMoney(totalPnl, pool.currency)} hint="Realised + open" tone={totalPnl === null || totalPnl === 0 ? "muted" : totalPnl > 0 ? "positive" : "negative"} />
+          {/* The overview's own count, NOT positions.length: the positions request
+              is separate, so while it is pending or failed the list is empty and a
+              tile reading 0 would be a false statement sitting next to an error
+              (Codex ckpt-2). Both numbers come from strategy-owned trades. */}
+          <StatTile label="Open positions" value={formatNumber(summary.activePositions, 0)} />
+          <StatTile label="Remaining" value={formatMoney(number(pool.remaining_capital), pool.currency)} hint="Assigned less invested" />
         </div>
         <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
           <p className="text-xs uppercase tracking-wide text-slate-500">Mandate</p>
@@ -121,6 +133,42 @@ export function StrategyPortfolioLens() {
           </div>
         </div>
       </section>
+
+      <section aria-labelledby="pot-performance">
+        <h2 id="pot-performance" className="text-sm font-semibold">
+          Portfolio performance
+        </h2>
+        <p className="mt-1 text-xs text-slate-500">Automated positions only; research backtests are excluded.</p>
+        {/* Average/trade and success rate are the pot's own record. They came
+            across with the section rather than being dropped in the split. */}
+        <div className="mt-4 grid grid-cols-2 gap-5 sm:grid-cols-3">
+          <Metric label="Total P&L" value={formatMoney(summary.totalPnl, "USD")} hint="Realised + open" />
+          <Metric label="Average / trade" value={formatPct(summary.averageReturn)} hint="Completed outcomes" />
+          <Metric
+            label="Success rate"
+            value={formatPct(summary.successRate)}
+            hint={`${formatNumber(summary.resolved, 0)} completed`}
+          />
+        </div>
+        {pnlHistory.loading ? (
+          <div className="flex h-52 items-center justify-center text-xs text-slate-500">Loading P&amp;L history…</div>
+        ) : pnlHistory.error ? (
+          <SectionError onRetry={pnlHistory.refetch} />
+        ) : pnlHistory.data?.points.length ? (
+          <>
+            <PnlChart history={pnlHistory.data.points} />
+            <p className="mt-2 text-xs text-slate-500">
+              Daily realised plus open P&amp;L from exact automated positions; manual positions are excluded.
+              Gaps mean an owned mark or close could not reconcile.
+            </p>
+          </>
+        ) : (
+          <EmptyPnlChart />
+        )}
+        <AccountEvidence overview={data} />
+      </section>
+
+      <AutomationControl overview={data} onUpdated={overview.refetch} />
 
       <section aria-labelledby="pot-holdings">
         <h2 id="pot-holdings" className="sr-only">
@@ -156,6 +204,10 @@ export function StrategyPortfolioLens() {
           setCloseFor(null);
           void ownedPositions.refetch();
           void overview.refetch();
+          // The chart is on this lens now, so it is this callback's job to
+          // refresh it — otherwise it keeps painting the pre-close valuation
+          // until a reload (Codex ckpt-2).
+          void pnlHistory.refetch();
         }}
       />
     </div>

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -108,12 +108,14 @@ describe("StrategyPortfolioLens", () => {
       positions: [],
       live_quote_instrument_ids: [],
     } as never);
+    vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({ points: [] } as never);
   });
 
   it("leads with the verdict and the ordered reasons, not the money", async () => {
     renderLens();
     expect(await screen.findByText("Not trading")).toBeInTheDocument();
-    const reasons = await screen.findAllByRole("listitem");
+    const list = await screen.findByRole("list", { name: "Reasons the pot is not trading" });
+    const reasons = within(list).getAllByRole("listitem");
     // Kill switch is the outermost gate and must be reason 1 — funding the pot
     // underneath an active kill switch changes nothing.
     expect(reasons[0]).toHaveTextContent("Kill switch is on");
@@ -129,6 +131,58 @@ describe("StrategyPortfolioLens", () => {
   it("renders a real empty state instead of a zeroed positions table", async () => {
     renderLens();
     expect(await screen.findByText("Nothing held")).toBeInTheDocument();
+  });
+
+  it("refreshes every read it owns after a close, the P&L chart included", async () => {
+    // Regression guard: the chart moved onto this lens with the split, so a
+    // close that refreshed only positions left it painting a stale valuation.
+    const position = {
+      strategy_trade_id: 1,
+      broker_position_id: "p-1",
+      instrument_id: 7,
+      symbol: "AAPL",
+      currency: "USD",
+      units: "1",
+      assigned_value: "100",
+      current_price: "110",
+    } as never;
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [position],
+      live_quote_instrument_ids: [7],
+    } as never);
+    vi.spyOn(strategiesApi, "closeStrategyOwnedPosition").mockResolvedValue({} as never);
+
+    renderLens();
+    await userEvent.click(await screen.findByRole("button", { name: /close/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /^Close position$/i }));
+
+    await waitFor(() => {
+      expect(strategiesApi.fetchStrategyPnlHistory).toHaveBeenCalledTimes(2);
+    });
+    expect(strategiesApi.fetchStrategyOwnedPositions).toHaveBeenCalledTimes(2);
+  });
+
+  it("never reports zero open positions while the positions request is failing", async () => {
+    // The tile reads the overview's count, which is already loaded, rather than
+    // the length of a list that is empty only because its request has not
+    // landed — a 0 next to an error message is a false statement (Codex ckpt-2).
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockRejectedValue(new Error("boom"));
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...BLOCKED,
+      strategies: [
+        // `aggregate` sums `pnl.active_position_count` — the field the tile
+        // actually reads. An earlier version of this fixture set a made-up
+        // `open_positions` key, so the sum was NaN and the assertion passed
+        // for the wrong reason.
+        { pnl: { total_pnl: "0", active_position_count: 2 }, attribution: {}, allocation: {}, purpose: "capital_candidate" },
+      ],
+    } as unknown as StrategyOverviewResponse);
+
+    renderLens();
+    // StatTile nests label and value in sibling divs, so step up to the tile root.
+    const tile = (await screen.findByText("Open positions")).parentElement!;
+    expect(tile.textContent).toContain("2");
+    expect(tile.textContent).not.toMatch(/\b0\b/);
   });
 
   it("reports the pot as halted", async () => {
