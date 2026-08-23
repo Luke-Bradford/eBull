@@ -40,7 +40,7 @@ No endpoint or UI exposes raw copyrighted responses.
 
 ## 2 Identifiers + identity drift
 
-Identity is `(source, dataset_key, response_sha256)` for a raw snapshot and
+Identity is `(source, dataset_key, response_sha256, parser_version)` for a raw snapshot and
 `(snapshot_id, series_key, observation_date)` for an observation. Provider
 series names are retained verbatim in `series_key`; aliases are not resolved.
 Historical provider revisions create a new immutable snapshot rather than
@@ -50,24 +50,25 @@ mutating observations from an older response.
 
 All are HTTP GET, single-response and unpaginated:
 
-- French five factors:
+- French five factors (source-shaped fixture built in `tests/test_reference_data.py`):
   `https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_CSV.zip`;
-  fixture `tests/fixtures/reference_data/french_five_factor.zip`.
+  generated ZIP fixture.
 - French momentum:
   `https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_CSV.zip`;
-  fixture `tests/fixtures/reference_data/french_momentum.zip`.
+  generated ZIP fixture.
 - AQR monthly VME factors:
   `https://www.aqr.com/-/media/AQR/Documents/Insights/Data-Sets/Value-and-Momentum-Everywhere-Factors-Monthly.xlsx`;
-  fixture `tests/fixtures/reference_data/aqr_vme_monthly.xlsx`.
+  generated workbook fixture.
 - FRED `DGS3MO` and `USREC`:
   `https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}`;
-  fixtures under `tests/fixtures/reference_data/fred_*.csv`.
+  generated CSV fixtures.
 
 ## 4 Schema
 
 `reference_data_snapshots` stores source/dataset/url, fetch headers, exact
 `BYTEA` payload, SHA-256, parser version, parse status/error and accepted
-coverage/count. It has a BIGSERIAL PK and one unique identity index: two total.
+coverage/count. It has a BIGSERIAL PK, one unique identity index and one partial
+latest-accepted lookup index: three total.
 `reference_data_observations` stores snapshot FK, series key, date, NUMERIC
 value and a closed unit; its composite PK is its only index. The FK is
 `ON DELETE RESTRICT`. UTF-8 applies to text, timestamps are UTC, dates are

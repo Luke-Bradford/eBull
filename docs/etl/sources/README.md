@@ -39,6 +39,9 @@ CI gate: `scripts/check_etl_source_docs.sh` enforces.
 | sec_13f_securities_list | [sec_13f_securities_list.md](sec_13f_securities_list.md) | SEC bulk reference | 13F Official List |
 | etoro_candles | [etoro_candles.md](etoro_candles.md) | broker REST | market data |
 | cboe_vix | [cboe_vix.md](cboe_vix.md) | Cboe public reference | volatility-regime context |
+| kenneth_french | [kenneth_french.md](kenneth_french.md) | public factor reference | factor validation |
+| aqr | [aqr.md](aqr.md) | public factor reference | factor validation |
+| fred | [fred.md](fred.md) | public macro reference | factor/regime context |
 
 ---
 
@@ -88,6 +91,9 @@ of truth. Vocabulary:
 | sec_13f_securities_list | HTTP errors propagate to caller | per-row drop (CUSIP regex miss) | job-level; defensive per-row parse |
 | etoro_candles | broker retry (429 → back-off; 5xx → retry budget) | — | 401 → token refresh; per-instrument isolated |
 | cboe_vix | HTTP failure raises; scheduler records failure and retries next due/catch-up | exact-schema or invalid-OHLC rejection; transaction rolls back | 304 → benign no-op; conditional `If-Modified-Since` |
+| kenneth_french | HTTP error raises; next due/catch-up retries | whole snapshot rejected and raw bytes retained | 304 → benign no-op |
+| aqr | HTTP error raises; next due/catch-up retries | whole snapshot rejected and raw bytes retained | 304 → benign no-op |
+| fred | HTTP error raises; next due/catch-up retries | whole snapshot rejected and raw bytes retained | 304 → benign no-op |
 
 ---
 

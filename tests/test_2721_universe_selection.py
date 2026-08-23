@@ -45,8 +45,10 @@ from app.services.strategy_result_universe import (
     store_termination_census,
 )
 from app.services.universe_selection import (
+    EXCHANGE_TEST_ISSUE_SYMBOLS,
     INTRADER_CAPTURE_DATE,
     SURVIVORSHIP_FREE_VENDOR,
+    load_universe_selection,
     vendor_for,
 )
 from app.services.walk_forward import FoldRecord
@@ -267,6 +269,7 @@ class TestWriteBoundary:
             "universe_admitted_total": 7,
             "universe_unlinked_alive_excluded": 2,
             "universe_linked_early_reuse_suspect": 1,
+            "universe_exchange_test_issues_excluded": 0,
             "universe_unharvested_excluded": 1,
             "universe_vendor_series_total": 10,
         }
@@ -287,6 +290,44 @@ class TestWriteBoundary:
         """A class added to ``series_termination`` without a migration must fail
         HERE, not silently produce an unstorable census."""
         assert {f"terminated_{member.value}" for member in TerminationClass} <= TERMINATION_CENSUS_STRATA
+
+    def test_exchange_test_issues_are_a_closed_identity_rule_not_a_return_filter(self) -> None:
+        assert {"ATEST", "ZBZZT", "ZTEST"} <= EXCHANGE_TEST_ISSUE_SYMBOLS
+        assert "AAPL" not in EXCHANGE_TEST_ISSUE_SYMBOLS
+
+    def test_alive_and_terminated_exchange_test_issues_are_excluded_before_classification(self) -> None:
+        class _Result:
+            def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+                self._rows = rows
+
+            def fetchone(self) -> tuple[Any, ...] | None:
+                return self._rows[0] if self._rows else None
+
+            def fetchall(self) -> list[tuple[Any, ...]]:
+                return self._rows
+
+        class _Conn:
+            def execute(self, query: str, _params: object) -> _Result:
+                if "count(*)" in query:
+                    return _Result([(4, 0)])
+                if "max(last_bar)" in query:
+                    return _Result([(INTRADER_CAPTURE_DATE,)])
+                return _Result(
+                    [
+                        (1, "ZBZZT", None, INTRADER_CAPTURE_DATE, None, None),
+                        (2, "ATEST", None, date(2020, 1, 1), None, None),
+                        (3, "AAPL", 7, INTRADER_CAPTURE_DATE, None, None),
+                        (4, "DEAD", None, date(2020, 1, 1), None, None),
+                    ]
+                )
+
+        selection = load_universe_selection(
+            cast("Any", _Conn()), universe="survivorship_free", validated_ids=frozenset({7})
+        )
+
+        assert selection.exchange_test_issues_excluded == 2
+        assert [item.series_id for item in selection.admitted] == [3, 4]
+        assert len(selection.admitted) + selection.exchange_test_issues_excluded == selection.vendor_series_total
 
     def test_standing_refusals_no_longer_carry_the_universe_member(self) -> None:
         assert "universe_basis_not_survivorship_free" not in STANDING_REFUSALS

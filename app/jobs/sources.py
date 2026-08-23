@@ -99,6 +99,7 @@ Lane = Literal[
     "finra",
     "nasdaq",
     "cboe",
+    "reference_data",
     "openfigi",
 ]
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
@@ -121,6 +122,10 @@ the rate — it does not.
   execution or unrelated SEC/FINRA collection.
 * ``cboe`` — one official daily VIX history request. It is separate from the
   broker and Nasdaq lanes because those vendors share no overlap budget.
+* ``reference_data`` — the five bounded public-file requests used by #2912:
+  Kenneth French, AQR and FRED refresh jobs serialise conservatively. The lane
+  bounds job overlap; conditional GETs and each provider's HTTP response remain
+  the source-specific fetch contract.
 * ``sec_rate`` — the SEC discovery/producer jobs (per-accession fetchers +
   per-issuer ingest). They serialise under one ``JobLock`` to bound job
   overlap, NOT request rate (the HTTP floor above bounds rate). #1478

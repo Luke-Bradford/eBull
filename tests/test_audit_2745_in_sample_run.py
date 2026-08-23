@@ -89,6 +89,7 @@ def _attachments() -> Attachments:
         termination_census={
             "universe_admitted_total": 90,
             "universe_unlinked_alive_excluded": 5,
+            "universe_exchange_test_issues_excluded": 0,
             "universe_unharvested_excluded": 5,
             "universe_vendor_series_total": 100,
         },

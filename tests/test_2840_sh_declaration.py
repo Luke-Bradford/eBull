@@ -63,7 +63,11 @@ class TestTheRegisterEntry:
         entry = STRATEGY_MANIFEST[STRATEGY_ID]
         scan_version = entry.identity(universe=SCAN_UNIVERSE, cost_model_id=COST_MODEL_ID).version
         assert STRATEGY_VERSION != scan_version
-        assert STRATEGY_VERSION == entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
+        current_research_version = entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
+        # #2912 corrected the shared universe population after this declaration
+        # froze. Historical evidence stays on its old version and must not move
+        # merely because the manifest now computes a new current identity.
+        assert STRATEGY_VERSION != current_research_version
 
 
 class TestTheDeclaration:

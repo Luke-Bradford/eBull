@@ -13,16 +13,12 @@ four preamble warnings apply here verbatim and are not restated:
   ``freeze_preregistration`` refuses a declaration no ``DeclaredTrial`` claims;
 - no number below is chosen here.
 
-⚠⚠ THE STRATEGY VERSION IS THE ``survivorship_free`` IDENTITY, AND THAT IS A CHOICE
-BETWEEN TWO REAL TRIALS RATHER THAN A LOOKUP. ``S11.identity(universe=...)`` returns
-``strategy-registry-v1+d5f25fd08376`` for ``survivorship_free`` and
-``strategy-registry-v1+65274a70a40b`` for ``survivor_only``, and declarations key on
-``(strategy_id, strategy_version)`` — so the two universes are two declarations and
-two charges on the shared register. The exploration this declaration authorises runs
-on the research corpus, i.e. ``strategy_result_identity.BACKTEST_UNIVERSE``, which IS
-``survivorship_free``; ``survivor_only`` is ``strategy_signal_scan.SCAN_UNIVERSE`` and
-is not what step 3 measures. Asserted below rather than pasted, so a future change to
-either constant fails loudly instead of freezing the wrong trial.
+⚠⚠ THE STRATEGY VERSION IS THE HISTORICAL ``survivorship_free`` IDENTITY recorded by
+this contract's immutable trial-register entry. Declarations key on
+``(strategy_id, strategy_version)``: a universe-rule change creates a new population
+and must not move this older evidence onto it. The exploration this declaration
+authorised ran on the research corpus; a current manifest version is deliberately not
+substituted if that population later changes.
 """
 
 from __future__ import annotations
@@ -39,21 +35,23 @@ from app.config import settings
 from app.services.cost_model import CARRY_UNMODELLED, FX_UNMODELLED
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.result_ledger import PreregDeclarationRefused, freeze_preregistration, load_preregistration
-from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION, structural_promotion_refusals
-from app.services.strategy_result_identity import BACKTEST_UNIVERSE, COST_MODEL_ID
+from app.services.strategy_result_identity import BACKTEST_UNIVERSE
+from app.services.trial_register import TRIAL_REGISTER
 from scripts._prereg_freeze_guard import assert_policy_version_merged, policy_version_report
 
 STRATEGY_ID: Final = "s11-volatile-regime-gated-breakout"
 CONTRACT_VERSION: Final = "sh-volatile-regime-gate-2026-08-22"
 DECLARED_BY: Final = "scripts/freeze_2840_sh_regime_gate_declaration.py (#2840)"
 
-#: ⚠ COMPUTED from the merged manifest, never pasted. A hand-typed hash that
-#: stopped matching the module would freeze a declaration for a strategy version
-#: that does not exist, and nothing downstream would ever load it.
-STRATEGY_VERSION: Final = (
-    STRATEGY_MANIFEST[STRATEGY_ID].identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
-)
+#: Historical declaration identity, read from the immutable trial register rather
+#: than the moving current manifest. #2912 corrected the shared universe rule and
+#: therefore minted a new current S-11 version; rewriting this older declaration
+#: onto that version would falsely transfer evidence across populations.
+_DECLARED_TRIAL: Final = next(trial for trial in TRIAL_REGISTER.trials if trial.trial_id == CONTRACT_VERSION)
+if _DECLARED_TRIAL.declared_for is None or _DECLARED_TRIAL.declared_for[0] != STRATEGY_ID:
+    raise RuntimeError(f"trial {CONTRACT_VERSION!r} does not declare {STRATEGY_ID!r}")
+STRATEGY_VERSION: Final = _DECLARED_TRIAL.declared_for[1]
 
 # --- The forward-shadow floor's priors. All four are REGIME-SERIES facts. ---
 #

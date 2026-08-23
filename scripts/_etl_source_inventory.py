@@ -42,6 +42,9 @@ BULK_REFERENCE_SOURCES: tuple[str, ...] = (
     "company_tickers_exchange",
     "sec_13f_securities_list",
     "etoro_candles",
+    "kenneth_french",
+    "aqr",
+    "fred",
 )
 
 ALL_SOURCES: tuple[str, ...] = tuple(sorted(set(MANIFEST_SOURCES + AD_HOC_SOURCES + BULK_REFERENCE_SOURCES)))
