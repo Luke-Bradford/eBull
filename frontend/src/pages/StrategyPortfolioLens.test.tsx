@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as configApi from "@/api/config";
@@ -258,6 +258,16 @@ describe("StrategyPortfolioLens", () => {
   });
 });
 
+/** `MemoryRouter` exposes no history object, so read the URL from inside it. */
+function LocationProbe(): JSX.Element {
+  const { search } = useLocation();
+  return <output data-testid="location-search">{search}</output>;
+}
+
+function currentParams(): URLSearchParams {
+  return new URLSearchParams(screen.getByTestId("location-search").textContent ?? "");
+}
+
 describe("StrategiesHubPage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -301,5 +311,21 @@ describe("StrategiesHubPage", () => {
       </MemoryRouter>,
     );
     expect(await screen.findByRole("tab", { name: "Research" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("preserves query params it does not own when switching lens", async () => {
+    render(
+      <MemoryRouter initialEntries={["/strategies?symbol=AAPL"]}>
+        <StrategiesHubPage />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+    await screen.findByText("Not trading");
+    await userEvent.click(screen.getByRole("tab", { name: "Research" }));
+    await waitFor(() => {
+      expect(currentParams().get("view")).toBe("research");
+    });
+    // Neither lens owns URL state today; this pins the rule before one does.
+    expect(currentParams().get("symbol")).toBe("AAPL");
   });
 });

@@ -6,6 +6,7 @@ import { ApiError } from "@/api/client";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate, formatMoney, formatPct } from "@/lib/format";
+import { number } from "@/lib/strategyFormat";
 import { useLiveTick } from "@/components/quotes/LiveQuoteProvider";
 import { liveTickPriceIn } from "@/lib/useLiveQuote";
 
@@ -17,13 +18,9 @@ import { liveTickPriceIn } from "@/lib/useLiveQuote";
  * close modal belongs wherever the positions are. Extracted rather than copied
  * — a fifth near-copy of a money-rendering row is exactly what the
  * `information-architecture` skill's "extract once and share" rule exists to stop.
+ * That rule binds the formatters too: `number` comes from `@/lib/strategyFormat`,
+ * never a private re-declaration.
  */
-function number(value: string | null): number | null {
-  if (value === null) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function StrategyPositionRow({
   position,
   onClose,

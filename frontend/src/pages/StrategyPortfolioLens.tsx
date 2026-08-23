@@ -16,7 +16,6 @@ import { EmptyState } from "@/components/states/EmptyState";
 import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategies/StrategyPositions";
 import {
   AccountEvidence,
-  aggregate,
   AutomationControl,
   EmptyPnlChart,
   PnlChart,
@@ -24,6 +23,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { formatMoney, formatNumber, formatPct } from "@/lib/format";
+import { aggregate } from "@/lib/strategyAggregate";
 import { number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
 import { useAsync } from "@/lib/useAsync";

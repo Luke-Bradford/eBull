@@ -45,6 +45,27 @@ function isViewKey(value: string | null): value is ViewKey {
   return value === "portfolio" || value === "research";
 }
 
+/**
+ * Switch preset without dropping params the hub does not own.
+ *
+ * `setParams({ view: key })` REPLACES the whole query string. Neither lens owns
+ * URL state today, so nothing is lost yet — but the mirror-image trap is a
+ * settled rule already (`.claude/skills/frontend/information-architecture.md`,
+ * "Lens components must PRESERVE the hub's `view` param", from #1917), and a
+ * hub that clears a lens's filters on tab-switch is the same defect pointing
+ * the other way. Set only our own key; leave the rest untouched.
+ */
+function selectView(
+  setParams: ReturnType<typeof useSearchParams>[1],
+  key: ViewKey,
+): void {
+  setParams((prev) => {
+    const next = new URLSearchParams(prev);
+    next.set("view", key);
+    return next;
+  });
+}
+
 export function StrategiesHubPage(): JSX.Element {
   const [params, setParams] = useSearchParams();
   const raw = params.get("view");
@@ -70,7 +91,7 @@ export function StrategiesHubPage(): JSX.Element {
                 role="tab"
                 aria-selected={selected}
                 title={preset.hint}
-                onClick={() => setParams({ view: key })}
+                onClick={() => selectView(setParams, key)}
                 className={[
                   "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
                   selected

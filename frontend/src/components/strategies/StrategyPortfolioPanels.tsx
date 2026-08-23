@@ -99,50 +99,6 @@ function AccountEvidenceReasons({
   );
 }
 
-export function aggregate(overview: StrategyOverviewResponse) {
-  const pnlValues = overview.strategies.map((strategy) => number(strategy.pnl.total_pnl));
-  const forwardStrategies = overview.strategies.filter((strategy) => strategy.forward_outcome_supported);
-  const resolved = forwardStrategies.reduce(
-    (sum, strategy) => sum + strategy.attribution.resolved_entries,
-    0,
-  );
-  const winners = forwardStrategies.reduce(
-    (sum, strategy) => sum + strategy.attribution.winning_entries,
-    0,
-  );
-  let weightedReturn = 0;
-  let averageReturnKnown = resolved > 0;
-  for (const strategy of forwardStrategies) {
-    if (strategy.attribution.resolved_entries === 0) continue;
-    const average = number(strategy.attribution.shadow_average_return_pct);
-    if (average === null) {
-      averageReturnKnown = false;
-      break;
-    }
-    weightedReturn += average * strategy.attribution.resolved_entries;
-  }
-  const fired = forwardStrategies.reduce(
-    (sum, strategy) => sum + strategy.attribution.fired_entries,
-    0,
-  );
-  return {
-    totalPnl: pnlValues.every((value) => value !== null)
-      ? pnlValues.reduce<number>((sum, value) => sum + (value ?? 0), 0)
-      : null,
-    resolved,
-    winners,
-    unsuccessful: Math.max(0, resolved - winners),
-    awaitingOutcome: Math.max(0, fired - resolved),
-    successRate: resolved > 0 ? winners / resolved : null,
-    averageReturn: averageReturnKnown ? weightedReturn / resolved / 100 : null,
-    activePositions: overview.strategies.reduce(
-      (sum, strategy) => sum + strategy.pnl.active_position_count,
-      0,
-    ),
-    approved: overview.strategies.filter((strategy) => strategy.allocation_ready).length,
-  };
-}
-
 export function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div>

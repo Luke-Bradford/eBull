@@ -26,8 +26,8 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
+import { aggregate } from "@/lib/strategyAggregate";
 import { money, number, pctPoints } from "@/lib/strategyFormat";
-import { aggregate } from "@/components/strategies/StrategyPortfolioPanels";
 import { useAsync } from "@/lib/useAsync";
 
 /** The declared id is `primary-2022-plus`, not `primary` (#2624).
