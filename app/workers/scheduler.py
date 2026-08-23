@@ -3240,7 +3240,25 @@ def daily_candle_refresh() -> None:
 #: Params: ``benchmarks`` (``BENCHMARK_SYMBOLS``), ``pass_verdict``
 #: (``CORE_ELIGIBILITY_PASS_VERDICT``).
 QUOTES_REFRESH_SCOPE_SQL = """
-SELECT DISTINCT ON (i.instrument_id) i.instrument_id, i.symbol
+SELECT DISTINCT ON (i.instrument_id) i.instrument_id, i.symbol,
+       -- #2833 step 2: does this instrument ALSO satisfy the core-candidate
+       -- predicate (arm 5 below)?  Selected here rather than asked in a
+       -- second statement so scope and candidacy come from ONE snapshot --
+       -- two autocommit queries can disagree if a proof lands between them,
+       -- which would silently cost a newly proved candidate an hour of its
+       -- sample (Codex ckpt-3).  This is a plain boolean about ONE predicate,
+       -- not a claim about which OR'd arm admitted the row, so it needs no
+       -- arm precedence to stay honest.
+       (i.is_tradable = TRUE AND EXISTS (
+           SELECT 1
+           FROM (
+               SELECT DISTINCT ON (e.environment) e.verdict
+               FROM strategy_core_eligibility_proofs e
+               WHERE e.instrument_id = i.instrument_id
+               ORDER BY e.environment, e.observed_at DESC, e.core_eligibility_proof_id DESC
+           ) latest
+           WHERE latest.verdict = %(pass_verdict)s
+       )) AS is_core_candidate
 FROM instruments i
 LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
 LEFT JOIN positions p ON p.instrument_id = i.instrument_id AND p.current_units > 0
@@ -3366,6 +3384,9 @@ def quotes_refresh() -> None:
             ).fetchall()
 
             instruments = [(int(r[0]), str(r[1])) for r in rows]
+            # #2833 step 2 — same row, same snapshot as the scope above, so a
+            # proof landing mid-tick cannot make the two disagree.
+            candidate_ids = frozenset(int(r[0]) for r in rows if r[2])
             if not instruments:
                 # Same reasoning as daily_candle_refresh's empty-scope branch
                 # (#1293): an empty scope here is anomalous (no held positions,
@@ -3378,7 +3399,7 @@ def quotes_refresh() -> None:
                 tracker.row_count = 0
                 return
 
-            summary = refresh_quotes(provider, conn, instruments)
+            summary = refresh_quotes(provider, conn, instruments, observe_instrument_ids=candidate_ids)
             if summary.batch_error is not None:
                 # #2218 shape — a total upstream failure must NOT report as a
                 # clean run that simply found no quotes. This has to raise
@@ -3404,12 +3425,24 @@ def quotes_refresh() -> None:
         # eToro returned with a wide spread, which is not the same as rows now
         # flagged in the table — a stale snapshot rejected by the monotonicity
         # guard still counts here (review NITPICK on #2275).
-        "quotes_refresh complete: requested=%d updated=%d no_quote=%d wide_spreads_fetched=%d",
+        "quotes_refresh complete: requested=%d updated=%d no_quote=%d wide_spreads_fetched=%d "
+        "core_observations=%d core_observation_failures=%d",
         summary.instruments_requested,
         summary.quotes_updated,
         summary.quotes_skipped,
         summary.spread_flags_set,
+        summary.core_observations_written,
+        summary.core_observation_failures,
     )
+    if summary.core_observation_failures:
+        # Escalated above the per-instrument log line: the evidence lane is
+        # deliberately isolated from the quote refresh, so a fault here is
+        # invisible in the job's own success state (#2833).
+        logger.warning(
+            "quotes_refresh: %d core quote observation write(s) FAILED — the candidate spread "
+            "sample is not accruing; #2833's pass bar cannot be measured until this is fixed",
+            summary.core_observation_failures,
+        )
 
 
 def _cik_destination_is_empty(conn: psycopg.Connection) -> bool:  # type: ignore[type-arg]

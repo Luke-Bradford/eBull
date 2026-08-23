@@ -41,6 +41,17 @@ def _passthrough_conn() -> MagicMock:
     return conn
 
 
+def _provider() -> MagicMock:
+    """A provider mock carrying the real ``quote_batch_size`` contract.
+
+    Without it the attribute is a MagicMock and the candidate cohort's
+    chunking arithmetic silently misbehaves.
+    """
+    provider = MagicMock()
+    provider.quote_batch_size = 50
+    return provider
+
+
 class TestRefreshQuotes:
     def test_empty_instruments_does_not_call_provider(self) -> None:
         provider = MagicMock()
@@ -52,7 +63,7 @@ class TestRefreshQuotes:
     def test_instrument_without_a_returned_quote_counts_as_skipped(self) -> None:
         """A provider that answers for only some IDs must not be read as a
         failure — it is the normal shape for untraded instruments."""
-        provider = MagicMock()
+        provider = _provider()
         provider.get_quotes.return_value = [_quote(1)]
 
         with patch("app.services.market_data._upsert_quote", return_value=False):
@@ -62,11 +73,154 @@ class TestRefreshQuotes:
         assert summary.quotes_skipped == 1
         assert summary.batch_failed is False
 
+    def test_a_broken_observation_lane_is_counted_not_silently_swallowed(self) -> None:
+        """#2833 — the lane is isolated from the quote refresh, so a bad
+        column or bad SQL would otherwise log once an hour forever while the
+        candidate sample never grows. The count is the detector."""
+        provider = _provider()
+        provider.get_quotes.side_effect = [[_quote(1)], [_quote(1)]]
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch(
+                "app.services.market_data.record_core_quote_observations",
+                side_effect=RuntimeError("relation does not exist"),
+            ),
+        ):
+            summary = refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA")],
+                observe_instrument_ids=frozenset({1}),
+            )
+
+        assert summary.core_observation_failures == 1
+        assert summary.core_observations_written == 0
+        # The quote refresh eight headless services depend on still ran.
+        assert summary.quotes_updated == 1
+        assert summary.batch_failed is False
+
+    def test_observations_are_only_written_for_named_candidates(self) -> None:
+        provider = _provider()
+        provider.get_quotes.side_effect = [[_quote(1), _quote(2)], [_quote(2)]]
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch("app.services.market_data.record_core_quote_observations", return_value=1) as record,
+        ):
+            summary = refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA"), (2, "BBB")],
+                observe_instrument_ids=frozenset({2}),
+            )
+
+        assert summary.core_observations_written == 1
+        assert [o.instrument_id for o in record.call_args_list[0].args[1]] == [2]
+
+    def test_a_missing_quote_still_records_coverage_for_a_candidate(self) -> None:
+        """Absence is evidence: dropping it would shrink the sample silently."""
+        provider = _provider()
+        provider.get_quotes.side_effect = [[], []]
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch("app.services.market_data.record_core_quote_observations", return_value=1) as record,
+        ):
+            summary = refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA")],
+                observe_instrument_ids=frozenset({1}),
+            )
+
+        assert summary.quotes_skipped == 1
+        assert summary.core_observations_written == 1
+        assert record.call_args_list[0].args[1][0].observation_status == "missing"
+
+    def test_a_failed_candidate_fetch_records_nothing_rather_than_absence(self) -> None:
+        """#2833 — `get_quotes` swallows a failed CHUNK and returns the rest,
+        so a candidate in that chunk looks identical to one eToro has no
+        quote for. Writing it as `provider_omitted_quote` would store a
+        transport failure as broker evidence."""
+        provider = _provider()
+        provider.get_quotes.side_effect = [[_quote(1)], RuntimeError("etoro chunk down")]
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch("app.services.market_data.record_core_quote_observations", return_value=0) as record,
+        ):
+            summary = refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA")],
+                observe_instrument_ids=frozenset({1}),
+            )
+
+        record.assert_not_called()
+        assert summary.core_observations_written == 0
+        assert summary.core_observation_failures == 1
+        # The quote refresh itself is unaffected.
+        assert summary.quotes_updated == 1
+        assert summary.batch_failed is False
+
+    def test_the_candidate_cohort_is_split_by_the_provider_batch_size(self) -> None:
+        """#2833 — one call per upstream request, so no candidate can go
+        missing to a chunk the provider swallowed. A cohort larger than the
+        batch size must fan out, not ride in one ambiguous call."""
+        provider = MagicMock()
+        provider.quote_batch_size = 2
+        provider.get_quotes.side_effect = [
+            [_quote(1)],  # main scope
+            [_quote(1), _quote(2)],  # cohort chunk 1
+            [_quote(3)],  # cohort chunk 2
+        ]
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch("app.services.market_data.record_core_quote_observations", return_value=3) as record,
+        ):
+            refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA")],
+                observe_instrument_ids=frozenset({1, 2, 3}),
+            )
+
+        cohort_calls = [c.args[0] for c in provider.get_quotes.call_args_list[1:]]
+        assert cohort_calls == [[1, 2], [3]]
+        assert [o.instrument_id for o in record.call_args_list[0].args[1]] == [1, 2, 3]
+
+    def test_one_failed_cohort_chunk_voids_the_whole_tick(self) -> None:
+        """Partial cohort coverage would still mislabel the failed chunk's
+        candidates as `provider_omitted_quote`, so nothing is written."""
+        provider = MagicMock()
+        provider.quote_batch_size = 2
+        provider.get_quotes.side_effect = [
+            [_quote(1)],
+            [_quote(1), _quote(2)],
+            RuntimeError("chunk down"),
+        ]
+
+        with (
+            patch("app.services.market_data._upsert_quote", return_value=False),
+            patch("app.services.market_data.record_core_quote_observations", return_value=0) as record,
+        ):
+            summary = refresh_quotes(
+                provider,
+                _passthrough_conn(),
+                [(1, "AAA")],
+                observe_instrument_ids=frozenset({1, 2, 3}),
+            )
+
+        record.assert_not_called()
+        assert summary.core_observation_failures == 3
+
     def test_batch_fetch_failure_is_distinguishable_from_no_quotes(self) -> None:
         """#2218 shape — a total upstream outage and a universe of untraded
         instruments both write zero quotes. The caller must be able to tell
         them apart, or an outage reports as a clean run."""
-        provider = MagicMock()
+        provider = _provider()
         provider.get_quotes.side_effect = RuntimeError("etoro down")
 
         summary = refresh_quotes(provider, _passthrough_conn(), [(1, "AAA"), (2, "BBB")])
@@ -76,7 +230,7 @@ class TestRefreshQuotes:
         assert summary.quotes_skipped == 2
 
     def test_one_bad_upsert_does_not_abort_the_rest(self) -> None:
-        provider = MagicMock()
+        provider = _provider()
         provider.get_quotes.return_value = [_quote(1), _quote(2), _quote(3)]
 
         with patch("app.services.market_data._upsert_quote", side_effect=[RuntimeError("boom"), False, True]):
@@ -90,7 +244,7 @@ class TestQuotesRefreshJob:
     """The job's wiring — scope query, connection shape, empty-scope signal."""
 
     @staticmethod
-    def _run(rows: list[tuple[int, str]]) -> tuple[MagicMock, MagicMock]:
+    def _run(rows: list[tuple[int, str, bool]]) -> tuple[MagicMock, MagicMock]:
         conn = _passthrough_conn()
         result = MagicMock()
         result.fetchall.return_value = rows
@@ -129,14 +283,20 @@ class TestQuotesRefreshJob:
         """#2269 — the scope SELECT opens an implicit transaction, which would
         turn refresh_quotes' per-instrument ``conn.transaction()`` into a
         savepoint and defer every write to connection close."""
-        mock_connect, _ = self._run([(1, "AAPL")])
+        mock_connect, _ = self._run([(1, "AAPL", False)])
         mock_connect.assert_called_once()
         assert mock_connect.call_args.kwargs.get("autocommit") is True
 
     def test_scope_rows_are_passed_through(self) -> None:
-        _, mock_refresh = self._run([(1, "AAPL"), (2, "MSFT")])
+        _, mock_refresh = self._run([(1, "AAPL", False), (2, "MSFT", True)])
         mock_refresh.assert_called_once()
         assert mock_refresh.call_args[0][2] == [(1, "AAPL"), (2, "MSFT")]
+
+    def test_candidacy_comes_from_the_same_scope_row(self) -> None:
+        """#2833 — one snapshot, so a proof landing mid-tick cannot make the
+        scope and the candidate set disagree."""
+        _, mock_refresh = self._run([(1, "AAPL", False), (2, "MSFT", True)])
+        assert mock_refresh.call_args.kwargs["observe_instrument_ids"] == frozenset({2})
 
     def test_empty_scope_warns_rather_than_reading_as_a_clean_no_op(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level("WARNING"):
@@ -156,7 +316,7 @@ class TestQuotesRefreshJob:
 
         conn = _passthrough_conn()
         result = MagicMock()
-        result.fetchall.return_value = [(1, "AAPL")]
+        result.fetchall.return_value = [(1, "AAPL", False)]
         conn.execute.return_value = result
         conn.__enter__ = MagicMock(return_value=conn)
         conn.__exit__ = MagicMock(return_value=False)
