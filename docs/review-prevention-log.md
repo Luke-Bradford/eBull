@@ -5252,3 +5252,15 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Symptom: `freeze_2840_sh_regime_gate_declaration.py` recomputed S-11's version from the current manifest, while its immutable trial-register entry still claimed the original version. The pure gate failed before push; changing the trial would have falsely transferred already-seen evidence onto a different population.
 - Prevention: a script for an already-registered historical declaration reads `(strategy_id, strategy_version)` from its immutable `DeclaredTrial`. Current-version derivation belongs only to a new declaration and new trial charge. When a shared input-rule hash moves, run the entire pure tier so old freeze scripts cannot silently relabel evidence.
 - Enforced in: this prevention log; `scripts/freeze_2840_sh_regime_gate_declaration.py`; `tests/test_2840_sh_declaration.py`.
+
+### A verifier must prove the intended refusal branch, not merely catch the exception type
+- First seen in: #2914 PR #2922 (2026-08-23), caught by the review bot.
+- Symptom: the canonical verifier labelled a check `missing_anchor_refused`, but its fixture included
+  weekend dates as NYSE sessions. The helper correctly raised `ValueError` earlier for venue-calendar
+  disagreement; a generic catch converted that different refusal into evidence that the missing-anchor
+  branch fired.
+- Prevention: every verifier check intended to prove a specific refusal asserts the stable domain-error
+  text as well as the exception type. A broad `except ValueError: pass` proves only that something was
+  rejected and must not be attached to a branch-specific evidence label.
+- Enforced in: this prevention log; `scripts/verify_2914_operational_rules.py::_must_refuse`;
+  `tests/test_2914_operational_rules_verifier.py`.
