@@ -5,6 +5,22 @@ set -euo pipefail
 
 pr_title=${PR_TITLE:-}
 pr_body=${PR_BODY:-}
+pr_base=${PR_BASE:-}
+default_branch=${DEFAULT_BRANCH:-}
+
+# Two closing-verb alternations, deliberately NOT the same one, exported so the
+# perl guards below read them as $ENV{...} rather than each carrying a copy.
+#
+#   GITHUB  — GitHub's actual closing keywords. Gerunds are NOT among them, so
+#             this is the list to use when asking "what will GitHub really close".
+#   PROSE   — the same plus gerunds, for guards that detect an author's SENTENCE
+#             ("without closing #N") rather than a link GitHub would act on.
+#
+# Widening GITHUB to match PROSE would make the inert-reference guard refuse
+# phrasings GitHub ignores. Narrowing PROSE to match GITHUB would let the
+# negation guard miss "land without closing #N". Keep them apart.
+export CLOSING_VERBS_GITHUB='close[sd]?|fix(?:e[sd])?|resolve[sd]?'
+export CLOSING_VERBS_PROSE='close[sd]?|closing|fix(?:e[sd]|ing)?|resolve[sd]?|resolving'
 
 # Strip HTML comments + fenced code blocks + inline code so examples cannot
 # satisfy the link gate or trigger the negation incident guard.
@@ -15,7 +31,7 @@ body_clean=$(printf '%s' "$pr_body" | perl -0pe 's/<!--.*?-->//gs; s/```.*?```//
 # followed on the same line by a closing keyword reference; require an explicit
 # Refs/Part of/Umbrella form instead.
 if printf '%s\n' "$body_clean" | perl -ne '
-  $found = 1 if /(?:^|[^\w])(?:not|never|without|doesn.t|don.t|didn.t|won.t|wouldn.t|shouldn.t|mustn.t|can.t|cannot)(?!\w)[^#\r\n]{0,80}(?:^|[^\w])(?:close[sd]?|closing|fix(?:e[sd]|ing)?|resolve[sd]?|resolving)[\s:]+#\d+/i;
+  $found = 1 if /(?:^|[^\w])(?:not|never|without|doesn.t|don.t|didn.t|won.t|wouldn.t|shouldn.t|mustn.t|can.t|cannot)(?!\w)[^#\r\n]{0,80}(?:^|[^\w])(?:$ENV{CLOSING_VERBS_PROSE})[\s:]+#\d+/i;
   END { exit(!$found) }
 '; then
   echo "::error::PR body contains a negated closing-keyword reference. GitHub ignores negation and may close the issue on merge."
@@ -34,12 +50,33 @@ fi
 # \xe2\x80\x99 is a curly apostrophe. perl runs without -C here, so the body is
 # bytes and the literal character would trip shellcheck SC1112 besides.
 if printf '%s\n' "$body_clean" | perl -ne '
-  $found = 1 if /(?:^|[^\w-])(?:close[sd]?|closing|fix(?:e[sd]|ing)?|resolve[sd]?|resolving)[ \t:]+#\d+(?![0-9])[ \t]*(?:'"'"'s|\xe2\x80\x99s|(?:item|items|step|steps|class|classes|part|parts|phase|clause|arm|leg|half)\b)/i;
+  $found = 1 if /(?:^|[^\w-])(?:$ENV{CLOSING_VERBS_PROSE})[ \t:]+#\d+(?![0-9])[ \t]*(?:'"'"'s|\xe2\x80\x99s|(?:item|items|step|steps|class|classes|part|parts|phase|clause|arm|leg|half)\b)/i;
   END { exit(!$found) }
 '; then
   echo "::error::PR body closes an issue but describes only PART of it. GitHub reads 'KEYWORD #N' and closes the whole issue, ignoring the qualifier that follows."
   echo "Use 'Refs #N' or 'Part of #N' and describe the part in prose without a closing verb."
   exit 1
+fi
+
+# GitHub registers closing references only for PRs targeting the DEFAULT branch.
+# On a stacked PR "Closes #N" is inert: closingIssuesReferences comes back empty,
+# so safe_merge's done_everywhere closes nothing and boards nothing, silently.
+# Measured over the last 1000 merged PRs: 4 had a non-main base, 2 of those
+# declared a closing keyword (#2782 -> #2779, #2773 -> #2775) and both were
+# registered as closing NOTHING. See #2783.
+#
+# Both env vars absent (a local run) disables the check rather than guessing.
+if [ -n "$pr_base" ] && [ -n "$default_branch" ] && [ "$pr_base" != "$default_branch" ]; then
+  inert=$(printf '%s\n' "$body_clean" | perl -ne '
+    while (/(?:^|[^\w-])(?:$ENV{CLOSING_VERBS_GITHUB})[ \t:]+#(\d+)(?![0-9])/ig) {
+      print "$1\n";
+    }
+  ' | sort -un | paste -sd' ' -)
+  if [ -n "$inert" ]; then
+    echo "::error::PR base is '${pr_base}', not the default branch '${default_branch}'. GitHub registers closing references only against the default branch, so these are INERT and will close nothing on merge: ${inert}"
+    echo "Retarget the PR at '${default_branch}', or use 'Refs #N' and close the issue by hand once the stack lands."
+    exit 1
+  fi
 fi
 
 # Pull every #N out of the title. Empty title means no required issue link.

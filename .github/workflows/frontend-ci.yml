@@ -6,8 +6,8 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/frontend-ci.yml"
+  # No ``branches:`` filter on pull_request — see #2783.
   pull_request:
-    branches: [main]
     paths:
       - "frontend/**"
       - ".github/workflows/frontend-ci.yml"
