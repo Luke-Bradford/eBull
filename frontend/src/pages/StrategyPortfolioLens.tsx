@@ -17,6 +17,7 @@ import { OpenStrategyPositions, StrategyCloseModal } from "@/components/strategi
 import {
   AccountEvidence,
   AutomationControl,
+  BenchmarkRefusals,
   EmptyPnlChart,
   PnlChart,
 } from "@/components/strategies/StrategyPortfolioPanels";
@@ -235,6 +236,10 @@ export function StrategyPortfolioLens() {
         ) : (
           <EmptyPnlChart />
         )}
+        {/* #2602 item 5. Sourced from `overview`, not `pnlHistory` — see the
+            component. A benchmark that is absent must say so by name in every
+            branch above, including the error one. */}
+        <BenchmarkRefusals refusals={data.benchmark_refusals} />
         {/* Whether our P&L agrees with the broker's own equity. Kept when the
             page was trimmed to a control panel: it is the reason to trust the
             number above it, not commentary about it. */}

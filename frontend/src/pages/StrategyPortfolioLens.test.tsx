@@ -9,9 +9,27 @@ import type { StrategyOverviewResponse } from "@/api/types";
 import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 import { StrategyPortfolioLens } from "@/pages/StrategyPortfolioLens";
 
+/** #2602 item 5 — mirrors `app/api/strategies.py::BENCHMARK_REFUSALS`. */
+const BENCHMARK_REFUSALS = [
+  {
+    benchmark: "sp500_total_return",
+    label: "S&P 500 total return",
+    reasons: [
+      { code: "benchmark_source_unlicensed", detail: "No legal free S&P 500 total-return series has passed review." },
+      { code: "benchmark_identity_unverified", detail: "Every S&P series we hold is a tracking ETF's PRICE." },
+    ],
+  },
+  {
+    benchmark: "cpih_real_return",
+    label: "CPIH real return",
+    reasons: [{ code: "benchmark_series_not_ingested", detail: "No CPI/CPIH series is ingested." }],
+  },
+];
+
 /** The state the operator actually has today: kill switch on, nothing funded. */
 const BLOCKED = {
   as_of: "2026-08-23T00:00:00Z",
+  benchmark_refusals: BENCHMARK_REFUSALS,
   demo_connection: true,
   execution_enabled: false,
   live_execution_enabled: false,
@@ -161,6 +179,30 @@ describe("StrategyPortfolioLens", () => {
     expect(await screen.findByText("Nothing held")).toBeInTheDocument();
     // Nothing to close, so the destructive control is absent rather than disabled.
     expect(screen.queryByRole("button", { name: /Close all/ })).not.toBeInTheDocument();
+  });
+
+  it("names why there is no benchmark, by code and by evidence", async () => {
+    renderLens();
+    expect(await screen.findByText("No benchmark comparison")).toBeInTheDocument();
+    expect(screen.getByText("S&P 500 total return")).toBeInTheDocument();
+    expect(screen.getByText("CPIH real return")).toBeInTheDocument();
+    expect(screen.getByText("benchmark_source_unlicensed")).toBeInTheDocument();
+    expect(screen.getByText("benchmark_identity_unverified")).toBeInTheDocument();
+    expect(screen.getByText("benchmark_series_not_ingested")).toBeInTheDocument();
+    // The evidence is rendered, not hidden behind a hover: `title` is unreachable
+    // on touch and unreliable for assistive tech, and the evidence is the point.
+    expect(screen.getByText(/No CPI\/CPIH series is ingested/)).toBeInTheDocument();
+  });
+
+  it("still names the benchmark refusal when the P&L history request fails", async () => {
+    // #2602 item 5, Codex ckpt-1. The refusal is fed from the overview, not from
+    // the history response that also carries it — an absent benchmark must stay
+    // explained in exactly the branch where the operator is most likely to fill
+    // the gap with an assumption.
+    vi.mocked(strategiesApi.fetchStrategyPnlHistory).mockRejectedValue(new Error("boom"));
+    renderLens();
+    expect(await screen.findByText("No benchmark comparison")).toBeInTheDocument();
+    expect(screen.getByText("benchmark_series_not_ingested")).toBeInTheDocument();
   });
 
   it("reports the pot as halted", async () => {

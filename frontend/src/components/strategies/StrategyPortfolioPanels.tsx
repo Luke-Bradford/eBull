@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { updateStrategyPaperPool } from "@/api/strategies";
-import type { StrategyOverviewResponse } from "@/api/types";
+import type { BenchmarkRefusal, StrategyOverviewResponse } from "@/api/types";
 import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatMoney, formatNumber } from "@/lib/format";
@@ -215,6 +215,59 @@ export function PnlChart({ history }: { history: Array<{ date: string; total_pnl
           <Line type="stepAfter" dataKey="pnl" stroke={theme.primaryLine} strokeWidth={2} dot={{ r: 2 }} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
+    </div>
+  );
+}
+
+/**
+ * #2602 item 5 — why the chart above has no benchmark line.
+ *
+ * ⚠ Fed from `/strategies/overview`, NOT from the P&L history response, even
+ * though that response carries the same field. The history request is the one
+ * that can fail or return empty, and the refusal must not disappear in exactly
+ * the case where an operator is most likely to fill the gap with an assumption.
+ * The lens cannot render at all without `overview`, so sourcing it here means
+ * the notice is present whenever the section is.
+ *
+ * ⚠ No empty cell and no "—": a blank next to a chart reads as a number that
+ * happens to be zero. Every field states its own refusal by name.
+ *
+ * Kept to two lines per benchmark. The page's steer is toggles and summaries,
+ * not narration — but the `detail` is VISIBLE rather than a `title` tooltip,
+ * which is unreachable on touch and unreliable for assistive tech. The evidence
+ * is the point of the panel; hiding it behind a hover would defeat it.
+ */
+export function BenchmarkRefusals({ refusals }: { refusals: BenchmarkRefusal[] }) {
+  // ⚠ An older or foreign payload can omit the field. Rendering nothing would
+  // put the section back to an unexplained absence, which is the whole defect;
+  // crashing the lens would be worse. Say that the reason itself is missing —
+  // that is true, and it is loud.
+  const items = refusals ?? [];
+  return (
+    <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
+      <p className="text-xs font-medium text-slate-500">No benchmark comparison</p>
+      {items.length === 0 ? (
+        <p className="mt-2 text-xs text-slate-500">
+          The server sent no refusal state, so the reason for the absence is unknown here.
+        </p>
+      ) : null}
+      <ul className="mt-2 space-y-2">
+        {items.map((refusal) => (
+          <li key={refusal.benchmark}>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm text-slate-700 dark:text-slate-200">{refusal.label}</span>
+              {refusal.reasons.map((reason) => (
+                <Badge key={reason.code} tone="warn">
+                  {reason.code}
+                </Badge>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-slate-500">
+              {refusal.reasons.map((reason) => reason.detail).join(" ")}
+            </p>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

@@ -4,7 +4,13 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as strategiesApi from "@/api/strategies";
-import type { FiredSignal, StrategyOverviewResponse, StrategyOwnedPosition, StrategyResultArm } from "@/api/types";
+import type {
+  BenchmarkRefusal,
+  FiredSignal,
+  StrategyOverviewResponse,
+  StrategyOwnedPosition,
+  StrategyResultArm,
+} from "@/api/types";
 import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 
 const ARM: StrategyResultArm = {
@@ -81,6 +87,23 @@ const ARM: StrategyResultArm = {
     },
   ],
 };
+
+/** #2602 item 5 — mirrors `app/api/strategies.py::BENCHMARK_REFUSALS`. */
+const BENCHMARK_REFUSALS: BenchmarkRefusal[] = [
+  {
+    benchmark: "sp500_total_return",
+    label: "S&P 500 total return",
+    reasons: [
+      { code: "benchmark_source_unlicensed", detail: "No legal free S&P 500 total-return series has passed review." },
+      { code: "benchmark_identity_unverified", detail: "Every S&P series we hold is a tracking ETF's PRICE." },
+    ],
+  },
+  {
+    benchmark: "cpih_real_return",
+    label: "CPIH real return",
+    reasons: [{ code: "benchmark_series_not_ingested", detail: "No CPI/CPIH series is ingested." }],
+  },
+];
 
 const OVERVIEW: StrategyOverviewResponse = {
   as_of: "2026-08-09T12:00:00Z",
@@ -226,6 +249,7 @@ const OVERVIEW: StrategyOverviewResponse = {
     last_error: null,
     progress: null,
   },
+  benchmark_refusals: BENCHMARK_REFUSALS,
   strategies: [{
     strategy_id: "s1-time-series-momentum",
     strategy_version: "strategy-registry-v1+abc",
@@ -484,6 +508,7 @@ describe("StrategiesPage", () => {
       basis: "exact_owned_mark_to_market_nav",
       total_return_available: false,
       benchmark_comparison_available: false,
+      benchmark_refusals: BENCHMARK_REFUSALS,
       points: [],
     });
     vi.spyOn(strategiesApi, "fetchStrategyOwnedPositions").mockResolvedValue({
@@ -1098,6 +1123,7 @@ describe("StrategiesPage", () => {
       basis: "exact_owned_mark_to_market_nav",
       total_return_available: false,
       benchmark_comparison_available: false,
+      benchmark_refusals: BENCHMARK_REFUSALS,
       points: [{
         date: "2026-08-09",
         principal: "1000",
