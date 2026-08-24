@@ -93,7 +93,6 @@ function CoreSleeveControl({
   const [reason, setReason] = useState("");
   const [confirmRebalance, setConfirmRebalance] = useState(false);
   const [outcome, setOutcome] = useState<string | null>(null);
-  const showMandate = sleeve.can_configure || mandate.configured;
   const mandateDirty =
     enabled !== (mandate.enabled ?? false) ||
     Number(target) !== Number(mandate.core_target_pct ?? "80") ||
@@ -108,7 +107,7 @@ function CoreSleeveControl({
     try {
       await updateCoreMandate({
         enabled,
-        core_instrument_id: sleeve.selected_instrument_id ?? mandate.core_instrument_id,
+        core_instrument_id: sleeve.selected_instrument_id ?? mandate.core_instrument_id ?? null,
         core_target_pct: target,
         liquidity_reserve_pct: reserve,
         rebalance_band_pct: band,
@@ -154,65 +153,69 @@ function CoreSleeveControl({
 
   return (
     <>
-      {showMandate ? (
-        <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {[
-              ["Core target %", target, setTarget],
-              ["Cash reserve %", reserve, setReserve],
-              ["Rebalance band %", band, setBand],
-              ["Minimum amount", minimum, setMinimum],
-            ].map(([label, value, setter]) => (
-              <label key={label as string} className="text-xs font-medium text-slate-600 dark:text-slate-300">
-                {label as string}
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={value as string}
-                  onChange={(event) => (setter as (value: string) => void)(event.target.value)}
-                  className="mt-1 min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
-                />
-              </label>
-            ))}
-          </div>
-          <label className="mt-3 flex min-h-11 items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={enabled}
-              disabled={!sleeve.can_configure && !enabled}
-              onChange={(event) => setEnabled(event.target.checked)}
-            />
-            Enable demo core sleeve
-          </label>
-          <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
-            Audit reason
-            <input
-              value={reason}
-              onChange={(event) => setReason(event.target.value)}
-              className="mt-1 min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
-            />
-          </label>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={busy || reason.trim().length === 0 || (enabled && !sleeve.can_configure) || (mandate.configured && !mandateDirty)}
-              onClick={() => void saveMandate()}
-              className="min-h-11 rounded-md border border-slate-300 px-3 text-sm font-medium disabled:opacity-50 dark:border-slate-700"
-            >
-              {busy ? "Saving…" : "Save mandate"}
-            </button>
-            <button
-              type="button"
-              disabled={busy || (!sleeve.can_rebalance && !sleeve.can_resume) || (!sleeve.can_resume && mandateDirty)}
-              onClick={() => setConfirmRebalance(true)}
-              className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:opacity-50"
-            >
-              {sleeve.can_resume ? "Resume demo order" : "Rebalance demo now"}
-            </button>
-          </div>
+      <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+        {!sleeve.can_configure ? (
+          <p className="mb-3 text-xs text-slate-500">
+            Save these values as a disabled draft now. Enabling and demo rebalancing remain locked until the core instrument passes #2833.
+          </p>
+        ) : null}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            ["Core target %", target, setTarget],
+            ["Cash reserve %", reserve, setReserve],
+            ["Rebalance band %", band, setBand],
+            ["Minimum amount", minimum, setMinimum],
+          ].map(([label, value, setter]) => (
+            <label key={label as string} className="text-xs font-medium text-slate-600 dark:text-slate-300">
+              {label as string}
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={value as string}
+                onChange={(event) => (setter as (value: string) => void)(event.target.value)}
+                className="mt-1 min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
+              />
+            </label>
+          ))}
         </div>
-      ) : null}
+        <label className="mt-3 flex min-h-11 items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={!sleeve.can_configure && !enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+            className="disabled:cursor-not-allowed disabled:opacity-50"
+          />
+          Enable demo core sleeve
+        </label>
+        <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
+          Audit reason
+          <input
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            className="mt-1 min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
+          />
+        </label>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={busy || reason.trim().length === 0 || (enabled && !sleeve.can_configure) || (mandate.configured && !mandateDirty)}
+            onClick={() => void saveMandate()}
+            className="min-h-11 rounded-md border border-slate-300 px-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700"
+          >
+            {busy ? "Saving…" : "Save mandate"}
+          </button>
+          <button
+            type="button"
+            disabled={busy || (!sleeve.can_rebalance && !sleeve.can_resume) || (!sleeve.can_resume && mandateDirty)}
+            onClick={() => setConfirmRebalance(true)}
+            className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {sleeve.can_resume ? "Resume demo order" : "Rebalance demo now"}
+          </button>
+        </div>
+      </div>
       {outcome ? <p role="status" className="mt-3 text-sm text-slate-700 dark:text-slate-200">{outcome}</p> : null}
       <Modal isOpen={confirmRebalance} onRequestClose={() => setConfirmRebalance(false)} labelledBy="core-rebalance-title">
         <h2 id="core-rebalance-title" className="text-base font-semibold">

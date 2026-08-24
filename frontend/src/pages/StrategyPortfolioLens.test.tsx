@@ -172,6 +172,34 @@ describe("StrategyPortfolioLens", () => {
     expect(screen.getByText(/UK ISA at another broker tax-dominates/i)).toBeInTheDocument();
   });
 
+  it("lets the operator save a disabled draft while evidence is still collecting", async () => {
+    const save = vi.spyOn(strategiesApi, "updateCoreMandate").mockResolvedValue({
+      configured: true,
+      enabled: false,
+      core_instrument_id: null,
+      core_target_pct: "80",
+      liquidity_reserve_pct: "10",
+      rebalance_band_pct: "5",
+      min_rebalance_amount: "25",
+    } as never);
+    renderLens();
+
+    expect(await screen.findByText(/Save these values as a disabled draft now/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Enable demo core sleeve")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Rebalance demo now" })).toBeDisabled();
+
+    await userEvent.type(screen.getByLabelText("Audit reason"), "Prepare the core mandate before selection");
+    await userEvent.click(screen.getByRole("button", { name: "Save mandate" }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save.mock.calls[0]?.[0]).toMatchObject({
+      enabled: false,
+      core_instrument_id: null,
+      core_target_pct: "80",
+      reason: "Prepare the core mandate before selection",
+    });
+  });
+
   it("saves a materially changed ready mandate with an explicit audit reason", async () => {
     vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
     const save = vi.spyOn(strategiesApi, "updateCoreMandate").mockResolvedValue(CORE_READY.mandate as never);
