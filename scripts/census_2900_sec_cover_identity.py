@@ -265,6 +265,17 @@ def parse_cover_cache(
     return parsed
 
 
+def _has_usable_cover_context(contexts: list[dict[str, Any]]) -> bool:
+    """Whether a parsed accession contains a singleton listed-class identity."""
+    for context in contexts:
+        facts = context.get("facts")
+        if not isinstance(facts, dict):
+            continue
+        if all(isinstance(facts.get(name), list) and len(facts[name]) == 1 for name in _SECURITY_FACTS):
+            return True
+    return False
+
+
 def cover_census(
     rows: tuple[Submission, ...],
     cache_root: Path,
@@ -482,7 +493,11 @@ def resolve_cover_submissions(
                         except ET.XMLSyntaxError, OSError, EOFError:
                             parsed[candidate.accession] = None
                     contexts = parsed.get(candidate.accession)
-                    if contexts:
+                    if contexts is None:
+                        # Unknown is not proof of absence. Never route around a
+                        # malformed/unreadable newer accession to stale facts.
+                        break
+                    if _has_usable_cover_context(contexts):
                         formation[latest.cik] = candidate
                         break
             resolved[cutoff] = formation

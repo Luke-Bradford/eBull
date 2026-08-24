@@ -160,3 +160,96 @@ def test_cover_selection_falls_back_when_latest_amendment_omits_cover(tmp_path: 
 
     assert downloads == {}
     assert resolved[FORMATION_CLOSES[0]][original.cik] == original
+
+
+def test_cover_selection_does_not_fallback_after_unparseable_latest(tmp_path: Path) -> None:
+    original = Submission(
+        accession="0000000001-22-000001",
+        cik="0000000001",
+        form="10-K",
+        accepted=datetime(2022, 2, 28, 16),
+        period="20211231",
+        instance="original.xml",
+    )
+    amendment = Submission(
+        accession="0000000001-22-000002",
+        cik="0000000001",
+        form="10-K/A",
+        accepted=datetime(2022, 3, 30, 16),
+        period="20211231",
+        instance="amendment.xml",
+    )
+    for submission in (original, amendment):
+        path = _cache_path(tmp_path, submission)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(path, "wb") as handle:
+            handle.write(b"not xml")
+    parsed = {
+        amendment.accession: None,
+        original.accession: [
+            {
+                "facts": {
+                    "Security12bTitle": ["Common Stock"],
+                    "TradingSymbol": ["TEST"],
+                    "SecurityExchangeName": ["NYSE"],
+                }
+            }
+        ],
+    }
+
+    resolved, _ = resolve_cover_submissions(
+        {original.accession: original, amendment.accession: amendment},
+        {FORMATION_CLOSES[0]: (amendment,)},
+        tmp_path,
+        parsed,
+    )
+
+    assert original.cik not in resolved[FORMATION_CLOSES[0]]
+
+
+def test_cover_selection_falls_back_after_conflicting_latest_context(tmp_path: Path) -> None:
+    original = Submission(
+        accession="0000000001-22-000001",
+        cik="0000000001",
+        form="10-K",
+        accepted=datetime(2022, 2, 28, 16),
+        period="20211231",
+        instance="original.xml",
+    )
+    amendment = Submission(
+        accession="0000000001-22-000002",
+        cik="0000000001",
+        form="10-K/A",
+        accepted=datetime(2022, 3, 30, 16),
+        period="20211231",
+        instance="amendment.xml",
+    )
+    parsed = {
+        amendment.accession: [
+            {
+                "facts": {
+                    "Security12bTitle": ["Common Stock"],
+                    "TradingSymbol": ["A", "B"],
+                    "SecurityExchangeName": ["NYSE"],
+                }
+            }
+        ],
+        original.accession: [
+            {
+                "facts": {
+                    "Security12bTitle": ["Common Stock"],
+                    "TradingSymbol": ["TEST"],
+                    "SecurityExchangeName": ["NYSE"],
+                }
+            }
+        ],
+    }
+
+    resolved, _ = resolve_cover_submissions(
+        {original.accession: original, amendment.accession: amendment},
+        {FORMATION_CLOSES[0]: (amendment,)},
+        tmp_path,
+        parsed,
+    )
+
+    assert resolved[FORMATION_CLOSES[0]][original.cik] == original
