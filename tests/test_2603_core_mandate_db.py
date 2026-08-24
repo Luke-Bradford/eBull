@@ -23,6 +23,7 @@ import pytest
 from app.services.strategy_core_mandate import (
     CORE_MANDATE_MODE,
     CORE_MANDATE_POLICY_VERSION,
+    CoreMandate,
     CoreMandateError,
     configure_core_mandate,
     load_core_mandate,
@@ -411,3 +412,40 @@ def test_the_writer_appends_revisions_and_refuses_a_no_op(
             **account,
         )
     ebull_test_conn.rollback()
+
+
+def test_the_writer_can_advance_only_a_superseded_policy_stamp(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instrument_id = _seed_instrument(ebull_test_conn)
+    account = _seed_proved_account(ebull_test_conn, instrument_id)
+    legacy = CoreMandate(
+        event_id=999,
+        revision=1,
+        enabled=True,
+        base_currency="USD",
+        core_instrument_id=instrument_id,
+        core_target_pct=Decimal("60"),
+        liquidity_reserve_pct=Decimal("20"),
+        rebalance_band_pct=Decimal("5"),
+        min_rebalance_amount=Decimal("25"),
+        policy_version="core-mandate-v1",
+    )
+    monkeypatch.setattr("app.services.strategy_core_mandate.load_core_mandate", lambda _conn: legacy)
+
+    upgraded = configure_core_mandate(
+        ebull_test_conn,
+        enabled=legacy.enabled,
+        core_instrument_id=legacy.core_instrument_id,
+        core_target_pct=legacy.core_target_pct,
+        liquidity_reserve_pct=legacy.liquidity_reserve_pct,
+        rebalance_band_pct=legacy.rebalance_band_pct,
+        min_rebalance_amount=legacy.min_rebalance_amount,
+        changed_by="test",
+        reason="advance reviewed mandate policy",
+        **account,
+    )
+
+    assert upgraded.revision == 2
+    assert upgraded.policy_version == CORE_MANDATE_POLICY_VERSION

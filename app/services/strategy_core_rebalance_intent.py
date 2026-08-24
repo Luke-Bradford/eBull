@@ -14,11 +14,9 @@ arrived as promised; the promise was not re-read when it did.  ⚠ It also cited
 **that file does not exist** anywhere in the repo, so the claim was never enforced by
 anything.  A named enforcement is only as good as its existence.
 
-What holds instead, weaker on purpose: a row here is submission-gate INPUT, not
-authority.  The gate has no acting caller in ``app/`` or ``scripts/``, so no path runs
-from a row to an order.  That is a fact about today's call graph, not a mechanical
-impossibility -- and saying so is the point, because the previous wording survived the
-change that falsified it by sounding structural.
+What holds instead: a row here is submission-gate INPUT, not authority. The
+attended executor is the acting caller and applies that gate plus the DB, broker,
+capital and kill-switch refusals before it can record order authority.
 
 The producer is ``app/workers/scheduler.py::core_rebalance_observation``.
 

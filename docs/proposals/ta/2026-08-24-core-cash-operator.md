@@ -23,6 +23,10 @@ the server reports `evidence_collecting`, offers no instrument and refuses enabl
 - Demo only, underlying long, leverage 1, USD order currency. The global kill switch,
   runtime auto-trading flag, execution block, market session, halt feed, fresh quote,
   fresh account snapshot, fresh eligibility proof and cost quote all remain binding.
+- A core-only pool cannot rely on the periodic health job's alpha-deployment policy.
+  The attended executor therefore advances the shared account high-water row on every
+  fresh evaluation, including a hold, and enforces the pool's portfolio drawdown ceiling
+  before it creates durable order authority.
 - One server-side selection invariant is called by mandate configuration **and** by the
   acting path while the mandate lock is held. A legacy enabled mandate naming any other
   instrument is refused; checking only the endpoint would be a bypass.

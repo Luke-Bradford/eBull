@@ -2969,12 +2969,13 @@ export interface CoreSleeveResponse {
   }>;
   mandate: CoreMandate;
   can_configure: boolean;
+  can_enable_pool: boolean;
   can_rebalance: boolean;
   can_resume: boolean;
   pending_order_id: number | null;
   execution_action: "blocked" | "rebalance" | "resume";
   blockers: Array<{
-    code: "core_evidence_collecting" | "core_candidates_missing" | "core_selection_invalid" | "core_mandate_unconfigured" | "core_mandate_disabled" | "core_mandate_selection_mismatch" | "core_demo_required" | "core_order_unresolved" | "core_capital_authority_incomplete" | "core_live_snapshot_required" | "core_paper_pool_unconfigured" | "core_paper_pool_disabled" | "core_sandbox_exceeded";
+    code: "core_evidence_collecting" | "core_candidates_missing" | "core_selection_invalid" | "core_mandate_unconfigured" | "core_mandate_disabled" | "core_mandate_policy_unsupported" | "core_mandate_selection_mismatch" | "core_demo_required" | "core_order_unresolved" | "core_capital_authority_incomplete" | "core_live_snapshot_required" | "core_paper_pool_unconfigured" | "core_paper_pool_disabled" | "core_sandbox_exceeded";
     detail: string;
   }>;
   environment: "demo" | "real";

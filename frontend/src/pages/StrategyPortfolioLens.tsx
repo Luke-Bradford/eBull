@@ -93,7 +93,11 @@ function CoreSleeveControl({
   const [reason, setReason] = useState("");
   const [confirmRebalance, setConfirmRebalance] = useState(false);
   const [outcome, setOutcome] = useState<string | null>(null);
+  const policyUpgradeRequired = sleeve.blockers.some(
+    (blocker) => blocker.code === "core_mandate_policy_unsupported",
+  );
   const mandateDirty =
+    policyUpgradeRequired ||
     enabled !== (mandate.enabled ?? false) ||
     Number(target) !== Number(mandate.core_target_pct ?? "80") ||
     Number(reserve) !== Number(mandate.liquidity_reserve_pct ?? "10") ||
@@ -439,7 +443,14 @@ export function StrategyPortfolioLens() {
               />
             </section>
           ) : null}
-          <AutomationControl overview={data} onUpdated={overview.refetch} />
+          <AutomationControl
+            overview={data}
+            coreSleeve={coreSleeve.data}
+            onUpdated={() => {
+              void overview.refetch();
+              void coreSleeve.refetch();
+            }}
+          />
         </div>
       </section>
 

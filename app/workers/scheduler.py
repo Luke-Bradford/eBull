@@ -5771,10 +5771,10 @@ def core_rebalance_observation() -> None:
     ⚠ It produces submission-gate INPUT, not authority.
     ``strategy_core_submission_gate`` reads ``strategy_core_rebalance_intents``
     (that module's own SELECT, and ``sql/349``'s FK from ``strategy_trades``),
-    so the "no module reads it" line in ``sql/348`` is stale.  What holds is
-    that the gate has no acting caller, and that the one provider method used
-    here is informational -- ``refuse_broker_mutation_if_unattended`` is
-    deliberately not reached (#2645).
+    so the "no module reads it" line in ``sql/348`` is stale. The attended
+    executor is now the acting consumer; this scheduled producer remains
+    informational and deliberately never reaches
+    ``refuse_broker_mutation_if_unattended`` (#2645).
 
     Failures PROPAGATE rather than being caught and noted.  An unobservable
     sleeve and an unavailable broker are both genuine faults, and there is no

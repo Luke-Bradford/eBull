@@ -84,7 +84,7 @@ def _mandate(**overrides: object) -> CoreMandate:
         "liquidity_reserve_pct": Decimal("20"),
         "rebalance_band_pct": Decimal("5"),
         "min_rebalance_amount": Decimal("25"),
-        "policy_version": "core-mandate-v1",
+        "policy_version": "core-mandate-v2",
     }
     values.update(overrides)
     return CoreMandate(**values)  # type: ignore[arg-type]
@@ -157,6 +157,7 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     assert response.selected_instrument_id is None
     assert response.observed_trading_days == 1
     assert response.can_configure is False
+    assert response.can_enable_pool is False
     assert response.can_rebalance is False
     assert response.can_resume is False
     assert response.execution_action == "blocked"
@@ -202,7 +203,7 @@ def test_rebalance_passes_the_exact_loaded_credential_ids_to_the_executor(
     assert response.state == "held"
     assert response.submission_policy_version == "core-submission-v1"
     assert response.preflight_policy_version == "core-preflight-v2"
-    assert response.broker_preflight_policy_version == "core-broker-preflight-v1"
+    assert response.broker_preflight_policy_version == "core-broker-preflight-v2"
     assert execute.call_args.kwargs["api_key_credential_id"] == api.id
     assert execute.call_args.kwargs["user_key_credential_id"] == user.id
 
@@ -246,6 +247,7 @@ def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
     response = read_core_sleeve(cast(Any, MagicMock()))
 
     assert response.can_rebalance is False
+    assert response.can_enable_pool is True
     assert response.can_resume is True
     assert response.execution_action == "resume"
     assert response.pending_order_id == 31
@@ -287,6 +289,7 @@ def test_operator_view_does_not_advertise_unavailable_core_headroom(
 
     response = read_core_sleeve(cast(Any, MagicMock()))
 
+    assert response.can_enable_pool is True
     assert response.can_rebalance is False
     assert response.execution_action == "blocked"
     assert [blocker.code for blocker in response.blockers] == [expected_blocker]
@@ -315,9 +318,39 @@ def test_operator_view_refuses_a_mandate_for_the_previous_reviewed_selection(
 
     response = read_core_sleeve(cast(Any, MagicMock()))
 
+    assert response.can_enable_pool is False
     assert response.can_rebalance is False
     assert response.execution_action == "blocked"
     assert [blocker.code for blocker in response.blockers] == ["core_mandate_selection_mismatch"]
+
+
+def test_operator_view_refuses_a_superseded_mandate_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    selection = CoreSelection(
+        state="ready",
+        selected_instrument_id=3417,
+        selected_symbol="SPY.RTH",
+        evidence_ref="#2833 verdict",
+        required_trading_days=5,
+        observed_trading_days=5,
+        max_cost_bps=60,
+        candidates=(),
+        missing_candidate_ids=(),
+        configuration_error=None,
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+    monkeypatch.setattr(
+        "app.api.strategies.load_core_mandate",
+        lambda _conn: _mandate(core_instrument_id=3417, policy_version="core-mandate-v1"),
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", lambda _conn: _capital_authority())
+    monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+
+    response = read_core_sleeve(cast(Any, MagicMock()))
+
+    assert response.can_enable_pool is False
+    assert response.can_rebalance is False
+    assert [blocker.code for blocker in response.blockers] == ["core_mandate_policy_unsupported"]
 
 
 def test_resume_refuses_credentials_from_a_different_account(
@@ -474,7 +507,7 @@ class TestTheResponseMapping:
             response.rebalance_band_pct,
             response.min_rebalance_amount,
             response.policy_version,
-        ) == (True, 7, 3, True, "USD", 42, Decimal("60"), Decimal("20"), Decimal("5"), Decimal("25"), "core-mandate-v1")
+        ) == (True, 7, 3, True, "USD", 42, Decimal("60"), Decimal("20"), Decimal("5"), Decimal("25"), "core-mandate-v2")
 
     def test_cash_target_is_the_services_complement_and_not_recomputed(self) -> None:
         """⚠⚠ Cash has no stored column — it is `PERCENT_BASIS - core_target_pct`,

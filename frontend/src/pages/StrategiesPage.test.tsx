@@ -1002,7 +1002,7 @@ describe("StrategiesPage", () => {
     renderStrategies("portfolio");
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).toBeDisabled();
-    expect(screen.getByText("Automation stays off until at least one strategy passes validation.")).toBeInTheDocument();
+    expect(screen.getByText("New entries stay off until an alpha strategy passes validation or the evidence-selected core sleeve has an enabled mandate.")).toBeInTheDocument();
     expect(update).not.toHaveBeenCalled();
   });
 

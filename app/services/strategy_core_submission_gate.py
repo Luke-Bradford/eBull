@@ -6,10 +6,9 @@ the observe -> record -> submit path that consumes it, and ships after this one
 deliberately -- the opposite order produces a writer whose preconditions are a
 comment.
 
-⚠⚠ AUTHORISES NOTHING TODAY.  It has no caller in ``app/`` or ``scripts/`` and it
-writes nothing.  Named plainly, as steps 1 and 2 named it, because #2437's R4
-comment records *a control that exists, is tested, and sits on a path the decision
-does not take* nine times over on this ticket alone.
+The attended core executor now calls this gate immediately before durable order
+authority is recorded. It writes nothing by itself and remains only one layer of
+the composed submission decision.
 
 ⚠⚠ THE VOCABULARY BELOW IS NOT THE COMPLETE SUBMISSION REFUSAL VOCABULARY.  The
 kill switch, ``enable_auto_trading``, the execution block, market-session state,
@@ -17,7 +16,8 @@ quote availability and staleness, account-risk availability, broker minimums,
 cost assessment and broker rejection are all real refusals of a core submission
 and NONE of them is here -- they belong to 3b, which is the code that holds a
 quote and a broker.  A reader who takes this module for the full set will
-conclude the core arm has no kill-switch check.  It has none YET.
+conclude the core arm has no kill-switch check. The executor composes this gate
+with the DB-and-clock and broker preflights that carry those refusals.
 
 Spec: ``docs/proposals/ta/2026-08-14-core-submission-gate.md``
 """

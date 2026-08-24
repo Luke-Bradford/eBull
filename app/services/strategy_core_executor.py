@@ -18,7 +18,7 @@ from app.providers.broker import (
     BrokerOrderSubmissionUncertain,
     BrokerProvider,
 )
-from app.services.strategy_control_plane import link_strategy_order
+from app.services.strategy_control_plane import link_strategy_order, load_paper_pool
 from app.services.strategy_core_allocator import evaluate_core_rebalance
 from app.services.strategy_core_broker_preflight import (
     CORE_BROKER_PREFLIGHT_POLICY_VERSION,
@@ -87,6 +87,59 @@ def _result(
     amount: Decimal = Decimal("0"),
 ) -> CoreExecutionResult:
     return CoreExecutionResult(state, reason_code, intent_id, trade_id, order_id, amount)
+
+
+def _observe_core_portfolio_drawdown(
+    conn: psycopg.Connection[Any],
+    *,
+    equity: Decimal,
+    observed_at: datetime,
+    max_drawdown_pct: Decimal,
+) -> str | None:
+    """Advance the shared account high-water mark and enforce the pool mandate.
+
+    The periodic health job derives its policy from enabled alpha deployments. A
+    core-only pool therefore cannot rely on its global ``drawdown`` block. This
+    submission-local observation uses the same shared risk-state row and refuses
+    before durable order authority is created.
+    """
+    if (
+        not equity.is_finite()
+        or equity <= 0
+        or not max_drawdown_pct.is_finite()
+        or not (Decimal("0") < max_drawdown_pct < Decimal("100"))
+        or observed_at.tzinfo is None
+    ):
+        return "core_account_risk_unobservable"
+    row = conn.execute(
+        """
+        SELECT equity_high_water, observed_at
+        FROM strategy_paper_account_risk_state
+        WHERE id=true
+        FOR UPDATE
+        """
+    ).fetchone()
+    if row is not None and row[1] > observed_at:
+        return "core_account_risk_stale"
+    previous_high_water = Decimal(str(row[0])) if row is not None else equity
+    if not previous_high_water.is_finite() or previous_high_water <= 0:
+        return "core_account_risk_unobservable"
+    high_water = max(previous_high_water, equity)
+    drawdown = (high_water - equity) / high_water * Decimal("100")
+    conn.execute(
+        """
+        INSERT INTO strategy_paper_account_risk_state (
+            id,equity_high_water,last_equity,last_drawdown_pct,observed_at
+        ) VALUES (true,%s,%s,%s,%s)
+        ON CONFLICT (id) DO UPDATE SET
+          equity_high_water=EXCLUDED.equity_high_water,
+          last_equity=EXCLUDED.last_equity,
+          last_drawdown_pct=EXCLUDED.last_drawdown_pct,
+          observed_at=EXCLUDED.observed_at
+        """,
+        (high_water, equity, drawdown, observed_at),
+    )
+    return "portfolio_drawdown_limit" if drawdown >= max_drawdown_pct else None
 
 
 def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAuthority | None:
@@ -414,11 +467,29 @@ def execute_core_rebalance(
                 current_capital = load_engine_capital_authority(conn)
             except EngineCapitalObservationError as exc:
                 raise StrategyCoreExecutionError("the assigned-capital sandbox changed during preflight") from exc
-            if current_capital != capital_authority:
+            if current_capital is None or current_capital != capital_authority:
                 raise StrategyCoreExecutionError("the assigned-capital sandbox changed during broker preflight")
+            current_pool = load_paper_pool(conn)
+            if current_pool.event_id != current_capital.pool_event_id:
+                raise StrategyCoreExecutionError("the portfolio mandate changed during broker preflight")
+            drawdown_limit = current_pool.mandate.max_portfolio_drawdown_pct
+            if drawdown_limit is None:
+                raise StrategyCoreExecutionError("the portfolio mandate is unconfigured")
             require_selected_core_instrument(conn, instrument_id=current.core_instrument_id)
             intent = record_core_rebalance_intent(conn, state=state, recorded_by=recorded_by)
             intent_id = intent.core_rebalance_intent_id
+            # Observe EVERY attended evaluation, not only buys. Otherwise an
+            # in-band hold can be the account peak, and a later fall is measured
+            # from an older lower watermark. That understates drawdown precisely
+            # when this core-only path cannot rely on alpha's periodic health job.
+            initial_drawdown_refusal = _observe_core_portfolio_drawdown(
+                conn,
+                equity=snapshot.equity,
+                observed_at=snapshot.observed_at,
+                max_drawdown_pct=drawdown_limit,
+            )
+            if initial_drawdown_refusal is not None:
+                return _result("refused", initial_drawdown_refusal, intent_id=intent_id)
             if intent.decision.action == "hold":
                 return _result("held", intent.decision.reason_code or "core_hold", intent_id=intent_id)
             if intent.decision.action == "refused":
@@ -462,15 +533,25 @@ def execute_core_rebalance(
             if broker_verdict is None or not broker_verdict.admitted:
                 reason = None if broker_verdict is None else broker_verdict.reason_code
                 return _result("refused", reason or "core_broker_preflight_refused", intent_id=intent_id)
+            snapshot_observed_at = broker_verdict.snapshot_observed_at
             broker_evidence_age = (
-                None
-                if broker_verdict.snapshot_observed_at is None
-                else (clock() - broker_verdict.snapshot_observed_at).total_seconds()
+                None if snapshot_observed_at is None else (clock() - snapshot_observed_at).total_seconds()
             )
             if broker_evidence_age is None or not (
                 0 <= broker_evidence_age <= broker_verdict.max_account_risk_age_seconds
             ):
                 return _result("refused", "core_account_risk_stale", intent_id=intent_id)
+            account_equity = broker_verdict.account_equity
+            if account_equity is None or snapshot_observed_at is None:
+                return _result("refused", "core_account_risk_unobservable", intent_id=intent_id)
+            drawdown_refusal = _observe_core_portfolio_drawdown(
+                conn,
+                equity=account_equity,
+                observed_at=snapshot_observed_at,
+                max_drawdown_pct=drawdown_limit,
+            )
+            if drawdown_refusal is not None:
+                return _result("refused", drawdown_refusal, intent_id=intent_id)
 
             amount = broker_verdict.amount
             request_id = uuid4()

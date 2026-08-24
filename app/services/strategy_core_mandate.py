@@ -4,18 +4,19 @@ Hold a benchmark instrument and cash to operator-declared weights, rebalance onl
 outside a declared band.  Event-shaped like the other capital authorities in
 ``strategy_control_plane``: one append-only row per operator change.
 
-⚠ This module AUTHORISES NOTHING.  Nothing reads ``strategy_core_mandate_events``
-to act -- the allocator (#2603 item 3) is its first such consumer and no endpoint
-is wired.  It is state, not a gate, and must not be cited as one.
+This is now an authority consumed by the attended core executor and configurable
+through the operator-authenticated core-mandate endpoint. It is still not order
+authority by itself: the executor re-proves eligibility and applies every
+capital, preflight, kill-switch and broker guard before submission.
 
 What it now DOES do is refuse to record an unproved authority: as of item 2,
 ``configure_core_mandate`` requires a fresh account-specific proof that an
 enabled mandate's core instrument is the underlying product and not a CFD.  That
 is a constraint on WRITES, not a control on trading -- see its docstring.
 
-``CoreMandateError`` is deliberately standalone rather than a
-``StrategyControlError`` subclass: no endpoint maps this path yet, so inheriting
-would buy coupling to a 1000-line module for an integration that does not exist.
+``CoreMandateError`` remains deliberately standalone rather than coupling this
+service to the API's ``StrategyControlError`` hierarchy; the endpoint maps it at
+the boundary.
 
 Spec: ``docs/proposals/ta/2026-08-13-core-cash-mandate.md``
 """
@@ -304,7 +305,8 @@ def load_core_mandate(conn: psycopg.Connection[Any]) -> CoreMandate | None:
 
 def _is_material_change(current: CoreMandate, values: CoreMandateValues) -> bool:
     return (
-        current.enabled != values.enabled
+        current.policy_version != CORE_MANDATE_POLICY_VERSION
+        or current.enabled != values.enabled
         or current.base_currency != values.base_currency
         or current.core_instrument_id != values.core_instrument_id
         or current.core_target_pct != values.core_target_pct
@@ -388,7 +390,9 @@ def configure_core_mandate(
         )
     current = load_core_mandate(conn)
     if current is not None and not _is_material_change(current, values):
-        raise CoreMandateError("core mandate change must alter at least one mandate value")
+        raise CoreMandateError(
+            "core mandate change must alter at least one mandate value or advance its policy version"
+        )
     if current is not None and current.core_instrument_id != values.core_instrument_id:
         try:
             capital = load_engine_capital_authority(conn)

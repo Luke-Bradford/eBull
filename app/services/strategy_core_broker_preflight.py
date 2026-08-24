@@ -25,8 +25,8 @@ set: broker REJECTION and the uncertain-submission resume path (both outcomes of
 submission, not preconditions); ``maxUnitsPerOrder`` (quoted in units while this sizes in
 currency, so it needs the price 3b-1 holds); and any coherence guarantee ACROSS the five
 reads that inform a submission -- the advisory lock serialises our actors, not the
-broker's.  The ticket owes "eligibility read and submission in ONE transaction" to the
-submitter, and this module does not discharge it.
+broker's. The attended executor owns that composition and re-proves eligibility in the
+transaction that records durable order authority.
 
 Spec: ``docs/proposals/ta/2026-08-23-core-broker-preflight.md``
 """
@@ -93,14 +93,15 @@ class StrategyCoreBrokerPreflightError(RuntimeError):
     """
 
 
-#: Frozen with the rule set it stamps.  v1 fixes, BY CONSTRUCTION: the account-risk age
-#: bound below, the buy-only restriction, and the refusal precedence order.
+#: Frozen with the rule set it stamps.  v2 retains v1's account-risk age bound,
+#: buy-only restriction and refusal precedence, and carries the exact account equity
+#: consumed by the executor's portfolio-drawdown gate.
 #:
 #: ⚠⚠ Widening the bound is a VERSION BUMP, never an edit to the constant.  Editing it in
 #: place silently re-verdicts every past comparison, including ones already read -- the
 #: rule ``account_equity_evidence.RECONCILIATION_RULE_VERSION`` states for the same
 #: reason.
-CORE_BROKER_PREFLIGHT_POLICY_VERSION: Final = "core-broker-preflight-v1"
+CORE_BROKER_PREFLIGHT_POLICY_VERSION: Final = "core-broker-preflight-v2"
 
 #: One write-lane throttle wait, ``etoro_broker._ETORO_WRITE_INTERVAL_S`` = 3.5 s.
 #: ``get_what_if_costs`` posts on ``_http_write``, NOT the 1.1 s read lane.
@@ -212,6 +213,7 @@ class CoreBrokerPreflightVerdict:
     amount: Decimal
     cost_rate: Decimal | None
     snapshot_observed_at: datetime | None
+    account_equity: Decimal | None
     max_account_risk_age_seconds: int = CORE_MAX_ACCOUNT_RISK_AGE_SECONDS
     policy_version: str = CORE_BROKER_PREFLIGHT_POLICY_VERSION
 
@@ -230,6 +232,7 @@ def _refused(
         amount=_ZERO,
         cost_rate=None,
         snapshot_observed_at=snapshot_observed_at,
+        account_equity=None,
     )
 
 
@@ -419,4 +422,5 @@ def assess_core_broker_preflight(
         amount=sized.amount,
         cost_rate=sized.cost_rate,
         snapshot_observed_at=snapshot.observed_at,
+        account_equity=snapshot.equity,
     )
