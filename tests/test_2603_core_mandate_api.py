@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 from contextlib import nullcontext
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
@@ -156,6 +157,7 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     assert response.state == "evidence_collecting"
     assert response.selected_instrument_id is None
     assert response.observed_trading_days == 1
+    assert response.earliest_possible_verdict_at == datetime(2026, 9, 2, tzinfo=UTC)
     assert response.can_configure is False
     assert response.can_enable_pool is False
     assert response.can_rebalance is False

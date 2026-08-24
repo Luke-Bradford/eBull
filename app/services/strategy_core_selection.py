@@ -15,6 +15,13 @@ CORE_SELECTION_MAX_COST_BPS: Final = 60
 # 2026-08-24 observations.  The operator surface must count the same population
 # the sealed verifier will open, or it reports progress that is not evidence.
 CORE_SELECTION_EVIDENCE_NOT_BEFORE: Final = datetime(2026, 8, 25, tzinfo=UTC)
+# Lower bound only, not an evidence-completion promise. The first five possible
+# common NYSE/LSE sessions after the prospective boundary are 25-28 August and
+# 1 September: LSE is closed for the 31 August Summer Bank Holiday, while NYSE
+# remains open. The frozen verdict opens at the following 00:00 UTC boundary.
+# Sources: londonstockexchange.com/equities-trading/business-days and
+# nyse.com/trade/hours-calendars (official venue calendars, checked 2026-08-24).
+CORE_SELECTION_EARLIEST_POSSIBLE_VERDICT_AT: Final = datetime(2026, 9, 2, tzinfo=UTC)
 
 # Populated only by the reviewed #2833 verdict. Choosing here before the
 # prospective five-day gate completes would be adoption before measurement.
@@ -53,6 +60,11 @@ class CoreSelection:
     @property
     def ready(self) -> bool:
         return self.state == "ready"
+
+    @property
+    def earliest_possible_verdict_at(self) -> datetime:
+        """Return #2833's calendar-derived lower bound, never a completion ETA."""
+        return CORE_SELECTION_EARLIEST_POSSIBLE_VERDICT_AT
 
 
 _COVERAGE_SQL: Final = """
@@ -162,6 +174,7 @@ def require_selected_core_instrument(conn: psycopg.Connection[Any], *, instrumen
 
 __all__ = [
     "CORE_SELECTION_CANDIDATE_IDS",
+    "CORE_SELECTION_EARLIEST_POSSIBLE_VERDICT_AT",
     "CORE_SELECTION_EVIDENCE_NOT_BEFORE",
     "CORE_SELECTION_MAX_COST_BPS",
     "CORE_SELECTION_REQUIRED_TRADING_DAYS",

@@ -1016,6 +1016,7 @@ class CoreSleeveResponse(BaseModel):
     evidence_ref: str | None
     required_trading_days: int
     observed_trading_days: int
+    earliest_possible_verdict_at: datetime
     max_cost_bps: int
     candidates: list[CoreCandidateCoverageResponse]
     mandate: CoreMandateResponse
@@ -3688,6 +3689,7 @@ def read_core_sleeve(
         evidence_ref=selection.evidence_ref,
         required_trading_days=selection.required_trading_days,
         observed_trading_days=selection.observed_trading_days,
+        earliest_possible_verdict_at=selection.earliest_possible_verdict_at,
         max_cost_bps=selection.max_cost_bps,
         candidates=[
             CoreCandidateCoverageResponse(

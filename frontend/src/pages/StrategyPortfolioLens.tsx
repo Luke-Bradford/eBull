@@ -466,7 +466,7 @@ export function StrategyPortfolioLens() {
                   </Badge>
                 </div>
               </div>
-              <div className="mt-5 grid grid-cols-2 gap-x-6 sm:grid-cols-3">
+              <div className="mt-5 grid grid-cols-2 gap-x-6 lg:grid-cols-4">
                 <StatTile
                   size="md"
                   label="Evidence"
@@ -478,6 +478,12 @@ export function StrategyPortfolioLens() {
                   label="Instrument"
                   value={coreSleeve.data.selected_symbol ?? "Cash"}
                   hint={coreSleeve.data.selected_symbol ? "Evidence-selected" : "No sleeve adopted"}
+                />
+                <StatTile
+                  size="md"
+                  label="Earliest verdict"
+                  value={formatDate(coreSleeve.data.earliest_possible_verdict_at)}
+                  hint="Lower bound if all five common sessions complete"
                 />
                 <StatTile
                   size="md"

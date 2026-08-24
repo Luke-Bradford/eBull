@@ -1,6 +1,6 @@
 # Core/cash operator surface and attended submitter (#2603)
 
-Status: proposed, 2026-08-24.
+Status: implemented; attended broker acceptance remains gated on #2833, 2026-08-25.
 
 ## Outcome
 
@@ -9,10 +9,19 @@ the programme's honest fallback — cash until the cap-weighted core sleeve pass
 preregistered cost gate — and, after that gate passes, let a named operator configure
 the mandate and request one guarded demo rebalance.
 
-This does **not** adopt a sleeve before #2833 has a verdict. On 2026-08-24 the dev store
-contains one trading day of observations and #2833 requires five; the earliest honest
-decision is 2026-08-28. Until a selected instrument is frozen in code from that verdict,
-the server reports `evidence_collecting`, offers no instrument and refuses enablement.
+This does **not** adopt a sleeve before #2833 has a verdict. The corrected prospective
+declaration excludes 2026-08-24 and requires the first five complete dates shared by all
+three candidates. The earliest possible verdict boundary is therefore
+`2026-09-02T00:00:00Z`: the first possible common sessions are 25-28 August and 1
+September because the LSE is closed for the 31 August Summer Bank Holiday. This is a
+lower bound, not a completion promise; incomplete or invalid observations move the
+verdict later. Until a selected instrument is frozen in code from that verdict, the
+server reports `evidence_collecting`, offers no instrument and refuses enablement.
+
+Calendar facts are from the official
+[LSE business-day calendar](https://www.londonstockexchange.com/equities-trading/business-days)
+and [NYSE hours and calendars](https://www.nyse.com/trade/hours-calendars), checked
+2026-08-24.
 
 ## Existing contracts retained
 
@@ -55,7 +64,8 @@ the server reports `evidence_collecting`, offers no instrument and refuses enabl
 One canonical operator view, assembled server-side:
 
 - selection: `evidence_collecting | ready | unavailable`, selected instrument identity
-  when frozen, evidence window/trading-day coverage and the #2833 threshold;
+  when frozen, evidence window/trading-day coverage, the calendar-derived earliest
+  possible verdict lower bound and the #2833 threshold;
 - current mandate revision (the existing `CoreMandateResponse` fields);
 - latest intent plus the independently selected blocking non-terminal core trade/order
   (which can belong to an older intent) and its reconciliation state;

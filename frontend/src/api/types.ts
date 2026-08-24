@@ -2959,6 +2959,7 @@ export interface CoreSleeveResponse {
   evidence_ref: string | null;
   required_trading_days: number;
   observed_trading_days: number;
+  earliest_possible_verdict_at: string;
   max_cost_bps: number;
   candidates: Array<{
     instrument_id: number;
