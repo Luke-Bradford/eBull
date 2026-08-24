@@ -156,12 +156,33 @@ class BrokerStrategyOrder:
 
 
 @dataclass(frozen=True)
+class BrokerCoreOrder:
+    """The fixed, buy-only order shape for the deterministic core sleeve."""
+
+    instrument_id: int
+    amount: Decimal
+
+    def __post_init__(self) -> None:
+        if self.instrument_id <= 0 or self.amount <= 0:
+            raise ValueError("core order instrument and amount must be positive")
+
+
+@dataclass(frozen=True)
 class BrokerOrderSubmission:
     """Broker acceptance identity; execution detail is reconciled separately."""
 
     broker_order_ref: str
     reference_id: UUID
     token: UUID
+
+
+@dataclass(frozen=True)
+class BrokerCoreOrderSubmission:
+    """Normalized core-order acceptance without retaining the response token."""
+
+    broker_order_ref: str
+    reference_id: UUID
+    response_digest: str
 
 
 @dataclass(frozen=True)
@@ -667,6 +688,15 @@ class BrokerProvider(ABC):
         must treat ``NotImplementedError`` as refusal, never fall back to the
         generic/live-capable writer.
         """
+        raise NotImplementedError
+
+    def place_demo_core_order(
+        self,
+        order: BrokerCoreOrder,
+        *,
+        request_id: UUID,
+    ) -> BrokerCoreOrderSubmission:
+        """Submit a demo-only underlying x1 core buy without synthetic exits."""
         raise NotImplementedError
 
     def get_account_risk_snapshot(self) -> BrokerAccountRiskSnapshot:

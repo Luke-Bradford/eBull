@@ -42,6 +42,7 @@ from app.security.secrets_crypto import (
     decrypt,
     encrypt,
 )
+from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,14 @@ class CredentialMetadata:
     revoked_at: datetime | None
 
 
+@dataclass(frozen=True)
+class LoadedCredential:
+    """One decrypted secret plus the immutable row identity it came from."""
+
+    id: UUID
+    plaintext: str
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -100,6 +109,10 @@ class CredentialAlreadyExists(CredentialError):
 
 class CredentialNotFound(CredentialError):
     """Raised when no active credential matches the lookup."""
+
+
+class CredentialInUse(CredentialError):
+    """Raised when rotation would strand an unresolved broker authority."""
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +313,31 @@ def revoke_credential(
     ``with conn.transaction():`` at the call site to get clean
     rollback-on-exception semantics.
     """
+    # A core mutation holds this key through the broker response. Credential
+    # revocation/replacement takes the same key transactionally so decrypted
+    # credentials cannot become revoked between durable authority and HTTP I/O.
+    conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
     with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM strategy_core_eligibility_proofs proof
+                JOIN strategy_trades trade
+                  ON trade.core_eligibility_proof_id=proof.core_eligibility_proof_id
+                JOIN strategy_trade_orders link ON link.strategy_trade_id=trade.strategy_trade_id
+                JOIN strategy_order_reconciliation_state state ON state.order_id=link.order_id
+                WHERE %s IN (proof.api_key_credential_id, proof.user_key_credential_id)
+                  AND state.state NOT IN ('resolved','rejected')
+            )
+            """,
+            (credential_id,),
+        )
+        in_use = cur.fetchone()
+        if in_use == (True,):
+            raise CredentialInUse(
+                "credential rotation is refused while an unresolved core order requires this exact account"
+            )
         cur.execute(
             """
             UPDATE broker_credentials
@@ -410,7 +447,7 @@ def _write_durable_audit(
         )
 
 
-def load_credential_for_provider_use(
+def load_credential_with_id_for_provider_use(
     conn: psycopg.Connection[object],
     *,
     operator_id: UUID,
@@ -419,8 +456,8 @@ def load_credential_for_provider_use(
     environment: str,
     caller: str,
     audit_pool: ConnectionPool[psycopg.Connection[Any]] | None = None,
-) -> str:
-    """Decrypt and return the plaintext secret for internal provider use.
+) -> LoadedCredential:
+    """Decrypt a secret and return its row identity for account provenance.
 
     Both ``label`` and ``environment`` are required -- no defaults, no
     fallback from env-specific to global. If the credential is missing
@@ -553,4 +590,26 @@ def load_credential_for_provider_use(
                 success=True,
                 failure_reason=None,
             )
-    return plaintext
+    return LoadedCredential(id=row["id"], plaintext=plaintext)  # type: ignore[arg-type]
+
+
+def load_credential_for_provider_use(
+    conn: psycopg.Connection[object],
+    *,
+    operator_id: UUID,
+    provider: str,
+    label: str,
+    environment: str,
+    caller: str,
+    audit_pool: ConnectionPool[psycopg.Connection[Any]] | None = None,
+) -> str:
+    """Decrypt and return plaintext while preserving the established API."""
+    return load_credential_with_id_for_provider_use(
+        conn,
+        operator_id=operator_id,
+        provider=provider,
+        label=label,
+        environment=environment,
+        caller=caller,
+        audit_pool=audit_pool,
+    ).plaintext

@@ -49,6 +49,7 @@ from app.security.sessions import SessionRow
 from app.services.broker_credentials import (
     CredentialAlreadyExists,
     CredentialDecryptError,
+    CredentialInUse,
     CredentialMetadata,
     CredentialNotFound,
     CredentialValidationError,
@@ -511,6 +512,8 @@ def delete(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="credential not found",
         ) from exc
+    except CredentialInUse as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +906,12 @@ def replace(
     conn.commit()
 
     with conn.transaction():
+        # Lock order is core submission advisory lock -> credential row. The
+        # executor uses that same order; taking the row first would deadlock a
+        # replacement against eligibility's FOR SHARE credential proof.
+        from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
+
+        conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
@@ -983,11 +992,14 @@ def replace(
             )
 
         # Different secret. Revoke the existing row, then insert.
-        revoke_credential(
-            conn,
-            credential_id=existing["id"],
-            operator_id=session.operator_id,
-        )
+        try:
+            revoke_credential(
+                conn,
+                credential_id=existing["id"],
+                operator_id=session.operator_id,
+            )
+        except CredentialInUse as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         new_meta = store_credential(
             conn,
             operator_id=session.operator_id,

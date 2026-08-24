@@ -3,6 +3,9 @@ import type {
   AllocationUpdateRequest,
   AllocationUpdateResponse,
   CoreSleeveResponse,
+  CoreMandate,
+  CoreMandateUpdate,
+  CoreRebalanceResponse,
   FiredSignalsResponse,
   StrategyAdvanceResponse,
   StrategyOperatorAction,
@@ -21,6 +24,17 @@ export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
 
 export function fetchCoreSleeve(): Promise<CoreSleeveResponse> {
   return apiFetch("/strategies/core-sleeve");
+}
+
+export function updateCoreMandate(body: CoreMandateUpdate): Promise<CoreMandate> {
+  return apiFetch("/strategies/core-mandate", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export function rebalanceCoreSleeve(): Promise<CoreRebalanceResponse> {
+  return apiFetch("/strategies/core-sleeve/rebalance", { method: "POST" });
 }
 
 export function requestStrategyEvidenceRefresh(): Promise<StrategyEvidenceRefreshResponse> {

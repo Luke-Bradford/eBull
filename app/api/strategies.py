@@ -30,6 +30,7 @@ from app.services.broker_credentials import (
     CredentialNotFound,
     CredentialValidationError,
     load_credential_for_provider_use,
+    load_credential_with_id_for_provider_use,
     normalise_environment,
     normalise_provider,
 )
@@ -68,6 +69,13 @@ from app.services.strategy_control_plane import (
     resolve_approval_mode,
 )
 from app.services.strategy_core_eligibility import CoreEligibilityError
+from app.services.strategy_core_executor import (
+    CoreExecutionResult,
+    StrategyCoreExecutionError,
+    execute_core_rebalance,
+    load_core_resume_authority,
+    resume_core_submission,
+)
 from app.services.strategy_core_mandate import (
     CORE_MANDATE_SERIES_ID,
     CORE_MANDATE_SERIES_TITLE,
@@ -981,7 +989,9 @@ class CoreSleeveBlockerResponse(BaseModel):
         "core_selection_invalid",
         "core_mandate_unconfigured",
         "core_mandate_disabled",
-        "core_submitter_unavailable",
+        "core_mandate_selection_mismatch",
+        "core_demo_required",
+        "core_order_unresolved",
     ]
     detail: str
 
@@ -998,13 +1008,28 @@ class CoreSleeveResponse(BaseModel):
     mandate: CoreMandateResponse
     can_configure: bool
     can_rebalance: bool
+    can_resume: bool
+    pending_order_id: int | None
+    execution_action: Literal["blocked", "rebalance", "resume"]
     blockers: list[CoreSleeveBlockerResponse]
-    environment: Literal["demo"] = "demo"
+    environment: Literal["demo", "real"]
     buy_only: bool = True
     alpha_input_used: bool = False
     household_tax_caveat: str = (
         "A UK ISA at another broker tax-dominates this engine sleeve for eligible household capital."
     )
+
+
+class CoreRebalanceResponse(BaseModel):
+    state: Literal["held", "refused", "submitted", "submission_uncertain"]
+    reason_code: str
+    intent_id: int | None
+    trade_id: int | None
+    order_id: int | None
+    amount: Decimal
+    submission_policy_version: str
+    preflight_policy_version: str
+    broker_preflight_policy_version: str
 
 
 def _core_mandate_response(mandate: CoreMandate | None) -> CoreMandateResponse:
@@ -3445,6 +3470,7 @@ def read_core_sleeve(
     """Canonical operator state for the deterministic fallback sleeve."""
     selection = load_core_selection(conn)
     mandate = load_core_mandate(conn)
+    resume_authority = load_core_resume_authority(conn)
     blockers: list[CoreSleeveBlockerResponse] = []
     if not selection.ready:
         if selection.configuration_error is not None:
@@ -3489,14 +3515,44 @@ def read_core_sleeve(
                 detail="The current core/cash mandate is disabled.",
             )
         )
-    # This first product slice intentionally exposes no acting endpoint. Keeping
-    # this explicit prevents a ready mandate being presented as executable while
-    # the idempotent submitter remains under construction.
-    blockers.append(
-        CoreSleeveBlockerResponse(
-            code="core_submitter_unavailable",
-            detail="Attended demo rebalance submission is not deployed yet.",
+    elif selection.ready and mandate.core_instrument_id != selection.selected_instrument_id:
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_mandate_selection_mismatch",
+                detail=(
+                    "The enabled mandate names a different instrument from the reviewed core selection; "
+                    "save a reviewed mandate revision before rebalancing."
+                ),
+            )
         )
+    if settings.etoro_env != "demo":
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_demo_required",
+                detail="Core sleeve execution is available only while the broker environment is demo.",
+            )
+        )
+    if resume_authority is not None:
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_order_unresolved",
+                detail=(
+                    f"Order {resume_authority.order_id} is unresolved; the next attended action resumes or "
+                    "reconciles that exact order and cannot create a new rebalance."
+                ),
+            )
+        )
+    base_ready = (
+        selection.ready
+        and mandate is not None
+        and mandate.enabled
+        and mandate.core_instrument_id == selection.selected_instrument_id
+        and settings.etoro_env == "demo"
+    )
+    can_rebalance = base_ready and resume_authority is None
+    can_resume = settings.etoro_env == "demo" and resume_authority is not None
+    execution_action: Literal["blocked", "rebalance", "resume"] = (
+        "resume" if can_resume else "rebalance" if can_rebalance else "blocked"
     )
     return CoreSleeveResponse(
         state=selection.state,
@@ -3518,9 +3574,101 @@ def read_core_sleeve(
         ],
         mandate=_core_mandate_response(mandate),
         can_configure=selection.ready,
-        can_rebalance=False,
+        can_rebalance=can_rebalance,
+        can_resume=can_resume,
+        pending_order_id=None if resume_authority is None else resume_authority.order_id,
+        execution_action=execution_action,
         blockers=blockers,
+        environment=cast(Literal["demo", "real"], settings.etoro_env),
     )
+
+
+def _core_rebalance_response(result: CoreExecutionResult) -> CoreRebalanceResponse:
+    return CoreRebalanceResponse(
+        state=result.state,
+        reason_code=result.reason_code,
+        intent_id=result.intent_id,
+        trade_id=result.trade_id,
+        order_id=result.order_id,
+        amount=result.amount,
+        submission_policy_version=result.submission_policy_version,
+        preflight_policy_version=result.preflight_policy_version,
+        broker_preflight_policy_version=result.broker_preflight_policy_version,
+    )
+
+
+@router.post(
+    "/core-sleeve/rebalance",
+    response_model=CoreRebalanceResponse,
+    status_code=status.HTTP_200_OK,
+)
+def rebalance_core_sleeve(
+    request: Request,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CoreRebalanceResponse:
+    """Run one operator-attended, demo-only core rebalance evaluation."""
+    if settings.etoro_env != "demo":
+        raise HTTPException(status_code=409, detail="Core sleeve execution is available only for the demo account.")
+    audit_pool = getattr(request.app.state, "audit_pool", None)
+    resume_authority = load_core_resume_authority(conn)
+    try:
+        with conn.transaction():
+            if not ensure_broker_key_loaded(conn):
+                raise CredentialCryptoConfigError("broker credential key is unavailable")
+            api_key = load_credential_with_id_for_provider_use(
+                conn,
+                operator_id=session.operator_id,
+                provider="etoro",
+                label="api_key",
+                environment="demo",
+                caller="strategy_core_rebalance",
+                audit_pool=audit_pool,
+            )
+            user_key = load_credential_with_id_for_provider_use(
+                conn,
+                operator_id=session.operator_id,
+                provider="etoro",
+                label="user_key",
+                environment="demo",
+                caller="strategy_core_rebalance",
+                audit_pool=audit_pool,
+            )
+            if resume_authority is not None and (
+                api_key.id,
+                user_key.id,
+            ) != (
+                resume_authority.api_key_credential_id,
+                resume_authority.user_key_credential_id,
+            ):
+                raise StrategyCoreExecutionError(
+                    "the unresolved core order belongs to credentials that are no longer live; "
+                    "reconciliation against a different account is refused"
+                )
+    except CredentialNotFound as exc:
+        raise HTTPException(status_code=503, detail="Demo broker credentials are not configured.") from exc
+    except StrategyCoreExecutionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (CredentialDecryptError, CredentialCryptoConfigError, MasterKeyError) as exc:
+        logger.error("core rebalance: credential loading failed", exc_info=True)
+        raise HTTPException(status_code=503, detail="Demo broker credentials could not be loaded.") from exc
+
+    try:
+        with EtoroBrokerProvider(api_key=api_key.plaintext, user_key=user_key.plaintext, env="demo") as broker:
+            if resume_authority is not None:
+                result = resume_core_submission(conn, broker=broker, authority=resume_authority)
+            else:
+                result = execute_core_rebalance(
+                    conn,
+                    broker=broker,
+                    operator_id=session.operator_id,
+                    api_key_credential_id=api_key.id,
+                    user_key_credential_id=user_key.id,
+                    recorded_by=session.username,
+                )
+    except (CoreEligibilityError, CoreSelectionError, StrategyCoreExecutionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _core_rebalance_response(result)
 
 
 @router.put("/core-mandate", response_model=CoreMandateResponse, status_code=status.HTTP_200_OK)

@@ -12,6 +12,8 @@ Trading endpoints are environment-scoped: /demo/ prefix for demo, no prefix for 
 from __future__ import annotations
 
 import decimal
+import hashlib
+import json
 import logging
 import re
 from collections.abc import Callable, Sequence
@@ -28,6 +30,8 @@ from app.providers.broker import (
     BrokerAccountRiskSnapshot,
     BrokerClosedTrade,
     BrokerCloseOrderDetail,
+    BrokerCoreOrder,
+    BrokerCoreOrderSubmission,
     BrokerCostComponent,
     BrokerEligibilityResponse,
     BrokerInstrumentEligibility,
@@ -66,6 +70,15 @@ logger = logging.getLogger(__name__)
 # EXIT is routed to close_position by the service layer and must never
 # reach here. HOLD does not produce broker calls at all.
 _ALLOWED_PLACE_ORDER_ACTIONS = frozenset({"BUY", "ADD"})
+
+
+def _exact_json_decimal(value: Decimal) -> float:
+    """Return a JSON-native number only when its emitted decimal is unchanged."""
+    encoded = float(value)
+    if Decimal(str(encoded)) != value:
+        raise BrokerOrderSubmissionError("core order amount cannot be represented exactly in the broker JSON payload")
+    return encoded
+
 
 # Map eToro statusID values to our OrderStatus.
 # Populated from documented API responses. Edge-case status values
@@ -404,6 +417,64 @@ class EtoroBrokerProvider(BrokerProvider):
         if broker_order_id <= 0 or reference_id != request_id:
             raise BrokerOrderSubmissionUncertain("demo strategy order response identity does not match intent")
         return BrokerOrderSubmission(str(broker_order_id), reference_id, token)
+
+    def place_demo_core_order(
+        self,
+        order: BrokerCoreOrder,
+        *,
+        request_id: UUID,
+    ) -> BrokerCoreOrderSubmission:
+        """Submit one demo-only underlying core buy with no SL/TP fields."""
+        refuse_broker_mutation_if_unattended("place_demo_core_order")
+        if self._env != "demo":
+            raise BrokerOrderSubmissionError("core orders require demo credentials")
+        body: dict[str, Any] = {
+            "action": "open",
+            "transaction": "buy",
+            "instrumentId": order.instrument_id,
+            "settlementType": "real",
+            "orderType": "mkt",
+            "leverage": 1,
+            "amount": _exact_json_decimal(order.amount),
+            "orderCurrency": "usd",
+        }
+        try:
+            response = self._http_write.post(
+                "/api/v2/trading/execution/demo/orders",
+                json=body,
+                headers=self._request_headers(request_id),
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if 400 <= exc.response.status_code < 500:
+                raise BrokerOrderSubmissionError(
+                    f"demo core order rejected with HTTP {exc.response.status_code}"
+                ) from exc
+            raise BrokerOrderSubmissionUncertain("demo core order returned a server error") from exc
+        except httpx.HTTPError as exc:
+            raise BrokerOrderSubmissionUncertain("demo core order transport failed") from exc
+        try:
+            raw = response.json()
+        except ValueError as exc:
+            raise BrokerOrderSubmissionUncertain("demo core order returned non-JSON data") from exc
+        if not isinstance(raw, dict):
+            raise BrokerOrderSubmissionUncertain("demo core order response must be an object")
+        try:
+            broker_order_id = int(raw["orderId"])
+            reference_id = UUID(str(raw["referenceId"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BrokerOrderSubmissionUncertain("demo core order response identity is malformed") from exc
+        if broker_order_id <= 0 or reference_id != request_id:
+            raise BrokerOrderSubmissionUncertain("demo core order response identity does not match intent")
+        try:
+            canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise BrokerOrderSubmissionUncertain("demo core order response cannot be fingerprinted") from exc
+        return BrokerCoreOrderSubmission(
+            broker_order_ref=str(broker_order_id),
+            reference_id=reference_id,
+            response_digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        )
 
     def close_position(
         self,

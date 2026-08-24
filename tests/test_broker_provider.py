@@ -18,10 +18,12 @@ import httpx
 import pytest
 
 from app.providers.broker import (
+    BrokerCoreOrder,
     BrokerMirror,
     BrokerMirrorPosition,
     BrokerOrderNotFound,
     BrokerOrderSubmissionError,
+    BrokerOrderSubmissionUncertain,
     BrokerPortfolio,
     BrokerPositionMutationError,
     BrokerStrategyOrder,
@@ -685,6 +687,77 @@ class TestDemoStrategyOrder:
                 pass
             else:  # pragma: no cover
                 raise AssertionError("real credentials must not reach the paper writer")
+
+
+class TestDemoCoreOrder:
+    def test_writer_is_demo_only_buy_x1_real_usd_without_synthetic_exits(self) -> None:
+        request_id = UUID("1c94300c-90aa-4303-9d00-dec376d74efb")
+        raw = {
+            "token": "066faaee-e1e9-49d2-a568-c6e1cc336ad8",
+            "orderId": 13902598,
+            "referenceId": str(request_id),
+        }
+        response = MagicMock()
+        response.json.return_value = raw
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = response
+            result = broker.place_demo_core_order(
+                BrokerCoreOrder(instrument_id=3417, amount=Decimal("250")),
+                request_id=request_id,
+            )
+            call = broker._http_write.post.call_args
+
+        assert call.args[0] == "/api/v2/trading/execution/demo/orders"
+        assert call.kwargs["headers"] == {"x-request-id": str(request_id)}
+        assert call.kwargs["json"] == {
+            "action": "open",
+            "transaction": "buy",
+            "instrumentId": 3417,
+            "settlementType": "real",
+            "orderType": "mkt",
+            "leverage": 1,
+            "amount": 250.0,
+            "orderCurrency": "usd",
+        }
+        assert result.broker_order_ref == "13902598"
+        assert result.reference_id == request_id
+        assert result.response_digest == "0caf67206160f1c97554b988d9ff09aa6bec3813df377e1fc4aeb8f2f231c513"
+        assert not hasattr(result, "token")
+
+    def test_writer_refuses_an_amount_that_would_change_in_json(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            with pytest.raises(BrokerOrderSubmissionError, match="represented exactly"):
+                broker.place_demo_core_order(
+                    BrokerCoreOrder(instrument_id=3417, amount=Decimal("9007199254.740991")),
+                    request_id=uuid4(),
+                )
+            broker._http_write.post.assert_not_called()
+
+    def test_real_credentials_cannot_select_the_core_writer(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:
+            with pytest.raises(BrokerOrderSubmissionError, match="demo credentials"):
+                broker.place_demo_core_order(
+                    BrokerCoreOrder(instrument_id=3417, amount=Decimal("250")),
+                    request_id=uuid4(),
+                )
+
+    def test_reference_mismatch_is_uncertain(self) -> None:
+        response = MagicMock()
+        response.json.return_value = {
+            "token": "066faaee-e1e9-49d2-a568-c6e1cc336ad8",
+            "orderId": 13902598,
+            "referenceId": str(uuid4()),
+        }
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = response
+            with pytest.raises(BrokerOrderSubmissionUncertain, match="does not match"):
+                broker.place_demo_core_order(
+                    BrokerCoreOrder(instrument_id=3417, amount=Decimal("250")),
+                    request_id=uuid4(),
+                )
 
 
 class TestDemoStrategyPositionMutations:
