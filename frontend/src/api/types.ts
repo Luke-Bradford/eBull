@@ -2932,6 +2932,7 @@ export interface StrategyPaperPool {
   reserved_capital: string;
   invested_capital: string | null;
   remaining_capital: string | null;
+  capital_observation_complete: boolean;
   mandate: StrategyPortfolioMandate;
   available_mandates: StrategyPortfolioMandate[];
 }
@@ -2973,7 +2974,7 @@ export interface CoreSleeveResponse {
   pending_order_id: number | null;
   execution_action: "blocked" | "rebalance" | "resume";
   blockers: Array<{
-    code: "core_evidence_collecting" | "core_candidates_missing" | "core_selection_invalid" | "core_mandate_unconfigured" | "core_mandate_disabled" | "core_mandate_selection_mismatch" | "core_demo_required" | "core_order_unresolved";
+    code: "core_evidence_collecting" | "core_candidates_missing" | "core_selection_invalid" | "core_mandate_unconfigured" | "core_mandate_disabled" | "core_mandate_selection_mismatch" | "core_demo_required" | "core_order_unresolved" | "core_capital_authority_incomplete" | "core_live_snapshot_required" | "core_paper_pool_unconfigured" | "core_paper_pool_disabled" | "core_sandbox_exceeded";
     detail: string;
   }>;
   environment: "demo" | "real";

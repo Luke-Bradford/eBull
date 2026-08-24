@@ -331,7 +331,7 @@ export function StrategyPortfolioLens() {
             toneHint
           />
           <StatTile label="Open" value={formatNumber(summary.activePositions, 0)} hint={`${formatNumber(summary.approved, 0)} strategies approved`} />
-          <StatTile label="Available" value={formatMoney(number(pool.remaining_capital), pool.currency)} hint="To deploy" />
+          <StatTile label="Available" value={formatMoney(number(pool.capital_observation_complete === false ? null : pool.remaining_capital), pool.currency)} hint={pool.capital_observation_complete === false ? "Checked at action" : "To deploy"} />
         </div>
 
         {actionError ? (

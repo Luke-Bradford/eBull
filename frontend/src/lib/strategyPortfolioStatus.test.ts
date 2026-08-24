@@ -32,6 +32,7 @@ function overview(patch: Record<string, unknown> = {}): StrategyOverviewResponse
       reserved_capital: "0",
       invested_capital: "0",
       remaining_capital: "10000",
+      capital_observation_complete: true,
       mandate: { configured: true, risk_profile: "balanced" },
       available_mandates: [],
     },

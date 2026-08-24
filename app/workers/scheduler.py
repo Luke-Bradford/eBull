@@ -5788,9 +5788,14 @@ def core_rebalance_observation() -> None:
     Spec: ``docs/proposals/ta/2026-08-22-core-rebalance-observation-job.md``
     """
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.strategy_control_plane import PAPER_ALLOCATOR_ADVISORY_LOCK
     from app.services.strategy_core_mandate import CORE_MANDATE_ADVISORY_LOCK, load_core_mandate
     from app.services.strategy_core_rebalance_intent import record_core_rebalance_intent
     from app.services.strategy_core_sleeve import observe_core_sleeve
+    from app.services.strategy_engine_capital import (
+        load_engine_capital_authority,
+        resolve_engine_capital_usage,
+    )
 
     # `strategy_core_mandate_events.mode` is CHECK-pinned to 'paper' (sql/349),
     # so observing a REAL account would attribute a live book's drift to a
@@ -5814,6 +5819,11 @@ def core_rebalance_observation() -> None:
     # thing.
     with connect_job() as mandate_conn:
         mandate = load_core_mandate(mandate_conn)
+        capital_authority = (
+            None
+            if mandate is None or mandate.core_instrument_id is None
+            else load_engine_capital_authority(mandate_conn)
+        )
 
     # ⚠ The skip is recorded from the BODY, not only via the registry
     # `prerequisite`, because manual dispatch bypasses the registry path.
@@ -5833,6 +5843,9 @@ def core_rebalance_observation() -> None:
         detail = "no core mandate configured" if mandate is None else "core mandate has no core instrument"
         _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, detail)
         return
+    if capital_authority is None:
+        _record_prereq_skip(JOB_CORE_REBALANCE_OBSERVATION, "no assigned paper pot configured")
+        return
 
     creds = _load_etoro_credentials(JOB_CORE_REBALANCE_OBSERVATION)
     if creds is None:
@@ -5847,7 +5860,17 @@ def core_rebalance_observation() -> None:
         with EtoroBrokerProvider(api_key=creds[0], user_key=creds[1], env="demo") as broker:
             snapshot = broker.get_account_risk_snapshot()
 
-        state = observe_core_sleeve(snapshot, core_instrument_id=core_instrument_id)
+        usage = resolve_engine_capital_usage(
+            capital_authority,
+            snapshot,
+            core_instrument_id=core_instrument_id,
+        )
+        state = observe_core_sleeve(
+            snapshot,
+            core_instrument_id=core_instrument_id,
+            exact_owned_market_value=usage.core_market_value,
+            assigned_cash_available=min(snapshot.available_cash, usage.headroom.remaining),
+        )
 
         with connect_job() as conn:
             # ⚠⚠ The sleeve was observed for the mandate read BEFORE the HTTP
@@ -5866,8 +5889,12 @@ def core_rebalance_observation() -> None:
             # for two fast reads and one INSERT, NEVER across the broker
             # round-trip -- which is why the mandate is pre-read on a separate
             # connection rather than under this lock.
+            conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
             conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_MANDATE_ADVISORY_LOCK)
             current = load_core_mandate(conn)
+            current_capital = load_engine_capital_authority(conn)
+            if current_capital != capital_authority:
+                raise RuntimeError("assigned-capital authority changed during core observation")
             if current is None or current.event_id != mandate.event_id:
                 # Not a fault, so nothing raises: the operator reconfigured the
                 # mandate during the round-trip and the next tick is correct.

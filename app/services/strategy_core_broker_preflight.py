@@ -10,10 +10,8 @@ The split between 3b-1 and this one is "does it need a broker": 3b-1 holds no br
 handle and every refusal it names is provable in a pure test; every refusal here is
 observable only against a live account.
 
-⚠⚠ AUTHORISES NOTHING TODAY.  No caller in ``app/`` or ``scripts/``; it writes nothing.
-Named plainly, as every step of this arc has been, because #2437's R4 comment records *a
-control that exists, is tested, and sits on a path the decision does not take* nine times
-over on this ticket alone.
+This preflight writes nothing. The attended core executor calls it after the database gate
+and before durable order authority is committed.
 
 ⚠⚠ BUY ONLY.  ``sell_core`` refuses before any broker call --
 ``core_close_side_cost_quote_unavailable``.  See :data:`CoreBrokerPreflightRefusal`.
@@ -65,6 +63,11 @@ from app.services.strategy_core_sizing import (
     resolve_core_trade_size,
 )
 from app.services.strategy_core_sleeve import CoreSleeveObservationError, observe_core_sleeve
+from app.services.strategy_engine_capital import (
+    EngineCapitalAuthority,
+    EngineCapitalObservationError,
+    resolve_engine_capital_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +149,7 @@ CORE_MAX_ACCOUNT_RISK_AGE_SECONDS: Final = int(
 _FUTURE_SKEW: Final = timedelta(seconds=5)
 
 CoreBrokerPreflightRefusal = Literal[
+    "sandbox_exceeded",
     "core_close_side_cost_quote_unavailable",
     "core_account_risk_unavailable",
     "core_account_risk_stale",
@@ -243,6 +247,7 @@ def assess_core_broker_preflight(
     mandate: CoreMandate,
     decision: CoreRebalanceDecision,
     core_instrument_id: int,
+    capital_authority: EngineCapitalAuthority,
     eligibility_response_currency: str,
     eligibility_min_position_exposure: Decimal | None,
     eligibility_min_position_amount: Decimal | None,
@@ -289,6 +294,11 @@ def assess_core_broker_preflight(
         # Decided before any broker call: a request we know returns 400, or a quote we
         # know does not bound the cost, is not worth spending against the write lane.
         return _refused("core_close_side_cost_quote_unavailable")
+    if core_instrument_id != mandate.core_instrument_id:
+        # This is the allocator's existing, deterministic refusal.  Check it before
+        # joining exact ownership because the caller-supplied id cannot legitimately
+        # reinterpret the mandate's owned positions as belonging to another asset.
+        return _refused("sleeve_instrument_mismatch")
 
     try:
         snapshot = broker.get_account_risk_snapshot()
@@ -313,8 +323,20 @@ def assess_core_broker_preflight(
         return _refused("core_account_risk_stale", snapshot_observed_at=snapshot.observed_at)
 
     try:
-        state: CoreSleeveState = observe_core_sleeve(snapshot, core_instrument_id=core_instrument_id)
-    except CoreSleeveObservationError:
+        usage = resolve_engine_capital_usage(
+            capital_authority,
+            snapshot,
+            core_instrument_id=core_instrument_id,
+        )
+        if not usage.headroom.within_bound:
+            return _refused("sandbox_exceeded", snapshot_observed_at=snapshot.observed_at)
+        state: CoreSleeveState = observe_core_sleeve(
+            snapshot,
+            core_instrument_id=core_instrument_id,
+            exact_owned_market_value=usage.core_market_value,
+            assigned_cash_available=min(snapshot.available_cash, usage.headroom.remaining),
+        )
+    except CoreSleeveObservationError, EngineCapitalObservationError:
         return _refused("core_account_risk_unobservable", snapshot_observed_at=snapshot.observed_at)
 
     if eligibility_response_currency.strip().upper() != "USD":

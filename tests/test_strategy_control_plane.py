@@ -1132,6 +1132,43 @@ def test_paper_principal_cannot_be_withdrawn_below_committed_capital(
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
 
 
+def test_paper_principal_check_includes_recorded_active_core_commitment(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("1000"),
+        risk_profile="balanced",
+        approval_mode="manual",
+        changed_by="operator",
+        reason="fund virtual sleeve",
+    )
+    monkeypatch.setattr(
+        "app.services.strategy_engine_capital.load_engine_capital_authority",
+        lambda _conn: SimpleNamespace(
+            realised_delta=Decimal("0"),
+            alpha_committed=Decimal("0"),
+            core_pending_committed=Decimal("0"),
+            core_active_recorded_committed=Decimal("400"),
+            core_active_position_ids=(),
+        ),
+    )
+
+    with pytest.raises(StrategyControlError, match="below committed strategy capital"):
+        configure_paper_pool(
+            conn,
+            enabled=False,
+            capital_limit=Decimal("399"),
+            risk_profile="balanced",
+            approval_mode="manual",
+            changed_by="operator",
+            reason="invalid core withdrawal",
+        )
+
+
 def test_enabled_paper_pool_requires_and_persists_exact_versioned_mandate(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:

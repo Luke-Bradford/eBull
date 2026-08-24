@@ -52,7 +52,7 @@ from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
     SUPPORTED_DEPLOYMENT_CURRENCIES,
 )
-from app.services.strategy_capital_sandbox import sandbox_bound
+from app.services.strategy_capital_sandbox import sandbox_bound, sandbox_headroom
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -88,6 +88,10 @@ from app.services.strategy_core_selection import (
     CoreSelectionError,
     load_core_selection,
 )
+from app.services.strategy_engine_capital import (
+    EngineCapitalObservationError,
+    load_engine_capital_authority,
+)
 from app.services.strategy_live_gate import (
     REQUIRED_KILL_DRILLS,
     LiveGateReport,
@@ -110,7 +114,6 @@ from app.services.strategy_monitoring import (
     load_fire_rate,
     load_owned_pnl,
     pool_owned_pnl_by_strategy,
-    realised_pnl_for_keys,
 )
 from app.services.strategy_operator_promotion import (
     EvidenceRow,
@@ -650,6 +653,7 @@ class StrategyPaperPoolView(BaseModel):
     reserved_capital: Decimal
     invested_capital: Decimal | None
     remaining_capital: Decimal | None
+    capital_observation_complete: bool
     mandate: StrategyPortfolioMandateView
     available_mandates: list[StrategyPortfolioMandateView]
 
@@ -992,6 +996,11 @@ class CoreSleeveBlockerResponse(BaseModel):
         "core_mandate_selection_mismatch",
         "core_demo_required",
         "core_order_unresolved",
+        "core_capital_authority_incomplete",
+        "core_live_snapshot_required",
+        "core_paper_pool_unconfigured",
+        "core_paper_pool_disabled",
+        "core_sandbox_exceeded",
     ]
     detail: str
 
@@ -2212,15 +2221,12 @@ def get_strategy_overview(
     # Current versions only: a strategy_version is a rule set, so pooling two
     # would average two arithmetics into one rate (#2670's lesson).
     fire_rate_by_strategy = load_fire_rate(conn, versions=scan_version_values)
-    # ⚠⚠ THE DEPLOYMENT VERSIONS STAY IN THE FILTER — `realised_pnl_for_keys`
-    # reads this same dict at `paper_deployment_keys` for the capital base, and
-    # its own docstring is why: *"Old strategy versions remain part of the shared
-    # pot after they are retired; limiting this calculation to the current
-    # manifest would make realised gains or losses disappear from the capital
-    # base."* Dropping them would not raise — a missing key defaults to
-    # `StrategyPnl()`, whose `reconciled_realised_pnl` is 0 with no incomplete
-    # reason, so a deployed strategy's realised P&L would read as a confident
-    # zero.
+    # ⚠⚠ THE DEPLOYMENT VERSIONS STAY IN THE FILTER. The per-strategy card
+    # below still pools owned P&L over every deployed version, including retired
+    # ones. Dropping them would not raise: a missing key defaults to
+    # `StrategyPnl()`, so a deployed strategy's realised P&L would read as a
+    # confident zero. The shared capital service separately owns the sandbox's
+    # cross-arm realised-P&L calculation.
     #
     # ⚠ That the lookup succeeds at all also fixes the basis question here: the
     # rows are keyed by `strategy_signals.strategy_version`, so a deployment key
@@ -2236,6 +2242,15 @@ def get_strategy_overview(
     control_by_strategy = load_control_state(conn, versions=version_values)
     entry_block = load_entry_block_state(conn)
     paper_pool = load_paper_pool(conn)
+    capital_observation_failed = False
+    try:
+        engine_capital = load_engine_capital_authority(conn)
+    except EngineCapitalObservationError:
+        # Monitoring remains available when the exact capital population is not.
+        # Every derived money field below is withheld, so this cannot advertise
+        # headroom while the execution paths fail closed on the same condition.
+        engine_capital = None
+        capital_observation_failed = True
     account_equity = load_account_equity_evidence(
         conn,
         environment=cast(Literal["demo", "real"], settings.etoro_env),
@@ -2557,15 +2572,25 @@ def get_strategy_overview(
                 next_operator_action_refusals=list(next_operator_action_refusals),
             )
         )
-    reserved_total = sum((item.allocation.reserved_capital for item in strategies), Decimal("0"))
+    reserved_total = (
+        Decimal("0")
+        if engine_capital is None
+        else engine_capital.alpha_committed
+        + engine_capital.core_pending_committed
+        + engine_capital.core_active_recorded_committed
+    )
     invested_values = [item.allocation.invested_capital for item in strategies]
     invested_total = (
         sum((value for value in invested_values if value is not None), Decimal("0"))
-        if all(value is not None for value in invested_values)
+        if not capital_observation_failed
+        and all(value is not None for value in invested_values)
+        and (engine_capital is None or not engine_capital.core_active_position_ids)
         else None
     )
-    paper_realised = realised_pnl_for_keys(pnl_by_strategy, paper_deployment_keys)
-    realised_delta = None if paper_realised is None else sum(paper_realised.values(), Decimal("0"))
+    capital_observation_complete = not capital_observation_failed and (
+        engine_capital is None or not engine_capital.core_active_position_ids
+    )
+    realised_delta = None if engine_capital is None else engine_capital.realised_delta
     # One arithmetic with the executor and the withdrawal check (#2844). This figure
     # is what the card promises the operator as headroom, so a private copy here
     # could advertise capacity the executor refuses — with both internally
@@ -2649,9 +2674,10 @@ def get_strategy_overview(
             invested_capital=invested_total,
             remaining_capital=(
                 max(effective_pool_capital - reserved_total, Decimal("0"))
-                if effective_pool_capital is not None
+                if effective_pool_capital is not None and capital_observation_complete
                 else None
             ),
+            capital_observation_complete=capital_observation_complete,
             mandate=StrategyPortfolioMandateView(
                 configured=paper_pool.mandate.configured,
                 policy_version=paper_pool.mandate.policy_version,
@@ -3472,6 +3498,58 @@ def read_core_sleeve(
     mandate = load_core_mandate(conn)
     resume_authority = load_core_resume_authority(conn)
     blockers: list[CoreSleeveBlockerResponse] = []
+    capital_ready = False
+    try:
+        capital_authority = load_engine_capital_authority(conn)
+    except EngineCapitalObservationError as exc:
+        capital_authority = None
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_capital_authority_incomplete",
+                detail=f"The assigned-capital boundary is incomplete: {exc}",
+            )
+        )
+    if capital_authority is None:
+        if not any(item.code == "core_capital_authority_incomplete" for item in blockers):
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_paper_pool_unconfigured",
+                    detail="Assign a paper pot before core execution can be enabled.",
+                )
+            )
+    elif not capital_authority.enabled:
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_paper_pool_disabled",
+                detail="The assigned paper pot is disabled; existing holdings remain owned but no entry is allowed.",
+            )
+        )
+    elif capital_authority.core_active_position_ids:
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_live_snapshot_required",
+                detail=(
+                    "Active core commitment needs an exact broker snapshot; "
+                    "the read-only page cannot advertise rebalance headroom."
+                ),
+            )
+        )
+    else:
+        recorded_commitment = capital_authority.alpha_committed + capital_authority.core_pending_committed
+        recorded_headroom = sandbox_headroom(
+            capital_limit=capital_authority.capital_limit,
+            capital_mode=capital_authority.capital_mode,
+            realised_delta=capital_authority.realised_delta,
+            committed=recorded_commitment,
+        )
+        capital_ready = recorded_headroom.within_bound and recorded_headroom.remaining > 0
+        if not capital_ready:
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_sandbox_exceeded",
+                    detail="The assigned paper pot has no deployable core headroom; no new core entry is allowed.",
+                )
+            )
     if not selection.ready:
         if selection.configuration_error is not None:
             blockers.append(
@@ -3548,6 +3626,7 @@ def read_core_sleeve(
         and mandate.enabled
         and mandate.core_instrument_id == selection.selected_instrument_id
         and settings.etoro_env == "demo"
+        and capital_ready
     )
     can_rebalance = base_ready and resume_authority is None
     can_resume = settings.etoro_env == "demo" and resume_authority is not None

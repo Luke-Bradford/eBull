@@ -156,6 +156,7 @@ const OVERVIEW: StrategyOverviewResponse = {
     reserved_capital: "0.000000",
     invested_capital: "0.000000",
     remaining_capital: "1000.000000",
+    capital_observation_complete: true,
     mandate: {
       configured: true,
       policy_version: "portfolio-mandate-v1",

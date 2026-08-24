@@ -34,6 +34,7 @@ from uuid import UUID
 import psycopg
 from psycopg.pq import TransactionStatus
 
+from app.services.strategy_control_plane import PAPER_ALLOCATOR_ADVISORY_LOCK
 from app.services.strategy_core_eligibility import (
     CoreEligibilityError,
     require_core_eligibility,
@@ -243,16 +244,19 @@ def core_lock_held(conn: psycopg.Connection[Any], key: tuple[int, int]) -> bool:
 def core_submission_lock(conn: psycopg.Connection[Any]) -> Iterator[None]:
     """Serialise the core arm's observe-record-admit-submit-insert section.
 
-    Takes TWO locks, in this order:
+    Takes THREE locks, in this order:
 
-    1. ``CORE_MANDATE_ADVISORY_LOCK`` -- the same key ``configure_core_mandate``
+    1. ``PAPER_ALLOCATOR_ADVISORY_LOCK`` -- the shared assigned-capital lock used
+       by alpha reservation and paper-pool revisions. Core and alpha cannot both
+       spend the same headroom.
+    2. ``CORE_MANDATE_ADVISORY_LOCK`` -- the same key ``configure_core_mandate``
        takes as an *xact* lock.  Without it the gate's
        ``core_mandate_revision_stale`` check is a TOCTOU: a revision appended
        between the check and the trade INSERT leaves a trade citing a mandate the
        operator has replaced.  Session and transaction advisory locks share one
        lock manager, so holding it blocks mandate writes for the duration of a
        submission -- which is the intended behaviour, not a side effect.
-    2. ``CORE_SUBMISSION_ADVISORY_LOCK`` -- submissions against each other.
+    3. ``CORE_SUBMISSION_ADVISORY_LOCK`` -- submissions against each other.
 
     One acquisition order, and ``configure_core_mandate`` takes only the first, so
     there is no deadlock cycle.  Shape follows ``_allocator_lock``
@@ -260,7 +264,7 @@ def core_submission_lock(conn: psycopg.Connection[Any]) -> Iterator[None]:
     lock means the critical section was not what it claimed to be, and that must
     be loud.
     """
-    keys = (CORE_MANDATE_ADVISORY_LOCK, CORE_SUBMISSION_ADVISORY_LOCK)
+    keys = (PAPER_ALLOCATOR_ADVISORY_LOCK, CORE_MANDATE_ADVISORY_LOCK, CORE_SUBMISSION_ADVISORY_LOCK)
     for key in keys:
         conn.execute("SELECT pg_advisory_lock(%s, %s)", key)
     conn.commit()
@@ -342,6 +346,11 @@ def admit_core_rebalance_intent(
     and submission reopens the credential-swap window; keep the two in one
     transaction or re-admit afterwards.
     """
+    if not core_lock_held(conn, PAPER_ALLOCATOR_ADVISORY_LOCK):
+        raise StrategyCoreSubmissionError(
+            "core submission admission requires core_submission_lock to hold the shared paper allocator "
+            "advisory lock; without it alpha and core can reserve the same assigned capital"
+        )
     if not core_lock_held(conn, CORE_SUBMISSION_ADVISORY_LOCK):
         raise StrategyCoreSubmissionError(
             "core submission admission requires core_submission_lock to be held; "

@@ -53,6 +53,12 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
     registered_strategy_purpose,
 )
+from app.services.strategy_core_mandate import load_core_mandate
+from app.services.strategy_engine_capital import (
+    EngineCapitalObservationError,
+    load_engine_capital_authority,
+    resolve_engine_capital_usage,
+)
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
 from app.services.strategy_halt_identity import (
     HALT_IDENTITY_RULE_VERSION,
@@ -824,6 +830,7 @@ def _observe_local_mandate_risk(
     intent: _Intent,
     risk: BrokerAccountRiskSnapshot,
     now: datetime,
+    shared_pool_bound: Decimal,
 ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | str:
     """Read local allocation risk and advance the high-water mark atomically."""
     with conn.transaction():
@@ -846,10 +853,10 @@ def _observe_local_mandate_risk(
             raise StrategyPaperExecutionError("pending strategy risk observation was unavailable")
         pending_total = Decimal(str(pending_row[0]))
         pending_instrument = Decimal(str(pending_row[1]))
-        capital_bases = _effective_capital_bases(conn, intent)
-        if isinstance(capital_bases, str):
-            return capital_bases
-        deployment_base, pool_base = capital_bases
+        deployment_base = _effective_deployment_base(conn, intent)
+        if isinstance(deployment_base, str):
+            return deployment_base
+        pool_base = shared_pool_bound
         market_date = now.astimezone(_NY).date()
         market_day_start = datetime.combine(market_date, time.min, tzinfo=_NY).astimezone(UTC)
         market_day_end = (datetime.combine(market_date, time.min, tzinfo=_NY) + timedelta(days=1)).astimezone(UTC)
@@ -900,10 +907,35 @@ def _risk_and_amount(
         (row.amount for row in risk.instrument_investments if row.instrument_id == intent.instrument_id),
         Decimal("0"),
     )
+    try:
+        # Keep this observation in its own completed transaction.  A bare SELECT on
+        # psycopg opens an implicit transaction; leaving it open here would turn the
+        # later durable-order transaction into a savepoint and let broker I/O precede
+        # the actual commit.
+        with conn.transaction():
+            authority = load_engine_capital_authority(conn)
+            if authority is None or not authority.enabled:
+                return SANDBOX_EXCEEDED
+            core_mandate = load_core_mandate(conn)
+            usage = resolve_engine_capital_usage(
+                authority,
+                risk,
+                core_instrument_id=None if core_mandate is None else core_mandate.core_instrument_id,
+            )
+    except EngineCapitalObservationError as exc:
+        raise StrategyPaperExecutionError("shared assigned-capital observation is incomplete") from exc
+    if not usage.headroom.within_bound:
+        return SANDBOX_EXCEEDED
     # A just-accepted strategy order may not yet be visible in the provider's
     # account snapshot. The local observation counts every unresolved order and
     # advances account high-water state in one explicit transaction.
-    observed = _observe_local_mandate_risk(conn, intent=intent, risk=risk, now=now)
+    observed = _observe_local_mandate_risk(
+        conn,
+        intent=intent,
+        risk=risk,
+        now=now,
+        shared_pool_bound=usage.headroom.bound,
+    )
     if isinstance(observed, str):
         return observed
     deployment_base, pool_base, pending_total, pending_instrument, drawdown = observed
@@ -912,9 +944,9 @@ def _risk_and_amount(
     if drawdown >= intent.mandate_max_drawdown_pct:
         return "portfolio_drawdown_limit"
     deployment_remaining = max(Decimal("0"), deployment_base - intent.reserved)
-    # `pool_base` IS the bound — `_effective_capital_bases` resolved it from the
-    # pool's realised P&L in the same pass that resolved the deployment one.
-    pool_headroom = headroom_from_bound(bound=pool_base, committed=intent.pool_reserved)
+    # `pool_base` IS the shared bound resolved from exact-owned alpha and core
+    # realised P&L by `resolve_engine_capital_usage` above.
+    pool_headroom = headroom_from_bound(bound=pool_base, committed=usage.committed)
     pool_remaining = pool_headroom.remaining
     # ⚠ NAMED, and named BEFORE the nine other capacity terms fold into `min(...)`
     # below (#2844). Reaching the assignment used to surface as
@@ -939,13 +971,13 @@ def _risk_and_amount(
     )
     cash_reserve_capacity = max(
         Decimal("0"),
-        pool_base * (Decimal("100") - intent.mandate_cash_reserve_pct) / Decimal("100") - intent.pool_reserved,
+        pool_base * (Decimal("100") - intent.mandate_cash_reserve_pct) / Decimal("100") - usage.committed,
     )
     if cash_reserve_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
         return "portfolio_cash_reserve_limit"
     active_risk_capacity = max(
         Decimal("0"),
-        pool_base * intent.mandate_active_risk_budget_pct / Decimal("100") - intent.pool_reserved,
+        pool_base * intent.mandate_active_risk_budget_pct / Decimal("100") - usage.committed,
     )
     if active_risk_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
         return "portfolio_active_risk_limit"
@@ -981,33 +1013,25 @@ def _risk_and_amount(
     return amount, current_instrument, drawdown
 
 
-def _effective_capital_bases(
+def _effective_deployment_base(
     conn: psycopg.Connection[Any],
     intent: _Intent,
-) -> tuple[Decimal, Decimal] | str:
-    """Resolve capped or compounding bases from realised P&L, never open marks."""
+) -> Decimal | str:
+    """Resolve the capped or compounding deployment base from realised P&L."""
     realised_by_strategy = load_paper_realised_pnl(conn)
     if realised_by_strategy is None:
         return "realised_pnl_incomplete"
 
     strategy_realised = realised_by_strategy.get((intent.strategy_id, intent.strategy_version), Decimal("0"))
-    pool_realised = sum(realised_by_strategy.values(), Decimal("0"))
     # ⚠ ONE arithmetic, shared with the withdrawal check and the /strategies card
     # (#2844). This was three hand-written copies of `max(0, limit + realised)` with
     # the `fixed`-floors-profit rule restated each time -- so the panel promising the
     # operator headroom and the control enforcing it could drift apart with both
     # internally consistent and nothing to fail on.
-    return (
-        sandbox_bound(
-            capital_limit=intent.deployment_limit,
-            capital_mode=intent.capital_mode,
-            realised_delta=strategy_realised,
-        ),
-        sandbox_bound(
-            capital_limit=intent.pool_limit,
-            capital_mode=intent.capital_mode,
-            realised_delta=pool_realised,
-        ),
+    return sandbox_bound(
+        capital_limit=intent.deployment_limit,
+        capital_mode=intent.capital_mode,
+        realised_delta=strategy_realised,
     )
 
 
