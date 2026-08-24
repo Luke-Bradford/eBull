@@ -26,11 +26,16 @@ import {
 } from "@/components/strategies/StrategyPortfolioPanels";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
-import { formatMoney, formatNumber, formatPct } from "@/lib/format";
+import { formatDate, formatMoney, formatNumber, formatPct } from "@/lib/format";
 import { aggregate } from "@/lib/strategyAggregate";
 import { number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
 import { useAsync } from "@/lib/useAsync";
+
+// The server currently returns exactly the three preregistered #2833
+// candidates. Keep a defensive render cap anyway: API array types carry no
+// size bound, and a malformed response must not create an unbounded DOM.
+const CORE_CANDIDATE_RENDER_CAP = 10;
 
 /**
  * The fenced-off pot — a control panel, not a status page (#2868, reshaped on
@@ -67,6 +72,53 @@ function BlockerRow({
         <span className="text-slate-700 dark:text-slate-200">{label}</span>
       </span>
       {action}
+    </div>
+  );
+}
+
+function CoreCandidateCoverageTable({ sleeve }: { sleeve: CoreSleeveResponse }) {
+  return (
+    <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Candidate coverage</h3>
+      <p className="mt-1 text-xs text-slate-500">Overall evidence counts only dates shared by every candidate.</p>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full text-left text-sm" aria-label="Core candidate evidence coverage">
+          <thead className="text-xs text-slate-500">
+            <tr>
+              <th scope="col" className="py-1 pr-4 font-medium">Instrument</th>
+              <th scope="col" className="py-1 pr-4 font-medium">Evidence</th>
+              <th scope="col" className="py-1 font-medium">Prospective dates</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sleeve.candidates.slice(0, CORE_CANDIDATE_RENDER_CAP).map((candidate) => (
+              <tr key={candidate.instrument_id} className="border-t border-slate-100 dark:border-slate-800">
+                <th scope="row" className="py-2 pr-4 font-semibold">{candidate.symbol}</th>
+                <td className="py-2 pr-4 tabular-nums">
+                  {candidate.observed_trading_days} / {sleeve.required_trading_days}
+                </td>
+                <td className="py-2 text-slate-500">
+                  {candidate.first_observed_date && candidate.last_observed_date
+                    ? `${formatDate(candidate.first_observed_date)} – ${formatDate(candidate.last_observed_date)}`
+                    : "Awaiting first date"}
+                </td>
+              </tr>
+            ))}
+            {sleeve.candidates.length === 0 ? (
+              <tr className="border-t border-slate-100 dark:border-slate-800">
+                <td colSpan={3} className="py-2 text-slate-500">
+                  No candidate coverage is available; the blocker above names what must be restored.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+      {sleeve.candidates.length > CORE_CANDIDATE_RENDER_CAP ? (
+        <p className="mt-2 text-xs text-slate-500">
+          Showing {CORE_CANDIDATE_RENDER_CAP} of {sleeve.candidates.length} candidates.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -241,7 +293,7 @@ function CoreSleeveControl({
 
 export function StrategyPortfolioLens() {
   const overview = useAsync(fetchStrategyOverview, []);
-  const coreSleeve = useAsync(fetchCoreSleeve, []);
+  const coreSleeve = useAsync(fetchCoreSleeve, [], { preserveOnRefetch: true });
   const ownedPositions = useAsync(fetchStrategyOwnedPositions, []);
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
@@ -397,9 +449,22 @@ export function StrategyPortfolioLens() {
                     Deterministic fallback when no strategy has earned capital.
                   </p>
                 </div>
-                <Badge tone={coreSleeve.data.state === "ready" ? "ok" : "warn"}>
-                  {coreSleeve.data.state === "ready" ? "Ready" : "Cash"}
-                </Badge>
+                <div className="flex items-center gap-2">
+                  {coreSleeve.isRevalidating ? (
+                    <span className="text-xs text-amber-700 dark:text-amber-300">Status is stale — refreshing</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    disabled={coreSleeve.isRevalidating}
+                    onClick={coreSleeve.refetch}
+                    className="min-h-11 rounded-md border border-slate-300 px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700"
+                  >
+                    {coreSleeve.isRevalidating ? "Refreshing…" : "Refresh status"}
+                  </button>
+                  <Badge tone={coreSleeve.data.state === "ready" ? "ok" : "warn"}>
+                    {coreSleeve.data.state === "ready" ? "Ready" : "Cash"}
+                  </Badge>
+                </div>
               </div>
               <div className="mt-5 grid grid-cols-2 gap-x-6 sm:grid-cols-3">
                 <StatTile
@@ -426,12 +491,13 @@ export function StrategyPortfolioLens() {
                   <BlockerRow key={blocker.code} tone="warn" label={blocker.detail} />
                 ))}
               </div>
+              <CoreCandidateCoverageTable sleeve={coreSleeve.data} />
               <p className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
                 Demo only · buy only · no alpha signal. {coreSleeve.data.household_tax_caveat}
               </p>
               <CoreSleeveControl
                 sleeve={coreSleeve.data}
-                busy={busy}
+                busy={busy || coreSleeve.isRevalidating}
                 setBusy={setBusy}
                 onError={setActionError}
                 onUpdated={() => {
@@ -445,7 +511,10 @@ export function StrategyPortfolioLens() {
           ) : null}
           <AutomationControl
             overview={data}
-            coreSleeve={coreSleeve.data}
+            // A preserved core snapshot is visibly stale during revalidation
+            // and must not authorise the independent core activation lane.
+            // Alpha readiness remains available from `overview` on its own.
+            coreSleeve={coreSleeve.isRevalidating ? null : coreSleeve.data}
             onUpdated={() => {
               void overview.refetch();
               void coreSleeve.refetch();
