@@ -2974,8 +2974,8 @@ export interface CoreSleeveResponse {
     detail: string;
   }>;
   environment: "demo";
-  buy_only: true;
-  alpha_input_used: false;
+  buy_only: boolean;
+  alpha_input_used: boolean;
   household_tax_caveat: string;
 }
 
