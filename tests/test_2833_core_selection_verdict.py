@@ -17,6 +17,7 @@ from scripts.verify_2833_core_selection import (
 
 def _eligibility(instrument_id: int) -> Eligibility:
     return Eligibility(
+        proof_id=instrument_id,
         instrument_id=instrument_id,
         observed_at=datetime(2026, 8, 24, tzinfo=UTC),
         verdict="underlying",
@@ -56,6 +57,7 @@ def test_frozen_declaration_digest_is_intact() -> None:
     declaration = load_declaration(DECLARATION_PATH)
     assert declaration["schema_version"] == "core-selection-2833-v1"
     assert declaration["evidence_not_before"] == "2026-08-25T00:00:00Z"
+    assert declaration["eligibility_environment"] == "demo"
 
 
 def test_percentile_matches_continuous_n_minus_one_interpolation() -> None:
@@ -119,3 +121,17 @@ def test_unproved_product_cannot_pass_on_a_tight_spread() -> None:
     )
     iusa = next(row for row in result["candidates"] if row["instrument_id"] == 3075)
     assert "not_proved_real_long_x1" in iusa["refusals"]
+
+
+def test_x1_may_be_one_of_several_supported_leverages() -> None:
+    eligibilities = {instrument_id: _eligibility(instrument_id) for instrument_id in (3417, 3434, 3075)}
+    base = eligibilities[3434]
+    eligibilities[3434] = Eligibility(**{**base.__dict__, "leverage_values": (1, 2)})
+    result = evaluate(
+        _population(non_usd_id=3075),
+        eligibilities,
+        load_declaration(),
+        now=datetime(2026, 8, 30, tzinfo=UTC),
+    )
+    cspx = next(row for row in result["candidates"] if row["instrument_id"] == 3434)
+    assert "not_proved_real_long_x1" not in cspx["refusals"]

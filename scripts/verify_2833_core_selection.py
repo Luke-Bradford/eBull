@@ -23,11 +23,13 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.config import settings
+from app.services.operators import sole_operator_id
 from scripts._dev_guard import assert_dev_environment
 
 DECLARATION_PATH: Final = Path("docs/proposals/ta/2026-08-24-core-selection-declaration.json")
 # Filled from the exact declaration bytes before the prospective boundary.
-DECLARATION_SHA256: Final = "e935af30754a72b685097b650acb28a21017e1ba321e9a55fa903d771ea20649"
+DECLARATION_SHA256: Final = "5f3929e035c35d25254747512a3327adcec1863b9a5a5eb028706fcb95a66804"
+VERIFIER_PATH: Final = Path("scripts/verify_2833_core_selection.py")
 
 Verdict = Literal["PASS", "FAIL"]
 
@@ -44,6 +46,7 @@ class Observation:
 
 @dataclass(frozen=True)
 class Eligibility:
+    proof_id: int
     instrument_id: int
     observed_at: datetime | None
     verdict: str | None
@@ -64,6 +67,7 @@ class CandidateVerdict:
     verdict: Verdict
     refusals: tuple[str, ...]
     eligibility_observed_at: datetime | None
+    eligibility_proof_id: int | None
     eligibility_response_digest: str | None
 
 
@@ -189,7 +193,8 @@ def evaluate(
             eligibility.verdict != "underlying"
             or eligibility.settlement_type != "real"
             or eligibility.direction != "long"
-            or eligibility.leverage_values != (1,)
+            or eligibility.leverage_values is None
+            or 1 not in eligibility.leverage_values
             or eligibility.allow_open_position is not True
         ):
             refusals.append("not_proved_real_long_x1")
@@ -207,6 +212,7 @@ def evaluate(
                 verdict="FAIL" if refusals else "PASS",
                 refusals=tuple(sorted(set(refusals))),
                 eligibility_observed_at=None if eligibility is None else eligibility.observed_at,
+                eligibility_proof_id=None if eligibility is None else eligibility.proof_id,
                 eligibility_response_digest=None if eligibility is None else eligibility.response_digest,
             )
         )
@@ -235,10 +241,24 @@ ORDER BY o.instrument_id, o.sample_bucket
 
 _ELIGIBILITY_SQL: Final = """
 SELECT DISTINCT ON (instrument_id)
+       core_eligibility_proof_id AS proof_id,
        instrument_id, observed_at, verdict, settlement_type, direction,
        leverage_values, allow_open_position, response_digest
 FROM strategy_core_eligibility_proofs
 WHERE instrument_id = ANY(%(candidate_ids)s)
+  AND operator_id = %(operator_id)s
+  AND provider = %(provider)s
+  AND environment = %(environment)s
+  AND api_key_credential_id = (
+      SELECT id FROM broker_credentials
+      WHERE operator_id = %(operator_id)s AND provider = %(provider)s
+        AND environment = %(environment)s AND label = 'api_key' AND revoked_at IS NULL
+  )
+  AND user_key_credential_id = (
+      SELECT id FROM broker_credentials
+      WHERE operator_id = %(operator_id)s AND provider = %(provider)s
+        AND environment = %(environment)s AND label = 'user_key' AND revoked_at IS NULL
+  )
 ORDER BY instrument_id, observed_at DESC, core_eligibility_proof_id DESC
 """
 
@@ -247,23 +267,48 @@ def _git(*args: str) -> str:
     return subprocess.run(("git", *args), check=True, text=True, capture_output=True).stdout.strip()
 
 
+def assert_verifier_sources_clean() -> None:
+    """Refuse provenance that labels uncommitted verifier bytes as ``HEAD``."""
+    result = subprocess.run(
+        ("git", "diff", "--quiet", "HEAD", "--", str(DECLARATION_PATH), str(VERIFIER_PATH)),
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise RuntimeError("declaration or verifier differs from HEAD; commit before opening evidence")
+    raise RuntimeError(f"git diff failed with exit {result.returncode}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="write the completed canonical JSON result")
     args = parser.parse_args(argv)
+    assert_verifier_sources_clean()
     declaration = load_declaration()
     declaration_commit = _git("log", "-1", "--format=%H", "--", str(DECLARATION_PATH))
     execution_commit = _git("rev-parse", "HEAD")
     subprocess.run(("git", "merge-base", "--is-ancestor", declaration_commit, execution_commit), check=True)
     not_before = datetime.fromisoformat(str(declaration["evidence_not_before"]).replace("Z", "+00:00"))
     candidate_ids = [int(value) for value in declaration["candidate_ids"]]
+    provider = str(declaration["eligibility_provider"])
+    environment = str(declaration["eligibility_environment"])
     assert_dev_environment()
     with psycopg.connect(settings.database_url) as conn, conn.cursor(row_factory=dict_row) as cursor:
+        operator_id = sole_operator_id(conn)
         observation_rows = cursor.execute(
             _OBSERVATIONS_SQL,
             {"candidate_ids": candidate_ids, "not_before": not_before},
         ).fetchall()
-        eligibility_rows = cursor.execute(_ELIGIBILITY_SQL, {"candidate_ids": candidate_ids}).fetchall()
+        eligibility_rows = cursor.execute(
+            _ELIGIBILITY_SQL,
+            {
+                "candidate_ids": candidate_ids,
+                "operator_id": operator_id,
+                "provider": provider,
+                "environment": environment,
+            },
+        ).fetchall()
         now_row = cursor.execute("SELECT now() AS now").fetchone()
         if now_row is None:
             raise RuntimeError("database clock query returned no row")
@@ -271,6 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     observations = [Observation(**row) for row in observation_rows]
     eligibilities = {
         int(row["instrument_id"]): Eligibility(
+            proof_id=int(row["proof_id"]),
             instrument_id=int(row["instrument_id"]),
             observed_at=row["observed_at"],
             verdict=row["verdict"],
@@ -287,6 +333,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         declaration_commit=declaration_commit,
         execution_commit=execution_commit,
         measured_at=now,
+        eligibility_provider=provider,
+        eligibility_environment=environment,
+        query_sha256=hashlib.sha256((_OBSERVATIONS_SQL + "\0" + _ELIGIBILITY_SQL).encode()).hexdigest(),
+        verifier_sha256=_sha256(VERIFIER_PATH),
     )
     encoded = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False) + "\n"
     if args.output is not None:
@@ -307,6 +357,8 @@ __all__ = [
     "CandidateVerdict",
     "Eligibility",
     "Observation",
+    "VERIFIER_PATH",
+    "assert_verifier_sources_clean",
     "evaluate",
     "load_declaration",
     "main",

@@ -9,6 +9,9 @@
   "completion_rule": "evaluate only at or after 00:00Z following the fifth common UTC observation date",
   "descriptive_percentile": "0.50",
   "evidence_not_before": "2026-08-25T00:00:00Z",
+  "eligibility_account_rule": "sole operator, provider etoro, environment demo, and the current non-revoked api_key and user_key credential ids",
+  "eligibility_environment": "demo",
+  "eligibility_provider": "etoro",
   "fx_rule": "every included observed row must have conversion_rate exactly 1; otherwise the candidate fails fx_unmodelled",
   "issue": 2833,
   "missingness_rule": "within each candidate/date interval from its first through last observed hourly bucket, every hourly bucket must exist and be observed; otherwise the candidate fails incomplete_population",
@@ -19,5 +22,6 @@
   "required_common_utc_dates": 5,
   "schema_version": "core-selection-2833-v1",
   "selection_rule": "among passing candidates choose the lowest p75 full round-trip spread bps; break an exact tie by ascending instrument_id",
-  "spread_metric": "strategy_core_quote_observations.spread_bps, the full bid-ask spread divided by midpoint in basis points"
+  "spread_metric": "strategy_core_quote_observations.spread_bps, the full bid-ask spread divided by midpoint in basis points",
+  "supersedes_declaration_sha256": "e935af30754a72b685097b650acb28a21017e1ba321e9a55fa903d771ea20649"
 }
