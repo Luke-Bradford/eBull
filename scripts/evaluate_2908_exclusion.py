@@ -9,8 +9,11 @@ import json
 import subprocess
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
+import psycopg
+
+from app.config import settings
 from app.services.r6_exclusion_trial import (
     HALF_SPREAD,
     WINDOW_END,
@@ -24,6 +27,32 @@ from app.services.r6_exclusion_trial import (
     validate_factor,
 )
 from app.services.r6_pit_bundle import load_r6_pit_bundle
+from app.services.result_ledger import HoldoutAccess, record_holdout_access
+
+STRATEGY_ID: Final = "r6-dilution-exclusion"
+STRATEGY_VERSION: Final = "r6-2908-exclusion-v1"
+SYNTHETIC_CONTROL: Final = "not_applicable"
+SYNTHETIC_CONTROL_REASON: Final = (
+    "this is an annually formed cross-sectional exclusion, not an entry chosen from alternative eligible bars; "
+    "the identical annual full-population 1/N portfolio and literal buy-and-hold are its declared controls"
+)
+
+
+def _record_access() -> int:
+    with psycopg.connect(settings.database_url) as conn:
+        access_id = record_holdout_access(
+            conn,
+            HoldoutAccess(
+                strategy_id=STRATEGY_ID,
+                strategy_version=STRATEGY_VERSION,
+                result_version=None,
+                access_kind="read",
+                accessed_by="scripts/evaluate_2908_exclusion.py",
+                purpose="open every outcome in preregistered R6 arm #2908",
+            ),
+        )
+        conn.commit()
+    return access_id
 
 
 def _sha256(path: Path) -> str:
@@ -71,6 +100,7 @@ def main() -> int:
         raise RuntimeError("global-q source digest moved")
     _verify_mirror(args.price_mirror, args.price_mirror_commit)
     bundle = load_r6_pit_bundle(args.manifest, expected_manifest_sha256=args.manifest_sha256)
+    access_id = _record_access()
     prices = load_required_prices(bundle, args.price_mirror / "Data" / "Day")
     validation = validate_factor(constructed_nsi_factor(bundle, prices), read_global_q_nsi(args.global_q))
     if not validation.passed:
@@ -137,6 +167,7 @@ def main() -> int:
         json.dumps(
             {
                 "factor_validation": dataclasses.asdict(validation),
+                "holdout_access_id": access_id,
                 "haircut_rule": (
                     "scale positive gross excess vs buy-and-hold; never rescue non-positive gross excess; "
                     "subtract full strategy cost drag"

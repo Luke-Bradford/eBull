@@ -9,6 +9,9 @@ import json
 import subprocess
 from pathlib import Path
 
+import psycopg
+
+from app.config import settings
 from app.services.r6_exclusion_trial import (
     constructed_nsi_factor,
     load_required_prices,
@@ -16,6 +19,27 @@ from app.services.r6_exclusion_trial import (
     validate_factor,
 )
 from app.services.r6_pit_bundle import load_r6_pit_bundle
+from app.services.result_ledger import HoldoutAccess, record_holdout_access
+
+STRATEGY_ID = "r6-dilution-exclusion"
+STRATEGY_VERSION = "r6-2908-exclusion-v1"
+
+
+def _record_access() -> int:
+    with psycopg.connect(settings.database_url) as conn:
+        access_id = record_holdout_access(
+            conn,
+            HoldoutAccess(
+                strategy_id=STRATEGY_ID,
+                strategy_version=STRATEGY_VERSION,
+                result_version=None,
+                access_kind="read",
+                accessed_by="scripts/report_2908_factor_validation.py",
+                purpose="open #2908's preregistered published-factor identity gate",
+            ),
+        )
+        conn.commit()
+    return access_id
 
 
 def _sha256(path: Path) -> str:
@@ -53,6 +77,7 @@ def main() -> int:
         raise RuntimeError("global-q source digest moved")
     _verify_mirror(args.price_mirror, args.price_mirror_commit)
     bundle = load_r6_pit_bundle(args.manifest, expected_manifest_sha256=args.manifest_sha256)
+    access_id = _record_access()
     prices = load_required_prices(bundle, args.price_mirror / "Data" / "Day")
     ours = constructed_nsi_factor(bundle, prices)
     reference = read_global_q_nsi(args.global_q)
@@ -62,6 +87,7 @@ def main() -> int:
             {
                 "factor_validation": dataclasses.asdict(result),
                 "global_q_sha256": args.global_q_sha256,
+                "holdout_access_id": access_id,
                 "invalid_price_rows_skipped": sum(series.invalid_rows for series in prices.values()),
                 "manifest_sha256": args.manifest_sha256,
                 "price_mirror_commit": args.price_mirror_commit,
