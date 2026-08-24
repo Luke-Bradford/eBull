@@ -58,6 +58,15 @@ _VALID_ROW: dict[str, Any] = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _approved_instrument_for_pre_2833_writer_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests isolate mandate/eligibility behavior, not #2833 selection."""
+    monkeypatch.setattr(
+        "app.services.strategy_core_mandate.require_selected_core_instrument",
+        lambda _conn, *, instrument_id: instrument_id,
+    )
+
+
 def _migration_precondition_block() -> LiteralString:
     """sql/344's superseded-version guard, read from the SHIPPED file.
 

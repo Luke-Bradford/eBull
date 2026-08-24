@@ -76,6 +76,10 @@ from app.services.strategy_core_mandate import (
     configure_core_mandate,
     load_core_mandate,
 )
+from app.services.strategy_core_selection import (
+    CoreSelectionError,
+    load_core_selection,
+)
 from app.services.strategy_live_gate import (
     REQUIRED_KILL_DRILLS,
     LiveGateReport,
@@ -960,6 +964,47 @@ class CoreMandateResponse(BaseModel):
     rebalance_band_pct: Decimal | None = None
     min_rebalance_amount: Decimal | None = None
     policy_version: str | None = None
+
+
+class CoreCandidateCoverageResponse(BaseModel):
+    instrument_id: int
+    symbol: str
+    observed_trading_days: int
+    first_observed_date: date | None
+    last_observed_date: date | None
+
+
+class CoreSleeveBlockerResponse(BaseModel):
+    code: Literal[
+        "core_evidence_collecting",
+        "core_candidates_missing",
+        "core_selection_invalid",
+        "core_mandate_unconfigured",
+        "core_mandate_disabled",
+        "core_submitter_unavailable",
+    ]
+    detail: str
+
+
+class CoreSleeveResponse(BaseModel):
+    state: Literal["evidence_collecting", "ready", "unavailable"]
+    selected_instrument_id: int | None
+    selected_symbol: str | None
+    evidence_ref: str | None
+    required_trading_days: int
+    observed_trading_days: int
+    max_cost_bps: int
+    candidates: list[CoreCandidateCoverageResponse]
+    mandate: CoreMandateResponse
+    can_configure: bool
+    can_rebalance: bool
+    blockers: list[CoreSleeveBlockerResponse]
+    environment: Literal["demo"] = "demo"
+    buy_only: bool = True
+    alpha_input_used: bool = False
+    household_tax_caveat: str = (
+        "A UK ISA at another broker tax-dominates this engine sleeve for eligible household capital."
+    )
 
 
 def _core_mandate_response(mandate: CoreMandate | None) -> CoreMandateResponse:
@@ -3393,6 +3438,91 @@ def read_core_mandate(
     return _core_mandate_response(load_core_mandate(conn))
 
 
+@router.get("/core-sleeve", response_model=CoreSleeveResponse, status_code=status.HTTP_200_OK)
+def read_core_sleeve(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CoreSleeveResponse:
+    """Canonical operator state for the deterministic fallback sleeve."""
+    selection = load_core_selection(conn)
+    mandate = load_core_mandate(conn)
+    blockers: list[CoreSleeveBlockerResponse] = []
+    if not selection.ready:
+        if selection.configuration_error is not None:
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_selection_invalid",
+                    detail=selection.configuration_error,
+                )
+            )
+        elif selection.missing_candidate_ids:
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_candidates_missing",
+                    detail=(
+                        "#2833 cannot collect evidence because candidate instrument ids are missing: "
+                        + ", ".join(str(value) for value in selection.missing_candidate_ids)
+                        + "."
+                    ),
+                )
+            )
+        else:
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_evidence_collecting",
+                    detail=(
+                        f"#2833 has {selection.observed_trading_days} of "
+                        f"{selection.required_trading_days} required trading days; cash remains the fallback."
+                    ),
+                )
+            )
+    if mandate is None:
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_mandate_unconfigured",
+                detail="No core/cash mandate has been configured.",
+            )
+        )
+    elif not mandate.enabled:
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_mandate_disabled",
+                detail="The current core/cash mandate is disabled.",
+            )
+        )
+    # This first product slice intentionally exposes no acting endpoint. Keeping
+    # this explicit prevents a ready mandate being presented as executable while
+    # the idempotent submitter remains under construction.
+    blockers.append(
+        CoreSleeveBlockerResponse(
+            code="core_submitter_unavailable",
+            detail="Attended demo rebalance submission is not deployed yet.",
+        )
+    )
+    return CoreSleeveResponse(
+        state=selection.state,
+        selected_instrument_id=selection.selected_instrument_id,
+        selected_symbol=selection.selected_symbol,
+        evidence_ref=selection.evidence_ref,
+        required_trading_days=selection.required_trading_days,
+        observed_trading_days=selection.observed_trading_days,
+        max_cost_bps=selection.max_cost_bps,
+        candidates=[
+            CoreCandidateCoverageResponse(
+                instrument_id=candidate.instrument_id,
+                symbol=candidate.symbol,
+                observed_trading_days=candidate.observed_trading_days,
+                first_observed_date=candidate.first_observed_date,
+                last_observed_date=candidate.last_observed_date,
+            )
+            for candidate in selection.candidates
+        ],
+        mandate=_core_mandate_response(mandate),
+        can_configure=selection.ready,
+        can_rebalance=False,
+        blockers=blockers,
+    )
+
+
 @router.put("/core-mandate", response_model=CoreMandateResponse, status_code=status.HTTP_200_OK)
 def update_core_mandate(
     body: CoreMandateUpdateRequest,
@@ -3455,7 +3585,7 @@ def update_core_mandate(
                 provider=provider,
                 environment=environment,
             )
-    except (CoreMandateError, CoreEligibilityError) as exc:
+    except (CoreMandateError, CoreEligibilityError, CoreSelectionError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _core_mandate_response(mandate)
 

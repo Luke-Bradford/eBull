@@ -30,6 +30,7 @@ from uuid import UUID
 import psycopg
 
 from app.services.strategy_core_eligibility import require_core_eligibility
+from app.services.strategy_core_selection import require_selected_core_instrument
 
 # v2 as of #2670, which made both band triggers REACHABLE rather than merely in
 # range.  Bumped even though the table held 0 rows: a version denotes a rule set,
@@ -374,6 +375,7 @@ def configure_core_mandate(
         # authorisation must not be removable by an interpreter flag.
         if values.core_instrument_id is None:
             raise CoreMandateError("an enabled core mandate must name a core instrument")
+        require_selected_core_instrument(conn, instrument_id=values.core_instrument_id)
         require_core_eligibility(
             conn,
             instrument_id=values.core_instrument_id,

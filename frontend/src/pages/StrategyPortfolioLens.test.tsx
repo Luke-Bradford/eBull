@@ -95,6 +95,29 @@ const BLOCKED = {
   strategies: [],
 } as unknown as StrategyOverviewResponse;
 
+const CORE_COLLECTING = {
+  state: "evidence_collecting",
+  selected_instrument_id: null,
+  selected_symbol: null,
+  evidence_ref: null,
+  required_trading_days: 5,
+  observed_trading_days: 1,
+  max_cost_bps: 60,
+  candidates: [],
+  mandate: { configured: false },
+  can_configure: false,
+  can_rebalance: false,
+  blockers: [
+    { code: "core_evidence_collecting", detail: "#2833 has 1 of 5 required trading days; cash remains the fallback." },
+    { code: "core_mandate_unconfigured", detail: "No core/cash mandate has been configured." },
+    { code: "core_submitter_unavailable", detail: "Attended demo rebalance submission is not deployed yet." },
+  ],
+  environment: "demo",
+  buy_only: true,
+  alpha_input_used: false,
+  household_tax_caveat: "A UK ISA at another broker tax-dominates this engine sleeve for eligible household capital.",
+} as const;
+
 function renderLens() {
   return render(
     <MemoryRouter>
@@ -107,11 +130,21 @@ describe("StrategyPortfolioLens", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(strategiesApi, "fetchStrategyOverview").mockResolvedValue(BLOCKED);
+    vi.spyOn(strategiesApi, "fetchCoreSleeve").mockResolvedValue(CORE_COLLECTING as never);
     vi.spyOn(strategiesApi, "fetchStrategyOwnedPositions").mockResolvedValue({
       positions: [],
       live_quote_instrument_ids: [],
     } as never);
     vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({ points: [] } as never);
+  });
+
+  it("shows cash as the evidence-gated fallback instead of an approved strategy", async () => {
+    renderLens();
+    expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
+    expect(screen.getByText("1 / 5")).toBeInTheDocument();
+    expect(screen.getByText("No sleeve adopted")).toBeInTheDocument();
+    expect(screen.getByText(/cash remains the fallback/i)).toBeInTheDocument();
+    expect(screen.getByText(/UK ISA at another broker tax-dominates/i)).toBeInTheDocument();
   });
 
   it("states what is blocking as facts, and offers the control for the one that has one", async () => {

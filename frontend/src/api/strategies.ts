@@ -2,6 +2,7 @@ import { apiFetch } from "@/api/client";
 import type {
   AllocationUpdateRequest,
   AllocationUpdateResponse,
+  CoreSleeveResponse,
   FiredSignalsResponse,
   StrategyAdvanceResponse,
   StrategyOperatorAction,
@@ -16,6 +17,10 @@ import type {
 
 export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
   return apiFetch("/strategies/overview");
+}
+
+export function fetchCoreSleeve(): Promise<CoreSleeveResponse> {
+  return apiFetch("/strategies/core-sleeve");
 }
 
 export function requestStrategyEvidenceRefresh(): Promise<StrategyEvidenceRefreshResponse> {
