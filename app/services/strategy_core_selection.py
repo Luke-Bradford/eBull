@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, Final, Literal
 
 import psycopg
@@ -11,6 +11,10 @@ import psycopg
 CORE_SELECTION_CANDIDATE_IDS: Final = (3417, 3434, 3075)
 CORE_SELECTION_REQUIRED_TRADING_DAYS: Final = 5
 CORE_SELECTION_MAX_COST_BPS: Final = 60
+# #2833's corrected prospective declaration excludes the already-seen
+# 2026-08-24 observations.  The operator surface must count the same population
+# the sealed verifier will open, or it reports progress that is not evidence.
+CORE_SELECTION_EVIDENCE_NOT_BEFORE: Final = datetime(2026, 8, 25, tzinfo=UTC)
 
 # Populated only by the reviewed #2833 verdict. Choosing here before the
 # prospective five-day gate completes would be adoption before measurement.
@@ -52,15 +56,27 @@ class CoreSelection:
 
 
 _COVERAGE_SQL: Final = """
+WITH candidate_dates AS (
+    SELECT o.instrument_id,
+           (o.sample_bucket AT TIME ZONE 'UTC')::date AS observation_date
+    FROM strategy_core_quote_observations o
+    WHERE o.instrument_id = ANY(%s)
+      AND o.sample_bucket >= %s
+      AND o.observation_status = 'observed'
+    GROUP BY o.instrument_id, (o.sample_bucket AT TIME ZONE 'UTC')::date
+), common_dates AS (
+    SELECT observation_date
+    FROM candidate_dates
+    GROUP BY observation_date
+    HAVING count(*) = cardinality(%s::bigint[])
+)
 SELECT i.instrument_id, i.symbol,
-       count(DISTINCT (o.observed_at AT TIME ZONE 'UTC')::date)
-           FILTER (WHERE o.observation_status = 'observed') AS observed_days,
-       min((o.observed_at AT TIME ZONE 'UTC')::date)
-           FILTER (WHERE o.observation_status = 'observed') AS first_observed_date,
-       max((o.observed_at AT TIME ZONE 'UTC')::date)
-           FILTER (WHERE o.observation_status = 'observed') AS last_observed_date
+       count(d.observation_date) AS observed_days,
+       min(d.observation_date) AS first_observed_date,
+       max(d.observation_date) AS last_observed_date,
+       (SELECT count(*) FROM common_dates) AS common_observed_days
 FROM instruments i
-LEFT JOIN strategy_core_quote_observations o ON o.instrument_id = i.instrument_id
+LEFT JOIN candidate_dates d ON d.instrument_id = i.instrument_id
 WHERE i.instrument_id = ANY(%s)
 GROUP BY i.instrument_id, i.symbol
 ORDER BY array_position(%s::bigint[], i.instrument_id)
@@ -71,7 +87,13 @@ def load_core_selection(conn: psycopg.Connection[Any]) -> CoreSelection:
     """Return reviewed selection and descriptive coverage, never infer a verdict."""
     rows = conn.execute(
         _COVERAGE_SQL,
-        (list(CORE_SELECTION_CANDIDATE_IDS), list(CORE_SELECTION_CANDIDATE_IDS)),
+        (
+            list(CORE_SELECTION_CANDIDATE_IDS),
+            CORE_SELECTION_EVIDENCE_NOT_BEFORE,
+            list(CORE_SELECTION_CANDIDATE_IDS),
+            list(CORE_SELECTION_CANDIDATE_IDS),
+            list(CORE_SELECTION_CANDIDATE_IDS),
+        ),
     ).fetchall()
     candidates = tuple(
         CoreCandidateCoverage(
@@ -87,10 +109,10 @@ def load_core_selection(conn: psycopg.Connection[Any]) -> CoreSelection:
     missing_candidate_ids = tuple(
         instrument_id for instrument_id in CORE_SELECTION_CANDIDATE_IDS if instrument_id not in coverage_by_id
     )
-    observed_days = min(
-        coverage_by_id[instrument_id].observed_trading_days if instrument_id in coverage_by_id else 0
-        for instrument_id in CORE_SELECTION_CANDIDATE_IDS
-    )
+    # The verdict window is the first five dates observed by EVERY candidate,
+    # not the minimum of three independent date counts.  The latter can reach
+    # 5/5 while the common-date intersection is still only four days.
+    observed_days = int(rows[0][5]) if rows and not missing_candidate_ids else 0
     selected = SELECTED_CORE_INSTRUMENT_ID
     selected_candidate = None if selected is None else coverage_by_id.get(selected)
     evidence_ref = SELECTED_CORE_EVIDENCE_REF
@@ -140,6 +162,7 @@ def require_selected_core_instrument(conn: psycopg.Connection[Any], *, instrumen
 
 __all__ = [
     "CORE_SELECTION_CANDIDATE_IDS",
+    "CORE_SELECTION_EVIDENCE_NOT_BEFORE",
     "CORE_SELECTION_MAX_COST_BPS",
     "CORE_SELECTION_REQUIRED_TRADING_DAYS",
     "CoreCandidateCoverage",
