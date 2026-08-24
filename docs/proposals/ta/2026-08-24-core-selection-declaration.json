@@ -1,0 +1,23 @@
+{
+  "all_in_cost_rule": "p75_full_round_trip_spread_bps; documented entry-sizing conversion markup is 0 bps; carry is structural zero only for a real long at x1",
+  "binding_percentile": "0.75",
+  "candidate_ids": [
+    3417,
+    3434,
+    3075
+  ],
+  "completion_rule": "evaluate only at or after 00:00Z following the fifth common UTC observation date",
+  "descriptive_percentile": "0.50",
+  "evidence_not_before": "2026-08-25T00:00:00Z",
+  "fx_rule": "every included observed row must have conversion_rate exactly 1; otherwise the candidate fails fx_unmodelled",
+  "issue": 2833,
+  "missingness_rule": "within each candidate/date interval from its first through last observed hourly bucket, every hourly bucket must exist and be observed; otherwise the candidate fails incomplete_population",
+  "no_pass_action": "cash",
+  "pass_bar_bps": "60",
+  "percentile_method": "continuous linear interpolation at (n - 1) * p, matching PostgreSQL percentile_cont",
+  "population_rule": "all immutable hourly rows in each candidate/date interval on the first five common UTC dates at or after evidence_not_before",
+  "required_common_utc_dates": 5,
+  "schema_version": "core-selection-2833-v1",
+  "selection_rule": "among passing candidates choose the lowest p75 full round-trip spread bps; break an exact tie by ascending instrument_id",
+  "spread_metric": "strategy_core_quote_observations.spread_bps, the full bid-ask spread divided by midpoint in basis points"
+}
