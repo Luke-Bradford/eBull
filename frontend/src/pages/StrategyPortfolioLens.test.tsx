@@ -1,11 +1,11 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as configApi from "@/api/config";
 import * as strategiesApi from "@/api/strategies";
-import type { StrategyOverviewResponse } from "@/api/types";
+import type { CoreSleeveResponse, StrategyOverviewResponse } from "@/api/types";
 import { BENCHMARK_REFUSALS } from "@/components/strategies/__fixtures__/benchmarkRefusals";
 import { StrategiesHubPage } from "@/pages/StrategiesHubPage";
 import { StrategyPortfolioLens } from "@/pages/StrategyPortfolioLens";
@@ -104,7 +104,29 @@ const CORE_COLLECTING = {
   required_trading_days: 5,
   observed_trading_days: 1,
   max_cost_bps: 60,
-  candidates: [],
+  candidates: [
+    {
+      instrument_id: 3417,
+      symbol: "SPY.RTH",
+      observed_trading_days: 1,
+      first_observed_date: "2026-08-25",
+      last_observed_date: "2026-08-25",
+    },
+    {
+      instrument_id: 3434,
+      symbol: "CSPX.L",
+      observed_trading_days: 0,
+      first_observed_date: null,
+      last_observed_date: null,
+    },
+    {
+      instrument_id: 3075,
+      symbol: "IUSA.L",
+      observed_trading_days: 0,
+      first_observed_date: null,
+      last_observed_date: null,
+    },
+  ],
   mandate: { configured: false },
   can_configure: false,
   can_enable_pool: false,
@@ -169,10 +191,90 @@ describe("StrategyPortfolioLens", () => {
   it("shows cash as the evidence-gated fallback instead of an approved strategy", async () => {
     renderLens();
     expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
-    expect(screen.getByText("1 / 5")).toBeInTheDocument();
+    expect(screen.getAllByText("1 / 5")).toHaveLength(2);
     expect(screen.getByText("No sleeve adopted")).toBeInTheDocument();
     expect(screen.getByText(/cash remains the fallback/i)).toBeInTheDocument();
     expect(screen.getByText(/UK ISA at another broker tax-dominates/i)).toBeInTheDocument();
+    const coverage = screen.getByRole("table", { name: "Core candidate evidence coverage" });
+    expect(within(coverage).getByText("SPY.RTH")).toBeInTheDocument();
+    expect(within(coverage).getByText("25 Aug 2026 – 25 Aug 2026")).toBeInTheDocument();
+    expect(within(coverage).getAllByText("Awaiting first date")).toHaveLength(2);
+  });
+
+  it("refreshes the evidence status without hiding the current coverage", async () => {
+    const refreshed = {
+      ...CORE_COLLECTING,
+      observed_trading_days: 2,
+      candidates: CORE_COLLECTING.candidates.map((candidate) => ({
+        ...candidate,
+        observed_trading_days: 2,
+        first_observed_date: "2026-08-25",
+        last_observed_date: "2026-08-26",
+      })),
+      blockers: [{
+        code: "core_evidence_collecting",
+        detail: "#2833 has 2 of 5 required trading days; cash remains the fallback.",
+      }],
+    } as unknown as CoreSleeveResponse;
+    let finishRefresh!: (value: CoreSleeveResponse) => void;
+    vi.mocked(strategiesApi.fetchCoreSleeve)
+      .mockResolvedValueOnce(CORE_COLLECTING as never)
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        finishRefresh = resolve;
+      }));
+    renderLens();
+
+    await waitFor(() => expect(screen.getAllByText("1 / 5")).toHaveLength(2));
+    await userEvent.click(screen.getByRole("button", { name: "Refresh status" }));
+
+    expect(screen.getByRole("button", { name: "Refreshing…" })).toBeDisabled();
+    expect(screen.getByRole("table", { name: "Core candidate evidence coverage" })).toBeInTheDocument();
+    expect(screen.getAllByText("1 / 5")).toHaveLength(2);
+    await act(async () => finishRefresh(refreshed));
+    await waitFor(() => expect(strategiesApi.fetchCoreSleeve).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getAllByText("2 / 5")).toHaveLength(4));
+    const coverage = screen.getByRole("table", { name: "Core candidate evidence coverage" });
+    expect(within(coverage).getAllByText("25 Aug 2026 – 26 Aug 2026")).toHaveLength(3);
+  });
+
+  it("marks preserved status stale and withholds ready actions while refreshing", async () => {
+    let finishRefresh!: (value: CoreSleeveResponse) => void;
+    vi.mocked(strategiesApi.fetchCoreSleeve)
+      .mockResolvedValueOnce(CORE_READY as never)
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        finishRefresh = resolve;
+      }));
+    renderLens();
+
+    const rebalance = await screen.findByRole("button", { name: "Rebalance demo now" });
+    await userEvent.selectOptions(screen.getByLabelText("Risk profile"), "balanced");
+    const entries = screen.getByRole("checkbox", { name: "Allow new automated entries" });
+    expect(rebalance).not.toBeDisabled();
+    expect(entries).not.toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Refresh status" }));
+
+    expect(screen.getByText("Status is stale — refreshing")).toBeInTheDocument();
+    expect(rebalance).toBeDisabled();
+    expect(entries).toBeDisabled();
+    await act(async () => finishRefresh(CORE_READY as unknown as CoreSleeveResponse));
+    await waitFor(() => expect(rebalance).not.toBeDisabled());
+    expect(entries).not.toBeDisabled();
+  });
+
+  it("renders an actionable empty state when candidate coverage is unavailable", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue({
+      ...CORE_COLLECTING,
+      state: "unavailable",
+      candidates: [],
+      blockers: [{
+        code: "core_candidates_missing",
+        detail: "#2833 cannot collect evidence because candidate instrument ids are missing: 3417.",
+      }],
+    } as never);
+    renderLens();
+
+    expect(await screen.findByText(/candidate instrument ids are missing: 3417/i)).toBeInTheDocument();
+    expect(screen.getByText(/No candidate coverage is available; the blocker above names what must be restored/i)).toBeInTheDocument();
   });
 
   it("lets the operator save a disabled draft while evidence is still collecting", async () => {
