@@ -50,6 +50,7 @@ from app.services.runtime_config import (
     insert_runtime_config_audit_row,
     write_kill_switch_audit,
 )
+from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
 
 if TYPE_CHECKING:
     # layer_types sits at the bottom of the orchestrator import graph, but
@@ -898,8 +899,6 @@ def activate_kill_switch(
         # same key transactionally makes emergency activation and mutation a
         # single ordered history: after activation commits, no core order can
         # still pass a pre-activation check and reach the broker.
-        from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
-
         conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SELECT is_active FROM kill_switch WHERE id = TRUE FOR UPDATE")
@@ -972,8 +971,6 @@ def deactivate_kill_switch(
         # Use the same advisory-before-row order as activation. The database
         # trigger also takes this key on UPDATE, so taking the row first here
         # would deadlock a concurrent emergency activation.
-        from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
-
         conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SELECT is_active FROM kill_switch WHERE id = TRUE FOR UPDATE")

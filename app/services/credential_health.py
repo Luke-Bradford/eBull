@@ -34,6 +34,8 @@ import psycopg
 import psycopg.rows
 from psycopg_pool import ConnectionPool, PoolTimeout
 
+from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
+
 logger = logging.getLogger(__name__)
 
 
@@ -287,8 +289,6 @@ def _do_health_transition(
     # trigger. Take its advisory key before the explicit credential row lock;
     # otherwise a health writer can hold the row while waiting for a core
     # submission that already holds the advisory key and needs that same row.
-    from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
-
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(

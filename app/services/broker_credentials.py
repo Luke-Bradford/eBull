@@ -42,6 +42,7 @@ from app.security.secrets_crypto import (
     decrypt,
     encrypt,
 )
+from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -315,8 +316,6 @@ def revoke_credential(
     # A core mutation holds this key through the broker response. Credential
     # revocation/replacement takes the same key transactionally so decrypted
     # credentials cannot become revoked between durable authority and HTTP I/O.
-    from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
-
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
     with conn.cursor() as cur:
         cur.execute(

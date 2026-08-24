@@ -71,6 +71,15 @@ logger = logging.getLogger(__name__)
 # reach here. HOLD does not produce broker calls at all.
 _ALLOWED_PLACE_ORDER_ACTIONS = frozenset({"BUY", "ADD"})
 
+
+def _exact_json_decimal(value: Decimal) -> float:
+    """Return a JSON-native number only when its emitted decimal is unchanged."""
+    encoded = float(value)
+    if Decimal(str(encoded)) != value:
+        raise BrokerOrderSubmissionError("core order amount cannot be represented exactly in the broker JSON payload")
+    return encoded
+
+
 # Map eToro statusID values to our OrderStatus.
 # Populated from documented API responses. Edge-case status values
 # may need live validation — unknown statuses default to "pending".
@@ -426,7 +435,7 @@ class EtoroBrokerProvider(BrokerProvider):
             "settlementType": "real",
             "orderType": "mkt",
             "leverage": 1,
-            "amount": float(order.amount),
+            "amount": _exact_json_decimal(order.amount),
             "orderCurrency": "usd",
         }
         try:

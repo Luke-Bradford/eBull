@@ -725,6 +725,16 @@ class TestDemoCoreOrder:
         assert result.response_digest == "0caf67206160f1c97554b988d9ff09aa6bec3813df377e1fc4aeb8f2f231c513"
         assert not hasattr(result, "token")
 
+    def test_writer_refuses_an_amount_that_would_change_in_json(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            with pytest.raises(BrokerOrderSubmissionError, match="represented exactly"):
+                broker.place_demo_core_order(
+                    BrokerCoreOrder(instrument_id=3417, amount=Decimal("9007199254.740991")),
+                    request_id=uuid4(),
+                )
+            broker._http_write.post.assert_not_called()
+
     def test_real_credentials_cannot_select_the_core_writer(self) -> None:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:
             with pytest.raises(BrokerOrderSubmissionError, match="demo credentials"):
