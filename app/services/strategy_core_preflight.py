@@ -15,15 +15,14 @@ broker minimum, broker rejection -- stays with step 3b-2.  The split is on "does
 this need a broker", which is the line between a refusal provable in a pure test
 and one observable only against a live account.
 
-⚠⚠ AUTHORISES NOTHING TODAY.  No caller in ``app/`` or ``scripts/``; it writes
-nothing.  Named plainly, as every step of this arc has been, because #2437's R4
-comment records *a control that exists, is tested, and sits on a path the decision
-does not take* nine times over on this ticket alone.
+The attended core executor now calls this preflight after the stored-intent gate.
+It writes nothing and authorises nothing alone; the executor composes its verdict
+with broker preflight before durable order authority can be recorded.
 
 ⚠ NOT the complete vocabulary either.  It is the complete DB-and-clock vocabulary.
-A reader who takes this module plus step 3a for the whole set will conclude the
-core arm checks the broker's own view of the account before submitting.  It does
-not, YET.
+A reader who takes this module plus step 3a for the whole set will miss the
+broker's own view of the account. The executor's next layer,
+``strategy_core_broker_preflight``, performs those reads.
 
 Spec: ``docs/proposals/ta/2026-08-14-core-submission-preflight.md``
 """

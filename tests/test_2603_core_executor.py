@@ -23,6 +23,7 @@ from app.services.broker_credentials import CredentialInUse, revoke_credential
 from app.services.strategy_core_executor import (
     CoreExecutionResult,
     CoreResumeAuthority,
+    _observe_core_portfolio_drawdown,
     execute_core_rebalance,
     resume_core_submission,
 )
@@ -77,7 +78,11 @@ class FakeBroker:
 
     def get_account_risk_snapshot(self) -> object:
         self.events.append("read_snapshot")
-        return SimpleNamespace(available_cash=Decimal("500"))
+        return SimpleNamespace(
+            available_cash=Decimal("500"),
+            equity=Decimal("1000"),
+            observed_at=datetime.now(UTC),
+        )
 
     def place_demo_core_order(self, _order: object, *, request_id: UUID) -> BrokerCoreOrderSubmission:
         assert request_id is not None
@@ -110,6 +115,7 @@ def _run(
     snapshot_observed_at: datetime | None = None,
     clock: Callable[[], datetime] | None = None,
     binding_proof_id: int = 7,
+    drawdown_refusal: str | None = None,
 ) -> tuple[CoreExecutionResult, list[str]]:
     events: list[str] = []
     conn = FakeConn(events)
@@ -133,16 +139,26 @@ def _run(
         amount=Decimal("49.9"),
         snapshot_observed_at=snapshot_observed_at or datetime.now(UTC),
         max_account_risk_age_seconds=30,
+        account_equity=Decimal("1000"),
     )
-    capital_authority = SimpleNamespace(enabled=True)
+    capital_authority = SimpleNamespace(enabled=True, pool_event_id=5)
+    paper_pool = SimpleNamespace(
+        event_id=5,
+        mandate=SimpleNamespace(max_portfolio_drawdown_pct=Decimal("15")),
+    )
     capital_usage = SimpleNamespace(
         core_market_value=Decimal("500"),
         headroom=SimpleNamespace(within_bound=True, remaining=Decimal("500")),
     )
 
+    def observe_drawdown(*_args: object, **_kwargs: object) -> str | None:
+        events.append("drawdown_observation")
+        return drawdown_refusal
+
     with (
         patch("app.services.strategy_core_executor.load_core_mandate", return_value=mandate),
         patch("app.services.strategy_core_executor.load_engine_capital_authority", return_value=capital_authority),
+        patch("app.services.strategy_core_executor.load_paper_pool", return_value=paper_pool),
         patch("app.services.strategy_core_executor.resolve_engine_capital_usage", return_value=capital_usage),
         patch("app.services.strategy_core_executor.require_selected_core_instrument"),
         patch("app.services.strategy_core_executor.require_core_eligibility", side_effect=[proof, binding_proof]),
@@ -153,6 +169,10 @@ def _run(
         patch("app.services.strategy_core_executor.record_core_rebalance_intent", return_value=intent),
         patch("app.services.strategy_core_executor.admit_core_rebalance_intent", return_value=admission),
         patch("app.services.strategy_core_executor.preflight_core_submission", return_value=db_preflight),
+        patch(
+            "app.services.strategy_core_executor._observe_core_portfolio_drawdown",
+            side_effect=observe_drawdown,
+        ),
         patch(
             "app.services.strategy_core_executor.link_strategy_order",
             side_effect=lambda *_a, **_k: events.append("link"),
@@ -169,6 +189,62 @@ def _run(
             **kwargs,  # type: ignore[arg-type]
         )
     return result, events
+
+
+def test_core_drawdown_observation_refuses_at_the_portfolio_limit() -> None:
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = (
+        Decimal("1000"),
+        datetime(2026, 8, 24, 11, 59, tzinfo=UTC),
+    )
+
+    refusal = _observe_core_portfolio_drawdown(
+        conn,
+        equity=Decimal("850"),
+        observed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+        max_drawdown_pct=Decimal("15"),
+    )
+
+    assert refusal == "portfolio_drawdown_limit"
+    assert any("INSERT INTO strategy_paper_account_risk_state" in call.args[0] for call in conn.execute.call_args_list)
+
+
+def test_core_drawdown_observation_refuses_an_older_broker_snapshot() -> None:
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = (
+        Decimal("1000"),
+        datetime(2026, 8, 24, 12, 1, tzinfo=UTC),
+    )
+
+    refusal = _observe_core_portfolio_drawdown(
+        conn,
+        equity=Decimal("999"),
+        observed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+        max_drawdown_pct=Decimal("15"),
+    )
+
+    assert refusal == "core_account_risk_stale"
+    assert conn.execute.call_count == 1
+
+
+def test_core_drawdown_refusal_precedes_durable_order_authority() -> None:
+    result, events = _run(
+        AssertionError("must not submit"),
+        drawdown_refusal="portfolio_drawdown_limit",
+    )
+
+    assert result.state == "refused"
+    assert result.reason_code == "portfolio_drawdown_limit"
+    assert "persist_order" not in events
+    assert "broker_submit" not in events
+
+
+def test_hold_advances_the_shared_drawdown_high_water() -> None:
+    result, events = _run(AssertionError("must not submit"), action="hold")
+
+    assert result.state == "held"
+    assert events.count("drawdown_observation") == 1
+    assert "persist_order" not in events
 
 
 def test_acceptance_identity_is_persisted_after_authority_commits() -> None:

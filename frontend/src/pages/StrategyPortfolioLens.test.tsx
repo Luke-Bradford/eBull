@@ -107,6 +107,7 @@ const CORE_COLLECTING = {
   candidates: [],
   mandate: { configured: false },
   can_configure: false,
+  can_enable_pool: false,
   can_rebalance: false,
   can_resume: false,
   pending_order_id: null,
@@ -138,6 +139,7 @@ const CORE_READY = {
     min_rebalance_amount: "25",
   },
   can_configure: true,
+  can_enable_pool: true,
   can_rebalance: true,
   can_resume: false,
   execution_action: "rebalance",
@@ -243,6 +245,31 @@ describe("StrategyPortfolioLens", () => {
     });
   });
 
+  it("can fund the evidence-ready core lane when no alpha strategy passed", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({
+      ...BLOCKED.paper_pool,
+      configured: true,
+      enabled: true,
+      capital_limit: "1000.000000",
+    } as never);
+    renderLens();
+
+    const entries = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
+    await userEvent.selectOptions(screen.getByLabelText("Risk profile"), "balanced");
+    expect(entries).not.toBeDisabled();
+    await userEvent.click(entries);
+    await userEvent.clear(screen.getByLabelText("Trading capital (USD)"));
+    await userEvent.type(screen.getByLabelText("Trading capital (USD)"), "1000");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      enabled: true,
+      capital_limit: "1000.000000",
+      risk_profile: "balanced",
+    })));
+  });
+
   it("does not offer a reason-only save for an unchanged configured mandate", async () => {
     vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
     renderLens();
@@ -250,6 +277,32 @@ describe("StrategyPortfolioLens", () => {
     await userEvent.type(await screen.findByLabelText("Audit reason"), "No material change");
 
     expect(screen.getByRole("button", { name: "Save mandate" })).toBeDisabled();
+  });
+
+  it("offers a policy-only mandate upgrade without inventing a value change", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue({
+      ...CORE_READY,
+      mandate: { ...CORE_READY.mandate, policy_version: "core-mandate-v1" },
+      can_enable_pool: false,
+      can_rebalance: false,
+      execution_action: "blocked",
+      blockers: [{
+        code: "core_mandate_policy_unsupported",
+        detail: "The current core/cash mandate uses a superseded policy; save a reviewed revision.",
+      }],
+    } as never);
+    const save = vi.spyOn(strategiesApi, "updateCoreMandate").mockResolvedValue(CORE_READY.mandate as never);
+    renderLens();
+
+    await userEvent.type(await screen.findByLabelText("Audit reason"), "Advance reviewed policy stamp");
+    const button = screen.getByRole("button", { name: "Save mandate" });
+    expect(button).not.toBeDisabled();
+    await userEvent.click(button);
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      core_target_pct: "80",
+      reason: "Advance reviewed policy stamp",
+    })));
   });
 
   it("cannot confirm a rebalance against unsaved mandate edits", async () => {
@@ -274,7 +327,7 @@ describe("StrategyPortfolioLens", () => {
       amount: "49.9",
       submission_policy_version: "core-submission-v1",
       preflight_policy_version: "core-preflight-v2",
-      broker_preflight_policy_version: "core-broker-preflight-v1",
+      broker_preflight_policy_version: "core-broker-preflight-v2",
     });
     renderLens();
 
@@ -304,7 +357,7 @@ describe("StrategyPortfolioLens", () => {
       amount: "49.9",
       submission_policy_version: "core-submission-v1",
       preflight_policy_version: "core-preflight-v2",
-      broker_preflight_policy_version: "core-broker-preflight-v1",
+      broker_preflight_policy_version: "core-broker-preflight-v2",
     });
     renderLens();
 

@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { updateStrategyPaperPool } from "@/api/strategies";
-import type { BenchmarkRefusal, StrategyOverviewResponse } from "@/api/types";
+import type { BenchmarkRefusal, CoreSleeveResponse, StrategyOverviewResponse } from "@/api/types";
 import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatMoney, formatNumber } from "@/lib/format";
@@ -287,9 +287,11 @@ export function EmptyPnlChart() {
 
 export function AutomationControl({
   overview,
+  coreSleeve,
   onUpdated,
 }: {
   overview: StrategyOverviewResponse;
+  coreSleeve: CoreSleeveResponse | null;
   onUpdated: () => void;
 }) {
   const pool = overview.paper_pool;
@@ -337,10 +339,13 @@ export function AutomationControl({
   // other control in the app sets that flag. Requiring it here made the first
   // enable unreachable from the repository's fail-closed default — the page
   // demanded the flag be true before it would call the only endpoint that
-  // turns it true. The backend's own first-enable gate is `readiness.ready`,
-  // which is what this mirrors. `enable_live_trading` is untouched by the flow.
+  // turns it true. Alpha and the deterministic core sleeve are independent
+  // evidence lanes into the same pot; the backend supplies the core predicate
+  // so this form does not reconstruct mandate/selection policy. System-wide
+  // live trading is untouched by the flow.
   const accountEligible = overview.demo_connection || overview.live_strategy_activation_available;
-  const canEnable = overview.automation_readiness.ready && accountEligible && riskProfile !== "unconfigured";
+  const evidenceReady = overview.automation_readiness.ready || coreSleeve?.can_enable_pool === true;
+  const canEnable = evidenceReady && accountEligible && riskProfile !== "unconfigured";
   const selectedMandate = riskProfile === pool.mandate.risk_profile && pool.mandate.configured
     ? pool.mandate
     : pool.available_mandates.find((mandate) => mandate.risk_profile === riskProfile) ?? null;
@@ -478,7 +483,7 @@ export function AutomationControl({
             ? "This account cannot run strategy automation. Connect the demo account, or complete real-money activation first."
             : riskProfile === "unconfigured"
               ? "Choose a risk profile before allowing new entries."
-            : "Automation stays off until at least one strategy passes validation."}
+            : "New entries stay off until an alpha strategy passes validation or the evidence-selected core sleeve has an enabled mandate."}
         </p>
       ) : null}
       {overview.entry_block.new_entries_blocked ? (

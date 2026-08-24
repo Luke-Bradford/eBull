@@ -77,6 +77,8 @@ from app.services.strategy_core_executor import (
     resume_core_submission,
 )
 from app.services.strategy_core_mandate import (
+    CORE_MANDATE_ADVISORY_LOCK,
+    CORE_MANDATE_POLICY_VERSION,
     CORE_MANDATE_SERIES_ID,
     CORE_MANDATE_SERIES_TITLE,
     CoreMandate,
@@ -85,6 +87,7 @@ from app.services.strategy_core_mandate import (
     load_core_mandate,
 )
 from app.services.strategy_core_selection import (
+    CoreSelection,
     CoreSelectionError,
     load_core_selection,
 )
@@ -993,6 +996,7 @@ class CoreSleeveBlockerResponse(BaseModel):
         "core_selection_invalid",
         "core_mandate_unconfigured",
         "core_mandate_disabled",
+        "core_mandate_policy_unsupported",
         "core_mandate_selection_mismatch",
         "core_demo_required",
         "core_order_unresolved",
@@ -1016,6 +1020,7 @@ class CoreSleeveResponse(BaseModel):
     candidates: list[CoreCandidateCoverageResponse]
     mandate: CoreMandateResponse
     can_configure: bool
+    can_enable_pool: bool
     can_rebalance: bool
     can_resume: bool
     pending_order_id: int | None
@@ -1026,6 +1031,29 @@ class CoreSleeveResponse(BaseModel):
     alpha_input_used: bool = False
     household_tax_caveat: str = (
         "A UK ISA at another broker tax-dominates this engine sleeve for eligible household capital."
+    )
+
+
+def _core_pool_activation_ready(
+    *,
+    selection: CoreSelection,
+    mandate: CoreMandate | None,
+    environment: str,
+) -> bool:
+    """Whether core evidence can authorise the shared paper pot's first enable.
+
+    This deliberately excludes the pot itself: requiring an enabled pot here
+    would make the only endpoint that enables it unreachable. It also grants no
+    order authority. The attended executor separately re-proves current broker
+    eligibility, capital headroom, kill-switch state and every submission guard.
+    """
+    return (
+        selection.ready
+        and mandate is not None
+        and mandate.enabled
+        and mandate.policy_version == CORE_MANDATE_POLICY_VERSION
+        and mandate.core_instrument_id == selection.selected_instrument_id
+        and environment == "demo"
     )
 
 
@@ -3424,7 +3452,22 @@ def update_strategy_paper_pool(
             conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
             current_pool = load_paper_pool(conn)
             if body.enabled and not current_pool.enabled and readiness is not None and not readiness.ready:
-                raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
+                # Core and alpha are independent evidence lanes into this ONE
+                # capital boundary. Read the core mandate under the same lock
+                # order used by its writer (paper, then mandate), so a
+                # concurrent disable cannot slip between this decision and the
+                # pool event. Enabling the pool still submits no broker order.
+                conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_MANDATE_ADVISORY_LOCK)
+                core_ready = _core_pool_activation_ready(
+                    selection=load_core_selection(conn),
+                    mandate=load_core_mandate(conn),
+                    environment=settings.etoro_env,
+                )
+                if not core_ready:
+                    raise StrategyControlError(
+                        "automation cannot be enabled: "
+                        + ", ".join([*readiness.blockers, "core_sleeve_not_activation_ready"])
+                    )
             runtime = get_runtime_config(conn)
             # ⚠ Read INSIDE the advisory lock, and that only closes the race
             # because `app.api.config.patch_config` takes the SAME lock to
@@ -3593,6 +3636,13 @@ def read_core_sleeve(
                 detail="The current core/cash mandate is disabled.",
             )
         )
+    elif mandate.policy_version != CORE_MANDATE_POLICY_VERSION:
+        blockers.append(
+            CoreSleeveBlockerResponse(
+                code="core_mandate_policy_unsupported",
+                detail="The current core/cash mandate uses a superseded policy; save a reviewed revision.",
+            )
+        )
     elif selection.ready and mandate.core_instrument_id != selection.selected_instrument_id:
         blockers.append(
             CoreSleeveBlockerResponse(
@@ -3620,14 +3670,12 @@ def read_core_sleeve(
                 ),
             )
         )
-    base_ready = (
-        selection.ready
-        and mandate is not None
-        and mandate.enabled
-        and mandate.core_instrument_id == selection.selected_instrument_id
-        and settings.etoro_env == "demo"
-        and capital_ready
+    core_pool_ready = _core_pool_activation_ready(
+        selection=selection,
+        mandate=mandate,
+        environment=settings.etoro_env,
     )
+    base_ready = core_pool_ready and capital_ready
     can_rebalance = base_ready and resume_authority is None
     can_resume = settings.etoro_env == "demo" and resume_authority is not None
     execution_action: Literal["blocked", "rebalance", "resume"] = (
@@ -3653,6 +3701,7 @@ def read_core_sleeve(
         ],
         mandate=_core_mandate_response(mandate),
         can_configure=selection.ready,
+        can_enable_pool=core_pool_ready,
         can_rebalance=can_rebalance,
         can_resume=can_resume,
         pending_order_id=None if resume_authority is None else resume_authority.order_id,
@@ -3758,18 +3807,10 @@ def update_core_mandate(
 ) -> CoreMandateResponse:
     """Append one operator-authenticated core/cash mandate revision.
 
-    ⚠⚠ THIS IS THE ENTRY CONDITION FOR #2603 ITEM 3, AND ITS ABSENCE WAS THE
-    BLOCKER. ``configure_core_mandate`` had no caller anywhere in ``app/`` or
-    ``scripts/`` — only tests — so no mandate could be configured, therefore no
-    rebalance intent could cite one, therefore no core trade could exist. The
-    whole arc was unreachable from outside the test suite.
-
-    ⚠ Wiring this endpoint deliberately does NOT make the executor act on a
-    mandate. That is the correct intermediate state (step 1's posture), not a
-    gap to route around: a mandate becomes configurable here, and every
-    execution-time control — the one-trade-per-intent guard, the
-    no-open-core-trade precondition, the intent freshness bound — remains
-    unbuilt and is tracked on #2603.
+    This is the operator-authenticated entry condition for the attended core
+    executor. Saving a mandate submits no order: execution separately re-proves
+    the selected instrument, eligibility, capital ownership and every preflight
+    and submission guard.
 
     ⚠ ``require_session``, not the router's ``require_session_or_service_token``.
     A mandate revision is an operator authorisation and is recorded with a named

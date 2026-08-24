@@ -3,19 +3,12 @@
 Mandate plus observed sleeve state in, one verdict out.  Pure: no connection, no
 clock, no broker, no persistence.
 
-⚠ This module AUTHORISES NOTHING, and that has not changed -- but "has NO CALLER",
-which this docstring said until #2684, has.  ``record_core_rebalance_intent``
-now calls ``evaluate_core_rebalance`` and stores the verdict in
-``strategy_core_rebalance_intents``.  That table is itself read by nothing and
-referenced by nothing, so no verdict returned here still causes anything to
-happen; the chain is one link longer and equally inert.  #2437's R4 comment
-records *a control on a path the decision does not take* seven times over, so the
-state is named here rather than left to be inferred, and re-stated each time it
-moves.  The acting caller is item 3's executor, which needs the operator-attended
-session #2603 reserves.
+This pure decision authorises nothing by itself. The attended executor records
+its verdict as a rebalance intent, then independently applies the submission,
+preflight, broker and capital gates before an order can be attempted.
 
-The verdict is emphatically NOT an eligibility finding: item 2 owns the proof that
-the core instrument is the underlying product and not a CFD, and has no table yet.
+The verdict is emphatically NOT an eligibility finding: the separate eligibility
+proof owns whether the core instrument is the underlying product and not a CFD.
 
 Spec: ``docs/proposals/ta/2026-08-13-core-cash-allocator.md``
 """

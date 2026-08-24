@@ -33,6 +33,8 @@ from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_V
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import get_runtime_config, update_runtime_config
 from app.services.strategy_control_plane import configure_paper_pool, load_paper_pool
+from app.services.strategy_core_mandate import CoreMandate
+from app.services.strategy_core_selection import CoreSelection
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_monitoring import (
     load_attribution,
@@ -1352,6 +1354,74 @@ def test_shared_paper_pool_refuses_activation_without_a_ready_candidate(
     assert exc_info.value.status_code == 409
     assert "no_capital_candidates" in str(exc_info.value.detail)
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (0,)
+
+
+def test_shared_paper_pool_accepts_evidence_ready_core_without_an_alpha_candidate(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deterministic fallback is an independent route into the shared pot.
+
+    This deliberately leaves the real alpha readiness at
+    ``no_capital_candidates``. Before #2603's activation fix, that alpha-only
+    gate made an otherwise executable core sleeve unreachable from the page.
+    """
+    conn = ebull_test_conn
+    seed_universe_anchor(conn)
+    if get_runtime_config(conn).enable_auto_trading:
+        update_runtime_config(
+            conn,
+            updated_by="test-precondition",
+            reason="establish disabled automation precondition",
+            enable_auto_trading=False,
+        )
+    conn.commit()
+    monkeypatch.setattr(
+        "app.api.strategies.load_core_selection",
+        lambda _conn: CoreSelection(
+            state="ready",
+            selected_instrument_id=3417,
+            selected_symbol="SPY.RTH",
+            evidence_ref="#2833 verdict",
+            required_trading_days=5,
+            observed_trading_days=5,
+            max_cost_bps=60,
+            candidates=(),
+            missing_candidate_ids=(),
+            configuration_error=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.strategies.load_core_mandate",
+        lambda _conn: CoreMandate(
+            event_id=1,
+            revision=1,
+            enabled=True,
+            base_currency="USD",
+            core_instrument_id=3417,
+            core_target_pct=Decimal("80"),
+            liquidity_reserve_pct=Decimal("10"),
+            rebalance_band_pct=Decimal("5"),
+            min_rebalance_amount=Decimal("25"),
+            policy_version="core-mandate-v2",
+        ),
+    )
+
+    response = update_strategy_paper_pool(
+        StrategyPaperPoolUpdateRequest(
+            enabled=True,
+            capital_limit=Decimal("750"),
+            capital_mode="fixed",
+            risk_profile="balanced",
+            reason="fund evidence-ready deterministic fallback",
+        ),
+        _session(),
+        conn,
+    )
+
+    assert response.enabled
+    assert response.capital_limit == Decimal("750")
+    assert get_runtime_config(conn).enable_auto_trading
 
 
 def _ready_overview_patch(monkeypatch: pytest.MonkeyPatch) -> None:

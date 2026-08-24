@@ -15,9 +15,8 @@ for the other is not a small error.
 Pure: no connection, no clock, no broker call, no writes.  Decodes one already-fetched
 what-if response and does arithmetic.
 
-⚠ AUTHORISES NOTHING.  No caller in ``app/`` or ``scripts/``.  Stated plainly, as every
-step of this arc has been, because #2437's R4 comment records *a control that exists, is
-tested, and sits on a path the decision does not take* many times over on this ticket.
+This pure calculation authorises nothing by itself. The broker preflight calls it inside
+the attended executor path, whose later durable submission gate owns order authority.
 
 ⚠⚠ THE SELL PATH IS NOW FEEDABLE -- corrected 2026-08-14 (#2712), and this docstring said
 the opposite for one merge.  ``get_what_if_costs`` DID hardcode ``"action": "open"``, but
