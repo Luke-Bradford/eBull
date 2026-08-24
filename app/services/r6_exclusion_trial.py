@@ -46,6 +46,7 @@ class RebalanceEvent:
     traded_notional: float
     spread_cost: float
     target_count: int
+    censored_holdings: int
 
 
 @dataclass(frozen=True)
@@ -163,9 +164,13 @@ def _event_value(series: PriceSeries, day: date, *, field: Literal["open", "clos
     exact = next((bar for bar in series.bars if bar.day == day), None)
     if exact is not None:
         return exact.adjusted_open if field == "open" else exact.adjusted_close
-    if series.bars[-1].day < day:
-        return series.bars[-1].adjusted_close if case == "best" else 0.0
-    raise RuntimeError(f"{series.symbol} is missing required in-series session {day}")
+    prior = [bar for bar in series.bars if bar.day < day]
+    if prior:
+        # A halted holding is no more executable than a terminated one on the
+        # rebalance session. Bound it instead of inventing an in-session fill:
+        # stale last close in the best case, zero in the governing worst case.
+        return prior[-1].adjusted_close if case == "best" else 0.0
+    raise RuntimeError(f"{series.symbol} has no price at or before required session {day}")
 
 
 def _target_value(
@@ -210,6 +215,7 @@ def simulate_portfolio(
             symbol: shares * _event_value(prices[symbol], day, field="open", case=case)
             for symbol, shares in holdings.items()
         }
+        censored = sum(day not in prices[symbol].by_date for symbol in holdings)
         pre_cost = cash + sum(current.values())
         target_value = _target_value(pre_cost, current, target, half_spread)
         traded = sum(abs(target_value - current.get(symbol, 0.0)) for symbol in target)
@@ -220,7 +226,7 @@ def simulate_portfolio(
         target_prices = {symbol: _event_value(prices[symbol], day, field="open", case=case) for symbol in target}
         holdings = {symbol: target_value / target_prices[symbol] for symbol in target}
         cash = 0.0
-        events.append(RebalanceEvent(day, pre_cost, traded, cost, len(target)))
+        events.append(RebalanceEvent(day, pre_cost, traded, cost, len(target), censored))
 
     final_mid = sum(
         shares * _event_value(prices[symbol], window_end, field="close", case=case)
@@ -228,7 +234,8 @@ def simulate_portfolio(
     )
     final_traded = final_mid
     final_cost = half_spread * final_traded
-    events.append(RebalanceEvent(window_end, final_mid, final_traded, final_cost, 0))
+    final_censored = sum(window_end not in prices[symbol].by_date for symbol in holdings)
+    events.append(RebalanceEvent(window_end, final_mid, final_traded, final_cost, 0, final_censored))
     return PortfolioResult(total_return=final_mid - final_cost - 1.0, events=tuple(events))
 
 

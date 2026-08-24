@@ -57,6 +57,25 @@ def test_termination_bounds_are_explicit() -> None:
     assert worst.total_return == -1.0
 
 
+def test_in_series_halt_uses_same_declared_bounds() -> None:
+    halted = PriceSeries(
+        "AAA",
+        (
+            PriceBar(date(2022, 6, 30), 100.0, 100.0),
+            PriceBar(date(2022, 7, 1), 100.0, 100.0),
+            PriceBar(date(2023, 1, 3), 120.0, 120.0),
+            PriceBar(date(2025, 1, 2), 80.0, 80.0),
+        ),
+        0,
+    )
+    schedule = ((datetime(2022, 6, 30, 16), frozenset({"AAA"})),)
+    best = simulate_portfolio(schedule=schedule, prices={"AAA": halted}, case="best", half_spread=0)
+    worst = simulate_portfolio(schedule=schedule, prices={"AAA": halted}, case="worst", half_spread=0)
+    assert best.total_return == pytest.approx(0.20)
+    assert worst.total_return == -1.0
+    assert best.events[-1].censored_holdings == 1
+
+
 def test_haircut_never_rescues_negative_gross_edge() -> None:
     assert haircut_net_return(
         strategy_gross=0.05,
