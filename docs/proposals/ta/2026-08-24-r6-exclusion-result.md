@@ -9,7 +9,8 @@ reported, not promoted: the incremental exclusion claim failed its own plain-mar
   at commit `222d84386ba00753ec49a7974d694403cc58624e`
 - Halt-bound correction SHA-256: `cd694a39f392cf438e4331a29b9fe8613048127ee37770295c00650758f376fa`
 - ISO-date correction SHA-256: `becf2537852a85becfc0f444dccc56e9b50a16ebf48a339619bc8187b4e5a858`
-- Complete result SHA-256: `95ff5c230d9ad55360ab0579a9a73bb97665c91b5c90fb316422e7aec4cda4d9`
+- Cover-fallback correction SHA-256: `f6bbac8492967c881473b30cef3d475252976d9bcea9a75eb6936a5f6c34b425`
+- Canonical complete result SHA-256: `1ed032ca1243301764eb6e9fd9abef562e884be61c476ff50ec377babe2e1426`
 - Window: formation at `2022-06-30 16:00`; fills `2022-07-01`; final close `2024-09-27`
 - Return/cost basis: USD split-and-dividend-adjusted wealth, long/x1, `0.725%` half-spread on every traded dollar,
   zero commission and structural-zero carry
@@ -22,10 +23,14 @@ before either correction was frozen.
 
 The gate passed on 27 months (`2022-07..2024-09`): correlation `+0.291888`, beta `+0.846831`, alpha
 `+0.075376/month`, lag `+0.197732`, lead `+0.088728`; no invalid price row was skipped. Factor-only result SHA-256:
-`c38618edc970b43bc4023b1a9c5599095b86b65f29591404c17fb8c28744544e`.
+`bf64591739f0fd0dcfdb480b8120e51f68b8659f184337285ff4b0336f1e89cd`.
 
 The large intercept and short window make this identity evidence modest, not an independent investability claim.
 It nevertheless clears the frozen sign/timing gate and is not wrong-signed or displaced.
+
+Pre-push review's resolver fix changed no population record or rank. Factor and outcome JSON reproduced exactly
+after deleting only the manifest-identity field; the canonical result above binds corrected manifest
+`0b25af8c37b12437963f4681df7513397b83cd0ba7e37b15e1165b52f90d17d2`.
 
 ## Full result
 
