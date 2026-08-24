@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import json
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,12 @@ def _portfolio_payload(result: PortfolioResult) -> dict[str, Any]:
     value["traded_notional_over_initial_capital"] = result.traded_notional_over_initial_capital
     value["spread_cost_over_initial_capital"] = result.spread_cost_over_initial_capital
     return value
+
+
+def _json_default(value: object) -> str:
+    if isinstance(value, date):
+        return value.isoformat()
+    raise TypeError(f"unsupported JSON result type: {type(value).__name__}")
 
 
 def main() -> int:
@@ -149,6 +156,7 @@ def main() -> int:
             },
             indent=2,
             sort_keys=True,
+            default=_json_default,
         )
     )
     return 0
