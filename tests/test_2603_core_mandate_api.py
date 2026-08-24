@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import inspect
 from decimal import Decimal
+from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.params import Depends as DependsParam
@@ -26,6 +28,7 @@ from fastapi.routing import APIRoute
 from app.api.strategies import (
     CoreMandateUpdateRequest,
     _core_mandate_response,
+    read_core_sleeve,
     router,
     update_core_mandate,
 )
@@ -35,8 +38,10 @@ from app.services.broker_credentials import (
     normalise_provider,
 )
 from app.services.strategy_core_mandate import CoreMandate
+from app.services.strategy_core_selection import CoreCandidateCoverage, CoreSelection
 
 CORE_MANDATE_PATH = "/strategies/core-mandate"
+CORE_SLEEVE_PATH = "/strategies/core-sleeve"
 
 
 def _routes() -> list[APIRoute]:
@@ -89,6 +94,43 @@ class TestTheRouteTable:
         before writing to it."""
         methods = {method for route in _routes() if route.path == CORE_MANDATE_PATH for method in route.methods}
         assert {"GET", "PUT"} <= methods
+
+    def test_the_operator_sleeve_view_is_registered_before_strategy_id_routes(self) -> None:
+        paths = [route.path for route in _routes()]
+        first_param_route = next(index for index, path in enumerate(paths) if "{strategy_id}" in path)
+        assert paths.index(CORE_SLEEVE_PATH) < first_param_route
+
+
+def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    selection = CoreSelection(
+        state="evidence_collecting",
+        selected_instrument_id=None,
+        selected_symbol=None,
+        evidence_ref=None,
+        required_trading_days=5,
+        observed_trading_days=1,
+        max_cost_bps=60,
+        candidates=(
+            CoreCandidateCoverage(3417, "SPY.RTH", 1, None, None),
+            CoreCandidateCoverage(3434, "CSPX.L", 1, None, None),
+            CoreCandidateCoverage(3075, "IUSA.L", 1, None, None),
+        ),
+        missing_candidate_ids=(),
+        configuration_error=None,
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+    monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: None)
+    response = read_core_sleeve(cast(Any, MagicMock()))
+    assert response.state == "evidence_collecting"
+    assert response.selected_instrument_id is None
+    assert response.observed_trading_days == 1
+    assert response.can_configure is False
+    assert response.can_rebalance is False
+    assert [blocker.code for blocker in response.blockers] == [
+        "core_evidence_collecting",
+        "core_mandate_unconfigured",
+        "core_submitter_unavailable",
+    ]
 
 
 class TestTheAuthDependency:

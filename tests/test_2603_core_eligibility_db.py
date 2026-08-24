@@ -30,6 +30,16 @@ from app.services.strategy_core_mandate import CoreMandateError, configure_core_
 INSTRUMENT_ID = 920604
 DIGEST = "a" * 64
 
+
+@pytest.fixture(autouse=True)
+def _approved_instrument_for_eligibility_consumer_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep this module's consumer tests focused on account eligibility."""
+    monkeypatch.setattr(
+        "app.services.strategy_core_mandate.require_selected_core_instrument",
+        lambda _conn, *, instrument_id: instrument_id,
+    )
+
+
 _INSERT = """
 INSERT INTO strategy_core_eligibility_proofs (
     instrument_id, operator_id, provider, environment,

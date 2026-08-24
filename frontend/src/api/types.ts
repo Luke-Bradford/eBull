@@ -2936,6 +2936,49 @@ export interface StrategyPaperPool {
   available_mandates: StrategyPortfolioMandate[];
 }
 
+export interface CoreMandate {
+  configured: boolean;
+  event_id: number | null;
+  revision: number | null;
+  enabled: boolean | null;
+  base_currency: string | null;
+  core_instrument_id: number | null;
+  core_target_pct: string | null;
+  cash_target_pct: string | null;
+  liquidity_reserve_pct: string | null;
+  rebalance_band_pct: string | null;
+  min_rebalance_amount: string | null;
+  policy_version: string | null;
+}
+
+export interface CoreSleeveResponse {
+  state: "evidence_collecting" | "ready" | "unavailable";
+  selected_instrument_id: number | null;
+  selected_symbol: string | null;
+  evidence_ref: string | null;
+  required_trading_days: number;
+  observed_trading_days: number;
+  max_cost_bps: number;
+  candidates: Array<{
+    instrument_id: number;
+    symbol: string;
+    observed_trading_days: number;
+    first_observed_date: string | null;
+    last_observed_date: string | null;
+  }>;
+  mandate: CoreMandate;
+  can_configure: boolean;
+  can_rebalance: boolean;
+  blockers: Array<{
+    code: "core_evidence_collecting" | "core_candidates_missing" | "core_selection_invalid" | "core_mandate_unconfigured" | "core_mandate_disabled" | "core_submitter_unavailable";
+    detail: string;
+  }>;
+  environment: "demo";
+  buy_only: boolean;
+  alpha_input_used: boolean;
+  household_tax_caveat: string;
+}
+
 export interface StrategyPortfolioMandate {
   configured: boolean;
   policy_version: string;

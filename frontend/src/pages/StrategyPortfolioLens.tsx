@@ -3,6 +3,7 @@ import { useState } from "react";
 import { postKillSwitch } from "@/api/config";
 import {
   closeStrategyOwnedPosition,
+  fetchCoreSleeve,
   fetchStrategyOverview,
   fetchStrategyOwnedPositions,
   fetchStrategyPnlHistory,
@@ -70,6 +71,7 @@ function BlockerRow({
 
 export function StrategyPortfolioLens() {
   const overview = useAsync(fetchStrategyOverview, []);
+  const coreSleeve = useAsync(fetchCoreSleeve, []);
   const ownedPositions = useAsync(fetchStrategyOwnedPositions, []);
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
@@ -213,7 +215,54 @@ export function StrategyPortfolioLens() {
         <h2 id="pot-setup" className="sr-only">
           Setup
         </h2>
-        <AutomationControl overview={data} onUpdated={overview.refetch} />
+        <div className="space-y-4">
+          {coreSleeve.loading ? <SectionSkeleton rows={3} /> : null}
+          {coreSleeve.error ? <SectionError onRetry={coreSleeve.refetch} /> : null}
+          {coreSleeve.data ? (
+            <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold">Core &amp; cash</h2>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Deterministic fallback when no strategy has earned capital.
+                  </p>
+                </div>
+                <Badge tone={coreSleeve.data.state === "ready" ? "ok" : "warn"}>
+                  {coreSleeve.data.state === "ready" ? "Ready" : "Cash"}
+                </Badge>
+              </div>
+              <div className="mt-5 grid grid-cols-2 gap-x-6 sm:grid-cols-3">
+                <StatTile
+                  size="md"
+                  label="Evidence"
+                  value={`${coreSleeve.data.observed_trading_days} / ${coreSleeve.data.required_trading_days}`}
+                  hint="Trading days"
+                />
+                <StatTile
+                  size="md"
+                  label="Instrument"
+                  value={coreSleeve.data.selected_symbol ?? "Cash"}
+                  hint={coreSleeve.data.selected_symbol ? "Evidence-selected" : "No sleeve adopted"}
+                />
+                <StatTile
+                  size="md"
+                  label="Cost ceiling"
+                  value={`${(coreSleeve.data.max_cost_bps / 100).toFixed(2)}%`}
+                  hint="Preregistered #2833 bar"
+                />
+              </div>
+              <div className="mt-4">
+                {coreSleeve.data.blockers.map((blocker) => (
+                  <BlockerRow key={blocker.code} tone="warn" label={blocker.detail} />
+                ))}
+              </div>
+              <p className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
+                Demo only · buy only · no alpha signal. {coreSleeve.data.household_tax_caveat}
+              </p>
+            </section>
+          ) : null}
+          <AutomationControl overview={data} onUpdated={overview.refetch} />
+        </div>
       </section>
 
       <section aria-labelledby="pot-performance">
