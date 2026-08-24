@@ -103,6 +103,7 @@ const CORE_COLLECTING = {
   evidence_ref: null,
   required_trading_days: 5,
   observed_trading_days: 1,
+  earliest_possible_verdict_at: "2026-09-02T00:00:00Z",
   max_cost_bps: 60,
   candidates: [
     {
@@ -193,6 +194,8 @@ describe("StrategyPortfolioLens", () => {
     expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
     expect(screen.getAllByText("1 / 5")).toHaveLength(2);
     expect(screen.getByText("No sleeve adopted")).toBeInTheDocument();
+    expect(screen.getByText("02 Sept 2026")).toBeInTheDocument();
+    expect(screen.getByText(/Lower bound if all five common sessions complete/i)).toBeInTheDocument();
     expect(screen.getByText(/cash remains the fallback/i)).toBeInTheDocument();
     expect(screen.getByText(/UK ISA at another broker tax-dominates/i)).toBeInTheDocument();
     const coverage = screen.getByRole("table", { name: "Core candidate evidence coverage" });
