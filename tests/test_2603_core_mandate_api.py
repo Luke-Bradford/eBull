@@ -17,11 +17,13 @@ service tests cannot see:
 from __future__ import annotations
 
 import inspect
+from contextlib import nullcontext
 from decimal import Decimal
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.params import Depends as DependsParam
 from fastapi.routing import APIRoute
 
@@ -29,19 +31,23 @@ from app.api.strategies import (
     CoreMandateUpdateRequest,
     _core_mandate_response,
     read_core_sleeve,
+    rebalance_core_sleeve,
     router,
     update_core_mandate,
 )
 from app.services.broker_credentials import (
     CredentialValidationError,
+    LoadedCredential,
     normalise_environment,
     normalise_provider,
 )
+from app.services.strategy_core_executor import CoreExecutionResult, CoreResumeAuthority
 from app.services.strategy_core_mandate import CoreMandate
 from app.services.strategy_core_selection import CoreCandidateCoverage, CoreSelection
 
 CORE_MANDATE_PATH = "/strategies/core-mandate"
 CORE_SLEEVE_PATH = "/strategies/core-sleeve"
+CORE_REBALANCE_PATH = "/strategies/core-sleeve/rebalance"
 
 
 def _routes() -> list[APIRoute]:
@@ -99,6 +105,11 @@ class TestTheRouteTable:
         paths = [route.path for route in _routes()]
         first_param_route = next(index for index, path in enumerate(paths) if "{strategy_id}" in path)
         assert paths.index(CORE_SLEEVE_PATH) < first_param_route
+        assert paths.index(CORE_REBALANCE_PATH) < first_param_route
+
+    def test_the_attended_rebalance_is_post_only(self) -> None:
+        methods = {method for route in _routes() if route.path == CORE_REBALANCE_PATH for method in route.methods}
+        assert methods == {"POST"}
 
 
 def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,17 +131,171 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     )
     monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
     monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
     response = read_core_sleeve(cast(Any, MagicMock()))
     assert response.state == "evidence_collecting"
     assert response.selected_instrument_id is None
     assert response.observed_trading_days == 1
     assert response.can_configure is False
     assert response.can_rebalance is False
+    assert response.can_resume is False
+    assert response.execution_action == "blocked"
     assert [blocker.code for blocker in response.blockers] == [
         "core_evidence_collecting",
         "core_mandate_unconfigured",
-        "core_submitter_unavailable",
     ]
+
+
+def test_rebalance_passes_the_exact_loaded_credential_ids_to_the_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import UUID
+
+    api = LoadedCredential(UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"), "api-secret")
+    user = LoadedCredential(UUID("f7306e0b-9494-415e-85fd-97874510cc83"), "user-secret")
+    monkeypatch.setattr("app.api.strategies.ensure_broker_key_loaded", lambda _conn: True)
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr(
+        "app.api.strategies.load_credential_with_id_for_provider_use",
+        MagicMock(side_effect=[api, user]),
+    )
+    execute = MagicMock(return_value=CoreExecutionResult("held", "within_band", 11, None, None, Decimal("0")))
+    monkeypatch.setattr("app.api.strategies.execute_core_rebalance", execute)
+
+    class BrokerContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr("app.api.strategies.EtoroBrokerProvider", lambda **_kwargs: BrokerContext())
+    conn = MagicMock()
+    conn.transaction.return_value = nullcontext()
+    request = MagicMock()
+    request.app.state.audit_pool = None
+    session = MagicMock(operator_id=UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"), username="operator")
+
+    response = rebalance_core_sleeve(request=request, session=session, conn=cast(Any, conn))
+
+    assert response.state == "held"
+    assert response.submission_policy_version == "core-submission-v1"
+    assert response.preflight_policy_version == "core-preflight-v2"
+    assert response.broker_preflight_policy_version == "core-broker-preflight-v1"
+    assert execute.call_args.kwargs["api_key_credential_id"] == api.id
+    assert execute.call_args.kwargs["user_key_credential_id"] == user.id
+
+
+def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import UUID
+
+    selection = CoreSelection(
+        state="ready",
+        selected_instrument_id=3417,
+        selected_symbol="SPY.RTH",
+        evidence_ref="#2833 verdict",
+        required_trading_days=5,
+        observed_trading_days=5,
+        max_cost_bps=60,
+        candidates=(),
+        missing_candidate_ids=(),
+        configuration_error=None,
+    )
+    authority = CoreResumeAuthority(
+        intent_id=11,
+        trade_id=21,
+        order_id=31,
+        instrument_id=3417,
+        amount=Decimal("49.9"),
+        request_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+        broker_order_ref=None,
+        eligibility_proof_id=7,
+        operator_id=UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"),
+        api_key_credential_id=UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"),
+        user_key_credential_id=UUID("f7306e0b-9494-415e-85fd-97874510cc83"),
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+    monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: authority)
+    monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+
+    response = read_core_sleeve(cast(Any, MagicMock()))
+
+    assert response.can_rebalance is False
+    assert response.can_resume is True
+    assert response.execution_action == "resume"
+    assert response.pending_order_id == 31
+    assert [blocker.code for blocker in response.blockers] == ["core_order_unresolved"]
+
+
+def test_operator_view_refuses_a_mandate_for_the_previous_reviewed_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selection = CoreSelection(
+        state="ready",
+        selected_instrument_id=3434,
+        selected_symbol="CSPX.L",
+        evidence_ref="#2833 revised verdict",
+        required_trading_days=5,
+        observed_trading_days=5,
+        max_cost_bps=60,
+        candidates=(),
+        missing_candidate_ids=(),
+        configuration_error=None,
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+    monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+
+    response = read_core_sleeve(cast(Any, MagicMock()))
+
+    assert response.can_rebalance is False
+    assert response.execution_action == "blocked"
+    assert [blocker.code for blocker in response.blockers] == ["core_mandate_selection_mismatch"]
+
+
+def test_resume_refuses_credentials_from_a_different_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import UUID
+
+    authority = CoreResumeAuthority(
+        intent_id=11,
+        trade_id=21,
+        order_id=31,
+        instrument_id=3417,
+        amount=Decimal("49.9"),
+        request_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+        broker_order_ref=None,
+        eligibility_proof_id=7,
+        operator_id=UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"),
+        api_key_credential_id=UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"),
+        user_key_credential_id=UUID("f7306e0b-9494-415e-85fd-97874510cc83"),
+    )
+    replacement = LoadedCredential(UUID("c05aa4fd-984b-47d0-a823-3728d95041fb"), "replacement")
+    monkeypatch.setattr("app.api.strategies.ensure_broker_key_loaded", lambda _conn: True)
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: authority)
+    monkeypatch.setattr(
+        "app.api.strategies.load_credential_with_id_for_provider_use",
+        MagicMock(return_value=replacement),
+    )
+    broker_factory = MagicMock()
+    monkeypatch.setattr("app.api.strategies.EtoroBrokerProvider", broker_factory)
+    conn = MagicMock()
+    conn.transaction.return_value = nullcontext()
+    request = MagicMock()
+    request.app.state.audit_pool = None
+    session = MagicMock(operator_id=UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"), username="operator")
+
+    with pytest.raises(HTTPException) as raised:
+        rebalance_core_sleeve(request=request, session=session, conn=cast(Any, conn))
+
+    assert raised.value.status_code == 409
+    assert "different account" in str(raised.value.detail)
+    broker_factory.assert_not_called()
 
 
 class TestTheAuthDependency:
@@ -166,6 +331,16 @@ class TestTheAuthDependency:
             if isinstance(parameter.default, DependsParam) and parameter.default.dependency is not None
         }
         assert declared, "no Depends markers on the endpoint — this test can no longer fail"
+        assert "require_session" in declared
+
+    def test_the_rebalance_route_requires_a_named_session(self) -> None:
+        signature = inspect.signature(rebalance_core_sleeve)
+        declared = {
+            parameter.default.dependency.__name__
+            for parameter in signature.parameters.values()
+            if isinstance(parameter.default, DependsParam) and parameter.default.dependency is not None
+        }
+        assert declared
         assert "require_session" in declared
 
 

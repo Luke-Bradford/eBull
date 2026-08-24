@@ -57,6 +57,7 @@ _MUTATING: Final[frozenset[str]] = frozenset(
         "close_demo_strategy_position",
         "close_position",
         "edit_demo_strategy_position",
+        "place_demo_core_order",
         "place_demo_strategy_order",
         "place_order",
     }

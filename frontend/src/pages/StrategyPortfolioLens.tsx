@@ -7,8 +7,10 @@ import {
   fetchStrategyOverview,
   fetchStrategyOwnedPositions,
   fetchStrategyPnlHistory,
+  rebalanceCoreSleeve,
+  updateCoreMandate,
 } from "@/api/strategies";
-import type { StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
+import type { CoreSleeveResponse, StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
 import { ApiError } from "@/api/client";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { StatTile } from "@/components/dashboard/StatTile";
@@ -66,6 +68,167 @@ function BlockerRow({
       </span>
       {action}
     </div>
+  );
+}
+
+function CoreSleeveControl({
+  sleeve,
+  busy,
+  setBusy,
+  onError,
+  onUpdated,
+}: {
+  sleeve: CoreSleeveResponse;
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+  onError: (message: string | null) => void;
+  onUpdated: () => void;
+}) {
+  const mandate = sleeve.mandate;
+  const [enabled, setEnabled] = useState(mandate.enabled ?? false);
+  const [target, setTarget] = useState(mandate.core_target_pct ?? "80");
+  const [reserve, setReserve] = useState(mandate.liquidity_reserve_pct ?? "10");
+  const [band, setBand] = useState(mandate.rebalance_band_pct ?? "5");
+  const [minimum, setMinimum] = useState(mandate.min_rebalance_amount ?? "25");
+  const [reason, setReason] = useState("");
+  const [confirmRebalance, setConfirmRebalance] = useState(false);
+  const [outcome, setOutcome] = useState<string | null>(null);
+  const showMandate = sleeve.can_configure || mandate.configured;
+  const mandateDirty =
+    enabled !== (mandate.enabled ?? false) ||
+    Number(target) !== Number(mandate.core_target_pct ?? "80") ||
+    Number(reserve) !== Number(mandate.liquidity_reserve_pct ?? "10") ||
+    Number(band) !== Number(mandate.rebalance_band_pct ?? "5") ||
+    Number(minimum) !== Number(mandate.min_rebalance_amount ?? "25");
+
+  async function saveMandate() {
+    setBusy(true);
+    onError(null);
+    setOutcome(null);
+    try {
+      await updateCoreMandate({
+        enabled,
+        core_instrument_id: sleeve.selected_instrument_id ?? mandate.core_instrument_id,
+        core_target_pct: target,
+        liquidity_reserve_pct: reserve,
+        rebalance_band_pct: band,
+        min_rebalance_amount: minimum,
+        reason: reason.trim(),
+        provider: "etoro",
+        environment: "demo",
+      });
+      setReason("");
+      onUpdated();
+    } catch (error) {
+      onError(error instanceof ApiError ? error.message : "The core mandate could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rebalance() {
+    setBusy(true);
+    onError(null);
+    setOutcome(null);
+    try {
+      const result = await rebalanceCoreSleeve();
+      const label =
+        result.state === "submitted"
+          ? "Broker accepted; fill reconciliation is pending."
+          : result.state === "submission_uncertain"
+            ? "Submission outcome is uncertain; reconciliation is required before retrying."
+            : result.reason_code === "core_order_reconciled"
+              ? "The existing broker order was reconciled; holdings and fill state have been refreshed."
+              : result.state === "held"
+                ? "No trade required; the sleeve remains inside its band."
+              : `Rebalance refused: ${result.reason_code}.`;
+      setOutcome(label);
+      onUpdated();
+    } catch (error) {
+      onError(error instanceof ApiError ? error.message : "The demo rebalance could not be evaluated.");
+    } finally {
+      setBusy(false);
+      setConfirmRebalance(false);
+    }
+  }
+
+  return (
+    <>
+      {showMandate ? (
+        <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              ["Core target %", target, setTarget],
+              ["Cash reserve %", reserve, setReserve],
+              ["Rebalance band %", band, setBand],
+              ["Minimum amount", minimum, setMinimum],
+            ].map(([label, value, setter]) => (
+              <label key={label as string} className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                {label as string}
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={value as string}
+                  onChange={(event) => (setter as (value: string) => void)(event.target.value)}
+                  className="mt-1 min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
+                />
+              </label>
+            ))}
+          </div>
+          <label className="mt-3 flex min-h-11 items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={!sleeve.can_configure && !enabled}
+              onChange={(event) => setEnabled(event.target.checked)}
+            />
+            Enable demo core sleeve
+          </label>
+          <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
+            Audit reason
+            <input
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              className="mt-1 min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
+            />
+          </label>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy || reason.trim().length === 0 || (enabled && !sleeve.can_configure) || (mandate.configured && !mandateDirty)}
+              onClick={() => void saveMandate()}
+              className="min-h-11 rounded-md border border-slate-300 px-3 text-sm font-medium disabled:opacity-50 dark:border-slate-700"
+            >
+              {busy ? "Saving…" : "Save mandate"}
+            </button>
+            <button
+              type="button"
+              disabled={busy || (!sleeve.can_rebalance && !sleeve.can_resume) || (!sleeve.can_resume && mandateDirty)}
+              onClick={() => setConfirmRebalance(true)}
+              className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {sleeve.can_resume ? "Resume demo order" : "Rebalance demo now"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {outcome ? <p role="status" className="mt-3 text-sm text-slate-700 dark:text-slate-200">{outcome}</p> : null}
+      <Modal isOpen={confirmRebalance} onRequestClose={() => setConfirmRebalance(false)} labelledBy="core-rebalance-title">
+        <h2 id="core-rebalance-title" className="text-base font-semibold">
+          {sleeve.can_resume ? `Resume demo order ${sleeve.pending_order_id}?` : `Rebalance ${sleeve.selected_symbol} in demo?`}
+        </h2>
+        <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
+          {sleeve.can_resume
+            ? "The server will look up and reconcile the already-authorised order using its original request ID and account credentials. It cannot create a second order."
+            : `The server will size within the ${target}% core mandate and every live guard. This path can buy only; it cannot sell or use alpha signals.`}
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={() => setConfirmRebalance(false)} className="min-h-11 rounded-md border border-slate-300 px-3 text-sm dark:border-slate-700">Cancel</button>
+          <button type="button" disabled={busy} onClick={() => void rebalance()} className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Evaluating…" : sleeve.can_resume ? "Confirm resume" : "Confirm demo rebalance"}</button>
+        </div>
+      </Modal>
+    </>
   );
 }
 
@@ -259,6 +422,18 @@ export function StrategyPortfolioLens() {
               <p className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
                 Demo only · buy only · no alpha signal. {coreSleeve.data.household_tax_caveat}
               </p>
+              <CoreSleeveControl
+                sleeve={coreSleeve.data}
+                busy={busy}
+                setBusy={setBusy}
+                onError={setActionError}
+                onUpdated={() => {
+                  void coreSleeve.refetch();
+                  void ownedPositions.refetch();
+                  void overview.refetch();
+                  void pnlHistory.refetch();
+                }}
+              />
             </section>
           ) : null}
           <AutomationControl overview={data} onUpdated={overview.refetch} />

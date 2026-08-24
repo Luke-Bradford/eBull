@@ -2969,14 +2969,41 @@ export interface CoreSleeveResponse {
   mandate: CoreMandate;
   can_configure: boolean;
   can_rebalance: boolean;
+  can_resume: boolean;
+  pending_order_id: number | null;
+  execution_action: "blocked" | "rebalance" | "resume";
   blockers: Array<{
-    code: "core_evidence_collecting" | "core_candidates_missing" | "core_selection_invalid" | "core_mandate_unconfigured" | "core_mandate_disabled" | "core_submitter_unavailable";
+    code: "core_evidence_collecting" | "core_candidates_missing" | "core_selection_invalid" | "core_mandate_unconfigured" | "core_mandate_disabled" | "core_mandate_selection_mismatch" | "core_demo_required" | "core_order_unresolved";
     detail: string;
   }>;
-  environment: "demo";
+  environment: "demo" | "real";
   buy_only: boolean;
   alpha_input_used: boolean;
   household_tax_caveat: string;
+}
+
+export interface CoreMandateUpdate {
+  enabled: boolean;
+  core_instrument_id: number | null;
+  core_target_pct: string;
+  liquidity_reserve_pct: string;
+  rebalance_band_pct: string;
+  min_rebalance_amount: string;
+  reason: string;
+  provider: "etoro";
+  environment: "demo";
+}
+
+export interface CoreRebalanceResponse {
+  state: "held" | "refused" | "submitted" | "submission_uncertain";
+  reason_code: string;
+  intent_id: number | null;
+  trade_id: number | null;
+  order_id: number | null;
+  amount: string;
+  submission_policy_version: string;
+  preflight_policy_version: string;
+  broker_preflight_policy_version: string;
 }
 
 export interface StrategyPortfolioMandate {

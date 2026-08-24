@@ -130,6 +130,10 @@ class CoreEligibilityProof:
     verdict: CoreEligibilityVerdict
     reason_code: str | None
     age_seconds: Decimal
+    response_currency: str
+    min_position_amount: Decimal | None
+    min_position_exposure: Decimal | None
+    max_units_per_order: Decimal | None
     #: ⚠ READ BACK SINCE #2603 step 3a, and NOT part of ``verdict``.  A passing
     #: verdict requires ``allow_open_position`` (``evaluate_core_eligibility``) and says
     #: nothing about closing.  A rebalance SELL is a partial close -- never a full
@@ -327,7 +331,9 @@ def load_latest_core_eligibility_proof(
         SELECT core_eligibility_proof_id, instrument_id, operator_id, provider, environment,
                api_key_credential_id, user_key_credential_id, observed_at, verdict, reason_code,
                EXTRACT(EPOCH FROM (now() - observed_at))::numeric AS age_seconds, policy_version,
-               allow_close_position, allow_partial_close_position
+               allow_close_position, allow_partial_close_position,
+               response_currency, min_position_amount, min_position_exposure,
+               max_units_per_order
         FROM strategy_core_eligibility_proofs
         WHERE instrument_id = %s AND operator_id = %s AND provider = %s AND environment = %s
         ORDER BY observed_at DESC, core_eligibility_proof_id DESC
@@ -356,6 +362,10 @@ def load_latest_core_eligibility_proof(
         # other way round once someone writes `not proof.allow_partial_close`).
         allow_close_position=None if row[12] is None else bool(row[12]),
         allow_partial_close_position=None if row[13] is None else bool(row[13]),
+        response_currency=str(row[14]),
+        min_position_amount=None if row[15] is None else Decimal(str(row[15])),
+        min_position_exposure=None if row[16] is None else Decimal(str(row[16])),
+        max_units_per_order=None if row[17] is None else Decimal(str(row[17])),
     )
 
 

@@ -478,8 +478,11 @@ def reconcile_backlog(
             SELECT state.order_id
             FROM strategy_order_reconciliation_state state
             JOIN orders o ON o.order_id = state.order_id
+            JOIN strategy_trade_orders link ON link.order_id=o.order_id
+            JOIN strategy_trades trade ON trade.strategy_trade_id=link.strategy_trade_id
             WHERE state.state NOT IN ('resolved', 'rejected')
               AND o.execution_origin = 'strategy'
+              AND trade.core_rebalance_intent_id IS NULL
             ORDER BY state.first_unresolved_at, state.order_id
             LIMIT %s
             """,

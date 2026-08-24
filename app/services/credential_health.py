@@ -283,6 +283,13 @@ def _do_health_transition(
     ``record_row_health_transition``, which provides the side-tx
     + PoolTimeout semantics.
     """
+    # Every broker_credentials UPDATE participates in the core safety-write
+    # trigger. Take its advisory key before the explicit credential row lock;
+    # otherwise a health writer can hold the row while waiting for a core
+    # submission that already holds the advisory key and needs that same row.
+    from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
+
+    conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """

@@ -26,9 +26,18 @@ the server reports `evidence_collecting`, offers no instrument and refuses enabl
 - One server-side selection invariant is called by mandate configuration **and** by the
   acting path while the mandate lock is held. A legacy enabled mandate naming any other
   instrument is refused; checking only the endpoint would be a bypass.
-- `core_submission_lock` spans the DB decision phase: record -> admit -> DB preflight ->
-  durable order authority. The request UUID is committed before mutating broker I/O and
-  reused after uncertainty. No second request identity is generated.
+- `core_submission_lock` spans record -> admit -> DB preflight -> durable order authority
+  -> broker mutation -> durable outcome. The request UUID is committed before mutating
+  broker I/O and reused after uncertainty. Kill-switch activation takes the same lock, so
+  an activation commit cannot race a previously admitted core mutation. No second request
+  identity is generated. Credential revocation/replacement takes that lock as well, so a
+  decrypted credential cannot become revoked during the broker-mutation window.
+- Database statement triggers take the same lock before writes to runtime configuration,
+  execution blocks, the kill switch or broker credentials. This makes the safety boundary
+  apply to every writer and acquires it before any target-row lock.
+- Credential rotation is refused at both the service and database boundary while an
+  unresolved core authority references that exact credential pair; reconciliation must
+  become terminal before the account identity can be removed.
 - Broker mutation remains refused from linked worktrees. The UI calls the main-checkout
   dev API; tests use broker doubles. A real demo acceptance is an attended post-merge
   check only after #2833 passes and the operator has deliberately cleared every gate.
@@ -67,11 +76,11 @@ Authenticated, attended request; no amount or instrument in the body. The server
 
 1. requires global demo configuration and loads the session operator's current demo
    credential ids and secrets. Those exact ids remain attached to the broker handle;
-2. outside a DB transaction, loads the fresh broker account snapshot and informational
-   cost quote inputs. No database lock is held across retryable network I/O;
-3. opens `core_submission_lock` and one short transaction, re-loads the mandate, checks
-   the server selection invariant, observes the already-fetched sleeve and records one
-   immutable intent;
+2. opens `core_submission_lock`, then loads the fresh broker account snapshot and
+   informational cost quote inputs. Holding the lock across these reads prevents a
+   second request from sizing against a snapshot taken before the first request fills;
+3. in one short transaction, re-loads the mandate, checks the server selection
+   invariant, observes the fresh sleeve and records one immutable intent;
 4. admits that exact intent, runs DB/clock preflight, and verifies the admission proof's
    credential ids equal the already-loaded pair. The `FOR SHARE` lock prevents a swap
    until this transaction commits; the broker handle then continues with the exact
@@ -131,6 +140,14 @@ Save, and a separate
 instrument, maximum mandate exposure, demo environment and buy-only limitation. It is
 disabled with visible reasons whenever the server says `can_rebalance=false`. A
 `submitted` result is labelled broker-accepted/pending reconciliation, never filled.
+If an authority is already unresolved, the read model instead exposes its order id and
+labels the sole action `Resume demo order`; that action uses the proof's exact credential
+row identities and original request UUID to reconcile only. A lookup miss remains
+non-terminal because delayed broker visibility cannot prove that an uncertain submission
+had no effect. The unresolved authority continues to block every new rebalance until the
+broker reports a terminal accepted or rejected outcome; resume never submits again.
+Real-environment deployments expose a demo-required blocker rather than an actionable
+button.
 
 Alpha Automation remains separate and disabled when no strategy passed. Core holdings
 continue through the existing positions/P&L panels under the `Core / cash mandate`
@@ -142,7 +159,8 @@ presentation identity.
   enabled eligible-but-unselected mandate), orchestration order,
   every early refusal, hold, accepted buy, explicit rejection, uncertainty, duplicate
   request/reconcile, credential replacement, exact proof provenance, older blocking
-  trades and lock/transaction boundaries.
+  trades and lock/transaction boundaries. The submission lock remains held from final
+  mandate validation through broker mutation and durable outcome persistence.
 - Provider tests for exact core request shape, demo-only refusal, reference mismatch,
   raw payload and unattended guard inventory.
 - API tests for auth, honest collecting state, enable refusal and response shapes.

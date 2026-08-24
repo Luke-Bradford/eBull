@@ -107,15 +107,40 @@ const CORE_COLLECTING = {
   mandate: { configured: false },
   can_configure: false,
   can_rebalance: false,
+  can_resume: false,
+  pending_order_id: null,
+  execution_action: "blocked",
   blockers: [
     { code: "core_evidence_collecting", detail: "#2833 has 1 of 5 required trading days; cash remains the fallback." },
     { code: "core_mandate_unconfigured", detail: "No core/cash mandate has been configured." },
-    { code: "core_submitter_unavailable", detail: "Attended demo rebalance submission is not deployed yet." },
   ],
   environment: "demo",
   buy_only: true,
   alpha_input_used: false,
   household_tax_caveat: "A UK ISA at another broker tax-dominates this engine sleeve for eligible household capital.",
+} as const;
+
+const CORE_READY = {
+  ...CORE_COLLECTING,
+  state: "ready",
+  selected_instrument_id: 3417,
+  selected_symbol: "SPY.RTH",
+  evidence_ref: "#2833 verdict",
+  observed_trading_days: 5,
+  mandate: {
+    configured: true,
+    enabled: true,
+    core_instrument_id: 3417,
+    core_target_pct: "80",
+    liquidity_reserve_pct: "10",
+    rebalance_band_pct: "5",
+    min_rebalance_amount: "25",
+  },
+  can_configure: true,
+  can_rebalance: true,
+  can_resume: false,
+  execution_action: "rebalance",
+  blockers: [],
 } as const;
 
 function renderLens() {
@@ -145,6 +170,101 @@ describe("StrategyPortfolioLens", () => {
     expect(screen.getByText("No sleeve adopted")).toBeInTheDocument();
     expect(screen.getByText(/cash remains the fallback/i)).toBeInTheDocument();
     expect(screen.getByText(/UK ISA at another broker tax-dominates/i)).toBeInTheDocument();
+  });
+
+  it("saves a materially changed ready mandate with an explicit audit reason", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    const save = vi.spyOn(strategiesApi, "updateCoreMandate").mockResolvedValue(CORE_READY.mandate as never);
+    renderLens();
+
+    const target = await screen.findByLabelText("Core target %");
+    await userEvent.clear(target);
+    await userEvent.type(target, "75");
+    await userEvent.type(await screen.findByLabelText("Audit reason"), "Adopt reviewed #2833 sleeve");
+    await userEvent.click(screen.getByRole("button", { name: "Save mandate" }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save.mock.calls[0]?.[0]).toMatchObject({
+      enabled: true,
+      core_instrument_id: 3417,
+      core_target_pct: "75",
+      reason: "Adopt reviewed #2833 sleeve",
+      environment: "demo",
+    });
+  });
+
+  it("does not offer a reason-only save for an unchanged configured mandate", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    renderLens();
+
+    await userEvent.type(await screen.findByLabelText("Audit reason"), "No material change");
+
+    expect(screen.getByRole("button", { name: "Save mandate" })).toBeDisabled();
+  });
+
+  it("cannot confirm a rebalance against unsaved mandate edits", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    renderLens();
+
+    const target = await screen.findByLabelText("Core target %");
+    await userEvent.clear(target);
+    await userEvent.type(target, "70");
+
+    expect(screen.getByRole("button", { name: "Rebalance demo now" })).toBeDisabled();
+  });
+
+  it("confirms a demo rebalance and labels acceptance as pending reconciliation", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    const rebalance = vi.spyOn(strategiesApi, "rebalanceCoreSleeve").mockResolvedValue({
+      state: "submitted",
+      reason_code: "broker_accepted_pending_reconciliation",
+      intent_id: 11,
+      trade_id: 21,
+      order_id: 31,
+      amount: "49.9",
+      submission_policy_version: "core-submission-v1",
+      preflight_policy_version: "core-preflight-v2",
+      broker_preflight_policy_version: "core-broker-preflight-v1",
+    });
+    renderLens();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Rebalance demo now" }));
+    expect(rebalance).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Confirm demo rebalance" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Broker accepted; fill reconciliation is pending");
+    expect(rebalance).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels an unresolved authority as resume and cannot present it as a new rebalance", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue({
+      ...CORE_READY,
+      can_rebalance: false,
+      can_resume: true,
+      pending_order_id: 31,
+      execution_action: "resume",
+      blockers: [{ code: "core_order_unresolved", detail: "Order 31 is unresolved." }],
+    } as never);
+    const resume = vi.spyOn(strategiesApi, "rebalanceCoreSleeve").mockResolvedValue({
+      state: "held",
+      reason_code: "core_order_reconciled",
+      intent_id: 11,
+      trade_id: 21,
+      order_id: 31,
+      amount: "49.9",
+      submission_policy_version: "core-submission-v1",
+      preflight_policy_version: "core-preflight-v2",
+      broker_preflight_policy_version: "core-broker-preflight-v1",
+    });
+    renderLens();
+
+    expect(await screen.findByText("Order 31 is unresolved.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rebalance demo now" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Resume demo order" }));
+    expect(screen.getByRole("heading", { name: "Resume demo order 31?" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Confirm resume" }));
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("status")).toHaveTextContent("existing broker order was reconciled");
   });
 
   it("states what is blocking as facts, and offers the control for the one that has one", async () => {

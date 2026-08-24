@@ -894,6 +894,13 @@ def activate_kill_switch(
         raise ValueError("activate_kill_switch: reason is required when activating")
     now = now or _utcnow()
     with conn.transaction():
+        # A core broker mutation holds this key as a session lock. Taking the
+        # same key transactionally makes emergency activation and mutation a
+        # single ordered history: after activation commits, no core order can
+        # still pass a pre-activation check and reach the broker.
+        from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
+
+        conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SELECT is_active FROM kill_switch WHERE id = TRUE FOR UPDATE")
             prior = cur.fetchone()
@@ -962,6 +969,12 @@ def deactivate_kill_switch(
         raise ValueError("deactivate_kill_switch: reason is required for attribution")
     now = now or _utcnow()
     with conn.transaction():
+        # Use the same advisory-before-row order as activation. The database
+        # trigger also takes this key on UPDATE, so taking the row first here
+        # would deadlock a concurrent emergency activation.
+        from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
+
+        conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SELECT is_active FROM kill_switch WHERE id = TRUE FOR UPDATE")
             prior = cur.fetchone()

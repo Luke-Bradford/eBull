@@ -579,10 +579,12 @@ class TestKillSwitch:
 
         result = activate_kill_switch(conn, reason="data corruption", activated_by="ops", now=_NOW)
 
-        # The UPDATE happens through the second cursor; the audit INSERT is the
-        # only conn.execute() call.
-        assert conn.execute.call_count == 1
-        audit_call = conn.execute.call_args_list[0]
+        # Activation first serialises with a core broker mutation, then writes
+        # the audit row. The kill-switch UPDATE uses the second cursor.
+        assert conn.execute.call_count == 2
+        lock_call, audit_call = conn.execute.call_args_list
+        assert "pg_advisory_xact_lock" in lock_call[0][0]
+        assert lock_call[0][1] == (2603, 3)
         assert "INSERT INTO runtime_config_audit" in audit_call[0][0]
         assert audit_call[0][1]["field"] == "kill_switch"
         assert audit_call[0][1]["new"] == "true"
@@ -615,8 +617,10 @@ class TestKillSwitch:
 
         deactivate_kill_switch(conn, deactivated_by="ops", reason="resolved", now=_NOW)
 
-        assert conn.execute.call_count == 2
-        update_call, audit_call = conn.execute.call_args_list
+        assert conn.execute.call_count == 3
+        lock_call, update_call, audit_call = conn.execute.call_args_list
+        assert "pg_advisory_xact_lock" in lock_call[0][0]
+        assert lock_call[0][1] == (2603, 3)
         # Order matters: UPDATE must precede the audit INSERT so the audit row
         # records committed state, not a speculative future state.
         assert "UPDATE kill_switch" in update_call[0][0]
