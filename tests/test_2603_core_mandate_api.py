@@ -19,6 +19,7 @@ from __future__ import annotations
 import inspect
 from contextlib import nullcontext
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -44,6 +45,24 @@ from app.services.broker_credentials import (
 from app.services.strategy_core_executor import CoreExecutionResult, CoreResumeAuthority
 from app.services.strategy_core_mandate import CoreMandate
 from app.services.strategy_core_selection import CoreCandidateCoverage, CoreSelection
+
+
+def _capital_authority(
+    *,
+    active_position_ids: tuple[int, ...] = (),
+    alpha_committed: Decimal = Decimal("0"),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        enabled=True,
+        capital_limit=Decimal("1000"),
+        capital_mode="fixed",
+        realised_delta=Decimal("0"),
+        alpha_committed=alpha_committed,
+        core_pending_committed=Decimal("0"),
+        core_active_recorded_committed=Decimal("0"),
+        core_active_position_ids=active_position_ids,
+    )
+
 
 CORE_MANDATE_PATH = "/strategies/core-mandate"
 CORE_SLEEVE_PATH = "/strategies/core-sleeve"
@@ -132,6 +151,7 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
     monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: None)
     monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", lambda _conn: None)
     response = read_core_sleeve(cast(Any, MagicMock()))
     assert response.state == "evidence_collecting"
     assert response.selected_instrument_id is None
@@ -141,6 +161,7 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     assert response.can_resume is False
     assert response.execution_action == "blocked"
     assert [blocker.code for blocker in response.blockers] == [
+        "core_paper_pool_unconfigured",
         "core_evidence_collecting",
         "core_mandate_unconfigured",
     ]
@@ -219,6 +240,7 @@ def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
     monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
     monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
     monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: authority)
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", lambda _conn: _capital_authority())
     monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
 
     response = read_core_sleeve(cast(Any, MagicMock()))
@@ -228,6 +250,46 @@ def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
     assert response.execution_action == "resume"
     assert response.pending_order_id == 31
     assert [blocker.code for blocker in response.blockers] == ["core_order_unresolved"]
+
+
+@pytest.mark.parametrize(
+    ("capital_authority", "expected_blocker"),
+    [
+        (_capital_authority(active_position_ids=(99,)), "core_capital_authority_incomplete"),
+        (_capital_authority(alpha_committed=Decimal("1000")), "core_sandbox_exceeded"),
+    ],
+)
+def test_operator_view_does_not_advertise_unavailable_core_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+    capital_authority: SimpleNamespace,
+    expected_blocker: str,
+) -> None:
+    selection = CoreSelection(
+        state="ready",
+        selected_instrument_id=3417,
+        selected_symbol="SPY.RTH",
+        evidence_ref="#2833 verdict",
+        required_trading_days=5,
+        observed_trading_days=5,
+        max_cost_bps=60,
+        candidates=(),
+        missing_candidate_ids=(),
+        configuration_error=None,
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+    monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr(
+        "app.api.strategies.load_engine_capital_authority",
+        lambda _conn: capital_authority,
+    )
+    monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+
+    response = read_core_sleeve(cast(Any, MagicMock()))
+
+    assert response.can_rebalance is False
+    assert response.execution_action == "blocked"
+    assert [blocker.code for blocker in response.blockers] == [expected_blocker]
 
 
 def test_operator_view_refuses_a_mandate_for_the_previous_reviewed_selection(
@@ -248,6 +310,7 @@ def test_operator_view_refuses_a_mandate_for_the_previous_reviewed_selection(
     monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
     monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
     monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", lambda _conn: _capital_authority())
     monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
 
     response = read_core_sleeve(cast(Any, MagicMock()))

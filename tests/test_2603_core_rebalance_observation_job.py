@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -59,6 +60,7 @@ class _Harness:
         self.broker = MagicMock()
         self.broker.__enter__ = MagicMock(return_value=self.broker)
         self.broker.__exit__ = MagicMock(return_value=False)
+        self.broker.get_account_risk_snapshot.return_value = SimpleNamespace(available_cash=Decimal("4000"))
 
         self.tracker = MagicMock()
         self.tracker.__enter__ = MagicMock(return_value=self.tracker)
@@ -102,6 +104,11 @@ class _Harness:
         observe_kwargs: dict[str, Any] = (
             {"side_effect": observe} if isinstance(observe, Exception) else {"return_value": observe or _state()}
         )
+        capital_authority = SimpleNamespace(enabled=True)
+        capital_usage = SimpleNamespace(
+            core_market_value=Decimal("6000"),
+            headroom=SimpleNamespace(remaining=Decimal("4000"), within_bound=True),
+        )
 
         with (
             patch("app.workers.scheduler.settings.etoro_env", env),
@@ -111,6 +118,14 @@ class _Harness:
             patch("app.workers.scheduler.connect_job", return_value=self.conn),
             patch("app.providers.implementations.etoro_broker.EtoroBrokerProvider", return_value=self.broker) as prov,
             patch("app.services.strategy_core_mandate.load_core_mandate", **load_kwargs) as load,
+            patch(
+                "app.services.strategy_engine_capital.load_engine_capital_authority",
+                return_value=capital_authority,
+            ),
+            patch(
+                "app.services.strategy_engine_capital.resolve_engine_capital_usage",
+                return_value=capital_usage,
+            ),
             patch("app.services.strategy_core_sleeve.observe_core_sleeve", **observe_kwargs) as obs,
             patch(
                 "app.services.strategy_core_rebalance_intent.record_core_rebalance_intent",
@@ -243,8 +258,12 @@ class TestTheMandateRevisionRace:
         harness = _Harness()
         harness.run()
         locks = [c for c in harness.conn.execute.call_args_list if "pg_advisory_xact_lock" in str(c.args[0])]
-        assert len(locks) == 1
-        assert locks[0].args[1] == CORE_MANDATE_ADVISORY_LOCK
+        from app.services.strategy_control_plane import PAPER_ALLOCATOR_ADVISORY_LOCK
+
+        assert [call.args[1] for call in locks] == [
+            PAPER_ALLOCATOR_ADVISORY_LOCK,
+            CORE_MANDATE_ADVISORY_LOCK,
+        ]
 
 
 class TestTheHappyPath:
@@ -298,6 +317,17 @@ class TestTheHappyPath:
                 return_value=harness.broker,
             ) as provider,
             patch("app.services.strategy_core_mandate.load_core_mandate", return_value=_mandate()),
+            patch(
+                "app.services.strategy_engine_capital.load_engine_capital_authority",
+                return_value=SimpleNamespace(enabled=True),
+            ),
+            patch(
+                "app.services.strategy_engine_capital.resolve_engine_capital_usage",
+                return_value=SimpleNamespace(
+                    core_market_value=Decimal("6000"),
+                    headroom=SimpleNamespace(remaining=Decimal("4000")),
+                ),
+            ),
             patch("app.services.strategy_core_sleeve.observe_core_sleeve", return_value=_state()),
             patch(
                 "app.services.strategy_core_rebalance_intent.record_core_rebalance_intent",
@@ -314,7 +344,9 @@ class TestTheHappyPath:
         harness = _Harness()
         order: list[str] = []
         harness.conn.__exit__ = MagicMock(side_effect=lambda *_: order.append("conn_closed") or False)
-        harness.broker.get_account_risk_snapshot.side_effect = lambda: order.append("http") or MagicMock()
+        harness.broker.get_account_risk_snapshot.side_effect = lambda: (
+            order.append("http") or SimpleNamespace(available_cash=Decimal("4000"))
+        )
 
         harness.run()
 

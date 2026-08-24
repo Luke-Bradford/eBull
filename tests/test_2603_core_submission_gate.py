@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from app.services.strategy_control_plane import PAPER_ALLOCATOR_ADVISORY_LOCK
 from app.services.strategy_core_mandate import CORE_MANDATE_ADVISORY_LOCK
 from app.services.strategy_core_submission_gate import (
     _ADMISSION_SQL,
@@ -78,7 +79,7 @@ def test_the_lock_assertion_pins_the_two_int4_advisory_encoding() -> None:
     assert "granted" in text
 
 
-def test_both_advisory_keys_are_positive_because_the_assertion_compares_unsigned() -> None:
+def test_all_advisory_keys_are_positive_and_distinct_because_the_assertion_compares_unsigned() -> None:
     """``pg_locks.classid``/``objid`` are OID-width; the lock functions take signed int4.
 
     A negative key component would be stored as its uint32 image and would not
@@ -86,9 +87,10 @@ def test_both_advisory_keys_are_positive_because_the_assertion_compares_unsigned
     a lock that IS held — and the gate would raise on every call.  Cheap to pin,
     invisible if it ever changes.
     """
-    for key in (CORE_MANDATE_ADVISORY_LOCK, CORE_SUBMISSION_ADVISORY_LOCK):
+    keys = (PAPER_ALLOCATOR_ADVISORY_LOCK, CORE_MANDATE_ADVISORY_LOCK, CORE_SUBMISSION_ADVISORY_LOCK)
+    for key in keys:
         assert all(component > 0 for component in key), key
-    assert CORE_MANDATE_ADVISORY_LOCK != CORE_SUBMISSION_ADVISORY_LOCK
+    assert len(set(keys)) == len(keys)
 
 
 def test_the_admission_query_is_one_statement() -> None:

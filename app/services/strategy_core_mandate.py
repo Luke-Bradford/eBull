@@ -29,8 +29,10 @@ from uuid import UUID
 
 import psycopg
 
+from app.services.strategy_control_plane import PAPER_ALLOCATOR_ADVISORY_LOCK
 from app.services.strategy_core_eligibility import require_core_eligibility
 from app.services.strategy_core_selection import require_selected_core_instrument
+from app.services.strategy_engine_capital import EngineCapitalObservationError, load_engine_capital_authority
 
 # v2 as of #2670, which made both band triggers REACHABLE rather than merely in
 # range.  Bumped even though the table held 0 rows: a version denotes a rule set,
@@ -363,6 +365,7 @@ def configure_core_mandate(
     )
     # Serialise revision allocation; the UNIQUE on revision is the backstop, not
     # the mechanism.
+    conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_MANDATE_ADVISORY_LOCK)
     if values.enabled:
         # Inside the lock and inside this transaction, so the freshness test and
@@ -386,6 +389,13 @@ def configure_core_mandate(
     current = load_core_mandate(conn)
     if current is not None and not _is_material_change(current, values):
         raise CoreMandateError("core mandate change must alter at least one mandate value")
+    if current is not None and current.core_instrument_id != values.core_instrument_id:
+        try:
+            capital = load_engine_capital_authority(conn)
+        except EngineCapitalObservationError as exc:
+            raise CoreMandateError("core instrument cannot change while capital ownership is incomplete") from exc
+        if capital is not None and capital.core_active_position_ids:
+            raise CoreMandateError("core instrument cannot change while an owned core position is active")
     revision = 1 if current is None else current.revision + 1
     row = conn.execute(
         """

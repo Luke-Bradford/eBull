@@ -35,6 +35,11 @@ from app.services.strategy_core_submission_gate import (
     admit_core_rebalance_intent,
     core_submission_lock,
 )
+from app.services.strategy_engine_capital import (
+    EngineCapitalObservationError,
+    load_engine_capital_authority,
+    resolve_engine_capital_usage,
+)
 from app.services.strategy_order_reconciliation import reconcile_strategy_order
 
 CoreExecutionState = Literal["held", "refused", "submitted", "submission_uncertain"]
@@ -354,12 +359,35 @@ def execute_core_rebalance(
     order_id: int | None = None
     amount = Decimal("0")
     with core_submission_lock(conn):
+        try:
+            capital_authority = load_engine_capital_authority(conn)
+        except EngineCapitalObservationError as exc:
+            raise StrategyCoreExecutionError("the assigned-capital sandbox is incomplete") from exc
+        if capital_authority is None:
+            raise StrategyCoreExecutionError("an assigned paper pot is required")
+        if not capital_authority.enabled:
+            raise StrategyCoreExecutionError("the assigned paper pot is disabled")
+        # Session advisory locks survive this commit; row snapshots do not need
+        # to be held across broker I/O because the authority is re-proved below.
+        conn.commit()
         # This observation must be inside the same serialised section as the
         # mutation. Otherwise request B can observe, wait while request A fills,
         # then submit a duplicate order from B's still-fresh pre-fill snapshot.
         try:
             snapshot = broker.get_account_risk_snapshot()
-            state = observe_core_sleeve(snapshot, core_instrument_id=mandate.core_instrument_id)
+            usage = resolve_engine_capital_usage(
+                capital_authority,
+                snapshot,
+                core_instrument_id=mandate.core_instrument_id,
+            )
+            if not usage.headroom.within_bound:
+                return _result("refused", "sandbox_exceeded")
+            state = observe_core_sleeve(
+                snapshot,
+                core_instrument_id=mandate.core_instrument_id,
+                exact_owned_market_value=usage.core_market_value,
+                assigned_cash_available=min(snapshot.available_cash, usage.headroom.remaining),
+            )
         except Exception as exc:
             raise StrategyCoreExecutionError("the broker account snapshot could not describe the core sleeve") from exc
         decision = evaluate_core_rebalance(mandate, state)
@@ -370,6 +398,7 @@ def execute_core_rebalance(
                 mandate=mandate,
                 decision=decision,
                 core_instrument_id=mandate.core_instrument_id,
+                capital_authority=capital_authority,
                 eligibility_response_currency=proof.response_currency,
                 eligibility_min_position_exposure=proof.min_position_exposure,
                 eligibility_min_position_amount=proof.min_position_amount,
@@ -381,6 +410,12 @@ def execute_core_rebalance(
                 raise StrategyCoreExecutionError("the core mandate changed before submission")
             if current.event_id != mandate.event_id:
                 raise StrategyCoreExecutionError("the core mandate was revised during broker preflight")
+            try:
+                current_capital = load_engine_capital_authority(conn)
+            except EngineCapitalObservationError as exc:
+                raise StrategyCoreExecutionError("the assigned-capital sandbox changed during preflight") from exc
+            if current_capital != capital_authority:
+                raise StrategyCoreExecutionError("the assigned-capital sandbox changed during broker preflight")
             require_selected_core_instrument(conn, instrument_id=current.core_instrument_id)
             intent = record_core_rebalance_intent(conn, state=state, recorded_by=recorded_by)
             intent_id = intent.core_rebalance_intent_id

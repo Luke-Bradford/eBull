@@ -39,6 +39,7 @@ const BLOCKED = {
     reserved_capital: "0",
     invested_capital: "0",
     remaining_capital: "0",
+    capital_observation_complete: true,
     mandate: { configured: false, policy_version: "portfolio-mandate-unconfigured", risk_profile: "unconfigured" },
     available_mandates: [{ risk_profile: "cautious" }, { risk_profile: "balanced" }, { risk_profile: "growth" }],
   },

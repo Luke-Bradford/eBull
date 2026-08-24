@@ -33,6 +33,7 @@ from app.providers.broker import (
     BrokerCoreOrder,
     BrokerCoreOrderSubmission,
     BrokerCostComponent,
+    BrokerDirectPositionInvestment,
     BrokerEligibilityResponse,
     BrokerInstrumentEligibility,
     BrokerInstrumentInvestment,
@@ -1279,7 +1280,11 @@ def _parse_account_risk_snapshot(
         return value
 
     def _instrument_id(parent: dict[str, Any]) -> int:
-        raw_id = parent.get("instrumentId", parent.get("instrumentID"))
+        documented = parent.get("instrumentId")
+        legacy = parent.get("instrumentID")
+        if documented is not None and legacy is not None and documented != legacy:
+            raise TradingPreflightParseError("account P&L instrument id aliases disagree")
+        raw_id = documented if documented is not None else legacy
         if raw_id is None:
             raise TradingPreflightParseError("account P&L instrument id is required")
         try:
@@ -1288,6 +1293,37 @@ def _parse_account_risk_snapshot(
             raise TradingPreflightParseError("account P&L instrument id is required") from exc
         if value <= 0:
             raise TradingPreflightParseError("account P&L instrument id must be positive")
+        return value
+
+    def _position_id(parent: dict[str, Any]) -> int:
+        def validated(value: object) -> int:
+            # The portal schema says integer. Do not let bool or int(1.2) become
+            # an exact ownership identity by Python coercion.
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TradingPreflightParseError("account P&L position id must be an integer")
+            if value <= 0 or value > 9_223_372_036_854_775_807:
+                raise TradingPreflightParseError("account P&L position id is outside signed BIGINT range")
+            return value
+
+        has_documented = "positionId" in parent
+        has_legacy = "positionID" in parent
+        if not has_documented and not has_legacy:
+            raise TradingPreflightParseError("account P&L position id must be an integer")
+        documented = validated(parent["positionId"]) if has_documented else None
+        legacy = validated(parent["positionID"]) if has_legacy else None
+        if documented is not None and legacy is not None and documented != legacy:
+            raise TradingPreflightParseError("account P&L position id aliases disagree")
+        if documented is not None:
+            return documented
+        assert legacy is not None
+        return legacy
+
+    def _is_partially_altered(row: dict[str, Any]) -> bool:
+        if "isPartiallyAltered" not in row:
+            raise TradingPreflightParseError("account P&L position isPartiallyAltered is required")
+        value = row["isPartiallyAltered"]
+        if not isinstance(value, bool):
+            raise TradingPreflightParseError("account P&L position isPartiallyAltered must be a boolean")
         return value
 
     def _is_buy(row: dict[str, Any]) -> bool:
@@ -1350,6 +1386,8 @@ def _parse_account_risk_snapshot(
         direct_long_value: dict[int, Decimal] = {}
         direct_long_count: dict[int, int] = {}
         direct_short_count: dict[int, int] = {}
+        direct_positions: list[BrokerDirectPositionInvestment] = []
+        direct_position_ids: set[int] = set()
         total_invested = Decimal("0")
         unrealized = Decimal("0")
 
@@ -1358,7 +1396,24 @@ def _parse_account_risk_snapshot(
             amount = _money(row, "amount")
             pnl = _money(_row(row.get("unrealizedPnL"), "positions.unrealizedPnL"), "pnL")
             instrument_id = _instrument_id(row)
+            position_id = _position_id(row)
+            if position_id in direct_position_ids:
+                raise TradingPreflightParseError("account P&L direct position ids must be unique")
+            direct_position_ids.add(position_id)
             is_buy = _is_buy(row)
+            is_partially_altered = _is_partially_altered(row)
+            market_value = amount + pnl
+            direct_positions.append(
+                BrokerDirectPositionInvestment(
+                    position_id=position_id,
+                    instrument_id=instrument_id,
+                    is_buy=is_buy,
+                    amount=amount,
+                    unrealized_pnl=pnl,
+                    market_value=market_value,
+                    is_partially_altered=is_partially_altered,
+                )
+            )
             total_invested += amount
             unrealized += pnl
             investments[instrument_id] = investments.get(instrument_id, Decimal("0")) + amount
@@ -1366,7 +1421,7 @@ def _parse_account_risk_snapshot(
                 # `amount + pnL` is this position's contribution to the equity
                 # identity, and for a long holding that IS its market value --
                 # cross-checked against our independent quote feed (#2704).
-                direct_long_value[instrument_id] = direct_long_value.get(instrument_id, Decimal("0")) + amount + pnl
+                direct_long_value[instrument_id] = direct_long_value.get(instrument_id, Decimal("0")) + market_value
                 direct_long_count[instrument_id] = direct_long_count.get(instrument_id, 0) + 1
             else:
                 direct_short_count[instrument_id] = direct_short_count.get(instrument_id, 0) + 1
@@ -1425,6 +1480,7 @@ def _parse_account_risk_snapshot(
                 )
                 for instrument_id, amount in sorted(investments.items())
             ),
+            direct_positions=tuple(direct_positions),
             observed_at=observed_at,
             raw_payload=raw,
             account_currency_id=account_currency_id,

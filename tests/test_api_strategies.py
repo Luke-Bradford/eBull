@@ -26,6 +26,7 @@ from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_V
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.result_ledger import store_holdout_result, store_in_sample_result
+from app.services.strategy_engine_capital import EngineCapitalObservationError
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_regime_evidence import (
@@ -464,6 +465,23 @@ def test_empty_ledgers_still_return_all_manifest_strategies(
     s4 = next(item for item in overview.strategies if item.strategy_id == "s4-volatility-compression-breakout")
     assert s4.runnable
     assert s4.exclusion_reason is None
+
+
+def test_incomplete_shared_capital_keeps_overview_readable_but_withholds_headroom(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_universe_anchor(ebull_test_conn)
+
+    def incomplete(_conn: object) -> None:
+        raise EngineCapitalObservationError("test incomplete ownership")
+
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", incomplete)
+    overview = get_strategy_overview(ebull_test_conn)
+
+    assert not overview.paper_pool.capital_observation_complete
+    assert overview.paper_pool.invested_capital is None
+    assert overview.paper_pool.remaining_capital is None
 
 
 def test_completed_zero_signal_scan_uses_its_watermark(

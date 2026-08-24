@@ -16,13 +16,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from app.providers.broker import BrokerAccountRiskSnapshot, BrokerInstrumentInvestment
+from app.providers.broker import BrokerAccountRiskSnapshot
 from app.services.account_equity_evidence import DOCUMENTED_ACCOUNT_CURRENCIES
 from app.services.strategy_core_allocator import CoreSleeveState
 
 __all__ = ["CoreSleeveObservationError", "observe_core_sleeve"]
-
-_ZERO = Decimal("0")
 
 
 class CoreSleeveObservationError(ValueError):
@@ -37,32 +35,19 @@ class CoreSleeveObservationError(ValueError):
     """
 
 
-def _core_row(snapshot: BrokerAccountRiskSnapshot, core_instrument_id: int) -> BrokerInstrumentInvestment | None:
-    """The one row for this instrument, or None when the account holds none.
-
-    Refuses a DUPLICATE rather than picking.  ``_parse_account_risk_snapshot`` keys
-    its accumulator by instrument id so it cannot emit two, but
-    ``BrokerAccountRiskSnapshot`` is publicly constructible and a test double or a
-    future producer can.  First-match silently drops a holding and summing silently
-    double-counts one; neither is a number worth having in a weight computation.
-    """
-    rows = [row for row in snapshot.instrument_investments if row.instrument_id == core_instrument_id]
-    if len(rows) > 1:
-        raise CoreSleeveObservationError(
-            f"snapshot reports {len(rows)} rows for instrument {core_instrument_id}; the core sleeve is ambiguous"
-        )
-    return rows[0] if rows else None
-
-
-def observe_core_sleeve(snapshot: BrokerAccountRiskSnapshot, *, core_instrument_id: int) -> CoreSleeveState:
+def observe_core_sleeve(
+    snapshot: BrokerAccountRiskSnapshot,
+    *,
+    core_instrument_id: int,
+    exact_owned_market_value: Decimal,
+    assigned_cash_available: Decimal,
+) -> CoreSleeveState:
     """Build the allocator's sleeve state from ONE broker snapshot.
 
-    ⚠⚠ What "one snapshot" buys, precisely.  Both money components come from a single
-    HTTP payload, so they are MUTUALLY CONSISTENT -- whatever instant the broker
-    computed them for, it is the same instant for both, which is the property
-    ``CoreSleeveState`` actually depends on and cannot check.  Sourcing cash from this
-    call and market value from ``get_portfolio()`` would breach it on every call, with
-    both figures arriving as plain Decimals and the breach undetectable downstream.
+    ``exact_owned_market_value`` is resolved by ``strategy_engine_capital`` from this
+    snapshot's exact direct rows and immutable ownership IDs. ``assigned_cash_available``
+    is the lesser of this snapshot's broker cash and the assigned-pot headroom. Thus both
+    still share one broker observation while DB authority can only narrow the cash term.
 
     ⚠ ``as_of`` is ``snapshot.observed_at``, which is our RECEIPT time -- assigned with
     ``datetime.now(UTC)`` after the response returns.  It is not a broker valuation
@@ -98,22 +83,11 @@ def observe_core_sleeve(snapshot: BrokerAccountRiskSnapshot, *, core_instrument_
             f"account currency id {snapshot.account_currency_id} is undocumented; refusing to infer its code"
         )
 
-    row = _core_row(snapshot, core_instrument_id)
-    if row is not None and row.direct_short_positions > 0:
-        # The sleeve's value is a LONG one.  Folding a short in misstates it and
-        # dropping it misstates it the other way -- and shorts are unobserved on this
-        # payload, so there is no measured basis for either.
-        raise CoreSleeveObservationError(
-            f"instrument {core_instrument_id} carries {row.direct_short_positions} direct short "
-            "position(s); a long core sleeve cannot be valued through them"
-        )
-
     return CoreSleeveState(
         core_instrument_id=core_instrument_id,
-        # Absent row and all-mirror row are the same true statement: no direct long
-        # holding.  `core_sleeve_empty` handles the state that results.
-        core_market_value=row.direct_long_market_value if row is not None else _ZERO,
-        cash_balance=snapshot.available_cash,
+        # Manual holdings never reach these inputs: only exact-owned ids were joined.
+        core_market_value=exact_owned_market_value,
+        cash_balance=assigned_cash_available,
         currency=currency,
         as_of=snapshot.observed_at,
     )

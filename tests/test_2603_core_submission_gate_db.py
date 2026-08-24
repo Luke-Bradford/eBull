@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 
+from app.services.strategy_control_plane import PAPER_ALLOCATOR_ADVISORY_LOCK
 from app.services.strategy_core_eligibility import CORE_ELIGIBILITY_POLICY_VERSION
 from app.services.strategy_core_mandate import CORE_MANDATE_MODE, CORE_MANDATE_POLICY_VERSION
 from app.services.strategy_core_submission_gate import (
@@ -274,6 +275,9 @@ def test_admission_without_the_lock_raises_rather_than_refusing(
     account = _seed_account(ebull_test_conn)
     _seed_proof(ebull_test_conn, account)
     intent_id = _seed_intent(ebull_test_conn, event_id=_seed_mandate(ebull_test_conn))
+    # Fixture setup acquires transaction-scoped credential and mandate locks;
+    # release them so this assertion really begins outside the critical section.
+    ebull_test_conn.commit()
     with pytest.raises(StrategyCoreSubmissionError, match="core_submission_lock"):
         admit_core_rebalance_intent(
             ebull_test_conn,
@@ -296,7 +300,8 @@ def test_holding_only_the_submission_lock_still_raises(
     account = _seed_account(ebull_test_conn)
     _seed_proof(ebull_test_conn, account)
     intent_id = _seed_intent(ebull_test_conn, event_id=_seed_mandate(ebull_test_conn))
-    ebull_test_conn.execute("SELECT pg_advisory_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
+    for key in (PAPER_ALLOCATOR_ADVISORY_LOCK, CORE_SUBMISSION_ADVISORY_LOCK):
+        ebull_test_conn.execute("SELECT pg_advisory_lock(%s, %s)", key)
     ebull_test_conn.commit()
     try:
         with pytest.raises(StrategyCoreSubmissionError, match="mandate advisory lock"):
@@ -308,7 +313,8 @@ def test_holding_only_the_submission_lock_still_raises(
                 environment="demo",
             )
     finally:
-        ebull_test_conn.execute("SELECT pg_advisory_unlock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK)
+        for key in (CORE_SUBMISSION_ADVISORY_LOCK, PAPER_ALLOCATOR_ADVISORY_LOCK):
+            ebull_test_conn.execute("SELECT pg_advisory_unlock(%s, %s)", key)
         ebull_test_conn.commit()
 
 

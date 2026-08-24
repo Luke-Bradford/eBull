@@ -28,7 +28,12 @@ from app.providers.broker import (
     BrokerPositionMutationUncertain,
     BrokerProvider,
 )
-from app.services.strategy_control_plane import StrategyControlError, StrategyOwnershipError, link_strategy_order
+from app.services.strategy_control_plane import (
+    PAPER_ALLOCATOR_ADVISORY_LOCK,
+    StrategyControlError,
+    StrategyOwnershipError,
+    link_strategy_order,
+)
 from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
 
 _RATE_QUANTUM = Decimal("0.000001")
@@ -113,6 +118,22 @@ def _position_lock(conn: psycopg.Connection[Any], broker_position_id: int) -> It
         conn.commit()
         if unlocked is None or unlocked[0] is not True:
             raise StrategyPositionManagerError("strategy position lock ownership was lost")
+
+
+@contextmanager
+def _paper_allocator_lock(conn: psycopg.Connection[Any]) -> Iterator[None]:
+    """Serialize exact-position exits with every shared-pot commitment."""
+    conn.execute("SELECT pg_advisory_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
+    conn.commit()
+    try:
+        yield
+    finally:
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
+        unlocked = conn.execute("SELECT pg_advisory_unlock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK).fetchone()
+        conn.commit()
+        if unlocked is None or unlocked[0] is not True:
+            raise StrategyPositionManagerError("paper allocator lock ownership was lost")
 
 
 def register_ratchet_variant(
@@ -839,7 +860,7 @@ def manage_owned_position(
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPositionManagerError("position management requires an idle connection")
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
-    with _position_lock(conn, broker_position_id):
+    with _paper_allocator_lock(conn), _position_lock(conn, broker_position_id):
         owned = _load_owned(conn, strategy_trade_id=strategy_trade_id, broker_position_id=broker_position_id)
         conn.commit()
         resumed = _resume_operation(conn, broker=broker, owned=owned)

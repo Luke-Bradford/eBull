@@ -164,8 +164,22 @@ FIXTURE_ACCOUNT_PNL_RESPONSE = {
         # Portal: `isBuy` is "true for long (buy) positions, false for short (sell)".
         # Required on every direct position since #2704.
         "positions": [
-            {"instrumentID": 1001, "amount": 200, "isBuy": True, "unrealizedPnL": {"pnL": 20}},
-            {"instrumentID": 1002, "amount": 100, "isBuy": True, "unrealizedPnL": {"pnL": -5}},
+            {
+                "positionID": 9001,
+                "instrumentID": 1001,
+                "amount": 200,
+                "isBuy": True,
+                "isPartiallyAltered": False,
+                "unrealizedPnL": {"pnL": 20},
+            },
+            {
+                "positionID": 9002,
+                "instrumentID": 1002,
+                "amount": 100,
+                "isBuy": True,
+                "isPartiallyAltered": False,
+                "unrealizedPnL": {"pnL": -5},
+            },
         ],
         "mirrors": [
             {
@@ -429,6 +443,86 @@ class TestStrategyAccountRisk:
         ]
         assert all(row.direct_short_positions == 0 for row in result.instrument_investments)
 
+        assert [
+            (
+                row.position_id,
+                row.instrument_id,
+                row.amount,
+                row.unrealized_pnl,
+                row.market_value,
+                row.is_partially_altered,
+            )
+            for row in result.direct_positions
+        ] == [
+            (9001, 1001, Decimal("200"), Decimal("20"), Decimal("220"), False),
+            (9002, 1002, Decimal("100"), Decimal("-5"), Decimal("95"), False),
+        ]
+
+    @pytest.mark.parametrize("position_id", [None, True, 1.2, "9001", 0, -1, 9_223_372_036_854_775_808])
+    def test_direct_position_id_fails_closed(self, position_id: object) -> None:
+        position = dict(FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"]["positions"][0])
+        position["positionID"] = position_id
+        payload = {
+            "clientPortfolio": {
+                **FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"],
+                "positions": [position],
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = payload
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            with pytest.raises(TradingPreflightParseError, match="position id"):
+                broker.get_account_risk_snapshot()
+
+    def test_documented_position_id_alias_is_accepted_and_conflict_refuses(self) -> None:
+        position = dict(FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"]["positions"][0])
+        position["positionId"] = position.pop("positionID")
+        payload = {
+            "clientPortfolio": {
+                **FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"],
+                "positions": [position],
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = payload
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            assert broker.get_account_risk_snapshot().direct_positions[0].position_id == 9001
+
+        position["positionID"] = 9002
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            with pytest.raises(TradingPreflightParseError, match="aliases disagree"):
+                broker.get_account_risk_snapshot()
+
+        position["positionId"] = 1
+        position["positionID"] = True
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            with pytest.raises(TradingPreflightParseError, match="must be an integer"):
+                broker.get_account_risk_snapshot()
+
+    def test_duplicate_direct_position_ids_fail_closed(self) -> None:
+        first, second = [dict(row) for row in FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"]["positions"]]
+        second["positionID"] = first["positionID"]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "clientPortfolio": {
+                **FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"],
+                "positions": [first, second],
+            }
+        }
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            with pytest.raises(TradingPreflightParseError, match="must be unique"):
+                broker.get_account_risk_snapshot()
+
     def test_direct_long_lots_net_and_shorts_are_counted_not_valued(self) -> None:
         """Two lots net; a short is counted so a caller can REFUSE, never valued.
 
@@ -441,10 +535,31 @@ class TestStrategyAccountRisk:
                 "accountCurrencyId": 1,
                 "credit": 1000,
                 "positions": [
-                    {"instrumentID": 1001, "amount": 200, "isBuy": True, "unrealizedPnL": {"pnL": 20}},
-                    {"instrumentID": 1001, "amount": 100, "isBuy": True, "unrealizedPnL": {"pnL": -30}},
+                    {
+                        "positionID": 9001,
+                        "instrumentID": 1001,
+                        "amount": 200,
+                        "isBuy": True,
+                        "isPartiallyAltered": False,
+                        "unrealizedPnL": {"pnL": 20},
+                    },
+                    {
+                        "positionID": 9002,
+                        "instrumentID": 1001,
+                        "amount": 100,
+                        "isBuy": True,
+                        "isPartiallyAltered": False,
+                        "unrealizedPnL": {"pnL": -30},
+                    },
                     # Sums to exactly zero -- invisible to any money-valued short field.
-                    {"instrumentID": 1001, "amount": 50, "isBuy": False, "unrealizedPnL": {"pnL": -50}},
+                    {
+                        "positionID": 9003,
+                        "instrumentID": 1001,
+                        "amount": 50,
+                        "isBuy": False,
+                        "isPartiallyAltered": False,
+                        "unrealizedPnL": {"pnL": -50},
+                    },
                 ],
                 "mirrors": [],
                 "ordersForOpen": [],
@@ -477,7 +592,14 @@ class TestStrategyAccountRisk:
                 "accountCurrencyId": 1,
                 "credit": 1000,
                 "positions": [
-                    {"instrumentID": 1001, "amount": 200, "isBuy": True, "unrealizedPnL": {"pnL": -250}},
+                    {
+                        "positionID": 9001,
+                        "instrumentID": 1001,
+                        "amount": 200,
+                        "isBuy": True,
+                        "isPartiallyAltered": False,
+                        "unrealizedPnL": {"pnL": -250},
+                    },
                 ],
                 "mirrors": [],
                 "ordersForOpen": [],
@@ -499,9 +621,29 @@ class TestStrategyAccountRisk:
     def test_direct_position_direction_fails_closed(self) -> None:
         """Absent or non-boolean `isBuy` raises: defaulting it books a short as a long."""
         for position in (
-            {"instrumentID": 1001, "amount": 200, "unrealizedPnL": {"pnL": 20}},
-            {"instrumentID": 1001, "amount": 200, "isBuy": "true", "unrealizedPnL": {"pnL": 20}},
-            {"instrumentID": 1001, "amount": 200, "isBuy": 1, "unrealizedPnL": {"pnL": 20}},
+            {
+                "positionID": 9001,
+                "instrumentID": 1001,
+                "amount": 200,
+                "isPartiallyAltered": False,
+                "unrealizedPnL": {"pnL": 20},
+            },
+            {
+                "positionID": 9001,
+                "instrumentID": 1001,
+                "amount": 200,
+                "isBuy": "true",
+                "isPartiallyAltered": False,
+                "unrealizedPnL": {"pnL": 20},
+            },
+            {
+                "positionID": 9001,
+                "instrumentID": 1001,
+                "amount": 200,
+                "isBuy": 1,
+                "isPartiallyAltered": False,
+                "unrealizedPnL": {"pnL": 20},
+            },
         ):
             payload = {
                 "clientPortfolio": {

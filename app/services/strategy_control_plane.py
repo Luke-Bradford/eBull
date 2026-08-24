@@ -333,55 +333,42 @@ def configure_paper_pool(
         raise StrategyControlError(
             "paper pool change must alter enabled state, capital limit, capital mode, mandate, or approval mode"
         )
-    if current.event_id is not None and capital_limit < current.capital_limit:
-        # A lower principal is an external withdrawal from the virtual sleeve,
-        # not merely a cosmetic limit edit.  It cannot remove money already
-        # committed to an allocated lifecycle.  Realised losses reduce the
-        # withdrawable balance; known profits count only in compound mode.
-        committed_row = conn.execute(
-            """
-            SELECT COALESCE(SUM(decision.amount), 0)
-            FROM strategy_funding_decisions decision
-            WHERE decision.verdict='allocated'
-              AND EXISTS (
-                  SELECT 1 FROM strategy_deployments deployment
-                  WHERE deployment.deployment_id=decision.deployment_id
-                    AND deployment.mode='paper'
-              )
-              AND (
-                  NOT EXISTS (
-                      SELECT 1 FROM strategy_trades trade
-                      WHERE trade.funding_decision_id=decision.funding_decision_id
-                  )
-                  OR EXISTS (
-                      SELECT 1 FROM strategy_trades trade
-                      WHERE trade.funding_decision_id=decision.funding_decision_id
-                        AND trade.status NOT IN ('closed', 'failed')
-                  )
-              )
-            """
-        ).fetchone()
-        assert committed_row is not None
-        committed = Decimal(str(committed_row[0]))
-        if committed:
-            # Local import keeps the governance module independent at import
-            # time while reusing the exact-owned, fail-closed reconciliation.
-            from app.services.strategy_monitoring import load_paper_realised_pnl
+    if current.event_id is not None and (
+        capital_limit != current.capital_limit or capital_mode != current.capital_mode
+    ):
+        # A mode switch can shrink the effective bound without changing principal
+        # (compound profit stops counting in capped mode), so every limit OR mode
+        # edit is checked against the same engine-wide authority as both executors.
+        from app.services.strategy_engine_capital import (
+            EngineCapitalObservationError,
+            load_engine_capital_authority,
+        )
 
-            realised = load_paper_realised_pnl(conn)
-            if realised is None:
-                raise StrategyControlError("paper principal cannot be withdrawn while realised P&L is incomplete")
-            # One arithmetic with the executor and the /strategies card (#2844) —
-            # this check decides whether the operator may withdraw below what the
-            # executor has already committed, so a divergence here would authorise a
-            # withdrawal the executor's own bound has already spent against.
-            effective_after = sandbox_bound(
-                capital_limit=capital_limit,
-                capital_mode=capital_mode,
-                realised_delta=sum(realised.values(), Decimal("0")),
-            )
-            if effective_after < committed:
-                raise StrategyControlError("paper principal cannot be withdrawn below committed strategy capital")
+        try:
+            authority = load_engine_capital_authority(conn)
+        except EngineCapitalObservationError as exc:
+            raise StrategyControlError("paper capital cannot change while shared commitments are incomplete") from exc
+        if authority is None:  # pragma: no cover - current.event_id proves one exists
+            raise StrategyControlError("paper capital authority disappeared during configuration")
+        current_effective = sandbox_bound(
+            capital_limit=current.capital_limit,
+            capital_mode=current.capital_mode,
+            realised_delta=authority.realised_delta,
+        )
+        effective_after = sandbox_bound(
+            capital_limit=capital_limit,
+            capital_mode=capital_mode,
+            realised_delta=authority.realised_delta,
+        )
+        if authority.core_active_position_ids and effective_after < current_effective:
+            # Current core commitment is a broker-observed amount rather than a DB
+            # balance.  This control-plane function has no broker snapshot, so it
+            # refuses the edit instead of substituting the opening ticket or the
+            # whole-account same-instrument holding.
+            raise StrategyControlError("paper capital cannot change while a core position is active")
+        committed = authority.alpha_committed + authority.core_pending_committed
+        if effective_after < committed:
+            raise StrategyControlError("paper principal cannot be withdrawn below committed strategy capital")
     row = conn.execute(
         """
         INSERT INTO strategy_paper_pool_events (

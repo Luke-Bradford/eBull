@@ -16,7 +16,8 @@ from app.providers.broker import BrokerAccountRiskSnapshot, BrokerInstrumentInve
 from app.services.account_equity_evidence import DOCUMENTED_ACCOUNT_CURRENCIES
 from app.services.strategy_core_allocator import CoreSleeveState, evaluate_core_rebalance
 from app.services.strategy_core_mandate import CORE_MANDATE_POLICY_VERSION, CoreMandate
-from app.services.strategy_core_sleeve import CoreSleeveObservationError, observe_core_sleeve
+from app.services.strategy_core_sleeve import CoreSleeveObservationError
+from app.services.strategy_core_sleeve import observe_core_sleeve as _observe_core_sleeve
 
 CORE_ID = 2449001
 _NOW = datetime(2026, 8, 14, 13, 7, tzinfo=UTC)
@@ -50,6 +51,23 @@ def row(
     shorts: int = 0,
 ) -> BrokerInstrumentInvestment:
     return BrokerInstrumentInvestment(instrument_id, Decimal(amount), Decimal(market_value), longs, shorts)
+
+
+def observe_core_sleeve(broker_snapshot: BrokerAccountRiskSnapshot, *, core_instrument_id: int) -> CoreSleeveState:
+    """Adapt legacy #2704 fixtures to the now externally exact-owned inputs."""
+    matches = [item for item in broker_snapshot.instrument_investments if item.instrument_id == core_instrument_id]
+    if len(matches) > 1:
+        raise CoreSleeveObservationError("core sleeve is ambiguous")
+    value = matches[0].direct_long_market_value if matches else Decimal("0")
+    state = _observe_core_sleeve(
+        broker_snapshot,
+        core_instrument_id=core_instrument_id,
+        exact_owned_market_value=value,
+        assigned_cash_available=broker_snapshot.available_cash,
+    )
+    if matches and matches[0].direct_short_positions:
+        raise CoreSleeveObservationError("core sleeve contains a short")
+    return state
 
 
 def test_the_sleeve_reads_market_value_and_not_committed_capital() -> None:

@@ -77,7 +77,7 @@ class FakeBroker:
 
     def get_account_risk_snapshot(self) -> object:
         self.events.append("read_snapshot")
-        return object()
+        return SimpleNamespace(available_cash=Decimal("500"))
 
     def place_demo_core_order(self, _order: object, *, request_id: UUID) -> BrokerCoreOrderSubmission:
         assert request_id is not None
@@ -134,9 +134,16 @@ def _run(
         snapshot_observed_at=snapshot_observed_at or datetime.now(UTC),
         max_account_risk_age_seconds=30,
     )
+    capital_authority = SimpleNamespace(enabled=True)
+    capital_usage = SimpleNamespace(
+        core_market_value=Decimal("500"),
+        headroom=SimpleNamespace(within_bound=True, remaining=Decimal("500")),
+    )
 
     with (
         patch("app.services.strategy_core_executor.load_core_mandate", return_value=mandate),
+        patch("app.services.strategy_core_executor.load_engine_capital_authority", return_value=capital_authority),
+        patch("app.services.strategy_core_executor.resolve_engine_capital_usage", return_value=capital_usage),
         patch("app.services.strategy_core_executor.require_selected_core_instrument"),
         patch("app.services.strategy_core_executor.require_core_eligibility", side_effect=[proof, binding_proof]),
         patch("app.services.strategy_core_executor.observe_core_sleeve", return_value=object()),

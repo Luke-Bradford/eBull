@@ -18,6 +18,7 @@ import pytest
 from app.providers.broker import (
     BrokerAccountRiskSnapshot,
     BrokerCostComponent,
+    BrokerDirectPositionInvestment,
     BrokerInstrumentInvestment,
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
@@ -33,6 +34,7 @@ from app.services.strategy_core_broker_preflight import (
     assess_core_broker_preflight,
 )
 from app.services.strategy_core_mandate import CORE_MANDATE_POLICY_VERSION, CoreMandate
+from app.services.strategy_engine_capital import EngineCapitalAuthority
 
 CORE_ID = 4242
 NOW = datetime(2026, 8, 23, 14, 30, tzinfo=UTC)
@@ -73,6 +75,17 @@ def snapshot(
         equity=Decimal(core_market_value) + Decimal(cash),
         instrument_investments=(
             BrokerInstrumentInvestment(CORE_ID, Decimal(core_market_value), Decimal(core_market_value), 1, shorts),
+        ),
+        direct_positions=(
+            BrokerDirectPositionInvestment(
+                position_id=9001,
+                instrument_id=CORE_ID,
+                is_buy=shorts == 0,
+                amount=Decimal(core_market_value),
+                unrealized_pnl=Decimal("0"),
+                market_value=Decimal(core_market_value),
+                is_partially_altered=False,
+            ),
         ),
         observed_at=observed_at,
         raw_payload={},
@@ -137,7 +150,28 @@ def decision(*, amount: Decimal | None = None) -> CoreRebalanceDecision:
 def _state() -> Any:
     from app.services.strategy_core_sleeve import observe_core_sleeve
 
-    return observe_core_sleeve(snapshot(), core_instrument_id=CORE_ID)
+    return observe_core_sleeve(
+        snapshot(),
+        core_instrument_id=CORE_ID,
+        exact_owned_market_value=Decimal(_CORE_MV),
+        assigned_cash_available=Decimal(_CASH),
+    )
+
+
+def capital_authority() -> EngineCapitalAuthority:
+    return EngineCapitalAuthority(
+        pool_event_id=1,
+        enabled=True,
+        capital_limit=Decimal("1000"),
+        capital_mode="fixed",
+        epoch_started_at=NOW,
+        realised_delta=Decimal("0"),
+        alpha_committed=Decimal("0"),
+        alpha_working=Decimal("0"),
+        core_pending_committed=Decimal("0"),
+        core_active_recorded_committed=Decimal("500"),
+        core_active_position_ids=(9001,),
+    )
 
 
 def assess(broker: FakeBroker, **overrides: Any) -> Any:
@@ -145,6 +179,7 @@ def assess(broker: FakeBroker, **overrides: Any) -> Any:
         "mandate": mandate(),
         "decision": decision(),
         "core_instrument_id": CORE_ID,
+        "capital_authority": capital_authority(),
         "eligibility_response_currency": "USD",
         "eligibility_min_position_exposure": Decimal("10"),
         "eligibility_min_position_amount": Decimal("10"),

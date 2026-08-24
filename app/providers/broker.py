@@ -438,6 +438,23 @@ class BrokerPortfolio:
 
 
 @dataclass(frozen=True)
+class BrokerDirectPositionInvestment:
+    """One exact direct-position contribution from the account P&L snapshot.
+
+    Identity is carried alongside the two source terms so ownership filtering can
+    never fall back to instrument matching and the derived mark remains auditable.
+    """
+
+    position_id: int
+    instrument_id: int
+    is_buy: bool
+    amount: Decimal
+    unrealized_pnl: Decimal
+    market_value: Decimal
+    is_partially_altered: bool
+
+
+@dataclass(frozen=True)
 class BrokerInstrumentInvestment:
     """What this account holds in one instrument, under TWO different questions.
 
@@ -506,6 +523,9 @@ class BrokerAccountRiskSnapshot:
     instrument_investments: tuple[BrokerInstrumentInvestment, ...]
     observed_at: datetime
     raw_payload: dict[str, Any]
+    #: Exact direct rows are optional only for non-eToro/test producers. A core
+    #: observer with active ownership fails closed when its ids are absent.
+    direct_positions: tuple[BrokerDirectPositionInvestment, ...] = ()
     account_currency_id: int | None = None
     #: Capital committed to orders that have not filled.  eToro SUBTRACTS this from
     #: ``credit`` to reach ``available_cash`` and ADDS it to ``total_invested``, so a

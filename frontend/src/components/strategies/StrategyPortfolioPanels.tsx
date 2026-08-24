@@ -464,9 +464,14 @@ export function AutomationControl({
       <dl className="mt-5 grid grid-cols-2 gap-3 border-t border-slate-200 pt-4 text-xs sm:grid-cols-4 dark:border-slate-800">
         <div><dt className="text-slate-500">Risk base</dt><dd className="font-semibold tabular-nums">{money(pool.effective_capital)}</dd></div>
         <div><dt className="text-slate-500">Working</dt><dd className="font-semibold tabular-nums">{money(pool.invested_capital)}</dd></div>
-        <div><dt className="text-slate-500">Reserved</dt><dd className="font-semibold tabular-nums">{money(pool.reserved_capital)}</dd></div>
-        <div><dt className="text-slate-500">Available</dt><dd className="font-semibold tabular-nums">{money(pool.remaining_capital)}</dd></div>
+        <div><dt className="text-slate-500">Committed</dt><dd className="font-semibold tabular-nums">{money(pool.capital_observation_complete === false ? null : pool.reserved_capital)}</dd></div>
+        <div><dt className="text-slate-500">Available</dt><dd className="font-semibold tabular-nums">{money(pool.capital_observation_complete === false ? null : pool.remaining_capital)}</dd></div>
       </dl>
+      <p className="mt-2 text-xs text-slate-500">
+        Working is marked value when the full owned population is observable here; it is unavailable while core is
+        active. Committed is the engine authority already issued, including pending orders and core. These figures
+        overlap and must not be added together.
+      </p>
       {!canEnable ? (
         <p className="mt-4 text-xs text-amber-700 dark:text-amber-300">
           {!accountEligible

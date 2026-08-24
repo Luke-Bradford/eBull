@@ -142,12 +142,16 @@ core executor, alpha executor, withdrawal guard, and overview.
   the same reconciled value already used today and the limitation remains named. No new,
   more optimistic P&L interpretation is introduced here. Fixed mode includes losses and
   excludes profits; compound mode includes both through `sandbox_bound`.
-- Page `committed` is the same combined authority total execution uses. Page `working` is
-  the subset whose trade has complete active exact ownership; `reserved` is renamed
-  `committed` in the UI, and `available = max(0, bound - committed)`. Working is explicitly
-  a subset of committed, never an additive bucket. These are DB-authority observations, not
-  claims to be simultaneous broker valuations; live value/P&L remains on the exact-position
-  and EOD wealth surfaces.
+- With no active core ownership, page `committed` is the same combined authority total
+  execution uses and `available = max(0, bound - committed)`. While core ownership is active,
+  the database can identify the exact broker position IDs but cannot value their remaining
+  cost basis without a live snapshot. The page therefore marks the capital observation
+  incomplete and renders `working`, `committed`, and `available` unavailable rather than
+  presenting the original request as current commitment. The database-only core status
+  endpoint does not advertise rebalance readiness in that state; scheduled or explicitly
+  invoked execution obtains the exact-position snapshot and applies the authoritative bound
+  before it can submit. These are deliberately not claims to be simultaneous broker
+  valuations; live value/P&L remains on the exact-position and EOD wealth surfaces.
 
 The existing per-deployment alpha realised/commitment calculations remain for deployment
 ceilings. Only the shared pool figures widen to both authorised arms.
@@ -216,9 +220,10 @@ the original committed cash; that is investment return, not newly committed capi
 not force a sale. The boundary limits additional cash authority, while the page separately
 shows live market value and P&L.
 
-The `/strategies` paper-pool view reports combined committed, working, and remaining capital,
-so the visible `Pot`, `Working`, `Committed`, and `Available` figures agree with the execution
-control. The core card names `paper_pool_unconfigured`,
+The `/strategies` paper-pool view reports combined committed, working, and remaining capital
+when those figures are complete. With active core ownership it reports the observation as
+incomplete and withholds those three figures, so the visible `Pot`, `Working`, `Committed`,
+and `Available` surface never overstates executable headroom. The core card names `paper_pool_unconfigured`,
 `paper_pool_disabled`, `sandbox_observation_incomplete`, or `sandbox_exceeded` as blockers and
 does not offer rebalance while any applies.
 
