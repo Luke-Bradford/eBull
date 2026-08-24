@@ -55,7 +55,7 @@ from app.services.strategy_opportunity_ranker import RankableOpportunity, persis
 from app.services.strategy_paper_executor import (
     COST_BASIS_BROKER_PREFLIGHT_VALUE,
     PaperExecutionResult,
-    _effective_capital_bases,
+    _effective_deployment_base,
     execute_fired_paper_signal,
 )
 from app.services.strategy_result import METRIC_AXIS_RULE_VERSION, metric_axis_sha256
@@ -595,6 +595,7 @@ def _broker(
         # here; the executor reads only `amount` (#2704).
         instrument_investments=(BrokerInstrumentInvestment(2449001, Decimal("250"), Decimal("250"), 1, 0),),
         observed_at=_NOW,
+        account_currency_id=1,
         raw_payload={},
     )
     broker.check_instrument_eligibility.return_value = BrokerEligibilityResponse(
@@ -890,6 +891,7 @@ def test_fixed_ticket_mode_requests_a_currency_amount_before_risk_caps(
         equity=Decimal("1000"),
         instrument_investments=(),
         observed_at=_NOW,
+        account_currency_id=1,
         raw_payload={},
     )
     monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
@@ -924,10 +926,10 @@ def test_capital_modes_use_realised_owned_pnl_and_refuse_unknown_pnl(
             ("S-OTHER", "v2"): Decimal("-25"),
         },
     )
-    assert _effective_capital_bases(conn, intent) == (Decimal("1100"), Decimal("2075"))
+    assert _effective_deployment_base(conn, intent) == Decimal("1100")
 
     intent.capital_mode = "fixed"
-    assert _effective_capital_bases(conn, intent) == (Decimal("1000"), Decimal("2000"))
+    assert _effective_deployment_base(conn, intent) == Decimal("1000")
     monkeypatch.setattr(
         "app.services.strategy_paper_executor.load_paper_realised_pnl",
         lambda _conn: {
@@ -935,13 +937,13 @@ def test_capital_modes_use_realised_owned_pnl_and_refuse_unknown_pnl(
             ("S-OTHER", "v2"): Decimal("25"),
         },
     )
-    assert _effective_capital_bases(conn, intent) == (Decimal("900"), Decimal("1925"))
+    assert _effective_deployment_base(conn, intent) == Decimal("900")
 
     monkeypatch.setattr(
         "app.services.strategy_paper_executor.load_paper_realised_pnl",
         lambda _conn: None,
     )
-    assert _effective_capital_bases(conn, intent) == "realised_pnl_incomplete"
+    assert _effective_deployment_base(conn, intent) == "realised_pnl_incomplete"
 
 
 def test_disabled_global_switch_keeps_an_unfunded_shadow_arm(
@@ -986,6 +988,7 @@ def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
         equity=Decimal("2000"),
         instrument_investments=(),
         observed_at=_NOW,
+        account_currency_id=1,
         raw_payload={},
     )
 
@@ -1010,6 +1013,7 @@ def test_mandate_loss_at_stop_reduces_position_size(
         equity=Decimal("2000"),
         instrument_investments=(),
         observed_at=_NOW,
+        account_currency_id=1,
         raw_payload={},
     )
 
@@ -1035,6 +1039,7 @@ def test_forecast_barriers_drive_loss_sizing_and_submitted_tp_sl(
         equity=Decimal("2000"),
         instrument_investments=(),
         observed_at=_NOW,
+        account_currency_id=1,
         raw_payload={},
     )
 
@@ -1112,6 +1117,7 @@ def test_mandate_active_risk_budget_reduces_position_size(
         equity=Decimal("2000"),
         instrument_investments=(),
         observed_at=_NOW,
+        account_currency_id=1,
         raw_payload={},
     )
 
@@ -1199,6 +1205,7 @@ def test_stricter_drawdown_limit_refuses_at_the_exact_boundary(
         equity=equity,
         instrument_investments=(),
         observed_at=_NOW,
+        account_currency_id=1,
         raw_payload={},
     )
 
@@ -1343,6 +1350,7 @@ def test_shared_paper_pool_excludes_future_live_reservations(
         equity=Decimal("2000"),
         instrument_investments=(),
         observed_at=_NOW,
+        account_currency_id=1,
         raw_payload={},
     )
     result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)

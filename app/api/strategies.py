@@ -997,6 +997,7 @@ class CoreSleeveBlockerResponse(BaseModel):
         "core_demo_required",
         "core_order_unresolved",
         "core_capital_authority_incomplete",
+        "core_live_snapshot_required",
         "core_paper_pool_unconfigured",
         "core_paper_pool_disabled",
         "core_sandbox_exceeded",
@@ -3526,7 +3527,7 @@ def read_core_sleeve(
     elif capital_authority.core_active_position_ids:
         blockers.append(
             CoreSleeveBlockerResponse(
-                code="core_capital_authority_incomplete",
+                code="core_live_snapshot_required",
                 detail=(
                     "Active core commitment needs an exact broker snapshot; "
                     "the read-only page cannot advertise rebalance headroom."

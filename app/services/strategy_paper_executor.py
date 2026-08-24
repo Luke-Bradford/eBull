@@ -853,10 +853,9 @@ def _observe_local_mandate_risk(
             raise StrategyPaperExecutionError("pending strategy risk observation was unavailable")
         pending_total = Decimal(str(pending_row[0]))
         pending_instrument = Decimal(str(pending_row[1]))
-        capital_bases = _effective_capital_bases(conn, intent)
-        if isinstance(capital_bases, str):
-            return capital_bases
-        deployment_base, _legacy_alpha_pool_base = capital_bases
+        deployment_base = _effective_deployment_base(conn, intent)
+        if isinstance(deployment_base, str):
+            return deployment_base
         pool_base = shared_pool_bound
         market_date = now.astimezone(_NY).date()
         market_day_start = datetime.combine(market_date, time.min, tzinfo=_NY).astimezone(UTC)
@@ -1014,33 +1013,25 @@ def _risk_and_amount(
     return amount, current_instrument, drawdown
 
 
-def _effective_capital_bases(
+def _effective_deployment_base(
     conn: psycopg.Connection[Any],
     intent: _Intent,
-) -> tuple[Decimal, Decimal] | str:
-    """Resolve capped or compounding bases from realised P&L, never open marks."""
+) -> Decimal | str:
+    """Resolve the capped or compounding deployment base from realised P&L."""
     realised_by_strategy = load_paper_realised_pnl(conn)
     if realised_by_strategy is None:
         return "realised_pnl_incomplete"
 
     strategy_realised = realised_by_strategy.get((intent.strategy_id, intent.strategy_version), Decimal("0"))
-    pool_realised = sum(realised_by_strategy.values(), Decimal("0"))
     # ⚠ ONE arithmetic, shared with the withdrawal check and the /strategies card
     # (#2844). This was three hand-written copies of `max(0, limit + realised)` with
     # the `fixed`-floors-profit rule restated each time -- so the panel promising the
     # operator headroom and the control enforcing it could drift apart with both
     # internally consistent and nothing to fail on.
-    return (
-        sandbox_bound(
-            capital_limit=intent.deployment_limit,
-            capital_mode=intent.capital_mode,
-            realised_delta=strategy_realised,
-        ),
-        sandbox_bound(
-            capital_limit=intent.pool_limit,
-            capital_mode=intent.capital_mode,
-            realised_delta=pool_realised,
-        ),
+    return sandbox_bound(
+        capital_limit=intent.deployment_limit,
+        capital_mode=intent.capital_mode,
+        realised_delta=strategy_realised,
     )
 
 

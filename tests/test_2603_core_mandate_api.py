@@ -255,7 +255,7 @@ def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
 @pytest.mark.parametrize(
     ("capital_authority", "expected_blocker"),
     [
-        (_capital_authority(active_position_ids=(99,)), "core_capital_authority_incomplete"),
+        (_capital_authority(active_position_ids=(99,)), "core_live_snapshot_required"),
         (_capital_authority(alpha_committed=Decimal("1000")), "core_sandbox_exceeded"),
     ],
 )
