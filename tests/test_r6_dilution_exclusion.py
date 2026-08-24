@@ -41,8 +41,8 @@ def test_non_nyse_names_are_assigned_on_nyse_breakpoints() -> None:
 
 
 def test_missing_red_flag_history_is_neutral_and_union_is_explicit() -> None:
-    flagged = NsiInput("FLAG", "NYSE", 120, 100, (0.7,), True)
-    incomplete = NsiInput("MISSING", "NYSE", 120, 100, (1.0,), False)
+    flagged = NsiInput("FLAG", "NYSE", Decimal(120), Decimal(100), (0.7,), True)
+    incomplete = NsiInput("MISSING", "NYSE", Decimal(120), Decimal(100), (1.0,), False)
     assert has_filing_red_flag(flagged)
     assert not has_filing_red_flag(incomplete)
 

@@ -6,6 +6,7 @@ import io
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from scripts.census_2900_sec_cover_identity import (
     FORMATION_CLOSES,
@@ -184,7 +185,7 @@ def test_cover_selection_does_not_fallback_after_unparseable_latest(tmp_path: Pa
         path.parent.mkdir(parents=True, exist_ok=True)
         with gzip.open(path, "wb") as handle:
             handle.write(b"not xml")
-    parsed = {
+    parsed: dict[str, list[dict[str, Any]] | None] = {
         amendment.accession: None,
         original.accession: [
             {
@@ -224,7 +225,7 @@ def test_cover_selection_falls_back_after_conflicting_latest_context(tmp_path: P
         period="20211231",
         instance="amendment.xml",
     )
-    parsed = {
+    parsed: dict[str, list[dict[str, Any]] | None] = {
         amendment.accession: [
             {
                 "facts": {
