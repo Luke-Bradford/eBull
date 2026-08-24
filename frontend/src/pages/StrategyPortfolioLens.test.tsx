@@ -173,6 +173,24 @@ describe("StrategyPortfolioLens", () => {
   });
 
   it("lets the operator save a disabled draft while evidence is still collecting", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve)
+      .mockResolvedValueOnce(CORE_COLLECTING as never)
+      .mockResolvedValue({
+        ...CORE_COLLECTING,
+        mandate: {
+          configured: true,
+          enabled: false,
+          core_instrument_id: null,
+          core_target_pct: "80",
+          liquidity_reserve_pct: "10",
+          rebalance_band_pct: "5",
+          min_rebalance_amount: "25",
+        },
+        blockers: [
+          CORE_COLLECTING.blockers[0],
+          { code: "core_mandate_disabled", detail: "The current core/cash mandate is disabled." },
+        ],
+      } as never);
     const save = vi.spyOn(strategiesApi, "updateCoreMandate").mockResolvedValue({
       configured: true,
       enabled: false,
@@ -198,6 +216,9 @@ describe("StrategyPortfolioLens", () => {
       core_target_pct: "80",
       reason: "Prepare the core mandate before selection",
     });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save mandate" })).toBeDisabled());
+    await userEvent.click(screen.getByRole("button", { name: "Save mandate" }));
+    expect(save).toHaveBeenCalledTimes(1);
   });
 
   it("saves a materially changed ready mandate with an explicit audit reason", async () => {
