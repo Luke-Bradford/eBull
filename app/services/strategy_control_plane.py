@@ -366,7 +366,9 @@ def configure_paper_pool(
             # refuses the edit instead of substituting the opening ticket or the
             # whole-account same-instrument holding.
             raise StrategyControlError("paper capital cannot change while a core position is active")
-        committed = authority.alpha_committed + authority.core_pending_committed
+        committed = (
+            authority.alpha_committed + authority.core_pending_committed + authority.core_active_recorded_committed
+        )
         if effective_after < committed:
             raise StrategyControlError("paper principal cannot be withdrawn below committed strategy capital")
     row = conn.execute(
