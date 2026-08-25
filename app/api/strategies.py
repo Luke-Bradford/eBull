@@ -3620,8 +3620,9 @@ def read_core_sleeve(
                 CoreSleeveBlockerResponse(
                     code="core_evidence_collecting",
                     detail=(
-                        f"#2833 has {selection.observed_trading_days} of "
-                        f"{selection.required_trading_days} required trading days; cash remains the fallback."
+                        f"#2833 has observations on {selection.observed_trading_days} of "
+                        f"{selection.required_trading_days} required common dates. The sealed verifier checks "
+                        "the complete populations after the fifth date closes; cash remains the fallback."
                     ),
                 )
             )

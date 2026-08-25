@@ -136,7 +136,10 @@ const CORE_COLLECTING = {
   pending_order_id: null,
   execution_action: "blocked",
   blockers: [
-    { code: "core_evidence_collecting", detail: "#2833 has 1 of 5 required trading days; cash remains the fallback." },
+    {
+      code: "core_evidence_collecting",
+      detail: "#2833 has observations on 1 of 5 required common dates. The sealed verifier checks the complete populations after the fifth date closes; cash remains the fallback.",
+    },
     { code: "core_mandate_unconfigured", detail: "No core/cash mandate has been configured." },
   ],
   environment: "demo",
@@ -193,6 +196,8 @@ describe("StrategyPortfolioLens", () => {
   it("shows cash as the evidence-gated fallback instead of an approved strategy", async () => {
     renderLens();
     expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
+    expect(screen.getByText("Common dates seen")).toBeInTheDocument();
+    expect(screen.getByText("Provisional until the sealed verifier opens")).toBeInTheDocument();
     expect(screen.getAllByText("1 / 5")).toHaveLength(2);
     expect(screen.getByText("No sleeve adopted")).toBeInTheDocument();
     expect(screen.getByText("02 Sept 2026")).toBeInTheDocument();
@@ -221,7 +226,7 @@ describe("StrategyPortfolioLens", () => {
       })),
       blockers: [{
         code: "core_evidence_collecting",
-        detail: "#2833 has 2 of 5 required trading days; cash remains the fallback.",
+        detail: "#2833 has observations on 2 of 5 required common dates. The sealed verifier checks the complete populations after the fifth date closes; cash remains the fallback.",
       }],
     } as unknown as CoreSleeveResponse;
     let finishRefresh!: (value: CoreSleeveResponse) => void;
