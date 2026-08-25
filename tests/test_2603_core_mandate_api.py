@@ -163,6 +163,9 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     assert response.can_rebalance is False
     assert response.can_resume is False
     assert response.execution_action == "blocked"
+    assert "No supported public-API route into eToro's Stocks & Shares ISA" in response.household_tax_caveat
+    assert "#2915's £50,000 sensitivity was mixed" in response.household_tax_caveat
+    assert "tax-dominates" not in response.household_tax_caveat
     assert [blocker.code for blocker in response.blockers] == [
         "core_paper_pool_unconfigured",
         "core_evidence_collecting",

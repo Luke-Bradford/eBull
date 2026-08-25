@@ -1031,7 +1031,9 @@ class CoreSleeveResponse(BaseModel):
     buy_only: bool = True
     alpha_input_used: bool = False
     household_tax_caveat: str = (
-        "A UK ISA at another broker tax-dominates this engine sleeve for eligible household capital."
+        "No supported public-API route into eToro's Stocks & Shares ISA is established. "
+        "Compare an ISA elsewhere using personal tax, FX and dealing costs, and expected turnover; "
+        "#2915's £50,000 sensitivity was mixed, not a universal ISA advantage."
     )
 
 
