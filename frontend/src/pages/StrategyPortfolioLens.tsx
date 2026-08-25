@@ -218,9 +218,9 @@ function CoreSleeveControl({
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {[
             ["Core target %", target, setTarget],
-            ["Cash reserve %", reserve, setReserve],
-            ["Rebalance band %", band, setBand],
-            ["Minimum amount", minimum, setMinimum],
+            ["Minimum cash reserve %", reserve, setReserve],
+            ["Rebalance band (pp)", band, setBand],
+            ["Minimum amount (USD)", minimum, setMinimum],
           ].map(([label, value, setter]) => (
             <label key={label as string} className="text-xs font-medium text-slate-600 dark:text-slate-300">
               {label as string}
