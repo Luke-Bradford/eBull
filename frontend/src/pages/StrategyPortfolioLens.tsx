@@ -86,7 +86,7 @@ function CoreCandidateCoverageTable({ sleeve }: { sleeve: CoreSleeveResponse }) 
           <thead className="text-xs text-slate-500">
             <tr>
               <th scope="col" className="py-1 pr-4 font-medium">Instrument</th>
-              <th scope="col" className="py-1 pr-4 font-medium">Evidence</th>
+              <th scope="col" className="py-1 pr-4 font-medium">Dates seen</th>
               <th scope="col" className="py-1 font-medium">Prospective dates</th>
             </tr>
           </thead>

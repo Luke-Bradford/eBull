@@ -209,6 +209,7 @@ describe("StrategyPortfolioLens", () => {
     expect(screen.getByLabelText("Rebalance band (pp)")).toHaveValue(5);
     expect(screen.getByLabelText("Minimum amount (USD)")).toHaveValue(25);
     const coverage = screen.getByRole("table", { name: "Core candidate evidence coverage" });
+    expect(within(coverage).getByRole("columnheader", { name: "Dates seen" })).toBeInTheDocument();
     expect(within(coverage).getByText("SPY.RTH")).toBeInTheDocument();
     expect(within(coverage).getByText("25 Aug 2026 – 25 Aug 2026")).toBeInTheDocument();
     expect(within(coverage).getAllByText("Awaiting first date")).toHaveLength(2);
