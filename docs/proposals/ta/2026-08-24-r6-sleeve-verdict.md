@@ -1,5 +1,10 @@
 # R6 deployable-sleeve verdict after #2908
 
+Status: **AUTHORITATIVE CURRENT R6 VERDICT.** This supersedes
+[`2026-08-23-r6-programme-verdict.md`](2026-08-23-r6-programme-verdict.md),
+whose no-arm rationale predated the repaired #2900 point-in-time path and the
+completed #2908 cycle.
+
 Verdict: **£0 — NO ACTIVE R6 SLEEVE IS JUSTIFIED**
 
 The research cycle found a clean point-in-time spine and an apparent robust return versus literal buy-and-hold,

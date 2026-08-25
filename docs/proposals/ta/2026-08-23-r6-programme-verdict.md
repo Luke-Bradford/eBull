@@ -1,6 +1,17 @@
-# R6 programme verdict and sleeve specification (#2899)
+# Historical R6 programme verdict before point-in-time recovery (#2899)
 
-Verdict: **NO DEPLOYABLE R6 SLEEVE — ALLOCATION £0**.
+> **SUPERSEDED 2026-08-24. Do not use this document as the current sleeve
+> specification.** #2900 was subsequently repaired and passed its adversarial
+> leak test, and #2908 then completed a frozen full-population cycle. The
+> authoritative verdict is
+> [`2026-08-24-r6-sleeve-verdict.md`](2026-08-24-r6-sleeve-verdict.md): R6 still
+> receives £0, but because its exclusion overlay lost to identical annual 1/N,
+> not because no arm could be measured.
+
+The remainder records the earlier 2026-08-23 gate verdict for audit history.
+Its present-tense claims must be read as historical statements at that date.
+
+Historical verdict as of 2026-08-23: **NO DEPLOYABLE R6 SLEEVE — ALLOCATION £0**.
 
 This is the programme's permitted no-sleeve ending, not a strategy failure or
 a zero-return backtest. The point-in-time gate failed before any Tier 2 arm
