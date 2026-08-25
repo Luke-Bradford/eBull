@@ -200,6 +200,9 @@ describe("StrategyPortfolioLens", () => {
     expect(screen.getByText(/cash remains the fallback/i)).toBeInTheDocument();
     expect(screen.getByText(/No supported public-API route into eToro's Stocks & Shares ISA/i)).toBeInTheDocument();
     expect(screen.getByText(/£50,000 sensitivity was mixed, not a universal ISA advantage/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Minimum cash reserve %")).toHaveValue(10);
+    expect(screen.getByLabelText("Rebalance band (pp)")).toHaveValue(5);
+    expect(screen.getByLabelText("Minimum amount (USD)")).toHaveValue(25);
     const coverage = screen.getByRole("table", { name: "Core candidate evidence coverage" });
     expect(within(coverage).getByText("SPY.RTH")).toBeInTheDocument();
     expect(within(coverage).getByText("25 Aug 2026 – 25 Aug 2026")).toBeInTheDocument();
