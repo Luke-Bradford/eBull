@@ -142,7 +142,8 @@ const CORE_COLLECTING = {
   environment: "demo",
   buy_only: true,
   alpha_input_used: false,
-  household_tax_caveat: "A UK ISA at another broker tax-dominates this engine sleeve for eligible household capital.",
+  household_tax_caveat:
+    "No supported public-API route into eToro's Stocks & Shares ISA is established. Compare an ISA elsewhere using personal tax, FX and dealing costs, and expected turnover; #2915's £50,000 sensitivity was mixed, not a universal ISA advantage.",
 } as const;
 
 const CORE_READY = {
@@ -197,7 +198,8 @@ describe("StrategyPortfolioLens", () => {
     expect(screen.getByText("02 Sept 2026")).toBeInTheDocument();
     expect(screen.getByText(/Lower bound if all five common sessions complete/i)).toBeInTheDocument();
     expect(screen.getByText(/cash remains the fallback/i)).toBeInTheDocument();
-    expect(screen.getByText(/UK ISA at another broker tax-dominates/i)).toBeInTheDocument();
+    expect(screen.getByText(/No supported public-API route into eToro's Stocks & Shares ISA/i)).toBeInTheDocument();
+    expect(screen.getByText(/£50,000 sensitivity was mixed, not a universal ISA advantage/i)).toBeInTheDocument();
     const coverage = screen.getByRole("table", { name: "Core candidate evidence coverage" });
     expect(within(coverage).getByText("SPY.RTH")).toBeInTheDocument();
     expect(within(coverage).getByText("25 Aug 2026 – 25 Aug 2026")).toBeInTheDocument();
