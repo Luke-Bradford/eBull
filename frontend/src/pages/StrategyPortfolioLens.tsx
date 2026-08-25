@@ -86,7 +86,7 @@ function CoreCandidateCoverageTable({ sleeve }: { sleeve: CoreSleeveResponse }) 
           <thead className="text-xs text-slate-500">
             <tr>
               <th scope="col" className="py-1 pr-4 font-medium">Instrument</th>
-              <th scope="col" className="py-1 pr-4 font-medium">Evidence</th>
+              <th scope="col" className="py-1 pr-4 font-medium">Dates seen</th>
               <th scope="col" className="py-1 font-medium">Prospective dates</th>
             </tr>
           </thead>
@@ -469,9 +469,9 @@ export function StrategyPortfolioLens() {
               <div className="mt-5 grid grid-cols-2 gap-x-6 lg:grid-cols-4">
                 <StatTile
                   size="md"
-                  label="Evidence"
+                  label="Common dates seen"
                   value={`${coreSleeve.data.observed_trading_days} / ${coreSleeve.data.required_trading_days}`}
-                  hint="Trading days"
+                  hint="Provisional until the sealed verifier opens"
                 />
                 <StatTile
                   size="md"
