@@ -63,11 +63,13 @@ AUDIT_POOL_MAX_SIZE: Final[int] = 1
 JOBS_POOL_MAX_SIZE: Final[int] = 2
 """Jobs-process control pool (``app/jobs/__main__.py``).
 
-#2934 shrank 4→2 to fund the two explicit raw connections charged to the
-reserved quote-observation execution lane without raising PostgreSQL's
-ceiling. Job bodies and their source locks do not borrow this pool; scheduled
-gate/prerequisite checks and the SEC floor gate borrow it only for bounded,
-short statements and release before external I/O or sleep."""
+#2934 shrank 4→2 as an aggregate connection-budget trade: the independent
+non-SEC raw-connection term grows by two when the reserved quote lane is added,
+while this configured pool maximum falls by two. Job bodies and their source
+locks do not borrow this pool; scheduled gate/prerequisite checks and the SEC
+floor gate borrow it only for bounded, short statements and release before
+external I/O or sleep. The complete old/new arithmetic lives beside
+``JOBS_NON_SEC_MAX_CONCURRENCY`` in ``pg_settings.py``."""
 
 BACKGROUND_POOL_MAX_SIZE: Final[int] = 2
 """Jobs-process bounded background pool (#1472 PR4b,

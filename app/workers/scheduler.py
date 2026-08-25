@@ -909,7 +909,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # process-wide HTTP throttle in EtoroMarketDataProvider.
         #
         # Cost: ~1,390 instruments / 50 IDs per rates request = ~28 GETs per
-        # fire, i.e. ~0.5 req/min against eToro's 120 GET/min market-data budget.
+        # fire, i.e. ~0.5 req/min against eToro's 120 GET/min shared market-data
+        # budget. Source: the live portal index reverified 2026-08-11 and
+        # recorded in docs/etoro-api-reference.md §Rate limits.
         cadence=Cadence.hourly(minute=23),
         # Fire on boot when overdue — a process restart otherwise leaves every
         # headless reader on quotes up to an hour old for no reason, and the

@@ -188,7 +188,15 @@ JOBS_NON_SEC_MAX_CONCURRENCY: Final[int] = (
 
 The three explicit lanes can overlap. Each is charged at its worst-case raw
 connection demand below; ``JOBS_POOL_MAX_SIZE`` is reduced by two in #2934 so
-the dev profile still fits the unchanged PostgreSQL ceiling."""
+the dev profile still fits the unchanged PostgreSQL ceiling. Worked demand
+calculation (terms follow ``_dev_profile_connection_demand``):
+
+* before #2934: ``4+1+1+4+2+3+(2*2)+1+4 = 24`` steady + 3 reserve = 27;
+* after #2934:  ``4+1+1+2+2+3+(3*2)+1+4 = 24`` steady + 3 reserve = 27.
+
+The quote lane therefore adds two independent raw-connection slots while the
+control-pool maximum gives back exactly two; it does not borrow those pooled
+connections."""
 
 JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION: Final[int] = 2
 """Worst-case connections held by one non-SEC execution: one session-scoped
