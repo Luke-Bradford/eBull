@@ -737,7 +737,7 @@ def refresh_market_data(
 
     # --- Quotes: batch fetch, then per-instrument upsert ---
     # When skip_quotes is True, quote freshness is owned by the hourly
-    # fx_rates_refresh job — the daily candle job must not shadow those
+    # quotes_refresh job — the daily candle job must not shadow those
     # fresher values with stale end-of-day data.
     if not skip_quotes:
         quote_result = refresh_quotes(provider, conn, instruments, max_spread_pct=max_spread_pct)

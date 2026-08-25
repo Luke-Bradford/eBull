@@ -116,6 +116,12 @@ class TestJobLockSourceLevel:
         """execute_approved_orders + etoro_lookups_refresh both source=etoro."""
         _assert_cross_thread_serialises("execute_approved_orders", "etoro_lookups_refresh")
 
+    def test_quote_observation_runs_concurrently_with_candle_lane(self) -> None:
+        """#2934: immutable hourly quotes cannot wait behind candle refresh."""
+        with JobLock(settings.database_url, "daily_candle_refresh"):
+            with JobLock(settings.database_url, "quotes_refresh"):
+                pass
+
     def test_sec_rate_vs_sec_bulk_download_run_parallel(self) -> None:
         """sec_rate and sec_bulk_download are disjoint rate buckets — no contention."""
         with JobLock(settings.database_url, "sec_form3_ingest"):  # sec_rate

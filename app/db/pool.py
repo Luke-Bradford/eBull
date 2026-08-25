@@ -60,8 +60,16 @@ AUDIT_POOL_MAX_SIZE: Final[int] = 1
 """API credential-audit pool (``app/main.py``, #111). #1472 PR2b shrank
 2→1: audit rows are written on a short side connection, one at a time."""
 
-JOBS_POOL_MAX_SIZE: Final[int] = 4
-"""Jobs-process pool (``app/jobs/__main__.py``)."""
+JOBS_POOL_MAX_SIZE: Final[int] = 2
+"""Jobs-process control pool (``app/jobs/__main__.py``).
+
+#2934 shrank 4→2 as an aggregate connection-budget trade: the independent
+non-SEC raw-connection term grows by two when the reserved quote lane is added,
+while this configured pool maximum falls by two. Job bodies and their source
+locks do not borrow this pool; scheduled gate/prerequisite checks and the SEC
+floor gate borrow it only for bounded, short statements and release before
+external I/O or sleep. The complete old/new arithmetic lives beside
+``JOBS_NON_SEC_MAX_CONCURRENCY`` in ``pg_settings.py``."""
 
 BACKGROUND_POOL_MAX_SIZE: Final[int] = 2
 """Jobs-process bounded background pool (#1472 PR4b,

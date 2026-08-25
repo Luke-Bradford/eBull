@@ -233,11 +233,11 @@ class TestDistinctJobConcurrency:
 
 
 class TestConnectionBudgetExecutionGate:
-    def test_paper_lifecycle_enters_while_general_work_waits(self) -> None:
+    def test_reserved_work_enters_while_general_work_waits(self) -> None:
         from app.jobs.runtime import _job_execution_slot, execution_slot_wait_snapshot
 
         release = threading.Event()
-        entered = [threading.Event() for _ in range(3)]
+        entered = [threading.Event() for _ in range(4)]
 
         def hold(job_name: str, marker: threading.Event) -> None:
             with _job_execution_slot(job_name):
@@ -248,6 +248,7 @@ class TestConnectionBudgetExecutionGate:
             threading.Thread(target=hold, args=("thesis_refresh", entered[0]), daemon=True),
             threading.Thread(target=hold, args=("pg_size_sample", entered[1]), daemon=True),
             threading.Thread(target=hold, args=("strategy_paper_cycle", entered[2]), daemon=True),
+            threading.Thread(target=hold, args=("quotes_refresh", entered[3]), daemon=True),
         ]
         try:
             threads[0].start()
@@ -267,6 +268,8 @@ class TestConnectionBudgetExecutionGate:
             assert snapshot["execution_slot_waits"][0]["wait_age_seconds"] >= 0
             threads[2].start()
             assert entered[2].wait(timeout=1.0), "paper lifecycle was starved by general jobs"
+            threads[3].start()
+            assert entered[3].wait(timeout=1.0), "quote observation was starved by general jobs"
         finally:
             release.set()
             for thread in threads:
@@ -274,6 +277,29 @@ class TestConnectionBudgetExecutionGate:
                     thread.join(timeout=1.0)
         assert entered[1].is_set()
         assert execution_slot_wait_snapshot()["execution_slot_waits"] == []
+
+    def test_second_quote_observation_waits_for_reserved_slot(self) -> None:
+        from app.jobs.runtime import _job_execution_slot
+
+        release = threading.Event()
+        entered = [threading.Event(), threading.Event()]
+
+        def hold(marker: threading.Event) -> None:
+            with _job_execution_slot("quotes_refresh"):
+                marker.set()
+                release.wait(timeout=2.0)
+
+        threads = [threading.Thread(target=hold, args=(marker,), daemon=True) for marker in entered]
+        try:
+            threads[0].start()
+            assert entered[0].wait(timeout=1.0)
+            threads[1].start()
+            assert not entered[1].wait(timeout=0.1)
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(timeout=1.0)
+        assert entered[1].is_set()
 
     def test_second_paper_lifecycle_waits_for_reserved_slot(self) -> None:
         from app.jobs.runtime import _job_execution_slot

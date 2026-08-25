@@ -69,6 +69,7 @@ from app.db.background_write import background_write_connection
 from app.db.pg_settings import (
     JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY,
     JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY,
+    JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY,
 )
 from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.locks import JobAlreadyRunning, JobLock
@@ -678,6 +679,7 @@ _MAX_INSTANCES_SKIP_REASON: Final[str] = "max_instances_active"
 _SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(SEC_LANE_MAX_CONCURRENCY)
 _GENERAL_NON_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY)
 _PAPER_LIFECYCLE_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY)
+_QUOTE_OBSERVATION_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,6 +749,9 @@ def _job_execution_slot(job_name: str) -> Iterator[None]:
     elif job_name == JOB_STRATEGY_PAPER_CYCLE:
         slots = _PAPER_LIFECYCLE_EXECUTION_SLOTS
         lane = "paper_lifecycle_reserved"
+    elif job_name == JOB_QUOTES_REFRESH:
+        slots = _QUOTE_OBSERVATION_EXECUTION_SLOTS
+        lane = "quote_observation_reserved"
     else:
         slots = _GENERAL_NON_SEC_EXECUTION_SLOTS
         lane = "general_non_sec"

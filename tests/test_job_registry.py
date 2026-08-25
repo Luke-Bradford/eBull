@@ -38,6 +38,9 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
     {
         "init",
         "etoro",
+        # #2934 — the hourly immutable quote population cannot share the
+        # multi-hour candle job lock; HTTP rate remains globally throttled.
+        "etoro_quotes",
         "sec_rate",
         # #1478 — sec_manifest_worker extracted from sec_rate into its own
         # lane so the heavy drainer stops starving the SEC producers. A lane
@@ -265,6 +268,7 @@ class TestSourceRegistry:
         # Spot-check a few known mappings against the audit.
         assert source_for("orchestrator_full_sync") == "db"
         assert source_for("execute_approved_orders") == "etoro"
+        assert source_for("quotes_refresh") == "etoro_quotes"
         assert source_for("sec_form3_ingest") == "sec_rate"
         assert source_for("nightly_universe_sync") == "init"
         # sec_bulk_download is a bootstrap-only invoker mapped to its

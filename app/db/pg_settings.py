@@ -174,11 +174,29 @@ The job remains independently serialised by APScheduler ``max_instances=1``,
 the manual in-flight lock and its source advisory lock. This reservation only
 prevents unrelated general work from starving its connection-budget entry."""
 
-JOBS_NON_SEC_MAX_CONCURRENCY: Final[int] = JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY + JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY
+JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY: Final[int] = 1
+"""Reserved execution capacity for ``quotes_refresh`` only (#2934).
+
+The hourly immutable evidence writer must not queue behind the multi-hour full
+sync. APScheduler, this slot and its dedicated source lock each independently
+keep a second instance serialized."""
+
+JOBS_NON_SEC_MAX_CONCURRENCY: Final[int] = (
+    JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY + JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY + JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY
+)
 """Total modeled non-SEC execution concurrency.
 
-The split remains exactly the prior total of two, so reserving the lifecycle
-slot does not increase PostgreSQL connection demand."""
+The three explicit lanes can overlap. Each is charged at its worst-case raw
+connection demand below; ``JOBS_POOL_MAX_SIZE`` is reduced by two in #2934 so
+the dev profile still fits the unchanged PostgreSQL ceiling. Worked demand
+calculation (terms follow ``_dev_profile_connection_demand``):
+
+* before #2934: ``4+1+1+4+2+3+(2*2)+1+4 = 24`` steady + 3 reserve = 27;
+* after #2934:  ``4+1+1+2+2+3+(3*2)+1+4 = 24`` steady + 3 reserve = 27.
+
+The quote lane therefore adds two independent raw-connection slots while the
+control-pool maximum gives back exactly two; it does not borrow those pooled
+connections."""
 
 JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION: Final[int] = 2
 """Worst-case connections held by one non-SEC execution: one session-scoped
