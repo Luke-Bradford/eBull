@@ -362,7 +362,7 @@ def test_quotes_refresh_is_registered_and_invocable() -> None:
 
     entry = next((j for j in SCHEDULED_JOBS if j.name == JOB_QUOTES_REFRESH), None)
     assert entry is not None, "quotes_refresh missing from SCHEDULED_JOBS"
-    assert entry.source == "etoro"
+    assert entry.source == "etoro_quotes"
     assert JOB_QUOTES_REFRESH in _INVOKERS
 
 

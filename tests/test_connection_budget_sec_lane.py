@@ -32,14 +32,16 @@ def test_demand_plus_reserve_exactly_fits_usable():
 
 
 def test_execution_gates_fit_the_modeled_cadence_burst():
-    # The three pins are the budget claim: the lifecycle reserve exists, and the
-    # TOTAL is unchanged at two so the proved PostgreSQL ceiling is not raised.
+    # The pins are the budget claim: lifecycle and quote observation each have
+    # reserved capacity while the total still fits the unchanged PG ceiling.
     # ⚠ No sum-equality assert: JOBS_NON_SEC_MAX_CONCURRENCY is *defined* as
-    # GENERAL + PAPER_LIFECYCLE in app/db/pg_settings.py, so asserting the sum
+    # GENERAL + PAPER_LIFECYCLE + QUOTE_OBSERVATION in app/db/pg_settings.py, so asserting the sum
     # is vacuous — it cannot fail, and it would still pass if both parts moved.
     # Pinning the absolute values is what actually catches a widened budget.
-    assert pg_settings.JOBS_NON_SEC_MAX_CONCURRENCY == 2
+    assert pg_settings.JOBS_NON_SEC_MAX_CONCURRENCY == 3
     assert pg_settings.JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY == 1
     assert pg_settings.JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY == 1
+    assert pg_settings.JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY == 1
+    assert pg_settings.JOBS_POOL_MAX_SIZE == 2
     assert pg_settings.JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION == 2
     assert pg_settings.JOBS_BACKTEST_PROGRESS_CONNECTIONS == 1

@@ -16,6 +16,9 @@ import httpx
 import pytest
 
 from app.providers.implementations.etoro import (
+    _ETORO_RATE_LIMIT_CLOCK,
+    _ETORO_RATE_LIMIT_LOCK,
+    EtoroMarketDataProvider,
     _normalise_candle,
     _normalise_candles,
     _normalise_instrument,
@@ -474,6 +477,18 @@ class TestNormaliseRates:
 
 class TestGetQuotesChunking:
     """Test that get_quotes chunks IDs at 50 and builds correct params."""
+
+    def test_provider_instances_share_process_rate_limit_state(self) -> None:
+        first = EtoroMarketDataProvider(api_key="k", user_key="u")
+        second = EtoroMarketDataProvider(api_key="k", user_key="u")
+        try:
+            assert first._http._last_request_at is _ETORO_RATE_LIMIT_CLOCK  # noqa: SLF001
+            assert second._http._last_request_at is _ETORO_RATE_LIMIT_CLOCK  # noqa: SLF001
+            assert first._http._throttle_lock is _ETORO_RATE_LIMIT_LOCK  # noqa: SLF001
+            assert second._http._throttle_lock is _ETORO_RATE_LIMIT_LOCK  # noqa: SLF001
+        finally:
+            first._client.close()  # noqa: SLF001
+            second._client.close()  # noqa: SLF001
 
     def test_empty_list_no_http_call(self) -> None:
         from app.providers.implementations.etoro import EtoroMarketDataProvider

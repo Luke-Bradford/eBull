@@ -895,19 +895,21 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_QUOTES_REFRESH,
         display_name="Quote refresh",
-        source="etoro",
+        source="etoro_quotes",
         description="Refresh the quotes table for held + benchmark + Tier 1/2 instruments.",
         # Hourly, NOT every_n_minutes, for two reasons. (1) Cadence: hourly is
         # what quote freshness had before #502, and the headless readers are
         # slower than that — the execution guard fires daily, position monitor
         # and portfolio hourly. (2) The #1526/#1527 lane tick-race: a 5-min-
         # aligned slot loses its lane tick to a same-lane every_5min job.
-        # :23 is not 5-min-aligned and collides with nothing else on the
-        # ``etoro`` lane (execute_approved_orders 06:30, exchanges_metadata
-        # Mon 04:00, etoro_lookups Mon 04:30).
+        # #2934 gives this collector its own job-overlap lane as well as a
+        # reserved execution slot. The :23 offset remains useful scheduling
+        # hygiene, but cannot protect a frozen hourly population from a
+        # multi-hour candle sweep. Concurrent market-data calls retain one
+        # process-wide HTTP throttle in EtoroMarketDataProvider.
         #
         # Cost: ~1,390 instruments / 50 IDs per rates request = ~28 GETs per
-        # fire, i.e. ~0.5 req/min against eToro's 60 GET/min shared budget.
+        # fire, i.e. ~0.5 req/min against eToro's 120 GET/min market-data budget.
         cadence=Cadence.hourly(minute=23),
         # Fire on boot when overdue — a process restart otherwise leaves every
         # headless reader on quotes up to an hour old for no reason, and the

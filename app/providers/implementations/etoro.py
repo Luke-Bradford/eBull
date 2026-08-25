@@ -32,10 +32,12 @@ Base URL: https://public-api.etoro.com (configurable via settings.etoro_base_url
 
 import logging
 import math
+import threading
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import TracebackType
+from typing import Final
 from uuid import uuid4
 
 import httpx
@@ -67,6 +69,13 @@ _RATES_BATCH_SIZE = 50
 # the older conservative pacing here because other processes use the same user
 # key and ResilientClient's gate is process-local, not account-global.
 _ETORO_READ_INTERVAL_S = 1.1
+# #2934 — market-data endpoints share one upstream request budget.  Quote
+# observations now run concurrently with the long candle sweep, so every
+# provider instance in this process must coordinate the same atomic clock.
+# This is deliberately process-local: the conservative 1.1s floor retains
+# headroom for the API process and other clients using the same account key.
+_ETORO_RATE_LIMIT_CLOCK: Final[list[float]] = [0.0]
+_ETORO_RATE_LIMIT_LOCK: Final[threading.Lock] = threading.Lock()
 
 _SEARCH_PAGE_SIZE = 10_000
 _SEARCH_MAX_PAGES = 2
@@ -117,6 +126,8 @@ class EtoroMarketDataProvider(MarketDataProvider):
         self._http = ResilientClient(
             self._client,
             min_request_interval_s=_ETORO_READ_INTERVAL_S,
+            shared_last_request=_ETORO_RATE_LIMIT_CLOCK,
+            shared_throttle_lock=_ETORO_RATE_LIMIT_LOCK,
         )
 
     def __enter__(self) -> EtoroMarketDataProvider:

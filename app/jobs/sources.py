@@ -62,6 +62,7 @@ from typing import Any, Literal
 Lane = Literal[
     "init",
     "etoro",
+    "etoro_quotes",
     "sec_rate",
     "sec_manifest",
     "sec_per_cik",
@@ -117,6 +118,14 @@ the rate — it does not.
 * ``etoro`` — eToro REST budget. ``execute_approved_orders`` +
   ``daily_candle_refresh`` + ``strategy_intraday_harvest`` +
   ``etoro_lookups_refresh`` + ``exchanges_metadata_refresh`` serialise.
+* ``etoro_quotes`` — ``quotes_refresh`` only (#2934). The immutable hourly
+  core-sleeve population cannot wait behind the multi-hour candle sweep. Its
+  writes are ordering-safe against former lanemates: candle refresh runs with
+  ``skip_quotes=True`` and writes ``price_daily`` / features / supply only;
+  other quote writers use the timestamp-monotonic ``quotes`` upsert; and this
+  job is the sole writer of ``strategy_core_quote_observations``. The shared
+  process-wide HTTP clock in ``implementations/etoro.py`` still bounds the
+  combined market-data request rate.
 * ``nasdaq`` — Nasdaq Trader public safety feeds. The strategy halt poll has
   its own lane so a delayed public-feed request cannot starve either broker
   execution or unrelated SEC/FINRA collection.
