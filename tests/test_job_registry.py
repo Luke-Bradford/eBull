@@ -120,6 +120,10 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # orchestrator_high_frequency_sync; writes only fx_rates_daily +
         # portfolio_eod_snapshots (write-disjoint). See sources.py::Lane.
         "db_eod_snapshot",
+        # #2844 clause 3 — the reconciliation-verdict ledger is the only writer of
+        # account_reconciliation_days, so it gets its own single-job lane rather than
+        # racing db_eod_snapshot for a lock it does not need.
+        "db_reconciliation_ledger",
         "db_cusip",
         "db_ownership_obs",
         # #1564 — pg_size_sample single-job lane. A daily db_size snapshot

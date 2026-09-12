@@ -31,6 +31,7 @@ from app.services.account_equity_evidence import (
     AccountEquityEvidence,
     load_account_equity_evidence,
 )
+from app.services.market_calendar import us_market_status
 
 logger = logging.getLogger(__name__)
 
@@ -198,52 +199,41 @@ def consecutive_reconciled_days(
     return ReconciliationStreak(len(counted), REQUIRED_GREEN_DAYS, counted[0], stop_reason)
 
 
-def load_countdown_calendar(conn: psycopg.Connection[Any], *, environment: str, as_of: date) -> set[date]:
-    """Dates on which the held book had a closing mark, UNION dates already judged.
+def countdown_calendar(as_of: date) -> set[date]:
+    """NYSE sessions in the countdown window. Pure -- reads no database.
 
-    ⚠ **The obvious discriminator is wrong and was falsified before use.** An unrestricted
-    ``EXISTS (SELECT 1 FROM price_daily WHERE price_date = D)`` returns true for 16 of the 17
-    stored broker days, Saturdays included, because ~308 instruments (crypto) carry weekend
-    bars. Restricting to the HELD instruments -- the same population and the same predicate
-    ``portfolio_eod._resolve_snapshot_date`` uses, ``position_id >= 0 AND units > 0`` --
-    returns every weekday and no weekend, and makes the countdown calendar and the comparand
-    calendar the same object by construction rather than by coincidence.
+    **Source rule: NYSE published holidays and early closings** (nyse.com/markets/
+    hours-calendars), already transcribed and cited in ``app.services.market_calendar``.
+    Reused rather than re-derived: that module distinguishes NYSE from the US federal
+    calendar (Good Friday closed, Columbus/Veterans open) and carries the extraordinary
+    closures too.
 
-    ⚠⚠ **The union with already-judged dates is not belt-and-braces.** Without it, calendar
-    CONTRACTION deletes failures: selling the one crypto holding removes the weekend sessions
-    from the derived side, which silently drops the refused weekend rows sitting between two
-    greens and splices them into one run. A day that was once recorded is a day that
-    happened. Conversely the derived side is what notices a session on which NOTHING ran --
-    the 2026-08-26 to 2026-09-12 host outage produced neither broker rows nor verdict rows,
-    and only the derived side knows those sessions existed.
+    ⚠ **Two wrong discriminators were tried first, and the second was only caught by an
+    adversarial review reproducing a 0/5 -> 5/5 flip.**
+
+    1. ``EXISTS (SELECT 1 FROM price_daily WHERE price_date = D)``, unrestricted, is true
+       for 16 of the 17 stored demo broker days -- every Saturday included -- because ~308
+       instruments (crypto) carry weekend bars against ~11k on weekdays.
+    2. The same query restricted to CURRENTLY-HELD instruments returns the right 12 of 17,
+       but it is a function of today's book. Selling the last crypto position REMOVES past
+       weekend sessions from the calendar, and a weekend the job never judged has no ledger
+       row to preserve it -- so a sale could delete a missing-day failure and turn 0/5 into
+       5/5 with no new evidence. A union with the recorded dates does not save it, because
+       the days at risk are precisely the ones with no row.
+
+    A published exchange calendar has neither failure: it is independent of the book, of
+    the price corpus, and of what the job has managed to record.
+
+    ⚠ Weekends are therefore never countdown days even when a held crypto marks on them.
+    That is conservative in the only direction that matters -- it removes days from the
+    count, it cannot add a day that was silently passed.
     """
     floor = as_of - timedelta(days=CALENDAR_LOOKBACK_DAYS)
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT DISTINCT pd.price_date
-            FROM price_daily pd
-            WHERE pd.price_date BETWEEN %(floor)s AND %(as_of)s
-              AND pd.instrument_id IN (
-                  SELECT DISTINCT instrument_id
-                  FROM broker_positions
-                  WHERE position_id >= 0 AND units > 0
-              )
-            UNION
-            SELECT snapshot_date
-            FROM account_reconciliation_days
-            WHERE environment=%(environment)s
-              AND reconciliation_rule_version=%(rule_version)s
-              AND snapshot_date BETWEEN %(floor)s AND %(as_of)s
-            """,
-            {
-                "floor": floor,
-                "as_of": as_of,
-                "environment": environment,
-                "rule_version": RECONCILIATION_RULE_VERSION,
-            },
-        )
-        return {row[0] for row in cur.fetchall()}
+    return {
+        floor + timedelta(days=offset)
+        for offset in range((as_of - floor).days + 1)
+        if us_market_status(floor + timedelta(days=offset)) != "closed"
+    }
 
 
 def load_reconciliation_days(
@@ -288,33 +278,30 @@ def load_reconciliation_streak(conn: psycopg.Connection[Any], *, as_of: date | N
     """
     today = as_of or datetime.now(UTC).date()
     rows = load_reconciliation_days(conn, environment=COUNTDOWN_ENVIRONMENT, as_of=today)
-    calendar = load_countdown_calendar(conn, environment=COUNTDOWN_ENVIRONMENT, as_of=today)
-    return consecutive_reconciled_days(rows, calendar, today)
+    return consecutive_reconciled_days(rows, countdown_calendar(today), today)
 
 
 def pending_reconciliation_dates(conn: psycopg.Connection[Any], *, environment: str, as_of: date) -> tuple[date, ...]:
-    """Broker days inside the window that have no DECIDED verdict yet, oldest first.
+    """Countdown days inside the window that have no DECIDED verdict yet, oldest first.
 
     ⚠ ``snapshot_date < as_of`` is load-bearing, not tidiness. A same-UTC-day broker row is
     still MUTABLE: ``record_account_equity_snapshot``'s ``ON CONFLICT`` updates it while
     ``snapshot_date = (now() AT TIME ZONE 'UTC')::date``. Deciding a day whose evidence can
     still change is exactly how a green freezes before the divergent observation lands.
 
-    ⚠⚠ **Restricted to DERIVED countdown days, and that restriction is not cosmetic.** The
+    ⚠⚠ **Filtered through ``countdown_calendar``, and that filter is not cosmetic.** The
     broker snapshot is stamped ``observed_at.date()``, so it writes a row on Saturdays and
-    Sundays too -- 5 of the 17 stored demo days. Those can never reconcile, because the
-    local comparand is stamped ``MAX(price_daily.price_date)`` over held instruments and no
-    weekend session exists for an equity book. Recording them would put permanently-refused
-    days into the ledger, ``load_countdown_calendar`` unions the ledger's dates back into
-    the calendar, and the countdown would be blocked forever by a day that was never a
-    countdown day. Caught by running the job against the real dev corpus, not by a test:
-    every weekend row landed ``refused (same_day_local_eod_snapshot_missing)``.
+    Sundays too -- 5 of the 17 stored demo days. Those can never reconcile: the local
+    comparand is a trading session. Recording them would fill the ledger with permanently
+    refused non-sessions. Caught by running the job against the real dev corpus, not by a
+    test: every weekend row landed ``refused (same_day_local_eod_snapshot_missing)``.
 
-    The union in ``load_countdown_calendar`` is still sound and still needed -- what it
-    defends is a day that WAS a countdown day when it was judged and would otherwise vanish
-    from the derived side when the book changes.
+    The filter runs in Python, not SQL, because the NYSE calendar is a published table in
+    ``app.services.market_calendar`` and re-expressing it as a predicate over our price
+    corpus is exactly the mistake the calendar docstring documents.
     """
     floor = as_of - timedelta(days=CALENDAR_LOOKBACK_DAYS)
+    sessions = countdown_calendar(as_of)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -331,16 +318,6 @@ def pending_reconciliation_dates(conn: psycopg.Connection[Any], *, environment: 
             WHERE b.snapshot_date >= %(floor)s
               AND b.snapshot_date < %(as_of)s
               AND coalesce(d.comparable,false) = false
-              AND EXISTS (
-                  SELECT 1
-                  FROM price_daily pd
-                  WHERE pd.price_date=b.snapshot_date
-                    AND pd.instrument_id IN (
-                        SELECT DISTINCT instrument_id
-                        FROM broker_positions
-                        WHERE position_id >= 0 AND units > 0
-                    )
-              )
             ORDER BY b.snapshot_date
             """,
             {
@@ -350,7 +327,7 @@ def pending_reconciliation_dates(conn: psycopg.Connection[Any], *, environment: 
                 "as_of": as_of,
             },
         )
-        return tuple(row[0] for row in cur.fetchall())
+        return tuple(row[0] for row in cur.fetchall() if row[0] in sessions)
 
 
 def _finite(value: Decimal | None) -> Decimal | None:
@@ -425,15 +402,30 @@ def record_reconciliation_day(
 
 
 def run_reconciliation_check(conn: psycopg.Connection[Any], *, as_of: date | None = None) -> int:
-    """Judge every undecided demo broker day in the window. Returns days recorded.
+    """Judge every undecided demo countdown day in the window. Returns days recorded.
 
     ⚠ Oldest-first, **each day in its own transaction with its own ``try``**. A permanent
     refusal -- or an exception -- on the oldest candidate must not starve every newer day
-    behind it. A run with no candidates is a successful no-op and asserts nothing about
-    reconciliation.
+    behind it.
+
+    ⚠⚠ **``conn`` MUST be autocommit.** Under ``autocommit=False`` the
+    ``pending_reconciliation_dates`` read above opens an implicit transaction, and every
+    ``with conn.transaction()`` below then degrades to a SAVEPOINT rather than a real
+    ``BEGIN``/``COMMIT`` -- so a connection loss part-way through discards every verdict
+    the run had already "committed". That is a recurring trap in this repo (prevention log:
+    "a single pre-loop commit is NOT sufficient when the loop body itself reads on the same
+    connection"), and here it is worse than usual: a discarded verdict can miss its own
+    ``MAX_DECISION_LAG_DAYS`` window and become permanently uncountable.
+
+    ⚠ **A run in which every candidate raised is a FAILED run, not a healthy no-op.**
+    Returning 0 quietly would be indistinguishable from "nothing left to judge", and
+    ``_tracked_job`` would record success over a dead pipeline -- the exact class of defect
+    the standing retrospective names ("a job that no-ops and reports success is invisible
+    to every automated check we have").
     """
     today = as_of or datetime.now(UTC).date()
     recorded = 0
+    failed: list[date] = []
     for snapshot_date in pending_reconciliation_dates(conn, environment=COUNTDOWN_ENVIRONMENT, as_of=today):
         try:
             with conn.transaction():
@@ -443,9 +435,14 @@ def run_reconciliation_check(conn: psycopg.Connection[Any], *, as_of: date | Non
                 if record_reconciliation_day(conn, environment=COUNTDOWN_ENVIRONMENT, evidence=evidence):
                     recorded += 1
         except Exception:
+            failed.append(snapshot_date)
             logger.warning(
                 "account_reconciliation_check: %s could not be judged; continuing",
                 snapshot_date,
                 exc_info=True,
             )
+    if failed:
+        raise ReconciliationLedgerError(
+            f"{len(failed)} reconciliation day(s) could not be judged: {', '.join(day.isoformat() for day in failed)}"
+        )
     return recorded

@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from app.services.account_reconciliation_ledger import (
+    CALENDAR_LOOKBACK_DAYS,
     COUNTDOWN_RULE_VERSION,
     MAX_DECISION_LAG_DAYS,
     MAX_EVIDENCE_AGE_DAYS,
@@ -19,6 +20,7 @@ from app.services.account_reconciliation_ledger import (
     REQUIRED_GREEN_DAYS,
     ReconciliationDay,
     consecutive_reconciled_days,
+    countdown_calendar,
 )
 
 AS_OF = date(2026, 9, 30)
@@ -199,3 +201,35 @@ def test_every_lag_inside_the_measured_window_still_counts(lag: int) -> None:
     days = _sessions(REQUIRED_GREEN_DAYS)
     streak = consecutive_reconciled_days(_ledger(days, decided_offset=lag), set(days), AS_OF)
     assert streak.green_days == REQUIRED_GREEN_DAYS
+
+
+# ---------------------------------------------------------------------------
+# The calendar itself
+# ---------------------------------------------------------------------------
+
+
+def test_the_countdown_calendar_is_the_published_nyse_one() -> None:
+    """⚠ Two wrong discriminators preceded this, and the second was subtle.
+
+    ``EXISTS (price_daily AT D)`` unrestricted admits every Saturday (~308 crypto
+    instruments carry weekend bars). Restricting to CURRENTLY-HELD instruments fixes that
+    but makes the calendar a function of today's book — selling the last crypto position
+    then deletes past weekend sessions, and a weekend the job never judged has no ledger
+    row to preserve it, so a sale could turn 0/5 into 5/5 with no new evidence.
+
+    A published exchange calendar is a function of neither the book nor the price corpus.
+    """
+    calendar = countdown_calendar(date(2026, 7, 10))
+    assert date(2026, 7, 10) in calendar  # Friday
+    assert date(2026, 7, 11) not in calendar  # Saturday
+    assert date(2026, 7, 12) not in calendar  # Sunday
+    # NYSE closes Jul 3 when Jul 4 falls on a Saturday — a federal-calendar rule would
+    # disagree, which is why `market_calendar` exists separately from `sec_calendar`.
+    assert date(2026, 7, 3) not in calendar
+
+
+def test_the_calendar_never_reaches_past_the_window_or_into_the_future() -> None:
+    as_of = date(2026, 7, 10)
+    calendar = countdown_calendar(as_of)
+    assert max(calendar) <= as_of
+    assert min(calendar) >= as_of - timedelta(days=CALENDAR_LOOKBACK_DAYS)

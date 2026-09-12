@@ -1441,6 +1441,10 @@ class LiveGateFactsView(BaseModel):
     live_trading_enabled: bool
     global_kill_active: bool
     active_execution_block_count: int
+    #: #2844 clause 3. Account-level, not strategy-level: every strategy on this account
+    #: shares one broker book, so the boundary's evidence is one number.
+    account_reconciliation_green_days: int
+    account_reconciliation_required_days: int
 
 
 class LiveGateResponse(BaseModel):

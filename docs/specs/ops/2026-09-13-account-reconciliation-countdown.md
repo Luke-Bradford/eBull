@@ -79,56 +79,48 @@ write access could forge it", it is recorded as out of model rather than defende
 
 ## The countdown day
 
-A **countdown day** is a date on which the held book had a closing mark — i.e. a date `D`
-for which `price_daily` holds a row at `D` for at least one instrument held under the same
-predicate `_resolve_snapshot_date` uses, verbatim: `position_id >= 0 AND units > 0` on
-`broker_positions`.
+A **countdown day** is an NYSE session — a date on which the US market traded.
 
-⚠ **The obvious discriminator is wrong and was falsified before use.** `EXISTS (SELECT 1
-FROM price_daily WHERE price_date = D)` — unrestricted — returns true for **16 of the 17**
-stored broker days, Saturdays included, because ~308 instruments (crypto) carry weekend
-bars:
+**Source rule: NYSE published holidays and early closings** (nyse.com/markets/hours-calendars),
+already transcribed and cited in `app/services/market_calendar.py::us_market_status`. Reused,
+not re-derived: that module is deliberately distinct from the US *federal* calendar in
+`app/providers/implementations/sec_calendar.py` (NYSE closes Good Friday, stays open on
+Columbus and Veterans Day) and it carries the extraordinary closures too.
 
-```sql
-select extract(isodow from price_date)::int dow, count(*), count(distinct instrument_id)
-  from price_daily where price_date >= '2026-08-01' group by 1 order by 1;
--- 1:44938/11078  2:45567/11073  3:35911/11073  4:35862/11068  5:35773/11045
--- 6:616/308      7:1220/307
-```
+⚠ **Two derivations from our own data were tried first and both are wrong.** Recorded because
+the second one measured correct on every day in the corpus and was only falsified by an
+adversarial review reproducing a `0/5 → 5/5` flip.
 
-Restricting to the currently-held instruments returns **12 of 17**, every weekday and no
-weekend — and it is the *same* population `portfolio_eod._resolve_snapshot_date` uses to
-stamp the local comparand, so the countdown calendar and the comparand calendar are the
-same object by construction rather than by coincidence.
+1. `EXISTS (SELECT 1 FROM price_daily WHERE price_date = D)`, unrestricted, returns true for
+   **16 of the 17** stored broker days, Saturdays included, because ~308 instruments (crypto)
+   carry weekend bars:
 
-⚠ **The calendar is the UNION of the derived sessions and every date already recorded in
-the ledger for the current version** — a set, deduplicated. Both halves are required and
-neither alone is sufficient:
+   ```sql
+   select extract(isodow from price_date)::int dow, count(*), count(distinct instrument_id)
+     from price_daily where price_date >= '2026-08-01' group by 1 order by 1;
+   -- 1:44938/11078  2:45567/11073  3:35911/11073  4:35862/11068  5:35773/11045
+   -- 6:616/308      7:1220/307
+   ```
 
-- Derived sessions alone would let **calendar contraction delete failures**. Selling the
-  one crypto holding removes the weekend sessions from `price_daily`-over-held, which
-  silently deletes the refused weekend rows sitting between two greens and splices them
-  into one run. A day that was once recorded is a day that happened; unioning the ledger's
-  own dates in means a recorded failure can never be un-recorded by a change of book.
-- The ledger alone would let **a day on which nothing ran be invisible**. The
-  2026-08-26 → 2026-09-12 host outage produced neither broker rows nor verdict rows; only
-  the independently derived side notices that those sessions existed and were never judged.
+2. The same query restricted to *currently-held* instruments (`position_id >= 0 AND units > 0`,
+   the predicate `portfolio_eod._resolve_snapshot_date` uses) returns the right 12 of 17 — every
+   weekday, no weekend — and appears to make the countdown calendar and the comparand calendar
+   the same object. But it is a function of **today's book**. Selling the last crypto position
+   removes past weekend sessions from the calendar, and a weekend the job never judged has **no
+   ledger row to preserve it**, so the sale deletes a missing-day failure and splices the greens
+   either side of it. Unioning the ledger's own recorded dates does not save it: the days at risk
+   are exactly the ones with no row.
 
-Two further consequences, stated rather than engineered around:
+A published exchange calendar has neither failure. It is a function of neither the book, nor the
+price corpus, nor what the job has managed to record — so a past day's classification cannot move.
 
-- **A held crypto makes weekends countdown days.** That is correct, not a loophole: if the
-  book holds an instrument that marks on Saturday, Saturday has a local snapshot and is
-  genuinely reconcilable. It does mean five countdown days need not be five business days.
-  ⚠ A mixed crypto/equity book makes every weekend a *mandatory* day on which the equity
-  legs are marked from a carried-forward Friday close; whether that reconciles is a
-  question for the tolerance, not for this calendar.
-- **Calendar expansion is fail-closed by construction.** Buying a weekend-marking
-  instrument turns past weekends into countdown days with no verdict row, which breaks a
-  streak. Selling the whole book empties the derived side, leaving only recorded dates —
-  and a cash-only or empty book therefore cannot start a new countdown at all. That is a
-  stated limitation, not an oversight: `_resolve_snapshot_date` falls back to *today* when
-  no held instrument has a price, so a cash-only book's local snapshots are stamped on a
-  calendar this rule deliberately does not recognise.
+Two consequences, stated rather than engineered around:
+
+- **Weekends are never countdown days, even when a held crypto marks on them.** Conservative in
+  the only direction that matters: it removes days from the count; it cannot let a day pass
+  unexamined.
+- **A US market holiday is not a countdown day**, so the broker's holiday row — which can never
+  reconcile, the local comparand being a trading session — is neither recorded nor counted.
 
 ## Storage — `account_reconciliation_days`
 
@@ -202,10 +194,25 @@ It does **not** evaluate only the latest day. Candidates are the broker snapshot
   nothing is lost by not re-visiting them.
 - no row yet for the current `reconciliation_rule_version` with `comparable = true`.
 
-Ordered oldest-first, **each day in its own transaction with its own `try`**, so a
-permanent refusal — or an exception — at the oldest candidate cannot starve every newer day
-behind it. A run with no candidates is a successful no-op and asserts nothing about
-reconciliation; `row_count` is days recorded.
+Candidates are additionally filtered through the countdown calendar: the broker writes a row
+on Saturdays and Sundays too (5 of the 17 stored demo days), and those can never reconcile,
+so recording them would fill the ledger with permanently refused non-sessions.
+
+Ordered oldest-first, **each day in its own transaction with its own `try`**, so a permanent
+refusal — or an exception — at the oldest candidate cannot starve every newer day behind it.
+
+⚠ **The connection must be `autocommit=True`.** Under `autocommit=False` the candidate-list
+read opens an implicit transaction and every `with conn.transaction()` below degrades to a
+SAVEPOINT rather than a real `BEGIN`/`COMMIT`, so a connection loss part-way through discards
+the verdicts the run had already written — and a discarded verdict can miss its own
+`MAX_DECISION_LAG_DAYS` window and become permanently uncountable. This is a recurring trap in
+this repo; see the prevention-log entry "a single pre-loop commit is NOT sufficient when the
+loop body itself reads on the same connection".
+
+⚠ **A run in which any candidate raised is a FAILED run.** `row_count` is days recorded, and a
+run with no candidates is a healthy no-op — so returning 0 quietly after every candidate threw
+would be indistinguishable from that, and `_tracked_job` would stamp `success` over a dead
+pipeline. The job raises after the loop, having still committed every day that did succeed.
 
 `load_account_equity_evidence` gains an optional `snapshot_date` parameter (`None` = latest,
 preserving the existing API caller's behaviour verbatim). ⚠ The parameter is cast
@@ -274,8 +281,8 @@ Each stop condition closes a specific bypass, and they were not all obvious:
   would mean consecutive *in a calendar with holes*.
 - **A missing row is a stop, not a skip**, which is what makes the calendar's independence
   from the ledger load-bearing. It is also why a dead job resets the count without any
-  heartbeat check: `price_daily` keeps advancing, so new countdown days keep appearing with
-  no row, and the run breaks at the newest of them.
+  heartbeat check: the NYSE calendar keeps advancing whatever our pipeline does, so new
+  countdown days keep appearing with no row, and the run breaks at the newest of them.
 - **`decided_at.date() < D` is rejected** — a verdict cannot predate the day it judges.
 
 Return type is a dataclass, not a bare int: `green_days`, `required_days`,
@@ -285,7 +292,8 @@ which is a worse failure than propagating.
 
 ## Readers — the counter must not be a writer with no reader
 
-1. **Live gate.** `LiveGateFacts` gains `account_reconciliation_green_days: int`;
+1. **Live gate.** `LiveGateFacts` gains `account_reconciliation_green_days` and
+   `account_reconciliation_required_days`;
    `live_gate_refusals` gains `account_reconciliation_streak_insufficient`. Appended
    **after** `live_strategy_broker_contract_not_validated`, which is unconditional — so the
    new code can never be `refusal_codes[0]` and the function's documented order contract is

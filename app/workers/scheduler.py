@@ -5465,7 +5465,13 @@ def account_reconciliation_check_job() -> None:
     from app.services.account_reconciliation_ledger import run_reconciliation_check
 
     with _tracked_job(JOB_ACCOUNT_RECONCILIATION_CHECK) as tracker:
-        with connect_job() as conn:
+        # ⚠ autocommit=True is REQUIRED, not stylistic. The body reads the candidate list
+        # on this same connection before its per-day `with conn.transaction()` blocks;
+        # under autocommit=False that read opens an implicit transaction and every block
+        # below silently degrades to a SAVEPOINT, so one failure late in the run would
+        # discard the verdicts already written. Prevention log: "a single pre-loop commit
+        # is NOT sufficient when the loop body itself reads on the same connection".
+        with connect_job(autocommit=True) as conn:
             tracker.row_count = run_reconciliation_check(conn)
 
 
