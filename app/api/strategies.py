@@ -24,6 +24,10 @@ from app.security.master_key import MasterKeyError, ensure_broker_key_loaded
 from app.security.secrets_crypto import CredentialCryptoConfigError
 from app.security.sessions import SessionRow
 from app.services.account_equity_evidence import load_account_equity_evidence
+from app.services.account_reconciliation_ledger import (
+    COUNTDOWN_RULE_VERSION,
+    load_reconciliation_streak,
+)
 from app.services.backtest_run import BACKTEST_UNIVERSE, corpus_version_for, runnable_strategies
 from app.services.broker_credentials import (
     CredentialDecryptError,
@@ -756,6 +760,20 @@ class AccountEquityEvidenceView(BaseModel):
     tolerance: Decimal | None
     comparable: bool
     incomplete_reasons: list[str]
+    #: #2844 clause 3 — the consecutive-green countdown before live enablement.
+    #:
+    #: ⚠ These describe a DIFFERENT object from every field above. The fields above are
+    #: the LATEST broker day, recomputed live on this request; the countdown is FROZEN
+    #: history over the countdown calendar, which excludes weekends and every day the
+    #: broker sync missed. They can legitimately disagree — `reconciliation_state` can read
+    #: `refused` beside a five-day streak, because the latest day is typically the one the
+    #: 0-3 day local-snapshot lag has not decided yet. `countdown_newest_counted_date` is
+    #: what the streak is as-of; `countdown_stop_reason` is why it stopped where it did.
+    countdown_green_days: int
+    countdown_required_days: int
+    countdown_newest_counted_date: date | None
+    countdown_stop_reason: str | None
+    countdown_rule_version: str
 
 
 #: #2602 item 5.  Named refusal states for the two benchmark fields F-0 owes the
@@ -2286,6 +2304,10 @@ def get_strategy_overview(
         conn,
         environment=cast(Literal["demo", "real"], settings.etoro_env),
     )
+    # ⚠ Demo only, regardless of `settings.etoro_env` above. `portfolio_eod_snapshots`
+    # carries no environment column, so a `real` countdown would silently consume the demo
+    # comparand — see `account_reconciliation_ledger.COUNTDOWN_ENVIRONMENT`.
+    reconciliation_streak = load_reconciliation_streak(conn)
 
     results_by_strategy: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in result_rows:
@@ -2773,6 +2795,11 @@ def get_strategy_overview(
             tolerance=account_equity.tolerance,
             comparable=account_equity.comparable,
             incomplete_reasons=list(account_equity.incomplete_reasons),
+            countdown_green_days=reconciliation_streak.green_days,
+            countdown_required_days=reconciliation_streak.required_days,
+            countdown_newest_counted_date=reconciliation_streak.newest_counted_date,
+            countdown_stop_reason=reconciliation_streak.stop_reason,
+            countdown_rule_version=COUNTDOWN_RULE_VERSION,
         ),
         evidence_refresh=EvidenceRefreshView(
             frozen_through=max(item.window.end for item in RECENT_EVIDENCE_WINDOWS.values()),

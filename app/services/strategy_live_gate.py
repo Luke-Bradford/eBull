@@ -19,6 +19,7 @@ import psycopg
 import psycopg.rows
 from psycopg.pq import TransactionStatus
 
+from app.services.account_reconciliation_ledger import load_reconciliation_streak
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration, declaration_refusals
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
@@ -128,6 +129,11 @@ class LiveGateFacts:
     live_trading_enabled: bool
     global_kill_active: bool
     active_execution_block_count: int
+    #: #2844 clause 3 — consecutive reconciled demo days on the CURRENT tolerance rule.
+    #: ⚠ Account-level, not strategy-level. Every strategy on this account shares one
+    #: broker book, so the boundary's evidence is one number, not one per candidate.
+    account_reconciliation_green_days: int
+    account_reconciliation_required_days: int
 
 
 @dataclass(frozen=True)
@@ -350,6 +356,7 @@ def assess_live_gate(
     """Derive one write-free promotion report from compact existing ledgers."""
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     policy = load_live_gate_policy(conn, strategy_id, strategy_version)
+    reconciliation_streak = load_reconciliation_streak(conn, as_of=observed_at.date())
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -566,6 +573,8 @@ def assess_live_gate(
         live_trading_enabled=entry_block.live_trading_enabled,
         global_kill_active=entry_block.global_kill_active,
         active_execution_block_count=active_blocks,
+        account_reconciliation_green_days=reconciliation_streak.green_days,
+        account_reconciliation_required_days=reconciliation_streak.required_days,
     )
 
     # ⚠ THE FLOOR IS READ OFF THE DECLARATION THE *POLICY* POINTS AT, never off
@@ -764,6 +773,13 @@ def live_gate_refusals(
     # Keep this explicit: every evidence gate can turn green without silently
     # making real broker I/O reachable.
     refusals.append("live_strategy_broker_contract_not_validated")
+    # #2844 clause 3 — the allocation boundary's evidence. ⚠ APPENDED AFTER the
+    # unconditional refusal above, deliberately: that one always fires, so the new code
+    # can never become `refusal_codes[0]` and this function's documented ORDER contract is
+    # untouched. Placing it before that line would change `[0]` on exactly the input where
+    # every other check passes, which is the input the contract exists for.
+    if facts.account_reconciliation_green_days < facts.account_reconciliation_required_days:
+        refusals.append("account_reconciliation_streak_insufficient")
     return tuple(dict.fromkeys(refusals))
 
 

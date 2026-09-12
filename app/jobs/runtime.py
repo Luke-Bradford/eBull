@@ -90,6 +90,7 @@ from app.services.processes.param_metadata import (
 )
 from app.services.sync_orchestrator.types import OrchestratorFenceHeld
 from app.workers.scheduler import (
+    JOB_ACCOUNT_RECONCILIATION_CHECK,
     JOB_AQR_REFERENCE_REFRESH,
     JOB_ATTRIBUTION_SUMMARY,
     JOB_CBOE_VIX_REFRESH,
@@ -166,6 +167,7 @@ from app.workers.scheduler import (
     Cadence,
     CadenceKind,
     ScheduledJob,
+    account_reconciliation_check_job,
     aqr_reference_refresh,
     attribution_summary_job,
     cboe_vix_refresh,
@@ -365,6 +367,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_THESIS_OUTCOME_CAPTURE: _adapt_zero_arg(thesis_outcome_capture),
     JOB_THESIS_REFRESH: _adapt_zero_arg(thesis_refresh),
     JOB_PORTFOLIO_EOD_SNAPSHOT: _adapt_zero_arg(portfolio_eod_snapshot_job),
+    JOB_ACCOUNT_RECONCILIATION_CHECK: _adapt_zero_arg(account_reconciliation_check_job),
     JOB_FX_HISTORY_BACKFILL: _adapt_zero_arg(fx_history_backfill_job),
     # #591 PR-B — risk-metrics recompute. Orchestrator-driven (DAG layer
     # "risk_metrics") + manual-trigger-only; NOT in SCHEDULED_JOBS (the

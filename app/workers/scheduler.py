@@ -374,6 +374,7 @@ JOB_QUOTES_REFRESH = "quotes_refresh"
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_PORTFOLIO_EOD_SNAPSHOT = "portfolio_eod_snapshot"
+JOB_ACCOUNT_RECONCILIATION_CHECK = "account_reconciliation_check"
 # Manual-trigger-only (triangle, like sec_rebuild): full-range Frankfurter
 # historical FX backfill into fx_rates_daily. Not in SCHEDULED_JOBS — the
 # eod-snapshot job self-backfills on first run; this is the operator re-run.
@@ -1114,6 +1115,29 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         misfire_grace_seconds=4 * 60 * 60,
         prerequisite=_bootstrap_complete,
         catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_ACCOUNT_RECONCILIATION_CHECK,
+        display_name="Account reconciliation countdown",
+        # Reads broker_account_equity_snapshots + portfolio_eod_snapshots, writes only
+        # account_reconciliation_days. No other job writes that table.
+        source="db_reconciliation_ledger",
+        description=(
+            "Judge every undecided demo broker day against the local end-of-day book "
+            "(#2844 clause 3) and store the verdict. row_count = days recorded; 0 is the "
+            "healthy steady state once the backlog is judged."
+        ),
+        # 22:45 UTC, after portfolio_eod_snapshot at 22:30.
+        #
+        # ⚠ The offset is convenience, NOT a dependency: the job never evaluates the
+        # current UTC day (a same-day broker row is still mutable) and it re-judges every
+        # undecided day in its window on each fire, so a late or missed local snapshot is
+        # picked up by a later fire rather than lost. Nothing here needs the 22:30 job to
+        # have finished.
+        cadence=Cadence.daily(hour=22, minute=45),
+        # A missed night is re-covered by the next fire -- undecided days stay candidates.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_FUNDAMENTALS_SYNC,
@@ -5426,6 +5450,23 @@ def portfolio_eod_snapshot_job() -> None:
         with connect_job() as conn:
             equity = compute_and_store_eod_snapshot(conn)
         tracker.row_count = equity.positions_priced
+
+
+def account_reconciliation_check_job() -> None:
+    """Store a per-day official/local reconciliation verdict (#2844 clause 3).
+
+    The countdown clause needs five consecutive reconciled days, and before this job the
+    verdict was computed on page load and discarded -- there was no record to count.
+
+    ⚠ It judges every UNDECIDED day in the window, not just the latest. The latest broker
+    day is precisely the one that cannot be decided: the local comparand is stamped
+    ``MAX(price_daily.price_date)`` and lands 0-3 days late.
+    """
+    from app.services.account_reconciliation_ledger import run_reconciliation_check
+
+    with _tracked_job(JOB_ACCOUNT_RECONCILIATION_CHECK) as tracker:
+        with connect_job() as conn:
+            tracker.row_count = run_reconciliation_check(conn)
 
 
 def fx_history_backfill_job() -> None:

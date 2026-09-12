@@ -81,6 +81,7 @@ Lane = Literal[
     "db_retry",
     "db_positions",
     "db_eod_snapshot",
+    "db_reconciliation_ledger",
     "db_cusip",
     "db_ownership_obs",
     "db_raw_sweep",

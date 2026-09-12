@@ -295,6 +295,10 @@ def _facts(**overrides: object) -> LiveGateFacts:
         "live_trading_enabled": True,
         "global_kill_active": False,
         "active_execution_block_count": 0,
+        # #2844 clause 3 — default to a satisfied countdown so the existing cases keep
+        # measuring what they were written to measure.
+        "account_reconciliation_green_days": 5,
+        "account_reconciliation_required_days": 5,
     }
     base.update(overrides)
     return LiveGateFacts(**base)  # type: ignore[arg-type]
