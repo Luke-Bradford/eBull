@@ -30,6 +30,13 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import {
+  isConnected,
+  isUnavailable,
+  statusOnStreamError,
+  type LiveConnectionStatus,
+} from "@/lib/liveQuoteConnection";
+
 export interface LiveTickPayload {
   instrument_id: number;
   native_currency: string | null;
@@ -48,10 +55,20 @@ export interface LiveTickPayload {
 export interface LiveQuoteState {
   /** Latest tick received on this connection, or null before the first
    *  tick arrives. Null is not a "broken" state — it just means eToro
-   *  hasn't pushed a rate for this instrument yet (quiet book). */
+   *  hasn't pushed a rate for this instrument yet (quiet book).
+   *  ⚠ Scoped to the requested id: a tick for a previous instrument is
+   *  never returned, even on the render before the effect re-runs. */
   tick: LiveTickPayload | null;
+  /** Transport state (#2944). The single source for badge copy; prefer it
+   *  over the two booleans below in new code. */
+  status: LiveConnectionStatus;
+  /** True when ``tick`` arrived on the connection that is currently open.
+   *  False after an error AND after a reopen that has not yet delivered a
+   *  frame — a reconnect must not silently re-bless a frozen price. */
+  tickFresh: boolean;
   /** True once the SSE connection has opened. Useful for a
-   *  "LIVE" badge UI. */
+   *  "LIVE" badge UI. ⚠ Being connected does NOT make the retained tick
+   *  live; gate a live badge on ``tickIsAuthoritative``. */
   connected: boolean;
   /** True if the backend returned 503 (no quote bus available) or
    *  the connection errored in a non-recoverable way. The UI should
@@ -61,26 +78,37 @@ export interface LiveQuoteState {
 
 export function useLiveQuote(instrumentId: number | null | undefined): LiveQuoteState {
   const [tick, setTick] = useState<LiveTickPayload | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [unavailable, setUnavailable] = useState(false);
+  const [status, setStatus] = useState<LiveConnectionStatus>("idle");
+  const [tickFresh, setTickFresh] = useState(false);
   // Ref holds the active EventSource across renders so React's strict-
   // mode double-invocation cleanup doesn't close a live stream while a
   // new one is being set up.
   const sourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    if (instrumentId === null || instrumentId === undefined) return;
+    // Reset FIRST, unconditionally (#2944). This used to sit below the two
+    // guards, so unsubscribing (id -> null) left the previous instrument's
+    // tick, ``connected`` and ``unavailable`` on screen indefinitely.
+    setTick(null);
+    setTickFresh(false);
+
+    if (instrumentId === null || instrumentId === undefined) {
+      setStatus("idle");
+      return;
+    }
     // Defensive: EventSource is a browser API. Test environments
     // without a jsdom polyfill hit this branch — no-op and let the
     // page fall back to its REST snapshot. Also covers SSR if we
     // ever render this component server-side.
-    if (typeof EventSource === "undefined") return;
+    if (typeof EventSource === "undefined") {
+      setStatus("idle");
+      return;
+    }
 
-    // Reset state when the subscribed id changes so the caller
-    // doesn't see stale ticks from a previous instrument.
-    setTick(null);
-    setConnected(false);
-    setUnavailable(false);
+    setStatus("connecting");
+    // ``hasOpened`` distinguishes "never got up" from "fell over": both
+    // report readyState CONNECTING on error.
+    let hasOpened = false;
 
     // Route through ``/api/*`` so the Vite dev proxy (see
     // frontend/vite.config.ts) strips the prefix and forwards to
@@ -102,7 +130,19 @@ export function useLiveQuote(instrumentId: number | null | undefined): LiveQuote
 
     source.onopen = () => {
       if (!isActive()) return;
-      setConnected(true);
+      hasOpened = true;
+      setStatus("live");
+      // A reopen does NOT re-bless whatever tick is still on screen: it
+      // predates this connection, so the 09:00 price of a stream that
+      // reconnected at 09:05 and received nothing must not pulse LIVE
+      // (Codex ckpt-1 on #2944).
+      // ⚠ In a real browser `onerror` always fires before a reconnect and
+      // clears this too, so this line is a REDUNDANT local guard, not the
+      // thing that makes the user-visible behaviour correct. Kept so the
+      // invariant "fresh means: arrived on the connection now open" holds at
+      // the handler that opens the connection, rather than resting on the
+      // browser always having fired an error first.
+      setTickFresh(false);
     };
 
     source.onmessage = (ev: MessageEvent) => {
@@ -113,6 +153,7 @@ export function useLiveQuote(instrumentId: number | null | undefined): LiveQuote
         // against a server-side filter bug leaking foreign ticks.
         if (payload.instrument_id === instrumentId) {
           setTick(payload);
+          setTickFresh(true);
         }
       } catch {
         // Malformed JSON — ignore the frame; the connection stays
@@ -122,14 +163,12 @@ export function useLiveQuote(instrumentId: number | null | undefined): LiveQuote
 
     source.onerror = () => {
       if (!isActive()) return;
-      // EventSource's built-in auto-reconnect handles transient drops.
-      // We only set ``unavailable`` once the connection is definitively
-      // closed (readyState CLOSED = 2). Browsers fire onerror on every
-      // reconnect attempt too, which should NOT flip unavailable.
-      if (source.readyState === EventSource.CLOSED) {
-        setUnavailable(true);
-        setConnected(false);
-      }
+      // The browser fires onerror on every automatic reconnect attempt, not
+      // only on a definitive close. ``statusOnStreamError`` reads the HTML
+      // spec's readyState to tell those apart; the old code handled only
+      // CLOSED and so left ``connected`` true through the whole outage.
+      setStatus(statusOnStreamError(source.readyState, hasOpened));
+      setTickFresh(false);
     };
 
     return () => {
@@ -140,11 +179,26 @@ export function useLiveQuote(instrumentId: number | null | undefined): LiveQuote
       if (sourceRef.current === source) {
         sourceRef.current = null;
       }
-      setConnected(false);
+      setStatus("idle");
+      setTickFresh(false);
     };
   }, [instrumentId]);
 
-  return { tick, connected, unavailable };
+  // Scope the returned tick to the REQUESTED id. The effect's reset lands a
+  // render late, so without this an id change briefly renders the previous
+  // instrument's price under the new instrument's heading.
+  const scopedTick =
+    tick !== null && instrumentId !== null && instrumentId !== undefined && tick.instrument_id === instrumentId
+      ? tick
+      : null;
+
+  return {
+    tick: scopedTick,
+    status,
+    tickFresh: scopedTick === null ? false : tickFresh,
+    connected: isConnected(status),
+    unavailable: isUnavailable(status),
+  };
 }
 
 /**

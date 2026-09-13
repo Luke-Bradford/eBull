@@ -29,6 +29,7 @@ import {
   liveTickNativePrice,
   useLiveQuote,
 } from "@/lib/useLiveQuote";
+import { staleQuoteReason, tickIsAuthoritative } from "@/lib/liveQuoteConnection";
 
 function formatPrice(
   value: string | null | undefined,
@@ -141,6 +142,16 @@ export function SummaryStrip({
   // sources now expose a native triple + a display companion, so the primary
   // is always native regardless of which resolves first.
   const liveNative = liveTickNativePrice(live.tick);
+  // #2944: the pulse follows the PROVENANCE OF THE PRICE ON SCREEN, not the
+  // socket. It used to read `live.connected`, so it pulsed through an entire
+  // reconnect (connected was never cleared on a CONNECTING error) and again
+  // after a reopen that delivered no frame. It must also not pulse when an
+  // open stream has simply never quoted this instrument and the REST snapshot
+  // is what is rendered.
+  const liveIsAuthoritative =
+    liveNative !== null && tickIsAuthoritative(live.status, live.tickFresh);
+  const staleLiveReason =
+    liveNative !== null && !liveIsAuthoritative ? staleQuoteReason(live.status) : null;
   const primaryCurrent = liveNative?.value ?? price?.current ?? null;
   const primaryCurrency = liveNative?.currency ?? price?.currency ?? null;
   // Source-couple the companion to the primary: when a live tick drives the
@@ -215,12 +226,23 @@ export function SummaryStrip({
           <>
             <span className="ml-auto flex items-baseline gap-1.5 text-2xl font-semibold tabular-nums text-slate-800 dark:text-slate-100">
               {formatPrice(primaryCurrent, primaryCurrency)}
-              {live.connected ? (
+              {liveIsAuthoritative ? (
                 <span
                   data-testid="live-pulse"
                   title="Live price stream active"
                   className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500"
                 />
+              ) : null}
+              {staleLiveReason !== null ? (
+                <span
+                  data-testid="stale-live-marker"
+                  title={staleLiveReason}
+                  className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400"
+                >
+                  <span className="inline-block h-2 w-2 rounded-full bg-amber-500" />
+                  <span className="sr-only">{staleLiveReason}</span>
+                  <span aria-hidden="true">not live</span>
+                </span>
               ) : null}
             </span>
             {showCompanion ? (

@@ -113,18 +113,126 @@ describe("useLiveQuote", () => {
 
   it("sets unavailable only on definitive CLOSED, not on transient errors", () => {
     const { result } = renderHook(() => useLiveQuote(1001));
+    // ⚠ #2944: this test used to fire the transient error WITHOUT opening the
+    // stream first, and asserted only ``unavailable``. Both omissions are why
+    // it could never catch ``connected`` staying true through an outage — an
+    // unopened stream has nothing to disconnect from.
+    act(() => {
+      FakeEventSource.instances[0]!.fireOpen();
+    });
+    expect(result.current.connected).toBe(true);
 
-    // Transient error (reconnect attempt) — must NOT flip unavailable.
+    // Transient error (reconnect attempt) — must NOT flip unavailable, and
+    // MUST drop connected: the transport is down.
     act(() => {
       FakeEventSource.instances[0]!.fireError(false);
     });
     expect(result.current.unavailable).toBe(false);
+    expect(result.current.connected).toBe(false);
+    expect(result.current.status).toBe("reconnecting");
 
     // Definitive close — now flip.
     act(() => {
       FakeEventSource.instances[0]!.fireError(true);
     });
     expect(result.current.unavailable).toBe(true);
+    expect(result.current.status).toBe("unavailable");
+  });
+
+  it("an error before any successful open is connecting, not reconnecting", () => {
+    const { result } = renderHook(() => useLiveQuote(1001));
+    act(() => {
+      FakeEventSource.instances[0]!.fireError(false);
+    });
+    expect(result.current.status).toBe("connecting");
+    expect(result.current.unavailable).toBe(false);
+  });
+
+  it("a reopen does not re-bless a tick from the previous connection", () => {
+    // #2944, Codex ckpt-1: a stream that drops at 09:00, reopens at 09:05 and
+    // receives NOTHING would otherwise show the 09:00 price pulsing LIVE
+    // forever. connected must go back to true (the pipe is up) while the
+    // retained tick stays non-authoritative until a frame actually lands.
+    const { result } = renderHook(() => useLiveQuote(1001));
+    const source = FakeEventSource.instances[0]!;
+
+    act(() => {
+      source.fireOpen();
+      source.fireMessage(JSON.stringify(makeTick()));
+    });
+    expect(result.current.tickFresh).toBe(true);
+
+    act(() => {
+      source.fireError(false);
+    });
+    expect(result.current.tickFresh).toBe(false);
+    expect(result.current.tick?.bid).toBe("100"); // price is KEPT, not hidden
+
+    act(() => {
+      source.fireOpen();
+    });
+    expect(result.current.connected).toBe(true);
+    expect(result.current.tickFresh).toBe(false);
+
+    act(() => {
+      source.fireMessage(JSON.stringify(makeTick({ bid: "111" })));
+    });
+    expect(result.current.tickFresh).toBe(true);
+    expect(result.current.tick?.bid).toBe("111");
+  });
+
+  it("an open alone never blesses a tick from before it", () => {
+    // Pins the invariant AT THE HANDLER. A real browser always fires `error`
+    // before reconnecting, so this sequence cannot occur in practice and the
+    // guard it covers is redundant defence — kept deliberately, and asserted
+    // so a future edit cannot quietly make `open` re-bless a cache.
+    const { result } = renderHook(() => useLiveQuote(1001));
+    const source = FakeEventSource.instances[0]!;
+    act(() => {
+      source.fireOpen();
+      source.fireMessage(JSON.stringify(makeTick()));
+      source.fireOpen();
+    });
+    expect(result.current.connected).toBe(true);
+    expect(result.current.tickFresh).toBe(false);
+  });
+
+  it("clears the previous instrument's tick when the id goes null", () => {
+    // #2944: the state reset used to sit BELOW the null-id early return, so
+    // unsubscribing left the old instrument's price, connected and
+    // unavailable on screen.
+    const { result, rerender } = renderHook(
+      ({ id }: { id: number | null }) => useLiveQuote(id),
+      { initialProps: { id: 1001 as number | null } },
+    );
+    act(() => {
+      FakeEventSource.instances[0]!.fireOpen();
+      FakeEventSource.instances[0]!.fireMessage(JSON.stringify(makeTick()));
+    });
+    expect(result.current.tick).not.toBeNull();
+
+    rerender({ id: null });
+    expect(result.current.tick).toBeNull();
+    expect(result.current.status).toBe("idle");
+    expect(result.current.connected).toBe(false);
+    expect(result.current.unavailable).toBe(false);
+  });
+
+  it("never returns a tick belonging to a different instrument id", () => {
+    // The effect's reset lands a render late, so the returned tick is scoped
+    // to the REQUESTED id rather than to whatever the last stream delivered.
+    const { result, rerender } = renderHook(({ id }: { id: number }) => useLiveQuote(id), {
+      initialProps: { id: 1001 },
+    });
+    act(() => {
+      FakeEventSource.instances[0]!.fireOpen();
+      FakeEventSource.instances[0]!.fireMessage(JSON.stringify(makeTick()));
+    });
+    expect(result.current.tick?.instrument_id).toBe(1001);
+
+    rerender({ id: 2002 });
+    expect(result.current.tick).toBeNull();
+    expect(result.current.tickFresh).toBe(false);
   });
 
   it("opens a new stream when the instrument id changes", () => {
