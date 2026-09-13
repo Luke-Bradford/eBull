@@ -5892,3 +5892,96 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   ancestor guard and the post-move verification, both with the ⚠⚠ note);
   `tests/test_ta_loop_worktree_sync.py::test_a_committed_but_unpushed_detached_head_is_never_checked_away`
   and `::test_a_main_ahead_of_the_remote_is_not_reported_as_re_synced`.
+
+### Adding an INPUT to an accumulator widens which failures make it unknown — the known-set does not follow (#2602, 2026-09-14)
+
+- Symptom: `load_owned_pnl`'s `fees` accumulator gained a second source (the broker's
+  running `broker_positions.total_fees` on open positions, alongside realised
+  `trade_events.fees_usd` on closed ones). The change was correct, tested and green. But
+  `fees_known` — the set of `incomplete_reasons` that force `observed_fees` to `None` —
+  still listed only the reasons belonging to the ORIGINAL source. So on
+  `active_position_missing_from_broker_snapshot` (the ordinary state when portfolio sync
+  deletes an externally-closed position before ownership reconciles) the guard skipped the
+  accrual and `continue`d, while the completeness set still let a **numeric** fee total
+  through — already-charged fees vanishing into a confident partial sum, and from there
+  into `_pooled_cash` as if they were zero. Caught by Codex checkpoint 2, by no test.
+- Root cause: a "known/complete" set encodes *which failures can make this figure wrong*,
+  which is a function of the figure's INPUTS. Adding an input silently widens that
+  function, and the set is a hand-maintained list sitting a screen away from the code that
+  reads the new input. Nothing couples them, so nothing fails when they drift apart. The
+  sibling sets for the same accumulator's peers (`invested_known`, `unrealised_known`)
+  ALREADY excluded the reason — the correct answer was visible three lines below and still
+  not applied.
+- Prevention: when adding a source to any accumulator that has a paired
+  completeness/known/valid flag, enumerate the new source's failure modes and put each one
+  in the flag's set IN THE SAME EDIT. Concretely: for every `continue` / early-out on the
+  path that feeds the accumulator, ask "does the figure remain correct without this
+  contribution?" — if not, its reason belongs in the set. ⚠ Cross-check against sibling
+  figures derived from the same row: if `invested_known` and `unrealised_known` exclude a
+  reason and yours does not, that asymmetry needs a stated justification, not silence.
+- ⚠ The failure is one-directional and quiet: the figure keeps a plausible value and the
+  flag keeps saying `complete`, so it reads as a measurement rather than a hole. Same
+  family as "a DEFAULT VALUE IS NOT A MEASUREMENT" and the `unknown_universe` entry — a
+  confident number standing in for a non-measurement.
+- Generalises to: any partial-aggregate with a companion quality flag — coverage
+  percentages, `*_complete` booleans, `incomplete_reasons` lists, staleness verdicts, and
+  the pooling helpers that propagate one unknown to a whole set.
+- Enforced in: this prevention log; `app/services/strategy_monitoring.py::load_owned_pnl`
+  (the ⚠ comment on `active_position_missing_from_broker_snapshot` inside `fees_known`);
+  `tests/test_strategy_monitoring.py::test_missing_broker_snapshot_makes_observed_fees_unknown`.
+
+### A refusal that fires on an ORDINARY state is not honesty, it is a blanked panel — gate it on the ambiguity being material (#2602, 2026-09-14)
+
+- Symptom: an unseparable-attribution case (a position partially closed AND still open,
+  where the broker does not document whether the remnant's cumulative fee figure still
+  carries the closed slice's share) was first handled by adding an `incomplete_reason`
+  unconditionally. That is the repo's normal idiom and it looked right. It also broke the
+  module's own canonical fixture, which is exactly such a position — because a partial
+  close on a live position is a ROUTINE state, not an error. Shipped as written, it would
+  have returned `observed_fees = None` for ordinary holdings forever.
+- Root cause: the refusal was scoped to the SHAPE that creates the ambiguity rather than to
+  the ambiguity HAVING ANY CONSEQUENCE. At a zero accrual there is no amount to
+  misattribute, so both candidate treatments agree exactly and there is nothing to refuse.
+  Refusing anyway trades a real number for a blank and buys nothing.
+- Prevention: before shipping a refusal, ask what it costs on the population where it will
+  actually fire — `select count(*) … where <refusal predicate>` — and whether the
+  competing treatments DIFFER there. Where they agree (a zero, an empty set, a single
+  candidate), compute; refuse only where the answer genuinely depends on the unknown. State
+  the gate and its reason next to the refusal, or the next reader will "simplify" it away
+  as a missing case.
+- ⚠ This does NOT weaken the standing rule against faking a denominator or splicing a
+  substitute series. Those refuse because the honest value is UNKNOWN. This refines *when*
+  it is unknown: a rule that refuses where the two readings coincide is not being careful,
+  it is being imprecise, and its cost is paid in permanently empty operator panels —
+  which train the operator to ignore the field, taking the real refusals down with it.
+- Generalises to: any named-refusal / `incomplete_reason` / `*_unavailable_reason` design —
+  and to validation predicates generally, where "reject the shape" and "reject the
+  consequence" are routinely conflated.
+- Enforced in: this prevention log; `app/services/strategy_monitoring.py::load_owned_pnl`
+  (the ⚠ note on the `accrued != 0` gate);
+  `tests/test_strategy_monitoring.py::test_partially_closed_open_position_with_no_accrual_stays_complete`.
+
+### "Nothing to verify it against" argues against CLAIMING verification, not against BUILDING (#2602, 2026-09-14)
+
+- Symptom: a prior session root-caused a defect, wrote the re-scope on-issue, and deferred
+  it with *"a reader wired today has nothing non-zero to read, so its dev-verify would be
+  vacuous"*. The measurement was true and still is. But it was recorded as a reason the
+  WORK was blocked, and it travelled that way — the item sat unbuilt while the column it
+  named stayed unread. Re-falsifying the deferral (working-order 3c) found the real defect
+  was not "a number we cannot populate yet" but a **false completeness claim** that held
+  regardless of what the column contained, and was fixed in one sitting with pure-logic
+  fixtures needing no live data.
+- Root cause: "I cannot dev-verify this" and "I cannot build this" are different
+  statements, and the first is the more comfortable one to write. Collapsing them turns an
+  evidence-availability fact into a work-status fact, which every later reader inherits as
+  measured.
+- Prevention: when deferring on absent data, write down separately (a) what cannot be
+  OBSERVED, and (b) what cannot be BUILT OR TESTED. If (b) is empty, build it, and record
+  the dev-verify as PENDING with the exact query that will make it exercisable. ⚠ Same
+  shape as the instruction-set rule about *"wants an explicit call"* — a label that
+  converts an unstarted step into a status.
+- Generalises to: any deferral whose stated reason is about the environment rather than the
+  change — absent fixtures, an unreachable third party, a seasonal event, an empty table.
+- Enforced in: this prevention log; the #2602 item-1 close-out comment, which records the
+  build and the pending watch condition (`select count(*) from broker_positions where
+  total_fees <> 0;`) as two separate facts.
