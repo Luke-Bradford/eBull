@@ -248,6 +248,9 @@ def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
     monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: authority)
     monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", lambda _conn: _capital_authority())
     monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+    # Stated, not inherited from a MagicMock's truthiness: this is the ordinary
+    # unresolved order, which a resume genuinely can still resolve.
+    monkeypatch.setattr("app.api.strategies.core_authority_is_stranded", lambda _conn, *, order_id: False)
 
     response = read_core_sleeve(cast(Any, MagicMock()))
 
@@ -257,6 +260,63 @@ def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
     assert response.execution_action == "resume"
     assert response.pending_order_id == 31
     assert [blocker.code for blocker in response.blockers] == ["core_order_unresolved"]
+
+
+def test_operator_view_does_not_promise_resolution_for_a_stranded_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2961: the generic wording promises a resume resolves the order.
+
+    For an authority that was never recorded as accepted and whose lookup has
+    already missed, that promise provably cannot be kept — and the generic text
+    would keep making it forever. Resume stays offered, because a late-appearing
+    order would be found; only the claim about resolution changes.
+    """
+    from uuid import UUID
+
+    selection = CoreSelection(
+        state="ready",
+        selected_instrument_id=3417,
+        selected_symbol="SPY.RTH",
+        evidence_ref="#2833 verdict",
+        required_trading_days=5,
+        observed_trading_days=5,
+        max_cost_bps=60,
+        candidates=(),
+        missing_candidate_ids=(),
+        configuration_error=None,
+    )
+    authority = CoreResumeAuthority(
+        intent_id=11,
+        trade_id=21,
+        order_id=31,
+        instrument_id=3417,
+        amount=Decimal("49.9"),
+        request_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+        broker_order_ref=None,
+        eligibility_proof_id=7,
+        operator_id=UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"),
+        api_key_credential_id=UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"),
+        user_key_credential_id=UUID("f7306e0b-9494-415e-85fd-97874510cc83"),
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+    monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: authority)
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", lambda _conn: _capital_authority())
+    monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+    monkeypatch.setattr("app.api.strategies.core_authority_is_stranded", lambda _conn, *, order_id: True)
+
+    response = read_core_sleeve(cast(Any, MagicMock()))
+
+    assert [blocker.code for blocker in response.blockers] == ["core_order_unresolved_lookup_missed"]
+    detail = response.blockers[0].detail
+    assert "not proof the broker never received it" in detail
+    assert "#2962" in detail and "#2961" in detail
+    # The affordance is unchanged — only the claim about it is.
+    assert response.can_resume is True
+    assert response.execution_action == "resume"
+    assert response.can_rebalance is False
+    assert response.pending_order_id == 31
 
 
 @pytest.mark.parametrize(
