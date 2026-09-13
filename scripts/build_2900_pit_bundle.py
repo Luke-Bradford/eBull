@@ -8,7 +8,6 @@ census from CSV date columns alone.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from collections import Counter, defaultdict
@@ -16,7 +15,12 @@ from pathlib import Path
 from typing import Any, Final, cast
 from uuid import uuid4
 
-from app.services.r6_pit_bundle import MANIFEST_SCHEMA, PAYLOAD_SCHEMA
+from app.services.r6_pit_bundle import (
+    MANIFEST_SCHEMA,
+    MAX_EVIDENCE_BYTES,
+    PAYLOAD_SCHEMA,
+    read_verified_document,
+)
 from app.services.r6_pit_universe import common_equity_reason
 
 BUILDER_VERSION: Final = "r6-2900-pit-builder-v1"
@@ -25,17 +29,17 @@ MANIFEST_FILENAME: Final = "r6-2900-pit-manifest.json"
 
 
 def _sha256(path: Path) -> str:
-    if not path.is_file() or path.is_symlink():
-        raise RuntimeError(f"source must be a regular non-symlink file: {path}")
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+    return read_verified_document(path)[0]
 
 
 def _load_pinned(path: Path, expected_sha256: str) -> dict[str, Any]:
-    measured = _sha256(path)
+    # ⚠ One read, hashed and parsed (#2945). The builder pins the census sources
+    # the whole evidence chain then trusts, so a digest here that does not bind
+    # the bytes parsed here signs a bundle nobody replaced the digest of.
+    measured, data = read_verified_document(path)
     if measured != expected_sha256:
         raise RuntimeError(f"source digest moved for {path}: expected {expected_sha256}, measured {measured}")
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(data.decode("utf-8"))
     if not isinstance(value, dict):
         raise RuntimeError(f"source must contain a JSON object: {path}")
     return value
@@ -54,6 +58,14 @@ def _formation_map(document: dict[str, Any], *, collection: str) -> dict[str, di
 def _write_exclusive(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    # ⚠ Refuse BEFORE publishing, not after. The loader bounds a document at
+    # MAX_EVIDENCE_BYTES, and the payload is written before it is hashed -- so
+    # checking afterwards would strand an unreadable frozen payload on disk that
+    # no retry can replace (`_write_exclusive` refuses to overwrite).
+    if len(encoded) > MAX_EVIDENCE_BYTES:
+        raise RuntimeError(
+            f"refusing to publish evidence larger than the loader will read ({len(encoded)} bytes): {path}"
+        )
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         with temporary.open("xb") as handle:
