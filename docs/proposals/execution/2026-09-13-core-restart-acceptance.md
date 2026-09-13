@@ -155,9 +155,27 @@ Two corrections to how this was first written, both of which matter for the fix:
 
 Two candidate shapes — drop the `core_rebalance_intent_id IS NULL` exclusion, or add a core-scoped
 scheduled caller that reuses the same services rather than duplicating the sizing/guard/
-reconciliation logic. ⚠ Neither is free: the generic poller holds one broker without the core
-arm's stored credential binding and does not take the core submission lock, so account provenance
-and submission/reconciliation serialisation both need resolving first. Scoped in #2962.
+reconciliation logic. Scoped in #2962.
+
+> ⚠ **Amended 2026-09-13, same session.** This paragraph originally said the blocker was account
+> provenance — that the generic poller holds a broker without the core arm's stored credential
+> binding. **That is wrong**, and a Codex checkpoint-1 pass on #2962's spec killed the design built
+> on it. `sql/373_core_unresolved_credential_guard.sql` is a DB trigger that refuses to revoke or
+> delete either credential while any core order referencing the proof is non-terminal, so the pair
+> an unresolved core authority names is guaranteed live and a provenance predicate would be dead
+> code.
+>
+> **The real reason the exclusion exists is serialisation**, and it is recorded in #2948's own spec
+> (`2026-09-13-reconciliation-backlog-fairness.md:236-239`): `_record_failure` can overwrite a
+> terminal row under concurrency, accepted there on the grounds that production has exactly one
+> scheduled reconciler and *"a second reconciler would be a new deployment decision"*. The core arm
+> already has a second one — the attended route — which does not race the job only because the job
+> excludes core orders. Removing the exclusion makes core the first order class with two
+> reconcilers. **#2964** is the prerequisite; #2962 is blocked on it.
+>
+> Also corrected: the G-1 claim above that the SLO "still sees it, so the condition surfaces" holds
+> only where an enabled paper deployment supplies a policy — which is the same conditional-escalation
+> point already made in G-1.3, and which the first #2962 draft contradicted.
 
 ### G-3 — the kill switch is outranked by two earlier refusals
 
@@ -240,9 +258,16 @@ Listed because they bound every classification in the table above, and a reader 
 ## Round 2 entry conditions
 
 1. #2961 (G-1) landed, with the terminalisation discriminator fail-closed and audited.
-2. #2962 (G-2) landed, so recovery has a caller that is not a browser.
-3. Then re-run this suite plus matrix item 5, which only becomes meaningful once the core arm is
-   in the backlog.
+2. **#2964 landed** — the reconciliation write path made safe for a second reconciler. Discovered
+   after this report was first written, and it is the true head of the chain: #2962 is blocked on
+   it, not the other way round.
+3. #2962 (G-2) landed on top of it, so recovery has a scheduled caller.
+4. Then re-run this suite plus matrix item 5, which only becomes meaningful once the core arm is
+   in the backlog. ⚠ Partial fills have a known defect to reproduce first — **#2965**: a
+   partially-filled core entry claims ownership while `pending`, and
+   `load_engine_capital_authority` raises on that combination, taking down the core executor, the
+   mandate writer and `core_rebalance_observation`. This suite's fake broker returns no executions
+   while pending, which is why it did not surface here.
 
 Round 2 is still fake-broker work. Account-specific demo evidence stays after it and stays
 operator-attended, because its acceptance mutates broker state.
