@@ -827,6 +827,13 @@ def _assert_submission_controls(
     scheduler pass re-evaluates them and refuses again for as long as they
     hold. Revoking the approval instead would discard a still-valid EXIT.
     """
+    # runtime_corrupt=False is not an assumption: ``runtime`` is typed
+    # ``RuntimeConfig``, not ``RuntimeConfig | None``, so corruption cannot
+    # reach here as a value. ``get_runtime_config`` either returns a valid
+    # config or raises ``RuntimeConfigCorrupt``, which propagates out of
+    # execute_order (Step 3) and never gets this far. The guard passes the
+    # flag because it collects the corruption as a rule result instead of
+    # raising; this caller has no such state to report.
     results = decide_submission_controls(
         load_kill_switch(conn),
         runtime,
