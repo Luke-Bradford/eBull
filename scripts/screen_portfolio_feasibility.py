@@ -136,8 +136,11 @@ def _symbols(conn: psycopg.Connection[Any], instrument_ids: list[int]) -> dict[i
 
     ⚠ NEVER shrink the candidate.  An id absent from ``instruments`` is an explicit
     error, not a dropped leg -- the screen's contract is that it returns a verdict
-    per leg of the caller's OWN list and never a subset, and a join that silently
-    dropped one would defeat that from underneath.
+    per leg of the caller's OWN list and never a subset, and anything that silently
+    dropped one would defeat that from underneath.  Hence the shape here: select
+    what exists, then DIFF against the request and raise on the remainder.  An
+    inner join would express the dropping directly; the explicit diff is what makes
+    the refusal visible.
     """
     rows = conn.execute(
         "SELECT instrument_id, symbol FROM instruments WHERE instrument_id = ANY(%(ids)s::bigint[])",
@@ -285,6 +288,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"database error: {exc}", file=sys.stderr)
         _discard_stale_artifact(out_path)
         return EXIT_CONFIG
+    except BaseException:
+        # ⚠ The stale-artifact guarantee must be UNCONDITIONAL, not a property of
+        # the exception list above.  An unexpected error -- or a Ctrl-C -- would
+        # otherwise skip the discard and leave the previous artifact in place,
+        # which is precisely the silent stale evidence this run failed to replace.
+        # Re-raised, never swallowed: an unexpected exception is a defect and must
+        # still surface with its traceback.
+        _discard_stale_artifact(out_path)
+        raise
 
     payload = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,

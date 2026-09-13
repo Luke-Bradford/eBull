@@ -292,3 +292,37 @@ def test_a_failed_run_removes_a_stale_artifact(tmp_path: pathlib.Path) -> None:
     )
     assert code == EXIT_CONFIG
     assert not artifact.exists()
+
+
+def test_an_unexpected_error_still_removes_the_stale_artifact(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⚠ The discard must be UNCONDITIONAL, not a property of the handled-exception
+    list. An error nobody anticipated would otherwise skip it and leave the
+    previous artifact standing as this run's result -- and the traceback must still
+    surface, so the exception is re-raised rather than swallowed.
+    """
+    artifact = tmp_path / "previous.json"
+    artifact.write_text('{"report": "from an earlier run"}', encoding="utf-8")
+
+    def _boom(_args: object) -> None:
+        raise RuntimeError("an error nobody anticipated")
+
+    monkeypatch.setattr("scripts.screen_portfolio_feasibility._parse_legs", _boom)
+
+    with pytest.raises(RuntimeError, match="nobody anticipated"):
+        main(
+            [
+                "--leg",
+                "3417:1",
+                "--assigned-capital",
+                "1000",
+                "--capital-currency",
+                "USD",
+                "--cash-reserve-fraction",
+                "0.02",
+                "--out",
+                str(artifact),
+            ]
+        )
+    assert not artifact.exists()

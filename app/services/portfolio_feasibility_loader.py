@@ -30,9 +30,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 import psycopg
 
-from app.services.operators import sole_operator_id
+from app.services.operators import OperatorLookupError, sole_operator_id
 from app.services.portfolio_feasibility import AccountScope, LegEligibility
 from app.services.strategy_core_eligibility import (
+    CoreEligibilityError,
     CoreEligibilityVerdict,
     live_credential_ids_unlocked,
 )
@@ -119,12 +120,19 @@ def resolve_account_scope(
     a feasibility verdict: rendering "we have no credentials" as ``refused`` would
     report a portfolio problem where there is an account problem.
     """
+    # ⚠ NARROW deliberately: `OperatorLookupError` (zero or several operators) and
+    # `CoreEligibilityError` (no live credential pair) are the two ways the account
+    # can legitimately fail to resolve.  A bare `except Exception` here would
+    # reclassify a programming bug -- a `TypeError`, a renamed column -- as a
+    # config error, which is the quietest possible way to hide a real defect.
+    # A `psycopg.Error` deliberately propagates: the caller distinguishes a
+    # database failure from an account that cannot be resolved.
     try:
         operator_id = sole_operator_id(cast("psycopg.Connection[object]", conn))
         api_key_credential_id, user_key_credential_id = live_credential_ids_unlocked(
             conn, operator_id=operator_id, provider=provider, environment=environment
         )
-    except Exception as exc:  # noqa: BLE001 -- re-raised as the module's own error below
+    except (OperatorLookupError, CoreEligibilityError) as exc:
         raise FeasibilityLoaderError(f"cannot resolve the {provider} {environment} account scope: {exc}") from exc
     return AccountScope(
         provider=provider,
