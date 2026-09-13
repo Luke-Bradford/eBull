@@ -104,12 +104,13 @@ def _history_arm(
     A relative arm resolves its ``minDate`` HERE rather than at run start, so the elapsed
     wall-clock of the preceding arms cannot silently push it past the bound it claims.
     """
-    if (min_date is None) == (lookback is None):
-        raise ValueError("pass exactly one of min_date / lookback")
     requested_at = datetime.now(UTC)
-    if min_date is None:
-        assert lookback is not None  # noqa: S101 - narrowed by the guard above
+    if lookback is not None:
+        if min_date is not None:
+            raise ValueError("pass exactly one of min_date / lookback")
         min_date = requested_at - lookback
+    elif min_date is None:
+        raise ValueError("pass exactly one of min_date / lookback")
     arm: dict[str, Any] = {
         "arm": label,
         "requested_at": requested_at.isoformat(),
@@ -143,7 +144,13 @@ def _closed_events_arm(broker: EtoroBrokerProvider) -> dict[str, Any]:
     """Independent per-close-year counts — the completeness oracle (#2991)."""
     arm: dict[str, Any] = {"arm": "C_closed_event_counts", "path": _CLOSED_EVENTS_PATH}
     try:
-        response = broker._http_read.get(  # noqa: SLF001 - one-off probe, no public method yet
+        # ⚠ Private client on purpose, same as `scripts/probe_2712_close_side_cost_quote.py`.
+        # A public provider method would have to be registered in `etoro_quota_lanes`
+        # CALL_SITES, which documents the endpoints the RUNTIME reaches — and nothing in
+        # `app/` calls this one. Minting a production method with no production caller to
+        # serve a diagnostic is the worse trade; `_http_read` is used (not bypassed) so the
+        # request still draws on the shared throttle.
+        response = broker._http_read.get(  # noqa: SLF001 - probe, not production code
             _CLOSED_EVENTS_PATH,
             headers=broker._request_headers(),  # noqa: SLF001
         )

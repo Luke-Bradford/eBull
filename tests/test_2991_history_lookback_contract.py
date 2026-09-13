@@ -110,9 +110,11 @@ def test_neither_history_operation_exposes_an_upper_bound_parameter(
     """#2991's windowing is unimplementable while this holds — and buildable the moment it fails."""
     names = {p["name"] for p in operations[key]["parameters"]}
     assert names == _EXPECTED_PARAMETERS, (
-        f"{key}'s parameter set changed to {sorted(names)}. If an upper-bound date parameter "
-        "(maxDate/toDate) has appeared, #2991's rebuttal has expired: the range can now be "
-        "tiled and get_trade_history must window it."
+        f"{key}'s parameter set changed to {sorted(names)}. ⚠ This asserts the WHOLE set, not "
+        "the absence of two names, so any added parameter trips it — deliberately, because a "
+        "new parameter on this operation is worth reading whatever it is called. If an "
+        "upper-bound date parameter has appeared under any name, #2991's rebuttal has expired: "
+        "the range can now be tiled and get_trade_history must window it."
     )
 
 
