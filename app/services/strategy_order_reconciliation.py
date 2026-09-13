@@ -988,6 +988,39 @@ def reconcile_backlog(
     return tuple(results)
 
 
+def count_unresolved_order_identity(conn: psycopg.Connection[Any]) -> int:
+    """How many strategy orders currently have unresolved broker identity.
+
+    The age-free companion to :func:`enforce_reconciliation_slo`, for the one
+    caller that has no declared age to measure against (#2961): a configuration
+    with no enabled paper deployment, and therefore no
+    ``strategy_execution_policies`` row, still has orders — the core arm never
+    had a deployment row at all.
+
+    ⚠ It lives here, beside the SLO, rather than in the caller, because the
+    terminal vocabulary is hard-coded per site in this module by design
+    (``_record_failure``'s note) and a SIXTH copy in another module is how the
+    list starts disagreeing with itself.
+
+    ⚠ Presence, not age, and deliberately no threshold parameter. Inventing an
+    age for a configuration that declares none would be a made-up constant
+    wearing a policy's clothes.
+    """
+    row = conn.execute(
+        """
+        SELECT count(*)
+        FROM strategy_order_reconciliation_state
+        WHERE state NOT IN ('resolved', 'rejected')
+        """
+    ).fetchone()
+    # A read helper on a shared connection must not leave a transaction open --
+    # the same discipline `load_core_resume_authority` states, and the caller here
+    # commits before its own write transaction.
+    conn.commit()
+    assert row is not None
+    return int(row[0])
+
+
 def enforce_reconciliation_slo(
     conn: psycopg.Connection[Any],
     *,
@@ -1051,6 +1084,7 @@ __all__ = [
     "ReconciliationResult",
     "StrategyReconciliationBusy",
     "StrategyReconciliationError",
+    "count_unresolved_order_identity",
     "enforce_reconciliation_slo",
     "ensure_strategy_request_id",
     "reconcile_backlog",

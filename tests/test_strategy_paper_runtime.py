@@ -408,8 +408,87 @@ def test_broker_outage_and_drawdown_unknown_block_entries_without_row_growth(
 
     conn.execute("UPDATE strategy_deployments SET enabled=false WHERE mode='paper'")
     conn.commit()
+    # ⚠ The clear is now CONDITIONAL on there being no unresolved order identity
+    # (#2961), so this arm proves the no-policy path only while that is true.
+    # Asserted rather than assumed: without it a later fixture change could make
+    # this pass for the wrong reason.
+    assert conn.execute(
+        "SELECT count(*) FROM strategy_order_reconciliation_state WHERE state NOT IN ('resolved','rejected')"
+    ).fetchone() == (0,)
     assert refresh_strategy_health(conn, broker=broker, now=_NOW) == 0
     assert conn.execute("SELECT count(*) FROM strategy_execution_blocks WHERE active").fetchone() == (0,)
+
+
+def test_unresolved_identity_still_blocks_when_no_deployment_declares_an_age(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2961: the no-policy clear must not overwrite a real unresolved order.
+
+    The configuration this is about is today's: zero enabled paper deployments,
+    a core arm that never had a ``strategy_deployments`` row, and an order whose
+    broker identity is unresolved.  The blanket clear wrote ``active=false`` /
+    *"no enabled paper strategy deployment requires this health gate"* over it —
+    true about deployments, false about the system, and the operator's only
+    signal that the core arm is stuck.
+
+    ⚠ The counter does not join to ``strategy_trades`` at all, so it is
+    arm-agnostic BY CONSTRUCTION rather than by a core predicate — which is what
+    makes a bare strategy order a faithful stand-in here and keeps this test out
+    of the core-seeding chain it would otherwise need.
+
+    ⚠ Both directions are asserted.  A test that only checked the block goes
+    active would pass against a function that never clears, which is the
+    opposite defect and would wedge the alpha arm the moment one is enabled.
+    """
+    conn = ebull_test_conn
+    _seed(conn)
+    broker = _broker()
+    conn.execute("UPDATE strategy_deployments SET enabled=false WHERE mode='paper'")
+    order = conn.execute(
+        """
+        INSERT INTO orders (
+            instrument_id, action, order_type, requested_amount, status,
+            execution_origin, strategy_request_id
+        ) VALUES (2449001,'BUY','MARKET',100,'submitted','strategy',gen_random_uuid())
+        RETURNING order_id
+        """
+    ).fetchone()
+    assert order is not None
+    conn.execute("INSERT INTO strategy_order_reconciliation_state (order_id) VALUES (%s)", (order[0],))
+    conn.commit()
+
+    assert refresh_strategy_health(conn, broker=broker, now=_NOW) == 1
+    block = conn.execute(
+        "SELECT active, reason FROM strategy_execution_blocks WHERE source='order_reconciliation'"
+    ).fetchone()
+    conn.commit()
+    assert block is not None
+    assert block[0] is True
+    # The reason must name the count AND say why no age is applied -- "1 order is
+    # unresolved" alone reads as an SLO breach against a threshold that does not
+    # exist in this configuration.
+    assert "1 strategy order(s) have unresolved broker identity" in block[1]
+    assert "no age threshold applies" in block[1]
+
+    # The other four stay scoped to deployments and still clear.
+    assert conn.execute(
+        "SELECT count(*) FROM strategy_execution_blocks WHERE active AND source <> 'order_reconciliation'"
+    ).fetchone() == (0,)
+
+    # Resolving it clears the block on the very next refresh, with no age involved.
+    conn.execute(
+        "UPDATE strategy_order_reconciliation_state SET state='resolved', reconciled_at=now() WHERE order_id=%s",
+        (order[0],),
+    )
+    conn.commit()
+    assert refresh_strategy_health(conn, broker=broker, now=_NOW) == 0
+    cleared = conn.execute(
+        "SELECT active, reason FROM strategy_execution_blocks WHERE source='order_reconciliation'"
+    ).fetchone()
+    conn.commit()
+    assert cleared is not None
+    assert cleared[0] is False
+    assert cleared[1] == "no strategy order has unresolved broker identity"
 
 
 def test_health_refresh_ends_read_transaction_before_broker_call(
