@@ -22,6 +22,7 @@ source db-marks the WHOLE module at collection.
 
 from __future__ import annotations
 
+import zlib
 from typing import Any
 
 import psycopg
@@ -50,7 +51,13 @@ def _seed_order(conn: psycopg.Connection[Any], *, symbol: str) -> int:
     # assigned, so every seed must supply one. Derived from the symbol so the id
     # is stable per test and cannot collide between parametrised cases; based
     # well above any real eToro instrument id.
-    instrument_id = 2_964_000 + (abs(hash(symbol)) % 900_000)
+    #
+    # ⚠ `zlib.crc32` and NOT `hash()`: Python randomises str hashing per
+    # interpreter (PYTHONHASHSEED), so `hash()` is stable only WITHIN one run.
+    # These tests would still pass — they roll back — but the ids would differ
+    # between runs, which is the kind of non-determinism that makes a future
+    # failure irreproducible. `crc32` is fixed for all time.
+    instrument_id = 2_964_000 + (zlib.crc32(symbol.encode()) % 900_000)
     conn.execute(
         "INSERT INTO instruments (instrument_id,symbol,company_name,is_tradable) "
         "VALUES (%s,%s,'Terminal Guard Test',TRUE) ON CONFLICT DO NOTHING",
