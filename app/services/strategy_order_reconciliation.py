@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, cast
@@ -27,6 +28,8 @@ from app.providers.broker import (
     BrokerProvider,
 )
 from app.services.strategy_control_plane import StrategyControlError, StrategyOwnershipError
+
+logger = logging.getLogger(__name__)
 
 ReconciliationState = Literal[
     "unresolved",
@@ -189,33 +192,116 @@ def _record_failure(
     error_code: str,
     broker_status: str | None = None,
 ) -> ReconciliationResult:
-    conn.execute(
-        """
-        INSERT INTO strategy_order_reconciliation_state (
-            order_id, state, last_attempt_at, attempt_count, broker_status,
-            last_error_code, updated_at
-        ) VALUES (%s, %s, now(), 1, %s, %s, now())
-        ON CONFLICT (order_id) DO UPDATE SET
-            state = EXCLUDED.state,
-            last_attempt_at = now(),
-            reconciled_at = NULL,
-            attempt_count = strategy_order_reconciliation_state.attempt_count + 1,
-            broker_status = EXCLUDED.broker_status,
-            last_error_code = EXCLUDED.last_error_code,
-            updated_at = now()
-        """,
-        (order_id, state, broker_status, error_code),
-    )
-    conn.execute(
-        """
-        UPDATE strategy_trades t
-        SET status = 'reconcile_required', updated_at = now()
-        FROM strategy_trade_orders sto
-        WHERE sto.order_id = %s AND sto.strategy_trade_id = t.strategy_trade_id
-          AND t.status NOT IN ('closed', 'failed')
-        """,
-        (order_id,),
-    )
+    # ⚠⚠ #2964 item 1. A failure arriving for an ALREADY-TERMINAL order is an
+    # OBSERVATION, never a state transition. Before the paired CASEs below this
+    # was a bare `state = EXCLUDED.state, reconciled_at = NULL`, so a delayed
+    # 404, a transport error or an unsafe-detail result could demote a
+    # `resolved`/`rejected` row and clear its `reconciled_at`.
+    #
+    # ⚠ The CHECK cannot catch that: `strategy_order_reconciliation_resolved_shape`
+    # (sql/285) requires `reconciled_at IS NOT NULL` exactly when the state is
+    # terminal, and the demotion moved BOTH together -- every step of the
+    # corruption produced a valid ROW. The constraint describes a valid row and
+    # says nothing about a valid TRANSITION.
+    #
+    # ⚠ Paired CASE rather than a `DO UPDATE ... WHERE`: a WHERE that skipped
+    # would leave the late failure with NO trace at all and would return no row,
+    # replacing a corruption with a silence. The CASEs read the EXISTING row, so
+    # both CHECK branches stay satisfied and the row's membership of the two
+    # partial indexes (sql/285:81, sql/376:18) is unchanged.
+    #
+    # ⚠⚠ `broker_status` and `last_error_code` are preserved on the terminal
+    # branch too, and that is not tidiness. Every call site passes
+    # `broker_status=None`, so assigning it would replace a terminal `Filled` with
+    # NULL and leave the row's provenance a mixture of the resolve and the late
+    # failure. And a retained `last_error_code` makes
+    # `app/api/strategies.py` add a `*_reconciliation_error` to the trade's
+    # lifecycle `incomplete_reasons` FOR A RESOLVED TRADE -- which nothing would
+    # ever clear, because the terminal early-return path in
+    # `reconcile_strategy_order` never writes. So the terminal branch moves the
+    # ATTEMPT COUNTERS only; the error detail lives in the WARNING logged below.
+    #
+    # ⚠ `terminal` is passed as a LIST: `_TERMINAL_RECONCILIATION_STATES` is a
+    # frozenset and psycopg rejects it as a parameter. The whole statement uses
+    # NAMED placeholders because mixing them with the positional ones this clause
+    # used to carry raises "positional and named placeholders cannot be mixed".
+    #
+    # ⚠ This parameter keeps THIS statement in step with the Python constant and
+    # nothing more -- the CHECK, both partial indexes, `_apply_detail`'s SQL and
+    # the backlog/SLO predicates each hard-code terminal membership on their own.
+    # Adding a terminal state still means touching those by hand.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            INSERT INTO strategy_order_reconciliation_state (
+                order_id, state, last_attempt_at, attempt_count, broker_status,
+                last_error_code, updated_at
+            ) VALUES (
+                %(order_id)s, %(state)s, now(), 1, %(broker_status)s, %(error_code)s, now()
+            )
+            ON CONFLICT (order_id) DO UPDATE SET
+                state = CASE
+                    WHEN strategy_order_reconciliation_state.state = ANY(%(terminal)s)
+                    THEN strategy_order_reconciliation_state.state
+                    ELSE EXCLUDED.state END,
+                reconciled_at = CASE
+                    WHEN strategy_order_reconciliation_state.state = ANY(%(terminal)s)
+                    THEN strategy_order_reconciliation_state.reconciled_at
+                    ELSE NULL END,
+                broker_status = CASE
+                    WHEN strategy_order_reconciliation_state.state = ANY(%(terminal)s)
+                    THEN strategy_order_reconciliation_state.broker_status
+                    ELSE EXCLUDED.broker_status END,
+                last_error_code = CASE
+                    WHEN strategy_order_reconciliation_state.state = ANY(%(terminal)s)
+                    THEN strategy_order_reconciliation_state.last_error_code
+                    ELSE EXCLUDED.last_error_code END,
+                last_attempt_at = now(),
+                attempt_count = strategy_order_reconciliation_state.attempt_count + 1,
+                updated_at = now()
+            RETURNING state, broker_status, last_error_code
+            """,
+            {
+                "order_id": order_id,
+                "state": state,
+                "broker_status": broker_status,
+                "error_code": error_code,
+                "terminal": sorted(_TERMINAL_RECONCILIATION_STATES),
+            },
+        )
+        stored = cur.fetchone()
+    assert stored is not None, "ON CONFLICT DO UPDATE without a WHERE always returns a row"
+    stored_state = cast(ReconciliationState, stored["state"])
+    guarded = stored_state != state
+
+    if guarded:
+        # The error detail is deliberately NOT stored (see above), so this line is
+        # the only place it exists. A failure arriving for a settled order is
+        # worth an operator seeing.
+        logger.warning(
+            "reconciliation failure %r arrived for order %s which is already %s; "
+            "recording the attempt without changing the outcome",
+            error_code,
+            order_id,
+            stored_state,
+        )
+    else:
+        # ⚠ Gated on the STORED state, not the attempted one: a terminal
+        # reconciliation row must not flag its trade `reconcile_required`, which
+        # would trade one wrong write for another.
+        #
+        # ⚠ The `NOT IN ('closed','failed')` predicate is PRE-EXISTING and
+        # preserved, not replaced -- this gate is additional.
+        conn.execute(
+            """
+            UPDATE strategy_trades t
+            SET status = 'reconcile_required', updated_at = now()
+            FROM strategy_trade_orders sto
+            WHERE sto.order_id = %s AND sto.strategy_trade_id = t.strategy_trade_id
+              AND t.status NOT IN ('closed', 'failed')
+            """,
+            (order_id,),
+        )
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -234,13 +320,18 @@ def _record_failure(
         persisted = cur.fetchone()
     assert persisted is not None
     persisted_ref = persisted["broker_order_ref"]
+    # ⚠ The STORED row, not the attempted write. These differ exactly in the
+    # guarded case, and a caller that believes a demotion happened is the same
+    # defect one layer up. `error_code` follows the same rule: reporting the late
+    # failure's code against a preserved terminal state would describe a row that
+    # does not exist.
     return ReconciliationResult(
         order_id,
-        state,
+        stored_state,
         str(persisted_ref) if persisted_ref is not None else None,
-        broker_status,
+        stored["broker_status"],
         tuple(int(value) for value in persisted["position_ids"]),
-        error_code,
+        stored["last_error_code"],
     )
 
 
