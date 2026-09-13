@@ -66,8 +66,10 @@ from app.services.execution_guard import (
     _check_spread,
     _check_thesis_freshness,
     _check_transaction_cost,
+    decide_submission_controls,
     evaluate_recommendation,
 )
+from app.services.runtime_config import RuntimeConfig
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -1077,3 +1079,71 @@ class TestEvaluateRecommendation:
                 evaluate_recommendation(conn, 42)
         # transaction() should never have been entered
         conn.transaction.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestDecideSubmissionControls (#2943)
+# ---------------------------------------------------------------------------
+
+
+def _runtime(*, auto: bool = True, live: bool = True) -> RuntimeConfig:
+    return RuntimeConfig(
+        enable_auto_trading=auto,
+        enable_live_trading=live,
+        display_currency="USD",
+        llm_provider="openai_compatible",
+        llm_base_url="http://localhost:11434/v1",
+        llm_model_writer="qwen3:14b",
+        llm_model_critic="qwen3:14b",
+        updated_at=_NOW,
+        updated_by="test",
+        reason="test",
+    )
+
+
+_KS_OFF: dict[str, Any] = {"is_active": False, "activated_at": None, "reason": None}
+_KS_ON: dict[str, Any] = {"is_active": True, "activated_at": _NOW, "reason": "halt"}
+
+
+class TestDecideSubmissionControls:
+    """The rule shared by the guard (approval time) and order_client
+    (submission time). Pure — no DB, no connection.
+    """
+
+    @pytest.mark.parametrize(
+        ("ks_row", "runtime", "corrupt", "expected_failures"),
+        [
+            (_KS_OFF, _runtime(), False, []),
+            (_KS_ON, _runtime(), False, ["kill_switch"]),
+            (None, _runtime(), False, ["kill_switch_config_corrupt"]),
+            (_KS_OFF, _runtime(auto=False), False, ["auto_trading"]),
+            (_KS_ON, _runtime(auto=False), False, ["kill_switch", "auto_trading"]),
+            (_KS_OFF, None, True, ["runtime_config_corrupt"]),
+            (_KS_OFF, _runtime(), True, ["runtime_config_corrupt"]),
+        ],
+    )
+    def test_failure_set(
+        self,
+        ks_row: dict[str, Any] | None,
+        runtime: RuntimeConfig | None,
+        corrupt: bool,
+        expected_failures: list[str],
+    ) -> None:
+        results = decide_submission_controls(ks_row, runtime, corrupt)
+        assert [r.rule for r in results if not r.passed] == expected_failures
+
+    def test_live_trading_is_not_a_submission_control(self) -> None:
+        """enable_live_trading selects the execution MODE — order_client
+        consumes it to choose broker vs synthetic fill. Including it here
+        would make the demo branch unreachable, which is a separate decision.
+        """
+        results = decide_submission_controls(_KS_OFF, _runtime(live=False), False)
+        assert [r.rule for r in results] == ["kill_switch", "auto_trading"]
+        assert all(r.passed for r in results)
+
+    def test_corrupt_config_reports_no_opinion_on_auto_trading(self) -> None:
+        """Fail closed: a corrupt row yields the corruption rule alone, never
+        a default-valued auto_trading PASS alongside it.
+        """
+        results = decide_submission_controls(_KS_OFF, None, True)
+        assert [r.rule for r in results] == ["kill_switch", "runtime_config_corrupt"]

@@ -3,6 +3,9 @@ Order client.
 
 Responsibilities:
   - Accept a guard-approved recommendation (PASS verdict only).
+  - Re-check the operator's standing trading authority (kill switch,
+    ``enable_auto_trading``) against live state immediately before taking
+    entry authority, and refuse if it changed since approval (#2943).
   - Place the order via the broker provider, or generate a synthetic fill
     in demo mode (enable_live_trading=False).
   - Persist every order attempt to the ``orders`` table with the raw broker
@@ -33,9 +36,10 @@ import psycopg.rows
 from psycopg.types.json import Jsonb
 
 from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
+from app.services.execution_guard import decide_submission_controls, load_kill_switch
 from app.services.quote_marks import directional_fill_price, positive_decimal_or_none
 from app.services.return_attribution import compute_attribution, persist_attribution
-from app.services.runtime_config import get_runtime_config
+from app.services.runtime_config import RuntimeConfig, get_runtime_config
 from app.services.trade_events import enqueue_post_trade_sync
 from app.services.transaction_cost import (
     estimate_cost,
@@ -56,7 +60,14 @@ OrderOutcome = Literal["filled", "pending", "failed"]
 
 _DEFAULT_ORDER_TYPE = "market"
 
-STAGE: str = "order_execution"
+# decision_audit.stage for every row this module writes.
+#
+# Must stay equal to the "order_client" literal in the audit filter vocabulary
+# (app/api/audit.py::Stage, frontend/src/api/types.ts::AuditStage). It read
+# "order_execution" until #2943, which no row in dev had ever been written with
+# — the writer and the only filter value that selects it had never agreed, so
+# an operator filtering the trail for order-client rows got an empty list.
+STAGE: str = "order_client"
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -775,6 +786,87 @@ class TransactionCostUnavailableError(RuntimeError):
     """BUY/ADD cannot execute while a cost component is unestablished."""
 
 
+class SubmissionControlsRevokedError(RuntimeError):
+    """The operator's standing trading authority no longer holds (#2943).
+
+    Raised when the kill switch or ``enable_auto_trading`` changed between
+    guard approval and submission. Carries ``failed_rules`` so the caller can
+    log which control closed without re-deriving it from the message.
+    """
+
+    def __init__(self, message: str, failed_rules: list[str]) -> None:
+        super().__init__(message)
+        self.failed_rules = failed_rules
+
+
+def _assert_submission_controls(
+    conn: psycopg.Connection[Any],
+    recommendation_id: int,
+    instrument_id: int,
+    runtime: RuntimeConfig,
+    now: datetime,
+) -> None:
+    """Refuse submission when the operator's trading authority has changed.
+
+    Applies to EVERY action, EXIT included — which preserves the established
+    exit policy rather than tightening it: the guard already evaluates these
+    same controls on every action (`execution_guard` module docstring, "All
+    actions"). "EXIT is never blocked" governs thesis / coverage / spread,
+    not the kill switch.
+
+    On refusal this COMMITS a ``decision_audit`` FAIL row before raising.
+    The commit is required, not incidental: the scheduler calls this inside
+    ``with connect_job() as conn``, which rolls back on exception, so an
+    uncommitted audit row would vanish exactly when it matters. The write is
+    the only one outstanding at this point in ``execute_order`` (the intent
+    INSERT happens later), so committing publishes nothing else — the same
+    connection-ownership contract the intent commit relies on.
+
+    The recommendation is deliberately left ``approved``: the controls are a
+    statement about NOW, not about the recommendation's merit, so the next
+    scheduler pass re-evaluates them and refuses again for as long as they
+    hold. Revoking the approval instead would discard a still-valid EXIT.
+    """
+    results = decide_submission_controls(
+        load_kill_switch(conn),
+        runtime,
+        runtime_corrupt=False,
+    )
+    failed = [r for r in results if not r.passed]
+    if not failed:
+        return
+
+    failed_rules = [r.rule for r in failed]
+    explanation = "Submission refused — " + "; ".join(r.detail or r.rule for r in failed)
+    conn.execute(
+        """
+        INSERT INTO decision_audit
+            (decision_time, instrument_id, recommendation_id, stage,
+             pass_fail, explanation, evidence_json)
+        VALUES
+            (%(dt)s, %(iid)s, %(rid)s, %(stage)s,
+             %(pf)s, %(expl)s, %(ev)s)
+        """,
+        {
+            "dt": now,
+            "iid": instrument_id,
+            "rid": recommendation_id,
+            "stage": STAGE,
+            "pf": "FAIL",
+            "expl": explanation,
+            "ev": Jsonb([{"rule": r.rule, "passed": r.passed, "detail": r.detail} for r in results]),
+        },
+    )
+    conn.commit()
+
+    logger.warning(
+        "execute_order: submission refused for recommendation_id=%d rules=%s",
+        recommendation_id,
+        failed_rules,
+    )
+    raise SubmissionControlsRevokedError(explanation, failed_rules)
+
+
 def _assert_safety_layers_enabled_for_buy_add(
     conn: psycopg.Connection[Any],
     action: str,
@@ -898,6 +990,15 @@ def execute_order(
     # Callers must have already passed execution_guard, which fails closed
     # on the same condition.
     runtime = get_runtime_config(conn)
+
+    # #2943: re-evaluate the operator's standing trading authority against
+    # LIVE state, immediately before any entry authority is taken. The guard
+    # checked these at approval time, which may have been minutes or days
+    # ago; an operator who has since hit the kill switch or turned auto
+    # trading off must not have a stale approval fire behind them. Same
+    # function the guard runs, so the two rule sets cannot drift.
+    _assert_submission_controls(conn, recommendation_id, instrument_id, runtime, now)
+
     is_live = runtime.enable_live_trading
 
     quote_data: dict[str, Any] | None = None
