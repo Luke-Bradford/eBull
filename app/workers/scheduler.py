@@ -2792,12 +2792,41 @@ def _record_prereq_skip(job_name: str, detail: str) -> None:
     written. The orchestrator's fresh_by_audit rule counts this row as
     ran-to-prerequisite-check (spec §1.3) so the layer doesn't look
     stale-forever while the prerequisite is missing.
+
+    ⚠⚠ "exactly one row" was NOT true on the scheduled path until #2972, and the
+    docstring said it anyway. `run_with_prelude` pre-allocates a `job_runs` row
+    and only `_tracked_job` consumed the id, so every body-level skip left that
+    row `running` forever and `reap_orphaned_job_runs` later rewrote it as
+    `status='failure'` / INTERNAL_ERROR / "orphaned: reaped at boot". A clean,
+    intentional skip became a recorded FAILURE whose message was false in every
+    particular. Measured on dev 2026-09-13: `core_rebalance_observation` carried
+    one such pair per skipped fire back to 08-24, and the hourly
+    `core_eligibility_refresh` (#2603) would have produced ~22/day.
+
+    ⚠ Counting stranded `running` rows is the WRONG detector and reports almost
+    nothing — the reaper has already converted them. Count
+    `orphaned: reaped at boot` instead.
+
+    So the prelude id is consumed here and its row CLOSED. `consume_prelude_run_id`
+    clears the contextvar, which is safe because every call site returns
+    immediately after this (23 of them, all checked); a caller that continued into
+    `_tracked_job` would get a fresh row rather than a corrupted one.
     """
+    try:
+        # Function-local, mirroring `_tracked_job`: app.jobs.runtime imports this
+        # module's invokers at top level, so the reverse import has to be lazy.
+        from app.jobs.runtime import consume_prelude_run_id
+
+        run_id = consume_prelude_run_id()
+    except Exception:
+        # A missing prelude id is not a reason to lose the audit row — fall back
+        # to the historical insert.
+        run_id = None
     try:
         # #1690 — deliberately RAW (not connect_job): runs BEFORE _tracked_job
         # sets the timeout var; a short audit write, left unbounded.
         with psycopg.connect(settings.database_url, autocommit=True) as conn:
-            record_job_skip(conn, job_name, prereq_skip_reason(detail))
+            record_job_skip(conn, job_name, prereq_skip_reason(detail), run_id=run_id)
     except Exception:
         logger.error("%s: failed to write prereq-skip audit row", job_name, exc_info=True)
 
