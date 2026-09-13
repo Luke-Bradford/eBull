@@ -313,6 +313,14 @@ def _seed_backlog(
     return order_ids
 
 
+def _slo_ages(conn: psycopg.Connection[Any]) -> dict[int, datetime]:
+    """The exact ``first_unresolved_at`` per order — the age the SLO measures."""
+    rows = conn.execute("SELECT order_id, first_unresolved_at FROM strategy_order_reconciliation_state").fetchall()
+    # reconcile_backlog refuses a connection that is not idle.
+    conn.commit()
+    return {int(order_id): unresolved_at for order_id, unresolved_at in rows}
+
+
 def _age_every_attempt(conn: psycopg.Connection[Any]) -> None:
     """Push every attempt clock a day back, preserving the relative order.
 
@@ -345,6 +353,7 @@ def test_backlog_rotates_and_never_strands_an_order_past_the_batch_limit(
     deployment_id = _seed_deployment(conn)
     orders = _seed_backlog(conn, deployment_id=deployment_id, count=6, first_instrument_id=2451200)
     broker = _not_found_broker()
+    slo_ages_at_seed = _slo_ages(conn)
 
     first = reconcile_backlog(conn, broker=broker, limit=3)
     assert [result.order_id for result in first] == orders[0:3]
@@ -366,6 +375,7 @@ def test_backlog_rotates_and_never_strands_an_order_past_the_batch_limit(
     _, arrival = _seed_order(conn, deployment_id=deployment_id, instrument_id=2451299)
     ensure_strategy_request_id(conn, order_id=arrival)
     conn.commit()
+    slo_ages_at_seed[arrival] = _slo_ages(conn)[arrival]
 
     third = reconcile_backlog(conn, broker=broker, limit=3)
     assert [result.order_id for result in third] == [arrival, orders[0], orders[1]]
@@ -385,11 +395,11 @@ def test_backlog_rotates_and_never_strands_an_order_past_the_batch_limit(
     assert broker.lookup_order.call_count == 12
 
     # The SLO age is measured on first_unresolved_at, which no attempt writes:
-    # rotation must not be able to make an overdue backlog look fresh.
-    assert conn.execute(
-        "SELECT count(*) FROM strategy_order_reconciliation_state "
-        "WHERE first_unresolved_at > now() - interval '1 second'"
-    ).fetchone() == (7,)
+    # rotation must not be able to make an overdue backlog look fresh. Compared
+    # as EXACT stored timestamps — a freshness window would both flake on a slow
+    # runner and pass if reconciliation reset the column to now().
+    assert _slo_ages(conn) == slo_ages_at_seed
+    assert len(slo_ages_at_seed) == 7
 
 
 def test_backlog_cooldown_defers_dead_orders_but_never_a_progressing_one(
