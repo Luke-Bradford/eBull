@@ -977,8 +977,16 @@ def _write_refusal_audit(
     The commit is load-bearing, not incidental: every caller of this helper
     raises immediately afterwards, and ``connect_job`` rolls back on a raising
     path — so an uncommitted audit row would vanish exactly when it matters
-    (#2943's lesson, re-applied here). Nothing else is outstanding on the
-    connection at these call sites, so the commit publishes only this row.
+    (#2943's lesson, re-applied here).
+
+    ⚠ The commit is NOT guaranteed to publish only this row. Every caller has
+    already resolved the order row for the same refusal, and
+    ``_release_claim_after_pre_io_refusal`` leaves its ``UPDATE orders SET
+    status='refused'`` outstanding when it calls here — so that UPDATE lands on
+    this commit. That is intended: the resolved status and its audit row are
+    one refusal and must become visible together or not at all. What the
+    caller contract actually requires is the #243 one it inherits — do not pass
+    a connection carrying UNRELATED uncommitted writes.
     """
     conn.execute(
         """
