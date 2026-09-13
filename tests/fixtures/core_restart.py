@@ -430,6 +430,14 @@ def seed_core_execution_world(conn: psycopg.Connection[Any]) -> None:
         """,
         (OPERATOR_ID,),
     )
+    # ⚠ Deliberately UNDECRYPTABLE. These rows exist so `_live_credential_ids`
+    # (`strategy_core_eligibility.py:396`) can prove the eligibility proof belongs
+    # to a live account -- that query reads `label` and `id` and nothing else.
+    # Nothing in this harness decrypts a credential: it calls the services
+    # directly, not the route that loads and decrypts them. A one-byte ciphertext
+    # therefore fails LOUDLY the moment a future change routes a decryption
+    # through here, which is the behaviour to want -- a plausible-looking fake
+    # secret would let such a change pass and report success.
     for credential_id, label in ((API_CREDENTIAL_ID, "api_key"), (USER_CREDENTIAL_ID, "user_key")):
         conn.execute(
             """
