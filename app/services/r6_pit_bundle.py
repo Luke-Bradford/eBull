@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -18,6 +20,16 @@ from typing import Any, Final
 
 MANIFEST_SCHEMA: Final = "r6-pit-manifest-v1"
 PAYLOAD_SCHEMA: Final = "r6-2900-pit-payload-v1"
+
+#: Ceiling on a single evidence document held in memory while it is hashed and
+#: parsed. There is no published bound to cite: it is fixed BY CONSTRUCTION as a
+#: memory-safety ceiling, not a schema claim about how many records a bundle may
+#: carry. The loader must hold the whole document to make the digest bind the
+#: bytes it parses (below), so an unbounded read is an unbounded allocation
+#: driven by a file on disk. A #2900-shaped payload is kilobytes per formation
+#: session; anything at this scale is a different artefact and refusing is the
+#: honest answer.
+MAX_EVIDENCE_BYTES: Final = 64 * 1024 * 1024
 
 
 class R6PitBundleError(RuntimeError):
@@ -70,11 +82,53 @@ class R6PitBundle:
         return hashlib.sha256(encoded).hexdigest()
 
 
-def _sha256(path: Path) -> str:
-    if not path.is_file() or path.is_symlink():
-        raise R6PitBundleError(f"evidence path must be a regular non-symlink file: {path}")
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+def read_verified_document(path: Path) -> tuple[str, bytes]:
+    """Return ``(sha256, bytes)`` from ONE read of ONE opened object.
+
+    ⚠ The digest and the parse must see the SAME bytes (#2945). Hashing a
+    pathname, closing it, then reopening that pathname to parse leaves a window
+    in which the file is replaced: the loader then reports the ORIGINAL digest
+    over CHANGED records, which is the one failure an evidence loader may never
+    have. Holding a descriptor open and reading it twice is not a fix either --
+    the second read still sees whatever the bytes are by then. The bytes are
+    read once and both the digest and the parse are taken from that value.
+
+    The regular-file / symlink rule is bound to the same descriptor for the same
+    reason: ``Path.is_file()`` / ``Path.is_symlink()`` stat a PATHNAME that can
+    be re-pointed before the open that follows. ``O_NOFOLLOW`` refuses a symlink
+    at open time and ``fstat`` judges the object actually opened.
+    """
+    # ⚠ ``O_NONBLOCK`` is load-bearing, not defensive noise. Opening a FIFO for
+    # reading BLOCKS until a writer appears, and that open happens before the
+    # ``fstat`` that would reject it -- so a FIFO planted at an evidence path
+    # would hang the loader forever where the old ``Path.is_file()`` refused it
+    # at once. POSIX regular files ignore the flag, so nothing else changes.
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise R6PitBundleError(f"evidence path must be a readable regular non-symlink file: {path}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise R6PitBundleError(f"evidence path must be a regular non-symlink file: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            # One byte past the ceiling, so "at the limit" and "over it" are
+            # distinguishable without a separate stat (which would be a third
+            # view of the file, and could disagree with this read).
+            data = handle.read(MAX_EVIDENCE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > MAX_EVIDENCE_BYTES:
+        raise R6PitBundleError(f"evidence document exceeds {MAX_EVIDENCE_BYTES} bytes: {path}")
+    return hashlib.sha256(data).hexdigest(), data
+
+
+def _json_object(data: bytes, *, label: str) -> dict[str, Any]:
+    """Parse the verified bytes -- never the pathname they came from."""
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise R6PitBundleError(f"{label} must be a UTF-8 JSON document") from exc
+    return _object(value, label=label)
 
 
 def _object(value: object, *, label: str) -> dict[str, Any]:
@@ -170,13 +224,13 @@ def _record(value: object, *, index: int) -> R6PitRecord:
 
 def load_r6_pit_bundle(manifest_path: Path, *, expected_manifest_sha256: str) -> R6PitBundle:
     """Verify and load exactly the payload named by a frozen manifest."""
-    manifest_sha = _sha256(manifest_path)
+    manifest_sha, manifest_bytes = read_verified_document(manifest_path)
     if manifest_sha != expected_manifest_sha256:
         raise R6PitBundleError(
             f"manifest digest moved: expected {expected_manifest_sha256}, measured {manifest_sha}; "
             "historical ranking refused"
         )
-    manifest = _object(json.loads(manifest_path.read_text(encoding="utf-8")), label="manifest")
+    manifest = _json_object(manifest_bytes, label="manifest")
     if manifest.get("schema_version") != MANIFEST_SCHEMA:
         raise R6PitBundleError(f"unsupported manifest schema {manifest.get('schema_version')!r}")
     payload_meta = _object(manifest.get("payload"), label="manifest.payload")
@@ -187,12 +241,12 @@ def load_r6_pit_bundle(manifest_path: Path, *, expected_manifest_sha256: str) ->
     if not isinstance(expected_sha, str) or len(expected_sha) != 64:
         raise R6PitBundleError("manifest payload sha256 must be a 64-character digest")
     payload_path = manifest_path.parent / filename
-    measured_sha = _sha256(payload_path)
+    measured_sha, payload_bytes = read_verified_document(payload_path)
     if measured_sha != expected_sha:
         raise R6PitBundleError(
             f"payload digest moved: expected {expected_sha}, measured {measured_sha}; historical ranking refused"
         )
-    payload = _object(json.loads(payload_path.read_text(encoding="utf-8")), label="payload")
+    payload = _json_object(payload_bytes, label="payload")
     if payload.get("schema_version") != PAYLOAD_SCHEMA:
         raise R6PitBundleError(f"unsupported payload schema {payload.get('schema_version')!r}")
     raw_records = payload.get("records")
@@ -210,9 +264,11 @@ def load_r6_pit_bundle(manifest_path: Path, *, expected_manifest_sha256: str) ->
 
 __all__ = [
     "MANIFEST_SCHEMA",
+    "MAX_EVIDENCE_BYTES",
     "PAYLOAD_SCHEMA",
     "R6PitBundle",
     "R6PitBundleError",
     "R6PitRecord",
     "load_r6_pit_bundle",
+    "read_verified_document",
 ]

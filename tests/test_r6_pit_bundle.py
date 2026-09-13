@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+import app.services.r6_pit_bundle as bundle_module
 from app.services.r6_pit_bundle import (
     MANIFEST_SCHEMA,
     PAYLOAD_SCHEMA,
@@ -96,4 +99,122 @@ def test_repointing_manifest_to_rewritten_payload_fails_frozen_manifest_hash(tmp
     manifest.write_text(json.dumps(manifest_document, sort_keys=True), encoding="utf-8")
 
     with pytest.raises(R6PitBundleError, match="manifest digest moved"):
+        load_r6_pit_bundle(manifest, expected_manifest_sha256=manifest_sha)
+
+
+def _replace_after_verification(monkeypatch: pytest.MonkeyPatch, target: str, mutate) -> None:
+    """Land a writer in the window the loader used to have (#2945).
+
+    The injection point is the same one the audit used: the instant the digest
+    for ``target`` has been taken. Before the fix a replacement here was parsed
+    under the old digest; after it the bytes are already in hand, so it cannot be.
+    """
+    original = bundle_module.read_verified_document
+
+    def racing(path: Path) -> tuple[str, bytes]:
+        result = original(path)
+        if path.name == target:
+            mutate(path)
+        return result
+
+    monkeypatch.setattr(bundle_module, "read_verified_document", racing)
+
+
+def test_payload_replaced_after_its_digest_is_taken_cannot_change_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, manifest_sha = _write_bundle(tmp_path)
+    payload = tmp_path / "payload.json"
+    verified_bytes = payload.read_bytes()
+
+    def swap(path: Path) -> None:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["records"][0]["current_shares"] = "240"
+        path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+
+    _replace_after_verification(monkeypatch, "payload.json", swap)
+
+    loaded = load_r6_pit_bundle(manifest, expected_manifest_sha256=manifest_sha)
+
+    assert loaded.records[0].current_shares == Decimal("120")
+    # The reported digest must describe the bytes that produced the records --
+    # not the bytes now sitting at the pathname.
+    assert loaded.payload_sha256 == hashlib.sha256(verified_bytes).hexdigest()
+    assert loaded.payload_sha256 != hashlib.sha256(payload.read_bytes()).hexdigest()
+
+
+def test_manifest_replaced_after_its_digest_is_taken_cannot_repoint_the_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, manifest_sha = _write_bundle(tmp_path)
+    decoy = tmp_path / "decoy.json"
+    decoy_document = json.loads((tmp_path / "payload.json").read_text(encoding="utf-8"))
+    decoy_document["records"][0]["current_shares"] = "999"
+    decoy.write_text(json.dumps(decoy_document, sort_keys=True), encoding="utf-8")
+
+    def repoint(path: Path) -> None:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["payload"] = {"filename": decoy.name, "sha256": hashlib.sha256(decoy.read_bytes()).hexdigest()}
+        path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+
+    _replace_after_verification(monkeypatch, "manifest.json", repoint)
+
+    loaded = load_r6_pit_bundle(manifest, expected_manifest_sha256=manifest_sha)
+
+    assert loaded.records[0].current_shares == Decimal("120")
+    assert loaded.manifest_sha256 == manifest_sha
+
+
+def test_symlinked_evidence_is_refused(tmp_path: Path) -> None:
+    manifest, manifest_sha = _write_bundle(tmp_path)
+    payload = tmp_path / "payload.json"
+    real = tmp_path / "elsewhere.json"
+    real.write_bytes(payload.read_bytes())
+    payload.unlink()
+    payload.symlink_to(real)
+
+    with pytest.raises(R6PitBundleError, match="regular non-symlink file"):
+        load_r6_pit_bundle(manifest, expected_manifest_sha256=manifest_sha)
+
+
+def test_document_over_the_memory_ceiling_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest, manifest_sha = _write_bundle(tmp_path)
+    monkeypatch.setattr(bundle_module, "MAX_EVIDENCE_BYTES", 8)
+
+    with pytest.raises(R6PitBundleError, match="exceeds 8 bytes"):
+        load_r6_pit_bundle(manifest, expected_manifest_sha256=manifest_sha)
+
+
+def test_non_json_evidence_refuses_as_a_bundle_error(tmp_path: Path) -> None:
+    manifest, _ = _write_bundle(tmp_path)
+    manifest.write_bytes(b"\xff\xfe not json")
+    changed = hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    with pytest.raises(R6PitBundleError, match="manifest must be a UTF-8 JSON document"):
+        load_r6_pit_bundle(manifest, expected_manifest_sha256=changed)
+
+
+def test_read_verified_document_returns_the_digest_of_the_bytes_it_returns(tmp_path: Path) -> None:
+    document = tmp_path / "evidence.json"
+    document.write_bytes(b'{"a":1}')
+
+    digest, data = bundle_module.read_verified_document(document)
+
+    assert data == b'{"a":1}'
+    assert digest == hashlib.sha256(data).hexdigest()
+
+
+def test_fifo_evidence_is_refused_instead_of_blocking(tmp_path: Path) -> None:
+    """A FIFO with no writer must refuse, not hang.
+
+    ``os.open`` on a FIFO blocks until a writer appears, and that happens before
+    the ``fstat`` that rejects it -- so the non-blocking flag is what keeps a
+    planted FIFO from stalling the loader indefinitely.
+    """
+    manifest, manifest_sha = _write_bundle(tmp_path)
+    payload = tmp_path / "payload.json"
+    payload.unlink()
+    os.mkfifo(payload)
+
+    with pytest.raises(R6PitBundleError, match="regular non-symlink file"):
         load_r6_pit_bundle(manifest, expected_manifest_sha256=manifest_sha)
