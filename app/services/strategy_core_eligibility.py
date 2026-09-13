@@ -63,7 +63,19 @@ CORE_ELIGIBILITY_MAX_AGE = timedelta(hours=24)
 #: module (stdlib imports only) -- importing it here pulls in no transport config, no
 #: `httpx` and no `settings`; importing `etoro_broker` would have, which is the version
 #: #2946 step 3 rejected.
-_LANE_B_CALL_SITE = next(site for site in CALL_SITES if site.method == "check_instrument_eligibility")
+#:
+#: ⚠ Explicit failure rather than a bare `StopIteration`: this runs at IMPORT time, so a
+#: rename in the lane map would otherwise surface as an unattributed `StopIteration`
+#: from a module that never mentions iteration.
+_LANE_B_CALL_SITE = next(
+    (site for site in CALL_SITES if site.method == "check_instrument_eligibility"),
+    None,
+)
+if _LANE_B_CALL_SITE is None:  # pragma: no cover - a lane-map rename, caught at import
+    raise RuntimeError(
+        "etoro_quota_lanes.CALL_SITES has no `check_instrument_eligibility` entry; "
+        "CORE_ELIGIBILITY_REQUEST_INTERVAL_S cannot be derived from the documented budget"
+    )
 
 # Minimum spacing between eligibility requests, in seconds -- DERIVED, not chosen.
 #
@@ -72,8 +84,15 @@ _LANE_B_CALL_SITE = next(site for site in CALL_SITES if site.method == "check_in
 # `LANES["B_eligibility"]`.  `min_interval_for_stamps` turns a budget into a spacing
 # under the rolling-window counting rule -- `floor(60/i) + 1`, not `60/i` -- and the
 # `- 1` here is one request of HEADROOM, which is the one constructed choice: the
-# portal publishes a budget, not a recommended utilisation.  60 / 18 = 3.33s, which
-# places 19 requests against a budget of 20.
+# portal publishes a budget, not a recommended utilisation.  60 / 18 = 3.33s.
+#
+# ⚠ That spacing places 18 requests per rolling minute, not the 19 the `- 1` targets:
+# `60 / 18` rounds UP in binary, so `60 / result` lands a hair under 18 and the count
+# comes out one BETTER than asked.  `min_interval_for_stamps` guarantees the `<=` and
+# not the exact count -- see its docstring.  Do not write the count down as though the
+# arithmetic pinned it; assert the inequality, which
+# `tests/test_2946_quota_load.py::test_single_lane_b_caller_fits_its_documented_budget`
+# does.
 #
 # ⚠⚠ This is deliberately NOT `etoro_broker._ETORO_WRITE_INTERVAL_S`, and the next
 # session's obvious "fix" is to make it so.  Do not.  That floor paces `_http_write`,
