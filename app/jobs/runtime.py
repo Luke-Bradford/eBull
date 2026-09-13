@@ -780,8 +780,12 @@ _RESERVED_EXECUTOR_LANES: Final[tuple[str, ...]] = (
 
 #: APScheduler's own default when no executor is configured (3.11.2,
 #: ``BaseScheduler._create_default_executor`` → ``ThreadPoolExecutor()``).  Named
-#: here because #2985 now registers the executor map explicitly, and an implicit
-#: default would silently change pool size.
+#: here because #2985 now registers the executor map explicitly, so a size that
+#: used to come from the library is now ours to state.  ⚠ Pinned to the library's
+#: actual default by
+#: ``test_default_pool_size_still_matches_apschedulers_own_default`` — an upstream
+#: change must fail a test rather than silently re-size the pool that every
+#: non-reserved job shares.
 _DEFAULT_EXECUTOR_MAX_WORKERS: Final[int] = 10
 
 

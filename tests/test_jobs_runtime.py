@@ -2194,6 +2194,19 @@ class TestReservedLaneSchedulerExecutors:
             members = [j.name for j in SCHEDULED_JOBS if runtime.execution_lane_for(j.name) == lane]
             assert len(members) == 1, f"{lane} has {members}"
 
+    def test_default_pool_size_still_matches_apschedulers_own_default(self) -> None:
+        """Before #2985 the default pool was IMPLICIT — registering the executor map
+        made it explicit, so the literal must be pinned to the library's own default
+        rather than to a remembered value. If APScheduler changes it, this fails here
+        instead of silently re-sizing the pool every non-reserved job shares.
+        """
+        import inspect
+
+        from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPoolExecutor
+
+        library_default = inspect.signature(APSchedulerThreadPoolExecutor.__init__).parameters["max_workers"].default
+        assert runtime._DEFAULT_EXECUTOR_MAX_WORKERS == library_default
+
     def test_non_reserved_lanes_stay_on_the_default_executor(self) -> None:
         """sec_rate and general keep today's pool — this PR does not re-shape them."""
         from app.workers.scheduler import SCHEDULED_JOBS
