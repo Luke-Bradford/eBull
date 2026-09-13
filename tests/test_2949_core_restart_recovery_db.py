@@ -23,9 +23,15 @@ would pass by amnesia rather than by recovery.  The file records each accepted
 order BEFORE the fault can fire, so "did the broker see two economic orders?" is
 answerable after our process is gone.
 
-Scenario numbering follows #2949's frozen matrix.  Items 5, 6 (in part) and 7 are
-deliberately NOT run here and the reasons are recorded in
-``docs/proposals/execution/2026-09-13-core-restart-acceptance.md`` — a silently
+Scenario numbering follows #2949's frozen matrix.  Round 2 added item 5 (a
+backlog genuinely over the batch cap, which #2962 made non-vacuous for the core
+arm); item 7's position-closure half lives in
+``tests/test_2949_core_close_recovery_db.py`` because the EXIT lifecycle is a
+different transaction, a different recovery reader and a different broker verb.
+What is still NOT run — item 6's credential rotation and mandate revocation,
+item 7's rebalance SELL (blocked by ``core_close_side_cost_quote_unavailable``),
+and partial fills — is recorded in
+``docs/proposals/execution/2026-09-13-core-restart-acceptance.md``; a silently
 dropped scenario reads as a covered one.
 """
 
@@ -108,6 +114,12 @@ def _provider(broker: FileBackedFakeBroker) -> BrokerProvider:
     return cast(BrokerProvider, broker)
 
 
+def _attempt_counts(conn: psycopg.Connection[Any]) -> dict[int, int]:
+    rows = conn.execute("SELECT order_id, attempt_count FROM strategy_order_reconciliation_state").fetchall()
+    conn.commit()
+    return {int(order_id): int(count) for order_id, count in rows}
+
+
 def _execute(conn: psycopg.Connection[Any], broker: FileBackedFakeBroker) -> Any:
     return execute_core_rebalance(
         conn,
@@ -177,6 +189,10 @@ def test_scenario_1_restart_before_commit_leaves_no_authority_and_no_mutation(
     assert crashed["core_trades"] == 0
     assert crashed["strategy_orders"] == 0
     assert crashed["reconciliation_rows"] == 0
+    # ⚠ The INTENT too. The other three counts would all be zero for an
+    # implementation that committed an orphan rebalance intent before opening the
+    # authority transaction, and "nothing durable" has to mean nothing.
+    assert crashed["intents"] == 0
     assert json.loads((core_world / "broker.json").read_text())["mutation_calls"] == 0
 
     broker = _restarted_engine_broker(core_world)
@@ -286,7 +302,7 @@ def test_scenario_2_stranded_authority_is_reached_unattended_and_still_cannot_re
     authority = load_core_resume_authority(ebull_test_conn)
     assert authority is not None
 
-    control_order_id = seed_non_core_strategy_order(ebull_test_conn)
+    control_order_id, _ = seed_non_core_strategy_order(ebull_test_conn)
     picked_up = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=20)
     assert sorted(result.order_id for result in picked_up) == sorted([authority.order_id, control_order_id])
 
@@ -505,6 +521,116 @@ def test_scenario_8_repeating_a_recovered_cycle_creates_no_further_order(
     report = core_state_report(ebull_test_conn)
     assert report["strategy_orders"] == 1
     assert report["core_trades"] == 1
+    assert report["active_ownership"] == 1
+    assert broker.read()["mutation_calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Scenario 5 — a backlog genuinely over the batch cap, with a core row in it
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_5_a_core_row_behind_the_batch_cap_is_reached_within_the_declared_bound(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Matrix item 5's OVER-CAP half, which #2962 made meaningful.
+
+    ⚠ Item 5 reads "outage, then recovery with a backlog over the batch cap" and
+    only the second clause is run here.  The outage half — a backlog full of
+    ``error`` / ``not_found`` rows accumulated while the broker was unreachable,
+    then drained once it returns — exercises the cooldown arithmetic rather than
+    the rotation, and is a separate scenario.  Claiming item 5 whole would be the
+    silently-dropped-scenario defect this matrix exists to avoid.
+
+    #2962 asserted the weaker two-pass property — a resolved core row leaves the
+    backlog — with a backlog of one.  This is the over-cap case: five alpha rows
+    are seeded FIRST so the core row is last in the queue and behind a cap of
+    two, and ``reconcile_backlog`` declares that a due row is selected within
+    ``ceil(due_rows / limit)`` completed cycles.
+
+    ⚠ THE COMPETITORS HAVE TO KEEP COMPETING.  Each is registered on the broker
+    double as an accepted-but-``Pending`` order, so every poll leaves it
+    ``pending`` — a progress state, which ``reconcile_backlog`` exempts from the
+    exponential cooldown.  Competitors that fell to ``not_found`` would earn the
+    cooldown, drop out of the selection, and let the core row through for a
+    reason that has nothing to do with the rotation — the test would then pass
+    against the very absorbing state #2948 fixed.
+
+    ⚠ NON-VACUITY IS ASSERTED, not assumed: cycle 1 must NOT contain the core
+    order.  Without that, a backlog that happened to select everything would
+    satisfy the bound trivially.  Under the pre-#2948 sort
+    (``first_unresolved_at, order_id``, both immutable for a non-terminal row)
+    the first two competitors would be re-selected forever and the core row at
+    position six would never be reached at all.
+    """
+    competitors = 5
+    limit = 2
+
+    broker = _restarted_engine_broker(core_world)
+    control_order_ids: list[int] = []
+    for ordinal in range(competitors):
+        order_id, request_id = seed_non_core_strategy_order(ebull_test_conn, ordinal=ordinal, amount="1")
+        # Same amount on both sides. They are different ledgers -- ours reserves
+        # against the 1,000 pot, the broker's nets against account cash -- and a
+        # competitor whose two sides disagreed would be seeding an accounting
+        # inconsistency into a test that is not about accounting.
+        broker.seed_accepted_order(reference_id=str(request_id), amount="1", status="Pending")
+        control_order_ids.append(order_id)
+
+    process = run_engine_until_fault(database_url=test_database_url(), workdir=core_world, fault="none")
+    assert process.returncode == 0, process.stderr
+    core_order_id = json.loads((core_world / "result.json").read_text())["order_id"]
+
+    due = ebull_test_conn.execute(
+        "SELECT count(*) FROM strategy_order_reconciliation_state WHERE state NOT IN ('resolved','rejected')"
+    ).fetchone()
+    ebull_test_conn.commit()
+    assert due is not None and int(due[0]) == competitors + 1
+
+    # ceil(6 / 2) == 3. Stated as the arithmetic rather than as a literal, so a
+    # change to either constant cannot leave the bound silently wrong.
+    bound = -(-(competitors + 1) // limit)
+    selected_per_cycle: list[list[int]] = []
+    for _ in range(bound):
+        results = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=limit)
+        selected_per_cycle.append([result.order_id for result in results])
+
+    assert [len(cycle) for cycle in selected_per_cycle] == [limit] * bound
+    assert core_order_id not in selected_per_cycle[0]
+    assert core_order_id in selected_per_cycle[bound - 1]
+
+    # The core order resolved on the one poll it got; the competitors are still
+    # pending, which is what kept them in the rotation.
+    states = dict(
+        ebull_test_conn.execute(
+            "SELECT order_id, state FROM strategy_order_reconciliation_state ORDER BY order_id"
+        ).fetchall()
+    )
+    ebull_test_conn.commit()
+    assert states[core_order_id] == "resolved"
+    assert {states[order_id] for order_id in control_order_ids} == {"pending"}
+    core_attempts_when_resolved = _attempt_counts(ebull_test_conn)[core_order_id]
+
+    # SUSTAINED rotation, not just the opening sweep.  The three cycles above
+    # start from five never-attempted competitors and one already-attempted core
+    # row, which a selector that merely preferred `last_attempt_at IS NULL` would
+    # also satisfy.  Running the rotation a second time round asserts the
+    # property that actually matters: every still-pending competitor is revisited
+    # once the never-attempted ones are gone.
+    for _ in range(bound):
+        reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=limit)
+    attempts = _attempt_counts(ebull_test_conn)
+    assert min(attempts[order_id] for order_id in control_order_ids) >= 2
+    # The resolved core row is terminal and must NOT be re-polled, whatever the
+    # rotation does -- it is excluded by STATE, not by having been seen.
+    # Asserted as "unchanged", not as a literal: the row already carries two
+    # attempts by the time it resolves, one written by the submission path and
+    # one by the poll that resolved it, and pinning that number here would make
+    # this test fail on an unrelated change to either.
+    assert attempts[core_order_id] == core_attempts_when_resolved
+
+    report = core_state_report(ebull_test_conn)
     assert report["active_ownership"] == 1
     assert broker.read()["mutation_calls"] == 1
 

@@ -58,18 +58,9 @@ def _install_fault(fault: str) -> None:
     strategy_core_executor.link_strategy_order = _link_then_die  # type: ignore[assignment]
 
 
-def main(argv: list[str]) -> int:
-    config: dict[str, Any] = json.loads(Path(argv[1]).read_text())
-    select_core_instrument()
-    _install_fault(config["fault"])
-
+def _run_entry(config: dict[str, Any], broker: FileBackedFakeBroker) -> dict[str, Any]:
     from app.services.strategy_core_executor import execute_core_rebalance
 
-    broker = FileBackedFakeBroker(
-        config["broker_state_path"],
-        fault=config["fault"],
-        fill_status=config.get("fill_status", "Filled"),
-    )
     with psycopg.connect(config["database_url"]) as conn:
         result = execute_core_rebalance(
             conn,
@@ -80,18 +71,59 @@ def main(argv: list[str]) -> int:
             recorded_by="core-restart-harness",
             clock=lambda: CLOCK,
         )
-    Path(config["result_path"]).write_text(
-        json.dumps(
-            {
-                "state": result.state,
-                "reason_code": result.reason_code,
-                "intent_id": result.intent_id,
-                "trade_id": result.trade_id,
-                "order_id": result.order_id,
-                "amount": str(result.amount),
-            }
+    return {
+        "state": result.state,
+        "reason_code": result.reason_code,
+        "intent_id": result.intent_id,
+        "trade_id": result.trade_id,
+        "order_id": result.order_id,
+        "amount": str(result.amount),
+    }
+
+
+def _run_close(config: dict[str, Any], broker: FileBackedFakeBroker) -> dict[str, Any]:
+    """Drive the EXIT lifecycle over the same process boundary (matrix 7).
+
+    ``close_reason='operator_close'`` rather than a timeout, because a core
+    holding has no horizon: ``manage_owned_position`` exempts it from age-out by
+    an explicit ``is_core`` test, so an explicit close is the ONLY way this arm
+    reaches ``_submit_close`` at all.  It is still the same function the
+    scheduled paper cycle calls, with the same locks and the same resume reader
+    running first.
+    """
+    from app.services.strategy_position_manager import manage_owned_position
+
+    with psycopg.connect(config["database_url"]) as conn:
+        result = manage_owned_position(
+            conn,
+            broker=broker,  # type: ignore[arg-type]
+            strategy_trade_id=int(config["strategy_trade_id"]),
+            broker_position_id=int(config["broker_position_id"]),
+            close_reason="operator_close",
+            now=CLOCK,
         )
+    return {
+        "state": result.state,
+        "reason_code": result.reason_code,
+        "strategy_trade_id": result.strategy_trade_id,
+        "broker_position_id": result.broker_position_id,
+        "position_operation_id": result.position_operation_id,
+    }
+
+
+def main(argv: list[str]) -> int:
+    config: dict[str, Any] = json.loads(Path(argv[1]).read_text())
+    select_core_instrument()
+    _install_fault(config["fault"])
+
+    broker = FileBackedFakeBroker(
+        config["broker_state_path"],
+        fault=config["fault"],
+        fill_status=config.get("fill_status", "Filled"),
     )
+    mode = config.get("mode", "entry")
+    payload = _run_close(config, broker) if mode == "close" else _run_entry(config, broker)
+    Path(config["result_path"]).write_text(json.dumps(payload))
     return 0
 
 
