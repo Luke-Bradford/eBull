@@ -93,6 +93,8 @@ def test_an_empty_history_is_not_an_error(broker: EtoroBrokerProvider) -> None:
         ([[2021, "Stocks", 1]], "row 0: expected an object"),
         ([{"assetType": "Stocks", "closedPositionEvents": 1}], "row 0"),
         ([{"closeYear": "nineteen", "assetType": "Stocks", "closedPositionEvents": 1}], "row 0"),
+        # A count cannot be negative; an int that parses is not therefore a figure.
+        ([{"closeYear": 2021, "assetType": "Stocks", "closedPositionEvents": -3}], "must be >= 0"),
     ],
 )
 def test_a_malformed_body_raises_rather_than_returning_a_partial_set(

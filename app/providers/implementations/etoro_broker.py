@@ -1173,11 +1173,17 @@ class EtoroBrokerProvider(BrokerProvider):
             if not isinstance(row, dict):
                 raise ClosedPositionEventCountParseError(f"row {idx}: expected an object")
             try:
+                events = int(row["closedPositionEvents"])
+                # A count cannot be negative. This is the field's definition, not a
+                # chosen bound — and without it a negative parses as a valid figure and
+                # drags a total (#2993's comparison) toward agreement.
+                if events < 0:
+                    raise ValueError(f"closedPositionEvents must be >= 0, got {events}")
                 counts.append(
                     ClosedPositionEventCount(
                         close_year=int(row["closeYear"]),
                         asset_type=str(row["assetType"]),
-                        closed_position_events=int(row["closedPositionEvents"]),
+                        closed_position_events=events,
                     )
                 )
             except (KeyError, ValueError, TypeError) as exc:
