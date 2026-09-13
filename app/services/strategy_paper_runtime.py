@@ -263,8 +263,14 @@ def refresh_strategy_health(
         policy = cur.fetchone()
     assert policy is not None
     if policy["reconciliation_age"] is None:
+        # ⚠ No `conn.commit()` here, and the absence is load-bearing rather than a
+        # saving: the policy SELECT above leaves the connection INTRANS, and
+        # `conn.transaction()` on a non-idle connection opens a SAVEPOINT instead
+        # of a transaction — silently, which is the trap. The commit that used to
+        # sit here is now `count_unresolved_order_identity`'s stated postcondition.
+        # A second one is not defence in depth, it is two commits in a row
+        # (review nitpick, round 1).
         unresolved = count_unresolved_order_identity(conn)
-        conn.commit()
         with conn.transaction():
             for source in (
                 "scan_freshness",
