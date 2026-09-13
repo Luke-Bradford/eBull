@@ -58,6 +58,11 @@ from apscheduler.events import (
     JobExecutionEvent,
     JobSubmissionEvent,
 )
+
+# ⚠ NOT ``concurrent.futures.ThreadPoolExecutor`` — that name is already imported
+# above for ``_manual_executor``.  APScheduler needs its own wrapper class, and
+# handing it the stdlib one raises at scheduler construction.
+from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.util import undefined
@@ -682,10 +687,32 @@ _RECURRING_JOB_ID_PREFIX: Final[str] = "recurring:"
 # active"; the operator tells wedge from slow via the running row's age.
 _MAX_INSTANCES_SKIP_REASON: Final[str] = "max_instances_active"
 
-_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(SEC_LANE_MAX_CONCURRENCY)
-_GENERAL_NON_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY)
-_PAPER_LIFECYCLE_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY)
-_QUOTE_OBSERVATION_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY)
+EXECUTION_LANE_SEC: Final[str] = "sec_rate"
+EXECUTION_LANE_PAPER: Final[str] = "paper_lifecycle_reserved"
+EXECUTION_LANE_QUOTE: Final[str] = "quote_observation_reserved"
+EXECUTION_LANE_GENERAL: Final[str] = "general_non_sec"
+
+#: Lane → how many job bodies may execute on it at once.  The connection budget in
+#: ``app/db/pg_settings.py`` is computed from these same constants, so this mapping
+#: is a re-expression of that budget and not a second opinion on it.
+EXECUTION_LANE_PERMITS: Final[Mapping[str, int]] = {
+    EXECUTION_LANE_SEC: SEC_LANE_MAX_CONCURRENCY,
+    EXECUTION_LANE_GENERAL: JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY,
+    EXECUTION_LANE_PAPER: JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY,
+    EXECUTION_LANE_QUOTE: JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY,
+}
+
+#: Lane → its execution semaphore.  ``execution_lane_for`` is the ONLY producer of
+#: these keys, so the semaphore layer and the APScheduler-executor layer read one
+#: predicate rather than two copies of it (#2985).
+_EXECUTION_SLOTS_BY_LANE: Final[Mapping[str, threading.BoundedSemaphore]] = {
+    lane: threading.BoundedSemaphore(permits) for lane, permits in EXECUTION_LANE_PERMITS.items()
+}
+
+_SEC_EXECUTION_SLOTS = _EXECUTION_SLOTS_BY_LANE[EXECUTION_LANE_SEC]
+_GENERAL_NON_SEC_EXECUTION_SLOTS = _EXECUTION_SLOTS_BY_LANE[EXECUTION_LANE_GENERAL]
+_PAPER_LIFECYCLE_EXECUTION_SLOTS = _EXECUTION_SLOTS_BY_LANE[EXECUTION_LANE_PAPER]
+_QUOTE_OBSERVATION_EXECUTION_SLOTS = _EXECUTION_SLOTS_BY_LANE[EXECUTION_LANE_QUOTE]
 
 
 @dataclass(frozen=True, slots=True)
@@ -738,9 +765,38 @@ def execution_slot_wait_snapshot() -> ExecutionSlotWaitSnapshot:
     }
 
 
-@contextmanager
-def _job_execution_slot(job_name: str) -> Iterator[None]:
-    """Bound every runtime entry path before it opens lock/body connections."""
+#: Lanes that get their own APScheduler executor (#2985).  A job parked on another
+#: lane's semaphore still OWNS its APScheduler worker thread, so with 50 of the 63
+#: registered jobs sharing one general permit inside a 10-thread default pool, a
+#: reserved job's fire queues behind them and is discarded as a misfire before it
+#: ever reaches the semaphore its reservation bought.  Measured 2026-09-13:
+#: ``quotes_refresh``'s 03:23 fire was dequeued 2801.5s late and lost the 03:00
+#: quote-observation bucket for good.  A dedicated executor gives the lane a thread
+#: nothing else can take; the semaphore still bounds the body (and its connections).
+_RESERVED_EXECUTOR_LANES: Final[tuple[str, ...]] = (
+    EXECUTION_LANE_PAPER,
+    EXECUTION_LANE_QUOTE,
+)
+
+#: APScheduler's own default when no executor is configured (3.11.2,
+#: ``BaseScheduler._create_default_executor`` → ``ThreadPoolExecutor()``).  Named
+#: here because #2985 now registers the executor map explicitly, so a size that
+#: used to come from the library is now ours to state.  ⚠ Pinned to the library's
+#: actual default by
+#: ``test_default_pool_size_still_matches_apschedulers_own_default`` — an upstream
+#: change must fail a test rather than silently re-size the pool that every
+#: non-reserved job shares.
+_DEFAULT_EXECUTOR_MAX_WORKERS: Final[int] = 10
+
+
+def execution_lane_for(job_name: str) -> str:
+    """Return the execution lane *job_name* runs on.
+
+    Single source of truth for both admission layers: the connection-budget
+    semaphore (``_job_execution_slot``) and the APScheduler executor a recurring
+    fire is dispatched to (``_scheduler_executor_alias``).  Precedence is
+    SEC-source first, then the two reserved job names, then general.
+    """
     try:
         source = source_for(job_name)
     except KeyError:
@@ -750,17 +806,48 @@ def _job_execution_slot(job_name: str) -> Iterator[None]:
         # classification is the smaller non-SEC allowance.
         source = None
     if source == "sec_rate":
-        slots = _SEC_EXECUTION_SLOTS
-        lane = "sec_rate"
-    elif job_name == JOB_STRATEGY_PAPER_CYCLE:
-        slots = _PAPER_LIFECYCLE_EXECUTION_SLOTS
-        lane = "paper_lifecycle_reserved"
-    elif job_name == JOB_QUOTES_REFRESH:
-        slots = _QUOTE_OBSERVATION_EXECUTION_SLOTS
-        lane = "quote_observation_reserved"
-    else:
-        slots = _GENERAL_NON_SEC_EXECUTION_SLOTS
-        lane = "general_non_sec"
+        return EXECUTION_LANE_SEC
+    if job_name == JOB_STRATEGY_PAPER_CYCLE:
+        return EXECUTION_LANE_PAPER
+    if job_name == JOB_QUOTES_REFRESH:
+        return EXECUTION_LANE_QUOTE
+    return EXECUTION_LANE_GENERAL
+
+
+def build_scheduler_executors() -> dict[str, APSchedulerThreadPoolExecutor]:
+    """The recurring scheduler's executor map — one pool per reserved lane (#2985).
+
+    A job parked on another lane's semaphore still OWNS its APScheduler worker
+    thread, so a reserved lane needs a pool of its own or its fire queues behind
+    work its reservation was supposed to exclude.  Each reserved pool is sized FROM
+    that lane's permit count: a pool smaller than the semaphore would become the
+    tighter bound and re-create the starvation inside the lane.
+
+    Exposed (not inlined) so the regression tests configure the SAME map production
+    does rather than a copy of it.
+    """
+    executors: dict[str, APSchedulerThreadPoolExecutor] = {
+        "default": APSchedulerThreadPoolExecutor(_DEFAULT_EXECUTOR_MAX_WORKERS),
+    }
+    for lane in _RESERVED_EXECUTOR_LANES:
+        executors[lane] = APSchedulerThreadPoolExecutor(EXECUTION_LANE_PERMITS[lane])
+    return executors
+
+
+def _scheduler_executor_alias(job_name: str) -> str:
+    """Return the APScheduler executor alias for *job_name*'s recurring fire.
+
+    Reserved lanes get their own pool; ``sec_rate`` and general share ``default``.
+    """
+    lane = execution_lane_for(job_name)
+    return lane if lane in _RESERVED_EXECUTOR_LANES else "default"
+
+
+@contextmanager
+def _job_execution_slot(job_name: str) -> Iterator[None]:
+    """Bound every runtime entry path before it opens lock/body connections."""
+    lane = execution_lane_for(job_name)
+    slots = _EXECUTION_SLOTS_BY_LANE[lane]
 
     acquired = slots.acquire(blocking=False)
     if not acquired:
@@ -1478,6 +1565,13 @@ class JobRuntime:
         self._inflight: dict[str, threading.Lock] = {name: threading.Lock() for name in self._invokers}
         self._scheduler = BackgroundScheduler(
             timezone="UTC",
+            # #2985 — one executor per RESERVED lane, so a reserved job's fire can
+            # never queue behind jobs parked on another lane's semaphore.  Sized
+            # FROM the lane's own permit count, never a literal: a lane's pool must
+            # be at least its semaphore, or the pool becomes the tighter bound and
+            # re-creates the starvation inside the lane.  ``default`` keeps
+            # APScheduler's own size so general + sec_rate behaviour is unchanged.
+            executors=build_scheduler_executors(),
             job_defaults={
                 # Collapse multiple missed fires of the same recurring
                 # job into a single run. Without this a scheduler that
@@ -1576,6 +1670,12 @@ class JobRuntime:
                 id=f"recurring:{job.name}",
                 name=job.name,
                 replace_existing=True,
+                # #2985 — reserved lanes dispatch on their own pool. ⚠ APScheduler
+                # resolves the alias when the fire is DUE, not here, so an alias
+                # that is not registered above survives ``add_job`` and then
+                # removes the job at its first fire. ``test_jobs_runtime`` asserts
+                # every alias used here exists in the scheduler's executor map.
+                executor=_scheduler_executor_alias(job.name),
                 # #2880 — per-job override of the 1-second ``job_defaults``
                 # grace, for the jobs that can afford a late fire more than
                 # they can afford a lost one. ``undefined`` is APScheduler's

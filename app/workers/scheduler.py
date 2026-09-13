@@ -236,6 +236,24 @@ class Cadence:
         return f"monthly on day {self.day} at {self.hour:02d}:{self.minute:02d} UTC"
 
 
+def hourly_bucket_grace_seconds(minute: int) -> int:
+    """Largest misfire grace that still admits a fire inside its OWN hourly bucket.
+
+    For a producer whose output is keyed by the hour it was sampled in (#2985:
+    ``strategy_core_quote_observations.sample_bucket`` truncates ``observed_at`` to
+    the hour), a fire is only useful before the next hour begins. APScheduler admits
+    a late fire while ``now - run_time <= misfire_grace_time``, so the grace must be
+    STRICTLY under the seconds remaining to the boundary — ``<=`` at exactly the
+    boundary would admit a fire whose sample can only land in the next bucket.
+
+    Same counting rule as #2946's rolling-window off-by-one: an inclusive comparison
+    against a window edge admits one more than the window holds.
+    """
+    if not 0 <= minute <= 59:
+        raise ValueError(f"hourly minute must be 0..59, got {minute}")
+    return (60 - minute) * 60 - 1
+
+
 PrerequisiteResult = tuple[bool, str]
 """(met, reason) — True if the prerequisite is satisfied; reason explains why not."""
 
@@ -376,6 +394,9 @@ JOB_FX_RATES_REFRESH = "fx_rates_refresh"
 # scoring, portfolio, execution_guard, position_monitor, valuation,
 # transaction_cost and coverage — all of which read ``quotes`` headless.
 JOB_QUOTES_REFRESH = "quotes_refresh"
+#: Minute past each hour that ``quotes_refresh`` fires. Named because #2985's
+#: misfire ceiling is DERIVED from it — the two must not drift apart.
+QUOTES_REFRESH_MINUTE: Final[int] = 23
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_PORTFOLIO_EOD_SNAPSHOT = "portfolio_eod_snapshot"
@@ -924,7 +945,27 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # fire, i.e. ~0.5 req/min against eToro's 120 GET/min shared market-data
         # budget. Source: the live portal index reverified 2026-08-11 and
         # recorded in docs/etoro-api-reference.md §Rate limits.
-        cadence=Cadence.hourly(minute=23),
+        cadence=Cadence.hourly(minute=QUOTES_REFRESH_MINUTE),
+        # #2985 — SECOND layer, and deliberately not the fix. The 1-second
+        # ``job_defaults`` grace discards a lost-forever evidence bucket on any
+        # dispatch delay above a second, and sub-2s misfires are real in this
+        # process (``strategy_paper_cycle`` has one at 1.1s). The ceiling is
+        # derived from the bucket, not chosen: a fire at :MM is only useful
+        # inside its own hour and APScheduler admits while
+        # ``now - run_time <= grace``, so the grace must be strictly under the
+        # seconds remaining to the hour boundary.
+        #
+        # ⚠ It would NOT have saved the 2026-09-13 03:00 bucket — that fire was
+        # dequeued 2801.5s late, past any within-bucket ceiling. The executor
+        # reservation in ``app/jobs/runtime.py`` is what removes that cause;
+        # this covers the seconds-scale dispatch delays it cannot.
+        #
+        # ⚠ It does not GUARANTEE the bucket either: grace gates wrapper
+        # admission, and the body then runs a further ~40-90s (n=244: median
+        # 40.2s, p95 76.3s), so a very late admission can stamp the next
+        # bucket. The insert is ON CONFLICT (instrument_id, sample_bucket) DO
+        # NOTHING, so that is wasteful, never corrupting.
+        misfire_grace_seconds=hourly_bucket_grace_seconds(QUOTES_REFRESH_MINUTE),
         # Fire on boot when overdue — a process restart otherwise leaves every
         # headless reader on quotes up to an hour old for no reason, and the
         # fetch is bounded (28 GETs).
