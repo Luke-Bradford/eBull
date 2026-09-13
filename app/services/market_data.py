@@ -1011,6 +1011,17 @@ class CandleUpsertOutcome:
 
 
 def _revision_age_bucket(age_days: int) -> str:
+    """Bucket one revised bar's age. ``age_days`` is CALENDAR days; see the edges above.
+
+    ⚠ The caller computes ``age_days`` as ``reference_date - bar.price_date``,
+    where ``reference_date`` is the run's ``freshness_target`` — ``fresh_through``
+    if the caller pinned one, otherwise ``most_recent_trading_day(today)``. A
+    NEGATIVE age therefore means a bar dated after the session the run is
+    reconciling to, which is a provider or pinning fault rather than an age
+    (review nitpick, round 1: worth stating for anyone touching
+    ``freshness_target``, since nothing in this function's signature implies it).
+    It is bucketed separately for that reason and never clamped to zero.
+    """
     if age_days < 0:
         return _REVISION_AGE_FUTURE
     for name, edge in _REVISION_AGE_EDGES:
