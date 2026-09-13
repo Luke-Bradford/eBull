@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 from app.api.auth import require_session
 from app.config import settings
 from app.db import get_conn
+from app.providers.implementations.etoro_request_log import issue_raw_request
 from app.security import master_key
 from app.security.secrets_crypto import clear_active_key, set_active_key
 from app.security.sessions import SessionRow
@@ -521,6 +522,11 @@ def delete(
 # ---------------------------------------------------------------------------
 
 _VALIDATE_TIMEOUT_S = 10.0
+#: #2946 step 3 item 3 — provenance label for the two raw eToro probes below.  They
+#: bypass every ``ResilientClient`` throttle (they are two of the four
+#: ``etoro_quota_lanes.KNOWN_UNTHROTTLED`` entries), so they have to account for
+#: themselves or the lane totals understate real traffic.
+_SRC = "credential_validation"
 
 
 class ValidateCredentialRequest(BaseModel):
@@ -595,7 +601,9 @@ def _probe_etoro(
             headers=headers,
             timeout=_VALIDATE_TIMEOUT_S,
         ) as client:
-            me_resp = client.get("/api/v1/me")
+            # #2946 step 3 item 3 — records before the non-200 early return below, and
+            # records a raised request too (a read timeout still spent the quota).
+            me_resp = issue_raw_request(client, "GET", "/api/v1/me", src=_SRC, env=environment)
     except httpx.HTTPError:
         logger.warning("credential validation: /me request failed", exc_info=True)
         return ValidateCredentialResponse(
@@ -638,7 +646,9 @@ def _probe_etoro(
             headers=headers,
             timeout=_VALIDATE_TIMEOUT_S,
         ) as client:
-            env_resp = client.get(env_check_path)
+            # #2946 step 3 item 3 — level 2 runs ONLY after level 1 succeeded, so this
+            # endpoint sees at most one attempt per invocation.
+            env_resp = issue_raw_request(client, "GET", env_check_path, src=_SRC, env=environment)
     except httpx.HTTPError:
         logger.warning("credential validation: env check request failed", exc_info=True)
         return ValidateCredentialResponse(

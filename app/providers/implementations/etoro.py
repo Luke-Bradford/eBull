@@ -43,6 +43,7 @@ from uuid import uuid4
 import httpx
 
 from app.config import settings
+from app.providers.implementations.etoro_request_log import attempt_observer
 from app.providers.market_data import (
     BroadMarketSnapshot,
     ExchangeRecord,
@@ -128,6 +129,10 @@ class EtoroMarketDataProvider(MarketDataProvider):
             min_request_interval_s=_ETORO_READ_INTERVAL_S,
             shared_last_request=_ETORO_RATE_LIMIT_CLOCK,
             shared_throttle_lock=_ETORO_RATE_LIMIT_LOCK,
+            # #2946 step 3 item 3 — per-ATTEMPT accounting, wired at construction so
+            # retries are counted.  Lane F carries no environment segment at all, so
+            # `env` here is a provenance label on the caller, not a quota partition.
+            on_attempt=attempt_observer("market", env),
         )
 
     def __enter__(self) -> EtoroMarketDataProvider:

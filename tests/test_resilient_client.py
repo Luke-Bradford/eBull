@@ -83,7 +83,18 @@ def _patch_time() -> Generator[MagicMock]:
 
 def test_throttle_sleeps_when_requests_are_too_fast(_patch_time: MagicMock) -> None:
     """Requests closer than min_request_interval_s trigger a sleep."""
-    _patch_time.monotonic.side_effect = [0.0, 0.0, 0.1, 1.0]
+    # ⚠ A fixed side_effect list pins the NUMBER of clock reads, not just their values,
+    # so it is a contract on an internal detail. #2946 step 3 item 3 added one read per
+    # request (the pre-lock start, so the observer can report time spent waiting behind
+    # another caller); the entries below are grouped per request to make that visible.
+    _patch_time.monotonic.side_effect = [
+        0.0,  # req1 wait start (before the lock)
+        0.0,  # req1 throttle check
+        0.0,  # req1 record timestamp
+        0.1,  # req2 wait start
+        0.1,  # req2 throttle check → 0.1s since req1, needs 1.0s
+        1.0,  # req2 record timestamp
+    ]
 
     resp = _make_response(200)
     mock_httpx = MagicMock(spec=httpx.Client)
@@ -550,9 +561,13 @@ def test_5xx_body_preview_truncates_long_bodies(
 
 def test_shared_last_request_coordinates_throttle(_patch_time: MagicMock) -> None:
     """Two ResilientClient instances sharing a timestamp coordinate throttle."""
+    # See the note in test_throttle_sleeps_when_requests_are_too_fast: each request
+    # reads the clock three times since #2946 step 3 item 3.
     _patch_time.monotonic.side_effect = [
+        0.0,  # client_a wait start (before the lock)
         0.0,  # client_a _throttle check
         0.0,  # client_a record timestamp
+        0.5,  # client_b wait start
         0.5,  # client_b _throttle check → sees 0.5s since client_a, needs 1.0s
         1.0,  # client_b record timestamp
     ]

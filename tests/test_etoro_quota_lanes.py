@@ -198,12 +198,22 @@ def test_raw_httpx_call_counts_match_the_known_bypass_list() -> None:
 
     Counts REQUEST expressions, not ``httpx.Client`` constructions — a third
     request issued from an existing client would otherwise pass unnoticed.
+
+    Since #2946 step 3 item 3 every one of them must also go through
+    ``issue_raw_request``, which is what makes a raw site VISIBLE (it records before
+    the caller's early return and on a raised request). A direct verb call here is
+    therefore a regression on two counts, so it is asserted separately.
     """
     for module, expected in RAW_HTTPX_EXPRESSION_COUNTS.items():
-        found = _count_httpx_request_calls(module)
-        assert found == expected, (
-            f"{module}: found {found} raw httpx request expressions, lane map records {expected}. "
-            f"Every raw call bypasses ResilientClient entirely — record it in "
+        direct, via_helper = _count_httpx_request_calls(module)
+        assert direct == 0, (
+            f"{module}: found {direct} raw httpx verb call(s) not routed through "
+            f"etoro_request_log.issue_raw_request. A direct call is UNCOUNTED — it records "
+            f"nothing on a non-200 early return and nothing on a transport failure."
+        )
+        assert via_helper == expected, (
+            f"{module}: found {via_helper} raw eToro request expressions, lane map records "
+            f"{expected}. Every raw call bypasses ResilientClient entirely — record it in "
             f"etoro_quota_lanes.KNOWN_UNTHROTTLED with its quota lane."
         )
 
@@ -265,14 +275,23 @@ def _count_self_attr_calls(module: str, client_attr: str) -> int:
 _HTTPX_VERBS = {"get", "post", "put", "patch", "delete", "request", "send", "stream"}
 
 
-def _count_httpx_request_calls(module: str) -> int:
+def _count_httpx_request_calls(module: str) -> tuple[int, int]:
     """Count request expressions on locals bound from an ``httpx.Client``.
+
+    Returns ``(direct, via_helper)``.
 
     Deliberately narrow: it resolves the names bound by ``with httpx.Client(...)
     as <name>`` and ``<name> = httpx.Client(...)`` in the module, then counts
-    verb calls on those names. A helper that hides the client behind another
-    layer would evade it — noted in the module docstring rather than papered
-    over with a broader, noisier match.
+    verb calls on those names.
+
+    ⚠ It used to count only ``direct`` and its docstring warned that "a helper that
+    hides the client behind another layer would evade it". #2946 step 3 item 3 built
+    exactly that helper, on purpose: ``etoro_request_log.issue_raw_request`` is the one
+    place a raw site is guaranteed to account for its request both before the caller's
+    early return and on a raised request. So the scanner now recognises
+    ``issue_raw_request(<client>, ...)`` as a request expression on that client, and
+    the caller asserts ``direct == 0`` -- a raw verb call reappearing in one of these
+    modules is a REGRESSION, not merely an uncounted endpoint.
     """
     tree = _parse(module)
     client_names: set[str] = set()
@@ -298,14 +317,24 @@ def _count_httpx_request_calls(module: str) -> int:
 
     assert client_names, f"{module}: no httpx client binding found — the scanner's assumption broke"
 
-    total = 0
+    direct = 0
+    via_helper = 0
     for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
         if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
+            isinstance(node.func, ast.Attribute)
             and node.func.attr in _HTTPX_VERBS
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in client_names
         ):
-            total += 1
-    return total
+            direct += 1
+        elif (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "issue_raw_request"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in client_names
+        ):
+            via_helper += 1
+    return direct, via_helper

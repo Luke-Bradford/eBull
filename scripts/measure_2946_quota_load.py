@@ -76,6 +76,7 @@ import importlib
 import re
 import subprocess
 import sys
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -85,6 +86,7 @@ import psycopg
 
 from app.config import settings
 from app.providers.implementations import etoro_quota_lanes as lanes
+from app.providers.implementations import etoro_request_log
 
 # ---------------------------------------------------------------------------
 # A1 -- how each caller is actually paced
@@ -790,10 +792,166 @@ def print_uncounted(out: TextIO) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# M6 -- OBSERVED per-lane load, from the #2946 step 3 item 3 request artefact
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is CONFIGURED, DERIVED or UNCOUNTED: no eToro lane had a
+# per-request artefact when step 2 ran.  ``app.providers.implementations.
+# etoro_request_log`` now emits one line per issued attempt, and this arm reads them.
+#
+# ⚠ It takes ``--request-log`` MORE THAN ONCE and merges by the line's own ``ts``.  The
+# API process and the jobs daemon log to different files, and step 2's open clause 2
+# ("two concurrent lane-B callers on one user key") is a cross-PROCESS question that a
+# single file cannot answer.
+
+
+@dataclass(frozen=True)
+class ObservedAttempt:
+    ts: datetime
+    lane: str
+    src: str
+    env: str
+    status: str
+    err: str
+    wait_s: float
+
+
+_REQUEST_MARKER = f"{etoro_request_log.LINE_PREFIX} "
+
+
+def parse_request_log(lines: Iterable[str]) -> tuple[list[ObservedAttempt], int]:
+    """Parse emitted request lines out of a log file.
+
+    Returns ``(records, malformed_count)``.  Malformed lines are COUNTED and reported,
+    never silently dropped: a reader that drops evidence turns missing data into "no
+    traffic", which is the one error that would falsely close this ticket.
+
+    ⚠ A line is claimed by its MARKER first, and only then validated.  Matching on the
+    whole well-formed shape instead would make a truncated or corrupted record
+    indistinguishable from an unrelated log line -- damaged evidence would vanish into
+    the "not ours" bucket, which is the exact failure this counter exists to prevent.
+
+    The handler prefix is skipped rather than parsed -- the API process and the jobs
+    daemon format it differently and the API's carries no timestamp, which is why the
+    timestamp is inside the line.
+    """
+    records: list[ObservedAttempt] = []
+    malformed = 0
+    for line in lines:
+        index = line.find(_REQUEST_MARKER)
+        if index < 0:
+            continue
+        fields: dict[str, str] = {}
+        for token in line[index + len(_REQUEST_MARKER) :].split(" "):
+            key, sep, value = token.partition("=")
+            if sep:
+                fields[key] = value
+        if fields.get("v") != str(etoro_request_log.SCHEMA_VERSION):
+            malformed += 1
+            continue
+        try:
+            records.append(
+                ObservedAttempt(
+                    ts=datetime.fromisoformat(fields["ts"]),
+                    lane=fields["lane"],
+                    src=fields["src"],
+                    env=fields["env"],
+                    status=fields["status"],
+                    err=fields["err"],
+                    wait_s=float(fields["wait_s"]),
+                )
+            )
+        except KeyError, ValueError:
+            malformed += 1
+    return records, malformed
+
+
+def max_rolling_window(timestamps: Sequence[datetime], window_s: float = 60.0) -> int:
+    """Largest number of attempts in any window, counted the way a quota counts them.
+
+    The window is half-open ``(t - window_s, t]`` and anchored on each attempt, so the
+    anchor is always counted.  This is the OBSERVED counterpart of the census's DERIVED
+    ``stamps_in_window`` bound, and it is deliberately the same counting rule: a stamp
+    exactly ``window_s`` old has left the window.
+    """
+    ordered = sorted(timestamps)
+    left = 0
+    best = 0
+    for right, now in enumerate(ordered):
+        while (now - ordered[left]).total_seconds() >= window_s:
+            left += 1
+        best = max(best, right - left + 1)
+    return best
+
+
+def m6_observed(out: TextIO, paths: Sequence[Path]) -> None:
+    print("\n" + "=" * 78, file=out)
+    print("M6 -- OBSERVED per-lane load (#2946 step 3 item 3 request artefact)", file=out)
+    print("=" * 78, file=out)
+
+    records: list[ObservedAttempt] = []
+    malformed = 0
+    for path in paths:
+        if not path.exists():
+            print(f"  ⚠ MISSING: {path} -- absent evidence, NOT zero traffic", file=out)
+            continue
+        found, bad = parse_request_log(path.read_text(errors="replace").splitlines())
+        print(f"  read {len(found):7d} attempts ({bad} malformed) from {path}", file=out)
+        records.extend(found)
+        malformed += bad
+
+    if not records:
+        print(
+            "\n  No request lines found. Either the instrumented build is not deployed yet,\n"
+            "  or these files do not carry the eToro logger. This is NOT evidence of zero\n"
+            "  traffic and must not be reported as headroom.",
+            file=out,
+        )
+        return
+
+    first, last = min(r.ts for r in records), max(r.ts for r in records)
+    print(f"\n  merged window: {_fmt_dt(first)} .. {_fmt_dt(last)}", file=out)
+    print(f"  malformed lines across all inputs: {malformed}", file=out)
+    print(
+        f"\n  {'lane':18s} {'src':22s} {'env':6s} {'attempts':>9s} {'429':>5s} {'err':>5s} "
+        f"{'max/60s':>8s} {'budget':>7s} {'wait_s':>9s}",
+        file=out,
+    )
+    groups: dict[tuple[str, str, str], list[ObservedAttempt]] = {}
+    for record in records:
+        groups.setdefault((record.lane, record.src, record.env), []).append(record)
+    for (lane, src, env), rows in sorted(groups.items()):
+        budget = lanes.LANES[lane].documented_per_minute if lane in lanes.LANES else None
+        print(
+            f"  {lane:18s} {src:22s} {env:6s} {len(rows):9d} "
+            f"{sum(1 for r in rows if r.status == '429'):5d} "
+            f"{sum(1 for r in rows if r.err != '-'):5d} "
+            f"{max_rolling_window([r.ts for r in rows]):8d} "
+            f"{(str(budget) if budget is not None else '-'):>7s} "
+            f"{sum(r.wait_s for r in rows):9.1f}",
+            file=out,
+        )
+    print(
+        "\n  ⚠ 'max/60s' is per (lane, src, env) and is therefore a LOWER bound on what the\n"
+        "    lane saw: a lane reached from two processes is only bounded by summing them,\n"
+        "    which is what step 2's open clause 2 asks. 'wait_s' is SECONDS and is not the\n"
+        "    counterpart of the requests bound -- 'max/60s' is.\n"
+        "  ⚠ 'budget' is DOCUMENTED per-minute, never enforced-and-measured.",
+        file=out,
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--since", help="ISO timestamp; restrict M2/M3 to fires at or after it")
     ap.add_argument("--log", type=Path, default=DEFAULT_LOG, help="jobs-daemon log to parse for M4")
+    ap.add_argument(
+        "--request-log",
+        type=Path,
+        action="append",
+        help="eToro request artefact to tabulate (M6). Repeatable; pass one per process.",
+    )
     ap.add_argument("--out", type=Path, help="also write the census to this path")
     args = ap.parse_args()
 
@@ -808,6 +966,20 @@ def main() -> int:
             sys.stdout.flush()
 
     out: TextIO = _Tee()  # type: ignore[assignment]
+
+    def _write_out() -> None:
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text("".join(buffer))
+            print(f"\nwritten: {args.out}", file=sys.stdout)
+
+    # M6 is pure log parsing and deliberately needs no database: the artefact can be
+    # tabulated anywhere the log files are, including off this box.  It still goes
+    # through the tee, so ``--out`` cannot silently leave a stale report on disk.
+    if args.request_log:
+        m6_observed(out, args.request_log)
+        _write_out()
+        return 0
 
     with psycopg.connect(settings.database_url) as conn:
         # One snapshot for every arm so the arms cannot disagree about the corpus, and
@@ -840,10 +1012,7 @@ def main() -> int:
         m5_reconciliation(conn, out)
         print_uncounted(out)
 
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text("".join(buffer))
-        print(f"\nwritten: {args.out}", file=sys.stdout)
+    _write_out()
     return 0
 
 
