@@ -1,7 +1,13 @@
-# Core/cash process-restart acceptance — #2949, round 1
+# Core/cash process-restart acceptance — #2949
 
-**Tested commit:** `79720491969d1405c08193e23988c43ee3988d4c`
-**Harness:** `tests/test_2949_core_restart_recovery_db.py`, `tests/fixtures/core_restart.py`,
+**Round 1 tested at** `79720491969d1405c08193e23988c43ee3988d4c`.
+**Round 2's production base is** `ef93efcc3b7eeabd0d4984300ddea80dabb1571c` (`main`); its harness
+is the branch this document lands on, so reproducing it needs both. Round 2 is
+[a separate section below](#round-2--matrix-5-and-the-exit-lifecycle). Everything between here
+and that section is round 1 as written, except where a line says otherwise.
+
+**Harness:** `tests/test_2949_core_restart_recovery_db.py`,
+`tests/test_2949_core_close_recovery_db.py` (round 2), `tests/fixtures/core_restart.py`,
 `tests/fixtures/core_restart_child.py`
 **Broker:** deterministic file-backed fake. **Database:** the per-worker disposable test DB.
 **No broker mutation, no credentials, no order.** Every "order" in this document is a row in a
@@ -11,13 +17,20 @@ Reproduce:
 
 ```bash
 docker compose --profile test up -d postgres-test
-uv run pytest tests/test_2949_core_restart_recovery_db.py -v -o addopts=''
-# expect: 9 passed
+uv run pytest tests/test_2949_core_restart_recovery_db.py \
+              tests/test_2949_core_close_recovery_db.py -v -o addopts=''
+# expect: 15 passed
 ```
 
 ⚠ **Check the count, not the exit status.** `ebull_test_conn` *skips* when the test database is
-unreachable, so a run with no Postgres exits `0` with nine skips and looks identical to a pass at
-the shell. Verified here: 9 passed, and green on three consecutive runs under random ordering.
+unreachable, so a run with no Postgres exits `0` with skips and looks identical to a pass at
+the shell.
+
+⚠ **The 15 is not 9 + 6.** Round 1 shipped 9 tests in the restart file; #2962 and #2961's sessions
+added two more to it before round 2 started (the unattended lost-acceptance recovery and the
+stranded read-surface flag). Round 2 adds one matrix-5 test to that file, taking it to 12, plus 3
+in the close file. Quoting "9" as round 1's figure below is left as it was written; the current
+total is 15.
 
 ## What the harness is
 
@@ -206,6 +219,10 @@ one.
 | 7 — position closure | **not run, but it exists** | ⚠ Correction to the first draft, which said closure could not be tested. `close_strategy_owned_position` (`app/api/strategies.py:3320`) → `manage_owned_position` → `_submit_close` is a working full-close path for an exact owned position. It is attended, it is a different lifecycle from the rebalance sell, and it is untested across a process boundary. Round 2. |
 | Partial fills | **not run** | The fake broker's executions are whole. Ownership and reservation transitions under a partial fill *could* be tested without claiming any accounting tolerance; they are deferred for time. The accounting-tolerance half belongs to #2602. |
 
+⚠ **Two rows of this table moved in round 2** — matrix 5 and matrix 7's position closure are now
+run, with outcomes in [the round-2 section](#round-2--matrix-5-and-the-exit-lifecycle). The rest
+of the table still stands.
+
 ## What this does not prove
 
 ### Limits of the harness itself
@@ -271,3 +288,199 @@ Listed because they bound every classification in the table above, and a reader 
 
 Round 2 is still fake-broker work. Account-specific demo evidence stays after it and stays
 operator-attended, because its acceptance mutates broker state.
+
+---
+
+# Round 2 — matrix 5 and the exit lifecycle
+
+**Production base:** `ef93efcc3b7eeabd0d4984300ddea80dabb1571c`
+**Added:** `tests/test_2949_core_close_recovery_db.py` (3 scenarios) and one matrix-5 scenario in
+the round-1 file. Same fake broker, same disposable database, still no broker mutation.
+
+## What round 2 does and does not cover
+
+Entry condition 1 above — **#2961 landed** — is NOT met, and is not met by anything here. It is
+blocked on an attended demo order settling whether `orders:lookup?referenceId=` covers an order
+the broker never accepted, and that acceptance mutates broker state, so it stays out of an
+unattended run. Round 2 therefore took only the items that conditions 2 and 3 (#2964, landed as
+`fb18d2d1`; #2962, landed as `d33b3124`) unblock:
+
+| Round-2 item | Status |
+|---|---|
+| Matrix 5 — **over-cap half**: a core row behind the batch cap | **run** |
+| Matrix 5 — **outage half**: a backlog accumulated while the broker was unreachable, then drained | **not run** — it exercises the cooldown arithmetic, not the rotation, and is a separate scenario |
+| Matrix 7 — position closure across a process boundary | **run** (3 scenarios) |
+| G-1 **terminalisation** acceptance | **not run** — blocked on #2961. ⚠ G-1's *regression* tests do still run every time, in the round-1 file; what is missing is acceptance of a fix that does not exist yet |
+| Matrix 6 credential rotation, mandate revocation | **still not run** — unchanged from round 1 |
+| Matrix 7 rebalance SELL | **still blocked** by `core_close_side_cost_quote_unavailable` |
+| Partial fills | **still not run** — #2965 owns the defect to reproduce |
+
+⚠ **One half of G-1 moved while round 2's base was being assembled, and this report should say so
+rather than leave round 1's text standing.** G-1.1 recorded that the stranded core authority was
+*silent* because `refresh_strategy_health` cleared the reconciliation block when no paper
+deployment declared a policy. `ca7e4ee1` (#2961's visibility slice) changed that block to key on
+the presence of unresolved order identity, so a core-only configuration no longer clears it. The
+observability half of G-1 is therefore closed; the terminalisation half is not, and is still what
+makes G-1 disqualifying.
+
+## Matrix 5 — a core row behind the batch cap
+
+`test_scenario_5_a_core_row_behind_the_batch_cap_is_reached_within_the_declared_bound`.
+
+#2962's PR asserted only the weaker two-pass property on a backlog of one: a resolved core row
+leaves the backlog. This is the over-cap case. Five alpha rows are seeded **first**, so the core
+order is last in the queue, and the cap is two. `reconcile_backlog`'s docstring declares that a
+due row is selected within `ceil(due_rows / limit)` completed cycles; with six due rows and a cap
+of two that is three cycles, and the core row is selected in the third.
+
+**Outcome: automatically recovered.** The declared bound holds for the core arm.
+
+Two design points, because the test is worth nothing without either:
+
+- **The competitors have to keep competing.** Each is registered on the broker double as an
+  accepted-but-`Pending` order, so every poll leaves it `pending` — a progress state, which
+  `reconcile_backlog` exempts from the exponential cooldown. Competitors that fell to `not_found`
+  would earn the cooldown, drop out of the selection and let the core row through for a reason
+  that has nothing to do with the rotation.
+- **Non-vacuity is asserted, not assumed.** Cycle 1 must NOT contain the core order. Verified by
+  revert-probe rather than by argument: replacing the `ORDER BY state.last_attempt_at ASC NULLS
+  FIRST, ...` with the pre-#2948 `ORDER BY state.first_unresolved_at, state.order_id` fails the
+  test with `assert 6 in [1, 2]` — the core row is never reached at all. The probe was reverted;
+  the branch touches no production file.
+
+## Matrix 7 — position closure across a process boundary
+
+`tests/test_2949_core_close_recovery_db.py`. The lifecycle is `close_strategy_owned_position`
+(`app/api/strategies.py:3323`) → `manage_owned_position` (`strategy_position_manager.py:844`) →
+`_submit_close` (`:758`). The harness calls `manage_owned_position` directly, exactly as round 1
+called the executor directly: the route's authentication, credential decryption and provenance
+check are skipped, and that skip bounds the evidence.
+
+**Two structural facts, read from source before the first run rather than discovered by it.**
+Both shape every outcome below.
+
+1. `_submit_close` writes the `orders` row with `execution_origin='strategy'` and links it
+   `purpose='exit'`, but writes **no** `strategy_order_reconciliation_state` row.
+   `reconcile_backlog` selects from that table, so an EXIT order is structurally invisible to the
+   scheduled reconciler #2962 just extended to the core arm. Exit recovery rests entirely on
+   `_resume_operation` (`:474`), reached from `strategy_paper_runtime.py:493`.
+2. In `_resume_operation`, `landed` is hard-coded false for a close (`:520` —
+   `operation["operation_type"] != "close"` is the first conjunct). ⚠ Its own comment gives the
+   reason as "there is no edit/close lookup by request UUID", and that is established about **this
+   implementation** — `get_demo_close_order` takes an `order_id` and nothing else
+   (`app/providers/broker.py:700`). Whether eToro *could* offer one was not checked against the
+   portal here, so treat it as a property of our adapter, not of the broker.
+
+Fact 2 is why 7a and 7b produce the **same row on our side** and have opposite consequences.
+
+| # | Fault | Broker | Our state after the scheduled pass | Classification |
+|---|---|---|---|---|
+| 7c | none — the child completes and stops at `submitted` | close accepted, 1 call | resumed by a process that never submitted it: `applied`, ownership `released` with `release_reason='operator_close'`, trade `closed`, exit order `filled` | **automatically recovered** |
+| 7a | kill inside `close_demo_strategy_position` before anything is recorded | 0 closes **accepted** (the verb is entered and dies at its first statement), position untouched | `reconcile_required` / `crash_before_submission_identity`; ownership still active; allocator still `core_hold`; a fresh close request succeeds and places exactly one close | **safely stopped, recovered by re-request** |
+| 7b | kill after the broker recorded the close, before `persist_response` | 1 close call, position gone | `reconcile_required` / `crash_before_submission_identity` — **identical to 7a** — ownership permanently active, `execute_core_rebalance` **raises** | **safely stopped at the broker, wedged in accounting — #2979** |
+
+### 7c is the control, and it is not optional
+
+Without it, a scenario that released no ownership would be indistinguishable from a lifecycle that
+cannot release ownership at all. `close_calls == 1` is the load-bearing assertion in it: a resume
+that re-closed would also end with the ownership released and the trade closed.
+
+### 7a — the crash costs the request, not the position
+
+The scheduled pass terminalises the orphaned intent without resubmitting, the position is
+untouched, and the accounting join still resolves — so the core allocator keeps working and
+returns `core_hold`. The exit stays reachable: an explicit re-close places exactly one close.
+
+⚠ One observability cost, recorded and not ticketed: the trade is left at `reconcile_required`
+even though nothing is actually unresolved. The state is conservative in the safe direction, and
+distinguishing it requires exactly the discriminator fact 2 says does not exist.
+
+### 7b — the finding, filed as #2979
+
+The broker executed the close; the engine died before anything on our side recorded its identity.
+
+What is safe: no second close reaches the broker, on the resume pass or on a fresh close request
+(`close_calls` never leaves 1), and nothing invents a fill or releases ownership on an unverified
+assumption.
+
+What is wedged:
+
+- `strategy_position_ownership` stays `active` naming a position the account no longer carries,
+  and nothing terminalises it — the exit order is invisible to `reconcile_backlog` (fact 1), and
+  every later `manage_owned_position` pass returns `owned_position_missing` while releasing
+  nothing.
+- `resolve_engine_capital_usage` refuses that join by design
+  (`app/services/strategy_engine_capital.py:329`) and `strategy_core_executor.py:528` wraps the
+  refusal into `StrategyCoreExecutionError`. The core allocator does not refuse politely, it
+  **raises**, on this and every subsequent cycle, with no operator-visible reason code.
+
+- **It is invisible to the reconciliation health surface as well.** Both `enforce_reconciliation_slo`
+  and the no-policy block `ca7e4ee1` added count rows in `strategy_order_reconciliation_state`
+  (`strategy_paper_runtime.py:287` reads an `unresolved` count over that table). Fact 1 says an
+  EXIT order has no row there, so the wedge raises no health block either — it is silent in the
+  same way G-1.1 used to be.
+
+⚠ The fail-closed behaviour is correct in isolation. The defect is that no path exists to resolve
+it at all — the same shape G-1 (#2961) records for the entry side, arrived at from the exit side.
+
+⚠⚠ **"Permanent" is structural, not experimental**, and this is round 1's G-1 lesson restated. The
+test repeats the scheduled pass three times and the state does not move, which shows the loop is
+stable — not that it is eternal. What supports permanence is that the only reader which could
+terminalise the ownership (`_resume_operation`) has already written a terminal operation row, and
+the only other scheduled reconciler cannot see an EXIT order at all.
+
+## What round 2 adds to "what this does not prove"
+
+Round 1's limits all still bind. These are specific to this round.
+
+**The close lifecycle:**
+
+- **The close double has no partial close and no pending close.** `close_demo_strategy_position`
+  always fills. A close that the broker accepts and then only partially executes is untested, and
+  it is the shape #2965 is about on the entry side.
+- **Only CRASH failures are exercised.** A definite rejection, an uncertain transport
+  (`BrokerPositionMutationUncertain`, `strategy_position_manager.py:802-825`), a malformed
+  acceptance, a lookup outage and a rejected close all take materially different branches and none
+  of them is driven. ⚠ Note also that an unavailable portfolio blocks even a known-id close lookup,
+  because `_exact_broker_position` runs first (`:515`).
+- **Three crash windows inside the close are untested**: inside the close-intent transaction;
+  between the two normalised acceptance updates; during the lookup-response persistence; and
+  between the order-fill, ownership-release and trade-close writes in `_finish_close`. Splitting
+  any of those into separate commits could pass this suite.
+- **One of those windows is not merely untested, it is a candidate half of #2979.** The real
+  adapter persists the raw acceptance *before* parsing its order id, so a crash just after that
+  callback leaves durable close identity in `orders.raw_payload_json` which `_resume_operation`
+  never reads. The fake's raw payload does not carry eToro's `orderForClose.orderID` at all, so
+  this harness could not have found it — it is recorded on #2979 rather than claimed here.
+- **`_resume_operation`'s edit branch is untouched.** Only `operation_type='close'` is exercised;
+  the stop/take-profit resume path is exempt on the core arm by construction and was not driven on
+  the signal arm.
+- **The double does not validate close targets.** It records a filled close without checking that
+  the position exists or that the instrument matches, and it reports `get_portfolio().available_cash`
+  as zero while its risk snapshot derives cash properly. Those adapter and account contracts are
+  unchallenged here.
+
+**Matrix 5:**
+
+- **Only the over-cap half of item 5 is run**, as the table above says. No outage, no accumulated
+  `error` / `not_found` backlog, no elapsed retry delay, no restored service.
+- **One core row and five competitors.** It establishes the declared bound at that shape, over two
+  full rotations. It says nothing about contention: `StrategyReconciliationBusy` skips leave
+  `last_attempt_at` alone, which `reconcile_backlog` notes degrades the bound to
+  `ceil(due / (limit - b))` — that formula is in an implementation comment at the end of the
+  function, not in the docstring, and it is undefined at `b == limit`, where an all-busy batch
+  returns empty and is indistinguishable from an empty backlog. None of that is exercised.
+- **Its accounting assertions are aggregate.** Global active-ownership count and per-order
+  reconciliation state, not the exact trade-to-position mapping, the execution rows, or conserved
+  commitment. Corrupted ownership with the right cardinality would pass.
+
+## Round 3 entry conditions
+
+1. **#2961 landed.** Unchanged, and still the disqualifying one: an engine that can strand its own
+   trading authority and has no way to clear it is not hands-off.
+2. **#2979 landed**, so a close the broker executed can be accounted for.
+3. Then: matrix 6's credential rotation and mandate revocation, partial fills (#2965 first), and
+   the contention shape of matrix 5.
+
+**No green "ready" status.** Round 2 moved the exit lifecycle from untested to classified and
+found one new wedge; it removed none.

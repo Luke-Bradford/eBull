@@ -32,21 +32,29 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 
 from app.providers.broker import (
     BrokerAccountRiskSnapshot,
+    BrokerCloseOrderDetail,
     BrokerCoreOrder,
     BrokerCoreOrderSubmission,
     BrokerCostComponent,
     BrokerDirectPositionInvestment,
+    BrokerEligibilityResponse,
+    BrokerInstrumentEligibility,
     BrokerInstrumentInvestment,
+    BrokerLeverageConfig,
     BrokerOrderDetail,
     BrokerOrderLookupError,
     BrokerOrderNotFound,
+    BrokerPortfolio,
+    BrokerPosition,
+    BrokerPositionCloseSubmission,
     BrokerPositionExecution,
+    BrokerPositionMutationError,
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
 )
@@ -87,7 +95,18 @@ FaultPoint = Literal[
     "before_authority_commit",
     "after_commit_before_submit",
     "after_broker_accept",
+    # -- the EXIT lifecycle (round 2, matrix 7) -------------------------------
+    # Named for the same boundary the entry faults are named for: what the
+    # broker has been told, not which line of ours was executing.
+    "after_close_intent_before_submit",
+    "after_close_accept",
 ]
+
+#: Which lifecycle the child process drives.  ``entry`` is round 1's
+#: ``execute_core_rebalance``; ``close`` is round 2's ``manage_owned_position``
+#: with an explicit ``close_reason``, which is a different transaction, a
+#: different recovery reader and a different broker verb.
+ChildMode = Literal["entry", "close"]
 
 #: The exit status a SIGKILLed child reports through ``subprocess``.
 SIGKILL_RETURNCODE = -signal.SIGKILL
@@ -146,7 +165,16 @@ class FileBackedFakeBroker:
         self.fault = fault
         self.fill_status = fill_status
         if not self.state_path.exists():
-            self._write({"orders": [], "mutation_calls": 0, "lookup_calls": 0})
+            self._write(
+                {
+                    "orders": [],
+                    "closes": [],
+                    "mutation_calls": 0,
+                    "lookup_calls": 0,
+                    "close_calls": 0,
+                    "close_lookup_calls": 0,
+                }
+            )
 
     # -- state file -------------------------------------------------------
     def read(self) -> dict[str, Any]:
@@ -196,6 +224,13 @@ class FileBackedFakeBroker:
         pending = Decimal("0")
         positions: list[BrokerDirectPositionInvestment] = []
         for record in state["orders"]:
+            if record.get("closed"):
+                # A closed position contributes neither exposure nor cash
+                # commitment.  ⚠ This is what makes the lost-close-acceptance
+                # scenario real rather than staged: the ownership row still
+                # names a position id, and the account it must join against no
+                # longer carries it.
+                continue
             amount = Decimal(record["amount"])
             if record.get("status", self.fill_status) in _FILLED_BROKER_STATES:
                 invested += amount
@@ -292,6 +327,169 @@ class FileBackedFakeBroker:
                 continue
             return self._detail(record)
         raise BrokerOrderNotFound(f"no order for order_id={order_id!r} reference_id={reference_id!r}")
+
+    def seed_accepted_order(
+        self,
+        *,
+        reference_id: str,
+        instrument_id: int = CORE_INSTRUMENT_ID,
+        amount: str = "10",
+        status: str = "Pending",
+    ) -> dict[str, Any]:
+        """Register an order the broker already holds, without a mutation call.
+
+        For the matrix-5 competitors only.  They have to be RESOLVABLE and
+        PENDING: a lookup miss would drive them into ``not_found``, which earns
+        the exponential cooldown and drops them out of the selection — and a
+        competitor that stops competing cannot starve anything, so the test
+        would pass against the very absorbing-state bug #2948 fixed.
+
+        ⚠ Deliberately not routed through ``place_demo_core_order``: these rows
+        stand for orders some earlier process placed, and counting them as
+        mutations would corrupt the one number every other scenario asserts on.
+        """
+        state = self.read()
+        sequence = len(state["orders"]) + 1
+        record = {
+            "reference_id": reference_id,
+            "broker_order_ref": str(900000 + sequence),
+            "position_id": 950000 + sequence,
+            "instrument_id": instrument_id,
+            "amount": amount,
+            "status": status,
+        }
+        state["orders"].append(record)
+        self._write(state)
+        return record
+
+    # -- the exit lifecycle ------------------------------------------------
+    def get_portfolio(self) -> BrokerPortfolio:
+        """Open positions only, derived from the same accepted-order file."""
+        state = self.read()
+        positions = [
+            BrokerPosition(
+                instrument_id=int(record["instrument_id"]),
+                units=Decimal("1"),
+                open_price=Decimal(record["amount"]),
+                current_price=Decimal(record["amount"]),
+                raw_payload={},
+                position_id=int(record["position_id"]),
+                amount=Decimal(record["amount"]),
+                open_date_time=CLOCK,
+            )
+            for record in state["orders"]
+            if not record.get("closed") and record.get("status", self.fill_status) in _FILLED_BROKER_STATES
+        ]
+        return BrokerPortfolio(positions=positions, available_cash=Decimal("0"), raw_payload={})
+
+    def check_instrument_eligibility(self, instrument_ids: Any) -> BrokerEligibilityResponse:
+        return BrokerEligibilityResponse(
+            currency="USD",
+            eligibilities=tuple(
+                BrokerInstrumentEligibility(
+                    instrument_id=int(instrument_id),
+                    symbol="CORE2949",
+                    min_position_exposure=Decimal("10"),
+                    max_units_per_order=None,
+                    allow_open_position=True,
+                    allow_close_position=True,
+                    allow_partial_close_position=True,
+                    allow_trailing_stop_loss=False,
+                    leverage_configs=(
+                        BrokerLeverageConfig(
+                            settlement_type="real",
+                            direction="long",
+                            leverage_values=(1,),
+                            min_position_amount=Decimal("10"),
+                            allow_edit_stop_loss=True,
+                            allow_edit_take_profit=True,
+                            allow_stop_loss_take_profit=True,
+                            raw_payload={},
+                        ),
+                    ),
+                    raw_payload={},
+                )
+                for instrument_id in instrument_ids
+            ),
+            not_found_instrument_ids=(),
+            not_found_symbols=(),
+            raw_payload={},
+        )
+
+    def close_demo_strategy_position(
+        self,
+        *,
+        position_id: int,
+        instrument_id: int,
+        request_id: UUID,
+        persist_response: Any = None,
+    ) -> BrokerPositionCloseSubmission:
+        """The second economic verb, counted separately from ``mutation_calls``.
+
+        Two counters rather than one because the invariants differ: entry asks
+        "did the broker see two BUYS", exit asks "did it see two CLOSES", and
+        folding them would let one scenario's regression hide inside the other's
+        expected count.
+        """
+        if self.fault == "after_close_intent_before_submit":
+            # The engine dies holding a durable close intent the broker never
+            # received. The position is untouched; only our own state moved.
+            _kill_self()
+        state = self.read()
+        sequence = len(state.get("closes", [])) + 1
+        raw = {"positionId": position_id, "instrumentId": instrument_id}
+        broker_order_ref = str(800000 + sequence)
+        state["close_calls"] = int(state.get("close_calls", 0)) + 1
+        state.setdefault("closes", []).append(
+            {
+                "broker_order_ref": broker_order_ref,
+                "reference_id": str(request_id),
+                "position_id": position_id,
+                "status": "Filled",
+            }
+        )
+        for record in state["orders"]:
+            if int(record["position_id"]) == position_id:
+                record["closed"] = True
+        self._write(state)
+        if self.fault == "after_close_accept":
+            # The close is durable at the broker and its identity never reaches
+            # us. ⚠ Killed BEFORE `persist_response`, which is the tightest this
+            # can be made: that callback is the first thing our side would have
+            # written about the acceptance.
+            _kill_self()
+        if persist_response is not None:
+            persist_response(raw)
+        return BrokerPositionCloseSubmission(
+            broker_order_ref=broker_order_ref,
+            position_id=position_id,
+            raw_payload=raw,
+        )
+
+    def get_demo_close_order(
+        self,
+        *,
+        order_id: str,
+        persist_response: Any = None,
+    ) -> BrokerCloseOrderDetail:
+        state = self.read()
+        state["close_lookup_calls"] = int(state.get("close_lookup_calls", 0)) + 1
+        self._write(state)
+        for record in state.get("closes", []):
+            if record["broker_order_ref"] != order_id:
+                continue
+            if persist_response is not None:
+                persist_response({"orderId": order_id})
+            filled = record["status"] in _FILLED_BROKER_STATES
+            return BrokerCloseOrderDetail(
+                broker_order_ref=order_id,
+                status="filled" if filled else "pending",
+                broker_status=str(record["status"]),
+                position_ids=(int(record["position_id"]),) if filled else (),
+                reference_id=UUID(str(record["reference_id"])),
+                raw_payload={},
+            )
+        raise BrokerPositionMutationError(f"no close order for order_id={order_id!r}")
 
     def _detail(self, record: dict[str, Any]) -> BrokerOrderDetail:
         executions: tuple[BrokerPositionExecution, ...] = ()
@@ -519,11 +717,20 @@ def run_engine_until_fault(
     workdir: Path,
     fault: FaultPoint,
     fill_status: str = "Filled",
+    mode: ChildMode = "entry",
+    strategy_trade_id: int | None = None,
+    broker_position_id: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one engine process against ``database_url`` and let it hit ``fault``.
 
     Returns the completed process so the caller can assert on the exit status:
     ``SIGKILL_RETURNCODE`` means the fault fired, ``0`` means it ran to the end.
+
+    ``mode="close"`` drives the EXIT lifecycle instead and needs the exact
+    ownership coordinates, because ``manage_owned_position`` refuses to reach the
+    broker without them.  The parent establishes that ownership first — the close
+    matrix is about what a restart does to an ALREADY OWNED position, so building
+    the position is setup rather than part of any scenario.
 
     ⚠ Bounded.  The child takes an advisory submission lock and can block on it;
     without a timeout a lock-release regression would hang the suite rather than
@@ -531,6 +738,13 @@ def run_engine_until_fault(
     report.  The bound is generous — the child's own import of ``app`` dominates
     it — so it cannot fire on a slow machine.
     """
+    if mode == "close" and (strategy_trade_id is None or broker_position_id is None):
+        raise AssertionError("close mode needs the exact ownership coordinates")
+    # ⚠ Round 1 ran at most one child per workdir, so "a missing result file IS
+    # the signal that the fault fired" held for free.  Round 2 runs a fault-free
+    # ENTRY child and then a faulted CLOSE child in the same directory, and a
+    # stale result.json from the first would read as the second having survived.
+    (workdir / "result.json").unlink(missing_ok=True)
     config_path = workdir / "config.json"
     config_path.write_text(
         json.dumps(
@@ -538,6 +752,9 @@ def run_engine_until_fault(
                 "database_url": database_url,
                 "fault": fault,
                 "fill_status": fill_status,
+                "mode": mode,
+                "strategy_trade_id": strategy_trade_id,
+                "broker_position_id": broker_position_id,
                 "broker_state_path": str(workdir / "broker.json"),
                 "result_path": str(workdir / "result.json"),
             }
@@ -553,7 +770,12 @@ def run_engine_until_fault(
     )
 
 
-def seed_non_core_strategy_order(conn: psycopg.Connection[Any]) -> int:
+def seed_non_core_strategy_order(
+    conn: psycopg.Connection[Any],
+    *,
+    ordinal: int = 0,
+    amount: str = "100",
+) -> tuple[int, UUID]:
     """Seed one ALPHA-arm strategy order in the same unresolved shape, and COMMIT.
 
     The positive control for the core-exclusion claim.  Asserting only that
@@ -566,36 +788,55 @@ def seed_non_core_strategy_order(conn: psycopg.Connection[Any]) -> int:
     Raw INSERTs down the whole authorisation chain, because
     ``strategy_trades_exactly_one_authorisation`` requires a funding decision for
     a non-core trade and the point is the SHAPE, not how it was produced.
+
+    ``ordinal`` makes the seeder repeatable for matrix 5, which needs the backlog
+    to exceed the batch cap.  It moves ``signal_bar_date`` and
+    ``strategy_version`` — the latter because ``strategy_deployments_unique`` is
+    ``(strategy_id, strategy_version, mode)``, so a second call at the same
+    version collides.  Every seeded row is otherwise identical and none of them
+    is special.  The returned request
+    UUID is what lets the caller register a matching order on the broker double:
+    ``reconcile_strategy_order`` looks an unsubmitted order up by
+    ``strategy_request_id`` (``strategy_order_reconciliation.py:812``).
+
+    ⚠ ``amount`` is a knob because these rows are REAL committed capital to
+    ``load_engine_capital_authority``: each one is an allocated funding decision
+    against the 1,000 assigned pot.  One control at the default 100 is
+    immaterial; six of them would consume 60% of the sandbox and the core
+    allocator would start refusing ``sandbox_exceeded`` for a reason that has
+    nothing to do with the scenario.
     """
+    version = f"v{ordinal + 1}"
     signal = conn.execute(
         """
         INSERT INTO strategy_signals (
             strategy_id, strategy_version, instrument_id, signal_bar_date,
             signal_kind, verdict, universe, input_rule_set_versions
-        ) VALUES ('s-harness', 'v1', %s, DATE '2026-09-10', 'entry', 'not_fired',
+        ) VALUES ('s-harness', %s, %s, DATE '2026-09-10' - %s::int, 'entry', 'not_fired',
                   'survivorship_free', '{"harness": "2949"}'::jsonb)
         RETURNING signal_id
         """,
-        (CORE_INSTRUMENT_ID,),
+        (version, CORE_INSTRUMENT_ID, ordinal),
     ).fetchone()
     assert signal is not None
     deployment = conn.execute(
         """
         INSERT INTO strategy_deployments (
             strategy_id, strategy_version, mode, capital_limit, enabled, updated_by, reason
-        ) VALUES ('s-harness', 'v1', 'paper', 100, FALSE, 'core-restart-harness',
+        ) VALUES ('s-harness', %s, 'paper', 100, FALSE, 'core-restart-harness',
                   '#2949 positive control')
         RETURNING deployment_id
-        """
+        """,
+        (version,),
     ).fetchone()
     assert deployment is not None
     funding = conn.execute(
         """
         INSERT INTO strategy_funding_decisions (signal_id, deployment_id, verdict, amount, reason_code)
-        VALUES (%s, %s, 'allocated', 100, 'harness')
+        VALUES (%s, %s, 'allocated', %s, 'harness')
         RETURNING funding_decision_id
         """,
-        (signal[0], deployment[0]),
+        (signal[0], deployment[0], Decimal(amount)),
     ).fetchone()
     assert funding is not None
     trade = conn.execute(
@@ -607,15 +848,16 @@ def seed_non_core_strategy_order(conn: psycopg.Connection[Any]) -> int:
         (funding[0], CORE_INSTRUMENT_ID),
     ).fetchone()
     assert trade is not None
+    request_id = uuid4()
     order = conn.execute(
         """
         INSERT INTO orders (
             instrument_id, action, order_type, requested_amount, status,
             execution_origin, strategy_request_id
-        ) VALUES (%s, 'BUY', 'MARKET', 100, 'submitted', 'strategy', gen_random_uuid())
+        ) VALUES (%s, 'BUY', 'MARKET', %s, 'submitted', 'strategy', %s)
         RETURNING order_id
         """,
-        (CORE_INSTRUMENT_ID,),
+        (CORE_INSTRUMENT_ID, Decimal(amount), request_id),
     ).fetchone()
     assert order is not None
     conn.execute(
@@ -627,7 +869,7 @@ def seed_non_core_strategy_order(conn: psycopg.Connection[Any]) -> int:
         (order[0],),
     )
     conn.commit()
-    return int(order[0])
+    return int(order[0]), request_id
 
 
 def core_state_report(conn: psycopg.Connection[Any]) -> dict[str, Any]:
@@ -661,17 +903,76 @@ def core_state_report(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     }
 
 
+def core_ownership_coordinates(conn: psycopg.Connection[Any]) -> tuple[int, int]:
+    """The exact ``(strategy_trade_id, broker_position_id)`` of the core holding.
+
+    ``manage_owned_position`` takes both and joins on both, so a helper that
+    returned only the trade would push the second lookup into every test.
+    Deliberately strict: exactly one active core ownership must exist, because a
+    close matrix that silently picked the first of several would be testing an
+    arbitrary row.
+    """
+    rows = conn.execute(
+        """
+        SELECT own.strategy_trade_id, own.broker_position_id
+        FROM strategy_position_ownership own
+        JOIN strategy_trades t ON t.strategy_trade_id=own.strategy_trade_id
+        WHERE own.status='active' AND t.core_rebalance_intent_id IS NOT NULL
+        """
+    ).fetchall()
+    conn.commit()
+    assert len(rows) == 1, f"expected exactly one active core ownership, found {len(rows)}"
+    return int(rows[0][0]), int(rows[0][1])
+
+
+def close_state_report(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    """The persisted transitions the EXIT lifecycle moves (matrix 7)."""
+    row = conn.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM strategy_position_operations WHERE operation_type='close'),
+          (SELECT array_agg(status ORDER BY position_operation_id)
+             FROM strategy_position_operations WHERE operation_type='close'),
+          (SELECT array_agg(coalesce(last_error_code, '-') ORDER BY position_operation_id)
+             FROM strategy_position_operations WHERE operation_type='close'),
+          (SELECT count(*) FROM strategy_position_ownership WHERE status='active'),
+          (SELECT count(*) FROM strategy_position_ownership WHERE status='released'),
+          (SELECT array_agg(release_reason ORDER BY ownership_id)
+             FROM strategy_position_ownership WHERE status='released'),
+          (SELECT array_agg(DISTINCT status ORDER BY status) FROM strategy_trades),
+          (SELECT count(*) FROM orders WHERE action='EXIT'),
+          (SELECT array_agg(DISTINCT status ORDER BY status) FROM orders WHERE action='EXIT')
+        """
+    ).fetchone()
+    conn.commit()
+    assert row is not None
+    return {
+        "close_operations": int(row[0]),
+        "close_statuses": list(row[1] or []),
+        "close_error_codes": list(row[2] or []),
+        "active_ownership": int(row[3]),
+        "released_ownership": int(row[4]),
+        "release_reasons": list(row[5] or []),
+        "trade_statuses": list(row[6] or []),
+        "exit_orders": int(row[7]),
+        "exit_order_statuses": list(row[8] or []),
+    }
+
+
 __all__ = [
     "ACCOUNT_CASH",
     "API_CREDENTIAL_ID",
     "CANDIDATE_IDS",
     "CLOCK",
     "CORE_INSTRUMENT_ID",
+    "ChildMode",
     "FaultPoint",
     "FileBackedFakeBroker",
     "OPERATOR_ID",
     "SIGKILL_RETURNCODE",
     "USER_CREDENTIAL_ID",
+    "close_state_report",
+    "core_ownership_coordinates",
     "core_state_report",
     "run_engine_until_fault",
     "seed_core_execution_world",
