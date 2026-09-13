@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -1811,3 +1812,201 @@ def test_operator_allocation_uses_session_identity_and_immutable_event(
         """,
         (response.deployment_id,),
     ).fetchone() == (Decimal("250.000000"), True, "real-session-user", "bounded paper sleeve")
+
+
+def _open_position_with_accrual(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    instrument_id: int,
+    position_id: int,
+    total_fees: str,
+    close_event: bool = False,
+) -> None:
+    """Seed one strategy-owned, still-open broker position carrying an accrual.
+
+    ``total_fees`` is passed as a STRING and inserted verbatim so the test states
+    the broker's signed figure exactly as the payload would carry it, rather than
+    routing it through a float.
+    """
+    _instrument(conn, instrument_id)
+    signal_id = _signal(
+        conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    conn.execute(
+        """
+        INSERT INTO broker_positions (
+            position_id, instrument_id, is_buy, units, initial_units, amount,
+            initial_amount_in_dollars, open_rate, open_conversion_rate,
+            open_date_time, total_fees, raw_payload
+        ) VALUES (%s, %s, true, 5, 10, 100, 100, 10, 1, now(), %s, '{}'::jsonb)
+        """,
+        (position_id, instrument_id, Decimal(total_fees)),
+    )
+    conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id, status)
+        VALUES (%s, %s, 'active')
+        """,
+        (trade_id, position_id),
+    )
+    conn.execute(
+        "INSERT INTO quotes (instrument_id, quoted_at, bid, ask, last) VALUES (%s, now(), 11.9, 12.1, 12)",
+        (instrument_id,),
+    )
+    if close_event:
+        conn.execute(
+            """
+            INSERT INTO trade_events (
+                position_id, etoro_instrument_id, instrument_id, event_kind, side,
+                units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+            ) VALUES (%s, %s, %s, 'close', 'sell', 5, 12, now(), 1.25, 12.50, 'etoro_history', '{}'::jsonb)
+            """,
+            (position_id, instrument_id, instrument_id),
+        )
+
+
+def test_open_position_accrued_fees_reach_observed_fees(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2602 item 1: the broker's running charge on an OPEN position is counted.
+
+    Before this, ``_OWNED_LIFECYCLE_SQL`` selected ``bp.total_fees`` and nothing
+    read it, so an open position contributed to ``invested`` and ``unrealised``
+    while adding nothing to ``fees`` — and reported ``complete=True`` anyway.
+    """
+    strategy_id = "monitoring-accrual"
+    strategy_version = "monitoring-accrual-v1"
+    _open_position_with_accrual(
+        ebull_test_conn,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        instrument_id=2453060,
+        position_id=7601,
+        total_fees="3.75",
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert pnl.observed_fees == Decimal("3.75")
+    assert pnl.complete
+    assert pnl.incomplete_reasons == ()
+
+
+def test_open_position_distribution_nets_observed_fees_negative(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A distribution arrives as a NEGATIVE ``totalFees`` and must net the total down.
+
+    Source rule — ``TradingDemoApi_Position.totalFees``: *"Total overnight fees and
+    dividends charged/paid on the position in USD. Negative amount represents
+    refund"* (``tests/fixtures/etoro/openapi_v1.375.0.json``). eToro offers no way
+    to split the two, so ``observed_fees`` is legitimately signed and this test
+    pins that rather than clamping it at zero.
+    """
+    strategy_id = "monitoring-distribution"
+    strategy_version = "monitoring-distribution-v1"
+    _open_position_with_accrual(
+        ebull_test_conn,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        instrument_id=2453061,
+        position_id=7602,
+        total_fees="-12.40",
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert pnl.observed_fees == Decimal("-12.40")
+    assert pnl.complete
+
+
+def test_partially_closed_open_position_refuses_a_material_accrual(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Close rows AND a live accrual on one position cannot be added without guessing.
+
+    eToro documents ``totalFees`` as charged "on the position" and does not say
+    whether the still-open remnant's figure still carries the already-closed
+    slice's share. Adding both may double-count; adding neither may undercount.
+    So the figure is refused by name instead of being picked.
+    """
+    strategy_id = "monitoring-partial-accrual"
+    strategy_version = "monitoring-partial-accrual-v1"
+    _open_position_with_accrual(
+        ebull_test_conn,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        instrument_id=2453062,
+        position_id=7603,
+        total_fees="4.00",
+        close_event=True,
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert pnl.observed_fees is None
+    assert not pnl.complete
+    assert "open_position_fees_and_distributions_unseparable" in pnl.incomplete_reasons
+    # The refusal is scoped to the fee figure. Realised and unrealised P&L are
+    # computed from different sources and stay known.
+    assert pnl.realised_pnl == Decimal("12.50")
+    assert pnl.unrealised_pnl == Decimal("10")
+
+
+def test_partially_closed_open_position_with_no_accrual_stays_complete(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The refusal above must NOT fire at zero — a partial close is an ordinary state.
+
+    Refusing it unconditionally would blank ``observed_fees`` for a routine case in
+    exchange for nothing: with no accrual there is no amount to misattribute, so
+    adding it is exact. This is the guard that keeps the refusal affordable.
+    """
+    strategy_id = "monitoring-partial-zero"
+    strategy_version = "monitoring-partial-zero-v1"
+    _open_position_with_accrual(
+        ebull_test_conn,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        instrument_id=2453063,
+        position_id=7604,
+        total_fees="0",
+        close_event=True,
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert pnl.observed_fees == Decimal("1.25")
+    assert pnl.complete
+
+
+def test_owned_lifecycle_sql_total_fees_has_a_reader() -> None:
+    """The grep that would have caught this class in the first place.
+
+    ``docs/review-prevention-log.md:5169`` — *"a WRITER with no reader … `grep`
+    returning only its own definition is the whole test"*. ``bp.total_fees`` sat in
+    the SELECT list with no consumer anywhere in the module, which is invisible to
+    every other test in this file: the query ran, the column came back, nothing
+    read it, and nothing failed.
+    """
+    source = Path("app/services/strategy_monitoring.py").read_text(encoding="utf-8")
+    selected = 'bp.total_fees' in source
+    consumed = 'row["total_fees"]' in source
+    assert selected and consumed, (
+        "strategy_monitoring selects bp.total_fees; it must also read it. "
+        f"selected={selected} consumed={consumed}"
+    )

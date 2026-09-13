@@ -143,6 +143,17 @@ class StrategyPnl:
     realised_pnl: Decimal | None = Decimal("0")
     unrealised_pnl: Decimal | None = Decimal("0")
     total_pnl: Decimal | None = Decimal("0")
+    #: Fees AND distributions, netted, signed, POSITIVE = cost (#2602 item 1).
+    #:
+    #: Two sources, on complementary populations so they cannot double-count:
+    #: realised `trade_events.fees_usd` for closed slices, and the broker's running
+    #: `broker_positions.total_fees` for still-open ones. eToro nets overnight fees
+    #: and dividends into that one signed field and offers no way to split them, so
+    #: this figure MAY BE NEGATIVE when distributions exceed carry. A reader
+    #: treating it as a non-negative "fees" number is reading it wrong — the name is
+    #: kept only because the API field is already published under it.
+    #:
+    #: ⚠ NOT subtracted from `total_pnl`, which stays `realised + unrealised`.
     observed_fees: Decimal | None = Decimal("0")
     complete: bool = True
     incomplete_reasons: tuple[str, ...] = ()
@@ -750,6 +761,50 @@ def load_owned_pnl(conn: psycopg.Connection[Any], *, versions: Sequence[str]) ->
             if row["active_broker_position_id"] is None:
                 reasons.add("active_position_missing_from_broker_snapshot")
                 continue
+            # #2602 item 1. The broker's OWN running charge on a still-open position.
+            # `_OWNED_LIFECYCLE_SQL` has always selected `bp.total_fees` and nothing
+            # read it, so an open position contributed to `invested` and `unrealised`
+            # while adding nothing to `fees` — and no `fees_known` reason could fire
+            # for it, so `observed_fees` returned a number and `complete` returned
+            # True with the broker's figure excluded. A false completeness claim,
+            # not a missing number (`docs/review-prevention-log.md:5169`).
+            #
+            # Source rule: `TradingDemoApi_Position.totalFees` —
+            # *"Total overnight fees AND dividends charged/paid on the position in
+            # USD. Negative amount represents refund"*
+            # (`tests/fixtures/etoro/openapi_v1.375.0.json`). Positive is a cost, so
+            # it shares the sign convention of the close-event `fees_usd` this
+            # accumulator already sums, and a distribution arrives as a NEGATIVE that
+            # correctly nets the total down. That is also why the figure is named for
+            # fees AND distributions everywhere it surfaces: the two are a single
+            # signed number in this field and CANNOT be separated at position level
+            # (a +$40 distribution and a -$40 financing charge are indistinguishable
+            # from a flat $0), so `observed_fees` may legitimately go negative.
+            #
+            # Placed BEFORE the `mark is None` guard deliberately: the accrual is
+            # read off the broker row and does not depend on our being able to price
+            # the position, so gating it on a usable mark would drop the fee for
+            # precisely the positions already flagged as unmarkable.
+            accrued = Decimal(str(row["total_fees"]))
+            if row_close_count and accrued != 0:
+                # Partially closed AND still open, with a non-zero accrual. Both
+                # branches would contribute: the close rows above, and the remnant's
+                # accrual here. eToro documents `totalFees` as charged "on the
+                # position" and does NOT say whether the remnant's figure still
+                # carries the closed slice's share, so adding both may double-count
+                # and adding neither may undercount. Unresolvable from the source —
+                # refuse rather than pick.
+                #
+                # ⚠ Gated on `accrued != 0` deliberately, and this is the whole
+                # reason the refusal is affordable. A partial close on a still-open
+                # position is an ORDINARY state, not an error, so refusing it
+                # unconditionally would blank `observed_fees` for a routine case in
+                # exchange for nothing: at zero there is no amount to misattribute
+                # and adding it is exact. The refusal fires only when the ambiguity
+                # is actually worth money.
+                reasons.add("open_position_fees_and_distributions_unseparable")
+            else:
+                fees += accrued
             invested += Decimal(str(row["amount"]))
             mark = _mark(row)
             if mark is None:
@@ -783,6 +838,11 @@ def load_owned_pnl(conn: psycopg.Connection[Any], *, versions: Sequence[str]) ->
             "trade_not_reconciled_to_position",
             "released_position_missing_close_history",
             "fees_missing_from_history",
+            # #2602 item 1 — see the refusal's own comment above. Without this line
+            # the new reason would land in `incomplete_reasons` while `observed_fees`
+            # still reported a confident number, which is the shape this change
+            # exists to remove rather than relocate.
+            "open_position_fees_and_distributions_unseparable",
         }.intersection(reasons)
         realised_value = realised if realised_known else None
         unrealised_value = unrealised if unrealised_known else None
