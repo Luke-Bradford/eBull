@@ -5319,3 +5319,58 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   `app/services/account_reconciliation_ledger.py::consecutive_reconciled_days`;
   `tests/test_account_reconciliation_countdown.py::test_a_permanent_refusal_at_the_head_is_a_failure_not_a_skip`
   (revert-probed: restoring the skip returns 5 where the guard returns 0).
+
+### A digest must bind the bytes that were PARSED, not a pathname read twice
+- First seen in: #2945 (2026-09-13), found by the operator's codebase audit, reproduced on the real
+  loader before any fix.
+- Symptom: `load_r6_pit_bundle` hashed a path, closed it, then reopened that path to parse JSON —
+  twice for the manifest, twice for the payload. A replacement landing between the two reads was
+  parsed and returned **under the original digest**: `current_shares` 120 → 240 accepted,
+  `payload_sha256` unchanged, ranking input hash moved. Every existing test passed, because they all
+  mutate *before* the load, so none of them covered the window *inside* it. The same shape sat in
+  `scripts/build_2900_pit_bundle.py::_load_pinned`, on the census sources the whole evidence chain
+  then trusts.
+- Prevention: read once into bytes, hash those bytes, parse those bytes. A file-descriptor-only fix
+  that rereads is not sufficient — the second read still sees whatever is there by then. Bind the
+  file-type rule to the same descriptor too (`O_NOFOLLOW` + `fstat`): `Path.is_file()` /
+  `Path.is_symlink()` stat a pathname that can be re-pointed before the `open` that follows.
+  Self-review prompt for any verify-then-use path: **"between the check and the use, how many times
+  do I name this thing?"** More than once is the bug.
+- Enforced in: this prevention log; `app/services/r6_pit_bundle.py::read_verified_document` (both the
+  loader and the builder call it — fixing the instance and leaving the class is how this returns);
+  `tests/test_r6_pit_bundle.py::test_payload_replaced_after_its_digest_is_taken_cannot_change_records`,
+  `::test_manifest_replaced_after_its_digest_is_taken_cannot_repoint_the_payload`,
+  `::test_the_builder_pins_the_bytes_it_parses`.
+
+### `handle.read(n)` allocates `n` UP FRONT — a size cap is not a free guard
+- First seen in: #2945 (2026-09-13), PR #2952. The review bot filed it as a NITPICK ("minor allocation
+  increase"); I drafted a rebuttal; Codex checkpoint 3 sided with the bot and supplied the number.
+- Symptom: bounding a read as `handle.read(LIMIT + 1)` — the idiomatic way to distinguish "at the
+  limit" from "over it" without a second `stat` — sizes the buffer from the ARGUMENT, not from the
+  file. Measured, Python 3.14 / macOS: a **7-byte** document produced a **67,241,162-byte** traced
+  peak against a 64 MiB limit, versus 394,425 bytes for streaming `hashlib.file_digest`. Transient,
+  but it is `MemoryError` surface on every call, and it scales with the cap you thought was
+  protecting you. Raising the limit makes it strictly worse.
+- Prevention: accumulate in chunks and test the running length, never `read(cap + 1)`. Keep the single
+  forward pass if the correctness property needs it (see the entry above) — chunking does not cost you
+  that. Assert the property: `tracemalloc` peak on a small input, not just "it returns the right
+  bytes".
+- Enforced in: this prevention log; `app/services/r6_pit_bundle.py::_READ_CHUNK_BYTES` and the loop in
+  `read_verified_document`;
+  `tests/test_r6_pit_bundle.py::test_a_small_document_does_not_allocate_the_whole_ceiling`,
+  `::test_a_document_exactly_at_the_ceiling_is_accepted`.
+
+### A regression test whose failure mode is "hang" tests nothing
+- First seen in: #2945 (2026-09-13), Codex checkpoint 3, on a test written in the same session.
+- Symptom: the fix moved from `Path.is_file()` to `os.open`, which **blocks indefinitely** on a FIFO
+  with no writer — before the `fstat` that would reject it. `O_NONBLOCK` fixed it, and the regression
+  test asserted the refusal. But the test carried no timeout, so deleting `O_NONBLOCK` would not fail
+  it: the suite would simply stop, with no output, indistinguishable from a slow machine or a wedged
+  box. The guard against a hang was itself guarded by nothing.
+- Prevention: any test whose regression is a HANG needs an explicit clock, not an assertion alone.
+  `pytest-timeout` is not installed here; a `signal.setitimer(ITIMER_REAL, …)` context manager raising
+  `TimeoutError` is three lines and turns the hang into a failure. Related, already logged: never pipe
+  a gate command, and never pipe a long-running background measurement — both convert a visible
+  failure into silence.
+- Enforced in: this prevention log; `tests/test_r6_pit_bundle.py::_hang_guard` +
+  `::test_fifo_evidence_is_refused_instead_of_blocking`.
