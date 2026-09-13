@@ -491,6 +491,41 @@ describe("StrategyPortfolioLens", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("existing broker order was reconciled");
   });
 
+  it("does not claim the band was checked when something else resolved the order first", async () => {
+    // #2962. `core_resume_already_resolved` is `held`, and before this it fell
+    // through to the band sentence — a claim about an evaluation that never ran.
+    // The scheduled cycle now reconciles core orders every five minutes, so the
+    // operator loading this page and clicking resume can lose that race in
+    // ordinary use rather than only against a second operator.
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue({
+      ...CORE_READY,
+      can_rebalance: false,
+      can_resume: true,
+      pending_order_id: 31,
+      execution_action: "resume",
+      blockers: [{ code: "core_order_unresolved", detail: "Order 31 is unresolved." }],
+    } as never);
+    vi.spyOn(strategiesApi, "rebalanceCoreSleeve").mockResolvedValue({
+      state: "held",
+      reason_code: "core_resume_already_resolved",
+      intent_id: 11,
+      trade_id: 21,
+      order_id: 31,
+      amount: "49.9",
+      submission_policy_version: "core-submission-v1",
+      preflight_policy_version: "core-preflight-v2",
+      broker_preflight_policy_version: "core-broker-preflight-v2",
+    });
+    renderLens();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Resume demo order" }));
+    await userEvent.click(screen.getByRole("button", { name: "Confirm resume" }));
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent("already reconciled by the scheduled cycle");
+    expect(status).not.toHaveTextContent("remains inside its band");
+  });
+
   it("states what is blocking as facts, and offers the control for the one that has one", async () => {
     renderLens();
     const blocking = await screen.findByLabelText("Blocking conditions");

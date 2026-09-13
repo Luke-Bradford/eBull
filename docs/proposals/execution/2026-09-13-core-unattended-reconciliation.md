@@ -1,7 +1,9 @@
 # Unattended reconciliation for the core/cash arm — #2962
 
-**Status: BLOCKED at checkpoint 1. The first design was killed before implementation; nothing was
-built.** Base: `f78acbb3`.
+**Status: SHIPPED.** The first design was killed at checkpoint 1 (base `f78acbb3`) and nothing was
+built from it; the change that shipped is the scheduling one this document specified instead, on
+top of #2964. See "What shipped" at the end — the analysis below is unamended, because the
+falsified first design is the reason the shipped one is one predicate.
 
 **Evidence in:** `docs/proposals/execution/2026-09-13-core-restart-acceptance.md` (gap G-2),
 measured by `tests/test_2949_core_restart_recovery_db.py`.
@@ -122,3 +124,45 @@ because its fake broker returns no executions while pending.
 This spec existed for one Codex checkpoint-1 pass and was killed by it. That is the checkpoint
 working as intended — the cost was one document, against an implementation that would have added a
 second reconciler to a write path documented as unsafe for one.
+
+## What shipped
+
+The scheduling change above, on `fb18d2d1` (#2964 closed). One predicate,
+`AND trade.core_rebalance_intent_id IS NULL`, removed from `reconcile_backlog`'s selection in
+`app/services/strategy_order_reconciliation.py`. No provenance predicate, per §1.
+
+Three things this document expected to be work turned out not to be:
+
+- **"Pass the paper cycle's credentials through"** needed no change. `strategy_paper_cycle` already
+  builds its `EtoroBrokerProvider` from `_load_etoro_credentials` and hands it to
+  `run_strategy_paper_cycle`, which hands it to `reconcile_backlog`. The credentials were always
+  there; only the selection excluded the rows.
+- **No extra lock for the core arm.** The pre-lock window — durable authority committed, per-order
+  lock not yet taken — exists identically on the ALPHA arm (`strategy_paper_executor.py:1366`,
+  whose own comment says the backlog "can be polling this exact order while the broker call is in
+  flight") and was accepted there by #2964. Core joining the batch inherits that accepted window
+  rather than creating a new class of race. ⚠ Do not add `core_submission_lock` to the batch to
+  close it: that lock also takes `PAPER_ALLOCATOR`, so a per-row acquire would block alpha
+  allocation behind a core reconciliation.
+- **No core-arm predicate of any kind belongs in the selection.** `core_arm_authorised` fails
+  CLOSED, which is right for paths that act on a position and wrong here: an order whose intent or
+  mandate later went unexpected is exactly the one whose identity must still be resolved.
+
+Two operator-visible consequences confirmed rather than assumed, both from the unblock comment on
+the issue:
+
+1. `load_core_resume_authority` + `LIMIT 1` means the batch can resolve an order between an operator
+   loading the page and clicking. The result is `held` / `core_resume_already_resolved`, which is
+   honest — but `StrategyPortfolioLens.tsx` rendered every non-`core_order_reconciled` `held` as
+   "the sleeve remains inside its band", a claim about an evaluation that never ran. Fixed here, and
+   the shape is in the prevention log.
+2. `StrategyReconciliationBusy` → 409 already existed. Its detail was the raw exception string,
+   which names neither the holder nor the remedy; the endpoint now words it, and the exception text
+   is left alone because the batch logs it.
+
+⚠ The exposure consequence this document flagged is real and is in the PR description: resolving a
+core order inside the paper cycle can clear the global `order_reconciliation` block, and the same
+cycle then evaluates alpha entries.
+
+**Not closed by this:** G-1 / #2961. A stranded authority is now REACHED unattended every cycle and
+still cannot resolve — a repeated lookup miss is not a terminalisation surface.

@@ -235,38 +235,47 @@ def test_scenario_2_restart_after_commit_never_resubmits_and_blocks_new_authorit
     assert core_state_report(ebull_test_conn)["strategy_orders"] == 1
 
 
-def test_scenario_2_stranded_authority_is_unreachable_by_any_unattended_caller(
+def test_scenario_2_stranded_authority_is_reached_unattended_and_still_cannot_resolve(
     ebull_test_conn: psycopg.Connection[Any],
     core_world: Path,
 ) -> None:
-    """The stop is safe and has no resolution path, attended or otherwise.
+    """The stop is safe, is now REACHED unattended, and still cannot resolve.
+
+    ⚠ This test asserted the opposite until #2962, and the inversion is the
+    point rather than a rewrite.  ``reconcile_backlog`` carried
+    ``AND trade.core_rebalance_intent_id IS NULL`` from ``608dc879``, so the one
+    scheduled reconciliation caller could not see any core order — the finding
+    this harness was written to produce (G-2).  The predicate is gone; what did
+    NOT change is everything below it.
 
     Three facts, each asserted rather than argued:
 
-    1. ``reconcile_backlog`` — the only unattended reconciliation caller, reached
-       from ``scheduler.strategy_paper_cycle`` — cannot see this order.
-       ``strategy_order_reconciliation.py:532`` excludes every core trade
-       (``trade.core_rebalance_intent_id IS NULL``), added without comment in
-       ``608dc879``.  ⚠ Asserted against a POSITIVE CONTROL: a non-core order in
-       the same unresolved state, in the same database, IS returned by the same
-       call.  Without it, a backlog broken to return ``()`` unconditionally would
-       pass this test identically.
-    2. Repeating the attended resume changes nothing.  The broker genuinely never
-       accepted the order, so the exact-ID lookup misses and the reconciliation
-       row cannot reach a terminal state: ``_apply_detail`` needs a successful
-       lookup, and the executor's own ``rejected`` write
-       (``strategy_core_executor.py:321``) belongs to the submission path a dead
-       process never returns to.
-    3. ``enforce_reconciliation_slo`` does NOT share the core exclusion, so the
-       row nothing can resolve is the row it escalates — into a global
+    1. ``reconcile_backlog`` — reached from ``scheduler.strategy_paper_cycle`` —
+       now returns this order.  ⚠ Still asserted against a POSITIVE CONTROL, a
+       non-core order in the same unresolved state in the same database, because
+       the discrimination it buys only changed direction: with both present, a
+       selection broken to return everything and one correctly covering both arms
+       are still told apart by the control's presence, and the core order's
+       ``not_found`` outcome below is what proves the batch actually looked it up
+       rather than merely listing it.
+    2. The unattended pass changes nothing about resolvability, exactly as the
+       attended resume did not.  The broker genuinely never accepted the order,
+       so the exact-ID lookup misses and the reconciliation row cannot reach a
+       terminal state: ``_apply_detail`` needs a successful lookup, and the
+       executor's own ``rejected`` write (``strategy_core_executor.py:321``)
+       belongs to the submission path a dead process never returns to.  ⚠ The
+       mutation count is the invariant: covering the core arm unattended must not
+       have made anything place an order.
+    3. ``enforce_reconciliation_slo`` never shared the core exclusion, so the row
+       nothing can resolve is still the row it escalates — into a global
        ``strategy_execution_blocks`` row that stops new strategy ENTRIES on both
        arms.  ⚠ It does not stop reconciliation or owned-position management, and
        clearing it would not resolve the authority.
 
-    ⚠ Three immediate resumes cannot establish permanence as a matter of
-    experiment; what establishes it is that no code path writes a terminal state
-    without a successful lookup, and the lookup cannot succeed for an order that
-    was never submitted.  Recorded as gap G-1 (#2961).
+    ⚠ Repeated attempts cannot establish permanence as a matter of experiment;
+    what establishes it is that no code path writes a terminal state without a
+    successful lookup, and the lookup cannot succeed for an order that was never
+    submitted.  Recorded as gap G-1 (#2961), which #2962 does NOT close.
     """
     process = run_engine_until_fault(
         database_url=test_database_url(), workdir=core_world, fault="after_commit_before_submit"
@@ -274,15 +283,17 @@ def test_scenario_2_stranded_authority_is_unreachable_by_any_unattended_caller(
     assert process.returncode == SIGKILL_RETURNCODE
     broker = _restarted_engine_broker(core_world)
 
-    control_order_id = seed_non_core_strategy_order(ebull_test_conn)
-    picked_up = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=20)
-    assert [result.order_id for result in picked_up] == [control_order_id]
-
     authority = load_core_resume_authority(ebull_test_conn)
     assert authority is not None
-    for _ in range(3):
-        again = resume_core_submission(ebull_test_conn, broker=_provider(broker), authority=authority)
-        assert again.state == "submission_uncertain"
+
+    control_order_id = seed_non_core_strategy_order(ebull_test_conn)
+    picked_up = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=20)
+    assert sorted(result.order_id for result in picked_up) == sorted([authority.order_id, control_order_id])
+
+    # A second attended resume on top adds nothing and, critically, still places
+    # nothing -- the two reconcilers reaching the same order is now ordinary.
+    again = resume_core_submission(ebull_test_conn, broker=_provider(broker), authority=authority)
+    assert again.state == "submission_uncertain"
     assert broker.read()["mutation_calls"] == 0
     core_row = ebull_test_conn.execute(
         "SELECT state FROM strategy_order_reconciliation_state WHERE order_id=%s",
@@ -376,11 +387,11 @@ def test_scenario_3_lost_acceptance_reconciles_to_exactly_one_owned_position(
 ) -> None:
     """The only fault that can strand real money, and the one it recovers from.
 
-    Classification: AUTOMATICALLY RECOVERED, *conditional on an attended caller*
-    — ``resume_core_submission`` does the work and nothing schedules it (G-2).
-    What is proved here is the economics: the exact-ID lookup finds the order the
-    dead process submitted, one ownership claim is made, and the broker's
-    mutation count never moves past one.
+    Classification: AUTOMATICALLY RECOVERED.  What is proved here is the
+    economics of the ATTENDED path: the exact-ID lookup finds the order the dead
+    process submitted, one ownership claim is made, and the broker's mutation
+    count never moves past one.  The unattended path is the same recovery through
+    a different caller and is proved separately, immediately below.
     """
     process = run_engine_until_fault(database_url=test_database_url(), workdir=core_world, fault="after_broker_accept")
     assert process.returncode == SIGKILL_RETURNCODE
@@ -410,6 +421,61 @@ def test_scenario_3_lost_acceptance_reconciles_to_exactly_one_owned_position(
     assert report["reconciliation_states"] == ["resolved"]
     assert report["trade_statuses"] == ["open"]
     assert broker.read()["mutation_calls"] == 1
+
+
+def test_scenario_3_lost_acceptance_is_recovered_with_no_session_at_all(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """#2962's acceptance: the same recovery, reached by the scheduled caller.
+
+    Identical fault to the test above, and deliberately NOT a variation of it —
+    the difference is the caller and nothing else.  ``reconcile_backlog`` is what
+    ``scheduler.strategy_paper_cycle`` runs every five minutes, so this is the
+    whole claim "a core order left non-terminal by a process restart reaches
+    ``resolved`` with one ownership claim, with no browser session involved".
+
+    Nothing here holds an operator session, loads a credential by
+    ``session.operator_id`` or touches ``rebalance_core_sleeve``.  ⚠ The account
+    identity that makes that safe is held outside this code: ``sql/373`` refuses
+    to revoke or delete either credential the order's eligibility proof names
+    while it is non-terminal, and ``broker_credentials`` admits one live row per
+    ``(operator, provider, label, environment)``.  A provenance predicate in the
+    selection would be unreachable, which is why there is not one.
+
+    ⚠ ``mutation_calls == 1`` is the load-bearing assertion, not
+    ``active_ownership == 1``.  An unattended reconciler that resubmitted would
+    also end at one ownership row.
+    """
+    process = run_engine_until_fault(database_url=test_database_url(), workdir=core_world, fault="after_broker_accept")
+    assert process.returncode == SIGKILL_RETURNCODE
+    assert json.loads((core_world / "broker.json").read_text())["mutation_calls"] == 1
+
+    crashed = core_state_report(ebull_test_conn)
+    assert crashed["orders_with_broker_ref"] == 0
+    assert crashed["reconciliation_states"] == ["unresolved"]
+
+    broker = _restarted_engine_broker(core_world)
+    # A READ, for the assertion only -- the recovery below is given nothing but a
+    # connection and a broker, which is all the scheduled cycle has.
+    stranded = load_core_resume_authority(ebull_test_conn)
+    assert stranded is not None
+
+    reconciled = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=20)
+    assert [(result.order_id, result.state) for result in reconciled] == [(stranded.order_id, "resolved")]
+
+    report = core_state_report(ebull_test_conn)
+    assert report["strategy_orders"] == 1
+    assert report["active_ownership"] == 1
+    assert report["reconciliation_states"] == ["resolved"]
+    assert report["trade_statuses"] == ["open"]
+    assert broker.read()["mutation_calls"] == 1
+
+    # Matrix item 5 (backlog over the batch cap) stops being vacuous for the core
+    # arm here: the arm now HAS a batch. A second pass must select nothing, since
+    # the row is terminal.
+    assert reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=20) == ()
+    assert broker.read()["lookup_calls"] == 1
 
 
 def test_scenario_8_repeating_a_recovered_cycle_creates_no_further_order(

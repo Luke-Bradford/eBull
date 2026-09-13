@@ -868,6 +868,21 @@ def reconcile_backlog(
 
     ``first_unresolved_at`` is deliberately never written, so the age
     ``enforce_reconciliation_slo`` measures cannot be reset to look healthy.
+
+    ⚠⚠ The selection covers BOTH arms (#2962).  It carried
+    ``AND trade.core_rebalance_intent_id IS NULL`` from ``608dc879`` until now,
+    which left the core arm with no unattended reconciler at all -- not merely
+    no crash recovery, since an ordinary successful core submission also ends at
+    ``pending`` and needed an attended follow-up to finish.  The exclusion was
+    never about credential provenance: ``sql/373`` refuses to revoke or delete
+    either credential an unresolved core order's eligibility proof names, and
+    ``broker_credentials`` admits one live row per
+    ``(operator, provider, label, environment)``, so the account an unattended
+    reconciler reaches IS the one that placed the order.  It was about
+    SERIALISATION -- ``resume_core_submission`` was a second reconciler for the
+    core arm, into a write path with no claim and no terminal guard.  #2964
+    added both, so the two are now safe against each other: the attended resume
+    blocks for the lock, the batch tries and skips.
     """
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
@@ -880,6 +895,14 @@ def reconcile_backlog(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
+            -- The trade joins stay INNER after #2962 dropped the core exclusion:
+            -- they no longer select an arm, they still witness that the order is
+            -- linked to a strategy trade, which every attempt path assumes.
+            -- ⚠ No core-arm predicate belongs here. `core_arm_authorised` is for
+            -- paths that ACT on a position; reconciliation resolves the identity
+            -- of an order the broker may ALREADY hold, and an order whose intent
+            -- or mandate later went unexpected is precisely the one that must
+            -- still be looked up. Failing closed here would strand it invisibly.
             SELECT state.order_id
             FROM strategy_order_reconciliation_state state
             JOIN orders o ON o.order_id = state.order_id
@@ -887,7 +910,6 @@ def reconcile_backlog(
             JOIN strategy_trades trade ON trade.strategy_trade_id=link.strategy_trade_id
             WHERE state.state NOT IN ('resolved', 'rejected')
               AND o.execution_origin = 'strategy'
-              AND trade.core_rebalance_intent_id IS NULL
               AND (
                     state.state NOT IN ('not_found', 'ambiguous', 'error')
                  OR state.last_attempt_at IS NULL
