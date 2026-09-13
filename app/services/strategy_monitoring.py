@@ -843,6 +843,17 @@ def load_owned_pnl(conn: psycopg.Connection[Any], *, versions: Sequence[str]) ->
             # still reported a confident number, which is the shape this change
             # exists to remove rather than relocate.
             "open_position_fees_and_distributions_unseparable",
+            # ⚠ #2602 item 1 ADDED this one, and it belongs to the accrual rather
+            # than to the close rows. While `fees` was fed only by `trade_events`, a
+            # missing broker snapshot could not affect it, so its absence here was
+            # correct. It is now an INPUT: the guard above skips the accrual and
+            # `continue`s when `active_broker_position_id` is NULL — which is the
+            # ordinary state when portfolio sync deletes an externally-closed
+            # position before ownership reconciles — and without this line the
+            # already-charged fees would vanish into a confident partial sum, and
+            # then into `_pooled_cash` as if they were zero. `invested_known` and
+            # `unrealised_known` already exclude it for the same reason.
+            "active_position_missing_from_broker_snapshot",
         }.intersection(reasons)
         realised_value = realised if realised_known else None
         unrealised_value = unrealised if unrealised_known else None

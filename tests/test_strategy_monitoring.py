@@ -2004,9 +2004,55 @@ def test_owned_lifecycle_sql_total_fees_has_a_reader() -> None:
     read it, and nothing failed.
     """
     source = Path("app/services/strategy_monitoring.py").read_text(encoding="utf-8")
-    selected = 'bp.total_fees' in source
+    selected = "bp.total_fees" in source
     consumed = 'row["total_fees"]' in source
     assert selected and consumed, (
-        "strategy_monitoring selects bp.total_fees; it must also read it. "
-        f"selected={selected} consumed={consumed}"
+        f"strategy_monitoring selects bp.total_fees; it must also read it. selected={selected} consumed={consumed}"
     )
+
+
+def test_missing_broker_snapshot_makes_observed_fees_unknown(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2602 item 1, Codex ckpt-2 P2: the accrual's absence must reach `complete`.
+
+    An active ownership whose broker position has gone from the snapshot — the
+    ordinary state when portfolio sync deletes an externally-closed position before
+    ownership reconciles — cannot have its accrual read. While `fees` was fed only
+    by `trade_events` that did not matter; now it is an input, so a numeric fee
+    total here would be a confident partial sum of a figure we cannot see.
+    """
+    strategy_id = "monitoring-no-snapshot-fees"
+    strategy_version = "monitoring-no-snapshot-fees-v1"
+    instrument_id = 2453064
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    # Ownership is active, but no `broker_positions` row exists for 7605.
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id, status)
+        VALUES (%s, 7605, 'active')
+        """,
+        (trade_id,),
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert "active_position_missing_from_broker_snapshot" in pnl.incomplete_reasons
+    assert pnl.observed_fees is None
+    assert pnl.invested_capital is None
+    assert pnl.unrealised_pnl is None
