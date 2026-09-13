@@ -85,6 +85,31 @@ def _seed_account(conn: psycopg.Connection[Any]) -> tuple[UUID, UUID, UUID]:
     return operator_id, ids[0], ids[1]
 
 
+def _seed_revoked_pair(conn: psycopg.Connection[Any], operator_id: UUID) -> tuple[UUID, UUID]:
+    """A SUPERSEDED pair for the same account — what a rotation leaves behind.
+
+    ⚠ They must be revoked: ``broker_credentials_unique_active`` (sql/019) is
+    unique on ``(operator_id, provider, label, environment) WHERE revoked_at IS
+    NULL``, so a second LIVE pair cannot exist. That uniqueness is also why
+    ``live_credential_ids`` cannot return an arbitrary pick.
+    """
+    ids: list[UUID] = []
+    for label in ("api_key", "user_key"):
+        row = conn.execute(
+            """
+            INSERT INTO broker_credentials
+                (operator_id, provider, label, environment, ciphertext, last_four,
+                 key_version, revoked_at)
+            VALUES (%s,'etoro',%s,'demo','\\x00'::bytea,'0000',1, now())
+            RETURNING id
+            """,
+            (operator_id, label),
+        ).fetchone()
+        assert row is not None
+        ids.append(row[0])
+    return ids[0], ids[1]
+
+
 def _proof(
     conn: psycopg.Connection[Any],
     *,
@@ -385,4 +410,51 @@ def test_the_symbol_is_reported_for_the_job_note(ebull_test_conn: psycopg.Connec
     )
     scope = _select(ebull_test_conn, operator_id, (api_key_id, user_key_id))
     assert scope.due[0].symbol == "REF.M"
+    ebull_test_conn.rollback()
+
+
+def test_a_rotation_entry_is_not_deferred_behind_a_stale_backlog(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The WARNING's regression against real rows.
+
+    An arm-2 entry is selected because its credentials are superseded, which
+    typically means it is FRESH — so an age-only ordering put it last and the
+    per-run cap deferred it every tick. Ordering is superseded-first for that
+    reason: such a proof is unusable NOW, where a stale in-scope one is only
+    approaching unusable.
+    """
+    operator_id, api_key_id, user_key_id = _seed_account(ebull_test_conn)
+    stale_ids = []
+    for symbol, extra_days in (("REF.N", 1), ("REF.O", 2), ("REF.P", 3)):
+        instrument_id = _seed_instrument(ebull_test_conn, symbol)
+        stale_ids.append(instrument_id)
+        _proof(
+            ebull_test_conn,
+            instrument_id=instrument_id,
+            operator_id=operator_id,
+            api_key_id=api_key_id,
+            user_key_id=user_key_id,
+            age=_STALE + timedelta(days=extra_days),
+        )
+    # ⚠ The rotated instrument's proof is attributed to a SUPERSEDED pair while
+    # the three stale ones stay on the live pair. Passing a wholly-unknown pair
+    # to the selector instead would mark ALL FOUR superseded and the assertion
+    # would fall through to the age tiebreak — which is how the first draft of
+    # this test passed for the wrong reason.
+    old_api_key_id, old_user_key_id = _seed_revoked_pair(ebull_test_conn, operator_id)
+    rotated_instrument = _seed_instrument(ebull_test_conn, "REF.Q")
+    _proof(
+        ebull_test_conn,
+        instrument_id=rotated_instrument,
+        operator_id=operator_id,
+        api_key_id=old_api_key_id,
+        user_key_id=old_user_key_id,
+        age=timedelta(minutes=5),
+    )
+
+    scope = _select(ebull_test_conn, operator_id, (api_key_id, user_key_id), limit=1)
+    assert [s.instrument_id for s in scope.due] == [rotated_instrument]
+    assert scope.due[0].credentials_superseded is True
+    assert scope.deferred_count == 3
     ebull_test_conn.rollback()

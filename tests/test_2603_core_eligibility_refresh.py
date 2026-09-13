@@ -215,11 +215,38 @@ def test_a_fresh_proof_under_superseded_credentials_is_due() -> None:
     assert scope.due[0].credentials_superseded is True
 
 
-def test_selection_is_oldest_first() -> None:
+def test_selection_is_oldest_first_among_in_scope_proofs() -> None:
     """The starvation control: after downtime the most-expired go first, so the
     per-run cap cannot keep deferring the same tail."""
     scope = _select([_row(1, age_hours=13), _row(2, age_hours=40), _row(3, age_hours=20)])
     assert [stale.instrument_id for stale in scope.due] == [2, 3, 1]
+
+
+def test_a_rotation_entry_outranks_an_older_in_scope_one() -> None:
+    """⚠ Age alone put arm-2 entries LAST, which was a defect (review WARNING on
+    PR #2971): a superseded proof is selected precisely because its credentials
+    changed, so it is typically FRESH and sorted to the back.
+
+    A superseded proof is unusable RIGHT NOW — ``require_core_eligibility``
+    compares the pair — where a stale in-scope one is only approaching that.
+    """
+    scope = _select([_row(1, age_hours=400), _row(2, age_hours=0.1, superseded=True)])
+    assert [stale.instrument_id for stale in scope.due] == [2, 1]
+
+
+def test_the_cap_cannot_defer_a_rotation_entry_behind_a_stale_backlog() -> None:
+    """The regression the WARNING names, at the cap.
+
+    Under the old age-only ordering the rotation entry would be item 6 of 6 and
+    a ``limit=2`` run would defer it every tick — leaving a rotated account
+    unusable for exactly as long as arm 2 exists to prevent.
+    """
+    rows = [_row(i, age_hours=100 + i) for i in range(1, 6)]
+    rows.append(_row(99, age_hours=0.1, superseded=True))
+    scope = _select(rows, limit=2)
+    assert scope.due[0].instrument_id == 99
+    assert scope.due[0].credentials_superseded is True
+    assert scope.deferred_count == 4
 
 
 def test_the_cap_defers_the_remainder_rather_than_raising_or_truncating_silently() -> None:

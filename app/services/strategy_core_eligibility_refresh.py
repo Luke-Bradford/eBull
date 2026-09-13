@@ -192,8 +192,10 @@ def select_proofs_to_revalidate(
     this is advisory, deciding what to ask.  The WRITE attributes under the locked
     ``live_credential_ids``, as that reader's own docstring requires.
 
-    Ordered oldest-first: after downtime the most-expired instruments go first, so
-    the per-run cap cannot permanently starve the same tail.
+    Ordering is **superseded-credentials first, then oldest-first** — see the
+    comment on the sort. After downtime the most-expired instruments go before the
+    less-expired ones, so the per-run cap cannot permanently starve the same tail;
+    and an unusable proof outranks an ageing one.
     """
     if limit < 1:
         raise ValueError(f"limit must be at least 1, got {limit}")
@@ -233,7 +235,20 @@ def select_proofs_to_revalidate(
             )
         )
 
-    due.sort(key=lambda stale: stale.prior_age, reverse=True)
+    # ⚠⚠ UNUSABLE BEFORE MERELY-AGEING, then oldest-first within each group.
+    #
+    # Sorting on age alone was a defect (review WARNING on PR #2971): an arm-2
+    # entry is selected precisely BECAUSE its credentials are superseded, and
+    # such a proof is typically FRESH -- `prior_age` near zero -- so it sorted to
+    # the very back. Under the per-run cap a large stale backlog would then defer
+    # exactly the rotation-healing entries arm 2 exists to guarantee, leaving a
+    # rotated account unusable for longer than an age-only rule would have.
+    #
+    # The precedence is not a preference: a superseded proof is unusable RIGHT
+    # NOW -- `require_core_eligibility` compares the credential pair and refuses
+    # it whatever its age -- whereas a stale in-scope proof is only approaching
+    # that state. Restoring a broken account outranks extending a working one.
+    due.sort(key=lambda stale: (not stale.credentials_superseded, -stale.prior_age.total_seconds()))
     return RevalidationScope(
         due=tuple(due[:limit]),
         proved_instrument_count=len(rows),

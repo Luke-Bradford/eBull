@@ -6238,6 +6238,17 @@ def core_eligibility_refresh() -> None:
                     # "only sound because a proof requests exactly one
                     # instrument". Batching would need a digest rule change and
                     # buys nothing at this population.
+                    # ⚠ `env="demo"` LITERALLY, not `settings.etoro_env` again,
+                    # and this is the same deliberate choice `core_rebalance_
+                    # observation` makes two functions up: re-reading a mutable
+                    # setting between the check at the top of this function and
+                    # its use here is the check-then-use gap `strategy_paper_cycle`
+                    # closes the same way. ⚠ Review nitpick on PR #2971 read the
+                    # literal as coupling correctness to that gate; it is the
+                    # opposite -- the literal is what makes the broker call
+                    # independent of a setting that could be reloaded mid-run. The
+                    # DB reads keep `settings.etoro_env` because they must agree
+                    # with the value the SELECTION used.
                     with EtoroBrokerProvider(api_key=creds[0], user_key=creds[1], env="demo") as broker:
                         response = broker.check_instrument_eligibility([stale.instrument_id])
                     assessment = evaluate_core_eligibility(
