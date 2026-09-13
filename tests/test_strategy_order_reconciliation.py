@@ -27,14 +27,15 @@ from app.services.strategy_control_plane import (
 from app.services.strategy_order_reconciliation import (
     enforce_reconciliation_slo,
     ensure_strategy_request_id,
+    reconcile_backlog,
     reconcile_strategy_order,
 )
 
 pytestmark = pytest.mark.integration
 
 
-def _seed_trade(conn: psycopg.Connection[Any], *, instrument_id: int = 2451001) -> tuple[int, int]:
-    """Seed a paper-funded strategy trade linked to a submitted order.
+def _seed_deployment(conn: psycopg.Connection[Any], *, capital_limit: Decimal = Decimal("1000")) -> int:
+    """Promote ``S-REC`` to paper and return one funded deployment id.
 
     ⚠ Callers MUST request the ``registered_strategy_test_candidates``
     fixture. ``configure_deployment`` refuses capital authority to any
@@ -42,6 +43,38 @@ def _seed_trade(conn: psycopg.Connection[Any], *, instrument_id: int = 2451001) 
     ``capital_candidate``, and every production entry is
     ``harness_validation`` today — so ``S-REC`` only becomes fundable
     through that fixture's monkeypatched manifest.
+    """
+    conn.execute(
+        """
+        INSERT INTO strategy_promotions (
+            strategy_id, strategy_version, from_stage, to_stage, gate_version,
+            evidence_ref, promoted_by, reason
+        ) VALUES
+          ('S-REC', 'v1', NULL, 'research_candidate', 'test-v1', NULL, 'test', 'registered'),
+          ('S-REC', 'v1', 'research_candidate', 'historical_validated', 'test-v1', 'e:h', 'test', 'historical'),
+          ('S-REC', 'v1', 'historical_validated', 'forward_observation', 'test-v1', 'e:f', 'test', 'forward'),
+          ('S-REC', 'v1', 'forward_observation', 'paper_enabled', 'test-v1', 'e:p', 'test', 'paper')
+        """
+    )
+    deployment = configure_deployment(
+        conn,
+        strategy_id="S-REC",
+        strategy_version="v1",
+        mode="paper",
+        capital_limit=capital_limit,
+        enabled=True,
+        changed_by="test",
+        reason="reconciliation fixture",
+    )
+    return deployment.deployment_id
+
+
+def _seed_order(conn: psycopg.Connection[Any], *, deployment_id: int, instrument_id: int) -> tuple[int, int]:
+    """Seed one funded strategy trade and its submitted order.
+
+    Split out of ``_seed_trade`` for #2948: a fairness test needs several
+    orders under ONE deployment, and the promotion rows may only be inserted
+    once.
     """
     conn.execute(
         "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (%s, %s, %s, true)",
@@ -61,34 +94,11 @@ def _seed_trade(conn: psycopg.Connection[Any], *, instrument_id: int = 2451001) 
         (instrument_id,),
     ).fetchone()
     assert signal_row is not None
-    signal_id = signal_row[0]
-    conn.execute(
-        """
-        INSERT INTO strategy_promotions (
-            strategy_id, strategy_version, from_stage, to_stage, gate_version,
-            evidence_ref, promoted_by, reason
-        ) VALUES
-          ('S-REC', 'v1', NULL, 'research_candidate', 'test-v1', NULL, 'test', 'registered'),
-          ('S-REC', 'v1', 'research_candidate', 'historical_validated', 'test-v1', 'e:h', 'test', 'historical'),
-          ('S-REC', 'v1', 'historical_validated', 'forward_observation', 'test-v1', 'e:f', 'test', 'forward'),
-          ('S-REC', 'v1', 'forward_observation', 'paper_enabled', 'test-v1', 'e:p', 'test', 'paper')
-        """
-    )
-    deployment = configure_deployment(
-        conn,
-        strategy_id="S-REC",
-        strategy_version="v1",
-        mode="paper",
-        capital_limit=Decimal("1000"),
-        enabled=True,
-        changed_by="test",
-        reason="reconciliation fixture",
-    )
     decision_id = decide_funding(
         conn,
-        signal_id=int(signal_id),
+        signal_id=int(signal_row[0]),
         verdict="allocated",
-        deployment_id=deployment.deployment_id,
+        deployment_id=deployment_id,
         amount=Decimal("100"),
         reason_code="test",
     )
@@ -107,6 +117,12 @@ def _seed_trade(conn: psycopg.Connection[Any], *, instrument_id: int = 2451001) 
     order_id = order_row[0]
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=int(order_id), purpose="entry")
     return trade_id, int(order_id)
+
+
+def _seed_trade(conn: psycopg.Connection[Any], *, instrument_id: int = 2451001) -> tuple[int, int]:
+    """Seed a paper-funded strategy trade linked to a submitted order."""
+    deployment_id = _seed_deployment(conn)
+    return _seed_order(conn, deployment_id=deployment_id, instrument_id=instrument_id)
 
 
 def _detail(
@@ -274,6 +290,192 @@ def test_not_found_and_overdue_backlog_activate_entry_kill(
     healthy = enforce_reconciliation_slo(conn, max_unresolved_seconds=10)
     assert healthy.active_block is False
     assert conn.execute("SELECT count(*) FROM strategy_execution_blocks").fetchone() == (1,)
+
+
+def _not_found_broker() -> MagicMock:
+    """A broker that answers every lookup ``not_found`` and counts the calls."""
+    broker = MagicMock(spec=BrokerProvider)
+    broker.lookup_order.side_effect = BrokerOrderNotFound("not visible")
+    return broker
+
+
+def _seed_backlog(
+    conn: psycopg.Connection[Any], *, deployment_id: int, count: int, first_instrument_id: int
+) -> list[int]:
+    """Seed ``count`` submitted strategy orders that are already in the backlog."""
+    order_ids: list[int] = []
+    for offset in range(count):
+        _, order_id = _seed_order(conn, deployment_id=deployment_id, instrument_id=first_instrument_id + offset)
+        # ensure_strategy_request_id is what creates the unresolved state row.
+        ensure_strategy_request_id(conn, order_id=order_id)
+        order_ids.append(order_id)
+    conn.commit()
+    return order_ids
+
+
+def _slo_ages(conn: psycopg.Connection[Any]) -> dict[int, datetime]:
+    """The exact ``first_unresolved_at`` per order — the age the SLO measures."""
+    rows = conn.execute("SELECT order_id, first_unresolved_at FROM strategy_order_reconciliation_state").fetchall()
+    # reconcile_backlog refuses a connection that is not idle.
+    conn.commit()
+    return {int(order_id): unresolved_at for order_id, unresolved_at in rows}
+
+
+def _age_every_attempt(conn: psycopg.Connection[Any]) -> None:
+    """Push every attempt clock a day back, preserving the relative order.
+
+    ⚠ Advancing a Python ``now`` does not advance SQL ``now()``, so cycle
+    boundaries are simulated by moving the stored timestamps rather than by
+    sleeping.  Ageing every row by the SAME interval leaves the rotation order
+    untouched and puts everything past the cooldown cap, which isolates the
+    fairness ordering from the backoff.
+    """
+    conn.execute(
+        "UPDATE strategy_order_reconciliation_state "
+        "SET last_attempt_at = last_attempt_at - interval '1 day' "
+        "WHERE last_attempt_at IS NOT NULL"
+    )
+    conn.commit()
+
+
+def test_backlog_rotates_and_never_strands_an_order_past_the_batch_limit(
+    ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
+) -> None:
+    """#2948: a stuck head must not own the batch forever.
+
+    The old ``ORDER BY first_unresolved_at, order_id`` sorted on two keys that
+    never change for a non-terminal row, so orders past ``limit`` were never
+    visited again — this exact sequence would have been
+    ``[o0,o1,o2]`` four times.
+    """
+    conn = ebull_test_conn
+    deployment_id = _seed_deployment(conn)
+    orders = _seed_backlog(conn, deployment_id=deployment_id, count=6, first_instrument_id=2451200)
+    broker = _not_found_broker()
+    slo_ages_at_seed = _slo_ages(conn)
+
+    first = reconcile_backlog(conn, broker=broker, limit=3)
+    assert [result.order_id for result in first] == orders[0:3]
+    assert broker.lookup_order.call_count == 3
+    _age_every_attempt(conn)
+
+    second = reconcile_backlog(conn, broker=broker, limit=3)
+    assert [result.order_id for result in second] == orders[3:6]
+    assert broker.lookup_order.call_count == 6
+    _age_every_attempt(conn)
+
+    # Every one of the six was attempted within ceil(6 / 3) = 2 cycles.
+    assert conn.execute(
+        "SELECT count(*) FROM strategy_order_reconciliation_state WHERE last_attempt_at IS NULL"
+    ).fetchone() == (0,)
+
+    # A NEW order joins at the front (NULL sorts first) without resetting anyone
+    # else's rotation — but only because fewer than ``limit`` rows are unattempted.
+    _, arrival = _seed_order(conn, deployment_id=deployment_id, instrument_id=2451299)
+    ensure_strategy_request_id(conn, order_id=arrival)
+    conn.commit()
+    slo_ages_at_seed[arrival] = _slo_ages(conn)[arrival]
+
+    third = reconcile_backlog(conn, broker=broker, limit=3)
+    assert [result.order_id for result in third] == [arrival, orders[0], orders[1]]
+    assert broker.lookup_order.call_count == 9
+
+    # A terminal order leaves the backlog and is never polled again.
+    conn.execute(
+        "UPDATE strategy_order_reconciliation_state SET state = 'resolved', reconciled_at = now() WHERE order_id = %s",
+        (orders[2],),
+    )
+    conn.commit()
+    _age_every_attempt(conn)
+
+    fourth = reconcile_backlog(conn, broker=broker, limit=3)
+    assert [result.order_id for result in fourth] == orders[3:6]
+    assert orders[2] not in {result.order_id for result in fourth}
+    assert broker.lookup_order.call_count == 12
+
+    # The SLO age is measured on first_unresolved_at, which no attempt writes:
+    # rotation must not be able to make an overdue backlog look fresh. Compared
+    # as EXACT stored timestamps — a freshness window would both flake on a slow
+    # runner and pass if reconciliation reset the column to now().
+    assert _slo_ages(conn) == slo_ages_at_seed
+    assert len(slo_ages_at_seed) == 7
+
+
+def test_backlog_cooldown_defers_dead_orders_but_never_a_progressing_one(
+    ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
+) -> None:
+    """#2948: the cooldown is a venue-budget exclusion on no-progress states only."""
+    conn = ebull_test_conn
+    deployment_id = _seed_deployment(conn)
+    orders = _seed_backlog(conn, deployment_id=deployment_id, count=4, first_instrument_id=2451300)
+    inside_cooldown, at_boundary, capped, progressing = orders
+
+    for order_id, state, attempts, age_seconds in (
+        # attempt 1 -> 300 * (2^0 - 0.5) = 150s. 100s is inside it.
+        (inside_cooldown, "not_found", 1, 100),
+        # ...and one whole cycle later is outside it, which is the point of the
+        # half-cycle slack: a delay of exactly 300s would be missed here.
+        (at_boundary, "not_found", 1, 300),
+        # attempt 10 -> capped at 3450s, so 3000s is still inside.
+        (capped, "error", 10, 3000),
+        # 'pending' made progress; a lifetime attempt_count must never defer it.
+        (progressing, "pending", 99, 1),
+    ):
+        conn.execute(
+            "UPDATE strategy_order_reconciliation_state "
+            "SET state = %s, attempt_count = %s, last_attempt_at = now() - make_interval(secs => %s) "
+            "WHERE order_id = %s",
+            (state, attempts, age_seconds, order_id),
+        )
+    conn.commit()
+
+    broker = _not_found_broker()
+    results = reconcile_backlog(conn, broker=broker, limit=10)
+
+    assert [result.order_id for result in results] == [at_boundary, progressing]
+    assert broker.lookup_order.call_count == 2
+
+
+def test_an_unmodelled_failure_does_not_abort_the_batch_or_own_the_next_one(
+    ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
+) -> None:
+    """#2948: a poison row is the second absorbing state.
+
+    An exception outside the four modelled classes used to escape mid-generator:
+    every later order was skipped AND the failing row's attempt clock never
+    advanced, so the next cycle selected it first and failed identically.
+    """
+    conn = ebull_test_conn
+    deployment_id = _seed_deployment(conn)
+    orders = _seed_backlog(conn, deployment_id=deployment_id, count=3, first_instrument_id=2451400)
+    poison = orders[0]
+
+    broker = MagicMock(spec=BrokerProvider)
+    broker.lookup_order.side_effect = [
+        RuntimeError("unmodelled transport failure"),
+        BrokerOrderNotFound("not visible"),
+        BrokerOrderNotFound("not visible"),
+    ]
+
+    results = reconcile_backlog(conn, broker=broker, limit=3)
+    assert [result.order_id for result in results] == orders
+    assert results[0].state == "error"
+    assert results[0].error_code == "reconcile_unexpected_error"
+    assert [result.state for result in results[1:]] == ["not_found", "not_found"]
+    assert conn.execute(
+        "SELECT last_attempt_at IS NOT NULL, attempt_count FROM strategy_order_reconciliation_state "
+        "WHERE order_id = %s",
+        (poison,),
+    ).fetchone() == (True, 1)
+
+    # The poison row takes its turn in the rotation rather than monopolising it.
+    _age_every_attempt(conn)
+    broker.lookup_order.side_effect = BrokerOrderNotFound("not visible")
+    again = reconcile_backlog(conn, broker=broker, limit=3)
+    assert [result.order_id for result in again] == orders
 
 
 def test_manual_order_cannot_receive_strategy_submission_identity(
