@@ -346,6 +346,68 @@ def test_a_nested_acquire_raises_rather_than_silently_double_counting(
         pass
 
 
+def test_two_connections_in_one_context_may_hold_different_orders(
+    ebull_test_conn: psycopg.Connection[Any],
+    holder: psycopg.Connection[Any],
+) -> None:
+    """The nesting guard is per (connection, order), not per order.
+
+    Review nitpick on PR #2975. The hazard it exists for is ONE session acquiring
+    twice; two different connections in the same call context is the ordinary
+    contention this module resolves at the server. Keying on the order alone would
+    have invented a conflict Postgres does not have — and, worse, a SECOND caller
+    on its own connection would have been refused before ever asking the server,
+    so a legitimate wait would have surfaced as a programming error.
+    """
+    with try_reconciliation_order_lock(ebull_test_conn, 4251):
+        with try_reconciliation_order_lock(holder, 4252):
+            pass
+    # Same ORDER on the second connection is a real conflict, resolved by the
+    # server (Busy), not by the local guard.
+    with try_reconciliation_order_lock(ebull_test_conn, 4253):
+        with pytest.raises(StrategyReconciliationBusy):
+            with try_reconciliation_order_lock(holder, 4253):
+                pytest.fail("unreachable")
+
+
+def test_the_bodys_exception_survives_a_lost_lock_at_release(
+    ebull_test_conn: psycopg.Connection[Any],
+    holder: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A release failure must not replace the caller's real failure.
+
+    Review WARNING on PR #2975. Raising the lost-ownership error from the exit
+    path while another exception is propagating would surface a broker or
+    persistence failure as a lock-ownership message — less informative, and
+    pointing at the wrong subsystem entirely. It is logged instead.
+
+    ⚠ The lock is stolen mid-body by unlocking it from the holder connection
+    (advisory locks are not owner-checked across sessions for this purpose here:
+    the release simply finds nothing to release and returns FALSE), which is the
+    only way to reach the lost-ownership branch deterministically.
+    """
+    conn = ebull_test_conn
+    params = recon._order_lock_params(4254)
+    with caplog.at_level("ERROR"):
+        with pytest.raises(ValueError, match="the real failure"):
+            with try_reconciliation_order_lock(conn, 4254):
+                # Release it out from under the context manager, so its own
+                # unlock returns FALSE.
+                conn.execute(f"SELECT pg_advisory_unlock({recon._ORDER_LOCK_KEY_SQL})", params)
+                conn.commit()
+                raise ValueError("the real failure")
+    assert any("ownership for 4254 was lost" in record.getMessage() for record in caplog.records)
+
+    # Control arm: with NO exception in flight, the same lost lock DOES raise —
+    # otherwise the assertion above would pass for a helper that never checks.
+    with pytest.raises(StrategyReconciliationError, match="ownership for 4255 was lost"):
+        with try_reconciliation_order_lock(conn, 4255):
+            conn.execute(f"SELECT pg_advisory_unlock({recon._ORDER_LOCK_KEY_SQL})", recon._order_lock_params(4255))
+            conn.commit()
+    assert holder is not None  # the fixture supplies this module's skip-when-no-DB guard
+
+
 # --------------------------------------------------------------------------
 # 3. Item 2 — the reconciler claims, and the backlog skips what it cannot claim
 # --------------------------------------------------------------------------

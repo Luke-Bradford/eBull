@@ -172,7 +172,9 @@ _ORDER_LOCK_UNLOCK_SQL = f"SELECT pg_advisory_unlock({_ORDER_LOCK_KEY_SQL})"
 # leaving the lock HELD. An inner context manager exiting would therefore report
 # success and release nothing. No path nests today; this ContextVar (the shape of
 # ``app/jobs/locks.py::_HELD_SOURCES``) makes a future one fail loudly instead.
-_HELD_ORDER_LOCKS: ContextVar[frozenset[int]] = ContextVar("_reconciliation_held_order_locks", default=frozenset())
+_HELD_ORDER_LOCKS: ContextVar[frozenset[tuple[int, int]]] = ContextVar(
+    "_reconciliation_held_order_locks", default=frozenset()
+)
 
 
 def _order_lock_params(order_id: int) -> tuple[str, int]:
@@ -188,25 +190,62 @@ def _order_lock(conn: psycopg.Connection[Any], order_id: int, *, wait: bool) -> 
     # CONTENTION path needs the commit just as much as the success path.
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyReconciliationError("the reconciliation order lock requires an idle connection")
+    # ⚠ Keyed on (connection, order), not order alone. The hazard the guard exists
+    # for is ONE session acquiring twice; two different connections taking the same
+    # order's lock in one call context is the ordinary contention this module
+    # handles at the server, and refusing it here would invent a conflict Postgres
+    # does not have. ``id(conn)`` is sound as the key precisely because the
+    # connection object is alive for the whole hold, so it cannot be reused while
+    # the entry is in the set.
+    key = (id(conn), order_id)
     held = _HELD_ORDER_LOCKS.get()
-    if order_id in held:
-        raise StrategyReconciliationError(f"reconciliation order lock for {order_id} is already held in this context")
+    if key in held:
+        raise StrategyReconciliationError(
+            f"reconciliation order lock for {order_id} is already held on this connection"
+        )
     params = _order_lock_params(order_id)
     acquired = conn.execute(_ORDER_LOCK_WAIT_SQL if wait else _ORDER_LOCK_TRY_SQL, params).fetchone()
     conn.commit()
     if not wait and acquired != (True,):
         raise StrategyReconciliationBusy(f"order {order_id} is already being reconciled")
-    token = _HELD_ORDER_LOCKS.set(held | {order_id})
+    token = _HELD_ORDER_LOCKS.set(held | {key})
     try:
         yield
+    except BaseException:
+        # ⚠ The body's exception WINS. Raising a lost-ownership error from a
+        # `finally` while another exception is propagating replaces it -- the
+        # broker or persistence failure the caller actually needs would surface as
+        # a lock-ownership message, which is strictly less informative and points
+        # at the wrong subsystem. Release, log loudly, and let the original
+        # propagate. `BaseException` and not `Exception`: a `KeyboardInterrupt`
+        # must still release the lock.
+        _release_order_lock(conn, params=params, order_id=order_id, raise_on_loss=False)
+        raise
+    else:
+        _release_order_lock(conn, params=params, order_id=order_id, raise_on_loss=True)
     finally:
         _HELD_ORDER_LOCKS.reset(token)
-        if conn.info.transaction_status != TransactionStatus.IDLE:
-            conn.rollback()
-        released = conn.execute(_ORDER_LOCK_UNLOCK_SQL, params).fetchone()
-        conn.commit()
-        if released != (True,):
-            raise StrategyReconciliationError(f"reconciliation order lock ownership for {order_id} was lost")
+
+
+def _release_order_lock(
+    conn: psycopg.Connection[Any],
+    *,
+    params: tuple[str, int],
+    order_id: int,
+    raise_on_loss: bool,
+) -> None:
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.rollback()
+    released = conn.execute(_ORDER_LOCK_UNLOCK_SQL, params).fetchone()
+    conn.commit()
+    if released == (True,):
+        return
+    message = f"reconciliation order lock ownership for {order_id} was lost"
+    if raise_on_loss:
+        raise StrategyReconciliationError(message)
+    # A lost lock means the critical section was not what it claimed to be, so it
+    # must be loud even when it cannot be raised.
+    logger.error("%s while another exception was propagating", message)
 
 
 def reconciliation_order_lock(conn: psycopg.Connection[Any], order_id: int) -> AbstractContextManager[None]:
