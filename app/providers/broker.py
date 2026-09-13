@@ -90,7 +90,17 @@ class BrokerOrderSubmissionError(RuntimeError):
 
 
 class BrokerOrderSubmissionUncertain(BrokerOrderSubmissionError):
-    """Transport/response failure requires lookup by the same request UUID."""
+    """Transport/response failure requires lookup by the same request UUID.
+
+    ``raw_payload`` carries whatever the broker did return (an error body, a
+    transport message, an unparseable response). A caller that parks the
+    attempt must persist it: without the response evidence there is nothing
+    for a later operator resolution to work from (#2942).
+    """
+
+    def __init__(self, message: str, *, raw_payload: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.raw_payload: dict[str, Any] = raw_payload if raw_payload is not None else {"error": message}
 
 
 class BrokerPositionMutationError(RuntimeError):
@@ -593,6 +603,10 @@ class BrokerProvider(ABC):
         request_id: optional durable broker idempotency identity. Strategy
         callers must commit this UUID before I/O and reuse it after uncertainty.
         Returns the broker's response, including fill details if immediately filled.
+
+        Raises ``BrokerOrderSubmissionUncertain`` when the outcome is unknown
+        (transport failure, 5xx, 408/409/425/429, unparseable response). A
+        caller must NOT treat that as a rejection and must not re-submit.
         """
 
     @abstractmethod
@@ -600,12 +614,24 @@ class BrokerProvider(ABC):
         self,
         position_id: int,
         units_to_deduct: Decimal | None = None,
+        *,
+        instrument_id: int | None = None,
+        request_id: UUID | None = None,
     ) -> BrokerOrderResult:
         """
         Close an existing position by broker position ID.
 
         units_to_deduct: if provided, partial close. None = close entire position.
+        instrument_id: the position's instrument. eToro documents this as a
+        REQUIRED body field on the close endpoint (#2942); keyword-optional
+        only so existing provider fakes stay source compatible.
+        request_id: durable broker idempotency identity, committed before I/O
+        and never rotated.
         Returns the broker's response with fill details.
+
+        Raises ``BrokerOrderSubmissionUncertain`` when the outcome is unknown
+        (transport failure, 5xx, 408/409/425/429, unparseable response). A
+        caller must NOT treat that as a rejection and must not re-submit.
         """
 
     @abstractmethod

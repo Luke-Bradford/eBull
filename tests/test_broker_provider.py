@@ -1237,7 +1237,7 @@ class TestClosePosition:
             broker._http_write = MagicMock()
             broker._http_write.post.return_value = close_resp
 
-            result = broker.close_position(98765)
+            result = broker.close_position(98765, instrument_id=1001)
 
             broker._http_write.post.assert_called_once()
             post_endpoint = broker._http_write.post.call_args.args[0]
@@ -1245,7 +1245,10 @@ class TestClosePosition:
 
             body = broker._http_write.post.call_args.kwargs["json"]
             assert body["UnitsToDeduct"] is None
-            assert "InstrumentID" not in body
+            # eToro documents InstrumentID as REQUIRED on this body
+            # (api-reference/trading--demo/close-demo-position-by-units).
+            # The prior version of this test asserted its ABSENCE (#2942).
+            assert body["InstrumentID"] == 1001
 
             assert result.status == "filled"
             assert result.broker_order_ref == "12346"
@@ -1259,21 +1262,50 @@ class TestClosePosition:
             broker._http_write = MagicMock()
             broker._http_write.post.return_value = close_resp
 
-            broker.close_position(98765, units_to_deduct=Decimal("2.5"))
+            broker.close_position(98765, units_to_deduct=Decimal("2.5"), instrument_id=1001)
 
             body = broker._http_write.post.call_args.kwargs["json"]
             assert body["UnitsToDeduct"] == 2.5
 
-    def test_close_position_network_error_returns_failed(self) -> None:
-        """Network error during close POST returns a failed result."""
+    def test_close_position_requires_instrument_id(self) -> None:
+        """The documented required field cannot be silently omitted (#2942)."""
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+
+            with pytest.raises(ValueError, match="instrument_id"):
+                broker.close_position(98765)
+
+            broker._http_write.post.assert_not_called()
+
+    def test_close_position_network_error_is_uncertain(self) -> None:
+        """A transport failure does not prove the close failed (#2942).
+
+        It previously returned status='failed', which the caller booked as a
+        terminal failure — for an order that may well have landed.
+        """
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._http_write = MagicMock()
             broker._http_write.post.side_effect = httpx.ConnectError("connection refused")
 
-            result = broker.close_position(98765)
+            with pytest.raises(BrokerOrderSubmissionUncertain) as excinfo:
+                broker.close_position(98765, instrument_id=1001)
 
-            assert result.status == "failed"
-            assert "Network error" in result.raw_payload["error"]
+            assert "Network error" in excinfo.value.raw_payload["error"]
+
+    def test_close_position_carries_the_caller_request_id(self) -> None:
+        """The committed UUID must reach the broker as x-request-id (#2942)."""
+        close_resp = MagicMock()
+        close_resp.json.return_value = FIXTURE_CLOSE_ORDER_RESPONSE
+        request_id = UUID("11111111-2222-3333-4444-555555555555")
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = close_resp
+
+            broker.close_position(98765, instrument_id=1001, request_id=request_id)
+
+            headers = broker._http_write.post.call_args.kwargs["headers"]
+            assert headers["x-request-id"] == str(request_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1418,19 +1450,20 @@ class TestErrorHandling:
             assert result.raw_payload["message"] == "Bad request"
             assert result.raw_payload["_ebull_action"] == "BUY"
 
-    def test_network_error_returns_failed_with_error_string(self) -> None:
+    def test_network_error_is_uncertain(self) -> None:
+        """A transport failure leaves the submission's fate unknown (#2942)."""
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._http_write = MagicMock()
             broker._http_write.post.side_effect = httpx.ConnectError("connection refused")
 
-            result = broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
+            with pytest.raises(BrokerOrderSubmissionUncertain) as excinfo:
+                broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
-            assert result.status == "failed"
-            assert "Network error" in result.raw_payload["error"]
-            assert result.raw_payload["_ebull_action"] == "BUY"
+            assert "Network error" in excinfo.value.raw_payload["error"]
+            assert excinfo.value.raw_payload["_ebull_action"] == "BUY"
 
-    def test_non_json_success_response_returns_failed(self) -> None:
-        """When a 200 response body is not valid JSON, return status=failed."""
+    def test_non_json_success_response_is_uncertain(self) -> None:
+        """A 200 we cannot read is neither a success nor a rejection (#2942)."""
         mock_resp = MagicMock()
         mock_resp.raise_for_status.return_value = None
         mock_resp.json.side_effect = ValueError("not JSON")
@@ -1439,13 +1472,28 @@ class TestErrorHandling:
             broker._http_write = MagicMock()
             broker._http_write.post.return_value = mock_resp
 
-            result = broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
+            with pytest.raises(BrokerOrderSubmissionUncertain) as excinfo:
+                broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
-            assert result.status == "failed"
-            assert "Non-JSON" in result.raw_payload["error"]
+            assert "Non-JSON" in excinfo.value.raw_payload["error"]
 
-    def test_non_json_error_response_fallback(self) -> None:
-        """When error response is not JSON, raw_text is captured."""
+    def test_non_object_success_body_is_uncertain(self) -> None:
+        """A 200 whose body is not the documented object (#2942)."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = ["unexpected"]
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+
+            with pytest.raises(BrokerOrderSubmissionUncertain) as excinfo:
+                broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
+
+            assert excinfo.value.raw_payload["raw_json"] == ["unexpected"]
+
+    def test_5xx_is_uncertain_and_captures_raw_text(self) -> None:
+        """A 5xx does not prove the order failed; evidence is retained (#2942)."""
         error_resp = MagicMock()
         error_resp.status_code = 500
         error_resp.json.side_effect = ValueError("not JSON")
@@ -1459,10 +1507,49 @@ class TestErrorHandling:
                 response=error_resp,
             )
 
+            with pytest.raises(BrokerOrderSubmissionUncertain) as excinfo:
+                broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
+
+            assert excinfo.value.raw_payload["raw_text"] == "Internal Server Error"
+            assert excinfo.value.raw_payload["http_status"] == 500
+
+    @pytest.mark.parametrize("status_code", [408, 409, 425, 429])
+    def test_ambiguous_4xx_statuses_are_uncertain(self, status_code: int) -> None:
+        """A timeout, conflict, too-early or exhausted throttle proves nothing (#2942)."""
+        error_resp = MagicMock()
+        error_resp.status_code = status_code
+        error_resp.json.return_value = {"message": "try again"}
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.side_effect = httpx.HTTPStatusError(
+                str(status_code),
+                request=MagicMock(),
+                response=error_resp,
+            )
+
+            with pytest.raises(BrokerOrderSubmissionUncertain):
+                broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
+
+    def test_plain_4xx_stays_a_rejection(self) -> None:
+        """The broker answered and said no — that is terminal, not uncertain."""
+        error_resp = MagicMock()
+        error_resp.status_code = 400
+        error_resp.json.return_value = {"message": "Bad request"}
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.side_effect = httpx.HTTPStatusError(
+                "400",
+                request=MagicMock(),
+                response=error_resp,
+            )
+
             result = broker.place_order(1001, "BUY", amount=Decimal("100"), units=None)
 
             assert result.status == "failed"
-            assert result.raw_payload["raw_text"] == "Internal Server Error"
+            assert result.raw_payload["message"] == "Bad request"
+            assert result.raw_payload["_ebull_action"] == "BUY"
 
 
 # ---------------------------------------------------------------------------
@@ -1579,10 +1666,13 @@ class TestRequestBodyShape:
             broker._http_write = MagicMock()
             broker._http_write.post.return_value = close_resp
 
-            broker.close_position(98765)
+            broker.close_position(98765, instrument_id=1001)
 
             body = broker._http_write.post.call_args.kwargs["json"]
-            assert "InstrumentID" not in body
+            # Both fields the portal documents for this body. This assertion
+            # used to read `"InstrumentID" not in body`, pinning the omission
+            # of a field the source marks REQUIRED (#2942).
+            assert body["InstrumentID"] == 1001
             assert body["UnitsToDeduct"] is None
 
 

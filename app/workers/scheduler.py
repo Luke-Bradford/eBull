@@ -73,7 +73,12 @@ from app.services.ops_monitor import (
     record_job_skip,
     record_job_start,
 )
-from app.services.order_client import SubmissionControlsRevokedError, execute_order
+from app.services.order_client import (
+    BrokerSubmissionUncertainError,
+    PriorSubmissionUnresolvedError,
+    SubmissionControlsRevokedError,
+    execute_order,
+)
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
 from app.services.position_monitor import (
@@ -4920,6 +4925,8 @@ def execute_approved_orders() -> None:
             pending = 0
             failed = 0
             refused = 0
+            unresolved = 0
+            uncertain = 0
             for row in approved:
                 rec_id, decision_id = row[0], row[1]
                 try:
@@ -4966,6 +4973,29 @@ def execute_approved_orders() -> None:
                         rec_id,
                         exc.failed_rules,
                     )
+                except PriorSubmissionUnresolvedError as exc:
+                    # #2942: an earlier attempt still holds the submission
+                    # claim. Refusing is the point — submitting again would
+                    # create a second economic order. Counted apart from
+                    # `failed` so a parked recommendation does not read as a
+                    # broker outage; already audited by execute_order.
+                    unresolved += 1
+                    logger.warning(
+                        "execute_approved_orders: recommendation_id=%d parked — unresolved attempt order_id=%s",
+                        rec_id,
+                        exc.order_id,
+                    )
+                except BrokerSubmissionUncertainError as exc:
+                    # #2942: the broker call's outcome is unknown. The intent
+                    # row is parked `uncertain` with its response evidence and
+                    # keeps the claim, so nothing re-submits.
+                    uncertain += 1
+                    logger.error(
+                        "execute_approved_orders: recommendation_id=%d uncertain order_id=%d — %s",
+                        rec_id,
+                        exc.order_id,
+                        exc,
+                    )
                 except Exception:
                     failed += 1
                     logger.error(
@@ -4984,6 +5014,8 @@ def execute_approved_orders() -> None:
                 + pending
                 + failed
                 + refused
+                + unresolved
+                + uncertain
             )
 
         finally:
@@ -4994,7 +5026,7 @@ def execute_approved_orders() -> None:
         "execute_approved_orders complete: "
         "timing(passed=%d deferred=%d skipped=%d) "
         "guard(proposed=%d approved=%d rejected=%d) "
-        "exec(approved=%d executed=%d pending=%d failed=%d refused=%d)",
+        "exec(approved=%d executed=%d pending=%d failed=%d refused=%d unresolved=%d uncertain=%d)",
         timing_passed,
         timing_deferred,
         timing_skipped,
@@ -5006,6 +5038,8 @@ def execute_approved_orders() -> None:
         pending,
         failed,
         refused,
+        unresolved,
+        uncertain,
     )
 
 
