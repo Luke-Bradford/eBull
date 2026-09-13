@@ -180,6 +180,20 @@ def lane_for_request(verb: str, url: str) -> LaneMatch:
     return LaneMatch(UNCLASSIFIED, None)
 
 
+#: Characters left alone when a URL goes into a log line.  ``%`` is deliberately NOT in
+#: the set: with it, an already-malformed ``%`` sequence in the input would pass through
+#: un-re-encoded and the field would not be reversible.  Escaping it costs a legitimately
+#: percent-encoded URL one visible round of encoding (``%20`` renders as ``%2520``) and
+#: buys an exact contract instead: **``urllib.parse.unquote`` of the field returns the
+#: original bytes**, whatever they were.
+_LINE_SAFE_CHARS = "/:?&=@._~-"
+
+
+def _line_safe(value: str) -> str:
+    """Percent-encode anything that could break the line's space-delimited fields."""
+    return quote(value, safe=_LINE_SAFE_CHARS)
+
+
 @dataclass(frozen=True)
 class LaneCounter:
     """Attempts this PROCESS issued against one lane, split by client and environment.
@@ -244,12 +258,13 @@ def record_etoro_request(
             transport_errors=current.transport_errors + (1 if status is None else 0),
             wait_s=current.wait_s + pre_request_wait_s,
         )
-    path = normalise_path(url)
+    # BOTH url-bearing fields go through the same escape.  ``path`` is table-matched but
+    # not therefore safe: a template's ``{param}`` is ``[^/]+``, which admits a space, so
+    # a classified path can break the line's separator just as an unclassified one can.
+    path = _line_safe(normalise_path(url))
     # The raw URL is emitted only when nothing matched -- that is the one case where the
-    # input shape is unknown, so it is the one case worth keeping in full.  ``quote``
-    # leaves an ordinary URL byte-identical and encodes anything that would break the
-    # line's field separator.
-    raw_field = "" if match.is_classified else f" raw={quote(url, safe='/:?&=%@._~-')}"
+    # input shape is unknown, so it is the one case worth keeping in full.
+    raw_field = "" if match.is_classified else f" raw={_line_safe(url)}"
     logger.info(
         "%s v=%d ts=%s lane=%s src=%s env=%s verb=%s status=%s err=%s wait_s=%.3f attempt=%d path=%s%s",
         LINE_PREFIX,

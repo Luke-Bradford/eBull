@@ -237,6 +237,44 @@ def test_unclassified_line_carries_the_url_verbatim(caplog: pytest.LogCaptureFix
     assert line.endswith(" raw=/api/v1/brand-new?x=1")
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # A space would split one field into two and silently shift every later key.
+        ("/api/v1/trading/info/demo/orders/two words", "/api/v1/trading/info/demo/orders/two%20words"),
+        # ⚠ Already-encoded input is re-encoded, deliberately. The contract is that
+        # ``unquote`` of the field returns the original bytes; leaving `%` alone would
+        # make a malformed `%` sequence irreversible, which is what the review flagged.
+        ("/api/v1/x/%zz", "/api/v1/x/%25zz"),
+        ("/api/v1/x/%20", "/api/v1/x/%2520"),
+        ("/api/v1/x/a\nb", "/api/v1/x/a%0Ab"),
+    ],
+)
+def test_a_url_can_never_break_the_line_format(url: str, expected: str, caplog: pytest.LogCaptureFixture) -> None:
+    """Both url-bearing fields are escaped, not just the unclassified one.
+
+    ``path`` is table-matched but that does not make it safe: a template's ``{param}``
+    compiles to ``[^/]+``, which admits a space. A classified path can therefore corrupt
+    the space-delimited line exactly as an unclassified one can — the first case below
+    CLASSIFIES (as ``D_order_info``, with ``two words`` as the ``{orderId}``), which is
+    the whole point.
+    """
+    from urllib.parse import unquote
+
+    with caplog.at_level(logging.INFO, logger="app.etoro.requests"):
+        record_etoro_request(verb="GET", url=url, status=200, src="market", env="demo")
+    line = caplog.messages[-1]
+    path_field = line.split(" path=", 1)[1].split(" ", 1)[0]
+
+    assert path_field == expected
+    assert unquote(path_field) == url
+    # Every field still parses: the record survives its own url.
+    fields = {key: value for key, sep, value in (token.partition("=") for token in line.split(" ")) if sep}
+    assert fields["status"] == "200"
+    assert fields["src"] == "market"
+    assert fields["v"] == "1"
+
+
 # ---------------------------------------------------------------------------
 # Observer wiring in ResilientClient — acceptance 4-10
 # ---------------------------------------------------------------------------
