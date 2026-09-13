@@ -416,12 +416,23 @@ def a1_pacing(out: TextIO) -> None:
     b_callers = per_lane.get("B_eligibility", [])
     combined = sum(rate for _, rate in b_callers[:2])
     b_budget = budget.get("B_eligibility", 0)
+    # ⚠ A missing or zero budget means the lane map no longer carries an eligibility call
+    # site -- a renamed lane, a removed endpoint. That is a finding about the MAP, and it
+    # must surface as one rather than as a ZeroDivisionError that takes the whole census
+    # down with it (review round 1).
+    share = (
+        f"{combined / b_budget * 100:.0f}% of the conservative budget"
+        if b_budget
+        else (
+            "share UNCOMPUTABLE -- no eligibility call site in the lane map carries a "
+            "non-zero conservative budget. Re-read etoro_quota_lanes.CALL_SITES."
+        )
+    )
     print(
         f"Nothing serialises the hourly job against an operator/research run of the same\n"
         f"script: the job takes the `etoro` job lane, a script takes no lane at all, and\n"
         f"their clocks are independent by construction. Two concurrent lane-B callers:\n"
-        f"  {combined}/60s vs budget {b_budget}"
-        f"  -> {combined / b_budget * 100:.0f}% of the conservative budget\n"
+        f"  {combined}/60s vs budget {b_budget}  -> {share}\n"
         f"⚠ This is a CAPABILITY, not an observed event. Whether it has happened is M3's\n"
         f"question and M3 can only answer it for callers that write a job_runs row.",
         file=out,

@@ -26,6 +26,8 @@ HTTP call, so arrival says nothing about stamping.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from contextlib import ExitStack
 from typing import Any
 
 import httpx
@@ -95,11 +97,21 @@ def attach_recorders(*clients: rc_module.ResilientClient) -> dict[int, Recording
     return mapping
 
 
-def _mock_client() -> httpx.Client:
-    return httpx.Client(
+@pytest.fixture()
+def mock() -> Iterator[httpx.Client]:
+    """A transport that answers 200 to anything, closed by pytest.
+
+    A fixture rather than a helper so teardown survives an assertion failing between
+    the two arms of a test -- review round 1 caught that leak.
+    """
+    client = httpx.Client(
         base_url="https://mock.invalid",
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
     )
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 @pytest.fixture()
@@ -113,7 +125,9 @@ def virtual_time(monkeypatch: pytest.MonkeyPatch) -> VirtualClock:
 # ---------------------------------------------------------------------------
 
 
-def test_a_provider_built_per_request_never_reaches_its_own_floor(virtual_time: VirtualClock) -> None:
+def test_a_provider_built_per_request_never_reaches_its_own_floor(
+    virtual_time: VirtualClock, mock: httpx.Client
+) -> None:
     """FINDING 1. ``scheduler.py:6290`` constructs an ``EtoroBrokerProvider`` INSIDE the
     per-instrument loop, and both arms of ``scripts/prove_2603_core_eligibility.py``
     (``:119``, ``:191``) do the same. Every request is therefore the first on a virgin
@@ -124,7 +138,6 @@ def test_a_provider_built_per_request_never_reaches_its_own_floor(virtual_time: 
     ``with`` sits.
     """
     rounds = 4
-    mock = _mock_client()
 
     # ⚠ Every provider is built, and the recorders attached, BEFORE any request fires.
     # Attaching per iteration would give each provider its own recorder even when they
@@ -132,15 +145,16 @@ def test_a_provider_built_per_request_never_reaches_its_own_floor(virtual_time: 
     # a revert probe caught exactly that and this loop is the fix. One
     # ``attach_recorders`` call over all of them keys on identity, so a shared clock
     # yields one recorder and independent clocks yield several.
-    per_request_brokers = [EtoroBrokerProvider(api_key="k", user_key="u", env="demo") for _ in range(rounds)]
-    for broker in per_request_brokers:
-        broker._http_write._client = mock
-    per_request_recorders = attach_recorders(*(b._http_write for b in per_request_brokers))
-    for broker in per_request_brokers:
-        broker._http_write.post("/api/v2/trading/info/demo/eligibility", json={})
-    per_request_stamps = sorted(s for r in per_request_recorders.values() for s in r.stamps)
-    for broker in per_request_brokers:
-        broker._client.close()
+    with ExitStack() as stack:
+        per_request_brokers = [
+            stack.enter_context(EtoroBrokerProvider(api_key="k", user_key="u", env="demo")) for _ in range(rounds)
+        ]
+        for broker in per_request_brokers:
+            broker._http_write._client = mock
+        per_request_recorders = attach_recorders(*(b._http_write for b in per_request_brokers))
+        for broker in per_request_brokers:
+            broker._http_write.post("/api/v2/trading/info/demo/eligibility", json={})
+        per_request_stamps = sorted(s for r in per_request_recorders.values() for s in r.stamps)
 
     with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as reused:
         reused._http_write._client = mock
@@ -148,7 +162,6 @@ def test_a_provider_built_per_request_never_reaches_its_own_floor(virtual_time: 
         for _ in range(rounds):
             reused._http_write.post("/api/v2/trading/info/demo/eligibility", json={})
         reused_stamps = recorder.stamps
-    mock.close()
 
     assert len(per_request_stamps) == rounds
     assert len(reused_stamps) == rounds
@@ -165,7 +178,7 @@ def test_a_provider_built_per_request_never_reaches_its_own_floor(virtual_time: 
 
 
 def test_two_instances_on_one_user_key_stamp_at_the_same_virtual_instant(
-    virtual_time: VirtualClock,
+    virtual_time: VirtualClock, mock: httpx.Client
 ) -> None:
     """Fake-clock AND concurrent, which is what #2946 item 2 asks for in those words.
 
@@ -179,7 +192,6 @@ def test_two_instances_on_one_user_key_stamp_at_the_same_virtual_instant(
     and one lock, and the same two requests become floor-separated. So this test cannot
     pass for a reason unrelated to the sharing.
     """
-    mock = _mock_client()
 
     def fire_pair(*, share: bool) -> list[float]:
         with (
@@ -217,7 +229,6 @@ def test_two_instances_on_one_user_key_stamp_at_the_same_virtual_instant(
 
     independent = fire_pair(share=False)
     shared = fire_pair(share=True)
-    mock.close()
 
     assert len(independent) == 2
     assert independent[1] - independent[0] == pytest.approx(0.0), (
