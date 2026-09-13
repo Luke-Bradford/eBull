@@ -430,6 +430,12 @@ JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # verdict. Produces submission-gate INPUT, never authority: nothing invokes
 # the gate, and the only provider call is informational.
 JOB_CORE_REBALANCE_OBSERVATION = "core_rebalance_observation"
+# #2603 item 2, the revalidation half — re-ask the broker about instruments
+# already proved on this account, so a proof does not age past
+# CORE_ELIGIBILITY_MAX_AGE with no producer to renew it. Informational
+# (check_instrument_eligibility) and NON-WIDENING: only instruments already in
+# strategy_core_eligibility_proofs.
+JOB_CORE_ELIGIBILITY_REFRESH = "core_eligibility_refresh"
 # #2843 — the policy approver. Advances each eligible strategy by at most one
 # stage when the mandate carries approval_mode='autonomous'. Reads a flag and
 # calls the existing evidence-bound path; evaluates no evidence of its own.
@@ -2346,6 +2352,34 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # Gating on us_market_status would be wrong — settled-decisions permits
         # a non-US core instrument whose venue we have no calendar for.
         cadence=Cadence.daily(hour=22, minute=45),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_CORE_ELIGIBILITY_REFRESH,
+        display_name="Core eligibility revalidation (#2603)",
+        # Same lane as the observation job and for the same reason: the only
+        # external call is an informational eToro read and ``etoro`` owns that
+        # budget. The lane also serialises the two, so neither holds the broker
+        # session while the other is mid-batch.
+        source="etoro",
+        description=(
+            "Hourly — re-ask eToro about instruments already proved on this "
+            "account whose latest proof has passed half of "
+            "CORE_ELIGIBILITY_MAX_AGE, or was observed under superseded "
+            "credentials. Informational and NON-WIDENING: it can never add an "
+            "instrument the proofs table does not already carry. Demo-only. "
+            "Skips without any broker call when nothing is due."
+        ),
+        # Hourly at :20, clear of the :45 core observation and of the top of the
+        # hour where most other jobs cluster.
+        #
+        # ⚠ The cadence is not cosmetic and is READ BY A TEST:
+        # CORE_ELIGIBILITY_REFRESH_AGE + one tick must stay under
+        # CORE_ELIGIBILITY_MAX_AGE, and the test resolves "one tick" from THIS
+        # entry rather than from a literal hour -- so moving this to `daily`
+        # fails the test instead of silently deleting the margin.
+        cadence=Cadence.hourly(minute=20),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -6030,6 +6064,314 @@ def core_rebalance_observation() -> None:
             f"reason={intent.decision.reason_code or '-'} instrument={core_instrument_id} "
             f"mandate_event={intent.core_mandate_event_id}"
         )
+
+
+class _CredentialsRotatedMidBatch(RuntimeError):
+    """The live credential pair changed while an eligibility batch was in flight.
+
+    Its own type so ``core_eligibility_refresh``'s per-instrument
+    ``except Exception`` cannot swallow it: every remaining request in the batch
+    would still be made with the superseded plaintext keys, so this is a run-level
+    abort and not one instrument's failure.
+    """
+
+
+def core_eligibility_refresh() -> None:
+    """Re-ask the broker about already-proved instruments (#2603 item 2).
+
+    #2603 item 2 asked for a proof *"with a declared freshness/revalidation rule"*.
+    The freshness half shipped -- ``require_core_eligibility`` refuses a proof past
+    ``CORE_ELIGIBILITY_MAX_AGE`` -- and the revalidator did not, so the only writer
+    was a hand-run script and the two age-bounded consumers (the attended executor
+    and #2947's feasibility screen) could not pass 24h after it.
+
+    ⚠⚠ NON-WIDENING.  Only instruments already present in
+    ``strategy_core_eligibility_proofs`` are re-asked, because proof membership
+    also drives ``QUOTES_REFRESH_SCOPE_SQL`` arm 5, whose comment records that it
+    *"cannot widen to the universe on its own"*.  ⚠ It does not follow that quote
+    scope can only shrink: a ``not_underlying`` proof superseded by an
+    ``underlying`` one ADMITS that instrument.  Bounded by the invariant above, and
+    the correct direction, but a real behaviour change -- see the selector.
+
+    ⚠ Informational only.  ``check_instrument_eligibility`` posts to the v2 INFO
+    prefix and is deliberately outside ``refuse_broker_mutation_if_unattended``
+    (#2645: guarding the transport rather than the five mutating methods was the
+    other half of that error).  This job reaches no mutating method, and
+    ``tests/test_2603_core_eligibility_refresh.py`` asserts it.
+
+    Spec: ``docs/proposals/execution/2026-09-13-core-eligibility-revalidation.md``
+    """
+    import time
+
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.strategy_core_eligibility import (
+        CORE_ELIGIBILITY_REQUEST_CURRENCY,
+        CoreEligibilityError,
+        evaluate_core_eligibility,
+        live_credential_ids,
+        live_credential_ids_unlocked,
+        record_core_eligibility_proof,
+    )
+    from app.services.strategy_core_eligibility_refresh import (
+        REQUEST_INTERVAL_S,
+        select_proofs_to_revalidate,
+    )
+    from app.services.strategy_core_submission_gate import core_submission_lock
+
+    provider_name = "etoro"
+
+    # Mirrors `core_rebalance_observation`: proofs are per-environment and the
+    # credentials this job can load are `settings.etoro_env`'s. ⚠ The reason is
+    # NOT "a real proof has no consumer" -- quote scope reads proofs in any
+    # environment and `screen_portfolio_feasibility.py` accepts `--environment
+    # real`. It is that scheduling unattended eligibility traffic against a real
+    # account is not this job's call to make.
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_CORE_ELIGIBILITY_REFRESH, "core eligibility refresh requires demo environment")
+        return
+
+    # ⚠ The DB predicates run BEFORE `_load_etoro_credentials`, for the reason
+    # already recorded on `core_rebalance_observation`: the credential load
+    # decrypts two secrets and appends two audit rows, so every no-op tick would
+    # otherwise touch secrets storage for a job that was always going to skip.
+    with connect_job() as scope_conn:
+        operator_id = sole_operator_id(scope_conn)
+        # UNLOCKED reader: this decides WHAT TO ASK and authorises nothing. The
+        # locked reader is used at record time, as its own docstring requires for
+        # anything writing a proof-backed authority.
+        #
+        # ⚠ `live_credential_ids_unlocked` RAISES when either credential is
+        # missing or revoked -- it is not a "return None" reader. Without this
+        # guard the intended credentials-missing skip further down is
+        # unreachable, and an idle box with no demo credentials would record an
+        # hourly FAILURE instead of an hourly skip (Codex ckpt-2 P2). Reading
+        # credential METADATA decrypts nothing, so this stays above the
+        # secrets-touching load.
+        try:
+            advisory_pair = live_credential_ids_unlocked(
+                scope_conn,
+                operator_id=operator_id,
+                provider=provider_name,
+                environment=settings.etoro_env,
+            )
+        except CoreEligibilityError as exc:
+            _record_prereq_skip(JOB_CORE_ELIGIBILITY_REFRESH, f"etoro credentials missing: {exc}")
+            return
+        scope = select_proofs_to_revalidate(
+            scope_conn,
+            operator_id=operator_id,
+            provider=provider_name,
+            environment=settings.etoro_env,
+            live_credential_ids=advisory_pair,
+        )
+
+    if not scope.due:
+        # ⚠ Two causes, two messages. "no instrument has ever been proved" and
+        # "every proof is fresh" are different operator-facing situations, and
+        # one message for both would make the dev-verify re-run report a false
+        # explanation.
+        detail = (
+            "no instrument has ever been proved on this account"
+            if scope.proved_instrument_count == 0
+            else f"all {scope.proved_instrument_count} proved instrument(s) are fresh"
+        )
+        _record_prereq_skip(JOB_CORE_ELIGIBILITY_REFRESH, detail)
+        return
+
+    creds = _load_etoro_credentials(JOB_CORE_ELIGIBILITY_REFRESH)
+    if creds is None:
+        _record_prereq_skip(JOB_CORE_ELIGIBILITY_REFRESH, "etoro credentials missing")
+        return
+
+    # ⚠⚠ The pair is captured ONCE, immediately after the plaintext load, and
+    # every row in this batch is attributed to it. An earlier draft re-read the
+    # live pair inside the loop "so the write uses the locked reader", which was
+    # strictly WORSE (Codex ckpt-2 P1): the plaintext keys are loaded once before
+    # the loop, so a rotation mid-batch left later responses -- still made with
+    # the OLD keys -- stamped with the NEW credential ids. That is old-account
+    # evidence passing `require_core_eligibility` for the new account, which is
+    # the exact failure the credential columns exist to prevent.
+    #
+    # Read order (plaintext, then ids) matches
+    # `prove_2603_core_eligibility::_credentials` rather than inventing a third
+    # shape. The residual window between the two reads is that helper's and is
+    # not closed here; what IS closed is the far wider in-loop one, and the
+    # per-record check below turns a rotation into a loud abort.
+    with connect_job() as pair_conn:
+        try:
+            request_pair = live_credential_ids_unlocked(
+                pair_conn,
+                operator_id=operator_id,
+                provider=provider_name,
+                environment=settings.etoro_env,
+            )
+        except CoreEligibilityError as exc:
+            _record_prereq_skip(JOB_CORE_ELIGIBILITY_REFRESH, f"etoro credentials missing: {exc}")
+            return
+
+    with _tracked_job(JOB_CORE_ELIGIBILITY_REFRESH) as tracker:
+        written = 0
+        failed: list[int] = []
+        transitions: list[str] = []
+        last_error: Exception | None = None
+
+        # ⚠⚠ autocommit is LOAD-BEARING, not a copied default.
+        # `core_submission_lock` owns its own transaction boundaries -- it
+        # commits after acquiring the three keys and, in its `finally`, ROLLS
+        # BACK anything left uncommitted before unlocking. On a transactional
+        # connection there is an ambient transaction at both of those points and
+        # the rollback would discard the proof just written. Under autocommit the
+        # connection is IDLE except inside the explicit `conn.transaction()`
+        # block below, which commits before the lock's finally runs (verified:
+        # `commit()` and `rollback()` are safe no-ops in autocommit and leave
+        # `transaction_status` at IDLE).
+        #
+        # It also keeps each proof in its OWN transaction, which is what keeps
+        # `observed_at` distinct per row -- the column DEFAULTs to `now()`, which
+        # is transaction-START time, so a shared transaction would stamp every
+        # row identically and leave the readers' ordering on the id tiebreak.
+        with connect_job(autocommit=True) as conn:
+            for stale in scope.due:
+                try:
+                    # One instrument per request, deliberately: `response_digest`
+                    # digests the WHOLE response, which its docstring says is
+                    # "only sound because a proof requests exactly one
+                    # instrument". Batching would need a digest rule change and
+                    # buys nothing at this population.
+                    # ⚠ `env="demo"` LITERALLY, not `settings.etoro_env` again,
+                    # and this is the same deliberate choice `core_rebalance_
+                    # observation` makes two functions up: re-reading a mutable
+                    # setting between the check at the top of this function and
+                    # its use here is the check-then-use gap `strategy_paper_cycle`
+                    # closes the same way. ⚠ Review nitpick on PR #2971 read the
+                    # literal as coupling correctness to that gate; it is the
+                    # opposite -- the literal is what makes the broker call
+                    # independent of a setting that could be reloaded mid-run. The
+                    # DB reads keep `settings.etoro_env` because they must agree
+                    # with the value the SELECTION used.
+                    with EtoroBrokerProvider(api_key=creds[0], user_key=creds[1], env="demo") as broker:
+                        response = broker.check_instrument_eligibility([stale.instrument_id])
+                    assessment = evaluate_core_eligibility(
+                        response,
+                        instrument_id=stale.instrument_id,
+                        requested_currency=CORE_ELIGIBILITY_REQUEST_CURRENCY,
+                    )
+                    # ⚠⚠ Inside `core_submission_lock`: without it a proof can
+                    # commit between the attended executor's binding re-read and
+                    # its trade INSERT, which is the window that lock exists to
+                    # close. Held around ONE insert, never across the broker
+                    # round-trip above.
+                    #
+                    # ⚠⚠ `conn.transaction()` INSIDE the lock, and it is not
+                    # decoration. `live_credential_ids` takes `FOR SHARE`, which
+                    # is TRANSACTION-scoped -- under autocommit each statement is
+                    # its own transaction, so the share lock would be released
+                    # before the INSERT and guard nothing (Codex ckpt-2). The
+                    # explicit block holds it across the check and the write.
+                    # psycopg3's `transaction()` issues a real BEGIN even on an
+                    # autocommit connection, and commits on exit, so the lock's
+                    # `finally` sees IDLE and does not roll the proof back.
+                    #
+                    # ⚠ The locked read is a CHECK, not the attribution: the row
+                    # is attributed to `request_pair`, the credentials that
+                    # actually produced the response.
+                    with core_submission_lock(conn), conn.transaction():
+                        if (
+                            live_credential_ids(
+                                conn,
+                                operator_id=operator_id,
+                                provider=provider_name,
+                                environment=settings.etoro_env,
+                            )
+                            != request_pair
+                        ):
+                            # Loud, and it aborts the whole run rather than this
+                            # instrument: the plaintext keys in hand belong to the
+                            # previous account, so every REMAINING request would
+                            # be made with them too.
+                            raise _CredentialsRotatedMidBatch(
+                                "etoro credentials rotated during the eligibility refresh batch; "
+                                "the responses in flight were made with the previous pair"
+                            )
+                        record_core_eligibility_proof(
+                            conn,
+                            assessment=assessment,
+                            instrument_id=stale.instrument_id,
+                            operator_id=operator_id,
+                            provider=provider_name,
+                            environment=settings.etoro_env,
+                            api_key_credential_id=request_pair[0],
+                            user_key_credential_id=request_pair[1],
+                            recorded_by=JOB_CORE_ELIGIBILITY_REFRESH,
+                        )
+                except _CredentialsRotatedMidBatch:
+                    # ⚠ NOT swallowed by the per-instrument handler below. A
+                    # rotation invalidates the plaintext keys every REMAINING
+                    # request would use, so continuing would keep asking the old
+                    # account. Propagates and fails the run.
+                    raise
+                except Exception as exc:  # noqa: BLE001 - see below
+                    # ⚠ Broad by intent, and it does NOT rename the failure into a
+                    # domain vocabulary -- the distinguisher the prevention log
+                    # draws. Nothing synthesises an eligibility verdict from an
+                    # exception: `record_core_eligibility_proof`'s own contract is
+                    # that "a transport failure writes NOTHING ... absence of
+                    # evidence stored as an observation turns 'we could not ask'
+                    # into 'the broker said'".
+                    last_error = exc
+                    failed.append(stale.instrument_id)
+                    logger.error(
+                        "%s: instrument %s (%s) failed: %s: %s",
+                        JOB_CORE_ELIGIBILITY_REFRESH,
+                        stale.instrument_id,
+                        stale.symbol or "?",
+                        type(exc).__name__,
+                        exc,
+                    )
+                else:
+                    written += 1
+                    if assessment.verdict != stale.prior_verdict:
+                        transitions.append(
+                            f"{stale.symbol or stale.instrument_id}:{stale.prior_verdict}->{assessment.verdict}"
+                        )
+                    # ⚠ Progress is published AS THE LOOP RUNS. `_tracked_job`'s
+                    # failure branch does not populate these, so a late failure
+                    # would otherwise hide proofs already committed.
+                    tracker.row_count = written
+                finally:
+                    # ⚠ After EVERY attempt, success or not. A `continue` that
+                    # skips the sleep turns a failing endpoint into an unspaced
+                    # retry storm against a 20/min budget.
+                    time.sleep(REQUEST_INTERVAL_S)
+
+        note = (
+            f"written={written} failed={len(failed)} deferred={scope.deferred_count} "
+            f"proved={scope.proved_instrument_count}"
+        )
+        if transitions:
+            note += " transitions=" + ",".join(transitions)
+        if failed:
+            # ⚠ A partial failure still reports SUCCESS, which is right for the
+            # run and wrong as a freshness signal -- a permanently failing
+            # instrument expires while runs stay green. The ids are in the note so
+            # the condition is legible in `job_runs`; a per-instrument freshness
+            # alarm belongs with the other ops-monitor staleness checks.
+            note += " failed_ids=" + ",".join(str(i) for i in failed)
+        if scope.deferred_count:
+            logger.info(
+                "%s: %d instrument(s) deferred to the next tick by the per-run cap",
+                JOB_CORE_ELIGIBILITY_REFRESH,
+                scope.deferred_count,
+            )
+        tracker.row_count = written
+        tracker.note = note
+
+        if written == 0 and last_error is not None:
+            # ⚠ Re-raise the CAUSE, not a fresh RuntimeError: `_tracked_job`'s
+            # classifier inspects it, and a generic wrapper turns an actionable
+            # auth or rate-limit failure into INTERNAL_ERROR. A job that no-ops
+            # and reports success is invisible to every automated check here.
+            raise last_error
 
 
 def strategy_autonomous_promotion() -> None:

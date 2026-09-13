@@ -41,6 +41,7 @@ from app.services.broker_settlement_arms import select_underlying_long_arms
 from app.services.operators import sole_operator_id
 from app.services.strategy_core_eligibility import (
     CORE_ELIGIBILITY_REQUEST_CURRENCY,
+    CORE_ELIGIBILITY_REQUEST_INTERVAL_S,
     evaluate_core_eligibility,
     record_core_eligibility_proof,
 )
@@ -50,10 +51,13 @@ logger = logging.getLogger("prove_2603_core_eligibility")
 PROVIDER = "etoro"
 RECORDED_BY = "prove_2603_core_eligibility"
 # eToro documents the eligibility endpoint at 20 requests/minute DEDICATED and at
-# most 100 ids per request (live portal 2026-08-13).  3.2s between requests keeps
-# a 128-batch census inside that budget with headroom.
+# most 100 ids per request (live portal 2026-08-13).
 BATCH_SIZE = 100
-REQUEST_INTERVAL_S = 3.2
+# ⚠ Imported, not re-declared: `core_eligibility_refresh` became a second caller
+# needing the same spacing, and two copies of a rate-limit constant is the shape
+# where one gets tuned and the other does not.  The rule and its citation now live
+# beside the constant in `strategy_core_eligibility`.
+REQUEST_INTERVAL_S = CORE_ELIGIBILITY_REQUEST_INTERVAL_S
 
 
 def _credentials(conn: psycopg.Connection[Any], *, operator_id: UUID, environment: str) -> tuple[str, str, UUID, UUID]:
