@@ -53,6 +53,10 @@ ReconciliationState = Literal[
 # attempts it records. Sequence at these defaults: 150, 450, 1050, 2250, 3450, 3450...
 RECONCILIATION_RETRY_BASE_SECONDS = 300
 RECONCILIATION_RETRY_CAP_SECONDS = 3450
+# Bounds the exponent so ``power(2, n)`` cannot overflow on a pathological
+# attempt_count. 2**30 * 300s is ~10,000 years, so the seconds cap always binds
+# first and this only ever guards the arithmetic.
+_RECONCILIATION_RETRY_EXPONENT_CAP = 30
 
 _KNOWN_PENDING_BROKER_STATES = frozenset({"Pending"})
 _KNOWN_FILLED_BROKER_STATES = frozenset({"Filled", "Executed"})
@@ -532,13 +536,19 @@ def reconcile_backlog(
                  OR state.last_attempt_at <= now() - make_interval(secs => least(
                         %(cap)s::double precision,
                         %(base)s::double precision
-                            * greatest(power(2, least(state.attempt_count - 1, 30)) - 0.5, 0)))
+                            * greatest(
+                                power(2, least(state.attempt_count - 1, %(exponent_cap)s)) - 0.5, 0)))
               )
             ORDER BY state.last_attempt_at ASC NULLS FIRST,
                      state.first_unresolved_at, state.order_id
             LIMIT %(limit)s
             """,
-            {"limit": limit, "base": retry_base_seconds, "cap": retry_cap_seconds},
+            {
+                "limit": limit,
+                "base": retry_base_seconds,
+                "cap": retry_cap_seconds,
+                "exponent_cap": _RECONCILIATION_RETRY_EXPONENT_CAP,
+            },
         )
         rows = cur.fetchall()
     conn.commit()
