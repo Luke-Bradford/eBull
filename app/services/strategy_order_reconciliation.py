@@ -219,7 +219,18 @@ def _order_lock(conn: psycopg.Connection[Any], order_id: int, *, wait: bool) -> 
         # at the wrong subsystem. Release, log loudly, and let the original
         # propagate. `BaseException` and not `Exception`: a `KeyboardInterrupt`
         # must still release the lock.
-        _release_order_lock(conn, params=params, order_id=order_id, raise_on_loss=False)
+        #
+        # ⚠ The release is itself wrapped, and not belt-and-braces: a dropped
+        # connection makes `conn.execute` / `conn.commit` raise, and that NEW
+        # exception would replace the body's just as surely as the deliberate
+        # lost-ownership raise did (review nitpick, PR #2975 round 2). Suppressing
+        # it costs nothing real -- Postgres releases every advisory lock held by a
+        # connection when that connection dies, so the failure mode this hides is
+        # also the one that has already released the lock.
+        try:
+            _release_order_lock(conn, params=params, order_id=order_id, raise_on_loss=False)
+        except Exception:
+            logger.exception("releasing the reconciliation order lock for %s failed", order_id)
         raise
     else:
         _release_order_lock(conn, params=params, order_id=order_id, raise_on_loss=True)

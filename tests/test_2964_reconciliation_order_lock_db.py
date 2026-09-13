@@ -408,6 +408,43 @@ def test_the_bodys_exception_survives_a_lost_lock_at_release(
     assert holder is not None  # the fixture supplies this module's skip-when-no-DB guard
 
 
+def test_a_release_that_itself_raises_still_lets_the_body_exception_through(
+    ebull_test_conn: psycopg.Connection[Any],
+    holder: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review nitpick round 2: the release's OWN failure must not win either.
+
+    A dropped connection makes ``conn.execute``/``conn.commit`` raise inside the
+    release, and that new exception replaces the body's just as surely as the
+    deliberate lost-ownership raise did. Fixing only the deliberate case would
+    have left the accidental one — which is the likelier of the two in production,
+    because it is what a connection drop looks like.
+    """
+    conn = ebull_test_conn
+
+    def _explode(*_args: object, **_kwargs: object) -> None:
+        raise psycopg.OperationalError("connection dropped")
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(ValueError, match="the real failure"):
+            with try_reconciliation_order_lock(conn, 4256):
+                monkeypatch.setattr(recon, "_release_order_lock", _explode)
+                raise ValueError("the real failure")
+    assert any("releasing the reconciliation order lock for 4256 failed" in r.getMessage() for r in caplog.records)
+
+    # The real lock is still held by this connection — monkeypatching the release
+    # skipped it — so drop it explicitly rather than leaking it into the next test.
+    monkeypatch.undo()
+    conn.execute(f"SELECT pg_advisory_unlock({recon._ORDER_LOCK_KEY_SQL})", recon._order_lock_params(4256))
+    conn.commit()
+    assert holder.execute(
+        f"SELECT pg_try_advisory_lock({recon._ORDER_LOCK_KEY_SQL})", recon._order_lock_params(4256)
+    ).fetchone() == (True,)
+    holder.commit()
+
+
 # --------------------------------------------------------------------------
 # 3. Item 2 — the reconciler claims, and the backlog skips what it cannot claim
 # --------------------------------------------------------------------------
