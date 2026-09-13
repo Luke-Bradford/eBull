@@ -1,5 +1,20 @@
 {
   "call_sites": {
+    "GET /api/v1/data/positions/closed-events/history": {
+      "defaultPool": true,
+      "environment": "neutral",
+      "lane": "G_default_shared",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/data/positions/closed-events/history"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is the **default shared quota** — it is shared with every other endpoint that has no dedicated limit, so requests across those endpoints all draw from the same budget.",
+      "reached_by": [
+        "get_closed_position_event_counts"
+      ],
+      "shared": true,
+      "window": 60
+    },
     "GET /api/v1/market-data/exchanges": {
       "defaultPool": false,
       "environment": "neutral",
@@ -357,7 +372,7 @@
     }
   },
   "document_sha256": "9a4a63689cceaf9a7c43aa08d5c7befa27619572fe0f8a389a521f54ac20ecd0",
-  "extract_sha256": "3749ee2f7076cd4a9857582d94521149e4b05ea879f4605564139a33d74a1546",
+  "extract_sha256": "b9a8da9efcb109bc254454435b630cf5fd24fafa5753e23e7364fe1e692ffb47",
   "orphan_peer_references": [
     "DELETE /api/v1/trading/execution/demo/limit-orders/{orderId}",
     "DELETE /api/v1/trading/execution/demo/market-open-orders/{orderId}",
@@ -384,7 +399,7 @@
   },
   "provenance": {
     "byte_length": 1787381,
-    "extracted_at": "2026-09-13T21:08:05.082280+00:00",
+    "extracted_at": "2026-09-13T22:10:04.903297+00:00",
     "extractor_version": 1,
     "fetched_at": "2026-09-13T21:02:19.472836+00:00",
     "hashed_bytes": "document_sha256 is over the RAW response body as received, before any decode. extract_sha256 is over canonical(extract) — sorted keys, compact separators, UTF-8 — and covers the blocks below and nothing else. fetched_at is when the bytes were taken from the portal; extracted_at is when this extract was last derived from them, which an --offline re-run moves and a fetch date must not.",

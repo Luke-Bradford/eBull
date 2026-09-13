@@ -18,6 +18,7 @@ import logging
 import re
 import threading
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
@@ -186,6 +187,23 @@ class TradeHistoryParseError(Exception):
     so it is never swallowed by the incidental-exception handlers
     inside the parse loop.
     """
+
+
+class ClosedPositionEventCountParseError(Exception):
+    """Raised when a closed-position-event count row cannot be parsed safely."""
+
+
+@dataclass(frozen=True)
+class ClosedPositionEventCount:
+    """One ``(closeYear, assetType)`` bucket from the closed-position-event counter.
+
+    Provider-local rather than on ``BrokerProvider``: the endpoint is eToro's,
+    has no env segment, and nothing in the domain layer consumes it (#2993).
+    """
+
+    close_year: int
+    asset_type: str
+    closed_position_events: int
 
 
 class TradingPreflightParseError(Exception):
@@ -1065,6 +1083,17 @@ class EtoroBrokerProvider(BrokerProvider):
         is correct only because all of them are in the batch.  A page cap here
         would be a ledger-completeness decision, not a quota one.
 
+        ⚠⚠ The DATE range is deliberately not windowed, and #2991 is where that
+        was decided against the document rather than from first principles.  The
+        operation asks callers to keep each request's lookback under a year and
+        to "advance `minDate` per batch" for longer history; it exposes no
+        upper-bound date parameter, so each request runs to the present and
+        advancing `minDate` only shrinks the result.  A deep backfill from
+        `HISTORY_EPOCH` therefore cannot comply, and was observed to be served
+        anyway.  Do not add windowing here without first re-pinning the spec —
+        `tests/test_2991_history_lookback_contract.py` fails if `maxDate` ever
+        appears, which is the signal that it has become buildable.
+
         Env segment placement differs from the other info endpoints:
         /api/v1/trading/info/trade/demo/history (demo) vs
         /api/v1/trading/info/trade/history (real).
@@ -1107,6 +1136,59 @@ class EtoroBrokerProvider(BrokerProvider):
             if len(rows) < page_size:
                 return trades
             page += 1
+
+    def get_closed_position_event_counts(self) -> tuple[ClosedPositionEventCount, ...]:
+        """Closed-position event counts per (close year, asset type).
+
+        ⚠⚠ NOT an environment-scoped figure, and not yet established to be one
+        that can be compared against ``get_trade_history``.  The operation takes
+        no ``env`` segment and no parameters: it answers for the caller's own
+        gateway-issued GCID, which spans the real and demo customer ids that
+        ``/api/v1/me`` reports separately.  On the dev demo account it returns
+        counts across years in which this account did not exist.  #2993 holds
+        the undetermined-scope evidence and the experiment that would settle it;
+        until it does, do NOT read this as a completeness oracle for the ledger.
+
+        Exists so that reading it is METERED.  ``etoro_quota_lanes.CALL_SITES``
+        records the endpoints this repo reaches, and
+        ``etoro_request_log`` classifies an observed request by matching that
+        table — a caller reaching this path outside the provider is recorded as
+        ``unclassified`` and its draw on lane G goes uncounted.
+
+        Raises on HTTP or network errors (caller should handle).
+        """
+        response = self._http_read.get(
+            "/api/v1/data/positions/closed-events/history",
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        try:
+            rows = response.json()
+        except ValueError as exc:  # 200 with a non-JSON body
+            raise ClosedPositionEventCountParseError(f"response body is not JSON: {exc}") from exc
+        if not isinstance(rows, list):
+            raise ClosedPositionEventCountParseError(f"expected a JSON array, got {type(rows).__name__}")
+        counts: list[ClosedPositionEventCount] = []
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ClosedPositionEventCountParseError(f"row {idx}: expected an object")
+            try:
+                events = int(row["closedPositionEvents"])
+                # A count cannot be negative. This is the field's definition, not a
+                # chosen bound — and without it a negative parses as a valid figure and
+                # drags a total (#2993's comparison) toward agreement.
+                if events < 0:
+                    raise ValueError(f"closedPositionEvents must be >= 0, got {events}")
+                counts.append(
+                    ClosedPositionEventCount(
+                        close_year=int(row["closeYear"]),
+                        asset_type=str(row["assetType"]),
+                        closed_position_events=events,
+                    )
+                )
+            except (KeyError, ValueError, TypeError) as exc:
+                raise ClosedPositionEventCountParseError(f"row {idx}: {exc}") from exc
+        return tuple(counts)
 
 
 # ------------------------------------------------------------------
