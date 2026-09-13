@@ -605,6 +605,13 @@ class StrategyPnlView(BaseModel):
     realised_pnl: Decimal | None
     unrealised_pnl: Decimal | None
     total_pnl: Decimal | None
+    #: Fees AND distributions, netted into one signed figure, POSITIVE = cost
+    #: (#2602 item 1). eToro reports overnight fees and dividends as a single
+    #: `totalFees` per position and documents no way to separate them, so this
+    #: **may be negative** when distributions exceed carry. Do not render it as a
+    #: magnitude, and do not label it "fees" alone.
+    #:
+    #: ⚠ NOT deducted from `total_pnl`.
     observed_fees: Decimal | None
     complete: bool
     incomplete_reasons: list[str]
