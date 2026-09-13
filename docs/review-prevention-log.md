@@ -5661,3 +5661,59 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   `frontend/src/pages/StrategyPortfolioLens.test.tsx::does not claim the band was checked when
   something else resolved the order first`, which asserts both the new sentence and the ABSENCE of
   the band sentence.
+
+### A rolling-window quota counts STAMPS, so `window / budget` is over budget by one (#2946, 2026-09-13)
+
+- Symptom: `CallSite.conservative_min_interval_s` returned `window_s / conservative_per_minute`
+  — `60 / 20 = 3.0s` at the eToro eligibility lane — and was the required value in
+  `test_configured_floor_is_at_least_the_conservative_minimum`, the only test in that file
+  that checks live configuration. A floor of exactly 3.0s would have passed it while placing
+  **21** requests against a documented 20.
+- Root cause: two different questions share one formula. `window / budget` is sustained
+  THROUGHPUT. A rolling quota counts stamps in any window, and a caller spaced at `i` fires at
+  0, i, 2i … so the window holds `floor(window / i) + 1` — the first stamp is free. The gap is
+  always exactly one request, which is why it survives review: the number looks right and is
+  off by an amount too small to notice and too large to ignore at a 20/min budget.
+- Prevention: derive any pacing interval from the budget through one helper that states the
+  counting rule — `app/providers/implementations/etoro_quota_lanes.py::min_interval_for_stamps`.
+  Never write `window / budget` where the question is "is a caller paced at this inside the
+  budget". Keep the throughput property if the name says throughput, and say in its docstring
+  that it is NOT stamp-safe. ⚠ The helper's guarantee is the `<=`, not an exact count: binary
+  rounding can put the result one request under the target (it does at lane B — `60 / 18`
+  rounds up, so it places 18 not 19). Assert the inequality, never the count.
+- Generalises to: any rolling-window limiter — API quotas, per-minute job caps, burst budgets,
+  token buckets read as "N per window". The tell is a constant computed as `period / limit`.
+- Enforced in: this prevention log; `etoro_quota_lanes.min_interval_for_stamps` +
+  `tests/test_etoro_quota_lanes.py::test_min_interval_for_stamps_is_safe_by_the_rolling_window_rule`,
+  which carries the `window/budget` arithmetic as an in-file revert probe.
+
+### "Dead code" on a DEDICATED lane can be correct, and making it live is the regression (#2946, 2026-09-13)
+
+- Symptom: a census found `_ETORO_WRITE_INTERVAL_S` unreachable on the entire eToro eligibility
+  path (every caller builds its provider inside the request loop, so each request is the first
+  on a virgin clock) and wrote it up as FINDING 1 with "hoist the provider out of the loop" as
+  the preferred fix. A follow-up spec went further and proposed promoting the clock to module
+  scope, mirroring a precedent that had shipped for the market-data provider.
+- Root cause: an unreachable guard reads as a defect regardless of what reaching it would do.
+  Here the floor paces `_http_write`, which also carries ORDER SUBMISSION; the eligibility lane
+  is documented *dedicated, pooled with nothing*. Making the floor reach it couples a research
+  sweep to the order path for no quota reason — the coupling an earlier proposal had already
+  rejected by name — and, via `CORE_MAX_ACCOUNT_RISK_AGE_SECONDS` (derived from *one* nominal
+  throttle wait), makes a stale-risk REFUSAL reachable on the execution path. Caught at Codex
+  checkpoint 1, not by any test: every test passed both before and after, because the tests
+  pinned the mechanism and the mechanism was never in dispute.
+- Prevention: before "activating" any guard, constant or gate found to be unreachable, ask what
+  it would GOVERN once reached and whether that is the right scope — the scope question is
+  separate from the reachability question and is the one that decides. Where the answer is
+  "unreachable is correct", ship the INVARIANT that says so, with the reason, next to the
+  constant and in a test; otherwise the next session re-finds the same dead code and fixes it.
+  ⚠ Corollary for handoff notes: a finding labelled "needs no further evidence" is still a
+  premise (working-order 3c). Re-derive what the fix would do before implementing it.
+- Generalises to: unused feature flags, unreferenced CHECK constraints, an `on_429` callback no
+  provider wires, a lock nobody takes. "Nothing uses it" is a measurement; "so wire it up" is a
+  conclusion that needs its own evidence.
+- Enforced in: this prevention log;
+  `tests/test_2946_quota_load.py::test_lane_b_is_deliberately_not_paced_by_the_shared_write_floor`
+  (asserts the DERIVATION, not just inequality, so a coincidence cannot satisfy it) + the
+  ⚠⚠ block on `CORE_ELIGIBILITY_REQUEST_INTERVAL_S` in
+  `app/services/strategy_core_eligibility.py`.

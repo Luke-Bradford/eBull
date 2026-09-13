@@ -1,4 +1,4 @@
-"""#2946 step 2 -- what actually paces an eToro caller, and what two of them cost.
+"""#2946 steps 2+3 -- what actually paces an eToro caller, and what two of them cost.
 
 Pure: no DB, no network, no broker request.  Every request goes through the SHIPPED
 ``ResilientClient._request`` path into an ``httpx.MockTransport``; only the transport and
@@ -11,9 +11,19 @@ file owns step 2's LOAD questions, which that file does not reach:
 * a provider built INSIDE a request loop never reaches its own floor (finding 1);
 * two instances on one user key stamp at the same instant -- asserted with a fake clock
   AND real concurrency, which #2946 item 2 requires in those words;
-* the constant that actually paces lane B is LOOSER than the floor it substitutes for.
+* lane B's pacing fits lane B's documented budget, and is DERIVED from it.
+
+⚠⚠ **Finding 1's VERDICT changed at step 3 and the mechanism did not.** The first two
+tests still describe exactly what the code does; what moved is what that means. A
+provider built per request never reaching the shared write floor is DELIBERATE, because
+lane B is a dedicated quota and that floor also paces order submission -- see
+``test_lane_b_is_deliberately_not_paced_by_the_shared_write_floor``. Do not read these
+two tests as pinning a defect awaiting repair; the repair was specced, reviewed and
+rejected as a regression on the execution path.
 
 Census + verdict: ``docs/proposals/execution/2026-09-13-etoro-quota-load-census.md``.
+Step 3's change + the rejected alternatives:
+``docs/proposals/execution/2026-09-13-lane-b-dead-throttle-fix.md``.
 
 ⚠ Prevention log §3665 governs the assertions: capture the quantity the code WROTE from
 inside its own critical section, never a reading taken after the call returns.  Stamps
@@ -128,14 +138,21 @@ def virtual_time(monkeypatch: pytest.MonkeyPatch) -> VirtualClock:
 def test_a_provider_built_per_request_never_reaches_its_own_floor(
     virtual_time: VirtualClock, mock: httpx.Client
 ) -> None:
-    """FINDING 1. ``scheduler.py:6290`` constructs an ``EtoroBrokerProvider`` INSIDE the
-    per-instrument loop, and both arms of ``scripts/prove_2603_core_eligibility.py``
-    (``:119``, ``:191``) do the same. Every request is therefore the first on a virgin
-    clock, so ``_ETORO_WRITE_INTERVAL_S`` paces nothing on the entire lane-B path.
+    """FINDING 1's MECHANISM. ``scheduler.py:6292`` constructs an ``EtoroBrokerProvider``
+    INSIDE the per-instrument loop, and both arms of
+    ``scripts/prove_2603_core_eligibility.py`` (``:119``, ``:191``) do the same. Every
+    request is therefore the first on a virgin clock, so ``_ETORO_WRITE_INTERVAL_S``
+    paces nothing on the lane-B path.
 
     The contrast arm is the point: the identical request sequence through ONE reused
     provider is floor-spaced. Nothing about the requests changed -- only where the
     ``with`` sits.
+
+    ⚠⚠ This is CHARACTERISATION, not a defect awaiting repair. Step 3 established that
+    lane B must NOT be paced by that floor (dedicated quota; the floor also carries order
+    submission), so what actually paces this path is
+    ``CORE_ELIGIBILITY_REQUEST_INTERVAL_S``, derived from lane B's own budget. See
+    ``test_lane_b_is_deliberately_not_paced_by_the_shared_write_floor``.
     """
     rounds = 4
 
@@ -241,31 +258,82 @@ def test_two_instances_on_one_user_key_stamp_at_the_same_virtual_instant(
     )
 
 
-def test_the_lane_b_pacing_constant_is_looser_than_the_floor_it_substitutes_for() -> None:
-    """The arithmetic behind finding 1, pinned so a constant change cannot go unnoticed.
+def _in_one_minute(interval_s: float) -> int:
+    """Requests a caller spaced at ``interval_s`` places in a ROLLING minute.
 
-    Because every lane-B caller builds its provider per request, the only thing spacing
-    those requests is ``CORE_ELIGIBILITY_REQUEST_INTERVAL_S`` -- a constant in a
-    different module from the throttle it stands in for, and a smaller one.
+    ⚠ ``floor(60 / i) + 1``, not ``60 / i``. A caller fires at 0, i, 2i, ... so the
+    window holds one more request than the sustained-throughput figure. At lane B that
+    is the difference between "comfortable" and "at the limit".
+    """
+    return int(60.0 // interval_s) + 1
 
-    ⚠ The comparison is ``floor(60 / interval) + 1``, not ``60 / interval``. A caller
-    spaced at ``i`` fires at 0, i, 2i, ... so a 60 s window holds one more request than
-    the sustained-throughput figure. At 3.2 s that is 19 against a documented 20, which
-    is the difference between "comfortable" and "one caller from the limit".
+
+def test_single_lane_b_caller_fits_its_documented_budget() -> None:
+    """#2946 step 2's acceptance clause 1, read from the lane map rather than a literal.
+
+    ``floor(60 / pacing) + 1 <= CallSite.conservative_per_minute`` for the lane-B call
+    site. Both sides come from ``etoro_quota_lanes`` -- the budget from the portal-cited
+    ``QuotaLane``, the pacing from ``CORE_ELIGIBILITY_REQUEST_INTERVAL_S``, which #2946
+    step 3 made a DERIVATION of that same budget rather than a number chosen beside it.
     """
     site = next(c for c in lanes.CALL_SITES if c.method == "check_instrument_eligibility")
-    budget = site.conservative_per_minute
+    placed = _in_one_minute(CORE_ELIGIBILITY_REQUEST_INTERVAL_S)
 
-    def in_one_minute(interval_s: float) -> int:
-        return int(60.0 // interval_s) + 1
-
-    assert CORE_ELIGIBILITY_REQUEST_INTERVAL_S < _ETORO_WRITE_INTERVAL_S, (
-        "the hand-written pacing is expected to be LOOSER than the floor it replaces; "
-        "if this ever inverts, finding 1's arithmetic changes and the census is stale"
+    assert placed <= site.conservative_per_minute, (
+        f"one lane-B caller places {placed} requests against a documented {site.conservative_per_minute}/min"
     )
-    assert in_one_minute(CORE_ELIGIBILITY_REQUEST_INTERVAL_S) == 19
-    assert in_one_minute(_ETORO_WRITE_INTERVAL_S) == 18
-    # One caller already sits inside the budget with a single request of headroom.
-    assert in_one_minute(CORE_ELIGIBILITY_REQUEST_INTERVAL_S) < budget
-    # Two do not, and nothing serialises the hourly job against a research run.
-    assert 2 * in_one_minute(CORE_ELIGIBILITY_REQUEST_INTERVAL_S) > budget
+    # The constructed choice is one request of HEADROOM -- the portal publishes a budget,
+    # not a recommended utilisation, so the margin is fixed here and pinned rather than
+    # left implicit.
+    assert placed <= site.conservative_per_minute - 1
+
+
+def test_two_concurrent_lane_b_callers_still_exceed_the_budget() -> None:
+    """#2946 step 2's acceptance clause 2 is OPEN, and this records that it is.
+
+    Two lane-B callers on one user key -- the hourly ``core_eligibility_refresh`` job and
+    an operator running ``scripts/prove_2603_core_eligibility.py`` -- are separate
+    PROCESSES. No pacing constant and no process-local clock can reach across them, so
+    step 3's change does not close this and does not claim to. Closing it needs a
+    cross-process gate (``app/providers/postgres_rate_gate.py`` exists but is wired for
+    SEC only, via ``set_sec_rate_gate``, and fails OPEN) or an advisory lock serialising
+    the two callers. Both are the coordinator, whose step-2 verdict is
+    ``insufficient_evidence``: zero eToro 429s over 76 days from two independent sources.
+
+    ⚠ This test asserts the SHORTFALL. If it ever fails, the gap has been closed and this
+    test should be replaced by the assertion that it stays closed -- not deleted.
+    """
+    site = next(c for c in lanes.CALL_SITES if c.method == "check_instrument_eligibility")
+    assert 2 * _in_one_minute(CORE_ELIGIBILITY_REQUEST_INTERVAL_S) > site.conservative_per_minute
+
+
+def test_lane_b_is_deliberately_not_paced_by_the_shared_write_floor() -> None:
+    """⚠⚠ The invariant that stops the next session shipping the obvious regression.
+
+    ``_ETORO_WRITE_INTERVAL_S`` paces ``_http_write``, which also carries lane A (ORDER
+    SUBMISSION) and lane C. Lane B is documented DEDICATED -- "not shared (pooled across)
+    any other endpoint" -- so pacing eligibility from that floor, whether by hoisting the
+    provider out of the request loop or by promoting the clock to module scope, makes a
+    research eligibility sweep delay ORDER WRITES for no quota reason. #2946 step 2
+    recorded the same coupling as item 1's blocker, and
+    ``docs/proposals/execution/2026-09-13-etoro-trading-throttle-coordination.md``
+    rejected a per-user-key registry on that ground.
+
+    So the two constants must stay independent, and lane B's must be derived from lane
+    B's own budget. Asserting only ``!=`` would pass on any coincidence, so this asserts
+    the DERIVATION: the interval is what the lane map produces for lane B's budget.
+    """
+    site = next(c for c in lanes.CALL_SITES if c.method == "check_instrument_eligibility")
+    expected = lanes.min_interval_for_stamps(lanes.LANES[site.lane].window_s, site.conservative_per_minute - 1)
+
+    assert CORE_ELIGIBILITY_REQUEST_INTERVAL_S == pytest.approx(expected), (
+        "lane B's pacing must be derived from lane B's documented budget, not chosen"
+    )
+    assert CORE_ELIGIBILITY_REQUEST_INTERVAL_S != _ETORO_WRITE_INTERVAL_S, (
+        "lane B is a DEDICATED quota; pacing it from the shared write floor couples a "
+        "research sweep to order submission -- see this test's docstring"
+    )
+    assert lanes.LANES[site.lane].scope == "dedicated", (
+        "this invariant's whole justification is lane B's dedicated scope; if the portal "
+        "ever repools it, re-derive rather than keeping the test green"
+    )

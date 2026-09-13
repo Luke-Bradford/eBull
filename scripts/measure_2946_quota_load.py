@@ -393,7 +393,7 @@ def a1_pacing(out: TextIO) -> None:
     for c in PACED_CALLERS:
         print(f"  {c.label:40s} {c.site}\n      {c.note}", file=out)
 
-    # The defect, stated as arithmetic rather than prose.
+    # The mechanism, stated as arithmetic rather than prose.
     write_floor = _const(_BROKER_MOD, "_ETORO_WRITE_INTERVAL_S")
     elig_pace = _const("app.services.strategy_core_eligibility", "CORE_ELIGIBILITY_REQUEST_INTERVAL_S")
     print("\n" + "-" * 78, file=out)
@@ -402,11 +402,17 @@ def a1_pacing(out: TextIO) -> None:
     print(
         f"All three lane-B callers build a provider INSIDE the request loop, so every\n"
         f"request is the first on its own clock and _ETORO_WRITE_INTERVAL_S={write_floor}s\n"
-        f"never paces the batch. Pacing is CORE_ELIGIBILITY_REQUEST_INTERVAL_S={elig_pace}s,\n"
-        f"an application constant in a different module -- and it is LOOSER than the floor\n"
-        f"it stands in for ({elig_pace} < {write_floor}).\n"
+        f"never paces the batch. Pacing is CORE_ELIGIBILITY_REQUEST_INTERVAL_S={elig_pace}s.\n"
         f"  one caller:  {stamps_in_window(elig_pace)}/60s vs budget {budget.get('B_eligibility')}\n"
-        f"  had the floor applied: {stamps_in_window(write_floor)}/60s",
+        f"  had the floor applied: {stamps_in_window(write_floor)}/60s\n"
+        f"\n"
+        f"VERDICT (step 3, 2026-09-13): unreachable here is CORRECT, not a defect.\n"
+        f"_ETORO_WRITE_INTERVAL_S paces _http_write, which also carries lane A (order\n"
+        f"submission) and lane C; lane B is documented DEDICATED, so pacing it from that\n"
+        f"floor would make a research sweep delay order writes for no quota reason. What\n"
+        f"step 3 fixed is PROVENANCE: the lane-B constant is now derived from lane B's own\n"
+        f"budget via etoro_quota_lanes.min_interval_for_stamps, where it used to be chosen.\n"
+        f"See docs/proposals/execution/2026-09-13-lane-b-dead-throttle-fix.md.",
         file=out,
     )
 

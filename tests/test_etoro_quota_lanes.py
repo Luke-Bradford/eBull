@@ -34,6 +34,7 @@ from app.providers.implementations.etoro_quota_lanes import (
     KNOWN_UNTHROTTLED,
     LANES,
     RAW_HTTPX_EXPRESSION_COUNTS,
+    min_interval_for_stamps,
 )
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -56,6 +57,9 @@ def test_lane_table_is_internally_consistent() -> None:
         assert lane.window_s > 0, f"{key}: non-positive window"
         assert lane.witnesses >= 1, f"{key}: a lane with no witness is not a census entry"
         assert lane.source_url.startswith("https://api-portal.etoro.com/"), f"{key}: source is not the live portal"
+        # ⚠ Sustained CADENCE, deliberately not the stamp-safe interval — see the
+        # property's docstring and `test_min_interval_for_stamps_is_safe_by_the_rolling
+        # _window_rule` for the one-request difference between them.
         assert lane.min_interval_s == pytest.approx(lane.window_s / lane.documented_per_minute)
 
 
@@ -90,6 +94,36 @@ def test_membership_ambiguity_is_recorded_only_where_the_readings_disagree() -> 
             assert site.general_tier_per_minute != LANES[site.lane].documented_per_minute, (
                 f"{site.method}: flagged ambiguous but both readings agree"
             )
+
+
+def test_min_interval_for_stamps_is_safe_by_the_rolling_window_rule() -> None:
+    """The derivation behind every floor requirement, and the off-by-one it replaced.
+
+    A rolling quota counts STAMPS: a caller spaced at ``i`` fires at 0, i, 2i, ... so a
+    window holds ``floor(window / i) + 1`` of them, one MORE than sustained throughput.
+    ``window / budget`` -- what ``conservative_min_interval_s`` returned before #2946
+    step 3 -- therefore places ``budget + 1``, and the floor guard below admitted it.
+
+    ⚠ The guarantee asserted here is the ``<=``, not an exact count. Binary rounding can
+    make the returned interval land one request BELOW the target (it does at lane B:
+    ``60 / 18`` rounds up, so the result places 18 and not 19). Never above.
+    """
+
+    def placed(interval_s: float) -> int:
+        return int(60.0 // interval_s) + 1
+
+    for key, lane in LANES.items():
+        budget = lane.documented_per_minute
+        safe = min_interval_for_stamps(lane.window_s, budget)
+        assert placed(safe) <= budget, f"{key}: {safe}s places {placed(safe)} against {budget}/min"
+
+        # The revert probe, in-file: the arithmetic this replaced is over budget by
+        # exactly one at every lane, which is why it could not stay.
+        naive = lane.window_s / budget
+        assert placed(naive) == budget + 1, f"{key}: window/budget is expected to be over by one"
+
+    with pytest.raises(ValueError):
+        min_interval_for_stamps(60, 1)
 
 
 # ---------------------------------------------------------------------------

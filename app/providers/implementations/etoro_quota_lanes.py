@@ -48,6 +48,38 @@ LaneScope = Literal["dedicated", "shared", "default"]
 EnvSeparation = Literal["witnessed", "neutral", "spans"]
 
 
+def min_interval_for_stamps(window_s: float, max_stamps: int) -> float:
+    """Smallest spacing whose ROLLING-window request count is ``<= max_stamps``.
+
+    ⚠ NOT ``window_s / max_stamps``, and the difference is one request.  A caller
+    spaced at ``i`` fires at 0, i, 2i … so a window-long ROLLING window holds
+    ``floor(window_s / i) + 1`` stamps -- one MORE than sustained throughput, because a
+    rolling quota counts stamps and the first one is free.  Compliance therefore needs
+    ``floor(window_s / i) <= max_stamps - 1``, which holds for every
+    ``i > window_s / max_stamps``.
+
+    That bound is OPEN -- ``window_s / max_stamps`` itself places ``max_stamps + 1`` --
+    so the smallest value expressible from the budget that satisfies it is
+    ``window_s / (max_stamps - 1)``.
+
+    ⚠ The returned interval places ``max_stamps`` requests, or ``max_stamps - 1`` when
+    binary rounding makes ``window_s / result`` land a hair under ``max_stamps - 1``.
+    Never MORE: exactly, ``window_s / result == max_stamps - 1``, and the float result is
+    within an ULP of that, while the threshold it must stay under is a whole request
+    away.  The guarantee is the ``<=``; the exact count is not pinned and callers must
+    not assume it (an earlier draft of this docstring claimed the count exactly and was
+    wrong at lane B, where ``60 / 18`` rounds up and yields 18 requests, not 19).
+
+    #2946 step 2 measured the consequence: lane B at 3.2 s places 19 requests, not the
+    18.75 sustained throughput suggests.  Before this helper existed,
+    ``CallSite.conservative_min_interval_s`` returned ``60 / 20 = 3.0`` for that lane and
+    a floor of exactly 3.0 would have passed the floor guard at 21 requests/min.
+    """
+    if max_stamps < 2:
+        raise ValueError("max_stamps must be at least 2 to express an interval")
+    return window_s / (max_stamps - 1)
+
+
 @dataclass(frozen=True)
 class QuotaLane:
     """One documented eToro quota family."""
@@ -67,7 +99,14 @@ class QuotaLane:
 
     @property
     def min_interval_s(self) -> float:
-        """Fastest sustained cadence for a caller owning the whole pool."""
+        """Fastest sustained CADENCE for a caller owning the whole pool.
+
+        ⚠ Sustained throughput, which is NOT the same question as "is a caller paced at
+        this interval inside the budget".  It is not: a caller spaced at exactly this
+        value places ``documented_per_minute + 1`` stamps in a rolling window.  Use
+        ``min_interval_for_stamps`` for the pacing question -- this property is kept for
+        what it says, the cadence, and is deliberately not routed through it.
+        """
         return self.window_s / self.documented_per_minute
 
 
@@ -169,7 +208,16 @@ class CallSite:
 
     @property
     def conservative_min_interval_s(self) -> float:
-        return LANES[self.lane].window_s / self.conservative_per_minute
+        """Slowest-reading floor this call site must respect, by the ROLLING-window rule.
+
+        ⚠ Was ``window_s / conservative_per_minute`` until #2946 step 3, which is off by
+        one request: at lane B that returned 3.0 s, and a floor of exactly 3.0 s places
+        21 requests against a documented 20.  The floor guard
+        (``tests/test_etoro_quota_lanes.py::test_configured_floor_is_at_least_the_
+        conservative_minimum``) is the only live consumer, so the off-by-one was an
+        admission gap in the one test that checks real configuration.
+        """
+        return min_interval_for_stamps(LANES[self.lane].window_s, self.conservative_per_minute)
 
 
 _BROKER = "app/providers/implementations/etoro_broker.py"
