@@ -79,7 +79,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 import psycopg
 
@@ -130,8 +130,7 @@ PACED_CALLERS: tuple[PacedCaller, ...] = (
         "B_eligibility",
         "per_request",
         ("app.services.strategy_core_eligibility", "CORE_ELIGIBILITY_REQUEST_INTERVAL_S"),
-        "one instrument per request by design (the proof digests the whole response); "
-        "sleeps at :152",
+        "one instrument per request by design (the proof digests the whole response); sleeps at :152",
     ),
     PacedCaller(
         "prove_2603_core_eligibility census",
@@ -221,14 +220,20 @@ JOB_CLOCKS: tuple[JobClock, ...] = (
         "execute_approved_orders",
         f"{_SCHED}:4988",
         "instance",
-        ((_BROKER_MOD, "_ETORO_READ_INTERVAL_S", "_http_read"), (_BROKER_MOD, "_ETORO_WRITE_INTERVAL_S", "_http_write")),
+        (
+            (_BROKER_MOD, "_ETORO_READ_INTERVAL_S", "_http_read"),
+            (_BROKER_MOD, "_ETORO_WRITE_INTERVAL_S", "_http_write"),
+        ),
         ("A_order_write", "B_eligibility", "C_what_if_costs", "E_account_read"),
     ),
     JobClock(
         "strategy_paper_cycle",
         f"{_SCHED}:5930",
         "instance",
-        ((_BROKER_MOD, "_ETORO_READ_INTERVAL_S", "_http_read"), (_BROKER_MOD, "_ETORO_WRITE_INTERVAL_S", "_http_write")),
+        (
+            (_BROKER_MOD, "_ETORO_READ_INTERVAL_S", "_http_read"),
+            (_BROKER_MOD, "_ETORO_WRITE_INTERVAL_S", "_http_write"),
+        ),
         ("A_order_write", "B_eligibility", "C_what_if_costs", "D_order_info", "E_account_read"),
     ),
     JobClock(
@@ -335,6 +340,18 @@ def _rolling_bound(duration_s: float, floor_s: float, window_s: float = 60.0) ->
     in Postgres bounds identically to one that spent it on HTTP.
     """
     return int(min(duration_s, window_s) // floor_s) + 1
+
+
+def _fetch_one(cur: psycopg.Cursor[Any]) -> tuple[Any, ...]:
+    """``fetchone`` with the ``None`` case made explicit.
+
+    Every call site here runs an aggregate, which always returns exactly one row. If one
+    ever does not, failing on this line beats unpacking ``None`` three frames later.
+    """
+    row = cur.fetchone()
+    if row is None:  # pragma: no cover - an aggregate with no row is a broken query
+        raise RuntimeError("aggregate query returned no row")
+    return row
 
 
 def _fmt_dt(value: datetime | None) -> str:
@@ -449,7 +466,8 @@ def m2_derived(conn: psycopg.Connection, out: TextIO, *, since: str | None) -> N
     for jc in JOB_CLOCKS:
         r = by_job.get(jc.job_name)
         if r is None:
-            print(f"{jc.job_name:28s} {'-':>6s} {'-':>5s} {'-':>6s} {'-':>5s} {'-':>8s} {'-':>9s} {jc.clock_scope:>12s}", file=out)
+            dashes = f"{'-':>6s} {'-':>5s} {'-':>6s} {'-':>5s} {'-':>8s} {'-':>9s}"
+            print(f"{jc.job_name:28s} {dashes} {jc.clock_scope:>12s}", file=out)
             continue
         total_reaped += r[2]
         total_unfinished += r[3]
@@ -466,7 +484,7 @@ def m2_derived(conn: psycopg.Connection, out: TextIO, *, since: str | None) -> N
         file=out,
     )
 
-    print(f"\nper-fire bound on the worst non-reaped fire, by clock:", file=out)
+    print("\nper-fire bound on the worst non-reaped fire, by clock:", file=out)
     print(f"{'job':28s} {'client':>12s} {'floor s':>8s} {'bound':>7s}  lanes reachable", file=out)
     for jc in JOB_CLOCKS:
         r = by_job.get(jc.job_name)
@@ -555,7 +573,7 @@ def m3_concurrency(conn: psycopg.Connection, out: TextIO, *, since: str | None) 
         """,
         params,
     )
-    (peak_n,) = cur.fetchone()
+    (peak_n,) = _fetch_one(cur)
     print(f"\nMax simultaneous eToro-touching JOB runs: {peak_n}", file=out)
     print(
         "⚠ Job concurrency is not instance concurrency and not quota concurrency: one job\n"
@@ -572,7 +590,7 @@ def m3_concurrency(conn: psycopg.Connection, out: TextIO, *, since: str | None) 
         """
     )
     rows = cur.fetchall()
-    print(f"\nlive eToro credentials (read directly; the loader would WRITE an audit row):", file=out)
+    print("\nlive eToro credentials (read directly; the loader would WRITE an audit row):", file=out)
     for env, n, labels in rows:
         print(f"  environment={env:8s} rows={n} distinct labels={labels}", file=out)
     print(
@@ -634,8 +652,11 @@ def m4_retryables(conn: psycopg.Connection, out: TextIO, *, log_path: Path) -> N
             print(f"  {prefix:34s} {status}  {n}", file=out)
         if not by_path:
             print("  (none)", file=out)
-        print(f"\nPARSED-EVENT accounting: {retry_lines} = {sum(by_host.values())} absolute + "
-              f"{sum(by_path.values())} relative + {len(unparsed)} malformed", file=out)
+        print(
+            f"\nPARSED-EVENT accounting: {retry_lines} = {sum(by_host.values())} absolute + "
+            f"{sum(by_path.values())} relative + {len(unparsed)} malformed",
+            file=out,
+        )
         for line in unparsed[:5]:
             print(f"  malformed: {line[:150]}", file=out)
         etoro_429 = sum(n for (_, s), n in by_path.items() if s == "429")
@@ -691,7 +712,7 @@ def m5_reconciliation(conn: psycopg.Connection, out: TextIO) -> None:
           from strategy_order_reconciliation_state
         """
     )
-    unresolved, lo, hi, total = cur.fetchone()
+    unresolved, lo, hi, total = _fetch_one(cur)
     print(f"\nrows={total}  with first_unresolved_at set={unresolved}", file=out)
     print(f"oldest unresolved={_fmt_dt(lo)}  newest={_fmt_dt(hi)}", file=out)
     if not unresolved:
@@ -744,7 +765,7 @@ def main() -> int:
         conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         cur = conn.cursor()
         cur.execute("select now()")
-        (cutoff,) = cur.fetchone()
+        (cutoff,) = _fetch_one(cur)
 
         print("#2946 step 2 -- eToro quota load census", file=out)
         print(f"git={_git_sha()}  db_snapshot_at={_fmt_dt(cutoff)} (REPEATABLE READ, read-only)", file=out)

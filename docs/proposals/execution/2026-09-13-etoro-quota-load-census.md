@@ -1,283 +1,231 @@
-# #2946 step 2 — the representative-interval load census
+# #2946 step 2 — the eToro quota load census, and the verdict for item 4
 
-Spec, revision 2. Written 2026-09-13 from `a555fe2b`. Revision 1 went through Codex
-checkpoint 1 and 30 of its findings are folded in below; the ones that changed the SHAPE
-of the work rather than a sentence are marked ⚠C.
-
-Step 1 (`bb1c2806`, PR #2969) produced the LANE MAP — what the portal documents. This
-step produces the LOAD — what we actually spend against it, and whether the missing
-cross-instance coordination costs anything. Step 1's own closing line sets the boundary:
+Measured 2026-09-13 from `a555fe2b`. Step 1 (`bb1c2806`, PR #2969) produced the lane MAP
+— what the portal documents — and closed with the boundary this step crosses:
 *"Documentation proves a number is DOCUMENTED, never that it is ENFORCED. #2946 step 2
 is the measurement."*
 
-## Scope
+Instrument: `scripts/measure_2946_quota_load.py` (read-only; one REPEATABLE READ
+snapshot plus one log file). Tests: `tests/test_2946_quota_load.py`. Artefact:
+`var/quota-census/2026-09-13-census.txt`.
 
-#2946 acceptance item 2, verbatim:
+**No real broker request was made.** No trading write, no portal re-fetch, no floor
+change, no coordinator.
 
-> Measure one representative operating interval: requests/rolling minute, throttle wait,
-> 429s and reconciliation latency. A fake-clock concurrent test is required; deliberately
-> exceeding a real broker quota is not.
+## The headline
 
-Plus item 4's verdict — *whether an implementation is warranted, the concrete affected
-workload and measurable acceptance*. Item 3's comparison of candidate gates is written
-only as far as the measurement supports; building one is NOT in this unit.
+Two findings, and neither is the one the ticket expected.
 
-**No real broker request is made by anything in this change.** The census reads the dev
-DB and the retained jobs-daemon log; the test uses `httpx.MockTransport`.
+1. **On the entire lane-B path the `ResilientClient` floor is unreachable.** All three
+   eligibility callers construct an `EtoroBrokerProvider` *inside* the request loop
+   (`app/workers/scheduler.py:6290`, `scripts/prove_2603_core_eligibility.py:119` and
+   `:191`), so every request is the first on a virgin clock and
+   `_ETORO_WRITE_INTERVAL_S = 3.5 s` paces nothing. The actual spacing is a hand-written
+   `time.sleep(CORE_ELIGIBILITY_REQUEST_INTERVAL_S)` where that constant is **3.2 s**
+   (`app/services/strategy_core_eligibility.py:67`) — **looser than the floor it stands
+   in for**, in a different module from it.
+2. **That leaves one request of headroom.** A caller spaced at 3.2 s places
+   `floor(60/3.2) + 1 = 19` requests in a rolling minute against lane B's conservative
+   budget of **20**. Two lane-B callers — the hourly job and an operator running the
+   script — reach **38, or 190% of the budget**, and nothing serialises them: the job
+   takes the `etoro` job lane and a script takes no lane at all.
 
-## Source rule
+⚠ The `+ 1` is load-bearing. Sustained throughput is `60/3.2 = 18.75`, which rounds to a
+comfortable-looking 18. A rolling-minute quota counts *stamps*, and a caller firing at
+0, 3.2, … 57.6 places nineteen of them.
 
-The governing numbers are the portal's, already read by step 1 and recorded in
-`app/providers/implementations/etoro_quota_lanes.py` (`VERIFIED_ON = 2026-09-13`). This
-step cites that module rather than re-reading the portal: a second fetch would produce a
-second transcript of the same pages and two sources of truth for one table.
+## What could NOT be measured, and why that matters
 
-⚠C **Step 1 is explicit that its evidence is a DATED TRANSCRIPT, not a pinned artefact**
-— *"WebFetch returns a rendered reading, not raw bytes, and no response hash was
-captured"* (`etoro_quota_lanes.py:38-40`). Revision 1 of this spec called it "pinned".
-It is not, and the census must not upgrade its provenance.
+⚠⚠ **No eToro lane has a per-request artefact.** The first draft of this work treated
+`strategy_core_eligibility_proofs` as a request log for lane B and computed a "17
+requests in a rolling 60 s" figure from it. That was wrong four ways, each checkable:
 
-Where a budget is quoted it is `CallSite.conservative_per_minute` — the LOWER of the
-per-endpoint number and the general page's operation tier, which is step 1's recorded
-policy because the portal states no precedence between the two readings.
+1. `observed_at TIMESTAMPTZ NOT NULL DEFAULT now()` (`sql/346_core_eligibility_proofs.sql:47`)
+   — and Postgres's `now()` is **transaction-start** time. The insert runs inside
+   `with core_submission_lock(conn), conn.transaction():` (`scheduler.py:6316`), a
+   transaction beginning *after* the HTTP round-trip and *after* a lock wait. The column
+   times the recording, not the request.
+2. A request failing in transport writes no row — eligibility is explicitly
+   non-persisting (`etoro_broker.py:867`) and transport failures are excluded
+   (`strategy_core_eligibility.py:273`). Failures still spend quota.
+3. Other eligibility callers write no proof at all (`strategy_paper_executor.py:1241`,
+   `strategy_position_manager.py:408`).
+4. The table's own comment: *"Evidence of an observation, not an attestation of one …
+   nothing can stop a caller asserting an account it never contacted."*
 
-⚠C **Lane G is NOT aggregated.** Its membership is `UNENUMERATED`
-(`etoro_quota_lanes.py:131-141`) and its two call sites carry different conservative
-readings, one of them flagged `membership_ambiguous`. Summing them into "lane G load"
-would invent a data treatment the source does not license. Lane G is reported per call
-site, with the comparison against a budget stated as **undefined**, not estimated.
+So the census reports **CONFIGURED** (a pacing constant read by import), **DERIVED** (an
+arithmetic bound from a code reading and a `job_runs` fire) and **UNCOUNTED** (traffic
+with neither). It never reports an observed request rate, because none exists.
 
-The measurement side has no external source rule to find: this is our own traffic. Its
-rules are the repo's own, cited inline.
+**UNCOUNTED, named every run so it cannot be read as zero:** the WS reconcile runner
+(`etoro_websocket.py:999`, own provider, *different OS process*), subscriber REST quote
+polling (`:1622`), API candle requests (`app/api/instruments.py:1390`), two
+operator-triggered endpoints (`app/api/strategies.py:3357`, `:3852`), six broker
+constructions across five scripts, and step 1's four raw-`httpx` sites that bypass every
+throttle.
 
-## What is OBSERVED vs what is DERIVED vs what is UNCOUNTED
+⚠ Consequently every rate here is a **lower** bound on account-wide load while every
+per-fire figure is an **upper** bound on that fire. The two point opposite ways and
+neither becomes a headroom claim on its own.
 
-⚠C Revision 1 had two buckets. Three are needed, because the third is where a census
-quietly becomes a false clean bill of health.
+## 429s — zero, and the exact scope of that zero
 
-| bucket | meaning | reported as |
-| --- | --- | --- |
-| OBSERVED | one durable artefact per HTTP request | a count |
-| DERIVED | code-path reading × measured fire count | a bound, with the algorithm stated |
-| UNCOUNTED | traffic with neither artefact nor fire record | named, never zero-filled |
+| source | result |
+| --- | --- |
+| jobs-daemon log, 1,200,426 lines, 2026-06-29 → 09-13 | 3,107 retryable lines = 3,105 `www.sec.gov` 503 + 2 eToro (one 500, one 504) + 0 malformed. **eToro 429s: 0** |
+| `job_runs.error_category = 'rate_limited'` | 15 rows, **all `sec_atom_fast_lane`**, none eToro |
 
-Only ONE lane is OBSERVED: lane B. `strategy_core_eligibility_proofs` writes one row per
-`check_instrument_eligibility` call, carrying `observed_at` and `recorded_by`.
+⚠ Classifying by hostname would have found none of this. `ResilientClient` logs the URL
+**as passed** (`resilient_client.py:213`), and the eToro providers pass *relative paths*
+against an httpx `base_url` — so an eToro 429 carries no hostname. The census matches
+absolute → host, leading `/` → path prefix, and prints an explicit malformed bucket with
+whole-file accounting.
 
-⚠C The UNCOUNTED set, enumerated so the verdict cannot be read as account-wide:
+⚠ The count is a **lower bound**: the final attempt raises via `raise_for_status()`
+without emitting the warning line (`resilient_client.py:201-203`), and callers swallow
+terminal failures (`scheduler.py:4492`; `strategy_paper_executor.py:1242` turns an
+eligibility exception into a rejection). Its scope is the **jobs process**; the API
+process logs elsewhere and its retained log ends 2026-08-26. Nothing here is account-wide.
 
-- the **API/uvicorn process** — `app/main.py:79` starts `EtoroWebSocketSubscriber`, whose
-  `_default_reconcile_runner` (`etoro_websocket.py:979-1011`) builds its OWN
-  `EtoroBrokerProvider` and calls `get_portfolio` + `get_trade_history`. It is
-  event-driven off private WS events (`_schedule_reconcile`, line 1082), writes no
-  `job_runs` row, and runs in a different OS process from the jobs daemon. Its retained
-  log ends 2026-08-26.
-- the **two API endpoints** `close_strategy_owned_position` and `rebalance_core_sleeve`
-  (`app/api/strategies.py:3357, 3852`).
-- the **six research/operator scripts** that construct a broker provider. Lane B's
-  `recorded_by` does capture `prove_2603_core_eligibility`, so that one is OBSERVED for
-  lane B only; the rest are uncounted.
-- step 1's **four `KNOWN_UNTHROTTLED` raw-httpx sites** (`etoro_quota_lanes.py:363-388`),
-  which bypass every throttle.
-- **suppressed fires** — the scheduler drops a fire with `max_instances active` and no
-  `job_runs` row is written, so demand that was never serviced is invisible.
+## Concurrency — possible overlap, not demonstrated contention
 
-⚠C Consequently the census measures **SERVICED DEMAND**, not offered load. Queued,
-suppressed and cancelled demand is out of reach. The word "offered" does not appear in
-the output.
+Full retained history. Clock scope is read from the *construction site*, never the job
+name.
 
-## The measurements
+| pair | n | max overlap | clocks | shared lanes |
+| --- | ---: | ---: | --- | --- |
+| `daily_portfolio_sync` × `strategy_paper_cycle` | 764 | 4.5 s | INDEPENDENT | E |
+| `daily_candle_refresh` × `quotes_refresh` | 50 | 84.1 s | **SHARED floor** | F |
+| `daily_portfolio_sync` × `execute_approved_orders` | 20 | 0.0 s | INDEPENDENT | E |
+| `core_eligibility_refresh` × `strategy_paper_cycle` | 7 | 2.5 s | INDEPENDENT | **B** |
+| `execute_approved_orders` × `strategy_paper_cycle` | 1 | 0.5 s | INDEPENDENT | **A, B, C, E** |
 
-### M1 — lane B, OBSERVED rolling-60s peak (full history)
+Max simultaneous eToro-touching job runs: **3**.
 
-Over ALL `strategy_core_eligibility_proofs` rows, not a window:
+The lane-F row is #2934 working: `EtoroMarketDataProvider` passes the module-level
+`_ETORO_RATE_LIMIT_CLOCK` (`etoro.py:77-78`), so fifty overlaps cost one floor between
+them. Every other row is `EtoroBrokerProvider`, which builds a fresh clock per instance
+(`etoro_broker.py:225-236`), so those rates add.
 
-- max count in any rolling 60 s window, overall and per `recorded_by`;
-- the same split by UTC day, so one batch cannot be reported as a standing rate;
-- the minimum observed inter-request gap, compared against
-  `_ETORO_WRITE_INTERVAL_S = 3.5` (`etoro_broker.py:103`).
+⚠ Job concurrency is neither instance concurrency nor quota concurrency: one job can fan
+out to several providers (every per-request caller does), two jobs can share one clock,
+and two overlapping jobs can touch disjoint lanes. The table is an upper bound on
+co-occurrence *between jobs that write a `job_runs` row*, and blind to every UNCOUNTED
+caller.
 
-Lane B's conservative budget is 20/min. One provider instance's write clock is floored at
-3.5 s, i.e. **17.14 req/min is the per-instance ceiling across lanes A+B+C+G-write
-COMBINED** — so the question is not whether one caller breaches, it is how little
-headroom one caller leaves for a second.
+⚠ The quota is per **user key**, so independent clocks contend only on a shared key. Two
+live non-revoked demo credential rows exist; row inequality does not prove key
+inequality, and historical calls cannot be attributed to today's rows at all.
 
-### M2 — per-lane DERIVED serviced demand, with the algorithm stated
+## Reconciliation latency — no population
 
-⚠C Revision 1 gave fire counts and durations and called the result a rolling-minute
-load. It is not one: totals do not locate requests inside a window. The algorithm is
-stated here or the number is not reported.
+Acceptance item 2's fourth quantity has a governing rule already, and the census uses it
+rather than inventing one: `enforce_reconciliation_slo` measures unresolved order
+identity from `strategy_order_reconciliation_state.first_unresolved_at` against a
+deployment-supplied `max_unresolved_seconds`
+(`app/services/strategy_order_reconciliation.py:1024`). A whole-job duration is not this.
 
-For a fire of duration `d` on a client with floor `f`, holding at most `k` requests, the
-most requests it can place in ANY 60 s window is
+`strategy_order_reconciliation_state` holds **0 rows**.
 
-    bound(fire) = min(k, floor(min(d, 60) / f) + 1)
+⚠ Zero unresolved rows means the SLO has no population, **not** that reconciliation is
+fast. With the demo account holding one manual filled order and no recommendation-origin
+orders, this quantity has no observations at all. That is an evidence gap.
 
-⚠C The `+ 1` matters and revision 1 omitted it: requests at 0.0, 1.1, 2.2 and 3.3 s all
-fit inside a 3.7 s run, so a 3.7 s job at a 1.1 s floor bounds to **4**, not 3. The bound
-further assumes every request lies inside the recorded `[started_at, finished_at]` and
-that one clock was retained for the whole fire.
+## `job_runs` corrections applied
 
-For a set of fires overlapping a window, the window bound is the SUM of their individual
-bounds — and only for fires on **independent clocks**; fires sharing a clock contribute
-one floor between them. ⚠C Peaks are never summed across callers whose peaks occur at
-different times; the bound is computed per window, not per caller.
+- **134 reaped rows excluded** from duration and overlap arithmetic. `ops_monitor.py:648`
+  rewrites an orphaned `running` row at boot with `finished_at = now()`, so its
+  "duration" spans the 2026-08-26 → 09-12 outage, not the work — `daily_candle_refresh`
+  alone had 107 such rows and a 15,410 s maximum. ⚠ Excluding them removes real requests
+  too: the affected windows are incomplete, not clean.
+- ⚠ Counting stranded `running` rows is the wrong detector — the reaper has already
+  converted them. Match the message.
+- **Suppressed fires are NOT invisible.** An earlier draft said they were;
+  `app/jobs/runtime.py:1636` records a `max_instances_active` skip row and `:1665`
+  records misfires.
+- The credential loader is deliberately **not** used: it writes an access-audit row and
+  bumps `last_used_at` (`app/api/broker_credentials.py:469`), which would make a
+  read-only census a writer.
 
-Per-fire request counts `k` come from the code, cited `file:line`, and distinguish four
-different things that revision 1 ran together: instruments, logical calls, HTTP attempts,
-and persisted rows. `job_runs.row_count` is none of them.
+## Tests
 
-⚠C Three `job_runs` corrections that materially move the numbers:
+`tests/test_2946_quota_load.py`, pure, driving the shipped `ResilientClient._request`
+into an `httpx.MockTransport`. The sibling `tests/test_2946_etoro_throttle_lock.py` owns
+item 2's lock fix and the identity assertions; this file owns the load questions.
 
-1. **Reaped rows carry a false `finished_at`.** `app/services/ops_monitor.py:648` rewrites
-   an orphaned `running` row at boot, so its duration spans the OUTAGE, not the work. Any
-   row whose message matches the reaper's is excluded from duration and overlap
-   arithmetic and reported as a separate count. The host was down 2026-08-26 → 09-12, so
-   this is not hypothetical.
-2. **A recorded fire need not perform HTTP.** Prereq skips (`_record_prereq_skip`), empty
-   scopes (`quotes_refresh`'s 0-instrument branch) and gated runs make zero requests. Fires
-   are split by whether the code path they took can reach a broker call.
-3. **Historical fires may not reflect current code.** Provider lifetime, batching and
-   retry policy have all changed inside the retained history. Derived counts are computed
-   only over the interval since the current revision of each call path, and that interval
-   is stated per job.
+1. **`test_a_provider_built_per_request_never_reaches_its_own_floor`** — four fresh
+   providers place four requests with zero spread; the identical sequence through one
+   reused provider pays 3.5 s between every pair.
+2. **`test_two_instances_on_one_user_key_stamp_at_the_same_virtual_instant`** —
+   fake-clock **and** concurrent, which is what item 2 asks for in those words. Two
+   instances on the same key, released together by a `threading.Barrier`, stamp at the
+   same virtual instant; a second arm forcing them onto one clock and lock pays the
+   floor, so the assertion cannot pass for an unrelated reason.
+3. **`test_the_lane_b_pacing_constant_is_looser_than_the_floor_it_substitutes_for`** —
+   pins 3.2 < 3.5, 19 vs 18 stamps per minute, and 2 × 19 > 20.
 
-Reported over two intervals, never pooled: full retained history, and the post-recovery
-interval. ⚠C The post-recovery interval is 2026-09-12 → 09-13 and **contains a weekend
-and a boot catch-up**. It is reported as what it is — a low-trading, catch-up-inflated
-sample — and no verdict rests on its representativeness.
+Assertions read the stamp the throttle wrote **from inside its critical section** (a
+`list` subclass whose `__setitem__` records — prevention log §3665), never a reading
+taken afterwards. Transport arrival order is a different invariant and is deliberately
+not asserted: a pacing lock is released before the HTTP call, so arrival says nothing
+about stamping.
 
-### M3 — concurrency census (possible overlap, not contention)
+⚠ **Revert-probed, and the first probe found a defect in the test rather than the code.**
+Giving `EtoroBrokerProvider` a module-level clock left test 1 passing, because
+`attach_recorders` was being called per loop iteration and handed each provider its own
+recorder — manufacturing the independence under test. Fixed by attaching all recorders
+once, keyed on object identity, so a shared clock yields one recorder. Re-probed: that
+mutation now fails tests 1 and 2 plus the sibling file's
+`test_two_broker_instances_do_not_share_a_budget`, and nothing else. A second probe
+(raising the pacing constant above the floor) fails test 3 alone.
 
-⚠C Revision 1 called this "clock overlap" and classified by job name. Both are wrong.
+## Verdict — item 4
 
-- Overlap of two runs is **possible** request overlap. It does not demonstrate
-  contention, and non-overlapping runs can still share a rolling minute. The census
-  reports it as an upper bound on co-occurrence and says so.
-- Clock identity is a property of the **construction site**, not the job. It is read from
-  the constructor: `EtoroMarketDataProvider` passes the module-level
-  `_ETORO_RATE_LIMIT_CLOCK` / `_LOCK` (`etoro.py:77-78, 126-130`) so every instance in a
-  process shares one clock; `EtoroBrokerProvider` builds a fresh `shared_ts` and lock per
-  instance (`etoro_broker.py:225-236`). The census maps each job to its construction site
-  by `file:line` and derives clock identity from that.
-- ⚠C Independent clocks do NOT by themselves imply competing quotas — the quota is per
-  **user key**, so two instances contend only if they hold the same key. The census
-  reports the credential identity each caller loads.
-- ⚠C Report **N-way** maximum concurrency (the largest number of eToro-touching runs live
-  at any instant), not only pairwise counts, which both miss 3-way saturation and
-  double-count occasions.
+**`insufficient_evidence` for a coordinator. One bounded, non-coordinator correction is
+justified on arithmetic alone.**
 
-### M4 — retryable-response census
+Why not "warranted": zero eToro 429s in 76 days across both independent sources, and
+aggregate serviced demand is far under every lane budget. Why not "not warranted": that
+zero is a lower bound in one process, the reconciliation-latency population is empty, and
+the largest traffic sources are UNCOUNTED by construction. Neither bound supports a
+headroom claim, which is precisely why the third outcome exists.
 
-`ResilientClient` logs `Retryable %d from %s %s` on every retried attempt
-(`resilient_client.py:213-216`). Parse the whole retained daemon log.
+**The correction that does not need more evidence** is finding 1. It is not a
+coordination problem and does not wait on one:
 
-⚠C **Host-based classification is broken and revision 1 relied on it.** The `%s %s` is
-the METHOD and the URL ARGUMENT AS PASSED — and the broker passes relative paths
-(`etoro_broker.py`, e.g. `get_trade_history`), so an eToro 429 logs no hostname at all.
-Classification is therefore: absolute URL → host; leading `/` → path-prefix match against
-the `CALL_SITES` templates in the lane map; anything else → an explicit **unmatched
-bucket**, reported, never silently dropped. Whole-file accounting is printed: lines read,
-lines matched, lines unmatched.
+- `CORE_ELIGIBILITY_REQUEST_INTERVAL_S = 3.2` substitutes for
+  `_ETORO_WRITE_INTERVAL_S = 3.5` on a path where the latter cannot apply, and is looser
+  than it. Two mechanisms pace one path and they disagree.
+- Preferred fix: **hoist the provider out of the request loop** so the floor applies and
+  the duplicate constant disappears. ⚠ This is a behaviour change — a provider would then
+  live across a batch that has run for 1,022 s — so it belongs to step 3/4 with its own
+  review, not to this measurement.
+- Cheaper fix if hoisting is rejected: raise the constant to at least the floor. It
+  removes the inversion but leaves two mechanisms in place.
 
-⚠C **This log is not the only 429 evidence.** `app/services/sync_orchestrator/exception_classifier.py:55`
-classifies `RATE_LIMITED`, and a final-attempt failure raises past the warning into
-`job_runs.error_msg` (`resilient_client.py:201-203`). Both are queried, and the two
-sources are reconciled rather than added — a single incident can appear in both.
+**Measurable acceptance for whichever is chosen:** for every lane-B caller,
+`floor(60 / pacing) + 1 ≤ CallSite.conservative_per_minute`; and two concurrent lane-B
+callers on one user key must not exceed it — which does require cross-instance
+coordination *on lane B specifically*.
 
-⚠C Stated limits: the count is a **lower bound** (the final attempt emits no warning);
-its scope is the **jobs process only**; retention is reported as first/last timestamp,
-byte size and whether any rotation or format change is visible in the file. ⚠C Log
-timestamps are naive local-time; DB timestamps are tz-aware UTC. The offset used to align
-them is stated, and any window that straddles the retention boundary is marked incomplete
-rather than reported as a low count.
+That last clause is now safe to build and was not before. The prior spec
+(`2026-09-13-etoro-trading-throttle-coordination.md`) rejected a per-user-key registry
+because eligibility and what-if costs ride `_http_write` on **dedicated** portal quotas,
+so one pool per credential would make a research census delay order writes on endpoints
+the portal documents as independent — and it named lane-splitting as the prerequisite.
+Step 1's lane map **is** that split. The rejection's stated blocker is gone; the
+remaining question is whether the measured load justifies the machinery, and on this
+evidence it does not yet.
 
-### M5 — the fake-clock concurrent test (required by acceptance)
+**Residual unknowns the verdict does not cover:** cross-process market-data traffic (the
+module clock is process-local and the API process holds its own), sequential instance
+churn under sustained load, retry/429 cooldown interaction (a `Retry-After` pauses only
+the failing request while siblings keep spending the same quota — already recorded as out
+of scope on the prior spec), and lane G's accepted floor exception.
 
-⚠C Revision 1 proposed one mechanism for three different questions. Codex is right that a
-virtual clock shared across real threads can itself serialise independent clocks and hide
-the defect. The three questions get three mechanisms:
-
-**A — identity, asserted directly.** Before anything is measured, assert the constructor
-choice with `is` comparisons: two `EtoroMarketDataProvider` instances share one clock
-object and one lock object; two `EtoroBrokerProvider` instances do not. This is the
-defect in its simplest form and needs neither threads nor a clock. ⚠C Recording wrappers
-are attached only AFTER these assertions, so the instrumentation cannot impose the
-sharing under test; module-level state is restored in a fixture teardown, because
-`_ETORO_RATE_LIMIT_CLOCK` is global and leaks between tests.
-
-**B — rate, measured single-threaded on a patched clock.** The defect (two instances,
-same user key, no coordination) is deterministic and does not need real concurrency to
-exhibit. Requests are driven through the shipped entry points — `provider._http_write.post(...)`
-into an `httpx.MockTransport` — alternating between two instances built with the SAME
-api/user key, with `time.monotonic` and `time.sleep` patched to a virtual clock. Measured:
-max requests in any rolling 60 s window, and total throttle wait per caller.
-⚠C The quantity asserted is the **stamp** sequence recorded from inside
-`_throttle_and_stamp`'s critical section (via a `list` subclass whose `__setitem__`
-records — prevention log §3665), NOT transport arrival order. Stamp spacing and arrival
-spacing are distinct invariants and the rate claim is about stamping.
-
-**C — occupancy, asserted with a real-thread barrier.** Per prevention log §4318, a
-"did these overlap?" question is decided by a `threading.Barrier(2)` placed inside the
-mock transport handler — reachable only after the throttle has returned. If the two
-broker instances coordinate, occupancy caps at 1, the barrier cannot form and
-`BrokenBarrierError` fires. Bounded `join`, worker exceptions re-raised in the main
-thread.
-
-**D — the within-instance over-restriction.** On ONE `EtoroBrokerProvider` starting from
-an idle clock, a lane-A request issued after a lane-B batch waits behind the 3.5 s write
-floor, because lanes A, B and C share one clock despite having three INDEPENDENT
-documented budgets. ⚠C Requires an explicitly idle starting clock and controlled timing,
-or the measured wait includes prior debt. The measured wait goes in the census.
-
-⚠C B/C/D measure opposite-signed defects on the same clock — across instances we
-under-restrict, within an instance we over-restrict. Both must be stated, or the verdict
-reads as "add coordination" when half the evidence says the coordination we have is
-applied at the wrong granularity.
-
-⚠C **Each assertion gets its OWN revert probe.** Revision 1 proposed one mutation for all
-of them, which cannot invalidate D (flipping module-vs-instance sharing leaves lanes A
-and B on one instance's clock either way). Probes: for A/B/C, give `EtoroBrokerProvider`
-a module-level clock; for D, split the write clock per lane. Each probe must fail its own
-test and, per the prevention log, be checked for toppling neighbours.
-
-⚠C **Not covered, and said so rather than implied:** cross-PROCESS market-data traffic
-(the module clock is process-local, and the API process has its own), sequential instance
-churn, retry/429 cooldown interaction, and lane G's accepted floor exception. These are
-mechanisms the test cannot reach; they are listed as residual unknowns in the verdict.
-
-## Deliverables
-
-1. `scripts/measure_2946_quota_load.py` — M1-M4, read-only, one arm per measurement,
-   writing a dated artefact under `var/quota-census/`. ⚠C The artefact records the git
-   SHA, the DB cutoff timestamp, the log path + byte size + line accounting, and every
-   query it ran, so the run is reproducible rather than merely dated.
-2. `tests/test_2946_quota_contention.py` — M5.
-3. This file, rewritten from spec into the census + verdict once the numbers exist.
-4. An issue comment carrying the verdict for item 4.
-
-## Non-goals
-
-- No coordinator, no `RateGate` injection, no floor change. Item 3/4 decides that and
-  this unit produces its input.
-- No real broker request, no portal re-fetch.
-- No change to `etoro_quota_lanes.py`'s table. If the census contradicts it, that is a
-  finding to report, not an edit to make silently.
-
-## Acceptance
-
-- Every reported figure is labelled OBSERVED, DERIVED or UNCOUNTED, and no UNCOUNTED
-  source is zero-filled.
-- Lane B's peak is computed over full history; the derived arms state their algorithm and
-  their interval, and never pool across the outage.
-- Reaped `job_runs` rows are excluded from duration/overlap arithmetic and counted
-  separately.
-- The 429 census prints whole-file line accounting with an unmatched bucket, states its
-  process scope, and states that it is a lower bound.
-- The test drives the shipped entry points, asserts stamps rather than arrivals, and each
-  assertion is revert-probed with its own mutation.
-- ⚠C The verdict has THREE permitted outcomes, not two: *warranted*, *not warranted at
-  the measured load*, or **`insufficient_evidence`**. Sparse retained traffic and zero
-  logged 429s in one process cannot by themselves establish safe headroom, enforcement,
-  or the absence of reconciliation harm. If the evidence only supports the third, that is
-  the answer, and it names what would have to be instrumented to reach one of the others.
+**What would have to be instrumented to reach a stronger verdict:** a per-request counter
+on the eToro path. `ResilientClient` already accepts an `on_429` callback
+(`resilient_client.py:74`) and **only SEC providers wire it** — so eToro 429s increment
+no counter anywhere, and the log is the sole witness. Wiring that callback plus a
+per-lane request counter is the smallest change that would turn every DERIVED number
+above into an OBSERVED one.

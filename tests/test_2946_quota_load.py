@@ -31,10 +31,10 @@ from typing import Any
 import httpx
 import pytest
 
-from app.providers.implementations.etoro_broker import _ETORO_WRITE_INTERVAL_S, EtoroBrokerProvider
-from app.services.strategy_core_eligibility import CORE_ELIGIBILITY_REQUEST_INTERVAL_S
 from app.providers import resilient_client as rc_module
 from app.providers.implementations import etoro_quota_lanes as lanes
+from app.providers.implementations.etoro_broker import _ETORO_WRITE_INTERVAL_S, EtoroBrokerProvider
+from app.services.strategy_core_eligibility import CORE_ELIGIBILITY_REQUEST_INTERVAL_S
 
 #: Virtual monotonic never starts at 0: ``_last_request_at`` is initialised to 0.0, and a
 #: clock starting there would make the very first elapsed reading 0 and force a spurious
@@ -126,13 +126,21 @@ def test_a_provider_built_per_request_never_reaches_its_own_floor(virtual_time: 
     rounds = 4
     mock = _mock_client()
 
-    per_request_stamps: list[float] = []
-    for _ in range(rounds):
-        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-            broker._http_write._client = mock
-            recorders = attach_recorders(broker._http_write)
-            broker._http_write.post("/api/v2/trading/info/demo/eligibility", json={})
-            per_request_stamps += next(iter(recorders.values())).stamps
+    # ⚠ Every provider is built, and the recorders attached, BEFORE any request fires.
+    # Attaching per iteration would give each provider its own recorder even when they
+    # shared a clock object, which silently manufactures the independence under test --
+    # a revert probe caught exactly that and this loop is the fix. One
+    # ``attach_recorders`` call over all of them keys on identity, so a shared clock
+    # yields one recorder and independent clocks yield several.
+    per_request_brokers = [EtoroBrokerProvider(api_key="k", user_key="u", env="demo") for _ in range(rounds)]
+    for broker in per_request_brokers:
+        broker._http_write._client = mock
+    per_request_recorders = attach_recorders(*(b._http_write for b in per_request_brokers))
+    for broker in per_request_brokers:
+        broker._http_write.post("/api/v2/trading/info/demo/eligibility", json={})
+    per_request_stamps = sorted(s for r in per_request_recorders.values() for s in r.stamps)
+    for broker in per_request_brokers:
+        broker._client.close()
 
     with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as reused:
         reused._http_write._client = mock
