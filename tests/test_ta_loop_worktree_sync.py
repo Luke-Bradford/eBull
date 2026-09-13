@@ -171,6 +171,28 @@ def test_a_named_feature_branch_is_never_moved(loop) -> None:  # noqa: F811
     assert "a named branch is a ticket in flight" in log
 
 
+def test_a_diverged_feature_branch_is_named_rather_than_reported_generically(loop) -> None:  # noqa: F811
+    """Both refusals are correct; only one of them tells a human which branch.
+
+    A branch carrying local commits satisfies the ancestor refusal too, so the
+    check order decides the message. Naming the branch is the actionable form.
+    """
+    _git(loop.root, "checkout", "--quiet", "-b", "feature/5678-diverged")
+    _advance_origin(loop)
+    (loop.root / "branch_work.txt").write_text("work on the branch\n")
+    _git(loop.root, "add", "-A")
+    _git(loop.root, "commit", "-q", "-m", "branch work")
+    before = _head(loop.root)
+
+    result = loop.run()
+
+    assert result.returncode == 0, result.stderr
+    assert _head(loop.root) == before
+    log = loop.log.read_text()
+    assert "NOT re-synced, on branch feature/5678-diverged" in log
+    assert "HEAD carries commits" not in log
+
+
 def test_a_main_that_diverged_is_reported_not_rewritten(loop) -> None:  # noqa: F811
     """Local commits on main stop the re-sync; nothing here rewrites them."""
     _advance_origin(loop)

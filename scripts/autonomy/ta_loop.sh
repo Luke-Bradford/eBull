@@ -287,18 +287,21 @@ sync_worktree() {
   # ("already up to date"), so the naive reading logs RESYNCED while the agent
   # runs on local-only commits. Both are the same property — the target must be
   # a descendant of HEAD — so one test answers both.
-  if ! git -C "$WORKTREE" merge-base --is-ancestor HEAD "$target" 2>/dev/null; then
-    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — NOT re-synced, HEAD carries commits $target does not"
-    log "WARN worktree $worktree_status"
-    log "WARN   they exist ONLY here; moving the checkout would leave them reflog-only. Push or branch them"
-    return
-  fi
+  # ⚠ The BRANCH check goes first even though the ancestor check below would also
+  # refuse a diverged one. Both refuse; only this one says WHICH branch, and the
+  # refusal a human has to act on is only as good as the name it gives them.
   # `symbolic-ref` fails on a detached HEAD, which is the normal resting state.
   branch="$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD || true)"
   if [[ -n "$branch" && "$branch" != "main" ]]; then
     worktree_status="STALE ${before:0:12} != $target ${after:0:12} — NOT re-synced, on branch $branch"
     log "WARN worktree $worktree_status"
     log "WARN   a named branch is a ticket in flight; finish or delete it, the driver will not move it"
+    return
+  fi
+  if ! git -C "$WORKTREE" merge-base --is-ancestor HEAD "$target" 2>/dev/null; then
+    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — NOT re-synced, HEAD carries commits $target does not"
+    log "WARN worktree $worktree_status"
+    log "WARN   they exist ONLY here; moving the checkout would leave them reflog-only. Push or branch them"
     return
   fi
   if [[ -z "$branch" ]]; then
