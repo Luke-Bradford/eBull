@@ -219,6 +219,111 @@ check_driver_freshness() {
   fi
 }
 
+# One line, rewritten every iteration and echoed into status.md — same contract
+# as $prompt_status. An un-re-synced worktree must be visible in the file a human
+# opens, not only in a log line that scrolled past.
+worktree_status="not yet checked"
+
+# #2607 item 2: the CODE the iteration works from, which had no check at all.
+#
+# ⚠ The prompt sync is not this. That derives one file from the git object store;
+# this moves the working tree. On 2026-08-12 the loop resumed on a worktree
+# detached ~160 commits behind origin/main and every branch it cut would have
+# been based on stale code — the shape of the `git reset --soft origin/main`
+# incident in the gotchas archive. Nothing failed, because nothing looked.
+#
+# ⚠⚠ NEVER destructive, and the three refusals are the point:
+#
+#   * a DIRTY tree is unfinished work. Re-syncing it would discard exactly what
+#     the 2026-07-16 clobber race cost, so it warns and leaves the tree alone.
+#   * a NAMED FEATURE BRANCH is a ticket in flight, not a stale checkout. The
+#     loop's own contract is to leave no half-done branch, so finding one means
+#     the previous iteration died — announce it, do not bulldoze it.
+#   * `main` moves by `--ff-only`, so local commits on it stop the re-sync
+#     rather than being rewritten.
+#
+# A refusal never halts the loop. An iteration on stale code is a bad iteration;
+# a driver that exits because the tree is dirty is an outage, and the month-long
+# unnoticed PAUSE is this file's standing lesson about silent stoppage.
+#
+# ⚠ Call AFTER sync_prompt: `refresh_prompt_ref` is what updates the local
+# $PROMPT_REF tracking ref, and without that fetch this compares HEAD against a
+# snapshot as old as the last one — a check that passes because its reference
+# point is stale, which is #2658 one layer down.
+sync_worktree() {
+  local target before after branch how
+  target="$PROMPT_REF"
+  if ! after="$(git -C "$WORKTREE" rev-parse --verify --quiet "$target^{commit}")"; then
+    worktree_status="UNVERIFIED — $target is not a commit in $WORKTREE"
+    log "WARN worktree $worktree_status"
+    return
+  fi
+  if ! before="$(git -C "$WORKTREE" rev-parse --verify --quiet 'HEAD^{commit}')"; then
+    worktree_status="UNVERIFIED — $WORKTREE has no HEAD commit"
+    log "WARN worktree $worktree_status"
+    return
+  fi
+  if [[ "$before" == "$after" ]]; then
+    worktree_status="at $target (${after:0:12})"
+    log "worktree $worktree_status"
+    return
+  fi
+  # `--porcelain` is empty for a clean tree and non-empty for anything else,
+  # including untracked files. Gitignored paths are excluded, which is why the
+  # loop's own var/autonomy/ state does not block a re-sync.
+  if [[ -n "$(git -C "$WORKTREE" status --porcelain 2>/dev/null)" ]]; then
+    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — NOT re-synced, working tree is dirty"
+    log "WARN worktree $worktree_status"
+    return
+  fi
+  # ⚠⚠ A CLEAN TREE IS NOT "NOTHING TO LOSE", and this guard is the one that
+  # matters most. A crashed iteration can leave COMMITTED work on a detached
+  # HEAD: `status --porcelain` is empty, and a plain `checkout --detach` then
+  # deletes those files and leaves the commits reachable only through the
+  # reflog. Caught by Codex at checkpoint 2, which reproduced exactly that.
+  #
+  # It also covers the case `--ff-only` reports dishonestly: a local `main`
+  # AHEAD of the remote makes `git merge --ff-only` exit 0 WITHOUT moving HEAD
+  # ("already up to date"), so the naive reading logs RESYNCED while the agent
+  # runs on local-only commits. Both are the same property — the target must be
+  # a descendant of HEAD — so one test answers both.
+  # ⚠ The BRANCH check goes first even though the ancestor check below would also
+  # refuse a diverged one. Both refuse; only this one says WHICH branch, and the
+  # refusal a human has to act on is only as good as the name it gives them.
+  # `symbolic-ref` fails on a detached HEAD, which is the normal resting state.
+  branch="$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD || true)"
+  if [[ -n "$branch" && "$branch" != "main" ]]; then
+    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — NOT re-synced, on branch $branch"
+    log "WARN worktree $worktree_status"
+    log "WARN   a named branch is a ticket in flight; finish or delete it, the driver will not move it"
+    return
+  fi
+  if ! git -C "$WORKTREE" merge-base --is-ancestor HEAD "$target" 2>/dev/null; then
+    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — NOT re-synced, HEAD carries commits $target does not"
+    log "WARN worktree $worktree_status"
+    log "WARN   they exist ONLY here; moving the checkout would leave them reflog-only. Push or branch them"
+    return
+  fi
+  if [[ -z "$branch" ]]; then
+    git -C "$WORKTREE" checkout --quiet --detach "$target" 2>/dev/null || true
+    how="detached"
+  else
+    git -C "$WORKTREE" merge --quiet --ff-only "$target" 2>/dev/null || true
+    how="main fast-forward"
+  fi
+  # ⚠ The MOVE is verified, never inferred from the command's exit status. Both
+  # git verbs above can exit 0 without leaving HEAD where this claims it is, and
+  # a status line that says RESYNCED when nothing moved is worse than no line at
+  # all — it is the "check that passes because nobody looked" shape again.
+  if [[ "$(git -C "$WORKTREE" rev-parse --verify --quiet 'HEAD^{commit}')" == "$after" ]]; then
+    worktree_status="RESYNCED ${before:0:12} -> $target ${after:0:12} ($how)"
+    log "worktree $worktree_status"
+  else
+    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — $how onto $target did not move HEAD"
+    log "WARN worktree $worktree_status"
+  fi
+}
+
 
 # ⚠ ONE driver per worktree. The dedicated worktree stops this loop clobbering
 # ~/Dev/eBull; it does nothing about a second copy of the loop itself, and
@@ -321,6 +426,11 @@ while true; do
   # seven-day #2658 stall is what happens when nothing re-reads the source.
   sync_prompt
 
+  # ⚠ AFTER sync_prompt, which is what fetches $PROMPT_REF — see the function's
+  # own note. Every iteration for the same reason the prompt is: this loop stays
+  # up for days, and a merge on day three has to reach the iteration after it.
+  sync_worktree
+
   # ⚠ status.md is written BEFORE the iteration as well as after. Written only
   # at the end, the file a human is told to open does not exist at all during
   # the first run — which is the same "instrumentation is silent exactly when
@@ -333,6 +443,7 @@ while true; do
     echo "- pid: $$"
     echo "- transcript: \`$transcript\`"
     echo "- prompt: $prompt_status"
+    echo "- worktree: $worktree_status"
   } > "$STATUS"
 
   # ⚠ NOT piped into head/tail. A pipe returns the pipe's status and buffers
@@ -405,6 +516,7 @@ while true; do
     echo "- consecutive failures: $consecutive_failures"
     echo "- transcript: \`$transcript\`"
     echo "- prompt: $prompt_status"
+    echo "- worktree: $worktree_status"
     echo
     echo "## Last 40 lines"
     echo '```'
