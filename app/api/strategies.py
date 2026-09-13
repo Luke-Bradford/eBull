@@ -76,6 +76,7 @@ from app.services.strategy_core_eligibility import CoreEligibilityError
 from app.services.strategy_core_executor import (
     CoreExecutionResult,
     StrategyCoreExecutionError,
+    core_authority_is_stranded,
     execute_core_rebalance,
     load_core_resume_authority,
     resume_core_submission,
@@ -1018,6 +1019,7 @@ class CoreSleeveBlockerResponse(BaseModel):
         "core_mandate_selection_mismatch",
         "core_demo_required",
         "core_order_unresolved",
+        "core_order_unresolved_lookup_missed",
         "core_capital_authority_incomplete",
         "core_live_snapshot_required",
         "core_paper_pool_unconfigured",
@@ -3696,15 +3698,36 @@ def read_core_sleeve(
             )
         )
     if resume_authority is not None:
-        blockers.append(
-            CoreSleeveBlockerResponse(
-                code="core_order_unresolved",
-                detail=(
-                    f"Order {resume_authority.order_id} is unresolved; the next attended action resumes or "
-                    "reconciles that exact order and cannot create a new rebalance."
-                ),
+        if core_authority_is_stranded(conn, order_id=resume_authority.order_id):
+            # The generic wording below promises that resuming resolves the order.
+            # For this shape it provably cannot, and would say so forever: a lookup
+            # has already missed, `_apply_detail` is reached only from a SUCCESSFUL
+            # lookup, and `reconcile_backlog` excludes the core arm entirely
+            # (#2962). Resume is still offered -- a late-appearing order would be
+            # found -- but the operator must not be told resolution is forthcoming.
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_order_unresolved_lookup_missed",
+                    detail=(
+                        f"Order {resume_authority.order_id} was never recorded as accepted and a broker "
+                        "lookup has already returned no such order. Resuming re-checks the broker and will "
+                        "resolve it if it appears, but a repeated miss cannot resolve it: no unattended "
+                        "reconciler covers the core arm (#2962) and no terminalisation surface exists yet "
+                        "(#2961). A miss is not proof the broker never received it, so resubmission stays "
+                        "refused and no new core rebalance can be created until this is settled."
+                    ),
+                )
             )
-        )
+        else:
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_order_unresolved",
+                    detail=(
+                        f"Order {resume_authority.order_id} is unresolved; the next attended action resumes or "
+                        "reconciles that exact order and cannot create a new rebalance."
+                    ),
+                )
+            )
     core_pool_ready = _core_pool_activation_ready(
         selection=selection,
         mandate=mandate,

@@ -183,6 +183,47 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
     )
 
 
+def core_authority_is_stranded(conn: psycopg.Connection[Any], *, order_id: int) -> bool:
+    """Has this core authority been looked up and found absent at the broker?
+
+    Read-only, and deliberately NOT part of :class:`CoreResumeAuthority` — the
+    execution path must never branch on this. It answers one operator-facing
+    question: is telling the operator that "the next attended action resumes or
+    reconciles that exact order" still honest for this row?
+
+    True means both of:
+
+    * ``orders.broker_order_ref IS NULL`` -- acceptance was never persisted, so
+      this authority is a candidate for the crash window between the durable
+      commit and ``place_demo_core_order`` (#2961);
+    * the reconciliation state is ``not_found`` -- a lookup has ALREADY run and
+      the broker said it has no such order.
+
+    ⚠ True is NOT proof the broker never received it. ``orders:lookup``'s
+    ``referenceId`` coverage is undocumented (the #2942 half-2 capability
+    question), so a miss is an observation, not an absence proof -- which is
+    exactly why resubmission stays refused and why this returns a flag for a
+    read surface rather than a verdict for a writer.
+    """
+    row = conn.execute(
+        """
+        SELECT o.broker_order_ref, state.state
+        FROM strategy_order_reconciliation_state state
+        JOIN orders o ON o.order_id = state.order_id
+        WHERE state.order_id = %s
+        """,
+        (order_id,),
+    ).fetchone()
+    # Same discipline as `load_core_resume_authority`: a read helper on a shared
+    # connection must not leave a transaction open. `resume_core_submission`
+    # refuses a non-idle connection outright, so omitting this turns a read into
+    # a failure of the very action the caller is deciding whether to offer.
+    conn.commit()
+    if row is None:
+        return False
+    return row[0] is None and str(row[1]) == "not_found"
+
+
 def _persist_core_acceptance(
     conn: psycopg.Connection[Any],
     *,

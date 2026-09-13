@@ -41,6 +41,7 @@ import pytest
 
 from app.providers.broker import BrokerProvider
 from app.services.strategy_core_executor import (
+    core_authority_is_stranded,
     execute_core_rebalance,
     load_core_resume_authority,
     resume_core_submission,
@@ -313,6 +314,55 @@ def test_scenario_2_stranded_authority_is_unreachable_by_any_unattended_caller(
     ).fetchone()
     ebull_test_conn.commit()
     assert block is not None and block[0] is True
+
+
+def test_the_stranded_shape_is_distinguishable_on_the_read_surface(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """#2961: the operator page must not promise a resume will resolve this.
+
+    ``core_authority_is_stranded`` is what lets ``GET /core-sleeve`` say
+    something true about this row instead of the generic "the next attended
+    action resumes or reconciles that exact order", which for this shape is a
+    promise that can never be kept.
+
+    Both conjuncts are asserted to be load-bearing rather than assumed: the
+    stored ``broker_order_ref`` and the ``not_found`` state each flip the answer
+    on their own. A test asserting only ``True`` on the stranded row would pass
+    against a function that returned ``True`` unconditionally.
+
+    ⚠ This is a READ-surface flag and deliberately not a verdict. A lookup miss
+    is not proof the broker never received the order — ``orders:lookup``'s
+    ``referenceId`` coverage is undocumented — which is why nothing here
+    terminalises anything and resubmission stays refused.
+    """
+    process = run_engine_until_fault(
+        database_url=test_database_url(), workdir=core_world, fault="after_commit_before_submit"
+    )
+    assert process.returncode == SIGKILL_RETURNCODE
+    broker = _restarted_engine_broker(core_world)
+
+    authority = load_core_resume_authority(ebull_test_conn)
+    assert authority is not None
+
+    # Before any lookup has run the row is `unresolved`, not `not_found`: nothing
+    # has yet asked the broker, so nothing may be said about what it holds.
+    assert core_authority_is_stranded(ebull_test_conn, order_id=authority.order_id) is False
+
+    resumed = resume_core_submission(ebull_test_conn, broker=_provider(broker), authority=authority)
+    assert resumed.state == "submission_uncertain"
+    assert broker.read()["mutation_calls"] == 0
+    assert core_authority_is_stranded(ebull_test_conn, order_id=authority.order_id) is True
+
+    # The second conjunct: had acceptance ever been persisted, a position may
+    # exist and this shape is no longer the never-submitted one.
+    ebull_test_conn.execute(
+        "UPDATE orders SET broker_order_ref='90210' WHERE order_id=%s",
+        (authority.order_id,),
+    )
+    ebull_test_conn.commit()
+    assert core_authority_is_stranded(ebull_test_conn, order_id=authority.order_id) is False
 
 
 # ---------------------------------------------------------------------------
