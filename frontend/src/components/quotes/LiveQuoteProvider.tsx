@@ -89,8 +89,6 @@ type Action =
   | { type: "suspend" }
   | { type: "reset" };
 
-const EMPTY_STATE: State = { ticks: new Map(), status: "idle", freshIds: new Set() };
-
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "tick": {
@@ -146,9 +144,9 @@ export function LiveQuoteProvider({
   children,
 }: LiveQuoteProviderProps) {
   const [state, dispatch] = useReducer(reducer, undefined, () => ({
-    ticks: new Map(EMPTY_STATE.ticks),
-    status: EMPTY_STATE.status,
-    freshIds: new Set(EMPTY_STATE.freshIds),
+    ticks: new Map<number, LiveTickPayload>(),
+    status: "idle" as LiveConnectionStatus,
+    freshIds: new Set<number>(),
   }));
 
   const canonical = useMemo(() => canonicaliseIds(instrumentIds), [instrumentIds]);
@@ -160,11 +158,6 @@ export function LiveQuoteProvider({
   const reopenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    // The old source is closed by cleanup before this body runs, so nothing is
-    // live from here until the new one opens. Leaving ``status`` at "live"
-    // through the 300ms debounce was the provider's copy of #2944's badge lie.
-    dispatch({ type: "suspend" });
-
     if (typeof EventSource === "undefined") {
       // Reset unconditionally: the guard used to sit ABOVE the empty-set
       // branch, so losing EventSource support left prior ticks and status
@@ -183,9 +176,15 @@ export function LiveQuoteProvider({
       }
       // Reset regardless of whether a source existed: a page that mounts with
       // zero ids must also land in "idle", not in the initial state by luck.
+      // ``reset`` subsumes ``suspend`` here, which is why the suspend below
+      // sits AFTER both guards rather than at the top of the effect.
       dispatch({ type: "reset" });
       return;
     }
+    // The old source is closed by cleanup before this body runs, so nothing is
+    // live from here until the new one opens. Leaving ``status`` at "live"
+    // through the 300ms debounce was the provider's copy of #2944's badge lie.
+    dispatch({ type: "suspend" });
     let hasOpened = false;
 
     // Debounce reopen so a burst of state changes resolves into one
