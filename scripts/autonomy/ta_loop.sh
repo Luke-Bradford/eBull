@@ -251,7 +251,7 @@ worktree_status="not yet checked"
 # snapshot as old as the last one — a check that passes because its reference
 # point is stale, which is #2658 one layer down.
 sync_worktree() {
-  local target before after branch
+  local target before after branch how
   target="$PROMPT_REF"
   if ! after="$(git -C "$WORKTREE" rev-parse --verify --quiet "$target^{commit}")"; then
     worktree_status="UNVERIFIED — $target is not a commit in $WORKTREE"
@@ -276,29 +276,47 @@ sync_worktree() {
     log "WARN worktree $worktree_status"
     return
   fi
-  # `symbolic-ref` fails on a detached HEAD, which is the normal resting state.
-  branch="$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD || true)"
-  if [[ -z "$branch" ]]; then
-    if git -C "$WORKTREE" checkout --quiet --detach "$target" 2>/dev/null; then
-      worktree_status="RESYNCED ${before:0:12} -> $target ${after:0:12} (detached)"
-      log "worktree $worktree_status"
-    else
-      worktree_status="STALE ${before:0:12} != $target ${after:0:12} — detach onto $target failed"
-      log "WARN worktree $worktree_status"
-    fi
+  # ⚠⚠ A CLEAN TREE IS NOT "NOTHING TO LOSE", and this guard is the one that
+  # matters most. A crashed iteration can leave COMMITTED work on a detached
+  # HEAD: `status --porcelain` is empty, and a plain `checkout --detach` then
+  # deletes those files and leaves the commits reachable only through the
+  # reflog. Caught by Codex at checkpoint 2, which reproduced exactly that.
+  #
+  # It also covers the case `--ff-only` reports dishonestly: a local `main`
+  # AHEAD of the remote makes `git merge --ff-only` exit 0 WITHOUT moving HEAD
+  # ("already up to date"), so the naive reading logs RESYNCED while the agent
+  # runs on local-only commits. Both are the same property — the target must be
+  # a descendant of HEAD — so one test answers both.
+  if ! git -C "$WORKTREE" merge-base --is-ancestor HEAD "$target" 2>/dev/null; then
+    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — NOT re-synced, HEAD carries commits $target does not"
+    log "WARN worktree $worktree_status"
+    log "WARN   they exist ONLY here; moving the checkout would leave them reflog-only. Push or branch them"
     return
   fi
-  if [[ "$branch" != "main" ]]; then
+  # `symbolic-ref` fails on a detached HEAD, which is the normal resting state.
+  branch="$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD || true)"
+  if [[ -n "$branch" && "$branch" != "main" ]]; then
     worktree_status="STALE ${before:0:12} != $target ${after:0:12} — NOT re-synced, on branch $branch"
     log "WARN worktree $worktree_status"
     log "WARN   a named branch is a ticket in flight; finish or delete it, the driver will not move it"
     return
   fi
-  if git -C "$WORKTREE" merge --quiet --ff-only "$target" 2>/dev/null; then
-    worktree_status="RESYNCED ${before:0:12} -> $target ${after:0:12} (main fast-forward)"
+  if [[ -z "$branch" ]]; then
+    git -C "$WORKTREE" checkout --quiet --detach "$target" 2>/dev/null || true
+    how="detached"
+  else
+    git -C "$WORKTREE" merge --quiet --ff-only "$target" 2>/dev/null || true
+    how="main fast-forward"
+  fi
+  # ⚠ The MOVE is verified, never inferred from the command's exit status. Both
+  # git verbs above can exit 0 without leaving HEAD where this claims it is, and
+  # a status line that says RESYNCED when nothing moved is worse than no line at
+  # all — it is the "check that passes because nobody looked" shape again.
+  if [[ "$(git -C "$WORKTREE" rev-parse --verify --quiet 'HEAD^{commit}')" == "$after" ]]; then
+    worktree_status="RESYNCED ${before:0:12} -> $target ${after:0:12} ($how)"
     log "worktree $worktree_status"
   else
-    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — main will not fast-forward onto $target"
+    worktree_status="STALE ${before:0:12} != $target ${after:0:12} — $how onto $target did not move HEAD"
     log "WARN worktree $worktree_status"
   fi
 }

@@ -171,8 +171,8 @@ def test_a_named_feature_branch_is_never_moved(loop) -> None:  # noqa: F811
     assert "a named branch is a ticket in flight" in log
 
 
-def test_a_main_that_will_not_fast_forward_is_reported_not_rewritten(loop) -> None:  # noqa: F811
-    """Local commits on main stop the re-sync; `--ff-only` never rewrites them."""
+def test_a_main_that_diverged_is_reported_not_rewritten(loop) -> None:  # noqa: F811
+    """Local commits on main stop the re-sync; nothing here rewrites them."""
     _advance_origin(loop)
     (loop.root / "local_only.txt").write_text("committed here, never pushed\n")
     _git(loop.root, "add", "-A")
@@ -184,7 +184,55 @@ def test_a_main_that_will_not_fast_forward_is_reported_not_rewritten(loop) -> No
     assert result.returncode == 0, result.stderr
     assert _head(loop.root) == before
     assert (loop.root / "local_only.txt").exists()
-    assert "will not fast-forward" in loop.log.read_text()
+    assert "HEAD carries commits origin/main does not" in loop.log.read_text()
+
+
+def test_a_committed_but_unpushed_detached_head_is_never_checked_away(loop) -> None:  # noqa: F811
+    """The clean-tree check is not enough, and this is the case that proves it.
+
+    A crashed iteration can leave COMMITTED work on a detached HEAD. The tree is
+    clean, so the dirty guard says nothing — and a plain `checkout --detach` then
+    deletes those files and leaves the commits reachable only through the reflog.
+    """
+    _git(loop.root, "checkout", "--quiet", "--detach", "HEAD")
+    _advance_origin(loop)
+    orphanable = loop.root / "unpublished.txt"
+    orphanable.write_text("an interrupted iteration's work\n")
+    _git(loop.root, "add", "-A")
+    _git(loop.root, "commit", "-q", "-m", "committed, never pushed, no branch")
+    before = _head(loop.root)
+
+    result = loop.run()
+
+    assert result.returncode == 0, result.stderr
+    assert _head(loop.root) == before
+    assert orphanable.exists(), "the re-sync deleted committed work that exists nowhere else"
+    log = loop.log.read_text()
+    assert "HEAD carries commits origin/main does not" in log
+    assert "they exist ONLY here" in log
+
+
+def test_a_main_ahead_of_the_remote_is_not_reported_as_re_synced(loop) -> None:  # noqa: F811
+    """`git merge --ff-only` exits 0 WITHOUT moving HEAD when local main is ahead.
+
+    So a status line derived from that exit status announces a re-sync that did
+    not happen, while the agent runs on local-only commits. Origin is deliberately
+    NOT advanced here: ahead-only is the case a divergence test does not reach.
+    """
+    (loop.root / "local_only.txt").write_text("committed here, never pushed\n")
+    _git(loop.root, "add", "-A")
+    _git(loop.root, "commit", "-q", "-m", "ahead of origin, not diverged")
+    before = _head(loop.root)
+
+    result = loop.run()
+
+    assert result.returncode == 0, result.stderr
+    assert _head(loop.root) == before
+    log = loop.log.read_text()
+    # ⚠ Prefixed: the prompt sync logs its own `prompt RESYNCED` on a first run,
+    # so a bare "RESYNCED" assertion here passes or fails on the wrong subsystem.
+    assert "worktree RESYNCED" not in log
+    assert "HEAD carries commits origin/main does not" in log
 
 
 def test_the_loops_own_state_directory_does_not_block_a_re_sync(loop) -> None:  # noqa: F811
