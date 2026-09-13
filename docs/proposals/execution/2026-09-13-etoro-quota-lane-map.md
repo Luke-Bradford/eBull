@@ -206,6 +206,14 @@ step 2's call once request rates are measured. It ships as a named
 `ACCEPTED_FLOOR_EXCEPTIONS` entry so the floor test stays red-by-default for anything new —
 an explicit exception, not a silent pass.
 
+> ✅ **SUPERSEDED 2026-09-13 by step 3 item 1.** The second option was taken: history got
+> its own client, `_http_history`, at a floor DERIVED from this table
+> (`60/18 = 3.33s`, one request of lane-G headroom). `ACCEPTED_FLOOR_EXCEPTIONS` is now
+> empty. The `54.5` requests/min above is therefore a historical reading of the defect,
+> not a current rate — and it was always a WORST CASE, reachable only at `>= page_size`
+> closes inside the 7-day watermark overlap or on a `HISTORY_EPOCH` deep backfill. See
+> `2026-09-13-lane-g-history-floor.md`.
+
 ## What the map changes
 
 ### 1. Three independent 60/min pools sit behind one clock — but this does NOT isolate reconciliation
@@ -380,6 +388,8 @@ A frozen, dated lane table in code plus drift tests — not prose that goes stal
 - `KNOWN_UNTHROTTLED` — the four raw-`httpx` sites.
 - `KNOWN_PATH_DRIFT` — the five real-env mismatches, classified `unknown`.
 - `ACCEPTED_FLOOR_EXCEPTIONS` — exactly one entry, lane-G history, with its reason.
+  ✅ **EMPTY since step 3 item 1** — see the superseded note above; the entry was deleted
+  when `get_trade_history` moved to `_http_history`.
 - `VERIFIED_ON` + source URL per lane.
 
 `tests/test_etoro_quota_lanes.py` (pure logic, no DB)

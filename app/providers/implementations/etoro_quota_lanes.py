@@ -331,15 +331,23 @@ CALL_SITES: tuple[CallSite, ...] = (
     CallSite(
         _BROKER, "get_account_risk_snapshot", "_http_read", "GET", "/api/v1/trading/info/demo/pnl", "E_account_read", 60
     ),
-    # --- lane G on the READ clock: trading history --------------------------
+    # --- lane G on its OWN clock: trading history ----------------------------
     # The per-endpoint page says 60/min default shared; the general page's
     # 20/min tier explicitly names "detailed user trade history queries".  The
-    # method paginates in a `while True` loop, so one logical call issues
-    # back-to-back requests at the read floor.  See ACCEPTED_FLOOR_EXCEPTIONS.
+    # method paginates in a `while True` loop, so one logical call can issue
+    # back-to-back requests -- which is why it does not ride `_http_read` at
+    # 1.1s.  #2946 step 3 item 1 gave it `_http_history`, whose floor is DERIVED
+    # from this very entry (`etoro_broker._ETORO_HISTORY_INTERVAL_S`).
+    #
+    # ⚠ That derivation makes the floor test tautological for this site.  The
+    # live guard on the number is
+    # `tests/test_etoro_quota_lanes.py::test_history_floor_reserves_one_request_
+    # of_lane_g_headroom`, which asserts the rolling-window COUNT, not the
+    # expression.  Do not delete it as redundant.
     CallSite(
         _BROKER,
         "get_trade_history",
-        "_http_read",
+        "_http_history",
         "GET",
         "/api/v1/trading/info/trade/demo/history",
         "G_default_shared",
@@ -377,8 +385,12 @@ CALL_SITES: tuple[CallSite, ...] = (
 # serve several templates.  A new endpoint moves these numbers and fails the
 # drift test until its lane is recorded above.
 EXPRESSION_COUNTS: dict[tuple[str, str], int] = {
-    (_BROKER, "_http_read"): 6,
+    (_BROKER, "_http_read"): 5,
     (_BROKER, "_http_write"): 7,
+    # One expression, inside a `while True` — so this count says nothing about
+    # how many REQUESTS one logical call issues.  That is the whole reason the
+    # endpoint has its own client.
+    (_BROKER, "_http_history"): 1,
     (_MARKET, "_http"): 8,
 }
 
@@ -390,6 +402,10 @@ EXPRESSION_COUNTS: dict[tuple[str, str], int] = {
 FLOOR_CONSTANT_NAMES: dict[tuple[str, str], tuple[str, str]] = {
     (_BROKER, "_http_read"): ("app.providers.implementations.etoro_broker", "_ETORO_READ_INTERVAL_S"),
     (_BROKER, "_http_write"): ("app.providers.implementations.etoro_broker", "_ETORO_WRITE_INTERVAL_S"),
+    # ⚠ This one is DERIVED from the table above rather than hand-chosen, so the
+    # floor test compares the table with itself here and cannot fail.  See the
+    # note on the `get_trade_history` call site for the test that can.
+    (_BROKER, "_http_history"): ("app.providers.implementations.etoro_broker", "_ETORO_HISTORY_INTERVAL_S"),
     (_MARKET, "_http"): ("app.providers.implementations.etoro", "_ETORO_READ_INTERVAL_S"),
 }
 
@@ -489,14 +505,11 @@ KNOWN_PATH_DRIFT: tuple[PathDrift, ...] = (
 
 # Call sites whose configured floor is BELOW the conservative reading, accepted
 # with a stated reason rather than silently passing the floor test.  Keep this
-# tuple as short as it is; every entry is a known gap.
-ACCEPTED_FLOOR_EXCEPTIONS: dict[tuple[str, str], str] = {
-    (_BROKER, "get_trade_history"): (
-        "Lane-G membership ambiguity: the per-endpoint page says 60/min (1.0s, satisfied by "
-        "the 1.1s read floor) while the general page's 20/min tier names 'detailed user trade "
-        "history queries' (3.0s, NOT satisfied). Raising the read floor is a behavioural "
-        "change to the trade-event sync path (trade_events.py:478) and the method paginates, "
-        "so the fix is either bounding the pagination loop or lane-splitting. Deferred to "
-        "#2946 step 2, which measures the real request rate."
-    ),
-}
+# dict as short as it is; every entry is a known gap.
+#
+# EMPTY since #2946 step 3 item 1.  Its only entry was `get_trade_history`,
+# which rode `_http_read` at 1.1s against a 3.158s conservative reading; it now
+# has its own client and complies.  `test_accepted_floor_exceptions_are_real_
+# exceptions_with_a_reason` is what forced the deletion — an entry naming a site
+# that no longer violates its floor fails that test.
+ACCEPTED_FLOOR_EXCEPTIONS: dict[tuple[str, str], str] = {}

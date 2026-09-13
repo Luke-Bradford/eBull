@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from app.providers.implementations.etoro_broker import (
+    _ETORO_HISTORY_INTERVAL_S,
     _ETORO_READ_INTERVAL_S,
     _ETORO_WRITE_INTERVAL_S,
     EtoroBrokerProvider,
@@ -100,17 +101,25 @@ def test_a_shared_clock_with_independent_locks_bursts_past_the_floor() -> None:
     assert _violations(offsets), f"expected at least one gap below the floor with independent locks; offsets={offsets}"
 
 
-def test_the_broker_provider_shares_one_lock_and_one_clock_across_both_lanes() -> None:
-    """Identity, not behaviour: a refactor must not silently return to per-lane locks."""
+def test_the_broker_provider_shares_one_lock_and_one_clock_across_every_lane() -> None:
+    """Identity, not behaviour: a refactor must not silently return to per-lane locks.
+
+    ⚠ The history client (#2946 step 3 item 1) is the reason this is worth re-asserting.
+    Its own clock would be a SECOND independent budget against one user key — the exact
+    failure the item exists to remove — and the constants can all be right while the
+    client is wired to a fresh list.
+    """
     with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
-        read, write = broker._http_read, broker._http_write
-        assert read._throttle_lock is write._throttle_lock
-        assert read._last_request_at is write._last_request_at
-        # The two lanes keep their DIFFERENT floors — sharing the clock must not
-        # collapse the read and write rates into one.
+        read, write, history = broker._http_read, broker._http_write, broker._http_history
+        for other in (write, history):
+            assert read._throttle_lock is other._throttle_lock
+            assert read._last_request_at is other._last_request_at
+        # Each lane keeps its OWN floor — sharing the clock must not collapse the
+        # three rates into one.
         assert read._min_interval == _ETORO_READ_INTERVAL_S
         assert write._min_interval == _ETORO_WRITE_INTERVAL_S
-        assert read._min_interval != write._min_interval
+        assert history._min_interval == _ETORO_HISTORY_INTERVAL_S
+        assert len({read._min_interval, write._min_interval, history._min_interval}) == 3
 
 
 def test_two_broker_instances_do_not_share_a_budget() -> None:
@@ -138,5 +147,22 @@ def test_two_broker_instances_do_not_share_a_budget() -> None:
 def test_the_production_floors_are_the_documented_ones(floor: float, expected: float) -> None:
     """Pins the constants the head-of-line-blocking trade-off is argued from: the
     accepted worst case is 3.5 - 1.1 = 2.4s, and a silent change to either number
-    changes that argument without changing the spec."""
+    changes that argument without changing the spec.
+
+    ⚠ `_ETORO_HISTORY_INTERVAL_S` is deliberately NOT pinned to a literal here — it is
+    derived from the lane map, and writing the number down would be a hand-copied derived
+    statistic that goes stale the moment the budget moves. Its property is asserted in
+    `tests/test_etoro_quota_lanes.py::test_history_floor_reserves_one_request_of_lane_g_
+    headroom`. It does not widen the blocking worst case: it sits below the write floor.
+    """
     assert floor == expected
+
+
+def test_the_history_floor_does_not_widen_the_head_of_line_blocking_worst_case() -> None:
+    """The 2.4s figure above is argued from the SLOWEST floor sharing the lock.
+
+    A history floor above the write floor would silently make that argument wrong, so it
+    is asserted rather than assumed. Stated as an inequality, not a number, because the
+    history floor is derived.
+    """
+    assert _ETORO_READ_INTERVAL_S < _ETORO_HISTORY_INTERVAL_S <= _ETORO_WRITE_INTERVAL_S
