@@ -72,6 +72,17 @@ logger = logging.getLogger(__name__)
 # reach here. HOLD does not produce broker calls at all.
 _ALLOWED_PLACE_ORDER_ACTIONS = frozenset({"BUY", "ADD"})
 
+# 4xx codes that do NOT prove the submission failed. A request timeout, a
+# conflict, a too-early and an exhausted-retry throttle all leave the order's
+# fate unknown, so the caller must park the attempt rather than re-submit it
+# (#2942). Every other 4xx is a rejection: the broker answered and said no.
+_UNCERTAIN_4XX_STATUSES = frozenset({408, 409, 425, 429})
+
+
+def _submission_outcome_is_uncertain(status_code: int) -> bool:
+    """True when an HTTP status leaves an order-writing request unresolved."""
+    return status_code >= 500 or status_code in _UNCERTAIN_4XX_STATUSES
+
 
 def _exact_json_decimal(value: Decimal) -> float:
     """Return a JSON-native number only when its emitted decimal is unchanged."""
@@ -229,6 +240,97 @@ class EtoroBrokerProvider(BrokerProvider):
         """Return a caller-owned idempotency UUID or a fresh request identity."""
         return {"x-request-id": str(request_id or uuid4())}
 
+    def _submit(
+        self,
+        *,
+        operation: str,
+        endpoint: str,
+        body: dict[str, Any],
+        request_id: UUID | None,
+        normalise: Callable[[dict[str, Any]], BrokerOrderResult],
+        extra_payload: dict[str, Any] | None = None,
+    ) -> BrokerOrderResult:
+        """POST one order-writing request and classify its outcome honestly.
+
+        The distinction that matters is REJECTED vs UNCERTAIN (#2942). Before
+        this existed both collapsed into ``status="failed"``, so a transport
+        failure on an order that actually landed was booked as a terminal
+        failure and its position went unowned.
+
+        Uncertain: transport error, 5xx, and 408/409/425/429 -- a timeout, a
+        conflict or an exhausted-retry throttle does not prove the request
+        failed. Also any response we cannot parse, including a 200 whose body
+        is not the documented object: we have no idea what happened.
+
+        Rejected (today's ``status="failed"`` return): every other 4xx. The
+        broker answered and the answer was no.
+
+        ``ResilientClient`` retries 429/5xx with this same headers dict, so all
+        retries inside one call share one ``x-request-id``.
+        """
+        extra = extra_payload or {}
+        try:
+            response = self._http_write.post(
+                endpoint,
+                json=body,
+                headers=self._request_headers(request_id),
+            )
+            response.raise_for_status()
+            raw = response.json()
+        except httpx.HTTPStatusError as exc:
+            error_body = _safe_json(exc.response)
+            status_code = exc.response.status_code
+            if _submission_outcome_is_uncertain(status_code):
+                logger.error(
+                    "eToro %s uncertain: status=%d body=%s",
+                    operation,
+                    status_code,
+                    error_body,
+                )
+                raise BrokerOrderSubmissionUncertain(
+                    f"{operation} returned HTTP {status_code} — outcome unknown, do not re-submit",
+                    raw_payload={**extra, "http_status": status_code, **error_body},
+                ) from exc
+            logger.error("eToro %s failed: status=%d body=%s", operation, status_code, error_body)
+            return BrokerOrderResult(
+                broker_order_ref=None,
+                status="failed",
+                filled_price=None,
+                filled_units=None,
+                fees=Decimal("0"),
+                raw_payload={**extra, **error_body},
+            )
+        except httpx.HTTPError as exc:
+            logger.error("eToro %s network error: %s", operation, exc)
+            raise BrokerOrderSubmissionUncertain(
+                f"{operation} transport failure — outcome unknown, do not re-submit",
+                raw_payload={**extra, "error": f"Network error: {exc}"},
+            ) from exc
+        except ValueError as exc:
+            logger.error("eToro %s non-JSON response: %s", operation, exc)
+            raise BrokerOrderSubmissionUncertain(
+                f"{operation} returned a non-JSON response — outcome unknown, do not re-submit",
+                raw_payload={**extra, "error": f"Non-JSON response: {exc}"},
+            ) from exc
+
+        if not isinstance(raw, dict):
+            logger.error("eToro %s returned a non-object body: %r", operation, raw)
+            raise BrokerOrderSubmissionUncertain(
+                f"{operation} returned a non-object body — outcome unknown, do not re-submit",
+                raw_payload={**extra, "raw_json": raw},
+            )
+        raw.update(extra)
+        try:
+            return normalise(raw)
+        except (decimal.DecimalException, TypeError, ValueError, AttributeError) as exc:
+            # A 200 we cannot read is not a success and not a rejection. The
+            # order may well exist at the broker.
+            logger.error("eToro %s response could not be normalised: %s", operation, exc)
+            raise BrokerOrderSubmissionUncertain(
+                f"{operation} response could not be normalised — outcome unknown, do not re-submit",
+                raw_payload=raw,
+            ) from exc
+
     # ------------------------------------------------------------------
     # BrokerProvider implementation
     # ------------------------------------------------------------------
@@ -309,54 +411,17 @@ class EtoroBrokerProvider(BrokerProvider):
                 "Amount": float(amount),
             }
 
-        try:
-            response = self._http_write.post(
-                endpoint,
-                json=body,
-                headers=self._request_headers(request_id),
-            )
-            response.raise_for_status()
-            raw = response.json()
-        except httpx.HTTPStatusError as exc:
-            raw = _safe_json(exc.response)
-            logger.error(
-                "eToro place_order failed: status=%d body=%s",
-                exc.response.status_code,
-                raw,
-            )
-            return BrokerOrderResult(
-                broker_order_ref=None,
-                status="failed",
-                filled_price=None,
-                filled_units=None,
-                fees=Decimal("0"),
-                raw_payload={"_ebull_action": action, **raw},
-            )
-        except httpx.HTTPError as exc:
-            logger.error("eToro place_order network error: %s", exc)
-            return BrokerOrderResult(
-                broker_order_ref=None,
-                status="failed",
-                filled_price=None,
-                filled_units=None,
-                fees=Decimal("0"),
-                raw_payload={"_ebull_action": action, "error": f"Network error: {exc}"},
-            )
-        except ValueError as exc:
-            logger.error("eToro place_order non-JSON response: %s", exc)
-            return BrokerOrderResult(
-                broker_order_ref=None,
-                status="failed",
-                filled_price=None,
-                filled_units=None,
-                fees=Decimal("0"),
-                raw_payload={"_ebull_action": action, "error": f"Non-JSON response: {exc}"},
-            )
-
-        # Preserve the domain action in raw_payload for audit trail.
-        # eToro only has IsBuy — our BUY/ADD distinction is eBull-specific.
-        raw["_ebull_action"] = action
-        return _normalise_open_order_response(raw)
+        # ``_ebull_action`` preserves the domain action in raw_payload for the
+        # audit trail: eToro only has IsBuy — our BUY/ADD distinction is
+        # eBull-specific. It is attached on every outcome, including uncertain.
+        return self._submit(
+            operation="place_order",
+            endpoint=endpoint,
+            body=body,
+            request_id=request_id,
+            normalise=_normalise_open_order_response,
+            extra_payload={"_ebull_action": action},
+        )
 
     def place_demo_strategy_order(
         self,
@@ -481,57 +546,31 @@ class EtoroBrokerProvider(BrokerProvider):
         self,
         position_id: int,
         units_to_deduct: Decimal | None = None,
+        *,
+        instrument_id: int | None = None,
+        request_id: UUID | None = None,
     ) -> BrokerOrderResult:
+        """Close one position by broker position id.
+
+        ``InstrumentID`` is documented REQUIRED on the close body
+        (api-reference/trading--demo/close-demo-position-by-units, re-read
+        2026-09-13); it was previously omitted entirely, so every close would
+        have been rejected (#2942).
+        """
         refuse_broker_mutation_if_unattended("close_position")
+        if instrument_id is None:
+            raise ValueError("close_position requires instrument_id — eToro documents InstrumentID as required")
         body: dict[str, Any] = {
+            "InstrumentID": instrument_id,
             "UnitsToDeduct": float(units_to_deduct) if units_to_deduct is not None else None,
         }
-
-        try:
-            response = self._http_write.post(
-                f"{self._exec_prefix}/market-close-orders/positions/{position_id}",
-                json=body,
-                headers=self._request_headers(),
-            )
-            response.raise_for_status()
-            raw = response.json()
-        except httpx.HTTPStatusError as exc:
-            raw = _safe_json(exc.response)
-            logger.error(
-                "eToro close_position failed: status=%d body=%s",
-                exc.response.status_code,
-                raw,
-            )
-            return BrokerOrderResult(
-                broker_order_ref=None,
-                status="failed",
-                filled_price=None,
-                filled_units=None,
-                fees=Decimal("0"),
-                raw_payload=raw,
-            )
-        except httpx.HTTPError as exc:
-            logger.error("eToro close_position network error: %s", exc)
-            return BrokerOrderResult(
-                broker_order_ref=None,
-                status="failed",
-                filled_price=None,
-                filled_units=None,
-                fees=Decimal("0"),
-                raw_payload={"error": f"Network error: {exc}"},
-            )
-        except ValueError as exc:
-            logger.error("eToro close_position non-JSON response: %s", exc)
-            return BrokerOrderResult(
-                broker_order_ref=None,
-                status="failed",
-                filled_price=None,
-                filled_units=None,
-                fees=Decimal("0"),
-                raw_payload={"error": f"Non-JSON response: {exc}"},
-            )
-
-        return _normalise_close_order_response(raw)
+        return self._submit(
+            operation="close_position",
+            endpoint=f"{self._exec_prefix}/market-close-orders/positions/{position_id}",
+            body=body,
+            request_id=request_id,
+            normalise=_normalise_close_order_response,
+        )
 
     def edit_demo_strategy_position(
         self,

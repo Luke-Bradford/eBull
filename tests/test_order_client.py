@@ -50,13 +50,19 @@ from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
+import psycopg
 import pytest
 
-from app.providers.broker import BrokerOrderResult, OrderParams
+from app.providers.broker import BrokerOrderResult, BrokerOrderSubmissionUncertain, OrderParams
+from app.security.unattended_guard import UnattendedExecutionRefused
 from app.services.order_client import (
+    BrokerSubmissionUncertainError,
+    PriorSubmissionUnresolvedError,
     SubmissionControlsRevokedError,
     _load_approved_recommendation,
     _load_latest_quote_price,
@@ -1061,7 +1067,12 @@ class TestExecuteOrderLiveMode:
             broker=broker,
         )
         assert result.outcome == "filled"
-        broker.close_position.assert_called_once_with(98765)
+        broker.close_position.assert_called_once()
+        call = broker.close_position.call_args
+        assert call.args == (98765,)
+        assert call.kwargs["instrument_id"] == 1
+        # #2942: the committed identity, not a fresh one minted at the header.
+        assert isinstance(call.kwargs["request_id"], UUID)
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_exit_no_broker_positions_row_fails(self, _mock_now: MagicMock) -> None:
@@ -1686,3 +1697,222 @@ class TestPersistBrokerPosition:
         assert params["no_tp"] is True
         assert params["leverage"] == 1
         assert params["tsl"] is False
+
+
+# ---------------------------------------------------------------------------
+# #2942 — durable request identity and the submission claim
+# ---------------------------------------------------------------------------
+
+
+class _ClaimViolation(psycopg.errors.UniqueViolation):
+    """A UniqueViolation that reports the claim index by name.
+
+    psycopg builds ``diag`` from a libpq result, which a unit test has no way
+    to fabricate. Overriding the property is the smallest thing that exercises
+    the constraint-name check rather than bypassing it.
+    """
+
+    @property
+    def diag(self) -> Any:  # type: ignore[override]
+        return SimpleNamespace(constraint_name="idx_orders_recommendation_open_attempt")
+
+
+class _OtherViolation(psycopg.errors.UniqueViolation):
+    @property
+    def diag(self) -> Any:  # type: ignore[override]
+        return SimpleNamespace(constraint_name="orders_pkey")
+
+
+def _raising_cursor(exc: BaseException) -> MagicMock:
+    cur = MagicMock()
+    cur.execute.side_effect = exc
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    return cur
+
+
+class TestSubmissionClaim:
+    """An uncertain attempt must not be able to create a second economic order."""
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_second_attempt_is_refused_without_calling_the_broker(
+        self,
+        _mock_now: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            # the claim INSERT collides with the outstanding attempt
+            _raising_cursor(_ClaimViolation("duplicate key")),
+            # after rollback: which attempt holds the claim?
+            _make_cursor(
+                [
+                    {
+                        "order_id": 11,
+                        "status": "uncertain",
+                        "recommendation_request_id": UUID(int=7),
+                    }
+                ]
+            ),
+        ]
+        conn = _make_conn(cursors)
+
+        with pytest.raises(PriorSubmissionUnresolvedError) as excinfo:
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        assert excinfo.value.order_id == 11
+        # The whole point: no second submission.
+        broker.place_order.assert_not_called()
+        broker.close_position.assert_not_called()
+        # The aborted transaction is rolled back BEFORE anything else is
+        # written, and the refusal audit is committed so a raising caller
+        # (connect_job rolls back) cannot lose it.
+        assert conn.rollback.called
+        assert conn.rollback.call_count >= 1
+        assert conn.commit.called
+        audit_sql = " ".join(str(call.args[0]) for call in conn.execute.call_args_list)
+        assert "decision_audit" in audit_sql
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_an_unrelated_unique_violation_is_not_reinterpreted(
+        self,
+        _mock_now: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Catching every UniqueViolation would tell the operator a false story."""
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _raising_cursor(_OtherViolation("some other constraint")),
+        ]
+        conn = _make_conn(cursors)
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        broker.place_order.assert_not_called()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_the_committed_request_id_is_sent_to_the_broker(
+        self,
+        _mock_now: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-1",
+            status="pending",
+            filled_price=None,
+            filled_units=None,
+            fees=Decimal("0"),
+            raw_payload={"status": "pending"},
+        )
+        intent_cursor = _order_returning_cursor(order_id=11)
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            intent_cursor,
+            _update_cursor(rowcount=1),
+        ]
+        conn = _make_conn(cursors)
+
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        sent = broker.place_order.call_args.kwargs["request_id"]
+        persisted = intent_cursor.execute.call_args.args[1]["request_id"]
+        # Same UUID in the committed row and on the wire — never rotated.
+        assert sent == persisted
+        assert isinstance(sent, UUID)
+
+
+class TestUncertainSubmission:
+    """A broker call whose outcome is unknown is not a failure."""
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_uncertain_place_order_parks_the_attempt(
+        self,
+        _mock_now: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.place_order.side_effect = BrokerOrderSubmissionUncertain(
+            "transport failure",
+            raw_payload={"error": "Network error: connection refused"},
+        )
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=11),
+        ]
+        conn = _make_conn(cursors)
+
+        with pytest.raises(BrokerSubmissionUncertainError) as excinfo:
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        assert excinfo.value.order_id == 11
+        statements = [str(call.args[0]) for call in conn.execute.call_args_list]
+        joined = " ".join(statements)
+        # The intent is parked, not failed, and keeps the claim.
+        assert "status = 'uncertain'" in joined
+        assert "execution_pending" in joined
+        # Nothing economic is booked: we do not know that anything executed.
+        assert "INSERT INTO fills" not in joined
+        assert "cash_ledger" not in joined
+        assert conn.commit.called
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_a_pre_io_refusal_releases_the_claim(
+        self,
+        _mock_now: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The unattended guard raises BEFORE any request is built (#2942).
+
+        No order can exist at the broker, so holding the claim would park the
+        recommendation permanently — including after the operator does exactly
+        what the refusal message asks and re-runs from the main checkout.
+        """
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.place_order.side_effect = UnattendedExecutionRefused(
+            "refusing 'place_order': this checkout is a linked git worktree"
+        )
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=11),
+        ]
+        conn = _make_conn(cursors)
+
+        with pytest.raises(UnattendedExecutionRefused):
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        joined = " ".join(str(call.args[0]) for call in conn.execute.call_args_list)
+        # 'refused' is outside the claim index predicate, so the claim lifts.
+        assert "status = 'refused'" in joined
+        assert "status = 'uncertain'" not in joined
+        # The recommendation is untouched — it stays approved and retryable.
+        assert "trade_recommendations" not in joined
+        assert conn.commit.called

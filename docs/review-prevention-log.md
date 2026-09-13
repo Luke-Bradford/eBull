@@ -5374,3 +5374,70 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   failure into silence.
 - Enforced in: this prevention log; `tests/test_r6_pit_bundle.py::_hang_guard` +
   `::test_fifo_evidence_is_refused_instead_of_blocking`.
+
+### A test asserting the ABSENCE of a field the source documents as REQUIRED freezes the bug
+- First seen in: #2942 (2026-09-13), found while adding a durable request id to
+  `EtoroBrokerProvider.close_position`.
+- Symptom: `tests/test_broker_provider.py::TestRequestBodyShape::test_close_body_has_required_fields`
+  — a test whose NAME claims to pin the required fields — asserted `assert "InstrumentID" not in body`.
+  The eToro portal marks `InstrumentID` **required** on
+  `POST …/market-close-orders/positions/{positionId}`
+  (`api-reference/trading--demo/close-demo-position-by-units`), so every legacy EXIT would have been
+  rejected by the broker. Two more tests in `TestClosePosition` carried the same assertion. The
+  omission was not merely untested: it was *pinned*, so the fix had to delete an assertion rather
+  than add one, and nothing in the suite would ever have surfaced it.
+- Prevention: a test that asserts a request field is ABSENT must cite why the source says it does not
+  belong. Absent such a citation the assertion is describing the implementation, not the contract —
+  and a request-shape test is exactly where the contract is the source's, never ours. When writing or
+  reviewing one, open the endpoint page and diff the documented field list against the body; assert
+  the fields that ARE required by name and value. ⚠ The same shape hides in the opposite direction:
+  the hand-rolled body had drifted from the portal at some point and no gate compares them, so treat
+  "our request-shape test passes" as evidence about our code and nothing else.
+- Enforced in: this prevention log;
+  `tests/test_broker_provider.py::TestClosePosition::test_close_position_posts_to_correct_endpoint`
+  and `::TestRequestBodyShape::test_close_body_has_required_fields` (both now assert
+  `body["InstrumentID"]`), plus
+  `::TestClosePosition::test_close_position_requires_instrument_id`, which makes the omission
+  impossible to reintroduce silently.
+
+### An ambiguous broker outcome recorded as a terminal one is the duplicate-order bug with the sign flipped
+- First seen in: #2942 (2026-09-13).
+- Symptom: `EtoroBrokerProvider.place_order` and `close_position` both returned
+  `BrokerOrderResult(status="failed")` for `httpx.HTTPError` (transport), `ValueError` (non-JSON) and
+  every `HTTPStatusError` including 5xx. `order_client.execute_order` then wrote the recommendation
+  `execution_failed`, which is terminal — so the scheduler never revisited it. A submission that
+  actually landed at the broker was booked as a failure and its position went unowned. The ticket was
+  filed about the opposite failure (re-submitting an interrupted attempt); this one hides inside the
+  same code and is easy to miss because "failed" reads as safe.
+- Prevention: for any external state-mutating call, classify the outcome into THREE buckets, never
+  two: succeeded / rejected / **unknown**. A transport error, a 5xx and 408/409/425/429 are unknown —
+  the broker never told you, so neither a retry nor a terminal status is justified. Only a plain 4xx
+  is a rejection. The unknown bucket must be a distinct persisted state that BLOCKS both re-submission
+  and terminal bookkeeping, and it must retain the response evidence; a boolean success flag cannot
+  express it. Self-review prompt: "which except clause here is claiming to know something the network
+  did not tell me?"
+- Enforced in: this prevention log;
+  `app/providers/implementations/etoro_broker.py::_submit` + `_submission_outcome_is_uncertain`;
+  `app/services/order_client.py::_park_uncertain_submission` (`orders.status = 'uncertain'`);
+  `tests/test_broker_provider.py::TestErrorHandling` (network / non-JSON / non-object / 5xx /
+  408-409-425-429 uncertain, plain 4xx still a rejection).
+
+### A pre-I/O refusal must release a claim that a post-I/O uncertainty would hold
+- First seen in: #2942 (2026-09-13), Codex checkpoint 2, which demonstrated it: claim committed,
+  zero HTTP calls made.
+- Symptom: a durable "one unresolved attempt per recommendation" claim is committed before the broker
+  call so a crash cannot produce a second economic order. But
+  `refuse_broker_mutation_if_unattended` raises at the TOP of every mutating provider method, before
+  credentials are read and before a request is built — so the claim was being held for an attempt
+  that provably never reached the broker. The recommendation would then be parked permanently,
+  including after the operator did exactly what the refusal message asks and re-ran from the main
+  checkout. The fail-closed default is right for uncertainty and wrong here.
+- Prevention: when adding a pre-I/O claim, enumerate the exceptions that can escape the guarded call
+  and sort them by whether a request could have been sent. Only an exception whose contract is
+  "raised before any I/O" may release the claim, and it must be caught BY TYPE — never a broad
+  `except Exception`, which would release the claim for a timeout that left a request on the wire.
+  Resolve the row to a terminal non-claiming status rather than deleting it; the attempt happened and
+  belongs in the audit trail.
+- Enforced in: this prevention log;
+  `app/services/order_client.py::_release_claim_after_pre_io_refusal` (`orders.status = 'refused'`);
+  `tests/test_order_client.py::TestSubmissionClaim::test_a_pre_io_refusal_releases_the_claim`.

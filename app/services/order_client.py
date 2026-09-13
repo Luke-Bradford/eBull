@@ -30,12 +30,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
+from uuid import UUID, uuid4
 
 import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
 
-from app.providers.broker import BrokerOrderResult, BrokerProvider, OrderParams
+from app.providers.broker import (
+    BrokerOrderResult,
+    BrokerOrderSubmissionUncertain,
+    BrokerProvider,
+    OrderParams,
+)
+from app.security.unattended_guard import UnattendedExecutionRefused
 from app.services.execution_guard import decide_submission_controls, load_kill_switch
 from app.services.quote_marks import directional_fill_price, positive_decimal_or_none
 from app.services.return_attribution import compute_attribution, persist_attribution
@@ -336,27 +343,38 @@ def _persist_submitted_intent(
     requested_amount: Decimal | None,
     requested_units: Decimal | None,
     now: datetime,
-) -> int:
+) -> tuple[int, UUID]:
     """Insert a durable order-intent row BEFORE the broker call (#243).
 
-    The row carries ``status='submitted'`` and a sentinel
-    ``raw_payload_json`` so a reconciler can find rows whose broker
-    call never returned. The caller MUST ``conn.commit()`` after
-    this returns and BEFORE issuing the external broker call —
-    otherwise the intent stays inside the implicit transaction and
-    a process crash erases it along with everything else.
+    The row carries ``status='submitted'``, a sentinel ``raw_payload_json`` so
+    a reconciler can find rows whose broker call never returned, and — since
+    #2942 — the durable ``recommendation_request_id`` that is sent as
+    ``x-request-id`` and never rotated. The caller MUST ``conn.commit()`` after
+    this returns and BEFORE issuing the external broker call — otherwise the
+    intent stays inside the implicit transaction and a process crash erases it
+    along with everything else, UUID included.
+
+    ``idx_orders_recommendation_open_attempt`` makes this INSERT the CLAIM: at
+    most one unresolved attempt may exist per recommendation. A second attempt
+    raises ``psycopg.errors.UniqueViolation``, which the caller translates to
+    ``PriorSubmissionUnresolvedError``. The claim lives in the database because
+    the failure mode is a restarted or concurrent second pass, which no
+    application-level ``SELECT … WHERE status IN (…)`` can exclude.
     """
+    request_id = uuid4()
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             INSERT INTO orders
                 (instrument_id, recommendation_id, decision_id,
                  action, order_type, requested_amount, requested_units,
-                 status, broker_order_ref, raw_payload_json, created_at)
+                 status, broker_order_ref, raw_payload_json, created_at,
+                 recommendation_request_id)
             VALUES
                 (%(iid)s, %(rid)s, %(did)s,
                  %(action)s, %(otype)s, %(amt)s, %(units)s,
-                 'submitted', NULL, %(payload)s, %(now)s)
+                 'submitted', NULL, %(payload)s, %(now)s,
+                 %(request_id)s)
             RETURNING order_id
             """,
             {
@@ -369,12 +387,13 @@ def _persist_submitted_intent(
                 "units": requested_units,
                 "payload": Jsonb(_SUBMITTED_INTENT_PAYLOAD),
                 "now": now,
+                "request_id": request_id,
             },
         )
         row = cur.fetchone()
     if row is None:
         raise RuntimeError("orders INSERT (submitted intent) returned no row")
-    return int(row["order_id"])
+    return int(row["order_id"]), request_id
 
 
 def _update_order_with_broker_result(
@@ -799,6 +818,35 @@ class SubmissionControlsRevokedError(RuntimeError):
         self.failed_rules = failed_rules
 
 
+class PriorSubmissionUnresolvedError(RuntimeError):
+    """This recommendation already holds an unresolved submission claim (#2942).
+
+    An earlier attempt reached (or may have reached) the broker and its fate is
+    not yet known. Submitting again would create a SECOND economic order, so
+    the path refuses. The recommendation stays ``approved``: the refusal is a
+    statement about the outstanding attempt, not about the recommendation's
+    merit.
+    """
+
+    def __init__(self, message: str, order_id: int | None = None) -> None:
+        super().__init__(message)
+        self.order_id = order_id
+
+
+class BrokerSubmissionUncertainError(RuntimeError):
+    """The broker call neither succeeded nor was refused (#2942).
+
+    A transport failure, a 5xx, a 408/409/425/429 or an unreadable response
+    leaves the order's fate unknown — it may already exist at the broker. The
+    intent row is parked at ``status='uncertain'`` with the response evidence,
+    which keeps the claim held so nothing re-submits.
+    """
+
+    def __init__(self, message: str, order_id: int) -> None:
+        super().__init__(message)
+        self.order_id = order_id
+
+
 def _assert_submission_controls(
     conn: psycopg.Connection[Any],
     recommendation_id: int,
@@ -910,6 +958,233 @@ def _assert_transaction_cost_complete_for_buy_add(
 
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
+
+
+_CLAIM_INDEX = "idx_orders_recommendation_open_attempt"
+
+
+def _write_refusal_audit(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    recommendation_id: int,
+    explanation: str,
+    evidence: dict[str, Any],
+    now: datetime,
+) -> None:
+    """Record a submission refusal and COMMIT it.
+
+    The commit is load-bearing, not incidental: every caller of this helper
+    raises immediately afterwards, and ``connect_job`` rolls back on a raising
+    path — so an uncommitted audit row would vanish exactly when it matters
+    (#2943's lesson, re-applied here). Nothing else is outstanding on the
+    connection at these call sites, so the commit publishes only this row.
+    """
+    conn.execute(
+        """
+        INSERT INTO decision_audit
+            (decision_time, instrument_id, recommendation_id, stage,
+             pass_fail, explanation, evidence_json)
+        VALUES
+            (%(dt)s, %(iid)s, %(rid)s, %(stage)s, 'FAIL', %(expl)s, %(ev)s)
+        """,
+        {
+            "dt": now,
+            "iid": instrument_id,
+            "rid": recommendation_id,
+            "stage": STAGE,
+            "expl": explanation,
+            "ev": Jsonb(evidence),
+        },
+    )
+    conn.commit()
+
+
+def _claim_submission(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    recommendation_id: int,
+    decision_id: int,
+    action: str,
+    requested_amount: Decimal | None,
+    requested_units: Decimal | None,
+    now: datetime,
+) -> tuple[int, UUID]:
+    """Take the single submission claim for this recommendation (#2942).
+
+    Returns the committed ``(order_id, request_id)``. The commit happens here
+    so the durable intent and its request identity survive a crash during the
+    broker call that follows.
+
+    Raises ``PriorSubmissionUnresolvedError`` when an unresolved attempt
+    already exists. That is the whole point of the ticket: an interrupted
+    submission previously left the recommendation ``approved``, and the next
+    scheduler pass minted a fresh intent and a fresh ``x-request-id`` and
+    submitted a SECOND economic order.
+    """
+    try:
+        order_id, request_id = _persist_submitted_intent(
+            conn,
+            instrument_id=instrument_id,
+            recommendation_id=recommendation_id,
+            decision_id=decision_id,
+            action=action,
+            requested_amount=requested_amount,
+            requested_units=requested_units,
+            now=now,
+        )
+    except psycopg.errors.UniqueViolation as exc:
+        # Match the claim index by name. Catching every UniqueViolation here
+        # would silently reinterpret an unrelated constraint failure as "a
+        # prior attempt exists", which is a different and wrong story.
+        if exc.diag.constraint_name != _CLAIM_INDEX:
+            raise
+        # A UniqueViolation aborts the transaction: no further statement can
+        # run on this connection until it is rolled back, including the audit
+        # INSERT below.
+        conn.rollback()
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT order_id, status, recommendation_request_id
+                FROM orders
+                WHERE recommendation_id = %(rid)s
+                  AND status IN ('submitted', 'pending', 'uncertain')
+                """,
+                {"rid": recommendation_id},
+            )
+            outstanding = cur.fetchone()
+        held_order_id = int(outstanding["order_id"]) if outstanding is not None else None
+        explanation = (
+            f"Submission refused — recommendation {recommendation_id} already holds an "
+            f"unresolved submission claim (order_id={held_order_id}); resolve it before re-submitting"
+        )
+        _write_refusal_audit(
+            conn,
+            instrument_id=instrument_id,
+            recommendation_id=recommendation_id,
+            explanation=explanation,
+            evidence={
+                "refusal": "prior_submission_unresolved",
+                "held_order_id": held_order_id,
+                "held_status": str(outstanding["status"]) if outstanding is not None else None,
+                "held_request_id": (
+                    str(outstanding["recommendation_request_id"])
+                    if outstanding is not None and outstanding["recommendation_request_id"] is not None
+                    else None
+                ),
+            },
+            now=now,
+        )
+        logger.error(
+            "execute_order: refusing recommendation_id=%d — unresolved attempt order_id=%s",
+            recommendation_id,
+            held_order_id,
+        )
+        raise PriorSubmissionUnresolvedError(explanation, held_order_id) from exc
+
+    conn.commit()
+    return order_id, request_id
+
+
+def _release_claim_after_pre_io_refusal(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    instrument_id: int,
+    recommendation_id: int,
+    reason: str,
+    now: datetime,
+) -> None:
+    """Release the claim for a refusal that provably never reached the broker.
+
+    ``refuse_broker_mutation_if_unattended`` raises at the TOP of every
+    mutating provider method, before credentials are read and before a request
+    is built — so no order can exist at the broker and holding the claim would
+    park the recommendation permanently, including after the operator does
+    exactly what the refusal message asks and re-runs from the main checkout.
+
+    The intent row is resolved to ``status='refused'`` rather than deleted: the
+    attempt happened and belongs in the audit trail, and ``refused`` is outside
+    ``idx_orders_recommendation_open_attempt``'s predicate so the claim lifts.
+    The recommendation stays ``approved``.
+
+    ⚠ This applies ONLY to an exception whose contract is "raised before any
+    I/O". An arbitrary exception out of a broker call may have left a request
+    on the wire and must stay uncertain.
+    """
+    conn.execute(
+        """
+        UPDATE orders
+        SET status = 'refused', raw_payload_json = %(payload)s
+        WHERE order_id = %(oid)s
+        """,
+        {"oid": order_id, "payload": Jsonb({"refusal": "pre_io_refusal", "detail": reason})},
+    )
+    _write_refusal_audit(
+        conn,
+        instrument_id=instrument_id,
+        recommendation_id=recommendation_id,
+        explanation=f"Submission refused before broker I/O — order_id={order_id}: {reason}",
+        evidence={"refusal": "pre_io_refusal", "order_id": order_id, "detail": reason},
+        now=now,
+    )
+    logger.warning(
+        "execute_order: recommendation_id=%d order_id=%d refused before broker I/O — %s",
+        recommendation_id,
+        order_id,
+        reason,
+    )
+
+
+def _park_uncertain_submission(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    instrument_id: int,
+    recommendation_id: int,
+    exc: BrokerOrderSubmissionUncertain,
+    now: datetime,
+) -> None:
+    """Park an attempt whose outcome the broker never told us, and COMMIT.
+
+    The order goes to ``status='uncertain'`` carrying the response evidence,
+    which keeps ``idx_orders_recommendation_open_attempt`` held so nothing
+    re-submits. The recommendation goes to ``execution_pending`` rather than
+    ``execution_failed``: the previous behaviour booked an order that may well
+    have landed as a terminal failure, leaving its position unowned.
+
+    No fill, position or cash-ledger write happens on this path — we do not
+    know that anything executed.
+    """
+    with conn.transaction():
+        conn.execute(
+            """
+            UPDATE orders
+            SET status = 'uncertain', raw_payload_json = %(payload)s
+            WHERE order_id = %(oid)s
+            """,
+            {"oid": order_id, "payload": Jsonb(exc.raw_payload)},
+        )
+        conn.execute(
+            "UPDATE trade_recommendations SET status = 'execution_pending' WHERE recommendation_id = %(rid)s",
+            {"rid": recommendation_id},
+        )
+    _write_refusal_audit(
+        conn,
+        instrument_id=instrument_id,
+        recommendation_id=recommendation_id,
+        explanation=f"Submission outcome unknown — order_id={order_id} parked as uncertain: {exc}",
+        evidence={"refusal": "broker_submission_uncertain", "order_id": order_id, "response": exc.raw_payload},
+        now=now,
+    )
+    logger.error(
+        "execute_order: recommendation_id=%d order_id=%d parked uncertain — %s",
+        recommendation_id,
+        order_id,
+        exc,
+    )
 
 
 def execute_order(
@@ -1035,7 +1310,9 @@ def execute_order(
                 # side effect, then commit so a crash mid-call leaves
                 # a durable ``status='submitted'`` row that a
                 # reconciler can chase against the broker.
-                submitted_order_id = _persist_submitted_intent(
+                # #2942: that row now also carries the durable
+                # ``x-request-id`` and takes the single submission claim.
+                submitted_order_id, request_id = _claim_submission(
                     conn,
                     instrument_id=instrument_id,
                     recommendation_id=recommendation_id,
@@ -1045,11 +1322,36 @@ def execute_order(
                     requested_units=requested_units,
                     now=now,
                 )
-                conn.commit()
-                broker_result = broker.close_position(exit_pos_id)
+                try:
+                    broker_result = broker.close_position(
+                        exit_pos_id,
+                        instrument_id=instrument_id,
+                        request_id=request_id,
+                    )
+                except UnattendedExecutionRefused as exc:
+                    _release_claim_after_pre_io_refusal(
+                        conn,
+                        order_id=submitted_order_id,
+                        instrument_id=instrument_id,
+                        recommendation_id=recommendation_id,
+                        reason=str(exc),
+                        now=now,
+                    )
+                    raise
+                except BrokerOrderSubmissionUncertain as exc:
+                    _park_uncertain_submission(
+                        conn,
+                        order_id=submitted_order_id,
+                        instrument_id=instrument_id,
+                        recommendation_id=recommendation_id,
+                        exc=exc,
+                        now=now,
+                    )
+                    raise BrokerSubmissionUncertainError(str(exc), submitted_order_id) from exc
         else:
             # #243: durable order intent before the broker call.
-            submitted_order_id = _persist_submitted_intent(
+            # #2942: it carries the request identity and the claim.
+            submitted_order_id, request_id = _claim_submission(
                 conn,
                 instrument_id=instrument_id,
                 recommendation_id=recommendation_id,
@@ -1059,14 +1361,35 @@ def execute_order(
                 requested_units=requested_units,
                 now=now,
             )
-            conn.commit()
-            broker_result = broker.place_order(
-                instrument_id=instrument_id,
-                action=action,
-                amount=requested_amount,
-                units=requested_units,
-                params=order_params,
-            )
+            try:
+                broker_result = broker.place_order(
+                    instrument_id=instrument_id,
+                    action=action,
+                    amount=requested_amount,
+                    units=requested_units,
+                    params=order_params,
+                    request_id=request_id,
+                )
+            except UnattendedExecutionRefused as exc:
+                _release_claim_after_pre_io_refusal(
+                    conn,
+                    order_id=submitted_order_id,
+                    instrument_id=instrument_id,
+                    recommendation_id=recommendation_id,
+                    reason=str(exc),
+                    now=now,
+                )
+                raise
+            except BrokerOrderSubmissionUncertain as exc:
+                _park_uncertain_submission(
+                    conn,
+                    order_id=submitted_order_id,
+                    instrument_id=instrument_id,
+                    recommendation_id=recommendation_id,
+                    exc=exc,
+                    now=now,
+                )
+                raise BrokerSubmissionUncertainError(str(exc), submitted_order_id) from exc
     else:
         quote_data = _load_quote_for_execution(conn, instrument_id)
         # Floor last/bid/ask to strictly-positive (#1439): a 0.00 row is not
