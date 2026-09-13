@@ -38,6 +38,22 @@ ReconciliationState = Literal[
     "error",
 ]
 
+# Retry cadence for the reconciliation backlog (#2948). No published rule fixes a
+# broker order-reconciliation cadence -- searched, none exists, and none is borrowed --
+# so it is fixed BY CONSTRUCTION from the two constraints that do bind:
+#   1. ``strategy_paper_cycle`` runs every five minutes
+#      (``Cadence.every_n_minutes(interval=5)``, app/workers/scheduler.py:2322);
+#   2. eToro's ordinary trading reads share 60/min and 429 carries no guaranteed
+#      Retry-After (.claude/skills/data-sources/etoro-api.md, "Stable facts"), so the
+#      client must supply its own capped backoff.
+# Delays are ``base * (2**(n - 1) - 0.5)`` -- k cycles LESS A HALF CYCLE. The half is
+# load-bearing: a delay of exactly one cycle is unreachable, because the batch selected
+# at 00:00 records its attempts at 00:00:02 and the 00:05 selection then sees only
+# 299.8s. The slack tolerates 150s of drift between a selection's grid time and the
+# attempts it records. Sequence at these defaults: 150, 450, 1050, 2250, 3450, 3450...
+RECONCILIATION_RETRY_BASE_SECONDS = 300
+RECONCILIATION_RETRY_CAP_SECONDS = 3450
+
 _KNOWN_PENDING_BROKER_STATES = frozenset({"Pending"})
 _KNOWN_FILLED_BROKER_STATES = frozenset({"Filled", "Executed"})
 _KNOWN_REJECTED_BROKER_STATES = frozenset({"Rejected", "Failed", "Cancelled", "Canceled"})
@@ -466,10 +482,37 @@ def reconcile_backlog(
     *,
     broker: BrokerProvider,
     limit: int = 50,
+    retry_base_seconds: int = RECONCILIATION_RETRY_BASE_SECONDS,
+    retry_cap_seconds: int = RECONCILIATION_RETRY_CAP_SECONDS,
 ) -> tuple[ReconciliationResult, ...]:
-    """Reconcile a bounded oldest-first restart backlog."""
+    """Reconcile a bounded least-recently-attempted backlog (#2948).
+
+    Selection is a round robin over ``last_attempt_at``, which every attempt
+    path writes.  The previous ``ORDER BY first_unresolved_at, order_id`` sorted
+    on two keys that never change for a non-terminal row, so once the oldest
+    ``limit`` orders were stuck the order at ``limit + 1`` was never visited
+    again -- an absorbing state, not a delay.
+
+    A capped exponential cooldown then keeps a permanently dead order off the
+    shared 60-requests/minute eToro trading-read budget.  It applies only to the
+    no-progress states, because ``_apply_detail`` increments the same
+    ``attempt_count`` on a successful poll that leaves an order ``pending``.
+
+    Declared bound, conditional on a finite stable backlog, monotonic timestamps
+    and no aborted batch: once a row is DUE it is selected within
+    ``ceil(due_rows / limit)`` completed cycles.  The cooldown and that queue
+    wait are ADDITIVE, and more than ``limit`` never-attempted rows still take
+    more than one cycle -- see the spec, both were overstated in its first draft.
+
+    ``first_unresolved_at`` is deliberately never written, so the age
+    ``enforce_reconciliation_slo`` measures cannot be reset to look healthy.
+    """
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
+    if retry_base_seconds < 1:
+        raise ValueError("retry_base_seconds must be positive")
+    if retry_cap_seconds < retry_base_seconds:
+        raise ValueError("retry_cap_seconds must be at least retry_base_seconds")
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyReconciliationError("backlog reconciliation requires an idle connection")
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -483,14 +526,46 @@ def reconcile_backlog(
             WHERE state.state NOT IN ('resolved', 'rejected')
               AND o.execution_origin = 'strategy'
               AND trade.core_rebalance_intent_id IS NULL
-            ORDER BY state.first_unresolved_at, state.order_id
-            LIMIT %s
+              AND (
+                    state.state NOT IN ('not_found', 'ambiguous', 'error')
+                 OR state.last_attempt_at IS NULL
+                 OR state.last_attempt_at <= now() - make_interval(secs => least(
+                        %(cap)s::double precision,
+                        %(base)s::double precision
+                            * greatest(power(2, least(state.attempt_count - 1, 30)) - 0.5, 0)))
+              )
+            ORDER BY state.last_attempt_at ASC NULLS FIRST,
+                     state.first_unresolved_at, state.order_id
+            LIMIT %(limit)s
             """,
-            (limit,),
+            {"limit": limit, "base": retry_base_seconds, "cap": retry_cap_seconds},
         )
         rows = cur.fetchall()
     conn.commit()
-    return tuple(reconcile_strategy_order(conn, broker=broker, order_id=int(row["order_id"])) for row in rows)
+    results: list[ReconciliationResult] = []
+    for row in rows:
+        order_id = int(row["order_id"])
+        try:
+            results.append(reconcile_strategy_order(conn, broker=broker, order_id=order_id))
+        except Exception:  # noqa: BLE001 - one poison order must not abort the batch
+            # ``reconcile_strategy_order`` models four failure classes; anything
+            # else (a psycopg error, an unmodelled broker exception) used to
+            # abort the whole batch mid-generator AND leave last_attempt_at
+            # unchanged, so the same row re-selected first forever. Advance the
+            # attempt clock and carry on: the trade is still marked
+            # ``reconcile_required`` and the SLO block still fires on age.
+            # The escaping exception may have left an aborted transaction.
+            conn.rollback()
+            with conn.transaction():
+                results.append(
+                    _record_failure(
+                        conn,
+                        order_id=order_id,
+                        state="error",
+                        error_code="reconcile_unexpected_error",
+                    )
+                )
+    return tuple(results)
 
 
 def enforce_reconciliation_slo(
