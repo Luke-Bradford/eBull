@@ -378,34 +378,53 @@ def _convert_local_total(
 
 
 def load_account_equity_evidence(
-    conn: psycopg.Connection[Any], *, environment: Literal["demo", "real"]
+    conn: psycopg.Connection[Any],
+    *,
+    environment: Literal["demo", "real"],
+    snapshot_date: date | None = None,
 ) -> AccountEquityEvidence:
-    """Return the latest official/local comparison, its verdict, and every blocker."""
+    """Return one official/local comparison, its verdict, and every blocker.
+
+    ``snapshot_date=None`` returns the LATEST stored broker day, which is what the
+    ``/strategies`` panel has always shown. #2844's countdown needs a named day instead,
+    because the latest broker day is precisely the one that cannot yet be decided: the
+    local comparand is stamped ``MAX(price_daily.price_date)`` and lands 0-3 days late.
+
+    ⚠ ``days_collected`` is counted over the whole environment BEFORE the date filter, so
+    it keeps meaning "broker days collected" for every caller. It never meant "days
+    reconciled" — ``account_reconciliation_ledger`` is what counts those.
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            WITH latest AS (
+            WITH env AS (
                 SELECT *,count(*) OVER () AS days_collected
                 FROM broker_account_equity_snapshots
-                WHERE environment=%s
+                WHERE environment=%(environment)s
+            ), chosen AS (
+                SELECT * FROM env
+                -- ⚠ CAST REQUIRED. An uncast nullable filter parameter raises psycopg3
+                -- AmbiguousParameter -- it appears only inside IS NULL / equality here,
+                -- so the server cannot infer its type.
+                WHERE %(snapshot_date)s::date IS NULL OR snapshot_date=%(snapshot_date)s::date
                 ORDER BY snapshot_date DESC
                 LIMIT 1
             )
-            SELECT latest.days_collected,latest.snapshot_date,latest.observed_at,latest.currency,
-                   latest.available_cash,latest.total_invested,latest.unrealised_pnl,latest.equity,
-                   latest.account_currency_id,
-                   latest.official_direct_long_market_value,latest.official_direct_long_positions,
-                   latest.official_direct_short_positions,latest.official_pending_order_amount,
+            SELECT chosen.days_collected,chosen.snapshot_date,chosen.observed_at,chosen.currency,
+                   chosen.available_cash,chosen.total_invested,chosen.unrealised_pnl,chosen.equity,
+                   chosen.account_currency_id,
+                   chosen.official_direct_long_market_value,chosen.official_direct_long_positions,
+                   chosen.official_direct_short_positions,chosen.official_pending_order_amount,
                    local.display_currency,local.total_value,local.fx_rate_date,
                    coalesce(local.positions_no_price,0) > 0
                      OR coalesce(local.positions_no_fx,0) > 0
                      OR coalesce(local.cash_no_fx_currencies,0) > 0 AS local_valuation_incomplete,
                    local.oldest_mark_date,local.positions_priced,local.stale_mark_positions,
                    local.positions_total,local.mark_rounding_tolerance
-            FROM latest
-            LEFT JOIN portfolio_eod_snapshots local ON local.snapshot_date=latest.snapshot_date
+            FROM chosen
+            LEFT JOIN portfolio_eod_snapshots local ON local.snapshot_date=chosen.snapshot_date
             """,
-            (environment,),
+            {"environment": environment, "snapshot_date": snapshot_date},
         )
         row = cur.fetchone()
     if row is None:
@@ -436,7 +455,10 @@ def load_account_equity_evidence(
             incomplete_reasons=("official_account_equity_missing",),
         )
 
-    snapshot_date = row["snapshot_date"]
+    # ⚠ Distinct name from the PARAMETER. `snapshot_date` is `date | None` on the
+    # signature (None = latest); the column is NOT NULL, so rebinding the parameter
+    # here would carry the Optional into every downstream use.
+    observed_date: date = row["snapshot_date"]
     local_value = _decimal(row["total_value"])
     official_equity = Decimal(str(row["equity"]))
     official_available_cash = Decimal(str(row["available_cash"]))
@@ -479,7 +501,7 @@ def load_account_equity_evidence(
             reasons.append("local_eod_valuation_incomplete")
         reasons.extend(
             mark_effectiveness_reasons(
-                snapshot_date=snapshot_date,
+                snapshot_date=observed_date,
                 oldest_mark_date=row["oldest_mark_date"],
                 positions_priced=int(row["positions_priced"]),
             )
@@ -538,7 +560,7 @@ def load_account_equity_evidence(
         reconciliation_state=reconciliation_state,
         reconciliation_rule_version=RECONCILIATION_RULE_VERSION,
         days_collected=int(row["days_collected"]),
-        snapshot_date=snapshot_date,
+        snapshot_date=observed_date,
         observed_at=row["observed_at"],
         account_currency_id=account_currency_id,
         currency=official_currency,

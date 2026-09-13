@@ -1269,6 +1269,29 @@ universe; a tilt that returns less than the market after costs is a failure.
 If arms 2–4 all fail on a PIT-correct spine, the honest conclusion is that we have no selection
 edge either, and the product is the low-cost market sleeve already queued as Phase 1 on #2437.
 
+## 2026-09-13 — The #2844 reconciliation countdown counts DAYS OF EVIDENCE on the held-session calendar
+
+`account_reconciliation_days` stores one verdict per `(environment, reconciliation_rule_version,
+snapshot_date)`; `account_reconciliation_ledger.consecutive_reconciled_days` counts the trailing run.
+No published rule fixes a broker-reconciliation cadence (searched; none exists, and none is borrowed
+— the same finding already recorded at `RECONCILIATION_RULE_VERSION`), so the rule is fixed BY
+CONSTRUCTION and frozen in `COUNTDOWN_RULE_VERSION = "f0-countdown-v1"`.
+
+⚠ **A decided verdict is FROZEN** — by a `BEFORE UPDATE` trigger, not just an `ON CONFLICT`
+predicate. An undecided one stays upgradeable, because the measured local-snapshot lag is 0-3 days.
+
+⚠⚠ **Bumping either `RECONCILIATION_RULE_VERSION` or `COUNTDOWN_RULE_VERSION` RESETS THE COUNTDOWN
+TO ZERO.** The tolerance version is part of the primary key, so a bump starts a parallel series and
+the counter reads only the current one. This is the point of the design: it removes "bump the
+version, then re-verdict only the days that came out red", because a bump invalidates the greens too.
+
+⚠ **Demo only.** `portfolio_eod_snapshots` has no environment column — it is the operator's one local
+book — so a `real` countdown would silently consume the demo comparand.
+
+The countdown is read by `live_gate_refusals` (`account_reconciliation_streak_insufficient`, appended
+AFTER the unconditional `live_strategy_broker_contract_not_validated` so `refusal_codes[0]` cannot
+move) and rendered on the `/strategies` account-evidence panel.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

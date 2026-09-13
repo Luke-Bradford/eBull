@@ -295,6 +295,10 @@ def _facts(**overrides: object) -> LiveGateFacts:
         "live_trading_enabled": True,
         "global_kill_active": False,
         "active_execution_block_count": 0,
+        # #2844 clause 3 — default to a satisfied countdown so the existing cases keep
+        # measuring what they were written to measure.
+        "account_reconciliation_green_days": 5,
+        "account_reconciliation_required_days": 5,
     }
     base.update(overrides)
     return LiveGateFacts(**base)  # type: ignore[arg-type]
@@ -400,6 +404,27 @@ def test_the_broker_contract_refusal_still_terminates_every_assessment() -> None
     Guards against this ticket accidentally becoming a path to live capital.
     """
     assert "live_strategy_broker_contract_not_validated" in _gate()
+
+
+def test_an_incomplete_reconciliation_countdown_refuses_the_live_gate() -> None:
+    """#2844 clause 3 — the allocation boundary's evidence, at the enablement point.
+
+    A counter nobody reads authorises nothing, which is the recurring defect shape in this
+    repo (a writer with no reader). This is the reader.
+    """
+    codes = _gate(facts=_facts(account_reconciliation_green_days=4))
+    assert "account_reconciliation_streak_insufficient" in codes
+    assert "account_reconciliation_streak_insufficient" not in _gate()
+
+
+def test_the_reconciliation_refusal_cannot_move_the_leading_refusal_code() -> None:
+    """``live_gate_refusals`` documents that ``refusal_codes[0]`` is stable.
+
+    An earlier draft appended the countdown refusal BEFORE the unconditional broker-contract
+    code and claimed the order was preserved. It is not — on the one input where every other
+    check passes, that placement changes ``[0]``. Appending after it cannot.
+    """
+    assert _gate(facts=_facts(account_reconciliation_green_days=0))[0] == _gate()[0]
 
 
 def test_a_rewritten_declaration_is_refused_by_the_live_gate() -> None:

@@ -72,7 +72,12 @@ const BLOCKED = {
   "comparable": false,
   "incomplete_reasons": [
     "same_day_local_eod_snapshot_missing"
-  ]
+  ],
+  "countdown_green_days": 0,
+  "countdown_required_days": 5,
+  "countdown_newest_counted_date": null,
+  "countdown_stop_reason": "day_never_recorded",
+  "countdown_rule_version": "f0-countdown-v1"
 },
   evidence_refresh: {
   "frozen_through": "2024-09-27",

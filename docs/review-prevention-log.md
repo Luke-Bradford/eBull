@@ -5272,3 +5272,50 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   rejected and must not be attached to a branch-specific evidence label.
 - Enforced in: this prevention log; `scripts/verify_2914_operational_rules.py::_must_refuse`;
   `tests/test_2914_operational_rules_verifier.py`.
+
+### A calendar predicate derived from MUTABLE state can delete the failures it is meant to expose
+- First seen in: #2844 clause 3 (2026-09-13). Wrong answer #1 written, wrong answer #2 written and
+  measured green, then falsified by Codex checkpoint 2 reproducing a `0/5 -> 5/5` flip.
+- Symptom: the countdown needed "is date D a trading session?", to decide which days a
+  reconciliation streak must cover. Two derivations were tried before the right one.
+  **(1)** `EXISTS (SELECT 1 FROM price_daily WHERE price_date = D)` returns TRUE for **16 of the 17**
+  stored demo broker days, **every Saturday included** — ~308 instruments (crypto) carry weekend bars
+  against ~11k instruments on weekdays
+  (`select extract(isodow from price_date)::int, count(*), count(distinct instrument_id) from price_daily where price_date >= '2026-08-01' group by 1`
+  → `6: 616/308`, `7: 1220/307`).
+  **(2)** The same query restricted to *currently-held* instruments returns the correct 12 of 17 and
+  looks right on every measurement — but it is a function of **today's book**. Selling the last
+  crypto position removes past weekend sessions from the calendar, and a weekend the job never
+  judged has no ledger row to preserve it, so the sale silently deletes a missing-day failure and
+  splices the greens either side of it. A UNION with the recorded dates does not save it: the days
+  at risk are precisely the ones with no row.
+- Prevention: a calendar predicate must not be a function of state that can change after the days it
+  classifies. Prefer a PUBLISHED calendar — here `app/services/market_calendar.py::us_market_status`,
+  NYSE's own holiday and early-close table, already transcribed and cited, and distinct from the US
+  federal calendar (Good Friday closed; Columbus/Veterans open). It is a function of neither the book
+  nor the price corpus nor what the job managed to record. Self-review prompts: "a trading day for
+  WHOM?" — if the answer is "the table", the predicate is wrong; and "what happens to a PAST day's
+  classification when the input I derived it from changes?"
+- Enforced in: this prevention log; `app/services/account_reconciliation_ledger.py::countdown_calendar`
+  (its docstring records both wrong answers) + `pending_reconciliation_dates`;
+  `tests/test_account_reconciliation_countdown.py::test_the_countdown_calendar_is_the_published_nyse_one`;
+  `docs/specs/ops/2026-09-13-account-reconciliation-countdown.md`.
+
+### A "skip the pending state" rule is a refusal bypass unless it carries a clock
+- First seen in: #2844 clause 3 (2026-09-13), caught by Codex checkpoint 1 on the spec, before code.
+- Symptom: the first design of the consecutive-green counter skipped a leading run of undecided
+  (`comparable = false`) days as "not yet judged", because the measured local-snapshot lag is 0-3 days
+  and freezing those refusals would have made 11 of 49 observed days permanently red. But a
+  *permanent* refusal has the same stored shape as a pending one — an undocumented account currency,
+  an unvalued short book, an incomplete local valuation — so it would have sat at the head forever
+  while five old greens kept the live gate green. The bypass is invisible: every row involved is
+  individually correct.
+- Prevention: never distinguish "pending" from "failed" by the state alone. Put a bound on how long a
+  unit may stay undecided, derived from the measured latency of whatever decides it, and treat
+  still-undecided past that bound as a failure. One constant (`MAX_DECISION_LAG_DAYS`) then replaces
+  the skip rule and closes the whole class. Generalises to any gate reading a pipeline that writes
+  asynchronously — order reconciliation, outcome resolution, manifest drains.
+- Enforced in: this prevention log;
+  `app/services/account_reconciliation_ledger.py::consecutive_reconciled_days`;
+  `tests/test_account_reconciliation_countdown.py::test_a_permanent_refusal_at_the_head_is_a_failure_not_a_skip`
+  (revert-probed: restoring the skip returns 5 where the guard returns 0).

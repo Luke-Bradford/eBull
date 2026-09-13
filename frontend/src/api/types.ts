@@ -2879,6 +2879,16 @@ export interface StrategyOverviewResponse {
     tolerance: string | null;
     comparable: boolean;
     incomplete_reasons: string[];
+    // #2844 clause 3 — the consecutive-green countdown before live enablement.
+    // These describe a DIFFERENT object from every field above: those are the latest
+    // broker day recomputed live, this is frozen history over the countdown calendar.
+    // They can legitimately disagree, because the latest day is usually the one the
+    // 0-3 day local-snapshot lag has not decided yet.
+    countdown_green_days: number;
+    countdown_required_days: number;
+    countdown_newest_counted_date: string | null;
+    countdown_stop_reason: string | null;
+    countdown_rule_version: string;
   };
   evidence_refresh: {
     frozen_through: string;

@@ -144,6 +144,11 @@ const OVERVIEW: StrategyOverviewResponse = {
     difference: null,
     comparable: false,
     incomplete_reasons: ["official_account_equity_missing"],
+    countdown_green_days: 0,
+    countdown_required_days: 5,
+    countdown_newest_counted_date: null,
+    countdown_stop_reason: "day_never_recorded",
+    countdown_rule_version: "f0-countdown-v1",
   },
   paper_pool: {
     configured: true,
@@ -548,6 +553,11 @@ describe("StrategiesPage", () => {
         tolerance: null,
         comparable: false,
         incomplete_reasons: ["local_eod_effective_time_unknown"],
+        countdown_green_days: 0,
+        countdown_required_days: 5,
+        countdown_newest_counted_date: null,
+        countdown_stop_reason: "day_never_recorded",
+        countdown_rule_version: "f0-countdown-v1",
       },
     });
     renderStrategies("portfolio");
@@ -591,6 +601,11 @@ describe("StrategiesPage", () => {
         tolerance: null,
         comparable: false,
         incomplete_reasons: ["account_currency_not_documented"],
+        countdown_green_days: 0,
+        countdown_required_days: 5,
+        countdown_newest_counted_date: null,
+        countdown_stop_reason: "day_never_recorded",
+        countdown_rule_version: "f0-countdown-v1",
       },
     });
     renderStrategies("portfolio");
@@ -636,6 +651,11 @@ describe("StrategiesPage", () => {
           "local_eod_marks_carried_forward",
           "future_account_reason",
         ],
+        countdown_green_days: 0,
+        countdown_required_days: 5,
+        countdown_newest_counted_date: null,
+        countdown_stop_reason: "day_never_recorded",
+        countdown_rule_version: "f0-countdown-v1",
       },
     });
 
@@ -672,6 +692,11 @@ describe("StrategiesPage", () => {
         tolerance: "0.21",
         comparable: true,
         incomplete_reasons: [],
+        countdown_green_days: 0,
+        countdown_required_days: 5,
+        countdown_newest_counted_date: null,
+        countdown_stop_reason: "day_never_recorded",
+        countdown_rule_version: "f0-countdown-v1",
       },
     });
 
@@ -681,7 +706,15 @@ describe("StrategiesPage", () => {
     expect(within(performance).getByText("US$0.00 vs US$0.21")).toBeInTheDocument();
     // The rule that produced the verdict travels with it — widening the tolerance is a
     // version bump, so the operator must be able to see which version they are reading.
-    expect(within(performance).getByText("Rule f0-reconcile-v1")).toBeInTheDocument();
+    // Both versions are shown: bumping EITHER resets the #2844 countdown to zero, so a
+    // reader who can see only one cannot explain a streak that went back to 0/5.
+    expect(
+      within(performance).getByText("Rule f0-reconcile-v1 · countdown f0-countdown-v1"),
+    ).toBeInTheDocument();
+    expect(within(performance).getByText("0 / 5")).toBeInTheDocument();
+    expect(
+      within(performance).getByText(/a session in the run was never judged/),
+    ).toBeInTheDocument();
   });
 
   it("distinguishes a comparison that ran and disagreed from one that could not run", async () => {
@@ -705,6 +738,11 @@ describe("StrategiesPage", () => {
         tolerance: "0.21",
         comparable: true,
         incomplete_reasons: [],
+        countdown_green_days: 0,
+        countdown_required_days: 5,
+        countdown_newest_counted_date: null,
+        countdown_stop_reason: "day_never_recorded",
+        countdown_rule_version: "f0-countdown-v1",
       },
     });
 

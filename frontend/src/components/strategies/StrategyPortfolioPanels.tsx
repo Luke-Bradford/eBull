@@ -99,6 +99,75 @@ function AccountEvidenceReasons({
   );
 }
 
+// Why the countdown stopped where it did. Each is written from the condition that emits
+// it in `account_reconciliation_ledger.consecutive_reconciled_days`, not inferred from the
+// identifier.
+//
+// ⚠ There is NO prettifying fallback here, deliberately (#2844 clause 2, `90a5ffe8`). A
+// `replaceAll("_", " ")` renders an unwritten code in the same slot, styling and register
+// as authored copy, which makes a missing label invisible to the operator, the reviewer
+// and a QA screenshot alike. An unknown code is shown verbatim so the gap is a visible gap.
+const COUNTDOWN_STOP_LABELS: Record<string, string> = {
+  day_never_recorded:
+    "a session in the run was never judged — the broker snapshot or the job did not run that day.",
+  still_refused_past_due:
+    "a session is still refused past the window it had to decide in.",
+  diverged: "a judged session's two valuations disagreed by more than the tolerance.",
+  divergence_inside_grace_window:
+    "a session judged within the last few days diverged, so the streak is void regardless of what precedes it.",
+  no_due_countdown_day: "no session is old enough to have been judged yet.",
+  countdown_calendar_stale:
+    "the newest session old enough to judge is too far in the past — the pipeline has stopped.",
+  countdown_rule_version_superseded:
+    "a session in the run was judged under a superseded countdown rule.",
+  verdict_predates_its_day: "a stored verdict is dated before the session it judges.",
+  backfilled_not_observed:
+    "a session was judged too long after the fact to count as an observation.",
+  streak_span_too_wide:
+    "the counted sessions are too far apart to be consecutive — the calendar has holes.",
+};
+
+export function ReconciliationCountdown({
+  evidence,
+}: {
+  evidence: StrategyOverviewResponse["account_equity_evidence"];
+}) {
+  const { countdown_green_days: green, countdown_required_days: required } = evidence;
+  const complete = green >= required;
+  const stop = evidence.countdown_stop_reason;
+  return (
+    <div className="mt-3 border-t border-slate-200 pt-2 dark:border-slate-800">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="font-medium text-slate-700 dark:text-slate-300">
+          Reconciled days before live enablement
+        </span>
+        <strong
+          className={`tabular-nums ${complete ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}`}
+        >
+          {green} / {required}
+        </strong>
+        {evidence.countdown_newest_counted_date !== null ? (
+          <span className="text-slate-500">
+            through {formatDate(evidence.countdown_newest_counted_date)}
+          </span>
+        ) : null}
+      </div>
+      {/* The verdict above is the LATEST broker day recomputed live; this is frozen
+          history. Saying so is the difference between an apparent contradiction and two
+          honest numbers. */}
+      <p className="mt-1 text-slate-500">
+        Frozen per-session history, weekends excluded. The verdict above is the latest
+        broker day, which the local end-of-day lag usually leaves undecided.
+      </p>
+      {!complete && stop !== null ? (
+        <p className="mt-1 text-amber-700 dark:text-amber-300">
+          Stopped because {COUNTDOWN_STOP_LABELS[stop] ?? stop}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div>
@@ -177,8 +246,9 @@ export function AccountEvidence({ overview }: { overview: StrategyOverviewRespon
         </div>
       </div>
       <AccountEvidenceReasons evidence={evidence} />
+      <ReconciliationCountdown evidence={evidence} />
       <p className="mt-2 text-[10px] uppercase tracking-wider text-slate-400">
-        Rule {evidence.reconciliation_rule_version}
+        Rule {evidence.reconciliation_rule_version} · countdown {evidence.countdown_rule_version}
       </p>
     </div>
   );
