@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import math
 import pathlib
 
 import pytest
@@ -154,6 +155,40 @@ def test_configured_floor_is_at_least_the_conservative_minimum() -> None:
                 f"conservative reading. Either raise {const_name} or record an explicit entry in "
                 f"ACCEPTED_FLOOR_EXCEPTIONS with a reason."
             )
+
+
+def test_history_floor_reserves_one_request_of_lane_g_headroom() -> None:
+    """The ONLY live guard on ``_ETORO_HISTORY_INTERVAL_S``.
+
+    ⚠ That constant is DERIVED from this very table (#2946 step 3 item 1), which makes
+    ``test_configured_floor_is_at_least_the_conservative_minimum`` tautological for
+    ``get_trade_history`` — it compares the table with itself and cannot fail.  What is
+    NOT automatic is the lane the derivation picked and the headroom term it applied,
+    both of which are hand-written.  So this asserts the resulting rolling-window COUNT,
+    which is the property the quota cares about, rather than restating the expression.
+
+    The strict ``- 1`` is the point: dropping the headroom still satisfies the plain
+    ``<= conservative_per_minute`` bound, so a bare budget check would not notice.
+    """
+    broker = "app/providers/implementations/etoro_broker.py"
+    sites = [s for s in CALL_SITES if s.module == broker and s.method == "get_trade_history"]
+    assert len(sites) == 1, "get_trade_history must be a unique call site — the derivation takes the only match"
+    site = sites[0]
+
+    # A wrong lane with a slower budget would pass the count assertion below on its own.
+    assert site.lane == "G_default_shared"
+    assert site.client_attr == "_http_history", (
+        "the history paginator must not ride a client shared with another lane — "
+        "one logical call issues unbounded back-to-back requests"
+    )
+
+    floor = importlib.import_module("app.providers.implementations.etoro_broker")._ETORO_HISTORY_INTERVAL_S
+    window_s = LANES[site.lane].window_s  # never a hardcoded 60: the lane owns its window
+    stamps = math.floor(window_s / floor) + 1
+    assert stamps <= site.conservative_per_minute - 1, (
+        f"a caller paced at {floor}s places {stamps} stamps in a rolling {window_s}s window; "
+        f"lane {site.lane} allows {site.conservative_per_minute} and this call site reserves one."
+    )
 
 
 def test_accepted_floor_exceptions_are_real_exceptions_with_a_reason() -> None:

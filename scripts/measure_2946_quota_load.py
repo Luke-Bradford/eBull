@@ -215,7 +215,14 @@ JOB_CLOCKS: tuple[JobClock, ...] = (
         "daily_portfolio_sync",
         f"{_SCHED}:4479",
         "instance",
-        ((_BROKER_MOD, "_ETORO_READ_INTERVAL_S", "_http_read"),),
+        # Two floors since #2946 step 3 item 1: the portfolio read is lane E on
+        # `_http_read`, and `get_trade_history` is lane G on its own `_http_history`
+        # client. They share one CLOCK, so the pair still caps their sum — but the
+        # paginator no longer pages at the 1.1s read floor.
+        (
+            (_BROKER_MOD, "_ETORO_READ_INTERVAL_S", "_http_read"),
+            (_BROKER_MOD, "_ETORO_HISTORY_INTERVAL_S", "_http_history"),
+        ),
         ("E_account_read", "G_default_shared"),
     ),
     JobClock(

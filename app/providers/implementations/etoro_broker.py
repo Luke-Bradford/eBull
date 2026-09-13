@@ -62,6 +62,7 @@ from app.providers.broker import (
     OrderParams,
     OrderStatus,
 )
+from app.providers.implementations.etoro_quota_lanes import CALL_SITES, LANES, min_interval_for_stamps
 from app.providers.implementations.etoro_request_log import attempt_observer
 from app.providers.resilient_client import ResilientClient
 from app.security.unattended_guard import refuse_broker_mutation_if_unattended
@@ -102,6 +103,48 @@ def _exact_json_decimal(value: Decimal) -> float:
 # Write: 3.5s interval ≈ 17/min (~15% headroom).
 _ETORO_READ_INTERVAL_S = 1.1
 _ETORO_WRITE_INTERVAL_S = 3.5
+
+#: The lane-G trade-history call site, so the pacing below is DERIVED from the documented
+#: budget rather than chosen next to it.  `etoro_quota_lanes` is a pure data module
+#: (stdlib imports only) and is already an indirect import here via `etoro_request_log`.
+#:
+#: ⚠ Matched on (module, method) and required to be UNIQUE — unlike the lane-B lookup in
+#: `strategy_core_eligibility`, which matches the method name alone.  `place_order`
+#: already proves one method name can carry two `CallSite` rows, so a `next(...)` would
+#: silently take the first of a future duplicate pair.
+_HISTORY_CALL_SITES = [
+    site
+    for site in CALL_SITES
+    if site.module == "app/providers/implementations/etoro_broker.py" and site.method == "get_trade_history"
+]
+if len(_HISTORY_CALL_SITES) != 1:  # pragma: no cover - a lane-map rename, caught at import
+    raise RuntimeError(
+        f"etoro_quota_lanes.CALL_SITES has {len(_HISTORY_CALL_SITES)} `get_trade_history` entries, "
+        "expected exactly 1; _ETORO_HISTORY_INTERVAL_S cannot be derived from the documented budget"
+    )
+_HISTORY_CALL_SITE = _HISTORY_CALL_SITES[0]
+
+# Minimum spacing between trade-history requests, in seconds -- DERIVED, not chosen.
+#
+# `get_trade_history` paginates in a `while True` loop, so one logical call can issue
+# back-to-back requests; on `_http_read`'s 1.1s floor that is 54.5/min against a lane
+# whose conservative reading is 20/min.  #2946 step 3 item 1 gave it its own client at
+# this floor and deleted the `ACCEPTED_FLOOR_EXCEPTIONS` entry that recorded the gap.
+#
+# `min_interval_for_stamps` turns a budget into a spacing under the ROLLING-window
+# counting rule -- `floor(60/i) + 1`, not `60/i`.  The `- 1` is one request of HEADROOM
+# and is the one constructed choice here: lane G's membership is UNENUMERATED, and two
+# of its known members draw on it OUTSIDE this client (`edit_demo_strategy_position` on
+# `_http_write`, and the unthrottled `/api/v1/me` in `KNOWN_UNTHROTTLED`), so the one
+# caller that can burst must not spend the last documented request.  60 / 18 = 3.33s.
+#
+# ⚠ The margin is a POLICY choice, not a derivation: nothing measures that one reserved
+# request is enough to cover the rest of lane G.  It matches lane B so the two reserve
+# alike.  See `docs/proposals/execution/2026-09-13-lane-g-history-floor.md`.
+_ETORO_HISTORY_INTERVAL_S = min_interval_for_stamps(
+    LANES[_HISTORY_CALL_SITE.lane].window_s,
+    _HISTORY_CALL_SITE.conservative_per_minute - 1,
+)
 
 #: Per-phase HTTP timeout handed to ``httpx.Client``.
 #:
@@ -242,6 +285,21 @@ class EtoroBrokerProvider(BrokerProvider):
             shared_last_request=shared_ts,
             shared_throttle_lock=shared_throttle_lock,
             on_attempt=attempt_observer("broker_write", env),
+        )
+        # Trade history only (#2946 step 3 item 1).  A third client rather than a raised
+        # read floor: `_http_read` also carries lanes D and E at 1.0s, and slowing order
+        # lookups to 3.3s to pace a paginator would be a quota cost with no quota reason.
+        #
+        # ⚠ Joins the SAME clock and lock as the other two.  Its own clock would be a
+        # second independent budget against one user key -- precisely the failure this
+        # item exists to remove.  The lock bounds STAMP spacing, not dispatch: it is
+        # released before `send()`, so two requests can be in flight at once.
+        self._http_history = ResilientClient(
+            self._client,
+            min_request_interval_s=_ETORO_HISTORY_INTERVAL_S,
+            shared_last_request=shared_ts,
+            shared_throttle_lock=shared_throttle_lock,
+            on_attempt=attempt_observer("broker_history", env),
         )
 
         # Environment-scoped path prefixes for trading endpoints.
@@ -996,6 +1054,17 @@ class EtoroBrokerProvider(BrokerProvider):
         come back full, collecting everything before returning so the
         service layer can group slices per position.
 
+        ⚠ Every page goes through ``_http_history``, NOT ``_http_read`` — the
+        loop is the only place in this provider where one logical call issues
+        unbounded back-to-back requests, and lane G's conservative reading is
+        20/min (#2946 step 3 item 1).  A page that switched clients would pace
+        the first request and nothing after it.
+
+        ⚠ Returns the WHOLE window, never a truncated prefix: ledger §4's
+        synthesized-open transform sums the slices of a never-seen position and
+        is correct only because all of them are in the batch.  A page cap here
+        would be a ledger-completeness decision, not a quota one.
+
         Env segment placement differs from the other info endpoints:
         /api/v1/trading/info/trade/demo/history (demo) vs
         /api/v1/trading/info/trade/history (real).
@@ -1008,7 +1077,7 @@ class EtoroBrokerProvider(BrokerProvider):
         trades: list[BrokerClosedTrade] = []
         page = 1
         while True:
-            response = self._http_read.get(
+            response = self._http_history.get(
                 path,
                 params={
                     "minDate": min_date.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
