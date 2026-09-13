@@ -720,6 +720,7 @@ def record_job_skip(
     *,
     now: datetime | None = None,
     params_snapshot: dict[str, Any] | None = None,
+    run_id: int | None = None,
 ) -> int:
     """Record a skipped job run (prerequisite not met).
 
@@ -740,11 +741,59 @@ def record_job_skip(
     params dict is committed alongside the skip row so the operator
     audit trail reflects the effective inputs even when the run never
     executed. ``None`` lets the column default to ``'{}'``.
+
+    ⚠⚠ ``run_id`` (#2972) — CLOSE an already-open row instead of inserting a
+    second one.  ``run_with_prelude`` pre-allocates a ``job_runs`` row and hands
+    its id over via ``consume_prelude_run_id``, and until #2972 only
+    ``_tracked_job`` consumed it.  A job returning early through a body-level
+    prerequisite skip therefore left that row ``running`` FOREVER, and
+    :func:`reap_orphaned_job_runs` later rewrote it
+    ``status='failure'`` / ``INTERNAL_ERROR`` / *"orphaned: reaped at boot"* —
+    so every clean, intentional skip eventually became a recorded FAILURE whose
+    message was false in every particular.  Measured on dev 2026-09-13:
+    ``core_rebalance_observation`` carried one such pair per skipped fire back to
+    08-24.
+
+    ``started_at`` is deliberately LEFT ALONE on this path.  The run really did
+    begin when the prelude opened the row, and overwriting it with the skip
+    instant would understate the time the lane was held.  The INSERT path keeps
+    ``started_at = finished_at`` because on that path there was no earlier start
+    to preserve.
+
+    ⚠ The UPDATE is guarded on ``status = 'running'``.  A ``run_id`` that has
+    already reached a terminal status is NOT clobbered -- the function falls back
+    to inserting, so a caller mistake costs an extra row rather than destroying a
+    recorded outcome.
     """
     assert conn.autocommit, (
         "record_job_skip requires autocommit=True so conn.transaction() issues a real BEGIN/COMMIT, not a savepoint"
     )
     now = now or _utcnow()
+    if run_id is not None:
+        with conn.transaction():
+            closed = conn.execute(
+                """
+                UPDATE job_runs
+                   SET status = 'skipped',
+                       finished_at = %(ts)s,
+                       row_count = 0,
+                       error_msg = %(reason)s,
+                       params_snapshot = COALESCE(%(params)s, params_snapshot)
+                 WHERE run_id = %(run_id)s
+                   AND job_name = %(name)s
+                   AND status = 'running'
+                RETURNING run_id
+                """,
+                {
+                    "ts": now,
+                    "reason": reason,
+                    "run_id": run_id,
+                    "name": job_name,
+                    "params": (None if params_snapshot is None else Jsonb(_jsonable_params(params_snapshot))),
+                },
+            ).fetchone()
+        if closed is not None:
+            return int(closed[0])
     with conn.transaction():
         if params_snapshot is None:
             row = conn.execute(
