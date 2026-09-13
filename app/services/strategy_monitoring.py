@@ -781,6 +781,16 @@ def load_owned_pnl(conn: psycopg.Connection[Any], *, versions: Sequence[str]) ->
             # (a +$40 distribution and a -$40 financing charge are indistinguishable
             # from a flat $0), so `observed_fees` may legitimately go negative.
             #
+            # "Cannot be separated" is measured over the WHOLE document, not
+            # inferred from this one field: every property in `openapi_v1.375.0.json`
+            # whose description mentions a dividend combines it with overnight fees
+            # — `TradingDemoApi_Position.totalFees`, its `TradingRealAdminApi_Position`
+            # twin, and `InstrumentBreakdown{,Demo}Position.overnightFeesAndDividends`
+            # (the same combined quantity in a different denomination, NOT a split).
+            # `totalExternalFees` is the complement and says so: *"does not include
+            # overnight fees and dividends"*. No endpoint offers the two apart, so
+            # no later change can "just read the dividend field".
+            #
             # Placed BEFORE the `mark is None` guard deliberately: the accrual is
             # read off the broker row and does not depend on our being able to price
             # the position, so gating it on a usable mark would drop the fee for
