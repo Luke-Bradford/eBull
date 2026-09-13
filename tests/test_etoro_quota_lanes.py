@@ -38,6 +38,11 @@ from app.providers.implementations.etoro_quota_lanes import (
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+# An accepted floor exception must carry a REASON, not a label. The threshold is
+# a floor on prose length: long enough that "deferred" or "known issue" fails,
+# short enough that a genuine one-sentence justification passes.
+_MIN_EXCEPTION_REASON_CHARS = 80
+
 
 # ---------------------------------------------------------------------------
 # Table invariants
@@ -126,7 +131,7 @@ def test_accepted_floor_exceptions_are_real_exceptions_with_a_reason() -> None:
     by_method = {(s.module, s.method): s for s in CALL_SITES}
     for key, reason in ACCEPTED_FLOOR_EXCEPTIONS.items():
         assert key in by_method, f"{key}: exception names a call site that does not exist"
-        assert len(reason) > 80, f"{key}: an exception needs a stated reason, not a label"
+        assert len(reason) > _MIN_EXCEPTION_REASON_CHARS, f"{key}: an exception needs a stated reason, not a label"
 
         site = by_method[key]
         mod_name, const_name = FLOOR_CONSTANT_NAMES[(site.module, site.client_attr)]
