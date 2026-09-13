@@ -20,9 +20,10 @@
  * in which case the REST fallback stays on screen indefinitely —
  * that's correct behaviour, not a bug.
  */
+import { staleQuoteReason } from "@/lib/liveQuoteConnection";
 import { liveTickPriceIn } from "@/lib/useLiveQuote";
 import { formatMoney } from "@/lib/format";
-import { useLiveTick } from "./LiveQuoteProvider";
+import { useLiveTickFreshness } from "./LiveQuoteProvider";
 
 interface LivePriceCellProps {
   instrumentId: number | null | undefined;
@@ -42,12 +43,27 @@ export function LivePriceCell({
   fallback,
   currency,
 }: LivePriceCellProps) {
-  const tick = useLiveTick(instrumentId);
+  const { tick, status, authoritative } = useLiveTickFreshness(instrumentId);
   const live = liveTickPriceIn(tick, currency);
   if (live !== null) {
     const numeric = Number(live.value);
     if (Number.isFinite(numeric)) {
-      return <span>{formatMoney(numeric, live.currency ?? currency ?? "USD")}</span>;
+      const money = formatMoney(numeric, live.currency ?? currency ?? "USD");
+      // A tick retained across a dropped or reopened stream is a cache, and
+      // `.claude/skills/frontend/safety-state-ui.md` requires a cache to be
+      // marked: "a silent cache that looks live is worse than no cache at
+      // all". Keep the number — it is still the most recent price anyone has
+      // — but render it in the same muted class the REST fallback uses so it
+      // no longer reads as live (#2944).
+      if (!authoritative) {
+        const reason = staleQuoteReason(status);
+        return (
+          <span className="text-slate-500" title={reason ?? undefined} data-testid="stale-live-price">
+            {money}
+          </span>
+        );
+      }
+      return <span data-testid="authoritative-live-price">{money}</span>;
     }
   }
   if (fallback === null || fallback === undefined) {

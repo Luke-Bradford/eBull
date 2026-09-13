@@ -821,3 +821,137 @@ describe("SummaryStrip — thesis subject-identity quarantine (#2306)", () => {
     expect(badge.textContent).not.toContain("(refused)");
   });
 });
+
+// ---------------------------------------------------------------------
+// #2944 — the pulsing LIVE dot used to be driven by `live.connected`,
+// which was never cleared on a reconnect (onerror handled only CLOSED).
+// It now follows the PROVENANCE OF THE PRICE ON SCREEN.
+// ---------------------------------------------------------------------
+class FreshnessEventSource extends FakeEventSource {
+  fireOpen(): void {
+    this.readyState = FakeEventSource.OPEN;
+    this.onopen?.(new Event("open"));
+  }
+  fireError(finalClose: boolean): void {
+    this.readyState = finalClose ? FakeEventSource.CLOSED : FakeEventSource.CONNECTING;
+    this.onerror?.(new Event("error"));
+  }
+}
+
+describe("SummaryStrip — live badge honesty (#2944)", () => {
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FreshnessEventSource);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const tickFrame = (last: string) =>
+    JSON.stringify({
+      instrument_id: 42,
+      native_currency: "USD",
+      bid: "109",
+      ask: "111",
+      last,
+      quoted_at: "2026-09-13T12:00:00+00:00",
+      display: null,
+    });
+
+  function renderStrip() {
+    return render(
+      <SummaryStrip
+        summary={summary({
+          price: {
+            current: "100.00",
+            day_change: null,
+            day_change_pct: null,
+            day_change_as_of: null,
+            week_52_high: null,
+            week_52_low: null,
+            currency: "USD",
+            display_current: null,
+            display_currency: null,
+          },
+        })}
+        thesis={null}
+        position={null}
+        {...noopProps()}
+      />,
+    );
+  }
+
+  it("does not pulse for an open stream that has never quoted this instrument", () => {
+    renderStrip();
+    act(() => {
+      (FakeEventSource.instances[0]! as FreshnessEventSource).fireOpen();
+    });
+    // REST snapshot is what is on screen; the socket being up is irrelevant.
+    expect(screen.getByText("USD 100.00")).toBeInTheDocument();
+    expect(screen.queryByTestId("live-pulse")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("stale-live-marker")).not.toBeInTheDocument();
+  });
+
+  it("pulses on a live tick, then marks it stale when the transport drops", () => {
+    renderStrip();
+    const source = FakeEventSource.instances[0]! as FreshnessEventSource;
+    act(() => {
+      source.fireOpen();
+      source.fireMessage(tickFrame("110"));
+    });
+    expect(screen.getByText("USD 110.00")).toBeInTheDocument();
+    expect(screen.getByTestId("live-pulse")).toBeInTheDocument();
+
+    // Transient drop: readyState CONNECTING. THE #2944 BUG — this branch was
+    // unhandled, so the dot kept pulsing over a dead transport.
+    act(() => {
+      source.fireError(false);
+    });
+    expect(screen.queryByTestId("live-pulse")).not.toBeInTheDocument();
+    const marker = screen.getByTestId("stale-live-marker");
+    expect(marker).toHaveAttribute(
+      "title",
+      "Price stream reconnecting — showing last received price",
+    );
+    // The price is KEPT — a retained tick is marked, not hidden.
+    expect(screen.getByText("USD 110.00")).toBeInTheDocument();
+  });
+
+  it("keeps the stale marker after a reopen that delivers no frame", () => {
+    renderStrip();
+    const source = FakeEventSource.instances[0]! as FreshnessEventSource;
+    act(() => {
+      source.fireOpen();
+      source.fireMessage(tickFrame("110"));
+      source.fireError(false);
+      source.fireOpen();
+    });
+    expect(screen.queryByTestId("live-pulse")).not.toBeInTheDocument();
+    expect(screen.getByTestId("stale-live-marker")).toHaveAttribute(
+      "title",
+      "Waiting for a live price — showing last received price",
+    );
+
+    act(() => {
+      source.fireMessage(tickFrame("112"));
+    });
+    expect(screen.getByTestId("live-pulse")).toBeInTheDocument();
+    expect(screen.queryByTestId("stale-live-marker")).not.toBeInTheDocument();
+    expect(screen.getByText("USD 112.00")).toBeInTheDocument();
+  });
+
+  it("marks the price stale on a definitive close", () => {
+    renderStrip();
+    const source = FakeEventSource.instances[0]! as FreshnessEventSource;
+    act(() => {
+      source.fireOpen();
+      source.fireMessage(tickFrame("110"));
+      source.fireError(true);
+    });
+    expect(screen.queryByTestId("live-pulse")).not.toBeInTheDocument();
+    expect(screen.getByTestId("stale-live-marker")).toHaveAttribute(
+      "title",
+      "Price stream unavailable — showing last received price",
+    );
+  });
+});

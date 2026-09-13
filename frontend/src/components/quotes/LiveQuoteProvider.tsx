@@ -35,6 +35,13 @@ import {
   type ReactNode,
 } from "react";
 
+import {
+  isConnected,
+  isUnavailable,
+  statusOnStreamError,
+  tickIsAuthoritative,
+  type LiveConnectionStatus,
+} from "@/lib/liveQuoteConnection";
 import type { LiveTickPayload } from "@/lib/useLiveQuote";
 
 const REOPEN_DEBOUNCE_MS = 300;
@@ -44,7 +51,14 @@ interface LiveQuoteContextValue {
    *  first tick (or when no tick will arrive — halted / illiquid
    *  instruments may never produce a snapshot). */
   ticks: ReadonlyMap<number, LiveTickPayload>;
-  /** True once the SSE connection has opened. */
+  /** Transport state (#2944). The single source for badge copy. */
+  status: LiveConnectionStatus;
+  /** Ids whose tick arrived on the connection that is currently open. A
+   *  reopen clears this: a retained tick predates the new connection and
+   *  must not be re-blessed as live without a fresh frame. */
+  freshIds: ReadonlySet<number>;
+  /** True once the SSE connection has opened. ⚠ Does NOT mean the retained
+   *  tick is live — gate a live badge on ``tickIsAuthoritative``. */
   connected: boolean;
   /** True if the backend returned 503 or the connection errored
    *  permanently. UI falls back to its REST snapshot. */
@@ -53,21 +67,29 @@ interface LiveQuoteContextValue {
 
 const LiveQuoteContext = createContext<LiveQuoteContextValue>({
   ticks: new Map(),
+  status: "idle",
+  freshIds: new Set(),
   connected: false,
   unavailable: false,
 });
 
 interface State {
   ticks: Map<number, LiveTickPayload>;
-  connected: boolean;
-  unavailable: boolean;
+  status: LiveConnectionStatus;
+  freshIds: Set<number>;
 }
 
 type Action =
   | { type: "tick"; payload: LiveTickPayload }
   | { type: "open" }
-  | { type: "error" }
+  | { type: "error"; status: LiveConnectionStatus }
+  /** Canonical set changed: the old source is already closed, so nothing is
+   *  live any more. Ticks are deliberately KEPT (the debounce exists to avoid
+   *  flicker) but every one of them is now a marked cache. */
+  | { type: "suspend" }
   | { type: "reset" };
+
+const EMPTY_STATE: State = { ticks: new Map(), status: "idle", freshIds: new Set() };
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
@@ -78,14 +100,20 @@ function reducer(state: State, action: Action): State {
       // typical eToro tick rates.
       const next = new Map(state.ticks);
       next.set(action.payload.instrument_id, action.payload);
-      return { ...state, ticks: next };
+      const fresh = new Set(state.freshIds);
+      fresh.add(action.payload.instrument_id);
+      return { ...state, ticks: next, freshIds: fresh };
     }
     case "open":
-      return { ...state, connected: true, unavailable: false };
+      // Clearing freshIds on open is the point: a reconnect that delivers no
+      // frame must leave every retained tick marked stale (Codex ckpt-1).
+      return { ...state, status: "live", freshIds: new Set() };
     case "error":
-      return { ...state, connected: false, unavailable: true };
+      return { ...state, status: action.status, freshIds: new Set() };
+    case "suspend":
+      return { ...state, status: "connecting", freshIds: new Set() };
     case "reset":
-      return { ticks: new Map(), connected: false, unavailable: false };
+      return { ticks: new Map(), status: "idle", freshIds: new Set() };
   }
 }
 
@@ -115,17 +143,32 @@ export function LiveQuoteProvider({
   children,
 }: LiveQuoteProviderProps) {
   const [state, dispatch] = useReducer(reducer, undefined, () => ({
-    ticks: new Map(),
-    connected: false,
-    unavailable: false,
+    ticks: new Map(EMPTY_STATE.ticks),
+    status: EMPTY_STATE.status,
+    freshIds: new Set(EMPTY_STATE.freshIds),
   }));
 
   const canonical = useMemo(() => canonicaliseIds(instrumentIds), [instrumentIds]);
+  const subscribedIds = useMemo(
+    () => new Set(canonical === "" ? [] : canonical.split(",").map(Number)),
+    [canonical],
+  );
   const sourceRef = useRef<EventSource | null>(null);
   const reopenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (typeof EventSource === "undefined") return;
+    // The old source is closed by cleanup before this body runs, so nothing is
+    // live from here until the new one opens. Leaving ``status`` at "live"
+    // through the 300ms debounce was the provider's copy of #2944's badge lie.
+    dispatch({ type: "suspend" });
+
+    if (typeof EventSource === "undefined") {
+      // Reset unconditionally: the guard used to sit ABOVE the empty-set
+      // branch, so losing EventSource support left prior ticks and status
+      // standing.
+      dispatch({ type: "reset" });
+      return;
+    }
     if (canonical === "") {
       // No ids → no stream. Close any prior connection cleanly so
       // pages that briefly drop to zero rows don't leave a dangling
@@ -134,10 +177,13 @@ export function LiveQuoteProvider({
       if (prior !== null) {
         prior.close();
         sourceRef.current = null;
-        dispatch({ type: "reset" });
       }
+      // Reset regardless of whether a source existed: a page that mounts with
+      // zero ids must also land in "idle", not in the initial state by luck.
+      dispatch({ type: "reset" });
       return;
     }
+    let hasOpened = false;
 
     // Debounce reopen so a burst of state changes resolves into one
     // SSE handshake. ``canonical`` already filters out re-renders
@@ -165,6 +211,7 @@ export function LiveQuoteProvider({
 
       source.onopen = () => {
         if (!isActive()) return;
+        hasOpened = true;
         dispatch({ type: "open" });
       };
 
@@ -172,7 +219,10 @@ export function LiveQuoteProvider({
         if (!isActive()) return;
         try {
           const payload = JSON.parse(ev.data) as LiveTickPayload;
-          if (typeof payload.instrument_id === "number") {
+          // Membership check, matching useLiveQuote's own defensive filter: a
+          // frame for an id this stream did not subscribe to is a server-side
+          // filter bug, not data for this page.
+          if (typeof payload.instrument_id === "number" && subscribedIds.has(payload.instrument_id)) {
             dispatch({ type: "tick", payload });
           }
         } catch {
@@ -183,12 +233,10 @@ export function LiveQuoteProvider({
 
       source.onerror = () => {
         if (!isActive()) return;
-        // EventSource auto-reconnects on transient drops; we only
-        // mark unavailable once the connection is definitively
-        // closed.
-        if (source.readyState === EventSource.CLOSED) {
-          dispatch({ type: "error" });
-        }
+        // The browser fires onerror on every reconnect attempt too. The old
+        // code handled only CLOSED, so ``connected`` stayed true through an
+        // entire outage (#2944).
+        dispatch({ type: "error", status: statusOnStreamError(source.readyState, hasOpened) });
       };
     }, REOPEN_DEBOUNCE_MS);
 
@@ -208,10 +256,12 @@ export function LiveQuoteProvider({
   const value = useMemo<LiveQuoteContextValue>(
     () => ({
       ticks: state.ticks,
-      connected: state.connected,
-      unavailable: state.unavailable,
+      status: state.status,
+      freshIds: state.freshIds,
+      connected: isConnected(state.status),
+      unavailable: isUnavailable(state.status),
     }),
-    [state.ticks, state.connected, state.unavailable],
+    [state.ticks, state.status, state.freshIds],
   );
 
   return (
@@ -237,10 +287,34 @@ export function useLiveTick(
   return ctx.ticks.get(instrumentId) ?? null;
 }
 
+/**
+ * Per-instrument tick PLUS whether it is the price of right now (#2944).
+ *
+ * ``authoritative`` false does not mean hide the tick — it means render it as
+ * the cache it is, per `.claude/skills/frontend/safety-state-ui.md`.
+ */
+export function useLiveTickFreshness(instrumentId: number | null | undefined): {
+  tick: LiveTickPayload | null;
+  status: LiveConnectionStatus;
+  authoritative: boolean;
+} {
+  const ctx = useContext(LiveQuoteContext);
+  if (instrumentId === null || instrumentId === undefined) {
+    return { tick: null, status: ctx.status, authoritative: false };
+  }
+  const tick = ctx.ticks.get(instrumentId) ?? null;
+  return {
+    tick,
+    status: ctx.status,
+    authoritative: tick !== null && tickIsAuthoritative(ctx.status, ctx.freshIds.has(instrumentId)),
+  };
+}
+
 export function useLiveQuoteConnection(): {
+  status: LiveConnectionStatus;
   connected: boolean;
   unavailable: boolean;
 } {
   const ctx = useContext(LiveQuoteContext);
-  return { connected: ctx.connected, unavailable: ctx.unavailable };
+  return { status: ctx.status, connected: ctx.connected, unavailable: ctx.unavailable };
 }
