@@ -362,7 +362,13 @@ def record_reconciliation_day(
         raise ReconciliationLedgerError(f"comparable verdict for {evidence.snapshot_date} is missing a money term")
     reasons = list(evidence.incomplete_reasons)
     if not decided and not reasons:
-        reasons = ["reconciliation_undecided_without_reason"]
+        # Unreachable by the loader's own construction -- `comparable` is
+        # `not incomplete_reasons and difference is not None and tolerance is not None`,
+        # and every path that nulls a money term appends a reason first. Synthesising a
+        # placeholder here would satisfy the table's CHECK and turn a loader regression into
+        # ordinary-looking data; the mirrored case below already raises, and the asymmetry
+        # was the reviewer's point.
+        raise ReconciliationLedgerError(f"undecided verdict for {evidence.snapshot_date} carries no refusal reason")
     row = conn.execute(
         """
         INSERT INTO account_reconciliation_days (

@@ -197,3 +197,20 @@ def test_a_run_where_every_candidate_raises_is_a_failed_run(
             ledger.run_reconciliation_check(ebull_test_conn, as_of=date(2026, 9, 10))
     finally:
         monkey.undo()
+
+
+def test_an_undecided_verdict_with_no_reason_is_refused_not_papered_over(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Unreachable by the loader's construction, which is exactly why it must raise.
+
+    Synthesising a placeholder reason would satisfy the table's CHECK and turn a loader
+    regression into ordinary-looking data. The mirrored case — a comparable verdict missing
+    a money term — already raises; this closes the asymmetry.
+    """
+    with pytest.raises(ReconciliationLedgerError, match="no refusal reason"):
+        record_reconciliation_day(
+            ebull_test_conn,
+            environment="demo",
+            evidence=_evidence(state="refused", comparable=False, difference=None, tolerance=None),
+        )
