@@ -428,10 +428,19 @@ def run_reconciliation_check(conn: psycopg.Connection[Any], *, as_of: date | Non
     ``_tracked_job`` would record success over a dead pipeline -- the exact class of defect
     the standing retrospective names ("a job that no-ops and reports success is invisible
     to every automated check we have").
+
+    ⚠ **A ``ReconciliationLedgerError`` is NAMED in the failure, but it does not abort the
+    loop.** It signals a loader-contract violation rather than a per-day flake, so folding it
+    anonymously into "could not be judged" would hide a structural defect (review NITPICK on
+    ``a90474da``) -- but re-raising it on the spot would starve every newer day behind it,
+    which is the starvation this per-day ``try`` exists to prevent. So the class travels
+    instead: logged at ``error`` rather than ``warning``, and the exception raised after the
+    loop carries ``date(ExceptionType)`` per failure, which is what reaches
+    ``job_runs.error_msg``.
     """
     today = as_of or datetime.now(UTC).date()
     recorded = 0
-    failed: list[date] = []
+    failed: list[tuple[date, Exception]] = []
     for snapshot_date in pending_reconciliation_dates(conn, environment=COUNTDOWN_ENVIRONMENT, as_of=today):
         try:
             with conn.transaction():
@@ -440,15 +449,16 @@ def run_reconciliation_check(conn: psycopg.Connection[Any], *, as_of: date | Non
                 )
                 if record_reconciliation_day(conn, environment=COUNTDOWN_ENVIRONMENT, evidence=evidence):
                     recorded += 1
-        except Exception:
-            failed.append(snapshot_date)
-            logger.warning(
-                "account_reconciliation_check: %s could not be judged; continuing",
+        except Exception as exc:
+            failed.append((snapshot_date, exc))
+            logger.log(
+                logging.ERROR if isinstance(exc, ReconciliationLedgerError) else logging.WARNING,
+                "account_reconciliation_check: %s could not be judged (%s); continuing",
                 snapshot_date,
+                type(exc).__name__,
                 exc_info=True,
             )
     if failed:
-        raise ReconciliationLedgerError(
-            f"{len(failed)} reconciliation day(s) could not be judged: {', '.join(day.isoformat() for day in failed)}"
-        )
+        detail = ", ".join(f"{day.isoformat()}({type(exc).__name__})" for day, exc in failed)
+        raise ReconciliationLedgerError(f"{len(failed)} reconciliation day(s) could not be judged: {detail}")
     return recorded

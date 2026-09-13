@@ -193,7 +193,7 @@ def test_a_run_where_every_candidate_raises_is_a_failed_run(
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("comparison unavailable")),
     )
     try:
-        with pytest.raises(ReconciliationLedgerError, match="2026-09-02"):
+        with pytest.raises(ReconciliationLedgerError, match=r"2026-09-02\(RuntimeError\)"):
             ledger.run_reconciliation_check(ebull_test_conn, as_of=date(2026, 9, 10))
     finally:
         monkey.undo()
@@ -214,3 +214,34 @@ def test_an_undecided_verdict_with_no_reason_is_refused_not_papered_over(
             environment="demo",
             evidence=_evidence(state="refused", comparable=False, difference=None, tolerance=None),
         )
+
+
+def test_a_loader_contract_violation_is_named_in_the_failure_not_folded_in(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Review NITPICK on `a90474da`, taken without reintroducing starvation.
+
+    A `ReconciliationLedgerError` is a loader-contract violation, not a per-day flake, so it
+    must be distinguishable in `job_runs.error_msg`. It must NOT abort the loop, though —
+    that would starve every newer day behind it, which is exactly what the per-day `try`
+    exists to prevent. So the class travels in the message instead.
+    """
+    import app.services.account_reconciliation_ledger as ledger
+
+    days = (date(2026, 9, 2), date(2026, 9, 3))
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(ledger, "pending_reconciliation_dates", lambda *a, **k: days)
+    monkey.setattr(
+        ledger,
+        "load_account_equity_evidence",
+        lambda *a, **k: (_ for _ in ()).throw(ReconciliationLedgerError("contract violated")),
+    )
+    try:
+        with pytest.raises(ReconciliationLedgerError) as excinfo:
+            ledger.run_reconciliation_check(ebull_test_conn, as_of=date(2026, 9, 10))
+    finally:
+        monkey.undo()
+    message = str(excinfo.value)
+    # BOTH days attempted — the first failure did not starve the second.
+    assert "2026-09-02(ReconciliationLedgerError)" in message
+    assert "2026-09-03(ReconciliationLedgerError)" in message
