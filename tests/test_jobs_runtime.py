@@ -29,6 +29,7 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 
+from app.jobs import runtime
 from app.jobs.locks import JobAlreadyRunning
 from app.jobs.runtime import JobRuntime, UnknownJob
 from app.workers.scheduler import Cadence, ScheduledJob
@@ -2056,7 +2057,11 @@ class TestMisfireVisibilityAndGrace:
         from app.workers.scheduler import SCHEDULED_JOBS
 
         opted_in = {j.name for j in SCHEDULED_JOBS if j.misfire_grace_seconds is not None}
-        assert opted_in == {"portfolio_eod_snapshot"}
+        # #2985 added ``quotes_refresh``: its hourly sample is keyed by the bucket
+        # it lands in, so a discarded fire is a permanently missing #2833
+        # observation. Its ceiling is derived in
+        # ``test_quotes_refresh_grace_cannot_reach_the_next_bucket``.
+        assert opted_in == {"portfolio_eod_snapshot", "quotes_refresh"}
 
     def test_grace_cannot_reach_the_next_frontier_advance(self) -> None:
         """The EOD grace must expire before the sweep that moves its anchor.
@@ -2082,3 +2087,181 @@ class TestMisfireVisibilityAndGrace:
         eod_fire = compute_next_run(eod.cadence, anchor)
         next_sweep = compute_next_run(full_sync.cadence, eod_fire)
         assert eod.misfire_grace_seconds < (next_sweep - eod_fire).total_seconds()
+
+
+class TestReservedLaneSchedulerExecutors:
+    """#2985 — a reserved lane needs its own APScheduler executor, not just a semaphore.
+
+    Measured 2026-09-13: ``quotes_refresh``'s 03:23 fire was dequeued **2801.5s**
+    late and discarded as a misfire, losing the 03:00 quote-observation bucket for
+    good. It never reached its reserved semaphore or its own source lock — both of
+    which were free. 50 of the 63 registered jobs share ONE general permit, and a
+    job blocked on that permit still owns the APScheduler worker thread it was
+    dispatched on, so ten parked fires exhaust the 10-thread default pool and every
+    other lane's fires queue behind them.
+    """
+
+    def test_reserved_lane_runs_while_every_default_worker_is_parked(self) -> None:
+        """The exact shape that failed at 03:23 — and it must now pass."""
+        for lane in runtime._RESERVED_EXECUTOR_LANES:
+            assert self._fires_with_default_pool_parked(lane), f"{lane} starved by the default pool"
+
+    def test_default_lane_is_starved_by_the_same_setup(self) -> None:
+        """Control arm: proves the harness reproduces the bug it claims to fix.
+
+        Without this, a test that passes for an unrelated reason (the pool never
+        actually filled, the hogs returned early) reads as a green reservation.
+        """
+        assert not self._fires_with_default_pool_parked("default")
+
+    @staticmethod
+    def _fires_with_default_pool_parked(executor_alias: str) -> bool:
+        """Fill every ``default`` worker, then fire one job on *executor_alias*."""
+        from apscheduler.schedulers.background import BackgroundScheduler
+
+        release = threading.Event()
+        parked = threading.Semaphore(0)
+        ran = threading.Event()
+
+        def hog() -> None:
+            parked.release()
+            release.wait(timeout=30)
+
+        scheduler = BackgroundScheduler(
+            timezone="UTC",
+            executors=runtime.build_scheduler_executors(),
+            job_defaults={"coalesce": True, "misfire_grace_time": 1, "max_instances": 1},
+        )
+        scheduler.start()
+        try:
+            now = datetime.now(UTC)
+            # One hog per default worker, plus two that must queue behind them.
+            for index in range(runtime._DEFAULT_EXECUTOR_MAX_WORKERS + 2):
+                scheduler.add_job(
+                    hog,
+                    "date",
+                    run_date=now,
+                    id=f"hog-{index}",
+                    executor="default",
+                    misfire_grace_time=3600,
+                )
+            for _ in range(runtime._DEFAULT_EXECUTOR_MAX_WORKERS):
+                assert parked.acquire(timeout=10), "default pool never filled — harness is not reproducing"
+
+            scheduler.add_job(
+                ran.set,
+                "date",
+                run_date=datetime.now(UTC),
+                id="probe",
+                executor=executor_alias,
+                misfire_grace_time=3600,
+            )
+            return ran.wait(timeout=3)
+        finally:
+            release.set()
+            scheduler.shutdown(wait=False)
+
+    def test_every_alias_used_is_registered_on_the_scheduler(self) -> None:
+        """⚠ APScheduler resolves the alias when the fire is DUE, not at ``add_job``.
+
+        An unregistered alias therefore survives registration and removes the job at
+        its first fire. Asserting ``job.executor`` alone would not catch that, so
+        this checks the alias against the executor map production builds.
+        """
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        registered = set(runtime.build_scheduler_executors())
+        for job in SCHEDULED_JOBS:
+            assert runtime._scheduler_executor_alias(job.name) in registered, job.name
+
+    def test_reserved_pool_is_at_least_its_lane_permits(self) -> None:
+        """A pool smaller than the semaphore would re-create the starvation inside the lane."""
+        executors = runtime.build_scheduler_executors()
+        for lane in runtime._RESERVED_EXECUTOR_LANES:
+            permits = runtime.EXECUTION_LANE_PERMITS[lane]
+            assert executors[lane]._pool._max_workers >= permits, lane
+
+    def test_exactly_one_registered_job_per_reserved_lane(self) -> None:
+        """One worker per reserved lane is sufficient ONLY while one job uses it.
+
+        Adding a second job to a reserved lane would let the two queue against each
+        other and misfire — the very failure this ticket fixes — so that must fail
+        here rather than in production.
+        """
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        for lane in runtime._RESERVED_EXECUTOR_LANES:
+            members = [j.name for j in SCHEDULED_JOBS if runtime.execution_lane_for(j.name) == lane]
+            assert len(members) == 1, f"{lane} has {members}"
+
+    def test_non_reserved_lanes_stay_on_the_default_executor(self) -> None:
+        """sec_rate and general keep today's pool — this PR does not re-shape them."""
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        for job in SCHEDULED_JOBS:
+            lane = runtime.execution_lane_for(job.name)
+            if lane in (runtime.EXECUTION_LANE_SEC, runtime.EXECUTION_LANE_GENERAL):
+                assert runtime._scheduler_executor_alias(job.name) == "default", job.name
+
+    def test_execution_lane_precedence_and_unknown_name_fallback(self) -> None:
+        """SEC source wins over the reserved job names; an unregistered name → general."""
+        from app.workers.scheduler import (
+            JOB_QUOTES_REFRESH,
+            JOB_SEC_ATOM_FAST_LANE,
+            JOB_STRATEGY_PAPER_CYCLE,
+        )
+
+        assert runtime.execution_lane_for(JOB_SEC_ATOM_FAST_LANE) == runtime.EXECUTION_LANE_SEC
+        assert runtime.execution_lane_for(JOB_QUOTES_REFRESH) == runtime.EXECUTION_LANE_QUOTE
+        assert runtime.execution_lane_for(JOB_STRATEGY_PAPER_CYCLE) == runtime.EXECUTION_LANE_PAPER
+        # ``source_for`` raises KeyError — the conservative classification is the
+        # smaller non-SEC allowance, which is what it was before #2985 too.
+        assert runtime.execution_lane_for("no-such-job-2985") == runtime.EXECUTION_LANE_GENERAL
+
+    def test_lane_permits_match_the_connection_budget_constants(self) -> None:
+        """This mapping re-expresses ``pg_settings``' budget; it must not become a second opinion."""
+        from app.db.pg_settings import (
+            JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY,
+            JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY,
+            JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY,
+        )
+        from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
+
+        assert runtime.EXECUTION_LANE_PERMITS == {
+            runtime.EXECUTION_LANE_SEC: SEC_LANE_MAX_CONCURRENCY,
+            runtime.EXECUTION_LANE_GENERAL: JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY,
+            runtime.EXECUTION_LANE_PAPER: JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY,
+            runtime.EXECUTION_LANE_QUOTE: JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY,
+        }
+
+    def test_quotes_refresh_grace_cannot_reach_the_next_bucket(self) -> None:
+        """The ceiling is DERIVED from the cadence minute, never written down.
+
+        ``sample_bucket`` truncates ``observed_at`` to the hour, so a fire admitted
+        at or after the boundary can only land in the next bucket. APScheduler
+        admits while ``now - run_time <= grace``, hence the strict inequality.
+        """
+        from app.workers.scheduler import (
+            JOB_QUOTES_REFRESH,
+            QUOTES_REFRESH_MINUTE,
+            SCHEDULED_JOBS,
+            hourly_bucket_grace_seconds,
+        )
+
+        job = next(j for j in SCHEDULED_JOBS if j.name == JOB_QUOTES_REFRESH)
+        assert job.cadence.kind == "hourly"
+        # The registered cadence is the source of truth for the derivation.
+        assert job.cadence.minute == QUOTES_REFRESH_MINUTE
+        seconds_to_bucket_end = (60 - job.cadence.minute) * 60
+        grace = job.misfire_grace_seconds
+        assert grace is not None, "quotes_refresh must opt out of the 1-second default"
+        assert grace == hourly_bucket_grace_seconds(job.cadence.minute)
+        assert grace < seconds_to_bucket_end
+
+    def test_scheduler_wide_fire_policy_is_unchanged(self) -> None:
+        """#2985 re-shapes dispatch only — coalescing, instances and the default grace hold."""
+        runtime_obj = JobRuntime(invokers={}, database_url="postgresql://stub/stub")
+        defaults = runtime_obj._scheduler._job_defaults
+        assert defaults["coalesce"] is True
+        assert defaults["max_instances"] == 1
+        assert defaults["misfire_grace_time"] == 1
