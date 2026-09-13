@@ -61,6 +61,15 @@ _CALLER = "probe_2991_history_lookback"
 # The documented maximum, in the form the operation states it: "1 year minus 1 day".
 _MAX_LOOKBACK = timedelta(days=364)
 
+# What the CONTROL arm asks for. ⚠ Deliberately a day inside the maximum, not on it: the
+# arm's `minDate` is fixed by our clock and read by eToro's some seconds later (credential
+# load, the deep-backfill arm, pagination, the lane-G floor), and `get_trade_history`
+# floors `minDate` to whole seconds on top. An arm sitting exactly on 364 days is over the
+# limit by the time it is served, so a gateway that enforced the maximum would reject the
+# control as well as the test arm — and a control that can fail for the same reason as the
+# arm it controls is not a control.
+_CONTROL_LOOKBACK = _MAX_LOOKBACK - timedelta(days=1)
+
 _CLOSED_EVENTS_PATH = "/api/v1/data/positions/closed-events/history"
 
 
@@ -83,12 +92,30 @@ def _load_demo_credentials(conn: psycopg.Connection[Any]) -> tuple[str, str]:
     return keys[0], keys[1]
 
 
-def _history_arm(broker: EtoroBrokerProvider, label: str, min_date: datetime, now: datetime) -> dict[str, Any]:
+def _history_arm(
+    broker: EtoroBrokerProvider,
+    label: str,
+    *,
+    min_date: datetime | None = None,
+    lookback: timedelta | None = None,
+) -> dict[str, Any]:
+    """Run one history arm. Exactly one of ``min_date`` / ``lookback`` is given.
+
+    A relative arm resolves its ``minDate`` HERE rather than at run start, so the elapsed
+    wall-clock of the preceding arms cannot silently push it past the bound it claims.
+    """
+    if (min_date is None) == (lookback is None):
+        raise ValueError("pass exactly one of min_date / lookback")
+    requested_at = datetime.now(UTC)
+    if min_date is None:
+        assert lookback is not None  # noqa: S101 - narrowed by the guard above
+        min_date = requested_at - lookback
     arm: dict[str, Any] = {
         "arm": label,
+        "requested_at": requested_at.isoformat(),
         "min_date": min_date.isoformat(),
-        "lookback_days": (now - min_date).days,
-        "exceeds_documented_max": (now - min_date) > _MAX_LOOKBACK,
+        "lookback_days": (requested_at - min_date).days,
+        "exceeds_documented_max": (requested_at - min_date) > _MAX_LOOKBACK,
     }
     try:
         trades = broker.get_trade_history(min_date)
@@ -148,8 +175,8 @@ def main(argv: list[str] | None = None) -> int:
 
     with EtoroBrokerProvider(api_key, user_key, env="demo") as broker:
         arms = [
-            _history_arm(broker, "A_epoch_deep_backfill", HISTORY_EPOCH, now),
-            _history_arm(broker, "B_within_documented_max", now - _MAX_LOOKBACK, now),
+            _history_arm(broker, "A_epoch_deep_backfill", min_date=HISTORY_EPOCH),
+            _history_arm(broker, "B_within_documented_max", lookback=_CONTROL_LOOKBACK),
             _closed_events_arm(broker),
         ]
 
@@ -159,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             "observed_at": now.isoformat(),
             "environment": "demo",
             "documented_max_lookback_days": _MAX_LOOKBACK.days,
+            "control_lookback_days": _CONTROL_LOOKBACK.days,
             "openapi_version": "v1.375.0",
         },
         "arms": arms,

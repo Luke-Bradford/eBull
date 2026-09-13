@@ -1,14 +1,16 @@
 {
   "_meta": {
     "refs": "#2991",
-    "observed_at": "2026-09-13T21:41:42.248690+00:00",
+    "observed_at": "2026-09-13T21:49:19.704200+00:00",
     "environment": "demo",
     "documented_max_lookback_days": 364,
+    "control_lookback_days": 363,
     "openapi_version": "v1.375.0"
   },
   "arms": [
     {
       "arm": "A_epoch_deep_backfill",
+      "requested_at": "2026-09-13T21:49:19.751480+00:00",
       "min_date": "2017-01-01T00:00:00+00:00",
       "lookback_days": 3542,
       "exceeds_documented_max": true,
@@ -23,8 +25,9 @@
     },
     {
       "arm": "B_within_documented_max",
-      "min_date": "2025-09-14T21:41:42.248690+00:00",
-      "lookback_days": 364,
+      "requested_at": "2026-09-13T21:49:20.287728+00:00",
+      "min_date": "2025-09-15T21:49:20.287728+00:00",
+      "lookback_days": 363,
       "exceeds_documented_max": false,
       "outcome": "ok",
       "row_count": 1,
@@ -33,7 +36,7 @@
       ],
       "min_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
       "max_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
-      "max_close_minus_min_date_days": 60
+      "max_close_minus_min_date_days": 59
     },
     {
       "arm": "C_closed_event_counts",
@@ -44,7 +47,7 @@
         "ratelimit-limit": "60",
         "ratelimit-policy": "60;w=60",
         "ratelimit-remaining": "57",
-        "ratelimit-reset": "59"
+        "ratelimit-reset": "56"
       },
       "body": [
         {

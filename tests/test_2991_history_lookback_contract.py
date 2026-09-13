@@ -153,5 +153,9 @@ def test_the_compliant_control_arm_returned_the_same_rows(probe: dict[str, Any])
     deep = _arm(probe, "A_epoch_deep_backfill")
     compliant = _arm(probe, "B_within_documented_max")
     assert compliant["exceeds_documented_max"] is False
+    # Strictly inside, not on the bound: an arm sitting exactly on 364 days is already
+    # over it by the time the gateway reads it, so it could fail for the same reason as
+    # the arm it controls.
+    assert compliant["lookback_days"] < _DOCUMENTED_MAX_LOOKBACK.days
     assert compliant["outcome"] == "ok"
     assert compliant["position_ids"] == deep["position_ids"]
