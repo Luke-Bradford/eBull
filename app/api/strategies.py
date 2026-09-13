@@ -3871,13 +3871,18 @@ def rebalance_core_sleeve(
         # ("order 42 is already being reconciled") is true and tells an operator
         # neither who holds it nor that retrying is the right move, so the detail
         # is worded here rather than in the exception the batch also logs.
+        #
+        # ⚠ The exception text is KEPT rather than replaced (review nitpick, round
+        # 1): it carries the order id, and a UI message and a triage identifier are
+        # not alternatives. The id is read off the exception and not off
+        # `resume_authority`, which is None on the fresh-submission path.
         logger.info("core rebalance: order held by another reconciler (%s)", exc)
         raise HTTPException(
             status_code=409,
             detail=(
                 "This core order is being checked with the broker right now, normally by the "
                 "scheduled strategy cycle. Nothing is wrong and nothing was lost — try again "
-                "in a moment."
+                f"in a moment. ({exc})"
             ),
         ) from exc
     except (CoreEligibilityError, CoreSelectionError, StrategyCoreExecutionError) as exc:
