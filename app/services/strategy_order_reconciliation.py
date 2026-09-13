@@ -230,6 +230,18 @@ def _record_failure(
     # nothing more -- the CHECK, both partial indexes, `_apply_detail`'s SQL and
     # the backlog/SLO predicates each hard-code terminal membership on their own.
     # Adding a terminal state still means touching those by hand.
+    #
+    # ⚠ The `= ANY(...)` predicate is repeated four times ON PURPOSE, and the
+    # hoisted alternative was TESTED rather than dismissed (review nitpick on PR
+    # #2974). `SET (state, reconciled_at, broker_status, last_error_code) = (SELECT
+    # ... FROM (SELECT ... AS terminal) t)` is accepted by Postgres and behaves
+    # correctly -- verified against the dev server, not reasoned about. It is not
+    # adopted because the trade is bad in both directions: the saving is four
+    # membership checks against a TWO-element array on at most `limit` rows per
+    # five-minute batch, which is nothing, while the cost is that each field's rule
+    # stops being readable at the field. That locality is the point here -- two of
+    # these columns are PRESERVED and two are ASSIGNED under the same condition,
+    # and that asymmetry is the whole defect being fixed.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
