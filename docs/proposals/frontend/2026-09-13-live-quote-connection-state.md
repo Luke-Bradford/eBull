@@ -145,9 +145,16 @@ that actually render a lie.
 
 "Arrived on this connection" is ordinary hook/reducer state, not a
 render-written ref: a `tickFresh` flag set **true** on `message` and **false**
-on both `error` and `open`. Setting it false on `open` is what stops a
-reconnect resurrecting a frozen price — after a reopen the retained tick stays
-stale-marked until an actual frame lands.
+on both `error` and `open`.
+
+⚠ **Attribution, measured rather than assumed:** it is the `error` clear that
+makes the reconnect case correct, because a browser always fires `error` before
+it retries. A revert-probe removing the `open` clear left every user-visible
+test green. The `open` clear is kept as a redundant local guard — so the
+invariant lives at the handler that opens the connection rather than resting on
+that ordering — and is pinned by a test that fires `open` twice with no
+intervening error, labelled as pinning a defensive invariant rather than a
+reachable bug.
 
 ⚠ The badge is driven by the **provenance of the price on screen**, not by the
 socket: an open stream that has never delivered a frame for this instrument

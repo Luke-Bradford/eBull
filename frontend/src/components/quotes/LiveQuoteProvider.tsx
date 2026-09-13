@@ -105,8 +105,11 @@ function reducer(state: State, action: Action): State {
       return { ...state, ticks: next, freshIds: fresh };
     }
     case "open":
-      // Clearing freshIds on open is the point: a reconnect that delivers no
-      // frame must leave every retained tick marked stale (Codex ckpt-1).
+      // A reconnect that delivers no frame must leave every retained tick
+      // marked stale (Codex ckpt-1). ⚠ Redundant in practice — `error` fires
+      // before any browser reconnect and clears freshIds too — but it keeps
+      // the invariant local to the handler that opens the connection instead
+      // of resting on that ordering.
       return { ...state, status: "live", freshIds: new Set() };
     case "error":
       return { ...state, status: action.status, freshIds: new Set() };

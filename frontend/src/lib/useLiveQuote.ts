@@ -133,9 +133,15 @@ export function useLiveQuote(instrumentId: number | null | undefined): LiveQuote
       hasOpened = true;
       setStatus("live");
       // A reopen does NOT re-bless whatever tick is still on screen: it
-      // predates this connection. Without this the 09:00 price of a stream
-      // that reconnected at 09:05 and received nothing would pulse LIVE
-      // forever (Codex ckpt-1 on #2944).
+      // predates this connection, so the 09:00 price of a stream that
+      // reconnected at 09:05 and received nothing must not pulse LIVE
+      // (Codex ckpt-1 on #2944).
+      // ⚠ In a real browser `onerror` always fires before a reconnect and
+      // clears this too, so this line is a REDUNDANT local guard, not the
+      // thing that makes the user-visible behaviour correct. Kept so the
+      // invariant "fresh means: arrived on the connection now open" holds at
+      // the handler that opens the connection, rather than resting on the
+      // browser always having fired an error first.
       setTickFresh(false);
     };
 

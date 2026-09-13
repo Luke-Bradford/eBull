@@ -181,6 +181,22 @@ describe("useLiveQuote", () => {
     expect(result.current.tick?.bid).toBe("111");
   });
 
+  it("an open alone never blesses a tick from before it", () => {
+    // Pins the invariant AT THE HANDLER. A real browser always fires `error`
+    // before reconnecting, so this sequence cannot occur in practice and the
+    // guard it covers is redundant defence — kept deliberately, and asserted
+    // so a future edit cannot quietly make `open` re-bless a cache.
+    const { result } = renderHook(() => useLiveQuote(1001));
+    const source = FakeEventSource.instances[0]!;
+    act(() => {
+      source.fireOpen();
+      source.fireMessage(JSON.stringify(makeTick()));
+      source.fireOpen();
+    });
+    expect(result.current.connected).toBe(true);
+    expect(result.current.tickFresh).toBe(false);
+  });
+
   it("clears the previous instrument's tick when the id goes null", () => {
     // #2944: the state reset used to sit BELOW the null-id early return, so
     // unsubscribing left the old instrument's price, connected and

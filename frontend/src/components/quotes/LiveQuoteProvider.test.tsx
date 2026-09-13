@@ -288,6 +288,28 @@ describe("LiveQuoteProvider", () => {
     expect(view.getByTestId("status").textContent).toBe("live/authoritative");
   });
 
+  it("an open alone never blesses a tick from before it", async () => {
+    // Pins the invariant AT THE HANDLER. A real browser always fires `error`
+    // before reconnecting, and that clears freshness too — so this sequence
+    // (open with no preceding error) cannot occur in practice and the guard
+    // it covers is redundant defence, deliberately kept. Asserted so a future
+    // edit cannot quietly make `open` the thing that re-blesses a cache.
+    const view = render(
+      <LiveQuoteProvider instrumentIds={[7]}>
+        <StatusConsumer id={7} />
+      </LiveQuoteProvider>,
+    );
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    await act(async () => {
+      fireOpen(0);
+      dispatchTick(0, { instrument_id: 7, bid: "100" });
+      fireOpen(0);
+    });
+    expect(view.getByTestId("status").textContent).toBe("live/stale");
+  });
+
   it("stops claiming live the moment the canonical set changes, before the debounce fires", async () => {
     const view = render(
       <LiveQuoteProvider instrumentIds={[7]}>
