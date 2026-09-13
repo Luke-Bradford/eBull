@@ -302,6 +302,14 @@ RETRYABLE_RE = re.compile(r"Retryable (?P<status>\d{3}) from (?P<method>[A-Z]+) 
 ABSOLUTE_RE = re.compile(r"^https?://(?P<host>[^/]+)")
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 
+#: eToro path prefixes, derived from the lane map's own templates rather than typed out.
+#: ⚠ Both the demo and real path shapes are covered: step 1 records that our real-env
+#: paths DIFFER from the demo ones (``KNOWN_PATH_DRIFT``), so matching only ``demo_path``
+#: would miss a real-env retryable entirely.
+ETORO_PATH_PREFIXES: tuple[str, ...] = tuple(
+    sorted({"/" + "/".join(c.demo_path.lstrip("/").split("/")[:3]) for c in lanes.CALL_SITES})
+)
+
 DEFAULT_LOG = Path.home() / "Dev/eBull/var/autonomy-logs/launchd.jobs-daemon.err.log"
 
 
@@ -535,6 +543,7 @@ def m3_concurrency(conn: psycopg.Connection, out: TextIO, *, since: str | None) 
            where job_name = any(%(jobs)s) {where_since}
              and finished_at is not null
              and coalesce(error_msg, '') not like %(reaper)s
+             and finished_at > started_at
         )
         select a.job_name, b.job_name, count(*),
                round(max(extract(epoch from (least(a.finished_at, b.finished_at)
@@ -563,6 +572,7 @@ def m3_concurrency(conn: psycopg.Connection, out: TextIO, *, since: str | None) 
            where job_name = any(%(jobs)s) {where_since}
              and finished_at is not null
              and coalesce(error_msg, '') not like %(reaper)s
+             and finished_at > started_at
         ), edges as (
           select started_at as t, 1 as d from live
           union all select finished_at as t, -1 as d from live
@@ -613,6 +623,7 @@ def m4_retryables(conn: psycopg.Connection, out: TextIO, *, log_path: Path) -> N
         lines_read = retry_lines = 0
         by_host: dict[tuple[str, str], int] = {}
         by_path: dict[tuple[str, str], int] = {}
+        by_other_relative: dict[tuple[str, str], int] = {}
         unparsed: list[str] = []
         first_ts = last_ts = None
 
@@ -636,8 +647,17 @@ def m4_retryables(conn: psycopg.Connection, out: TextIO, *, log_path: Path) -> N
                     key = (abs_m.group("host"), status)
                     by_host[key] = by_host.get(key, 0) + 1
                 elif url.startswith("/"):
-                    key = ("/" + url.lstrip("/").split("/")[0] + "/...", status)
-                    by_path[key] = by_path.get(key, 0) + 1
+                    # ⚠ A relative URL is NOT automatically an eToro one. Companies
+                    # House also logs relative paths (/company/{n}/filing-history), and
+                    # bucketing every relative URL as eToro reports another provider's
+                    # 429 as ours. Match the lane map's own path prefixes.
+                    prefix = next((pre for pre in ETORO_PATH_PREFIXES if url.startswith(pre)), None)
+                    if prefix is not None:
+                        key = (prefix + "...", status)
+                        by_path[key] = by_path.get(key, 0) + 1
+                    else:
+                        key = ("/" + url.lstrip("/").split("/")[0] + "/... (NOT eToro)", status)
+                        by_other_relative[key] = by_other_relative.get(key, 0) + 1
                 else:
                     unparsed.append(line.rstrip())
 
@@ -647,14 +667,20 @@ def m4_retryables(conn: psycopg.Connection, out: TextIO, *, log_path: Path) -> N
         print("\nABSOLUTE-url retryables -- SEC and other absolute-URL providers:", file=out)
         for (host, status), n in sorted(by_host.items(), key=lambda kv: -kv[1]):
             print(f"  {host:34s} {status}  {n}", file=out)
-        print("\nRELATIVE-path retryables -- these are the eToro ones:", file=out)
-        for (prefix, status), n in sorted(by_path.items(), key=lambda kv: -kv[1]) or []:
+        print("\nRELATIVE-path retryables matching an eToro CALL_SITES prefix:", file=out)
+        for (prefix, status), n in sorted(by_path.items(), key=lambda kv: -kv[1]):
             print(f"  {prefix:34s} {status}  {n}", file=out)
         if not by_path:
             print("  (none)", file=out)
+        print("\nRELATIVE-path retryables from OTHER providers (not counted as eToro):", file=out)
+        for (prefix, status), n in sorted(by_other_relative.items(), key=lambda kv: -kv[1]):
+            print(f"  {prefix:34s} {status}  {n}", file=out)
+        if not by_other_relative:
+            print("  (none)", file=out)
         print(
             f"\nPARSED-EVENT accounting: {retry_lines} = {sum(by_host.values())} absolute + "
-            f"{sum(by_path.values())} relative + {len(unparsed)} malformed",
+            f"{sum(by_path.values())} eToro-relative + {sum(by_other_relative.values())} "
+            f"other-relative + {len(unparsed)} malformed",
             file=out,
         )
         for line in unparsed[:5]:
@@ -701,14 +727,22 @@ def m5_reconciliation(conn: psycopg.Connection, out: TextIO) -> None:
     print(
         "Source rule: app/services/strategy_order_reconciliation.py:1024 measures unresolved\n"
         "order identity from strategy_order_reconciliation_state.first_unresolved_at against\n"
-        "a deployment-supplied max_unresolved_seconds. A whole-job duration is NOT this.",
+        "a deployment-supplied max_unresolved_seconds. A whole-job duration is NOT this.\n"
+        "⚠ Its predicate is copied, not paraphrased: state NOT IN ('resolved','rejected').\n"
+        "  first_unresolved_at STAYS populated after a terminal transition, so counting it\n"
+        "  alone would report every completed order as unresolved forever (Codex ckpt-2).",
         file=out,
     )
     cur = conn.cursor()
     cur.execute(
         """
-        select count(*) filter (where first_unresolved_at is not null) as unresolved,
-               min(first_unresolved_at), max(first_unresolved_at), count(*)
+        select count(*) filter (
+                 where first_unresolved_at is not null
+                   and state not in ('resolved', 'rejected')
+               ) as unresolved,
+               min(first_unresolved_at) filter (where state not in ('resolved', 'rejected')),
+               max(first_unresolved_at) filter (where state not in ('resolved', 'rejected')),
+               count(*)
           from strategy_order_reconciliation_state
         """
     )

@@ -72,14 +72,20 @@ neither becomes a headroom claim on its own.
 
 | source | result |
 | --- | --- |
-| jobs-daemon log, 1,200,426 lines, 2026-06-29 → 09-13 | 3,107 retryable lines = 3,105 `www.sec.gov` 503 + 2 eToro (one 500, one 504) + 0 malformed. **eToro 429s: 0** |
+| jobs-daemon log, 1,200,571 lines, 2026-06-29 → 09-13 | 3,107 retryable lines = 3,105 `www.sec.gov` 503 + 2 on `/api/v1/market-data` (one 500, one 504) + 0 other-relative + 0 malformed. **eToro 429s: 0** |
 | `job_runs.error_category = 'rate_limited'` | 15 rows, **all `sec_atom_fast_lane`**, none eToro |
 
 ⚠ Classifying by hostname would have found none of this. `ResilientClient` logs the URL
 **as passed** (`resilient_client.py:213`), and the eToro providers pass *relative paths*
-against an httpx `base_url` — so an eToro 429 carries no hostname. The census matches
-absolute → host, leading `/` → path prefix, and prints an explicit malformed bucket with
-whole-file accounting.
+against an httpx `base_url` — so an eToro 429 carries no hostname.
+
+⚠ But "relative ⇒ eToro" is also wrong, and the first pass assumed it. Companies House
+uses a `base_url` too (`companies_house.py:62`) and logs paths like
+`/company/{n}/filing-history`, so a bare relative-URL bucket reports another provider's
+429 as ours. The census now matches the lane map's own three-segment prefixes
+(`/api/v1/trading`, `/api/v1/market-data`, `/api/v2/trading`) and keeps a separate,
+explicitly-printed bucket for other providers' relative URLs — which is empty here, as a
+measured fact rather than an assumption. Caught by Codex checkpoint 2.
 
 ⚠ The count is a **lower bound**: the final attempt raises via `raise_for_status()`
 without emitting the warning line (`resilient_client.py:201-203`), and callers swallow
@@ -94,18 +100,26 @@ name.
 
 | pair | n | max overlap | clocks | shared lanes |
 | --- | ---: | ---: | --- | --- |
-| `daily_portfolio_sync` × `strategy_paper_cycle` | 764 | 4.5 s | INDEPENDENT | E |
-| `daily_candle_refresh` × `quotes_refresh` | 50 | 84.1 s | **SHARED floor** | F |
-| `daily_portfolio_sync` × `execute_approved_orders` | 20 | 0.0 s | INDEPENDENT | E |
-| `core_eligibility_refresh` × `strategy_paper_cycle` | 7 | 2.5 s | INDEPENDENT | **B** |
+| `daily_portfolio_sync` × `strategy_paper_cycle` | 765 | 4.5 s | INDEPENDENT | E |
+| `daily_candle_refresh` × `strategy_paper_cycle` | 161 | 18.7 s | INDEPENDENT | — |
+| `core_eligibility_refresh` × `strategy_paper_cycle` | 6 | 2.5 s | INDEPENDENT | **B** |
+| `daily_candle_refresh` × `quotes_refresh` | 5 | 84.1 s | **SHARED floor** | F |
 | `execute_approved_orders` × `strategy_paper_cycle` | 1 | 0.5 s | INDEPENDENT | **A, B, C, E** |
 
 Max simultaneous eToro-touching job runs: **3**.
 
 The lane-F row is #2934 working: `EtoroMarketDataProvider` passes the module-level
-`_ETORO_RATE_LIMIT_CLOCK` (`etoro.py:77-78`), so fifty overlaps cost one floor between
+`_ETORO_RATE_LIMIT_CLOCK` (`etoro.py:77-78`), so those overlaps cost one floor between
 them. Every other row is `EtoroBrokerProvider`, which builds a fresh clock per instance
 (`etoro_broker.py:225-236`), so those rates add.
+
+⚠ **These counts are the corrected ones.** A first pass reported 432, 50 and 20 for three
+of these pairs because `record_job_skip` writes a suppressed fire with
+`started_at == finished_at`, and a zero-width interval satisfies the overlap predicate
+while executing nothing. Filtering `finished_at > started_at` removed 271 phantom
+overlaps from one pair alone and dropped
+`daily_portfolio_sync` × `execute_approved_orders` from 20 to **zero**. Caught by Codex
+checkpoint 2.
 
 ⚠ Job concurrency is neither instance concurrency nor quota concurrency: one job can fan
 out to several providers (every per-request caller does), two jobs can share one clock,
@@ -124,6 +138,13 @@ rather than inventing one: `enforce_reconciliation_slo` measures unresolved orde
 identity from `strategy_order_reconciliation_state.first_unresolved_at` against a
 deployment-supplied `max_unresolved_seconds`
 (`app/services/strategy_order_reconciliation.py:1024`). A whole-job duration is not this.
+
+⚠ The predicate is copied, not paraphrased: `state NOT IN ('resolved', 'rejected')`.
+`first_unresolved_at` stays populated after a terminal transition, so counting it alone
+would report every completed order as unresolved forever — a latent error today (the
+table is empty) that would have surfaced as a false backlog the moment reconciliation
+processed anything. Caught by Codex checkpoint 2, and it is the same source-rule miss the
+census warns about elsewhere: citing a rule is not the same as copying its predicate.
 
 `strategy_order_reconciliation_state` holds **0 rows**.
 
