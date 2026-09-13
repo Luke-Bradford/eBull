@@ -25,6 +25,7 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
 )
 from app.services.strategy_order_reconciliation import (
+    _record_failure,
     enforce_reconciliation_slo,
     ensure_strategy_request_id,
     reconcile_backlog,
@@ -496,3 +497,92 @@ def test_manual_order_cannot_receive_strategy_submission_identity(
     manual_order_id = manual_order_row[0]
     with pytest.raises(StrategyControlError, match="strategy-origin"):
         ensure_strategy_request_id(conn, order_id=int(manual_order_id))
+
+
+# --------------------------------------------------------------------------
+# #2964 item 1 — the trade-status write is gated on the STORED state
+# --------------------------------------------------------------------------
+#
+# `_record_failure`'s write-semantics matrix lives in
+# `test_2964_reconciliation_terminal_guard_db`. These three assert its SECOND
+# write, which needs a real `strategy_trades` row — and that is created through
+# `create_strategy_trade(conn, decision_id)` off a funding decision, so the
+# fixtures in THIS module are the only honest way to seed one.
+
+
+def _set_reconciliation_state(conn: psycopg.Connection[Any], *, order_id: int, state: str, broker_status: str) -> None:
+    terminal = state in ("resolved", "rejected")
+    conn.execute(
+        """
+        INSERT INTO strategy_order_reconciliation_state (
+            order_id, state, reconciled_at, last_attempt_at, attempt_count, broker_status
+        ) VALUES (%s, %s, CASE WHEN %s THEN now() END, now() - interval '1 hour', 2, %s)
+        ON CONFLICT (order_id) DO UPDATE SET
+            state = EXCLUDED.state,
+            reconciled_at = EXCLUDED.reconciled_at,
+            broker_status = EXCLUDED.broker_status
+        """,
+        (order_id, state, terminal, broker_status),
+    )
+
+
+def _trade_status(conn: psycopg.Connection[Any], trade_id: int) -> str:
+    row = conn.execute("SELECT status FROM strategy_trades WHERE strategy_trade_id = %s", (trade_id,)).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_a_terminal_reconciliation_row_does_not_flag_its_trade(
+    ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
+) -> None:
+    """Preserving the reconciliation state while still flagging the trade would
+    trade one wrong write for another (#2964 item 1)."""
+    conn = ebull_test_conn
+    trade_id, order_id = _seed_trade(conn, instrument_id=2964101)
+    _set_reconciliation_state(conn, order_id=order_id, state="resolved", broker_status="Filled")
+    before = _trade_status(conn, trade_id)
+
+    _record_failure(conn, order_id=order_id, state="not_found", error_code="broker_order_not_found")
+
+    assert _trade_status(conn, trade_id) == before
+    conn.rollback()
+
+
+def test_a_non_terminal_reconciliation_row_still_flags_its_trade(
+    ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
+) -> None:
+    """The ADMITTING direction. A gate tested only on what it rejects is a gate
+    whose regression is silent."""
+    conn = ebull_test_conn
+    trade_id, order_id = _seed_trade(conn, instrument_id=2964102)
+    _set_reconciliation_state(conn, order_id=order_id, state="pending", broker_status="Placed")
+
+    _record_failure(conn, order_id=order_id, state="error", error_code="broker_lookup_error")
+
+    assert _trade_status(conn, trade_id) == "reconcile_required"
+    conn.rollback()
+
+
+@pytest.mark.parametrize("trade_status", ["closed", "failed"])
+def test_the_pre_existing_closed_and_failed_trade_exclusion_survives_the_new_gate(
+    ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
+    trade_status: str,
+) -> None:
+    """⚠ #2964's new terminal gate is ADDITIONAL to `t.status NOT IN
+    ('closed','failed')`, not a replacement. Dropping that predicate while adding
+    the new one would be invisible to every other test here."""
+    conn = ebull_test_conn
+    trade_id, order_id = _seed_trade(conn, instrument_id=2964103 + (0 if trade_status == "closed" else 1))
+    conn.execute(
+        "UPDATE strategy_trades SET status = %s WHERE strategy_trade_id = %s",
+        (trade_status, trade_id),
+    )
+    _set_reconciliation_state(conn, order_id=order_id, state="pending", broker_status="Placed")
+
+    _record_failure(conn, order_id=order_id, state="error", error_code="broker_lookup_error")
+
+    assert _trade_status(conn, trade_id) == trade_status
+    conn.rollback()
