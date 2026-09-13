@@ -5441,3 +5441,102 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Enforced in: this prevention log;
   `app/services/order_client.py::_release_claim_after_pre_io_refusal` (`orders.status = 'refused'`);
   `tests/test_order_client.py::TestSubmissionClaim::test_a_pre_io_refusal_releases_the_claim`.
+
+### A bounded queue ordered by an IMMUTABLE key is an absorbing state, not a slow queue
+- First seen in: #2948 (2026-09-13), operator audit. `reconcile_backlog` selected
+  `ORDER BY first_unresolved_at, order_id LIMIT 20`. Both keys are immutable for a
+  non-terminal row — `first_unresolved_at` is `DEFAULT now()` at insert and written by no
+  statement in the module — so the selected set is a pure function of the non-terminal row
+  set. While the oldest 20 stayed unresolved, order 21 was never visited, for any number of
+  cycles. Reproduced at 3 cycles / 60 lookups / 20 distinct orders / 0 attempts on the one
+  recoverable order.
+- Symptom: the runtime keeps doing work and reports success every cycle, so nothing is
+  failing and no health signal moves. The starvation is invisible to every automated check
+  we have; only an exact visited-ID assertion across MULTIPLE cycles can see it. A single
+  cycle looks perfect.
+- Prevention: for any `ORDER BY … LIMIT n` that feeds repeated work over a queue, ask which
+  sort key the WORK ITSELF mutates. If none does, the head is permanent. Order by a key the
+  work advances (`last_attempt_at`, already written on every attempt path here) so the batch
+  is a round robin by construction. ⚠ Raising `n` is not a fix — it relocates the same
+  absorbing state to a larger backlog. ⚠ Check the SIBLING batches in the same file first:
+  `strategy_paper_runtime.py`'s owned-position batch had already been fixed for this exact
+  class (slot rotation, with a comment saying so) and the reconciliation batch beside it
+  never got it. A fix can close the INSTANCE and leave the CLASS.
+- Enforced in: this prevention log;
+  `app/services/strategy_order_reconciliation.py::reconcile_backlog`; `sql/376`;
+  `tests/test_strategy_order_reconciliation.py::test_backlog_rotates_and_never_strands_an_order_past_the_batch_limit`
+  (exact visited IDs + broker-call counts across four cycles).
+
+### A retry delay anchored to a scheduler cadence must subtract slack, or it silently doubles
+- First seen in: #2948 (2026-09-13), Codex checkpoint 1.
+- Symptom: a backoff base is set to exactly one scheduler period (300 s for a five-minute
+  job) and documented as "the first retry costs no added latency". It does not fire on the
+  next cycle. The batch SELECTED at 00:00 RECORDS its attempts at 00:00:02, so at the 00:05
+  selection only 299.8 s have elapsed and a 300 s predicate excludes the row. Every delay
+  that is an exact multiple of the cadence has the same off-by-epsilon, so the whole retry
+  ladder is one cycle slower than written and the code comment is wrong at every rung.
+- Prevention: when a delay is expressed in units of a job's own cadence, write it as
+  `k cycles LESS A HALF CYCLE` (`base * (2**(n-1) - 0.5)`), which tolerates drift between a
+  selection's grid time and the attempts it records. The same applies to the cap. Then state
+  the resulting sequence in seconds in the code and verify it against the real database —
+  `least`/`greatest`/`power`/`make_interval` type behaviour is not guessable.
+- Enforced in: this prevention log;
+  `app/services/strategy_order_reconciliation.py` (`RECONCILIATION_RETRY_BASE_SECONDS` /
+  `_CAP_SECONDS` and their derivation comment);
+  `tests/test_strategy_order_reconciliation.py::test_backlog_cooldown_defers_dead_orders_but_never_a_progressing_one`
+  (asserts the exact one-cycle boundary row IS due).
+
+### An attempt counter that also counts SUCCESSES cannot drive a backoff
+- First seen in: #2948 (2026-09-13), Codex checkpoint 1.
+- Symptom: `attempt_count` is incremented by BOTH the failure path (`_record_failure`) and
+  the success path (`_apply_detail`) — the latter including a poll that succeeded and left
+  the order `pending` with newly discovered partial fills. Keying an exponential backoff off
+  it therefore defers hardest exactly the orders that are making progress: a partially
+  filled order discovering its remaining executions would wait up to the cap, while the
+  column's name says nothing is wrong.
+- Prevention: before using a stored counter as a backoff exponent, grep every writer and ask
+  what each increment MEANS. If the column counts polls rather than consecutive failures,
+  either add a separate consecutive-failure column or gate the backoff on the STATE
+  (`not_found` / `ambiguous` / `error` back off; `unresolved` / `pending` are always due),
+  which needs no migration. Assert the progress case explicitly — a row at
+  `attempt_count = 99` in a progress state must still be selected.
+- Enforced in: this prevention log;
+  `app/services/strategy_order_reconciliation.py::reconcile_backlog` (the
+  `state.state NOT IN ('not_found','ambiguous','error')` disjunct);
+  `tests/test_strategy_order_reconciliation.py::test_backlog_cooldown_defers_dead_orders_but_never_a_progressing_one`.
+
+### `tuple(f(x) for x in batch)` makes one poison item abort the whole batch AND own the next one
+- First seen in: #2948 (2026-09-13).
+- Symptom: a batch built as a generator comprehension over per-item work. The per-item
+  function models N failure classes and catches them; anything outside those (a psycopg
+  error, an unmodelled transport exception) escapes mid-generator, so every later item is
+  silently skipped and the caller's whole cycle fails. Worse, the failing item's
+  attempt/progress clock is never advanced, so the next cycle selects it FIRST and fails
+  identically — a second absorbing state reached with no backlog at all.
+- Prevention: a bounded batch over independent items reconciles item by item with a per-item
+  guard, not as a comprehension. On an unexpected exception: `conn.rollback()` first (the
+  escaping exception may have left an aborted transaction, and `conn.transaction()` would
+  otherwise open a SAVEPOINT), record a terminal-for-this-cycle failure so the ordering key
+  advances, then continue. Catch `Exception`, never `BaseException`. This widens what is
+  CAUGHT, never what is PERMITTED — the downstream block must still be armed by the recorded
+  failure. Prove it with a test whose broker raises an unmodelled error on the FIRST item and
+  asserts the later items were still visited.
+- Enforced in: this prevention log;
+  `app/services/strategy_order_reconciliation.py::reconcile_backlog` (the per-order
+  `except Exception` guard, `reconcile_unexpected_error`);
+  `tests/test_strategy_order_reconciliation.py::test_an_unmodelled_failure_does_not_abort_the_batch_or_own_the_next_one`.
+
+### A "still fresh" window assertion passes the very reset it is meant to forbid
+- First seen in: #2948 (2026-09-13), Codex checkpoint 2.
+- Symptom: to assert that reconciliation never rewrites the SLO age column, the test asserted
+  `count(*) WHERE first_unresolved_at > now() - interval '1 second' == 7`. It is wrong in
+  both directions at once: it FAILS on a loaded runner when every timestamp was correctly
+  preserved (setup plus four cycles exceed a second), and it PASSES if the code did reset the
+  column to `now()` — which is the exact defect the assertion exists to catch.
+- Prevention: an invariant of the form "this stored value must not change" is asserted by
+  SNAPSHOTTING the values before and comparing for exact equality after. Never by a freshness
+  or staleness window — a window is a measurement of wall-clock, and the thing under test is
+  identity. Self-review prompt: "if the code did the bad thing, would this assertion go red?"
+- Enforced in: this prevention log;
+  `tests/test_strategy_order_reconciliation.py::_slo_ages` +
+  `test_backlog_rotates_and_never_strands_an_order_past_the_batch_limit`.
