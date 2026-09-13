@@ -24,14 +24,17 @@ trade_history_demo.json`` (captured 2026-06-13, ``minDate=2020-01-01``) already 
 it — it returned a trade closing 2025-11-14, 5.9 years after ``minDate``. Arm A re-runs
 that against the current gateway at the real epoch, and arm B is its control.
 
-⚠ SILENT TRUNCATION OF OLD ROWS IS UNDECIDABLE ON THIS ACCOUNT and no arm here claims
-otherwise: the demo account's only close is 2025-11-14, which is inside a 364-day window
-from today, so arms A and B cannot disagree about a row older than a year because no such
-row exists. That is exactly why arm C is here — ``getClosedPositionEventsHistory`` counts
-closed position events per ``(closeYear, assetType)`` from a different service, so it is
-an INDEPENDENT total that stays decidable on an account whose history does span years.
+⚠⚠ SILENT TRUNCATION OF OLD ROWS IS UNDECIDABLE HERE and no arm claims otherwise. The
+only close this account has ever RETURNED is 2025-11-14, inside a compliant window — and
+"the only one it has" is the very thing under investigation, so it cannot be assumed. Arms
+A and B therefore cannot disagree about an older row: not because none exists, but because
+none has been observed. Arm C (``getClosedPositionEventsHistory``, counts per
+``(closeYear, assetType)``) is recorded because it DISAGREES, not because it resolves
+this — its scope is undetermined (#2993) and it is not a completeness oracle for the
+ledger until that is settled.
 
-Run (dev, demo credentials, 3 requests: 2 on lane G's history client, 1 on the read lane):
+Run (dev, demo credentials, 3 logical calls — arms A and B each paginate, so the request
+count is at least 2 on lane G's history client plus 1 on the read lane):
 
     PYTHONPATH=. uv run python -m scripts.probe_2991_history_lookback \
         --out tests/fixtures/etoro/history_lookback_probe_2026-09-13.json
@@ -41,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import pathlib
 import sys
 from datetime import UTC, datetime, timedelta
@@ -50,11 +54,16 @@ import httpx
 import psycopg
 
 from app.config import settings
-from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+from app.providers.implementations.etoro_broker import (
+    ClosedPositionEventCountParseError,
+    EtoroBrokerProvider,
+    TradeHistoryParseError,
+)
 from app.security.master_key import ensure_broker_key_loaded
 from app.services.broker_credentials import load_credential_for_provider_use
 from app.services.operators import sole_operator_id
 from app.services.trade_events import HISTORY_EPOCH
+from scripts.refresh_2946_openapi_census import SOURCE_FIXTURE
 
 _CALLER = "probe_2991_history_lookback"
 
@@ -129,10 +138,22 @@ def _history_arm(
         arm["outcome"] = "transport_error"
         arm["error"] = f"{type(exc).__name__}: {exc}"
         return arm
+    except TradeHistoryParseError as exc:
+        # ⚠ Captured, not propagated: an unhandled parse failure in one arm would discard
+        # the arms that already succeeded, and the run costs real requests.
+        arm["outcome"] = "parse_error"
+        arm["error"] = str(exc)
+        return arm
     closes = sorted(t.close_timestamp for t in trades)
     arm["outcome"] = "ok"
     arm["row_count"] = len(trades)
     arm["position_ids"] = sorted(t.position_id for t in trades)
+    # ⚠ Per-SLICE identity, not just the position id: eToro reduces the same positionId on
+    # a partial close, so two arms can agree on ids while disagreeing about which slices
+    # they returned. Comparing ids alone would call that "the same rows".
+    arm["slices"] = sorted(
+        (t.position_id, t.close_timestamp.isoformat(), str(t.units), str(t.net_profit)) for t in trades
+    )
     arm["min_close_timestamp"] = closes[0].isoformat() if closes else None
     arm["max_close_timestamp"] = closes[-1].isoformat() if closes else None
     # The falsifier for "the server caps the response at minDate + 1 year".
@@ -141,20 +162,16 @@ def _history_arm(
 
 
 def _closed_events_arm(broker: EtoroBrokerProvider) -> dict[str, Any]:
-    """Independent per-close-year counts — the completeness oracle (#2991)."""
+    """Per-close-year counts from a DIFFERENT service.
+
+    ⚠ Not established to be a completeness oracle for this ledger, and this arm does not
+    treat it as one: the operation has no env segment and answers for the caller's gateway
+    GCID, which spans the real and demo customer ids. It is recorded because its
+    disagreement with the history arms is what #2993 is about.
+    """
     arm: dict[str, Any] = {"arm": "C_closed_event_counts", "path": _CLOSED_EVENTS_PATH}
     try:
-        # ⚠ Private client on purpose, same as `scripts/probe_2712_close_side_cost_quote.py`.
-        # A public provider method would have to be registered in `etoro_quota_lanes`
-        # CALL_SITES, which documents the endpoints the RUNTIME reaches — and nothing in
-        # `app/` calls this one. Minting a production method with no production caller to
-        # serve a diagnostic is the worse trade; `_http_read` is used (not bypassed) so the
-        # request still draws on the shared throttle.
-        response = broker._http_read.get(  # noqa: SLF001 - probe, not production code
-            _CLOSED_EVENTS_PATH,
-            headers=broker._request_headers(),  # noqa: SLF001
-        )
-        response.raise_for_status()
+        counts = broker.get_closed_position_event_counts()
     except httpx.HTTPStatusError as exc:
         arm["outcome"] = "http_error"
         arm["status_code"] = exc.response.status_code
@@ -164,17 +181,32 @@ def _closed_events_arm(broker: EtoroBrokerProvider) -> dict[str, Any]:
         arm["outcome"] = "transport_error"
         arm["error"] = f"{type(exc).__name__}: {exc}"
         return arm
+    except ClosedPositionEventCountParseError as exc:
+        arm["outcome"] = "parse_error"
+        arm["error"] = str(exc)
+        return arm
     arm["outcome"] = "ok"
-    arm["status_code"] = response.status_code
-    arm["rate_limit_headers"] = {k: v for k, v in response.headers.items() if k.lower().startswith("ratelimit")}
-    arm["body"] = response.json()
+    arm["counts"] = [
+        {
+            "closeYear": c.close_year,
+            "assetType": c.asset_type,
+            "closedPositionEvents": c.closed_position_events,
+        }
+        for c in counts
+    ]
+    arm["total_closed_position_events"] = sum(c.closed_position_events for c in counts)
     return arm
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=pathlib.Path, help="write the verbatim observation set here")
+    parser.add_argument("--out", type=pathlib.Path, help="write the observation set here")
     args = parser.parse_args(argv)
+
+    # ⚠ Without this the run is INVISIBLE to the #2946 request artefact: the per-request
+    # lines `etoro_request_log` emits are INFO, and a bare script has no handler and an
+    # effective level of WARNING, so every observed attempt is discarded at process exit.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
     now = datetime.now(UTC)
     with psycopg.connect(settings.database_url) as conn:
@@ -194,7 +226,9 @@ def main(argv: list[str] | None = None) -> int:
             "environment": "demo",
             "documented_max_lookback_days": _MAX_LOOKBACK.days,
             "control_lookback_days": _CONTROL_LOOKBACK.days,
-            "openapi_version": "v1.375.0",
+            # Read from the committed document rather than typed: a hand-written version
+            # here would go stale the moment the census is re-pinned.
+            "openapi_version": json.loads(pathlib.Path(SOURCE_FIXTURE).read_text())["info"]["version"],
         },
         "arms": arms,
     }

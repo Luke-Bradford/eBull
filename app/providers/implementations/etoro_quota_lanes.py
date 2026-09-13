@@ -366,6 +366,21 @@ CALL_SITES: tuple[CallSite, ...] = (
         20,
         membership_ambiguous=True,
     ),
+    # --- lane G on the READ clock: closed-position event counts --------------
+    # No env segment and no parameters: the operation answers for the caller's
+    # gateway GCID.  Reached only by `scripts/probe_2991_history_lookback.py`
+    # today, which is precisely why it is recorded — `etoro_request_log`
+    # classifies an observed request by matching this table, so an unrecorded
+    # endpoint draws on lane G as `unclassified` and the census undercounts it.
+    CallSite(
+        _BROKER,
+        "get_closed_position_event_counts",
+        "_http_read",
+        "GET",
+        "/api/v1/data/positions/closed-events/history",
+        "G_default_shared",
+        60,
+    ),
     # --- lane F: market data (7 templates, 8 call expressions) --------------
     CallSite(
         _MARKET, "get_tradable_instruments", "_http", "GET", "/api/v1/market-data/instruments", "F_market_data", 60
@@ -397,7 +412,7 @@ CALL_SITES: tuple[CallSite, ...] = (
 # serve several templates.  A new endpoint moves these numbers and fails the
 # drift test until its lane is recorded above.
 EXPRESSION_COUNTS: dict[tuple[str, str], int] = {
-    (_BROKER, "_http_read"): 5,
+    (_BROKER, "_http_read"): 6,
     (_BROKER, "_http_write"): 7,
     # One expression, inside a `while True` — so this count says nothing about
     # how many REQUESTS one logical call issues.  That is the whole reason the

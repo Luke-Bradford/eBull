@@ -55,8 +55,11 @@ EventSource = Literal["etoro_sync", "etoro_history"]
 # `minDate` per batch)"*. That windowing is not implementable here — the operation takes
 # `x-request-id`, `minDate` (required), `page` and `pageSize` and **no upper-bound date
 # parameter**, so every request ends at the present and advancing `minDate` only SHRINKS
-# the returned set. A compliant request can therefore reach back 364 days at most, and
-# ledger §4's synthesized-open transform needs the whole account lifetime in one batch.
+# the returned set. A compliant request can therefore reach back 364 days at most — and
+# ledger §4's synthesized-open transform sums every slice of a never-seen position, so the
+# batch has to contain slices older than that. ⚠ The constraint is REACH, not one request:
+# several requests could be aggregated before ingest, but with no upper bound the only
+# request that reaches a slice older than 364 days is an over-length one.
 #
 # Measured on demo 2026-09-13 rather than assumed: the over-length request was served,
 # and it returned a close far outside a one-year cap — which falsifies the only reading

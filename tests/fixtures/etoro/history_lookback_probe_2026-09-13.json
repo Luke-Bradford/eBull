@@ -1,7 +1,7 @@
 {
   "_meta": {
     "refs": "#2991",
-    "observed_at": "2026-09-13T21:49:19.704200+00:00",
+    "observed_at": "2026-09-13T22:10:09.215199+00:00",
     "environment": "demo",
     "documented_max_lookback_days": 364,
     "control_lookback_days": 363,
@@ -10,7 +10,7 @@
   "arms": [
     {
       "arm": "A_epoch_deep_backfill",
-      "requested_at": "2026-09-13T21:49:19.751480+00:00",
+      "requested_at": "2026-09-13T22:10:09.255038+00:00",
       "min_date": "2017-01-01T00:00:00+00:00",
       "lookback_days": 3542,
       "exceeds_documented_max": true,
@@ -19,20 +19,36 @@
       "position_ids": [
         3308442654
       ],
+      "slices": [
+        [
+          3308442654,
+          "2025-11-14T19:24:35.307000+00:00",
+          "82.135523",
+          "1910.47"
+        ]
+      ],
       "min_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
       "max_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
       "max_close_minus_min_date_days": 3239
     },
     {
       "arm": "B_within_documented_max",
-      "requested_at": "2026-09-13T21:49:20.287728+00:00",
-      "min_date": "2025-09-15T21:49:20.287728+00:00",
+      "requested_at": "2026-09-13T22:10:09.514789+00:00",
+      "min_date": "2025-09-15T22:10:09.514789+00:00",
       "lookback_days": 363,
       "exceeds_documented_max": false,
       "outcome": "ok",
       "row_count": 1,
       "position_ids": [
         3308442654
+      ],
+      "slices": [
+        [
+          3308442654,
+          "2025-11-14T19:24:35.307000+00:00",
+          "82.135523",
+          "1910.47"
+        ]
       ],
       "min_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
       "max_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
@@ -42,14 +58,7 @@
       "arm": "C_closed_event_counts",
       "path": "/api/v1/data/positions/closed-events/history",
       "outcome": "ok",
-      "status_code": 200,
-      "rate_limit_headers": {
-        "ratelimit-limit": "60",
-        "ratelimit-policy": "60;w=60",
-        "ratelimit-remaining": "57",
-        "ratelimit-reset": "56"
-      },
-      "body": [
+      "counts": [
         {
           "closeYear": 2021,
           "assetType": "Commodities",
@@ -110,7 +119,8 @@
           "assetType": "Stocks",
           "closedPositionEvents": 5
         }
-      ]
+      ],
+      "total_closed_position_events": 301
     }
   ]
 }
