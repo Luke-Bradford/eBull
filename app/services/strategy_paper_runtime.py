@@ -32,7 +32,11 @@ from app.services.strategy_opportunity_ranker import (
     persist_ranking_batch,
     rank_positive_opportunities,
 )
-from app.services.strategy_order_reconciliation import enforce_reconciliation_slo, reconcile_backlog
+from app.services.strategy_order_reconciliation import (
+    count_unresolved_order_identity,
+    enforce_reconciliation_slo,
+    reconcile_backlog,
+)
 from app.services.strategy_paper_executor import execute_fired_paper_signal
 from app.services.strategy_position_manager import manage_owned_position
 
@@ -215,7 +219,33 @@ def _set_block(conn: psycopg.Connection[Any], *, source: str, active: bool, reas
 def refresh_strategy_health(
     conn: psycopg.Connection[Any], *, broker: BrokerProvider, now: datetime | None = None
 ) -> int:
-    """Refresh bounded current health state for enabled paper deployments."""
+    """Refresh bounded current health state for enabled paper deployments.
+
+    ⚠⚠ FOUR of the five gates are scoped to enabled paper deployments and clear
+    when none exists.  ``order_reconciliation`` is NOT, and the difference is
+    #2961: unresolved order identity is a property of the ORDERS, and the core
+    arm has orders without ever having a ``strategy_deployments`` row.  In
+    today's core-only configuration (measured 2026-09-13: zero enabled paper
+    deployments) the blanket clear wrote ``active=false`` / *"no enabled paper
+    strategy deployment requires this health gate"* over a database that could
+    hold a core order nothing can resolve — a sentence true about deployments
+    and false about the system.
+
+    ⚠ This is an OBSERVABILITY fix and deliberately not described as a safety
+    one.  A new core authority is already refused by ``core_trade_in_flight``
+    (#2949 scenario 2), and with no enabled deployment there are no alpha entries
+    to block, so nothing was ever admitted by the false clear.  What was lost was
+    the operator's only signal that the core arm is stuck.
+
+    ⚠⚠ The core-only branch keys on PRESENCE, not on an age, and that is forced
+    rather than chosen: ``strategy_core_mandate_events`` carries no
+    reconciliation-age column (checked), so there is no declared threshold for
+    this arm and none is invented here.  Presence is STRICTER than the policy
+    branch's age rule — it fires the moment a row is non-terminal — which is the
+    fail-closed direction and costs nothing, because the block gates entries that
+    this configuration cannot make anyway.  When a paper deployment IS enabled the
+    policy branch runs and the declared age governs, unchanged.
+    """
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -233,10 +263,10 @@ def refresh_strategy_health(
         policy = cur.fetchone()
     assert policy is not None
     if policy["reconciliation_age"] is None:
+        unresolved = count_unresolved_order_identity(conn)
         conn.commit()
         with conn.transaction():
             for source in (
-                "order_reconciliation",
                 "scan_freshness",
                 "quote_freshness",
                 "broker_availability",
@@ -248,7 +278,18 @@ def refresh_strategy_health(
                     active=False,
                     reason="no enabled paper strategy deployment requires this health gate",
                 )
-        return 0
+            _set_block(
+                conn,
+                source="order_reconciliation",
+                active=unresolved > 0,
+                reason=(
+                    f"{unresolved} strategy order(s) have unresolved broker identity and no enabled "
+                    "paper deployment declares a reconciliation age, so no age threshold applies"
+                    if unresolved
+                    else "no strategy order has unresolved broker identity"
+                ),
+            )
+        return 1 if unresolved else 0
 
     reconciliation = enforce_reconciliation_slo(conn, max_unresolved_seconds=int(policy["reconciliation_age"]))
     conn.commit()
