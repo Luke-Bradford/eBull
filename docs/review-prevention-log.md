@@ -5809,3 +5809,56 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   `tests/test_etoro_quota_lanes.py::test_history_floor_reserves_one_request_of_lane_g_headroom`,
   whose docstring states that the neighbouring floor test is tautological for that site and
   must not be deleted as redundant.
+
+### A THROTTLE paces, a LANE MAP accounts — routing through the throttled client does not make a request counted (#2991, 2026-09-13)
+
+- Symptom: a probe reached an eToro endpoint through `provider._http_read` rather than a
+  provider method, on the reasoning that "`_http_read` is used, not bypassed, so the shared
+  throttle still applies". True, and beside the point. `etoro_request_log` classifies an
+  observed request by matching its path against `etoro_quota_lanes.CALL_SITES`, so a path
+  absent from that table records as `unclassified` — the requests were paced correctly and
+  counted against nothing. The #2946 census undercounted lane G by exactly the traffic the
+  change added, and every artefact still looked healthy.
+- Root cause: two mechanisms that both sit on the client and are easy to conflate. Pacing is
+  a property of the CLIENT the call rides; accounting is a property of the MAP the path
+  appears in. Using the right client satisfies one and is silent about the other.
+- Prevention: before reaching any eToro path outside a provider method, check
+  `etoro_quota_lanes.CALL_SITES` for the path template. If it is absent, add it — entry +
+  bump `EXPRESSION_COUNTS[(module, client_attr)]` + re-run
+  `PYTHONPATH=. uv run python -m scripts.refresh_2946_openapi_census --offline`. ⚠ Note
+  `CallSite`'s own definition is *"one endpoint template this repo reaches"*; a SCRIPT
+  reaches, so "nothing in `app/` calls it" does not exempt it. A precedent for a private-
+  client probe (`scripts/probe_2712_close_side_cost_quote.py`) is only a precedent when the
+  endpoint it reaches is ALREADY mapped — varying an already-mapped endpoint's payload
+  and introducing an unmapped endpoint have different accounting consequences.
+- ⚠ Verify by running it: a correctly mapped call logs `lane=… src=… path=…` on
+  `app.etoro.requests`. A bare script also needs `logging.basicConfig(level=logging.INFO)`,
+  or those lines have no handler and die at process exit — which looks identical to a call
+  that was never made.
+- Generalises to: any "did I use the right wrapper" question where the wrapper does two
+  jobs — rate limiting vs metering, retry vs tracing, auth vs audit.
+- Enforced in: this prevention log; the `get_closed_position_event_counts` docstring;
+  `tests/test_2991_closed_event_counts.py::test_counts_are_parsed_and_the_request_lands_on_the_read_lane`.
+
+### An OpenAPI guard that reads `op["parameters"]` is bypassable — path-item parameters are INHERITED (#2991, 2026-09-13)
+
+- Symptom: a guard asserting the eToro trade-history operation's whole parameter set — the
+  live trigger for "an upper-bound parameter appeared, so the windowing fix is now
+  buildable" — read `load_operations(spec)[key]["parameters"]`. Codex added a `maxDate` at
+  the PATH-ITEM level and the guard still passed. OpenAPI 3 applies a path-item `parameters`
+  entry to every operation under that path unless overridden by name+location, so the
+  injected parameter was fully in effect and entirely invisible to the assertion.
+- Root cause: `scripts/refresh_2946_openapi_census.load_operations` returns the operation
+  object, which is the right shape for a rate-limit census and the wrong one for a parameter
+  contract. The helper is not wrong; reusing it for a different question was.
+- Prevention: resolve parameters as `operation.parameters + [p for p in
+  path_item.parameters if (name, in) not in operation's]` before asserting anything about
+  them. ⚠ And write the test-for-the-test: inject the parameter you are guarding against at
+  the inheriting level and assert it SURFACES. A guard nobody has tried to defeat is a guard
+  with an unknown blast radius — this one was defeated on the first attempt.
+- Generalises to: any spec/config format with inheritance or merge semantics — JSON Schema
+  `allOf`, Kubernetes defaults, `.editorconfig` cascades, Docker Compose `extends`, and
+  OpenAPI `$ref` + webhooks/components reuse.
+- Enforced in: this prevention log;
+  `tests/test_2991_history_lookback_contract.py::_effective_parameters` +
+  `::test_the_parameter_guard_sees_a_path_level_parameter`.
