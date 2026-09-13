@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -201,16 +202,39 @@ class EtoroBrokerProvider(BrokerProvider):
         # Separate throttle rates for reads (GET 60/min) and writes (POST 20/min).
         # Both share the same _last_request_at timestamp so interleaved
         # GET+POST calls cannot exceed the API's combined rate limit.
+        #
+        # ⚠⚠ #2946: sharing the CLOCK without sharing the LOCK is the #726
+        # check-and-write race, reintroduced across the two instances that share it.
+        # `ResilientClient.__init__` states the contract (`resilient_client.py:86-95`):
+        # *"providers sharing a `shared_last_request` list also need to share this lock
+        # to keep the throttle atomic across instances"*.  Measured before the fix: four
+        # concurrent acquisitions across the pair produced a gap of 0.000s against a
+        # 0.5s floor, i.e. two requests fired at once.  Five sibling call sites already
+        # pass the lock (`etoro.py:130`, `finra_regsho.py:87`,
+        # `finra_short_interest.py:99`, `sec_edgar.py:315,323`); this was the only eToro
+        # provider that did not.
+        #
+        # ⚠ Accepted cost: `_throttle_and_stamp` sleeps INSIDE the lock, so a write
+        # holding it across its 3.5s sleep blocks a read that owed 1.1s -- up to 2.4s of
+        # head-of-line blocking per write.  Deliberate: it is OVER-restriction (the safe
+        # direction), writes are per-submission while reads are the frequent path, and a
+        # 429's `Retry-After` costs more than 2.4s.  A reserve-then-sleep-outside gate
+        # would remove the blocking and was REJECTED -- it lets a research burst book the
+        # shared horizon arbitrarily far ahead, starving reconciliation behind the queue,
+        # which is unbounded and strictly worse.  See the spec.
         shared_ts: list[float] = [0.0]
+        shared_throttle_lock = threading.Lock()
         self._http_read = ResilientClient(
             self._client,
             min_request_interval_s=_ETORO_READ_INTERVAL_S,
             shared_last_request=shared_ts,
+            shared_throttle_lock=shared_throttle_lock,
         )
         self._http_write = ResilientClient(
             self._client,
             min_request_interval_s=_ETORO_WRITE_INTERVAL_S,
             shared_last_request=shared_ts,
+            shared_throttle_lock=shared_throttle_lock,
         )
 
         # Environment-scoped path prefixes for trading endpoints.
