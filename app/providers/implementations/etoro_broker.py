@@ -62,6 +62,7 @@ from app.providers.broker import (
     OrderParams,
     OrderStatus,
 )
+from app.providers.implementations.etoro_request_log import attempt_observer
 from app.providers.resilient_client import ResilientClient
 from app.security.unattended_guard import refuse_broker_mutation_if_unattended
 
@@ -224,17 +225,23 @@ class EtoroBrokerProvider(BrokerProvider):
         # which is unbounded and strictly worse.  See the spec.
         shared_ts: list[float] = [0.0]
         shared_throttle_lock = threading.Lock()
+        # #2946 step 3 item 3: per-ATTEMPT observers, wired at CONSTRUCTION.  Wrapping
+        # `.get()` / `.post()` instead would count logical calls and miss every retry --
+        # and a retry places its own stamp in a rolling-window quota, which is the
+        # quantity the instrumentation exists to observe.
         self._http_read = ResilientClient(
             self._client,
             min_request_interval_s=_ETORO_READ_INTERVAL_S,
             shared_last_request=shared_ts,
             shared_throttle_lock=shared_throttle_lock,
+            on_attempt=attempt_observer("broker_read", env),
         )
         self._http_write = ResilientClient(
             self._client,
             min_request_interval_s=_ETORO_WRITE_INTERVAL_S,
             shared_last_request=shared_ts,
             shared_throttle_lock=shared_throttle_lock,
+            on_attempt=attempt_observer("broker_write", env),
         )
 
         # Environment-scoped path prefixes for trading endpoints.

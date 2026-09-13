@@ -60,6 +60,7 @@ def etoro_candles_probe(
     import httpx
 
     from app.config import settings
+    from app.providers.implementations.etoro_request_log import issue_raw_request
     from app.services.broker_credentials import load_credential_for_provider_use
     from app.services.operators import sole_operator_id
 
@@ -93,7 +94,9 @@ def etoro_candles_probe(
     )
     headers = {"x-api-key": api, "x-user-key": user, "x-request-id": str(uuid.uuid4())}
     with httpx.Client(timeout=15.0) as c:
-        r = c.get(url, headers=headers)
+        # #2946 step 3 item 3 — accounts for the attempt before the non-200 early
+        # return below, and for a raised request too.
+        r = issue_raw_request(c, "GET", url, src="debug_ws_candles", env=settings.etoro_env, headers=headers)
         if r.status_code != 200:
             return {"status": r.status_code, "body": r.text[:500]}
         body = r.json()
@@ -123,6 +126,7 @@ def etoro_instrument_raw(request: Request, instrument_id: int = 1699) -> dict:
     import httpx
 
     from app.config import settings
+    from app.providers.implementations.etoro_request_log import issue_raw_request
     from app.services.broker_credentials import load_credential_for_provider_use
     from app.services.operators import sole_operator_id
 
@@ -151,10 +155,11 @@ def etoro_instrument_raw(request: Request, instrument_id: int = 1699) -> dict:
         conn.commit()
 
     headers = {"x-api-key": api, "x-user-key": user, "x-request-id": str(uuid.uuid4())}
+    instruments_url = f"{settings.etoro_base_url}/api/v1/market-data/instruments"
     with httpx.Client(timeout=20.0) as c:
-        r = c.get(
-            f"{settings.etoro_base_url}/api/v1/market-data/instruments",
-            headers=headers,
+        # #2946 step 3 item 3 — see the candle probe above.
+        r = issue_raw_request(
+            c, "GET", instruments_url, src="debug_ws_instruments", env=settings.etoro_env, headers=headers
         )
         if r.status_code != 200:
             return {"status": r.status_code, "body": r.text[:500]}

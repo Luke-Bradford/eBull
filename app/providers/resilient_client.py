@@ -19,6 +19,7 @@ import logging
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
@@ -42,6 +43,42 @@ _DEFAULT_BACKOFF = (1.0, 2.0, 4.0)
 # above this are truncated in-place; oversized payloads (e.g. an HTML
 # 502 page from a CDN) would otherwise blow up log lines.
 _BODY_PREVIEW_LIMIT = 200
+
+
+@dataclass(frozen=True)
+class RequestAttempt:
+    """One HTTP attempt this client actually issued (#2946 step 3 item 3).
+
+    Per ATTEMPT, not per logical call: a rolling-window quota counts stamps and a
+    retry places one, so a retry is a separate record.
+
+    ⚠ This is evidence that we ISSUED traffic, not proof that a remote quota was
+    spent.  A connect-pool failure may never reach the server, and how a server
+    accounts for a request it rejected is not observable from here.
+
+    ``status`` is ``None`` exactly when ``send()`` raised.  ⚠ ``httpx.Client.send``
+    reads the body before returning, so a body-read failure on an already-received
+    response also lands here -- a 429 can hide behind ``status=None``.
+
+    ``pre_request_wait_s`` is wall-clock around the whole throttle step, so it covers
+    the ``RateGate`` branch as well as the shared-clock one.  It is **wait before
+    send, lock contention included** -- not sleep time -- and it excludes retry
+    backoff, which is spent after this record is emitted.
+
+    ⚠⚠ ``ts`` is when the attempt was ISSUED, captured immediately before ``send()``
+    and carried through both outcomes.  Stamping it on COMPLETION instead would make
+    the rolling-window count a function of response latency: two requests dispatched
+    at 0s and 59s but completing at 0s and 61s would report a maximum of one per
+    minute when the quota saw two.  A quota counts dispatches.
+    """
+
+    ts: datetime
+    method: str
+    url: str
+    status: int | None
+    error: str | None
+    pre_request_wait_s: float
+    attempt: int
 
 
 class ResilientClient:
@@ -72,6 +109,7 @@ class ResilientClient:
         shared_throttle_lock: threading.Lock | None = None,
         gate: RateGate | None = None,
         on_429: Callable[[], None] | None = None,
+        on_attempt: Callable[[RequestAttempt], None] | None = None,
     ) -> None:
         self._client = client
         self._min_interval = min_request_interval_s
@@ -101,6 +139,11 @@ class ResilientClient:
         # providers wire this — ResilientClient itself has no knowledge of
         # the counter (it's a generic class shared by non-SEC providers).
         self._on_429 = on_429
+        # #2946 step 3 item 3: optional per-ATTEMPT observer.  eToro providers wire
+        # this and deliberately do NOT wire ``on_429`` -- ``on_attempt`` already sees
+        # every 429, and wiring both would double-count.  With ``on_attempt=None``
+        # the request path is exactly what it was before this parameter existed.
+        self._on_attempt = on_attempt
 
     # ------------------------------------------------------------------
     # Public API — mirrors httpx.Client.get / .post
@@ -140,9 +183,15 @@ class ResilientClient:
     # Internal
     # ------------------------------------------------------------------
 
-    def _throttle_and_stamp(self) -> None:
+    def _throttle_and_stamp(self) -> float:
         """Sleep if needed to enforce the inter-request floor, then
-        advance the shared timestamp atomically.
+        advance the shared timestamp atomically.  Returns the wall-clock
+        seconds spent here.
+
+        ⚠ The return value is NOT sleep time.  It is the whole wait before the
+        request goes out, so it includes lock contention behind another caller
+        and any work a ``RateGate`` does.  #2946 step 3 item 3 reports it under
+        that name; callers must not read it as "how long the floor made us wait".
 
         Pre-#726 this was a separate ``_throttle`` step + an
         unsynchronised ``_last_request_at[0] = ...`` write at the
@@ -153,18 +202,60 @@ class ResilientClient:
         across N concurrent callers — at most one thread is firing
         a request per ``min_request_interval_s``.
         """
+        # ⚠ Read BEFORE the lock: waiting behind another caller is the thing worth
+        # measuring here (``etoro_broker.py`` documents up to 2.4s of head-of-line
+        # blocking behind a write's 3.5s sleep).  Every branch reuses its existing
+        # clock read for the end point, so this adds exactly one read per request.
+        started = time.monotonic()
         if self._gate is not None:
             self._gate.acquire()
-            return
+            return time.monotonic() - started
         if self._min_interval <= 0:
             with self._throttle_lock:
-                self._last_request_at[0] = time.monotonic()
-            return
+                now = time.monotonic()
+                self._last_request_at[0] = now
+            return now - started
         with self._throttle_lock:
             elapsed = time.monotonic() - self._last_request_at[0]
             if elapsed < self._min_interval:
                 time.sleep(self._min_interval - elapsed)
-            self._last_request_at[0] = time.monotonic()
+            now = time.monotonic()
+            self._last_request_at[0] = now
+        return now - started
+
+    def _record_attempt(
+        self,
+        method: str,
+        url: str,
+        status: int | None,
+        error: str | None,
+        pre_request_wait_s: float,
+        attempt: int,
+        issued_at: datetime,
+    ) -> None:
+        """Hand one attempt to the observer.  Never raises, never blocks on a lock.
+
+        Called after the throttle lock has already been released, so an observer
+        cannot serialise unrelated lanes or deadlock by re-entering the client.  An
+        observer that raises is logged and swallowed: instrumentation must not be
+        able to fail a request.
+        """
+        if self._on_attempt is None:
+            return
+        try:
+            self._on_attempt(
+                RequestAttempt(
+                    ts=issued_at,
+                    method=method,
+                    url=url,
+                    status=status,
+                    error=error,
+                    pre_request_wait_s=pre_request_wait_s,
+                    attempt=attempt,
+                )
+            )
+        except Exception:
+            logger.warning("on_attempt observer raised for %s %s", method, url, exc_info=True)
 
     def _request(
         self,
@@ -183,7 +274,7 @@ class ResilientClient:
         last_response: httpx.Response | None = None
 
         for attempt in range(1 + self._max_retries):
-            self._throttle_and_stamp()
+            wait_s = self._throttle_and_stamp()
 
             request = self._client.build_request(
                 method,
@@ -192,7 +283,19 @@ class ResilientClient:
                 headers=headers,
                 json=json,
             )
-            response = self._client.send(request)
+            # ⚠ The observer is called IMMEDIATELY around ``send`` and nowhere else.
+            # This loop exits three ways -- ``return`` on a non-retryable status,
+            # ``continue`` on a retry, and ``raise_for_status()`` on the final
+            # retryable attempt -- so a loop-tail hook would miss the exhausted-retry
+            # attempt, which is the one a quota question cares about most.  Nothing is
+            # recorded when ``build_request`` or the gate raises: no request went out.
+            issued_at = datetime.now(UTC)
+            try:
+                response = self._client.send(request)
+            except Exception as exc:
+                self._record_attempt(method, url, None, type(exc).__name__, wait_s, attempt, issued_at)
+                raise
+            self._record_attempt(method, url, response.status_code, None, wait_s, attempt, issued_at)
 
             if response.status_code == 429 or response.status_code in _RETRYABLE_5XX:
                 last_response = response

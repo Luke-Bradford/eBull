@@ -5728,3 +5728,48 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   (asserts the DERIVATION, not just inequality, so a coincidence cannot satisfy it) + the
   ⚠⚠ block on `CORE_ELIGIBILITY_REQUEST_INTERVAL_S` in
   `app/services/strategy_core_eligibility.py`.
+
+### An observability timestamp taken at COMPLETION cannot measure a rate (#2946, 2026-09-13)
+
+- Symptom: per-request eToro instrumentation stamped each attempt when `send()` returned,
+  then fed those timestamps to a rolling-60s counter meant to be compared against a
+  documented per-minute quota. Two requests DISPATCHED at 0s and 59s but COMPLETING at 0s
+  and 61s report a maximum of one per minute; the quota saw two.
+- Root cause: "when did this happen" has two answers and only one of them is the rate's
+  clock. A quota counts dispatches, so the record has to be stamped immediately before the
+  send and carried through both the return and the raise path. Stamping on completion makes
+  the measurement a function of response latency — and it under-reports hardest exactly when
+  latency is worst, i.e. when the server is under load and the number matters most.
+- Prevention: for any counter compared against a rate limit, capture the timestamp at the
+  moment the event is EMITTED, before the call that can block, and pass it down. Never let
+  the observer call `now()` for itself — by then it is measuring its own position in the
+  call stack. Same rule for a log line: carry `ts` as a FIELD rather than relying on the log
+  handler's prefix, or two processes with different formats cannot be merged at all.
+- Generalises to: request-rate metrics, queue-arrival histograms, any "N per window" audit
+  built from logs, and any latency attribution that reuses one timestamp for two questions.
+- Enforced in: this prevention log; `ResilientClient.RequestAttempt`'s ⚠⚠ block +
+  `tests/test_2946_etoro_request_log.py::test_the_recorded_timestamp_is_issuance_not_completion`,
+  which asserts the recorded stamp precedes `send()` ENTERING.
+
+### Instrumenting a call site half-covers it unless BOTH exits record (#2946, 2026-09-13)
+
+- Symptom: four raw `httpx` eToro call sites were instrumented by adding a record call after
+  the request. Each records a non-200 correctly — but if the request RAISES, execution jumps
+  to the existing `except httpx.HTTPError` handler and nothing is recorded. A read timeout
+  arriving after eToro received the request therefore vanished from the attempt total, which
+  is precisely the failure mode the census had named as uncounted.
+- Root cause: a call site has more exits than the happy one, and a per-site "remember to add
+  the record" recipe gets each site right on the exit the author was looking at. The
+  throttled path got this right only because its recording lives inside one shared client.
+- Prevention: when instrumenting N call sites, write ONE helper that owns the call and both
+  exits, and route every site through it — then guard with an AST test that the direct call
+  shape has **zero** occurrences in those modules, so a new site cannot quietly reintroduce
+  the half-covered pattern. ⚠ Adding such a helper can silently empty an existing AST drift
+  guard that counted the direct shape (it did here); extend that guard rather than leaving it
+  passing on a count of zero.
+- Generalises to: metrics, audit rows, spans, rate accounting, retry bookkeeping — anything
+  added at more than one call site where the interesting case is the failure.
+- Enforced in: this prevention log; `etoro_request_log.issue_raw_request` +
+  `tests/test_etoro_quota_lanes.py::test_raw_httpx_call_counts_match_the_known_bypass_list`
+  (asserts `direct == 0` and `via_helper == expected`) +
+  `tests/test_2946_etoro_request_log.py::test_issue_raw_request_records_a_transport_failure_and_re_raises`.
