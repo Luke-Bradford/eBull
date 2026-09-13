@@ -5862,3 +5862,33 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Enforced in: this prevention log;
   `tests/test_2991_history_lookback_contract.py::_effective_parameters` +
   `::test_the_parameter_guard_sees_a_path_level_parameter`.
+
+### A CLEAN working tree is not "nothing to lose", and `--ff-only` exits 0 without moving HEAD (#2607, 2026-09-13)
+
+- Symptom: a start-of-iteration re-sync for the unattended loop driver checked
+  `git status --porcelain`, found it empty, and moved the checkout onto `origin/main`.
+  Two failures, both reproduced against a green nine-test suite: (1) a crashed iteration
+  can leave **committed** work on a **detached HEAD**, where the tree is clean and the
+  files are deleted by the checkout while the commits survive only in the reflog; (2)
+  when the local branch is **ahead** of the target, `git merge --ff-only <target>` exits
+  **0 without moving HEAD** ("already up to date"), so a status line derived from that
+  exit code announced `RESYNCED` while the agent ran on local-only commits.
+- Root cause: "clean" answers a question about the INDEX and the working tree, and says
+  nothing about commits. And a git verb's exit status answers "did the command decline",
+  not "did the ref move" — two different questions that coincide often enough to look
+  like one.
+- Prevention: before moving any checkout, assert the target is a DESCENDANT of the
+  current HEAD — `git merge-base --is-ancestor HEAD <target>` — which is the single
+  property both failures violate. Then verify the move happened by comparing
+  `git rev-parse HEAD` against the target AFTERWARDS; never infer it from the exit
+  status of `checkout`, `merge`, `reset` or `pull`.
+- ⚠ The same shape elsewhere: `git pull --ff-only` in a script, `git checkout <branch>`
+  after a failed rebase, and any cleanup step that treats `status --porcelain` as
+  "safe to discard". The gotchas archive already carries the sibling where
+  `git reset --soft origin/main` reverted a merged PR.
+- Generalises to: any automated VCS mutation in a driver, hook or CI step — and to the
+  wider class of "the command returned 0" standing in for "the state I wanted is true".
+- Enforced in: this prevention log; `scripts/autonomy/ta_loop.sh::sync_worktree` (the
+  ancestor guard and the post-move verification, both with the ⚠⚠ note);
+  `tests/test_ta_loop_worktree_sync.py::test_a_committed_but_unpushed_detached_head_is_never_checked_away`
+  and `::test_a_main_ahead_of_the_remote_is_not_reported_as_re_synced`.
