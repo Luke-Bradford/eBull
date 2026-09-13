@@ -510,6 +510,41 @@ def test_an_offline_rewrite_refuses_when_the_source_fixture_no_longer_matches(
     assert json.loads(artefact_path.read_text()) == original, "the artefact was rewritten despite the refusal"
 
 
+def test_a_transport_failure_reports_cleanly_instead_of_raising(
+    tmp_path: pathlib.Path, monkeypatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A Cloudflare 403, a timeout or a 5xx must not surface as a traceback.
+
+    ⚠ ``httpx`` is imported lazily inside ``_fetch`` so ``--offline`` needs no network
+    stack, which means ``main``'s handler cannot name an ``httpx`` type — the wrapping has
+    to happen at the fetch boundary. The script promises "nothing was written"; a
+    traceback does not say that.
+    """
+    import httpx
+
+    from scripts import refresh_2946_openapi_census as module
+
+    monkeypatch.setattr(module, "ARTEFACT", tmp_path / "census.json")
+    real_fetch = module._fetch  # captured BEFORE the stub replaces the module attribute
+
+    def _boom() -> bytes:
+        raise CensusError("GET … failed (ConnectTimeout: timed out)")
+
+    monkeypatch.setattr(module, "_fetch", _boom)
+    assert module.main([]) == 1
+    assert "nothing was written" in capsys.readouterr().err
+
+    # …and the real wrapper is what turns an httpx error into that CensusError.
+    request = httpx.Request("GET", module.SOURCE_URL)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *_args, **_kwargs: httpx.Response(403, request=request, content=b"<html>Attention Required</html>"),
+    )
+    with pytest.raises(CensusError, match="returned HTTP 403"):
+        real_fetch()
+
+
 def test_an_operation_reached_from_both_inventories_must_agree_on_its_lane(spec: dict[str, Any], monkeypatch) -> None:
     """The overlap is real, so a disagreement across it has to be an error.
 

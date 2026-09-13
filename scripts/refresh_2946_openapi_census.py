@@ -340,20 +340,33 @@ def extract_sha256(extract: dict[str, Any]) -> str:
 
 
 def _fetch() -> bytes:
+    """Fetch the document, or raise ``CensusError``.
+
+    ⚠ Every transport failure is wrapped HERE rather than caught in ``main``. Two reasons:
+    ``httpx`` is imported lazily so an ``--offline`` run needs no network stack at all,
+    and ``main``'s handler would otherwise have to name an exception type from a module it
+    does not import. A Cloudflare 403, a timeout or a 5xx would then surface as an
+    unhandled traceback instead of the "nothing was written" line this script promises.
+    """
     import httpx  # imported here so --offline needs no network stack at all
 
     user_agent = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     )
-    response = httpx.get(
-        SOURCE_URL,
-        headers={"User-Agent": user_agent, "Accept": "application/json"},
-        timeout=60.0,
-        follow_redirects=True,
-    )
-    response.raise_for_status()
-    body = response.content
+    try:
+        response = httpx.get(
+            SOURCE_URL,
+            headers={"User-Agent": user_agent, "Accept": "application/json"},
+            timeout=60.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        body = response.content
+    except httpx.HTTPStatusError as exc:
+        raise CensusError(f"GET {SOURCE_URL} returned HTTP {exc.response.status_code}") from exc
+    except httpx.HTTPError as exc:
+        raise CensusError(f"GET {SOURCE_URL} failed ({type(exc).__name__}: {exc})") from exc
     if not body.lstrip().startswith(b"{"):
         # Cloudflare serves an HTML interstitial with a 200 — a JSON parse error here
         # would be reported as "malformed spec" and send the reader to the wrong place.
@@ -497,7 +510,10 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "source_fixture": _repo_relative(SOURCE_FIXTURE),
         },
-        "document_sha256": hashlib.sha256(body).hexdigest(),
+        # Reuses the local computed above — recomputing it is not merely redundant, it is
+        # a second chance for the stored hash to disagree with the one the offline-rewrite
+        # guard just compared against.
+        "document_sha256": document_sha256,
         "extract_sha256": extract_sha256(extract),
         **extract,
     }
