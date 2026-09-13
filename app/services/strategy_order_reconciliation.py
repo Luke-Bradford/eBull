@@ -58,14 +58,64 @@ RECONCILIATION_RETRY_CAP_SECONDS = 3450
 # first and this only ever guards the arithmetic.
 _RECONCILIATION_RETRY_EXPONENT_CAP = 30
 
-_KNOWN_PENDING_BROKER_STATES = frozenset({"Pending"})
+# Broker order status vocabulary. Source rule: the eToro live portal's documented
+# ``status.name`` enum for ``GET /api/v2/trading/info/{demo|real}/orders:lookup``
+# (portal slug ``trading--demo/get-order-information-and-position-details``,
+# OpenAPI v1.375.0, verified 2026-09-13 per
+# ``.claude/skills/data-sources/etoro-api.md``). The twelve documented values are:
+#   Received, Placed, Filled, Rejected, PartiallyFilled, PendingCancel, Canceled,
+#   Expired, CanceledPartiallyFilled, RejectedPartiallyFilled, WaitingForMarket,
+#   PendingTriggeredRate
+# An unrecognised status raises, and ``_apply_detail`` runs inside a handler that
+# records the non-terminal ``ambiguous`` state -- so every documented value left
+# out of these sets is a way for the broker to wedge an order (#2961, #2962).
+#
+# ``Pending``, ``Executed``, ``Failed`` and ``Cancelled`` are NOT in that enum but
+# are retained: nothing establishes that the demo connection never emits them, and
+# dropping one would be a narrowing change measured only on its admit side.
+_KNOWN_PENDING_BROKER_STATES = frozenset({"Pending", "Received", "Placed", "WaitingForMarket", "PendingTriggeredRate"})
 _KNOWN_FILLED_BROKER_STATES = frozenset({"Filled", "Executed"})
-_KNOWN_REJECTED_BROKER_STATES = frozenset({"Rejected", "Failed", "Cancelled", "Canceled"})
+_KNOWN_REJECTED_BROKER_STATES = frozenset({"Rejected", "Failed", "Cancelled", "Canceled", "Expired"})
+# Documented, and DELIBERATELY still unrecognised so they keep raising (#2965).
+# These four are exactly the non-``Filled`` statuses that can carry
+# ``positionExecutions``, so admitting one activates an ownership lifecycle that is
+# not settled: ``_apply_detail`` claims ownership unconditional on state (:341-348)
+# while ``strategy_engine_capital.load_engine_capital_authority`` refuses that
+# combination, and ``_record_execution``'s ON CONFLICT treats the opening facts as
+# immutable -- so if eToro grows one ``positionId`` across successive partial fills
+# rather than emitting a new one, admitting these creates a fresh wedge on the
+# second poll. Settling that needs a real partial fill observed against the broker.
+# See docs/proposals/execution/2026-09-13-partial-fill-ownership-and-status-vocabulary.md.
+_UNSETTLED_PARTIAL_FILL_BROKER_STATES = frozenset(
+    {"PartiallyFilled", "PendingCancel", "CanceledPartiallyFilled", "RejectedPartiallyFilled"}
+)
 _TERMINAL_RECONCILIATION_STATES = frozenset({"resolved", "rejected"})
 
 
 class StrategyReconciliationError(StrategyControlError):
     """The broker response cannot safely advance a strategy order."""
+
+
+def classify_broker_order_status(broker_status: str) -> tuple[ReconciliationState, str]:
+    """Map a broker ``status.name`` to its reconciliation state and order status.
+
+    Pure so the whole documented vocabulary can be asserted without a database.
+    Raises rather than guessing: an unrecognised status must never advance an
+    order, and the four partial-fill statuses get their own message because they
+    are a known open question rather than an unrecognised string.
+    """
+    if broker_status in _KNOWN_FILLED_BROKER_STATES:
+        return "resolved", "filled"
+    if broker_status in _KNOWN_REJECTED_BROKER_STATES:
+        return "rejected", "rejected"
+    if broker_status in _KNOWN_PENDING_BROKER_STATES:
+        return "pending", "pending"
+    if broker_status in _UNSETTLED_PARTIAL_FILL_BROKER_STATES:
+        raise StrategyReconciliationError(
+            f"broker order status {broker_status} may carry position executions and its "
+            "ownership lifecycle is unsettled (#2965)"
+        )
+    raise StrategyReconciliationError(f"unknown broker order status: {broker_status}")
 
 
 @dataclass(frozen=True)
@@ -318,17 +368,7 @@ def _apply_detail(
         raise StrategyReconciliationError("broker order id differs from the previously reconciled id")
 
     broker_status = detail.broker_status
-    if broker_status in _KNOWN_FILLED_BROKER_STATES:
-        state: ReconciliationState = "resolved"
-        order_status = "filled"
-    elif broker_status in _KNOWN_REJECTED_BROKER_STATES:
-        state = "rejected"
-        order_status = "rejected"
-    elif broker_status in _KNOWN_PENDING_BROKER_STATES:
-        state = "pending"
-        order_status = "pending"
-    else:
-        raise StrategyReconciliationError(f"unknown broker order status: {broker_status}")
+    state, order_status = classify_broker_order_status(broker_status)
 
     if prior_state in _TERMINAL_RECONCILIATION_STATES and prior_state != state:
         raise StrategyReconciliationError("broker order attempted to regress or change terminal state")
