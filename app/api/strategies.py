@@ -1192,7 +1192,9 @@ class StrategyPositionCloseResponse(BaseModel):
 
 
 StrategyTradeStatus = Literal["planned", "submitted", "open", "closing", "closed", "failed", "reconcile_required"]
-StrategyOperationStatus = Literal["intent_persisted", "submitted", "applied", "rejected", "reconcile_required"]
+StrategyOperationStatus = Literal[
+    "intent_persisted", "submitting", "submitted", "applied", "rejected", "reconcile_required"
+]
 StrategyReconciliationState = Literal[
     "unresolved", "pending", "resolved", "rejected", "not_found", "ambiguous", "error"
 ]

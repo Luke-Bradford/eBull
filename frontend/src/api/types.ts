@@ -3126,7 +3126,16 @@ export interface StrategyTradeLifecycle {
   latest_operation_id: number | null;
   latest_operation_order_id: number | null;
   latest_operation_trigger: string | null;
-  latest_operation_status: "intent_persisted" | "submitted" | "applied" | "rejected" | "reconcile_required" | null;
+  // "submitting" (#2979) means the broker verb was entered and its outcome is not
+  // yet known — distinct from "intent_persisted", which proves it never was.
+  latest_operation_status:
+    | "intent_persisted"
+    | "submitting"
+    | "submitted"
+    | "applied"
+    | "rejected"
+    | "reconcile_required"
+    | null;
   latest_operation_created_at: string | null;
   latest_operation_submitted_at: string | null;
   latest_operation_resolved_at: string | null;

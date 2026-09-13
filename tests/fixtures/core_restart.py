@@ -98,6 +98,12 @@ FaultPoint = Literal[
     # -- the EXIT lifecycle (round 2, matrix 7) -------------------------------
     # Named for the same boundary the entry faults are named for: what the
     # broker has been told, not which line of ours was executing.
+    #
+    # ⚠ `after_close_intent_before_marker` (round 3, #2979) is the ONLY one of the
+    # three that lands before `mark_close_submitting` commits.  The other two both
+    # land after it, which is why they are indistinguishable from each other on the
+    # marker alone and this one is not.
+    "after_close_intent_before_marker",
     "after_close_intent_before_submit",
     "after_close_accept",
 ]

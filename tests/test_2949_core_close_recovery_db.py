@@ -24,18 +24,27 @@ source before the first run rather than discovered by it.**
    entirely on ``_resume_operation`` (``:474``), reached from the paper cycle at
    ``strategy_paper_runtime.py:493``.
 2. In ``_resume_operation``, ``landed`` is hard-coded false for a close
-   (``:520`` — ``operation["operation_type"] != "close"`` is the first
-   conjunct).  So a crash straddling close submission always terminalises to
-   ``reconcile_required`` / ``crash_before_submission_identity``, whatever the
-   broker actually did.  ⚠ Its own comment gives the reason as "there is no
-   edit/close lookup by request UUID", and that is established about THIS
-   ADAPTER — ``get_demo_close_order`` takes an ``order_id`` and nothing else
-   (``app/providers/broker.py:700``).  Whether eToro could offer one was not
-   checked against the portal, so it is not a claim about the broker.
+   (``operation["operation_type"] != "close"`` is the first conjunct).  So a crash
+   straddling the broker call still terminalises to ``reconcile_required`` /
+   ``crash_before_submission_identity``, whatever the broker actually did.  ⚠ Its
+   own comment gives the reason as "there is no edit/close lookup by request UUID",
+   and that is established about THIS ADAPTER — ``get_demo_close_order`` takes an
+   ``order_id`` and nothing else (``app/providers/broker.py:700``).  Whether eToro
+   could offer one was not checked against the portal, so it is not a claim about
+   the broker.
 
 Fact 2 is why scenarios 7a and 7b produce the SAME operation row and yet have
 opposite consequences: the difference is entirely in what the broker did, which
 our side cannot observe.  Separating them is the point of this file.
+
+**Round 3 (#2979) narrowed fact 2 without removing it.** ``_submit_close`` commits
+``mark_close_submitting`` between the close intent and the broker call, so
+``intent_persisted`` now PROVES the verb was never entered and ``submitting`` proves
+only that it was.  That carves out scenario 7d — the genuinely unambiguous crash,
+which recovers cleanly — and leaves 7a and 7b reading the same ``submitting`` status
+as each other, because no observation available to us distinguishes those two.
+Resolving ``submitting`` is #2979's remaining half, blocked on the same
+``orders:lookup?referenceId=`` coverage question as #2961, #2965 and #2942 half 2.
 
 ⚠ No broker mutation.  The double is file-backed, the database is a disposable
 per-worker one, no credential is decrypted and no eToro adapter is imported.
@@ -305,7 +314,12 @@ def test_scenario_7a_close_intent_without_submission_costs_the_request_not_the_p
     assert all(not record.get("closed") for record in broker_state["orders"])
 
     crashed = close_state_report(ebull_test_conn)
-    assert crashed["close_statuses"] == ["intent_persisted"]
+    # ⚠ `submitting`, not `intent_persisted`, since #2979: this fault fires INSIDE
+    # `close_demo_strategy_position`, so `mark_close_submitting` has already
+    # committed.  The status is therefore honest about what we can prove — the verb
+    # WAS entered — and deliberately does not claim the stronger "never submitted"
+    # that 7c establishes.
+    assert crashed["close_statuses"] == ["submitting"]
     assert crashed["exit_orders"] == 1
     assert crashed["trade_statuses"] == ["closing"]
 
@@ -409,8 +423,11 @@ def test_scenario_7b_lost_close_acceptance_wedges_the_core_capital_reader(
     assert all(record.get("closed") for record in broker_state["orders"])
 
     crashed = close_state_report(ebull_test_conn)
-    # Indistinguishable from 7a on our side, which is the point.
-    assert crashed["close_statuses"] == ["intent_persisted"]
+    # Still indistinguishable from 7a, and that remains the point: both faults land
+    # AFTER `mark_close_submitting`, so both read `submitting`.  #2979's marker
+    # separates 7c from this pair; it does not separate 7a from 7b, because nothing
+    # on our side can.
+    assert crashed["close_statuses"] == ["submitting"]
     assert crashed["trade_statuses"] == ["closing"]
 
     broker = _restarted_engine_broker(core_world)
@@ -465,3 +482,94 @@ def test_scenario_7b_lost_close_acceptance_wedges_the_core_capital_reader(
     assert broker.read()["close_calls"] == 1
     assert broker.read()["mutation_calls"] == 1
     assert close_state_report(ebull_test_conn)["close_operations"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 7d — the close request died before the broker verb was ever entered (#2979)
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_7d_close_intent_before_the_marker_is_provably_unsubmitted(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Classification: SAFELY STOPPED, and PROVABLY SO — recovered with no cost.
+
+    The case #2979's marker exists to carve out of 7a/7b.  ``_submit_close`` now
+    commits ``mark_close_submitting`` between the close intent and the broker call,
+    so a crash in the gap between those two commits leaves ``intent_persisted`` —
+    and that is a fact about OUR write ordering, not an inference about the broker.
+
+    ⚠ The distinction this file could not draw before is exactly here.  7a and 7b
+    both land AFTER the marker and both read ``submitting``; nothing on our side
+    separates them, and #2979's remaining half is still open for that.  This
+    scenario is the distinct third case, and it is the one where the engine can say "the
+    broker never saw it" and be right by construction rather than by assumption.
+
+    So the recovery is clean rather than conservative: the request is abandoned,
+    the POSITION is untouched, and the trade returns to ``open`` — not to
+    ``reconcile_required``, which is what 7a pays and which the 7a docstring
+    already records as an observability cost.
+
+    ⚠ No second close is placed by the recovery.  Abandoning the request leaves a
+    fresh close to the scheduled cycle's own judgement; placing one from inside a
+    crash-recovery path would let a crash trigger a broker mutation.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+
+    process = _run_close_child(core_world, coordinates, fault="after_close_intent_before_marker")
+    assert process.returncode == SIGKILL_RETURNCODE
+    assert not (core_world / "result.json").exists()
+
+    # The broker was never reached, and the intent IS durable -- both halves
+    # matter, because a rolled-back intent would make the scenario vacuous.
+    broker_state = json.loads((core_world / "broker.json").read_text())
+    assert broker_state["close_calls"] == 0
+    assert broker_state["closes"] == []
+    assert all(not record.get("closed") for record in broker_state["orders"])
+
+    crashed = close_state_report(ebull_test_conn)
+    assert crashed["close_statuses"] == ["intent_persisted"]
+    assert crashed["exit_orders"] == 1
+    assert crashed["trade_statuses"] == ["closing"]
+
+    broker = _restarted_engine_broker(core_world)
+    resumed = _manage(ebull_test_conn, broker, coordinates)
+    assert resumed.state == "rejected"
+    assert resumed.reason_code == "close_never_submitted"
+    assert broker.read()["close_calls"] == 0
+
+    resolved = close_state_report(ebull_test_conn)
+    assert resolved["close_statuses"] == ["rejected"]
+    assert resolved["close_error_codes"] == ["close_never_submitted"]
+    assert resolved["exit_order_statuses"] == ["rejected"]
+    # The position is still owned and the trade is back to a manageable state --
+    # this is the difference from 7a, and it is the whole point of the marker.
+    assert resolved["active_ownership"] == 1
+    assert resolved["released_ownership"] == 0
+    assert resolved["trade_statuses"] == ["open"]
+    _assert_exit_order_is_invisible_to_the_backlog(ebull_test_conn, broker)
+
+    # Accounting is intact: the allocator resolves capital against a snapshot that
+    # still carries the owned position, and holds rather than raising.
+    held = _execute_core(ebull_test_conn, broker)
+    assert held.state == "held"
+    assert held.reason_code == "core_hold"
+
+    # And the exit is reachable on the next request, exactly once.
+    strategy_trade_id, broker_position_id = coordinates
+    reclosed = manage_owned_position(
+        ebull_test_conn,
+        broker=_provider(broker),
+        strategy_trade_id=strategy_trade_id,
+        broker_position_id=broker_position_id,
+        close_reason="operator_close",
+        now=CLOCK,
+    )
+    assert reclosed.state == "submitted"
+    assert reclosed.reason_code == "broker_close_accepted"
+    assert broker.read()["close_calls"] == 1
+    assert broker.read()["mutation_calls"] == 1
+    reopened = close_state_report(ebull_test_conn)
+    assert reopened["close_operations"] == 2
+    assert reopened["close_statuses"] == ["rejected", "submitted"]

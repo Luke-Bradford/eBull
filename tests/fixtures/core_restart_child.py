@@ -44,7 +44,21 @@ def _install_fault(fault: str) -> None:
     Wrapping puts the kill as late as this module can reach by name — the only
     statement still outstanding is the reconciliation-state INSERT two lines
     later, which is inside the same transaction and therefore rolls back with it.
+
+    ``after_close_intent_before_marker`` fires between the two committed writes of
+    ``_submit_close``: the close intent is durable, and ``mark_close_submitting``
+    has NOT run, so the broker verb was provably never entered.  It kills BEFORE
+    calling through rather than after, which is the whole point — calling through
+    first would commit the marker and produce the scenario it exists to exclude.
     """
+    if fault == "after_close_intent_before_marker":
+        from app.services import strategy_position_manager
+
+        def _die_before_marking(*_args: Any, **_kwargs: Any) -> None:
+            _kill_self()
+
+        strategy_position_manager.mark_close_submitting = _die_before_marking  # type: ignore[assignment]
+        return
     if fault != "before_authority_commit":
         return
     from app.services import strategy_core_executor
