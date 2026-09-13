@@ -423,7 +423,7 @@ def _terminal(
         """
         UPDATE strategy_position_operations
         SET status=%s, last_error_code=%s, resolved_at=now(), updated_at=now()
-        WHERE position_operation_id=%s AND status IN ('intent_persisted','submitted')
+        WHERE position_operation_id=%s AND status IN ('intent_persisted','submitting','submitted')
         """,
         (status, error_code, operation_id),
     )
@@ -478,7 +478,7 @@ def _resume_operation(
         cur.execute(
             """
             SELECT * FROM strategy_position_operations
-            WHERE ownership_id=%s AND status IN ('intent_persisted','submitted')
+            WHERE ownership_id=%s AND status IN ('intent_persisted','submitting','submitted')
             ORDER BY position_operation_id DESC LIMIT 1
             """,
             (owned.ownership_id,),
@@ -513,9 +513,47 @@ def _resume_operation(
             operation_id,
         )
     position = _exact_broker_position(broker, owned)
-    if operation["status"] == "intent_persisted":
-        # There is no edit/close lookup by request UUID. A crash can occur on
-        # either side of broker I/O, so absence/non-landing is ambiguous.
+    if operation["status"] == "intent_persisted" and operation["operation_type"] == "close":
+        # `mark_close_submitting` commits BEFORE the broker verb is entered, so a
+        # close still sitting at `intent_persisted` never reached it (#2979).  That
+        # is a fact about our own write ordering, not an inference about the broker,
+        # which is what makes it safe to terminalise cleanly: the request is
+        # abandoned, the POSITION is untouched, and the trade goes back to `open`
+        # rather than carrying a reconciliation the operator would have to clear.
+        #
+        # ⚠ The position is NOT re-closed here.  Abandoning the request leaves the
+        # scheduled cycle free to request a fresh close on its own terms; inventing
+        # one inside a recovery path would make a crash trigger a broker mutation.
+        with conn.transaction():
+            conn.execute(
+                "UPDATE orders SET status='rejected' WHERE order_id=%s",
+                (operation["order_id"],),
+            )
+            _terminal(
+                conn,
+                operation_id=operation_id,
+                status="rejected",
+                error_code="close_never_submitted",
+            )
+            conn.execute(
+                "UPDATE strategy_trades SET status='open', updated_at=now() WHERE strategy_trade_id=%s",
+                (owned.strategy_trade_id,),
+            )
+        return PositionManagerResult(
+            owned.strategy_trade_id,
+            owned.broker_position_id,
+            "rejected",
+            "close_never_submitted",
+            operation_id,
+        )
+    if operation["status"] in ("intent_persisted", "submitting"):
+        # An EDIT has no marker, so it arrives here at `intent_persisted` and is
+        # resolved by comparing the broker's exact position to the intent, as before.
+        #
+        # A CLOSE arrives here only as `submitting`: the verb WAS entered, and there
+        # is no close lookup by request UUID, so what the broker did stays unknown.
+        # That ambiguity is #2979's remaining half and is unresolved by design here
+        # — it is not guessed at.
         landed = (
             operation["operation_type"] != "close"
             and position is not None
@@ -755,6 +793,27 @@ def _submit_edit(
     )
 
 
+def mark_close_submitting(conn: psycopg.Connection[Any], *, operation_id: int) -> None:
+    """Commit "the broker verb is about to be entered" BEFORE entering it.
+
+    This is the whole of #2979's separation, and it is durable-before-the-call by
+    construction: the UPDATE commits, and only then does ``_submit_close`` touch the
+    broker.  So a crash leaving ``intent_persisted`` PROVES the call was never
+    entered, while ``submitting`` proves only that it was -- never what the broker
+    then did.
+
+    ⚠ Module-level and public rather than inlined, because the #2949 harness has no
+    other way to place a fault between the two commits.  A fault it can only arm by
+    name is the difference between testing the ordering and asserting it.
+    """
+    with conn.transaction():
+        conn.execute(
+            "UPDATE strategy_position_operations SET status='submitting', updated_at=now() "
+            "WHERE position_operation_id=%s AND status='intent_persisted'",
+            (operation_id,),
+        )
+
+
 def _submit_close(
     conn: psycopg.Connection[Any],
     *,
@@ -792,6 +851,11 @@ def _submit_close(
             "UPDATE strategy_trades SET status='closing', updated_at=now() WHERE strategy_trade_id=%s",
             (owned.strategy_trade_id,),
         )
+    # ⚠ Its own committed transaction, deliberately not folded into the intent
+    # above: folding them would make the marker commit WITH the intent, so every
+    # close would read as "may have reached the broker" and the separation would
+    # be vacuous.  The whole value is that these two commits are distinct points.
+    mark_close_submitting(conn, operation_id=operation_id)
     try:
         submission = broker.close_demo_strategy_position(
             position_id=owned.broker_position_id,
