@@ -57,6 +57,15 @@ CORE_ELIGIBILITY_POLICY_VERSION = "core-eligibility-v1"
 # endpoint, so this is a CEILING on staleness, not a target.
 CORE_ELIGIBILITY_MAX_AGE = timedelta(hours=24)
 
+# Minimum spacing between eligibility requests, in seconds.  eToro documents the
+# endpoint at 20 requests/minute DEDICATED and at most 100 ids per request (live
+# portal 2026-08-13); 3.2s keeps a 100-id-per-request caller inside that budget
+# with headroom.  Lifted here from `scripts/prove_2603_core_eligibility.py`, which
+# owned the only copy, when `strategy_core_eligibility_refresh` became a second
+# caller -- one definition, cited beside the constant rather than beside one of
+# its users.
+CORE_ELIGIBILITY_REQUEST_INTERVAL_S = 3.2
+
 # Everything here quotes and requests USD.  Held as a constant rather than a
 # literal so the #2603 item 4 currency lift has one place to look; note this is
 # the currency the PROOF was requested in, which is a different question from the
