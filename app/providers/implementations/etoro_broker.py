@@ -1065,6 +1065,17 @@ class EtoroBrokerProvider(BrokerProvider):
         is correct only because all of them are in the batch.  A page cap here
         would be a ledger-completeness decision, not a quota one.
 
+        ⚠⚠ The DATE range is deliberately not windowed, and #2991 is where that
+        was decided against the document rather than from first principles.  The
+        operation asks callers to keep each request's lookback under a year and
+        to "advance `minDate` per batch" for longer history; it exposes no
+        upper-bound date parameter, so each request runs to the present and
+        advancing `minDate` only shrinks the result.  A deep backfill from
+        `HISTORY_EPOCH` therefore cannot comply, and was observed to be served
+        anyway.  Do not add windowing here without first re-pinning the spec —
+        `tests/test_2991_history_lookback_contract.py` fails if `maxDate` ever
+        appears, which is the signal that it has become buildable.
+
         Env segment placement differs from the other info endpoints:
         /api/v1/trading/info/trade/demo/history (demo) vs
         /api/v1/trading/info/trade/history (real).

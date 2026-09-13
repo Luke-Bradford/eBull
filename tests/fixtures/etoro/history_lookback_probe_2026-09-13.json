@@ -1,0 +1,113 @@
+{
+  "_meta": {
+    "refs": "#2991",
+    "observed_at": "2026-09-13T21:41:42.248690+00:00",
+    "environment": "demo",
+    "documented_max_lookback_days": 364,
+    "openapi_version": "v1.375.0"
+  },
+  "arms": [
+    {
+      "arm": "A_epoch_deep_backfill",
+      "min_date": "2017-01-01T00:00:00+00:00",
+      "lookback_days": 3542,
+      "exceeds_documented_max": true,
+      "outcome": "ok",
+      "row_count": 1,
+      "position_ids": [
+        3308442654
+      ],
+      "min_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
+      "max_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
+      "max_close_minus_min_date_days": 3239
+    },
+    {
+      "arm": "B_within_documented_max",
+      "min_date": "2025-09-14T21:41:42.248690+00:00",
+      "lookback_days": 364,
+      "exceeds_documented_max": false,
+      "outcome": "ok",
+      "row_count": 1,
+      "position_ids": [
+        3308442654
+      ],
+      "min_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
+      "max_close_timestamp": "2025-11-14T19:24:35.307000+00:00",
+      "max_close_minus_min_date_days": 60
+    },
+    {
+      "arm": "C_closed_event_counts",
+      "path": "/api/v1/data/positions/closed-events/history",
+      "outcome": "ok",
+      "status_code": 200,
+      "rate_limit_headers": {
+        "ratelimit-limit": "60",
+        "ratelimit-policy": "60;w=60",
+        "ratelimit-remaining": "57",
+        "ratelimit-reset": "59"
+      },
+      "body": [
+        {
+          "closeYear": 2021,
+          "assetType": "Commodities",
+          "closedPositionEvents": 27
+        },
+        {
+          "closeYear": 2021,
+          "assetType": "Crypto Currencies",
+          "closedPositionEvents": 5
+        },
+        {
+          "closeYear": 2021,
+          "assetType": "Stocks",
+          "closedPositionEvents": 113
+        },
+        {
+          "closeYear": 2022,
+          "assetType": "Commodities",
+          "closedPositionEvents": 14
+        },
+        {
+          "closeYear": 2022,
+          "assetType": "ETF",
+          "closedPositionEvents": 11
+        },
+        {
+          "closeYear": 2022,
+          "assetType": "Stocks",
+          "closedPositionEvents": 82
+        },
+        {
+          "closeYear": 2023,
+          "assetType": "Stocks",
+          "closedPositionEvents": 29
+        },
+        {
+          "closeYear": 2024,
+          "assetType": "Stocks",
+          "closedPositionEvents": 10
+        },
+        {
+          "closeYear": 2025,
+          "assetType": "Crypto Currencies",
+          "closedPositionEvents": 3
+        },
+        {
+          "closeYear": 2025,
+          "assetType": "Stocks",
+          "closedPositionEvents": 1
+        },
+        {
+          "closeYear": 2026,
+          "assetType": "Crypto Currencies",
+          "closedPositionEvents": 1
+        },
+        {
+          "closeYear": 2026,
+          "assetType": "Stocks",
+          "closedPositionEvents": 5
+        }
+      ]
+    }
+  ]
+}

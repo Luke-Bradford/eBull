@@ -47,6 +47,24 @@ EventSource = Literal["etoro_sync", "etoro_history"]
 
 # Pre-dates any eToro retail account we could hold; the deep-backfill
 # minDate for an empty ledger.
+#
+# ⚠⚠ This KNOWINGLY breaches the documented lookback and cannot stop doing so (#2991).
+# The history operation states, on the operation rather than on the `minDate` parameter:
+# *"Keep each request's lookback to less than 1 year (maximum 1 year minus 1 day). For
+# longer history, split the range into successive windows of at most that length (advance
+# `minDate` per batch)"*. That windowing is not implementable here — the operation takes
+# `x-request-id`, `minDate` (required), `page` and `pageSize` and **no upper-bound date
+# parameter**, so every request ends at the present and advancing `minDate` only SHRINKS
+# the returned set. A compliant request can therefore reach back 364 days at most, and
+# ledger §4's synthesized-open transform needs the whole account lifetime in one batch.
+#
+# Measured on demo 2026-09-13 rather than assumed: the over-length request was served,
+# and it returned a close far outside a one-year cap — which falsifies the only reading
+# under which the documented advice tiles a range (a server-side `[minDate, minDate + 1y]`
+# cap). The figures are in the observation set, not written down here; reproduce with
+# `PYTHONPATH=. uv run python -m scripts.probe_2991_history_lookback`. The guard that
+# expires this rebuttal if eToro ever adds `maxDate` is
+# `tests/test_2991_history_lookback_contract.py`.
 HISTORY_EPOCH = datetime(2017, 1, 1, tzinfo=UTC)
 
 # Re-fetch window behind the watermark — absorbs clock skew and
