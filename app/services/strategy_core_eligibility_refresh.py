@@ -48,9 +48,18 @@ from app.services.strategy_core_eligibility import (
 #: ``ScheduledJob`` rather than against a literal hour.
 CORE_ELIGIBILITY_REFRESH_AGE = CORE_ELIGIBILITY_MAX_AGE / 2
 
-#: Per-run WORK bound, fixed by construction from the runtime budget:
-#: ``100 * CORE_ELIGIBILITY_REQUEST_INTERVAL_S`` is about 5.3 minutes, comfortably
-#: inside an hourly tick.
+#: Per-run WORK bound, fixed by construction from the runtime budget: the run's
+#: SLEEPS total ``CORE_ELIGIBILITY_REFRESH_MAX_PER_RUN * CORE_ELIGIBILITY_REQUEST_
+#: INTERVAL_S``, which must stay inside the job's registered tick.  Asserted against
+#: the scheduler's own ``ScheduledJob`` in ``tests/test_2603_core_eligibility_refresh
+#: .py``; deliberately NOT written down here as a figure in minutes, because that
+#: figure is derived and goes stale silently the moment the interval moves (it did:
+#: #2946 step 3 changed the interval and the number written here was left behind).
+#:
+#: ⚠ It bounds the SLEEPS only.  HTTP phases, retries, a 429's ``Retry-After``, DB
+#: work and advisory-lock waits are all outside it, so this is a design margin and
+#: not a runtime guarantee -- the same distinction ``CORE_ELIGIBILITY_REFRESH_AGE``
+#: draws above between nominal ticks and wall-clock.
 #:
 #: ⚠⚠ It is NOT the endpoint's 100-ids-per-request ceiling wearing a different hat.
 #: That figure bounds ONE request and is no source rule at all for a job making

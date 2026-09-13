@@ -44,6 +44,7 @@ from uuid import UUID
 import psycopg
 
 from app.providers.broker import BrokerEligibilityResponse
+from app.providers.implementations.etoro_quota_lanes import CALL_SITES, LANES, min_interval_for_stamps
 from app.services.broker_settlement_arms import select_underlying_long_arms
 
 CORE_ELIGIBILITY_POLICY_VERSION = "core-eligibility-v1"
@@ -57,14 +58,38 @@ CORE_ELIGIBILITY_POLICY_VERSION = "core-eligibility-v1"
 # endpoint, so this is a CEILING on staleness, not a target.
 CORE_ELIGIBILITY_MAX_AGE = timedelta(hours=24)
 
-# Minimum spacing between eligibility requests, in seconds.  eToro documents the
-# endpoint at 20 requests/minute DEDICATED and at most 100 ids per request (live
-# portal 2026-08-13); 3.2s keeps a 100-id-per-request caller inside that budget
-# with headroom.  Lifted here from `scripts/prove_2603_core_eligibility.py`, which
-# owned the only copy, when `strategy_core_eligibility_refresh` became a second
-# caller -- one definition, cited beside the constant rather than beside one of
-# its users.
-CORE_ELIGIBILITY_REQUEST_INTERVAL_S = 3.2
+#: The lane-B call site, so the pacing below is derived from the DOCUMENTED budget
+#: rather than from a number chosen next to it.  `etoro_quota_lanes` is a pure data
+#: module (stdlib imports only) -- importing it here pulls in no transport config, no
+#: `httpx` and no `settings`; importing `etoro_broker` would have, which is the version
+#: #2946 step 3 rejected.
+_LANE_B_CALL_SITE = next(site for site in CALL_SITES if site.method == "check_instrument_eligibility")
+
+# Minimum spacing between eligibility requests, in seconds -- DERIVED, not chosen.
+#
+# eToro documents the eligibility endpoint at 20 requests/minute and DEDICATED
+# ("not shared with any other endpoint"); that figure and its source URL live on
+# `LANES["B_eligibility"]`.  `min_interval_for_stamps` turns a budget into a spacing
+# under the rolling-window counting rule -- `floor(60/i) + 1`, not `60/i` -- and the
+# `- 1` here is one request of HEADROOM, which is the one constructed choice: the
+# portal publishes a budget, not a recommended utilisation.  60 / 18 = 3.33s, which
+# places 19 requests against a budget of 20.
+#
+# ⚠⚠ This is deliberately NOT `etoro_broker._ETORO_WRITE_INTERVAL_S`, and the next
+# session's obvious "fix" is to make it so.  Do not.  That floor paces `_http_write`,
+# which also carries lane A (ORDER SUBMISSION) and lane C, so pacing lane B from it
+# makes a research eligibility sweep delay order writes for no quota reason -- lane B
+# is dedicated and shares its budget with nothing.  #2946 step 2 recorded the same
+# coupling as item 1's blocker, and `2026-09-13-etoro-trading-throttle-coordination.md`
+# rejected a per-user-key registry on that ground.  `tests/test_2946_quota_load.py`
+# pins the relationship.
+#
+# ⚠ The prior value (3.2s) was justified from "at most 100 ids per request", which
+# bounds ONE request and is no source rule at all for a job making singleton requests.
+CORE_ELIGIBILITY_REQUEST_INTERVAL_S = min_interval_for_stamps(
+    LANES[_LANE_B_CALL_SITE.lane].window_s,
+    _LANE_B_CALL_SITE.conservative_per_minute - 1,
+)
 
 # Everything here quotes and requests USD.  Held as a constant rather than a
 # literal so the #2603 item 4 currency lift has one place to look; note this is

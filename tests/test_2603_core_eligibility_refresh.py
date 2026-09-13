@@ -87,10 +87,17 @@ def test_the_margin_leaves_room_for_consecutive_missed_ticks() -> None:
 
 
 def test_the_per_run_cap_fits_inside_one_tick_at_the_documented_spacing() -> None:
-    """The cap is a RUNTIME bound, so it has to be one.
+    """The cap is a WORK bound, so it has to fit the tick it runs in.
 
     It is not the endpoint's 100-ids-per-request ceiling reused: that figure
     bounds one request and says nothing about a job making singleton ones.
+
+    ⚠ It bounds the SLEEPS only. HTTP phases, retries, a 429's ``Retry-After``,
+    DB work and advisory-lock waits are all outside this product, so a passing
+    assertion is a design margin and not a guarantee that the run completes
+    inside the tick -- the same distinction the ``REFRESH_AGE`` test above draws
+    between nominal ticks and wall-clock. Calling it a "runtime bound" (as this
+    docstring did before #2946 step 3) overstates what the arithmetic covers.
     """
     worst_case = timedelta(seconds=CORE_ELIGIBILITY_REFRESH_MAX_PER_RUN * REQUEST_INTERVAL_S)
     assert worst_case < _registered_tick()
