@@ -34,10 +34,10 @@ USER_CREDENTIAL = UUID("f7306e0b-9494-415e-85fd-97874510cc83")
 
 
 class FakeResult:
-    def __init__(self, row: tuple[int] | None = None) -> None:
+    def __init__(self, row: tuple[object, ...] | None = None) -> None:
         self._row = row
 
-    def fetchone(self) -> tuple[int] | None:
+    def fetchone(self) -> tuple[object, ...] | None:
         return self._row
 
 
@@ -54,6 +54,16 @@ class FakeConn:
 
     def execute(self, sql: str, _params: object = None) -> FakeResult:
         normalized = " ".join(sql.split())
+        # #2964 item 2. The submitter holds the per-order reconciliation lock
+        # across broker I/O and persistence. Both statements MUST answer
+        # ``(True,)``: the helper treats anything else as lost ownership and
+        # raises, which is the behaviour that matters and is asserted below.
+        if "pg_advisory_lock(" in normalized:
+            self.events.append("order_lock_acquired")
+            return FakeResult((True,))
+        if "pg_advisory_unlock(" in normalized:
+            self.events.append("order_lock_released")
+            return FakeResult((True,))
         if normalized.startswith("INSERT INTO strategy_trades"):
             self.events.append("persist_trade")
             return FakeResult((21,))
@@ -260,6 +270,19 @@ def test_acceptance_identity_is_persisted_after_authority_commits() -> None:
     assert result.reason_code == "broker_accepted_pending_reconciliation"
     assert events.index("persist_order") < events.index("broker_submit") < events.index("persist_acceptance")
     assert events.index("lock_enter") < events.index("broker_submit") < events.index("lock_exit")
+    # #2964 item 4. The per-order reconciliation lock spans the broker call AND
+    # the acceptance write. Without that span a reconciler can resolve the order
+    # between them, and `_persist_core_acceptance`'s `state='pending'` then leaves
+    # a terminal `reconciled_at` beside a non-terminal state, which
+    # `strategy_order_reconciliation_resolved_shape` refuses -- failing the
+    # ATTENDED request. Asserting only "the lock was taken" would not catch a
+    # release moved back above the persist, which is why both bounds are here.
+    assert (
+        events.index("order_lock_acquired")
+        < events.index("broker_submit")
+        < events.index("persist_acceptance")
+        < events.index("order_lock_released")
+    )
 
 
 @pytest.mark.parametrize(
@@ -278,6 +301,9 @@ def test_rejection_and_uncertainty_have_distinct_durable_outcomes(
 
     assert result.state == state
     assert evidence_event in events
+    # The failure branches write reconciliation state too, so they are inside the
+    # lock for the same reason the acceptance branch is.
+    assert events.index("order_lock_acquired") < events.index(evidence_event) < events.index("order_lock_released")
 
 
 def test_hold_records_an_intent_without_creating_or_submitting_an_order() -> None:

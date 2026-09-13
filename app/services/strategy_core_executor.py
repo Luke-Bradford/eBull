@@ -40,7 +40,10 @@ from app.services.strategy_engine_capital import (
     load_engine_capital_authority,
     resolve_engine_capital_usage,
 )
-from app.services.strategy_order_reconciliation import reconcile_strategy_order
+from app.services.strategy_order_reconciliation import (
+    reconcile_strategy_order,
+    reconciliation_order_lock,
+)
 
 CoreExecutionState = Literal["held", "refused", "submitted", "submission_uncertain"]
 
@@ -231,14 +234,21 @@ def _persist_core_acceptance(
     broker_order_ref: str,
     response_digest: str,
 ) -> CoreExecutionResult:
+    # ⚠ Stated lock ordering: orders -> reconciliation state -> strategy_trades.
+    #
+    # ⚠⚠ `state='pending'` is written WITHOUT clearing `reconciled_at`, which is
+    # safe only because the caller holds this order's reconciliation lock across
+    # the whole submission (#2964 item 4). A reconciler resolving the order
+    # inside this window would leave a terminal `reconciled_at` beside a
+    # non-terminal state, which `strategy_order_reconciliation_resolved_shape`
+    # (sql/285:75) refuses -- failing the attended request. The lock makes that
+    # schedule unreachable; a terminal-preserving CASE here would not, because
+    # the correct outcome in that schedule is not "keep the terminal state"
+    # either. Do not remove the lock and leave this statement.
     with conn.transaction():
         conn.execute(
             "UPDATE orders SET broker_order_ref=%s WHERE order_id=%s",
             (broker_order_ref, authority.order_id),
-        )
-        conn.execute(
-            "UPDATE strategy_trades SET status='submitted', updated_at=now() WHERE strategy_trade_id=%s",
-            (authority.trade_id,),
         )
         conn.execute(
             """
@@ -249,6 +259,10 @@ def _persist_core_acceptance(
             WHERE order_id=%s
             """,
             (response_digest, authority.order_id),
+        )
+        conn.execute(
+            "UPDATE strategy_trades SET status='submitted', updated_at=now() WHERE strategy_trade_id=%s",
+            (authority.trade_id,),
         )
     return _result(
         "submitted",
@@ -324,7 +338,31 @@ def _submit_core_authority(
     broker: BrokerProvider,
     authority: CoreResumeAuthority,
 ) -> CoreExecutionResult:
-    """Submit one durable authority while the caller retains the core lock."""
+    """Submit one durable authority while the caller retains the core lock.
+
+    ⚠ #2964 items 2-4. The per-order reconciliation lock is taken for the WHOLE
+    submission, from before broker I/O until after persistence, because the
+    ``orders`` and reconciliation rows are already committed by the time this
+    runs. Without it a reconciler can resolve the order inside this window, and
+    ``_persist_core_acceptance``'s ``state='pending'`` then violates
+    ``strategy_order_reconciliation_resolved_shape`` (``reconciled_at`` is set
+    but the state is not terminal) and fails the attended request.
+
+    ⚠ It BLOCKS rather than trying: refusing here would abandon a durable
+    authority that ``resume_core_submission`` is deliberately forbidden to
+    resubmit, wedging the core arm. ``core_submission_lock`` is already held by
+    the caller and is acquired first; this lock is always last.
+    """
+    with reconciliation_order_lock(conn, authority.order_id):
+        return _submit_core_authority_locked(conn, broker=broker, authority=authority)
+
+
+def _submit_core_authority_locked(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    authority: CoreResumeAuthority,
+) -> CoreExecutionResult:
     try:
         submission = broker.place_demo_core_order(
             BrokerCoreOrder(instrument_id=authority.instrument_id, amount=authority.amount),
@@ -332,15 +370,11 @@ def _submit_core_authority(
         )
     except BrokerOrderSubmissionError as exc:
         uncertain = isinstance(exc, BrokerOrderSubmissionUncertain)
+        # ⚠ Statement order follows the module lock ordering stated in
+        # `strategy_order_reconciliation`: orders -> reconciliation state ->
+        # strategy_trades. These branches used to write the trade first.
         with conn.transaction():
             if uncertain:
-                conn.execute(
-                    """
-                    UPDATE strategy_trades SET status='reconcile_required', updated_at=now()
-                    WHERE strategy_trade_id=%s
-                    """,
-                    (authority.trade_id,),
-                )
                 conn.execute(
                     """
                     UPDATE strategy_order_reconciliation_state
@@ -350,12 +384,15 @@ def _submit_core_authority(
                     """,
                     (authority.order_id,),
                 )
-            else:
-                conn.execute("UPDATE orders SET status='rejected' WHERE order_id=%s", (authority.order_id,))
                 conn.execute(
-                    "UPDATE strategy_trades SET status='failed', updated_at=now() WHERE strategy_trade_id=%s",
+                    """
+                    UPDATE strategy_trades SET status='reconcile_required', updated_at=now()
+                    WHERE strategy_trade_id=%s
+                    """,
                     (authority.trade_id,),
                 )
+            else:
+                conn.execute("UPDATE orders SET status='rejected' WHERE order_id=%s", (authority.order_id,))
                 conn.execute(
                     """
                     UPDATE strategy_order_reconciliation_state
@@ -364,6 +401,10 @@ def _submit_core_authority(
                     WHERE order_id=%s
                     """,
                     (authority.order_id,),
+                )
+                conn.execute(
+                    "UPDATE strategy_trades SET status='failed', updated_at=now() WHERE strategy_trade_id=%s",
+                    (authority.trade_id,),
                 )
         return _result(
             "submission_uncertain" if uncertain else "refused",
@@ -376,14 +417,8 @@ def _submit_core_authority(
     except Exception:
         # Acceptance may precede an unexpected provider error. Preserve the
         # request UUID and make reconciliation the only safe next action.
+        # Stated lock ordering: reconciliation state before strategy_trades.
         with conn.transaction():
-            conn.execute(
-                """
-                UPDATE strategy_trades SET status='reconcile_required', updated_at=now()
-                WHERE strategy_trade_id=%s
-                """,
-                (authority.trade_id,),
-            )
             conn.execute(
                 """
                 UPDATE strategy_order_reconciliation_state
@@ -392,6 +427,13 @@ def _submit_core_authority(
                 WHERE order_id=%s
                 """,
                 (authority.order_id,),
+            )
+            conn.execute(
+                """
+                UPDATE strategy_trades SET status='reconcile_required', updated_at=now()
+                WHERE strategy_trade_id=%s
+                """,
+                (authority.trade_id,),
             )
         raise
 
