@@ -119,6 +119,27 @@ changing what ran. So the driver instead **checks itself** at startup against
 both hashes when the copy is behind — the check that would have caught #2658's
 sibling before anyone went looking.
 
+⚠ **The CODE the iteration works from is re-synced too (#2607).** Every
+iteration, after the prompt sync has refreshed the `origin/main` tracking ref,
+the driver moves the worktree onto it: `--ff-only` on `main`, `checkout
+--detach` when HEAD is detached. Before this there was no check at all, and on
+2026-08-12 the loop resumed on a worktree ~160 commits behind — every branch it
+would have cut was based on stale code, and nothing failed because nothing
+looked.
+
+It is never destructive, and the refusals are the point. A **dirty** tree, a
+**named feature branch**, and a `main` that **will not fast-forward** are each
+announced (`WARN worktree STALE …`, plus a `- worktree:` line in `status.md`)
+and left exactly as they are — uncommitted work and an in-flight ticket are not
+stale checkouts, and discarding either unattended is what the 2026-07-16 clobber
+race cost. A refusal never halts the loop: an iteration on stale code is a bad
+iteration, a driver that exits because the tree is dirty is an outage.
+
+⚠ This depends on `/var/*` staying in `.gitignore`. The driver writes its log,
+status and installed prompt inside the worktree it re-syncs, so without that
+rule every tree reads as dirty and the re-sync silently never happens.
+`tests/test_ta_loop_worktree_sync.py` asserts it rather than assuming it.
+
 ⚠ **Deliberately dumb, and that is the design.** The previous eBull loop ran
 through the autonomy-engine supervisor and died on 2026-07-23 spinning on
 `WARN cannot determine kind for in-flight 'coder' (state unreadable)` — it
