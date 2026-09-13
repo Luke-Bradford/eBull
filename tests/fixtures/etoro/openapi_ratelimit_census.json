@@ -1,0 +1,501 @@
+{
+  "call_sites": {
+    "GET /api/v1/market-data/exchanges": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/rates`\n- `GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}`\n- `GET /api/v1/market-data/search`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "get_exchanges"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/market-data/instrument-types": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instruments`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/rates`\n- `GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}`\n- `GET /api/v1/market-data/search`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "get_instrument_types"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/market-data/instruments": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/rates`\n- `GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}`\n- `GET /api/v1/market-data/search`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "get_tradable_instruments"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/market-data/instruments/rates": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}`\n- `GET /api/v1/market-data/search`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "get_quotes"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/rates`\n- `GET /api/v1/market-data/search`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "get_daily_candles / get_intraday_candles"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/market-data/search": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/rates`\n- `GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "get_broad_market_snapshot"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/market-data/stocks-industries": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/rates`\n- `GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}`\n- `GET /api/v1/market-data/search`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "get_stocks_industries"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/trading/info/demo/close-orders/{orderId}": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "D_order_info",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/trading/info/demo/close-orders/{orderId}",
+        "GET /api/v1/trading/info/demo/orders/{orderId}",
+        "GET /api/v2/trading/info/demo/orders:lookup"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/trading/info/demo/orders/{orderId}`\n- `GET /api/v2/trading/info/demo/orders:lookup`",
+      "reached_by": [
+        "get_demo_close_order"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/trading/info/demo/pnl": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "E_account_read",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/trading/info/demo/pnl",
+        "GET /api/v1/trading/info/demo/portfolio",
+        "GET /api/v2/trading/info/demo/instrument-breakdown"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/trading/info/demo/portfolio`\n- `GET /api/v2/trading/info/demo/instrument-breakdown`",
+      "reached_by": [
+        "get_account_risk_snapshot"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/trading/info/demo/portfolio": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "E_account_read",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/trading/info/demo/pnl",
+        "GET /api/v1/trading/info/demo/portfolio",
+        "GET /api/v2/trading/info/demo/instrument-breakdown"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/trading/info/demo/pnl`\n- `GET /api/v2/trading/info/demo/instrument-breakdown`",
+      "reached_by": [
+        "get_portfolio"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/trading/info/trade/demo/history": {
+      "defaultPool": true,
+      "environment": "demo",
+      "lane": "G_default_shared",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/trading/info/trade/demo/history"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is the **default shared quota** — it is shared with every other endpoint that has no dedicated limit, so requests across those endpoints all draw from the same budget.",
+      "reached_by": [
+        "get_trade_history"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v2/trading/info/demo/orders:lookup": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "D_order_info",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/trading/info/demo/close-orders/{orderId}",
+        "GET /api/v1/trading/info/demo/orders/{orderId}",
+        "GET /api/v2/trading/info/demo/orders:lookup"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/trading/info/demo/close-orders/{orderId}`\n- `GET /api/v1/trading/info/demo/orders/{orderId}`",
+      "reached_by": [
+        "lookup_order"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "PATCH /api/v2/trading/demo/positions/{positionId}": {
+      "defaultPool": true,
+      "environment": "demo",
+      "lane": "G_default_shared",
+      "limit": 60,
+      "pool": [
+        "PATCH /api/v2/trading/demo/positions/{positionId}"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is the **default shared quota** — it is shared with every other endpoint that has no dedicated limit, so requests across those endpoints all draw from the same budget.",
+      "reached_by": [
+        "edit_demo_strategy_position"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "POST /api/v1/trading/execution/demo/market-close-orders/positions/{positionId}": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "A_order_write",
+      "limit": 20,
+      "pool": [
+        "DELETE /api/v1/trading/execution/demo/limit-orders/{orderId}",
+        "DELETE /api/v1/trading/execution/demo/market-close-orders/{orderId}",
+        "DELETE /api/v1/trading/execution/demo/market-open-orders/{orderId}",
+        "DELETE /api/v2/trading/execution/demo/orders/{orderId}",
+        "DELETE /api/v3/trading/execution/demo/orders/{orderId}",
+        "POST /api/v1/trading/execution/demo/limit-orders",
+        "POST /api/v1/trading/execution/demo/market-close-orders/positions/{positionId}",
+        "POST /api/v1/trading/execution/demo/market-open-orders/by-amount",
+        "POST /api/v1/trading/execution/demo/market-open-orders/by-units",
+        "POST /api/v2/trading/execution/demo/orders",
+        "POST /api/v3/trading/execution/demo/orders"
+      ],
+      "rate_limit_prose": "**Rate limit:** 20 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `DELETE /api/v1/trading/execution/demo/limit-orders/{orderId}`\n- `DELETE /api/v1/trading/execution/demo/market-close-orders/{orderId}`\n- `DELETE /api/v1/trading/execution/demo/market-open-orders/{orderId}`\n- `DELETE /api/v2/trading/execution/demo/orders/{orderId}`\n- `DELETE /api/v3/trading/execution/demo/orders/{orderId}`\n- `POST /api/v1/trading/execution/demo/limit-orders`\n- `POST /api/v1/trading/execution/demo/market-open-orders/by-amount`\n- `POST /api/v1/trading/execution/demo/market-open-orders/by-units`\n- `POST /api/v2/trading/execution/demo/orders`\n- `POST /api/v3/trading/execution/demo/orders`",
+      "reached_by": [
+        "close_demo_strategy_position",
+        "close_position"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "POST /api/v2/trading/execution/demo/orders": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "A_order_write",
+      "limit": 20,
+      "pool": [
+        "DELETE /api/v1/trading/execution/demo/limit-orders/{orderId}",
+        "DELETE /api/v1/trading/execution/demo/market-close-orders/{orderId}",
+        "DELETE /api/v1/trading/execution/demo/market-open-orders/{orderId}",
+        "DELETE /api/v2/trading/execution/demo/orders/{orderId}",
+        "DELETE /api/v3/trading/execution/demo/orders/{orderId}",
+        "POST /api/v1/trading/execution/demo/limit-orders",
+        "POST /api/v1/trading/execution/demo/market-close-orders/positions/{positionId}",
+        "POST /api/v1/trading/execution/demo/market-open-orders/by-amount",
+        "POST /api/v1/trading/execution/demo/market-open-orders/by-units",
+        "POST /api/v2/trading/execution/demo/orders",
+        "POST /api/v3/trading/execution/demo/orders"
+      ],
+      "rate_limit_prose": "**Rate limit:** 20 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `DELETE /api/v1/trading/execution/demo/limit-orders/{orderId}`\n- `DELETE /api/v1/trading/execution/demo/market-close-orders/{orderId}`\n- `DELETE /api/v1/trading/execution/demo/market-open-orders/{orderId}`\n- `DELETE /api/v2/trading/execution/demo/orders/{orderId}`\n- `DELETE /api/v3/trading/execution/demo/orders/{orderId}`\n- `POST /api/v1/trading/execution/demo/limit-orders`\n- `POST /api/v1/trading/execution/demo/market-close-orders/positions/{positionId}`\n- `POST /api/v1/trading/execution/demo/market-open-orders/by-amount`\n- `POST /api/v1/trading/execution/demo/market-open-orders/by-units`\n- `POST /api/v3/trading/execution/demo/orders`",
+      "reached_by": [
+        "place_demo_core_order",
+        "place_demo_strategy_order"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "POST /api/v2/trading/info/demo/costs": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "C_what_if_costs",
+      "limit": 20,
+      "pool": [
+        "POST /api/v2/trading/info/demo/costs"
+      ],
+      "rate_limit_prose": "**Rate limit:** 20 requests per 60 seconds. This is a **dedicated** limit for this endpoint — it is **not shared** with (pooled across) any other endpoint, so the full rate is available to this endpoint alone.",
+      "reached_by": [
+        "get_what_if_costs"
+      ],
+      "shared": false,
+      "window": 60
+    },
+    "POST /api/v2/trading/info/demo/eligibility": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "B_eligibility",
+      "limit": 20,
+      "pool": [
+        "POST /api/v2/trading/info/demo/eligibility"
+      ],
+      "rate_limit_prose": "**Rate limit:** 20 requests per 60 seconds. This is a **dedicated** limit for this endpoint — it is **not shared** with (pooled across) any other endpoint, so the full rate is available to this endpoint alone.",
+      "reached_by": [
+        "check_instrument_eligibility"
+      ],
+      "shared": false,
+      "window": 60
+    }
+  },
+  "document_sha256": "9a4a63689cceaf9a7c43aa08d5c7befa27619572fe0f8a389a521f54ac20ecd0",
+  "extract_sha256": "3749ee2f7076cd4a9857582d94521149e4b05ea879f4605564139a33d74a1546",
+  "orphan_peer_references": [
+    "DELETE /api/v1/trading/execution/demo/limit-orders/{orderId}",
+    "DELETE /api/v1/trading/execution/demo/market-open-orders/{orderId}",
+    "DELETE /api/v1/trading/execution/limit-orders/{orderId}",
+    "DELETE /api/v1/trading/execution/market-open-orders/{orderId}",
+    "GET /api/v1/feeds/instrument/{marketId}",
+    "GET /api/v1/feeds/user/{userId}",
+    "GET /api/v1/trading/info/demo/orders/{orderId}",
+    "GET /api/v1/trading/info/real/orders/{orderId}",
+    "POST /api/v1/trading/execution/demo/limit-orders",
+    "POST /api/v1/trading/execution/demo/market-open-orders/by-amount",
+    "POST /api/v1/trading/execution/demo/market-open-orders/by-units",
+    "POST /api/v1/trading/execution/limit-orders",
+    "POST /api/v1/trading/execution/market-open-orders/by-amount",
+    "POST /api/v1/trading/execution/market-open-orders/by-units"
+  ],
+  "population": {
+    "dedicated": 9,
+    "default_pool": 109,
+    "distinct_non_default_pools": 12,
+    "operations": 177,
+    "paths": 147,
+    "with_x_ratelimit": 177
+  },
+  "provenance": {
+    "byte_length": 1787381,
+    "extracted_at": "2026-09-13T21:08:05.082280+00:00",
+    "extractor_version": 1,
+    "fetched_at": "2026-09-13T21:02:19.472836+00:00",
+    "hashed_bytes": "document_sha256 is over the RAW response body as received, before any decode. extract_sha256 is over canonical(extract) — sorted keys, compact separators, UTF-8 — and covers the blocks below and nothing else. fetched_at is when the bytes were taken from the portal; extracted_at is when this extract was last derived from them, which an --offline re-run moves and a fetch date must not.",
+    "info_version": "v1.375.0",
+    "source_fixture": "tests/fixtures/etoro/openapi_v1.375.0.json",
+    "source_url": "https://api-portal.etoro.com/api-reference/openapi.json"
+  },
+  "unresolved": [
+    "GET /api/v1/trading/info/demo/orders/{orderId}",
+    "POST /api/v1/trading/execution/demo/market-open-orders/by-amount",
+    "POST /api/v1/trading/execution/demo/market-open-orders/by-units"
+  ],
+  "unthrottled": {
+    "GET /api/v1/market-data/instruments": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/rates`\n- `GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}`\n- `GET /api/v1/market-data/search`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "app/api/_debug_ws.py:155"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}": {
+      "defaultPool": false,
+      "environment": "neutral",
+      "lane": "F_market_data",
+      "limit": 120,
+      "pool": [
+        "GET /api/v1/market-data/exchanges",
+        "GET /api/v1/market-data/instrument-types",
+        "GET /api/v1/market-data/instruments",
+        "GET /api/v1/market-data/instruments/history/closing-price",
+        "GET /api/v1/market-data/instruments/rates",
+        "GET /api/v1/market-data/instruments/{instrumentId}/history/candles/{direction}/{interval}/{candlesCount}",
+        "GET /api/v1/market-data/search",
+        "GET /api/v1/market-data/stocks-industries",
+        "GET /api/v2/market-data/instruments",
+        "GET /api/v2/market-data/instruments/search",
+        "GET /api/v2/market-data/rates"
+      ],
+      "rate_limit_prose": "**Rate limit:** 120 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/market-data/exchanges`\n- `GET /api/v1/market-data/instrument-types`\n- `GET /api/v1/market-data/instruments`\n- `GET /api/v1/market-data/instruments/history/closing-price`\n- `GET /api/v1/market-data/instruments/rates`\n- `GET /api/v1/market-data/search`\n- `GET /api/v1/market-data/stocks-industries`\n- `GET /api/v2/market-data/instruments`\n- `GET /api/v2/market-data/instruments/search`\n- `GET /api/v2/market-data/rates`",
+      "reached_by": [
+        "app/api/_debug_ws.py:96"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/me": {
+      "defaultPool": true,
+      "environment": "neutral",
+      "lane": "G_default_shared",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/me"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is the **default shared quota** — it is shared with every other endpoint that has no dedicated limit, so requests across those endpoints all draw from the same budget.",
+      "reached_by": [
+        "app/api/broker_credentials.py:598"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/trading/info/demo/pnl": {
+      "defaultPool": false,
+      "environment": "demo",
+      "lane": "E_account_read",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/trading/info/demo/pnl",
+        "GET /api/v1/trading/info/demo/portfolio",
+        "GET /api/v2/trading/info/demo/instrument-breakdown"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/trading/info/demo/portfolio`\n- `GET /api/v2/trading/info/demo/instrument-breakdown`",
+      "reached_by": [
+        "app/api/broker_credentials.py:641"
+      ],
+      "shared": true,
+      "window": 60
+    },
+    "GET /api/v1/trading/info/real/pnl": {
+      "defaultPool": false,
+      "environment": "real",
+      "lane": "E_account_read",
+      "limit": 60,
+      "pool": [
+        "GET /api/v1/trading/info/portfolio",
+        "GET /api/v1/trading/info/real/pnl",
+        "GET /api/v2/trading/info/instrument-breakdown"
+      ],
+      "rate_limit_prose": "**Rate limit:** 60 requests per 60 seconds. This is a **shared quota** — the same budget is consumed by a group of related endpoints, so calling any of them reduces what is left for the others (you cannot call each at the full rate independently). Endpoints sharing this quota:\n- `GET /api/v1/trading/info/portfolio`\n- `GET /api/v2/trading/info/instrument-breakdown`",
+      "reached_by": [
+        "app/api/broker_credentials.py:641"
+      ],
+      "shared": true,
+      "window": 60
+    }
+  }
+}
