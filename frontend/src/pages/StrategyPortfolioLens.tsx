@@ -194,9 +194,18 @@ function CoreSleeveControl({
             ? "Submission outcome is uncertain; reconciliation is required before retrying."
             : result.reason_code === "core_order_reconciled"
               ? "The existing broker order was reconciled; holdings and fill state have been refreshed."
-              : result.state === "held"
-                ? "No trade required; the sleeve remains inside its band."
-              : `Rebalance refused: ${result.reason_code}.`;
+              : // ⚠ `core_resume_already_resolved` is `held`, and it does NOT mean the
+                // band was evaluated — the click loaded an unresolved order and
+                // something else resolved it first, so no sleeve observation ran at
+                // all. It fell through to the band sentence below, which is a claim
+                // about evidence this response does not carry. #2962 turned that from
+                // a two-operator race into the ordinary case: the scheduled cycle now
+                // reconciles core orders every five minutes.
+                result.reason_code === "core_resume_already_resolved"
+                ? "That order was already reconciled by the scheduled cycle. The sleeve was not re-evaluated — rebalance again to check the band."
+                : result.state === "held"
+                  ? "No trade required; the sleeve remains inside its band."
+                  : `Rebalance refused: ${result.reason_code}.`;
       setOutcome(label);
       onUpdated();
     } catch (error) {

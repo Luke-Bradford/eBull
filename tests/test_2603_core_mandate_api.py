@@ -311,7 +311,16 @@ def test_operator_view_does_not_promise_resolution_for_a_stranded_authority(
     assert [blocker.code for blocker in response.blockers] == ["core_order_unresolved_lookup_missed"]
     detail = response.blockers[0].detail
     assert "not proof the broker never received it" in detail
-    assert "#2962" in detail and "#2961" in detail
+    # ⚠ #2962 is deliberately NO LONGER named here: the core arm is in
+    # `reconcile_backlog` now, so "no unattended reconciler covers the core arm"
+    # would be a false claim on the operator's page. #2961 stays — a repeated
+    # miss still has no terminalisation surface, which is the part that did not
+    # change. The positive assertion is what keeps this honest in both
+    # directions: deleting the sentence entirely would also pass a bare
+    # `"#2962" not in detail`.
+    assert "#2962" not in detail
+    assert "#2961" in detail
+    assert "The scheduled reconciler re-checks it" in detail
     # The affordance is unchanged — only the claim about it is.
     assert response.can_resume is True
     assert response.execution_action == "resume"

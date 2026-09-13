@@ -5632,3 +5632,32 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   Self-review prompt: "can any caller of this function already hold this key?"
 - Enforced in: this prevention log; `app/services/strategy_order_reconciliation.py::_HELD_ORDER_LOCKS`
   + `tests/test_2964_reconciliation_order_lock_db.py::test_a_nested_acquire_raises_rather_than_silently_double_counting`.
+
+### A label chain's final `else` is an ASSERTION, so a new reason code silently acquires its claim
+
+- First seen in: #2962 (2026-09-13), found while confirming the operator-visible consequences of
+  putting the core arm into `reconcile_backlog`. `StrategyPortfolioLens.tsx` mapped the core
+  rebalance response through a ternary chain ending `result.state === "held" ? "No trade required;
+  the sleeve remains inside its band." : ...`. Three different reason codes produce `held`, and one
+  of them — `core_resume_already_resolved`, returned when another reconciler resolved the order
+  first — means **no sleeve observation ran at all**. The operator was told the band had been
+  checked by a response that carries no band evidence.
+- Symptom: a branch keyed on a COARSE field (a state, a status, a category) writes a sentence that
+  is only true for the subset of that field's producers the author had in mind. It is invisible
+  while that subset is the only one reachable, and becomes a false claim the moment a new producer
+  appears — here #2962 turned a two-operator race into the ordinary case, because the scheduled
+  cycle now reconciles core orders every five minutes.
+- ⚠ Distinct from the #2844 "a prettifying fallback IS the defect" entry, which is about UNKNOWN
+  keys being dressed up. This one is the opposite direction: every key is known, the chain matches
+  on the wrong granularity, and the fallback is a confident sentence rather than a passthrough.
+- Prevention: when adding a reason/refusal code, grep every renderer of the field it travels
+  beside — not the code itself, which by definition has no call sites yet. Then read each branch as
+  a claim and ask **"does this response carry the evidence for that sentence?"** A branch keyed on a
+  state must not assert anything the state alone does not establish; if it needs the reason code,
+  match on the reason code. Self-review prompt for any new enum member: "which existing `else` does
+  this now fall into, and what does that `else` promise?"
+- Enforced in: this prevention log; `frontend/src/pages/StrategyPortfolioLens.tsx` (the branch
+  carries the reason at the branch) +
+  `frontend/src/pages/StrategyPortfolioLens.test.tsx::does not claim the band was checked when
+  something else resolved the order first`, which asserts both the new sentence and the ABSENCE of
+  the band sentence.

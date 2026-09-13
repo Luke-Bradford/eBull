@@ -3702,20 +3702,25 @@ def read_core_sleeve(
         if core_authority_is_stranded(conn, order_id=resume_authority.order_id):
             # The generic wording below promises that resuming resolves the order.
             # For this shape it provably cannot, and would say so forever: a lookup
-            # has already missed, `_apply_detail` is reached only from a SUCCESSFUL
-            # lookup, and `reconcile_backlog` excludes the core arm entirely
-            # (#2962). Resume is still offered -- a late-appearing order would be
-            # found -- but the operator must not be told resolution is forthcoming.
+            # has already missed and `_apply_detail` is reached only from a
+            # SUCCESSFUL lookup. Resume is still offered -- a late-appearing order
+            # would be found -- but the operator must not be told resolution is
+            # forthcoming.
+            #
+            # ⚠ #2962 put the core arm into `reconcile_backlog`, so this row IS now
+            # re-checked unattended every cycle under the #2948 cooldown. That
+            # changes who repeats the lookup and NOT whether a repeated miss can
+            # resolve it, which is why the sentence below moved rather than went.
             blockers.append(
                 CoreSleeveBlockerResponse(
                     code="core_order_unresolved_lookup_missed",
                     detail=(
                         f"Order {resume_authority.order_id} was never recorded as accepted and a broker "
-                        "lookup has already returned no such order. Resuming re-checks the broker and will "
-                        "resolve it if it appears, but a repeated miss cannot resolve it: no unattended "
-                        "reconciler covers the core arm (#2962) and no terminalisation surface exists yet "
-                        "(#2961). A miss is not proof the broker never received it, so resubmission stays "
-                        "refused and no new core rebalance can be created until this is settled."
+                        "lookup has already returned no such order. The scheduled reconciler re-checks it "
+                        "and will resolve it if it appears, as will resuming, but a repeated miss cannot "
+                        "resolve it and no terminalisation surface exists yet (#2961). A miss is not proof "
+                        "the broker never received it, so resubmission stays refused and no new core "
+                        "rebalance can be created until this is settled."
                     ),
                 )
             )
@@ -3859,7 +3864,27 @@ def rebalance_core_sleeve(
         # reconciler holds this order right now. Without this arm it would have
         # surfaced as a 500, because StrategyReconciliationBusy is not a
         # StrategyCoreExecutionError.
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        #
+        # ⚠ #2962 made this reachable in ordinary operation rather than only under
+        # two attended clicks: the scheduled backlog now covers the core arm, so
+        # the other holder is usually `strategy_paper_cycle`. `str(exc)` alone
+        # ("order 42 is already being reconciled") is true and tells an operator
+        # neither who holds it nor that retrying is the right move, so the detail
+        # is worded here rather than in the exception the batch also logs.
+        #
+        # ⚠ The exception text is KEPT rather than replaced (review nitpick, round
+        # 1): it carries the order id, and a UI message and a triage identifier are
+        # not alternatives. The id is read off the exception and not off
+        # `resume_authority`, which is None on the fresh-submission path.
+        logger.info("core rebalance: order held by another reconciler (%s)", exc)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This core order is being checked with the broker right now, normally by the "
+                "scheduled strategy cycle. Nothing is wrong and nothing was lost — try again "
+                f"in a moment. ({exc})"
+            ),
+        ) from exc
     except (CoreEligibilityError, CoreSelectionError, StrategyCoreExecutionError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _core_rebalance_response(result)
