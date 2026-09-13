@@ -6066,6 +6066,16 @@ def core_rebalance_observation() -> None:
         )
 
 
+class _CredentialsRotatedMidBatch(RuntimeError):
+    """The live credential pair changed while an eligibility batch was in flight.
+
+    Its own type so ``core_eligibility_refresh``'s per-instrument
+    ``except Exception`` cannot swallow it: every remaining request in the batch
+    would still be made with the superseded plaintext keys, so this is a run-level
+    abort and not one instrument's failure.
+    """
+
+
 def core_eligibility_refresh() -> None:
     """Re-ask the broker about already-proved instruments (#2603 item 2).
 
@@ -6096,6 +6106,7 @@ def core_eligibility_refresh() -> None:
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
     from app.services.strategy_core_eligibility import (
         CORE_ELIGIBILITY_REQUEST_CURRENCY,
+        CoreEligibilityError,
         evaluate_core_eligibility,
         live_credential_ids,
         live_credential_ids_unlocked,
@@ -6128,12 +6139,24 @@ def core_eligibility_refresh() -> None:
         # UNLOCKED reader: this decides WHAT TO ASK and authorises nothing. The
         # locked reader is used at record time, as its own docstring requires for
         # anything writing a proof-backed authority.
-        advisory_pair = live_credential_ids_unlocked(
-            scope_conn,
-            operator_id=operator_id,
-            provider=provider_name,
-            environment=settings.etoro_env,
-        )
+        #
+        # ⚠ `live_credential_ids_unlocked` RAISES when either credential is
+        # missing or revoked -- it is not a "return None" reader. Without this
+        # guard the intended credentials-missing skip further down is
+        # unreachable, and an idle box with no demo credentials would record an
+        # hourly FAILURE instead of an hourly skip (Codex ckpt-2 P2). Reading
+        # credential METADATA decrypts nothing, so this stays above the
+        # secrets-touching load.
+        try:
+            advisory_pair = live_credential_ids_unlocked(
+                scope_conn,
+                operator_id=operator_id,
+                provider=provider_name,
+                environment=settings.etoro_env,
+            )
+        except CoreEligibilityError as exc:
+            _record_prereq_skip(JOB_CORE_ELIGIBILITY_REFRESH, f"etoro credentials missing: {exc}")
+            return
         scope = select_proofs_to_revalidate(
             scope_conn,
             operator_id=operator_id,
@@ -6160,6 +6183,32 @@ def core_eligibility_refresh() -> None:
         _record_prereq_skip(JOB_CORE_ELIGIBILITY_REFRESH, "etoro credentials missing")
         return
 
+    # ⚠⚠ The pair is captured ONCE, immediately after the plaintext load, and
+    # every row in this batch is attributed to it. An earlier draft re-read the
+    # live pair inside the loop "so the write uses the locked reader", which was
+    # strictly WORSE (Codex ckpt-2 P1): the plaintext keys are loaded once before
+    # the loop, so a rotation mid-batch left later responses -- still made with
+    # the OLD keys -- stamped with the NEW credential ids. That is old-account
+    # evidence passing `require_core_eligibility` for the new account, which is
+    # the exact failure the credential columns exist to prevent.
+    #
+    # Read order (plaintext, then ids) matches
+    # `prove_2603_core_eligibility::_credentials` rather than inventing a third
+    # shape. The residual window between the two reads is that helper's and is
+    # not closed here; what IS closed is the far wider in-loop one, and the
+    # per-record check below turns a rotation into a loud abort.
+    with connect_job() as pair_conn:
+        try:
+            request_pair = live_credential_ids_unlocked(
+                pair_conn,
+                operator_id=operator_id,
+                provider=provider_name,
+                environment=settings.etoro_env,
+            )
+        except CoreEligibilityError as exc:
+            _record_prereq_skip(JOB_CORE_ELIGIBILITY_REFRESH, f"etoro credentials missing: {exc}")
+            return
+
     with _tracked_job(JOB_CORE_ELIGIBILITY_REFRESH) as tracker:
         written = 0
         failed: list[int] = []
@@ -6170,14 +6219,14 @@ def core_eligibility_refresh() -> None:
         # `core_submission_lock` owns its own transaction boundaries -- it
         # commits after acquiring the three keys and, in its `finally`, ROLLS
         # BACK anything left uncommitted before unlocking. On a transactional
-        # connection that rollback would discard the proof this job just wrote
-        # unless a second commit were threaded inside the block. Under autocommit
-        # the single-row INSERT is durable on execution and the connection is
-        # already IDLE when the lock's finally runs (verified: `commit()` and
-        # `rollback()` are both safe no-ops in autocommit and leave
+        # connection there is an ambient transaction at both of those points and
+        # the rollback would discard the proof just written. Under autocommit the
+        # connection is IDLE except inside the explicit `conn.transaction()`
+        # block below, which commits before the lock's finally runs (verified:
+        # `commit()` and `rollback()` are safe no-ops in autocommit and leave
         # `transaction_status` at IDLE).
         #
-        # It also keeps each proof in its own transaction, which is what keeps
+        # It also keeps each proof in its OWN transaction, which is what keeps
         # `observed_at` distinct per row -- the column DEFAULTs to `now()`, which
         # is transaction-START time, so a shared transaction would stamp every
         # row identically and leave the readers' ordering on the id tiebreak.
@@ -6202,16 +6251,37 @@ def core_eligibility_refresh() -> None:
                     # close. Held around ONE insert, never across the broker
                     # round-trip above.
                     #
-                    # ⚠ The LOCKED credential reader here, not the advisory pair
-                    # used for selection -- the row being written is attributed
-                    # evidence.
-                    with core_submission_lock(conn):
-                        api_key_id, user_key_id = live_credential_ids(
-                            conn,
-                            operator_id=operator_id,
-                            provider=provider_name,
-                            environment=settings.etoro_env,
-                        )
+                    # ⚠⚠ `conn.transaction()` INSIDE the lock, and it is not
+                    # decoration. `live_credential_ids` takes `FOR SHARE`, which
+                    # is TRANSACTION-scoped -- under autocommit each statement is
+                    # its own transaction, so the share lock would be released
+                    # before the INSERT and guard nothing (Codex ckpt-2). The
+                    # explicit block holds it across the check and the write.
+                    # psycopg3's `transaction()` issues a real BEGIN even on an
+                    # autocommit connection, and commits on exit, so the lock's
+                    # `finally` sees IDLE and does not roll the proof back.
+                    #
+                    # ⚠ The locked read is a CHECK, not the attribution: the row
+                    # is attributed to `request_pair`, the credentials that
+                    # actually produced the response.
+                    with core_submission_lock(conn), conn.transaction():
+                        if (
+                            live_credential_ids(
+                                conn,
+                                operator_id=operator_id,
+                                provider=provider_name,
+                                environment=settings.etoro_env,
+                            )
+                            != request_pair
+                        ):
+                            # Loud, and it aborts the whole run rather than this
+                            # instrument: the plaintext keys in hand belong to the
+                            # previous account, so every REMAINING request would
+                            # be made with them too.
+                            raise _CredentialsRotatedMidBatch(
+                                "etoro credentials rotated during the eligibility refresh batch; "
+                                "the responses in flight were made with the previous pair"
+                            )
                         record_core_eligibility_proof(
                             conn,
                             assessment=assessment,
@@ -6219,10 +6289,16 @@ def core_eligibility_refresh() -> None:
                             operator_id=operator_id,
                             provider=provider_name,
                             environment=settings.etoro_env,
-                            api_key_credential_id=api_key_id,
-                            user_key_credential_id=user_key_id,
+                            api_key_credential_id=request_pair[0],
+                            user_key_credential_id=request_pair[1],
                             recorded_by=JOB_CORE_ELIGIBILITY_REFRESH,
                         )
+                except _CredentialsRotatedMidBatch:
+                    # ⚠ NOT swallowed by the per-instrument handler below. A
+                    # rotation invalidates the plaintext keys every REMAINING
+                    # request would use, so continuing would keep asking the old
+                    # account. Propagates and fails the run.
+                    raise
                 except Exception as exc:  # noqa: BLE001 - see below
                     # ⚠ Broad by intent, and it does NOT rename the failure into a
                     # domain vocabulary -- the distinguisher the prevention log

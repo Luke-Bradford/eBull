@@ -299,3 +299,271 @@ def test_the_job_only_reaches_the_informational_eligibility_method() -> None:
     ):
         assert mutating not in source
     assert "check_instrument_eligibility" in source
+
+
+# --------------------------------------------------------------------------
+# Job control flow, with every external edge faked
+# --------------------------------------------------------------------------
+
+
+class _NullConn:
+    """Enough connection for the paths that never touch SQL here.
+
+    ``transaction()`` is real enough to be entered and exited: the job wraps the
+    credential check and the INSERT in one so the ``FOR SHARE`` taken by
+    ``live_credential_ids`` survives to the write. Both are faked out here, but
+    the block still has to exist or the test would pass against a version that
+    dropped it.
+    """
+
+    def __enter__(self) -> _NullConn:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def transaction(self) -> _NullConn:
+        return self
+
+
+@dataclass
+class _Harness:
+    skips: list[str]
+    written: list[int]
+    row_count: int | None = None
+    note: str | None = None
+
+
+def _install(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    due: list[int],
+    unlocked: Any,
+    locked: Any,
+    on_request: Any,
+) -> _Harness:
+    """Fake every edge of ``core_eligibility_refresh`` except its own logic."""
+    import contextlib
+
+    from app.services import strategy_core_eligibility as elig
+    from app.services import strategy_core_eligibility_refresh as refresh
+    from app.services import strategy_core_submission_gate as gate
+    from app.workers import scheduler
+
+    harness = _Harness(skips=[], written=[])
+
+    monkeypatch.setattr(scheduler.settings, "etoro_env", "demo")
+    monkeypatch.setattr(scheduler, "connect_job", lambda **_kw: _NullConn())
+    monkeypatch.setattr(scheduler, "sole_operator_id", lambda _conn: uuid4())
+    monkeypatch.setattr(scheduler, "_load_etoro_credentials", lambda _name: ("api", "user"))
+    monkeypatch.setattr(
+        scheduler,
+        "_record_prereq_skip",
+        lambda _name, detail: harness.skips.append(detail),
+    )
+    monkeypatch.setattr(elig, "live_credential_ids_unlocked", unlocked)
+    monkeypatch.setattr(elig, "live_credential_ids", locked)
+
+    @contextlib.contextmanager
+    def _fake_lock(_conn: Any) -> Any:
+        yield None
+
+    monkeypatch.setattr(gate, "core_submission_lock", _fake_lock)
+
+    def _record(_conn: Any, **kwargs: Any) -> int:
+        harness.written.append(int(kwargs["instrument_id"]))
+        return len(harness.written)
+
+    monkeypatch.setattr(elig, "record_core_eligibility_proof", _record)
+    monkeypatch.setattr(
+        elig,
+        "evaluate_core_eligibility",
+        lambda response, **_kw: response,
+    )
+
+    class _FakeBroker:
+        def __init__(self, **_kw: Any) -> None: ...
+
+        def __enter__(self) -> _FakeBroker:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def check_instrument_eligibility(self, ids: list[int]) -> Any:
+            return on_request(ids[0])
+
+    monkeypatch.setattr(
+        "app.providers.implementations.etoro_broker.EtoroBrokerProvider",
+        _FakeBroker,
+    )
+    monkeypatch.setattr(
+        refresh,
+        "select_proofs_to_revalidate",
+        lambda _conn, **_kw: refresh.RevalidationScope(
+            due=tuple(
+                refresh.StaleProof(
+                    instrument_id=i,
+                    symbol=f"S{i}",
+                    prior_proof_id=i,
+                    prior_verdict="underlying",
+                    prior_age=timedelta(hours=20),
+                    credentials_superseded=False,
+                )
+                for i in due
+            ),
+            proved_instrument_count=len(due),
+            deferred_count=0,
+        ),
+    )
+
+    import contextlib as _ctx
+
+    @_ctx.contextmanager
+    def _fake_tracked(_name: str) -> Any:
+        class _T:
+            row_count: int | None = None
+            note: str | None = None
+
+        tracker = _T()
+        try:
+            yield tracker
+        finally:
+            harness.row_count = tracker.row_count
+            harness.note = tracker.note
+
+    monkeypatch.setattr(scheduler, "_tracked_job", _fake_tracked)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    return harness
+
+
+_PAIR = (_API, _USER)
+
+
+def _verdict(instrument_id: int) -> Any:
+    class _A:
+        verdict = "underlying"
+
+    return _A()
+
+
+def test_missing_credentials_skip_rather_than_failing_hourly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``live_credential_ids_unlocked`` RAISES on a missing or revoked pair — it
+    is not a "return None" reader. Unguarded, an idle box with no demo
+    credentials records an hourly FAILURE instead of an hourly skip, and the
+    credentials-missing skip further down is unreachable."""
+    from app.services.strategy_core_eligibility import CoreEligibilityError
+    from app.workers import scheduler
+
+    def _raise(*_a: Any, **_kw: Any) -> tuple[UUID, UUID]:
+        raise CoreEligibilityError("no live etoro demo credential pair for this operator")
+
+    harness = _install(monkeypatch, due=[1], unlocked=_raise, locked=_raise, on_request=_verdict)
+    scheduler.core_eligibility_refresh()
+
+    assert harness.written == []
+    assert len(harness.skips) == 1
+    assert "credentials missing" in harness.skips[0]
+
+
+def test_a_rotation_mid_batch_aborts_the_run_instead_of_failing_one_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plaintext keys are loaded ONCE before the loop, so after a rotation
+    every remaining request is still made with the superseded pair. Attributing
+    those responses to the new credential ids would let old-account evidence
+    pass ``require_core_eligibility`` for the new account.
+
+    ⚠ The per-instrument ``except Exception`` must NOT swallow this.
+    """
+    from app.workers import scheduler
+
+    rotated = (uuid4(), uuid4())
+    harness = _install(
+        monkeypatch,
+        due=[1, 2, 3],
+        unlocked=lambda *_a, **_kw: _PAIR,
+        locked=lambda *_a, **_kw: rotated,
+        on_request=_verdict,
+    )
+    with pytest.raises(RuntimeError, match="rotated during the eligibility refresh batch"):
+        scheduler.core_eligibility_refresh()
+
+    assert harness.written == []
+
+
+def test_the_proof_is_attributed_to_the_credentials_that_made_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unchanged credentials: the batch records against the captured pair."""
+    from app.workers import scheduler
+
+    harness = _install(
+        monkeypatch,
+        due=[1, 2],
+        unlocked=lambda *_a, **_kw: _PAIR,
+        locked=lambda *_a, **_kw: _PAIR,
+        on_request=_verdict,
+    )
+    scheduler.core_eligibility_refresh()
+
+    assert harness.written == [1, 2]
+    assert harness.row_count == 2
+    assert harness.note is not None
+    assert "written=2 failed=0" in harness.note
+
+
+def test_one_instrument_failing_does_not_stop_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport failure writes NOTHING for that instrument and is counted —
+    storing it as an observation would turn "we could not ask" into "the broker
+    said"."""
+    from app.workers import scheduler
+
+    def _flaky(instrument_id: int) -> Any:
+        if instrument_id == 2:
+            raise ConnectionError("boom")
+        return _verdict(instrument_id)
+
+    harness = _install(
+        monkeypatch,
+        due=[1, 2, 3],
+        unlocked=lambda *_a, **_kw: _PAIR,
+        locked=lambda *_a, **_kw: _PAIR,
+        on_request=_flaky,
+    )
+    scheduler.core_eligibility_refresh()
+
+    assert harness.written == [1, 3]
+    assert harness.row_count == 2
+    assert harness.note is not None
+    assert "failed=1" in harness.note
+    assert "failed_ids=2" in harness.note
+
+
+def test_an_all_fail_run_reraises_the_cause_not_a_generic_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_tracked_job``'s classifier inspects the cause, so a generic wrapper
+    turns an actionable auth or rate-limit failure into INTERNAL_ERROR. And a
+    job that no-ops and reports success is invisible to every automated check
+    this repo has."""
+    from app.workers import scheduler
+
+    def _always(instrument_id: int) -> Any:
+        raise PermissionError("401")
+
+    harness = _install(
+        monkeypatch,
+        due=[1, 2],
+        unlocked=lambda *_a, **_kw: _PAIR,
+        locked=lambda *_a, **_kw: _PAIR,
+        on_request=_always,
+    )
+    with pytest.raises(PermissionError):
+        scheduler.core_eligibility_refresh()
+
+    assert harness.written == []
