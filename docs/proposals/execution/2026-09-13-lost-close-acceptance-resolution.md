@@ -185,6 +185,25 @@ and breaks the next is the defect this revision exists to avoid:
   `strategy_position_ownership` are both empty with 0 strategy-origin EXIT orders — the
   wedge is latent in a wired path.
 
+## Migration locking assumption (review NITPICK on PR #2981)
+
+`377` rebuilds `idx_strategy_position_one_unresolved_operation` with a plain
+`DROP INDEX` / `CREATE UNIQUE INDEX`, which takes an `ACCESS EXCLUSIVE` lock on
+`strategy_position_operations` for the duration. **That is safe here only because the
+table is empty** — measured on the dev DB before the change, 0 rows — so the rebuild is
+effectively instant.
+
+Stated because it does not generalise: a future rebuild of this index against a populated
+table should use `CREATE UNIQUE INDEX CONCURRENTLY`, which this runner supports via the
+`-- runner: autocommit` directive on line 1 of a migration
+(`app/db/migrations.py:45`). `CONCURRENTLY` cannot run inside a transaction block, so the
+directive is not optional for it.
+
+⚠ The note lives here rather than in the migration's own comment because `377` and `378`
+are already applied and `schema_migrations.content_sha256` pins their bytes
+(`app/db/migrations.py:105`, `:149-170`) — editing either file would fail the ledger check
+at the next boot rather than document anything.
+
 ## Acceptance
 
 1. `test_scenario_7b_lost_close_acceptance_wedges_the_core_capital_reader` inverted:
