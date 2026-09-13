@@ -999,7 +999,12 @@ def main() -> int:
 
         print("#2946 step 2 -- eToro quota load census", file=out)
         print(f"git={_git_sha()}  db_snapshot_at={_fmt_dt(cutoff)} (REPEATABLE READ, read-only)", file=out)
-        print(f"lane map VERIFIED_ON={lanes.VERIFIED_ON} (a dated transcript, not a pinned artefact)", file=out)
+        print(
+            f"lane map VERIFIED_ON={lanes.VERIFIED_ON} — per-endpoint numbers PINNED against the\n"
+            "  portal's OpenAPI document (#2946 item 4, tests/fixtures/etoro/); the GENERAL\n"
+            "  rate-limit page behind `general_tier_per_minute` is still a dated transcript.",
+            file=out,
+        )
         if args.since:
             print(f"M2/M3 restricted to fires at or after {args.since}", file=out)
         print(

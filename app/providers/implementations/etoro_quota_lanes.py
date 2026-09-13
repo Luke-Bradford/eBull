@@ -37,6 +37,18 @@ from typing import Literal
 # Date the portal was read.  Everything below is "documented as read on this
 # date" — WebFetch returns a rendered reading, not raw bytes, and no response
 # hash was captured, so this is a dated transcript and not a pinned artefact.
+#
+# ⚠ Since #2946 item 4 that is true of the GENERAL page only.  The per-endpoint
+# numbers — every lane's `documented_per_minute`, its window, its scope and its
+# pool membership — are now cross-checked offline against the portal's OpenAPI
+# document, which carries a structured `x-ratelimit` on all 177 operations and is
+# committed with a content hash (`tests/fixtures/etoro/`,
+# `tests/test_2946_openapi_ratelimit_census.py`).
+#
+# ⚠⚠ That artefact is a CROSS-CHECK: it is eToro's document and this is our table.
+# Never regenerate this file from it — doing so turns the check into an identity
+# and leaves the census unguarded (see the prevention log, "a derivation can
+# silently turn a comparison test into an identity test").
 VERIFIED_ON = date(2026, 9, 13)
 
 PORTAL_GENERAL_RATE_LIMIT_PAGE = "https://api-portal.etoro.com/core/getting-started/rate-limits"

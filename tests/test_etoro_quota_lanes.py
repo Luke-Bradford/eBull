@@ -15,6 +15,13 @@ implied more than they deliver:
   endpoint in one commit, passes silently, and a count can never detect a WRONG
   lane assignment.  They are a re-read trigger, not a proof.
 * Nothing here can detect that the portal CHANGED.  Only a re-fetch can.
+  ⚠ Still true of THESE tests, and now only half the story for the census as a whole:
+  #2946 item 4 committed the portal's OpenAPI document plus an extract of its structured
+  ``x-ratelimit`` annotations, so ``tests/test_2946_openapi_ratelimit_census.py``
+  cross-checks every lane's ``documented_per_minute``, window, scope and pool membership
+  offline, and ``scripts/refresh_2946_openapi_census.py`` re-fetches to answer "did it
+  change".  The GENERAL rate-limit page — the source of
+  ``CallSite.general_tier_per_minute`` — is still an unpinned rendered reading.
 """
 
 from __future__ import annotations
