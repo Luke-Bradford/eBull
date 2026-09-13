@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import stat
 from dataclasses import dataclass
@@ -18,18 +19,29 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Final
 
+logger = logging.getLogger(__name__)
+
 MANIFEST_SCHEMA: Final = "r6-pit-manifest-v1"
 PAYLOAD_SCHEMA: Final = "r6-2900-pit-payload-v1"
 
-#: Ceiling on a single evidence document held in memory while it is hashed and
-#: parsed. There is no published bound to cite: it is fixed BY CONSTRUCTION as a
-#: memory-safety ceiling, not a schema claim about how many records a bundle may
-#: carry. The loader must hold the whole document to make the digest bind the
-#: bytes it parses (below), so an unbounded read is an unbounded allocation
-#: driven by a file on disk. A #2900-shaped payload is kilobytes per formation
-#: session; anything at this scale is a different artefact and refusing is the
-#: honest answer.
+#: Ceiling on a single evidence DOCUMENT held in memory while it is hashed and
+#: parsed. ⚠ It bounds that one document, NOT the loader's total footprint --
+#: manifest bytes, payload bytes, the decoded text and the parsed records all
+#: coexist, so peak use is a multiple of this. There is no published bound to
+#: cite: it is fixed BY CONSTRUCTION as a memory-safety ceiling, not a schema
+#: claim about how many records a bundle may carry. The loader must hold the
+#: whole document to make the digest bind the bytes it parses (below), so an
+#: unbounded read is an unbounded allocation driven by a file on disk. A
+#: #2900-shaped payload is kilobytes per formation session; anything at this
+#: scale is a different artefact and refusing is the honest answer.
 MAX_EVIDENCE_BYTES: Final = 64 * 1024 * 1024
+
+#: Read granularity. ⚠ NOT cosmetic: ``handle.read(n)`` ALLOCATES ``n`` up front
+#: before it discovers EOF, so reading the ceiling in one call cost 67 MB of
+#: transient peak for a 7-byte file (measured, Python 3.14 / macOS). Chunking
+#: makes the allocation proportional to the document while keeping the single
+#: forward pass that the digest/parse binding depends on.
+_READ_CHUNK_BYTES: Final = 1024 * 1024
 
 
 class R6PitBundleError(RuntimeError):
@@ -107,26 +119,50 @@ def read_verified_document(path: Path) -> tuple[str, bytes]:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         raise R6PitBundleError(f"evidence path must be a readable regular non-symlink file: {path}") from exc
+    buffer = bytearray()
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise R6PitBundleError(f"evidence path must be a regular non-symlink file: {path}")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            # One byte past the ceiling, so "at the limit" and "over it" are
-            # distinguishable without a separate stat (which would be a third
-            # view of the file, and could disagree with this read).
-            data = handle.read(MAX_EVIDENCE_BYTES + 1)
+            # Keep reading one chunk PAST the ceiling, so "exactly at the limit"
+            # and "over it" are distinguishable without a separate stat -- which
+            # would be a third view of the file, and could disagree with this read.
+            while len(buffer) <= MAX_EVIDENCE_BYTES:
+                chunk = handle.read(_READ_CHUNK_BYTES)
+                if chunk is None:
+                    # Non-blocking read with nothing available. On a regular file
+                    # this does not happen, but treating it as EOF would silently
+                    # truncate the document and still return a digest that matched
+                    # the truncation -- the #2945 failure in a new costume.
+                    raise R6PitBundleError(f"evidence read returned no data without reaching end of file: {path}")
+                if not chunk:
+                    break
+                buffer += chunk
+    except OSError as exc:
+        raise R6PitBundleError(f"evidence document could not be read: {path}") from exc
     finally:
-        os.close(descriptor)
-    if len(data) > MAX_EVIDENCE_BYTES:
+        try:
+            os.close(descriptor)
+        except OSError:
+            # ⚠ Swallowed deliberately. A close failure here would replace the
+            # refusal we are already raising with a less informative one.
+            logger.warning("failed to close evidence descriptor for %s", path, exc_info=True)
+    if len(buffer) > MAX_EVIDENCE_BYTES:
         raise R6PitBundleError(f"evidence document exceeds {MAX_EVIDENCE_BYTES} bytes: {path}")
+    data = bytes(buffer)
     return hashlib.sha256(data).hexdigest(), data
 
 
 def _json_object(data: bytes, *, label: str) -> dict[str, Any]:
     """Parse the verified bytes -- never the pathname they came from."""
     try:
+        # ⚠ ``ValueError``, not ``JSONDecodeError``. An oversized integer literal
+        # raises a plain ``ValueError`` from the C parser, which the narrower
+        # catch let escape as an untyped error out of a refusal path.
+        # ``UnicodeDecodeError`` is itself a ``ValueError``, so one clause covers
+        # the decode too.
         value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except ValueError as exc:
         raise R6PitBundleError(f"{label} must be a UTF-8 JSON document") from exc
     return _object(value, label=label)
 

@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any, Final, cast
 from uuid import uuid4
 
-from app.services.r6_pit_bundle import MANIFEST_SCHEMA, PAYLOAD_SCHEMA, read_verified_document
+from app.services.r6_pit_bundle import (
+    MANIFEST_SCHEMA,
+    MAX_EVIDENCE_BYTES,
+    PAYLOAD_SCHEMA,
+    read_verified_document,
+)
 from app.services.r6_pit_universe import common_equity_reason
 
 BUILDER_VERSION: Final = "r6-2900-pit-builder-v1"
@@ -53,6 +58,14 @@ def _formation_map(document: dict[str, Any], *, collection: str) -> dict[str, di
 def _write_exclusive(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    # ⚠ Refuse BEFORE publishing, not after. The loader bounds a document at
+    # MAX_EVIDENCE_BYTES, and the payload is written before it is hashed -- so
+    # checking afterwards would strand an unreadable frozen payload on disk that
+    # no retry can replace (`_write_exclusive` refuses to overwrite).
+    if len(encoded) > MAX_EVIDENCE_BYTES:
+        raise RuntimeError(
+            f"refusing to publish evidence larger than the loader will read ({len(encoded)} bytes): {path}"
+        )
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         with temporary.open("xb") as handle:

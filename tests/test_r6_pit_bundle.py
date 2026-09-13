@@ -3,12 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
+import tracemalloc
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 import app.services.r6_pit_bundle as bundle_module
+import scripts.build_2900_pit_bundle as builder
 from app.services.r6_pit_bundle import (
     MANIFEST_SCHEMA,
     PAYLOAD_SCHEMA,
@@ -204,6 +208,27 @@ def test_read_verified_document_returns_the_digest_of_the_bytes_it_returns(tmp_p
     assert digest == hashlib.sha256(data).hexdigest()
 
 
+@contextmanager
+def _hang_guard(seconds: int = 10):
+    """Turn a hang into a failure.
+
+    Without this the FIFO case below does not test anything useful: drop
+    ``O_NONBLOCK`` and the assertion never runs, the suite just stops. A test
+    whose failure mode is "no output forever" is not a regression test.
+    """
+
+    def _fire(signum: int, frame: object) -> None:
+        raise TimeoutError("evidence read blocked")
+
+    previous = signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def test_fifo_evidence_is_refused_instead_of_blocking(tmp_path: Path) -> None:
     """A FIFO with no writer must refuse, not hang.
 
@@ -216,5 +241,66 @@ def test_fifo_evidence_is_refused_instead_of_blocking(tmp_path: Path) -> None:
     payload.unlink()
     os.mkfifo(payload)
 
-    with pytest.raises(R6PitBundleError, match="regular non-symlink file"):
+    with _hang_guard(), pytest.raises(R6PitBundleError, match="regular non-symlink file"):
         load_r6_pit_bundle(manifest, expected_manifest_sha256=manifest_sha)
+
+
+def test_a_small_document_does_not_allocate_the_whole_ceiling(tmp_path: Path) -> None:
+    """Reading the ceiling in one call allocated it up front (Codex ckpt-3).
+
+    ``handle.read(n)`` sizes its buffer from ``n``, not from the file, so a
+    7-byte document cost ~64 MiB of transient peak. The chunked read must keep
+    the peak proportional to the document.
+    """
+    document = tmp_path / "small.json"
+    document.write_bytes(b'{"a":1}')
+
+    tracemalloc.start()
+    try:
+        bundle_module.read_verified_document(document)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < bundle_module.MAX_EVIDENCE_BYTES // 8
+
+
+def test_a_document_exactly_at_the_ceiling_is_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bundle_module, "MAX_EVIDENCE_BYTES", 64)
+    monkeypatch.setattr(bundle_module, "_READ_CHUNK_BYTES", 7)
+    document = tmp_path / "exact.bin"
+    document.write_bytes(b"x" * 64)
+
+    digest, data = bundle_module.read_verified_document(document)
+
+    assert len(data) == 64
+    assert digest == hashlib.sha256(b"x" * 64).hexdigest()
+
+
+def test_the_builder_pins_the_bytes_it_parses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The builder had the identical two-read shape on its pinned sources."""
+    source = tmp_path / "census.json"
+    source.write_text(json.dumps({"formations": {}}, sort_keys=True), encoding="utf-8")
+    pinned = hashlib.sha256(source.read_bytes()).hexdigest()
+    original = builder.read_verified_document
+
+    def racing(path: Path) -> tuple[str, bytes]:
+        result = original(path)
+        path.write_text(json.dumps({"formations": {"swapped": {}}}, sort_keys=True), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(builder, "read_verified_document", racing)
+
+    assert builder._load_pinned(source, pinned) == {"formations": {}}
+
+
+def test_the_builder_refuses_to_publish_beyond_the_loader_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse before the write, or a frozen payload no reader can load is stranded."""
+    monkeypatch.setattr(builder, "MAX_EVIDENCE_BYTES", 16)
+
+    with pytest.raises(RuntimeError, match="refusing to publish evidence larger"):
+        builder._write_exclusive(tmp_path / "payload.json", {"records": ["x" * 64]})
+
+    assert not (tmp_path / "payload.json").exists()
