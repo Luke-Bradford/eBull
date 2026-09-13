@@ -30,6 +30,7 @@ from app.providers.implementations.etoro import (
     _normalise_rates,
 )
 from app.providers.market_data import OHLCVBar, Quote
+from app.services import market_data
 from app.services.market_data import (
     _INCREMENTAL_FETCH_BARS,
     DEFAULT_MAX_SPREAD_PCT,
@@ -1167,6 +1168,47 @@ class TestCandlesFetchCount:
         assert _candles_fetch_count(conn, 42, default=400, today=today) == _INCREMENTAL_FETCH_BARS
 
 
+class TestRevisionAgeBucket:
+    """#2414 — how far back a revised bar was, bucketed by this module's own constants.
+
+    Pure and table-driven because every edge is a decision: the whole point of
+    the histogram is to tell an in-progress bar from a four-year-old correction,
+    and an off-by-one at an edge silently reclassifies exactly the case the
+    measurement exists to find.
+    """
+
+    @pytest.mark.parametrize(
+        ("age_days", "expected"),
+        [
+            (0, "same_day"),
+            (1, "1_3"),
+            (3, "1_3"),  # _INCREMENTAL_FETCH_BARS, inclusive
+            (4, "4_30"),
+            (30, "4_30"),
+            (31, "31_365"),
+            (365, "31_365"),
+            (366, "over_365"),
+            (1_500, "over_365"),
+        ],
+    )
+    def test_edges_are_inclusive_upper_bounds(self, age_days: int, expected: str) -> None:
+        assert market_data._revision_age_bucket(age_days) == expected
+
+    def test_a_future_dated_bar_gets_its_own_bucket(self) -> None:
+        """⚠ It must NOT fall into ``same_day``.
+
+        A bar dated after the run's reference date is its own defect. Folding it
+        into the in-progress-bar bucket would hide it behind the one bucket
+        everybody expects to be noisy — the prettifying-fallback shape.
+        """
+        assert market_data._revision_age_bucket(-1) == "future"
+
+    def test_the_buffer_edge_is_the_modules_own_constant(self) -> None:
+        """Not a magic 3: if the correction buffer moves, this must be revisited."""
+        assert _INCREMENTAL_FETCH_BARS == 3
+        assert dict(market_data._REVISION_AGE_EDGES)["1_3"] == _INCREMENTAL_FETCH_BARS
+
+
 class TestRefreshMarketDataForceBackfill:
     """force_backfill=True bypasses freshness skip + uses lookback_days
     regardless of incremental mode (#603)."""
@@ -1260,8 +1302,14 @@ class TestRefreshMarketDataForceBackfill:
             patch("app.services.market_data._candles_are_fresh", return_value=False),
             patch("app.services.market_data._candles_fetch_count", return_value=3),
             patch("app.services.market_data._last_bar", return_value=None),
-            # (inserted, revised) since #2414 — a bare int unpacks to nothing.
-            patch("app.services.market_data._upsert_candles", return_value=(1, 0)) as upsert,
+            # A `CandleUpsertOutcome` since #2414 — a bare int, and latterly a
+            # bare tuple, unpacks to nothing.
+            patch(
+                "app.services.market_data._upsert_candles",
+                return_value=market_data.CandleUpsertOutcome(
+                    inserted=1, revised=0, revision_age_days={}, revision_max_age_days=None
+                ),
+            ) as upsert,
             patch("app.services.market_data._compute_and_store_features", return_value=0),
             patch("app.services.market_data._record_supply_outcome"),
         ):
@@ -1323,17 +1371,31 @@ class TestRefreshMarketDataForceBackfill:
         provider.get_daily_candles.return_value = [MagicMock()]  # non-empty bars
 
         with (
-            # (inserted, revised) since #2414. Deliberately BOTH non-zero: the
-            # #1293 accumulate-only-after-a-clean-commit rule binds the revision
-            # counter exactly as it binds the row total, and a (5, 0) fixture
-            # would leave that half of it unpinned.
-            _patch.object(market_data, "_upsert_candles", return_value=(3, 2)),
+            # Deliberately non-zero on EVERY field since #2414: the #1293
+            # accumulate-only-after-a-clean-commit rule binds the revision
+            # counter, its age histogram and its max-age exactly as it binds the
+            # row total, and a fixture that zeroed any of them would leave that
+            # part unpinned.
+            _patch.object(
+                market_data,
+                "_upsert_candles",
+                return_value=market_data.CandleUpsertOutcome(
+                    inserted=3, revised=2, revision_age_days={"31_365": 2}, revision_max_age_days=200
+                ),
+            ),
             _patch.object(market_data, "_compute_and_store_features", side_effect=RuntimeError("feature boom")),
         ):
             summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
 
         assert summary.candle_rows_upserted == 0  # the 3 inserts rolled back — not counted
         assert summary.candle_rows_revised == 0  # ...and neither are the 2 revisions
+        # #2414 — the age histogram and the max-age are accumulated in the same
+        # place and under the same rule, so a rolled-back instrument must leave
+        # both empty. Asserted separately because they are merged by different
+        # code (a dict merge and a max), and one could survive while the other
+        # does not.
+        assert summary.candle_revision_age_days == {}
+        assert summary.candle_revision_max_age_days is None
         assert summary.candles_failed == 1
 
 

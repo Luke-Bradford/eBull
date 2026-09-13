@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -291,6 +291,22 @@ class MarketRefreshSummary:
     # This makes the rate measurable going forward — it does NOT recover the
     # history, and it does not fix the ledger collision #2414 is really about.
     candle_rows_revised: int = 0
+    # #2414 — the same revisions, split by HOW FAR BACK the overwritten bar was.
+    # The rate alone cannot choose between the ticket's two candidate fixes: an
+    # embargo ("do not decide on a bar younger than the correction buffer") is
+    # sufficient if and only if revisions never reach past it, and a corpus stamp
+    # in the signal key is required if they do. Measured 2026-09-13 on the 21
+    # stored runs that carry `bars_revised`: 4,076 of 36,636 bar-writes (11.1%)
+    # were revisions, so the "rate might be zero" branch is already refuted — but
+    # nothing stored says whether those were the in-progress bar or four-year-old
+    # history, and the two have opposite consequences.
+    # ⚠ `default_factory`, not `{}` — a mutable default is shared across every
+    # instance, and this dataclass is constructed per run.
+    candle_revision_age_days: dict[str, int] = field(default_factory=dict)
+    # The oldest single revision in the run, in calendar days. Kept beside the
+    # histogram because one deep revision IS the finding and a bucket count of 1
+    # does not say how deep. `None` when nothing was revised.
+    candle_revision_max_age_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -567,6 +583,8 @@ def refresh_market_data(
 
     candle_rows_upserted = 0
     candle_rows_revised = 0
+    candle_revision_age_days: dict[str, int] = {}
+    candle_revision_max_age_days: int | None = None
     features_computed = 0
     quotes_updated = 0
     quotes_skipped = 0
@@ -609,6 +627,8 @@ def refresh_market_data(
             fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=freshness_target)
         upserted = 0
         revised = 0
+        revision_ages: dict[str, int] = {}
+        revision_max_age: int | None = None
         computed = 0
         adjustment_detected = False
         try:
@@ -656,8 +676,11 @@ def refresh_market_data(
                         # only a heal if the series was actually rewritten.
                         adjustment_detected = bool(bars)
                 if bars:
-                    inserted, revised = _upsert_candles(conn, instrument_id, bars)
-                    upserted = inserted + revised
+                    outcome = _upsert_candles(conn, instrument_id, bars, reference_date=freshness_target)
+                    revised = outcome.revised
+                    upserted = outcome.inserted + revised
+                    revision_ages = outcome.revision_age_days
+                    revision_max_age = outcome.revision_max_age_days
                     computed = _compute_and_store_features(conn, instrument_id)
             # Accumulate the running totals ONLY after the transaction has
             # committed cleanly (#1293 / Codex): incrementing inside the
@@ -666,6 +689,17 @@ def refresh_market_data(
             # — and that same instrument is also counted in ``candles_failed``.
             candle_rows_upserted += upserted
             candle_rows_revised += revised
+            # Merged here rather than inside the `with` for the same #1293
+            # reason as the counters above: an instrument whose commit later
+            # raised did not revise anything.
+            for bucket, count in revision_ages.items():
+                candle_revision_age_days[bucket] = candle_revision_age_days.get(bucket, 0) + count
+            if revision_max_age is not None:
+                candle_revision_max_age_days = (
+                    revision_max_age
+                    if candle_revision_max_age_days is None
+                    else max(candle_revision_max_age_days, revision_max_age)
+                )
             features_computed += computed
             # Counted only after a clean commit (same #1293 rule as the row
             # totals) — a heal whose re-fetch or write failed did NOT happen.
@@ -749,6 +783,8 @@ def refresh_market_data(
         instruments_refreshed=len(instruments),
         candle_rows_upserted=candle_rows_upserted,
         candle_rows_revised=candle_rows_revised,
+        candle_revision_age_days=candle_revision_age_days,
+        candle_revision_max_age_days=candle_revision_max_age_days,
         features_computed=features_computed,
         quotes_updated=quotes_updated,
         quotes_skipped=quotes_skipped,
@@ -931,16 +967,95 @@ def _stored_overlap_closes(
     return {row[0]: row[1] for row in rows}
 
 
+#: Calendar-day upper edges for the revised-bar age histogram (#2414), in the
+#: order they are tested. NOT invented: every edge is one of this module's own
+#: constants, so the buckets answer the question the code already poses.
+#:
+#: * ``0`` — the run's own reference date: the in-progress bar being re-observed
+#:   as the session moves. This is NOT a historical correction and must never be
+#:   summed with the others.
+#: * ``3`` — ``_INCREMENTAL_FETCH_BARS``, the documented correction buffer.
+#: * ``30`` / ``365`` — the two spans between the buffer and the ``lookback_days``
+#:   (1000 bars ≈ 4 calendar years) deep re-fetch.
+#: * beyond — reachable ONLY through that deep re-fetch path.
+#:
+#: ⚠⚠ The edges are CALENDAR days; ``_INCREMENTAL_FETCH_BARS`` counts BARS. A
+#: 3-bar buffer spans up to 5 calendar days across a weekend, and more across a
+#: holiday, so ``1_3`` is a strict SUBSET of "inside the buffer" and ``4_30``
+#: contains an unknown handful of inside-buffer revisions. The decisive reading is
+#: therefore ``31_365`` and ``over_365``, which no buffer explanation covers.
+_REVISION_AGE_EDGES: tuple[tuple[str, int], ...] = (("same_day", 0), ("1_3", 3), ("4_30", 30), ("31_365", 365))
+_REVISION_AGE_BEYOND = "over_365"
+#: A bar dated after the run's reference date. Its own defect if it ever appears,
+#: and given its own bucket so it can never be absorbed into ``same_day``.
+_REVISION_AGE_FUTURE = "future"
+
+
+@dataclass(frozen=True)
+class CandleUpsertOutcome:
+    """What one instrument's upsert did, split by KIND rather than counted once.
+
+    A dataclass rather than a widening tuple: the caller merges these into
+    running totals only after a clean commit (the #1293 rule), and a four-slot
+    positional return is where that merge starts going wrong silently.
+    """
+
+    inserted: int
+    revised: int
+    #: bucket name -> count, over the REVISED bars only. Empty when none.
+    revision_age_days: dict[str, int]
+    #: The oldest revised bar's age in calendar days, or ``None`` if none were
+    #: revised. Kept beside the histogram because a single deep revision is the
+    #: finding, and a bucket count of 1 does not say how deep.
+    revision_max_age_days: int | None
+
+
+def _revision_age_bucket(age_days: int) -> str:
+    """Bucket one revised bar's age. ``age_days`` is CALENDAR days; see the edges above.
+
+    ⚠ The caller computes ``age_days`` as ``reference_date - bar.price_date``,
+    where ``reference_date`` is the run's ``freshness_target`` — ``fresh_through``
+    if the caller pinned one, otherwise ``most_recent_trading_day(today)``. A
+    NEGATIVE age therefore means a bar dated after the session the run is
+    reconciling to, which is a provider or pinning fault rather than an age
+    (review nitpick, round 1: worth stating for anyone touching
+    ``freshness_target``, since nothing in this function's signature implies it).
+    It is bucketed separately for that reason and never clamped to zero.
+    """
+    if age_days < 0:
+        return _REVISION_AGE_FUTURE
+    for name, edge in _REVISION_AGE_EDGES:
+        if age_days <= edge:
+            return name
+    return _REVISION_AGE_BEYOND
+
+
 def _upsert_candles(
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instrument_id: int,
     bars: list[OHLCVBar],
-) -> tuple[int, int]:
+    *,
+    reference_date: date,
+) -> CandleUpsertOutcome:
     """
     Upsert OHLCV bars into price_daily. Idempotent — re-running with the same
     data produces no changes (ON CONFLICT DO UPDATE with WHERE clause).
-    Returns ``(inserted, revised)`` — NEW bars and bars whose stored OHLCV was
-    OVERWRITTEN by a different value. Their sum is the old scalar return.
+    Returns inserted and revised counts — NEW bars and bars whose stored OHLCV
+    was OVERWRITTEN by a different value. Their sum is the old scalar return.
+
+    ⚠ The age histogram is FREE: the revised bar's ``price_date`` is already in
+    hand, so it costs no query and no column. It is here rather than in a
+    separate probe because ``price_daily`` keeps no prior value — once this
+    statement returns, the age of what was overwritten is unrecoverable, exactly
+    as the magnitude already is.
+
+    ⚠ MAGNITUDE is deliberately NOT captured. ``RETURNING OLD.close`` would give
+    it for nothing, and that is PostgreSQL 18; this cluster is 17.9 (checked, not
+    assumed). The alternatives — a per-bar SELECT or a prior-value CTE — double
+    the index probes on a path that writes up to 500k rows in one stale sweep, to
+    answer a question that does not discriminate between #2414's two candidate
+    fixes. Age does: an embargo works only if revisions never reach past the
+    correction buffer.
 
     ⚠⚠ The split exists because these two are not the same event and the
     caller could not tell them apart (#2414). A new bar extends the series; a
@@ -971,6 +1086,8 @@ def _upsert_candles(
     """
     inserted = 0
     revised = 0
+    age_days: dict[str, int] = {}
+    max_age: int | None = None
     for bar in bars:
         row = conn.execute(
             """
@@ -1012,7 +1129,19 @@ def _upsert_candles(
             inserted += 1
         else:
             revised += 1
-    return inserted, revised
+            age = (reference_date - bar.price_date).days
+            bucket = _revision_age_bucket(age)
+            age_days[bucket] = age_days.get(bucket, 0) + 1
+            # ⚠ `max` over the RAW age, including a negative one: a future-dated
+            # bar must not be silently floored at 0 here after being given its
+            # own bucket above.
+            max_age = age if max_age is None else max(max_age, age)
+    return CandleUpsertOutcome(
+        inserted=inserted,
+        revised=revised,
+        revision_age_days=age_days,
+        revision_max_age_days=max_age,
+    )
 
 
 def _compute_and_store_features(

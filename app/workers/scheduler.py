@@ -3366,6 +3366,15 @@ def daily_candle_refresh() -> None:
                     # ``outcomes`` deliberately — every key there counts
                     # INSTRUMENTS, and this counts BARS.
                     "bars_revised": summary.candle_rows_revised,
+                    # #2414 — the same revisions split by how far back the
+                    # overwritten bar was, and the single deepest one. The rate
+                    # alone cannot choose the fix: an embargo is sufficient iff
+                    # revisions never reach past the correction buffer, and a
+                    # corpus stamp in the signal key is required if they do.
+                    # Persisted for the same reason as `bars_revised` — after
+                    # this function returns, nothing can establish it.
+                    "bars_revised_age_days": summary.candle_revision_age_days,
+                    "bars_revised_max_age_days": summary.candle_revision_max_age_days,
                 },
             )
         tracker.row_count = summary.candle_rows_upserted
