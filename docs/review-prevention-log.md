@@ -5540,3 +5540,47 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Enforced in: this prevention log;
   `tests/test_strategy_order_reconciliation.py::_slo_ages` +
   `test_backlog_rotates_and_never_strands_an_order_past_the_batch_limit`.
+
+### A resolver's broad `except Exception` reclassifies programming bugs as configuration errors
+- First seen in: #2947 (2026-09-13), PR #2970 review round 1 (WARNING).
+- Symptom: `portfolio_feasibility_loader.resolve_account_scope` wrapped
+  `sole_operator_id` + `live_credential_ids_unlocked` in `except Exception` and re-raised
+  everything as `FeasibilityLoaderError`, which the CLI renders as a configuration error with
+  its own exit code. A `TypeError`, a renamed column or any other defect in those calls would
+  therefore be reported as "the account could not be resolved" — an outcome that reads as
+  expected operational state, so nobody investigates. The quietest possible way to hide a
+  real defect is to give it a legitimate-looking name.
+- Prevention: in a RESOLVER or LOADER that maps failures onto a domain error, catch only the
+  exceptions the underlying calls actually raise, named explicitly (here
+  `OperatorLookupError` and `CoreEligibilityError`), and let everything else propagate.
+  Infrastructure errors (`psycopg.Error`) deserve their own arm where the caller
+  distinguishes them. Self-review prompt: "if this function had a typo in it, would the
+  caller print a tidy operational message instead of a traceback?" ⚠ This is NOT a blanket
+  ban on `except Exception` — a batch loop that must not abort on one poison item still needs
+  it (see the `reconcile_backlog` entry above). The distinguisher is whether the handler
+  RENAMES the failure into a domain vocabulary.
+- Enforced in: this prevention log;
+  `app/services/portfolio_feasibility_loader.py::resolve_account_scope`.
+
+### An "atomic artifact" guarantee is a property of the catch-all, not of the handled-exception list
+- First seen in: #2947 (2026-09-13), PR #2970 review round 1 (WARNING), after Codex ckpt-2
+  had already found the same class in the exit codes.
+- Symptom: `screen_portfolio_feasibility.py` documented that *"a failed run must not leave the
+  PREVIOUS artifact in place looking like its result"* and discarded the stale file in each of
+  its named `except` arms. Any exception outside that list — or a `KeyboardInterrupt` — skipped
+  the discard entirely, leaving yesterday's artifact at the declared path with nothing marking
+  it superseded. The docstring's guarantee was therefore false exactly when it mattered most,
+  because the anticipated failures are the ones least likely to produce a misleading artifact.
+  ⚠ `os.replace` does NOT cover this: atomic replacement prevents a half-written file, and a
+  failed run writes no file at all.
+- Prevention: when a CLI entrypoint promises anything about the state it leaves behind, wrap
+  the WHOLE body in `except BaseException: <cleanup>; raise`. Re-raise unconditionally — the
+  cleanup is not a reason to swallow a defect. Then assert it with a test that injects an
+  exception the code does not model (monkeypatch an inner call to raise `RuntimeError`) and
+  checks both that it propagates and that the cleanup ran. A test over only the handled
+  exceptions cannot distinguish the two designs.
+  Self-review prompt: "which exceptions skip my cleanup, and did I write that guarantee down
+  as if none did?"
+- Enforced in: this prevention log;
+  `scripts/screen_portfolio_feasibility.py::main` (the trailing `except BaseException`) +
+  `tests/test_2947_feasibility_loader.py::test_an_unexpected_error_still_removes_the_stale_artifact`.

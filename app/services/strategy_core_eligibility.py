@@ -369,14 +369,46 @@ def load_latest_core_eligibility_proof(
     )
 
 
-def _live_credential_ids(
+# The ONE definition of "the live credential pair for this account".  Two readers
+# below differ only in lock posture; the predicate is shared so a change to what
+# "live" means cannot reach one caller and miss the other -- the "contract field
+# wired into one model not its sibling" class (#1955).
+_LIVE_CREDENTIALS_SQL = """
+    SELECT label, id FROM broker_credentials
+    WHERE operator_id = %s AND provider = %s AND environment = %s
+      AND revoked_at IS NULL AND label IN ('api_key','user_key')
+"""
+
+
+def _credential_pair(
+    conn: psycopg.Connection[Any],
+    *,
+    operator_id: UUID,
+    provider: str,
+    environment: str,
+    lock: bool,
+) -> tuple[UUID, UUID]:
+    rows = conn.execute(
+        _LIVE_CREDENTIALS_SQL + ("FOR SHARE" if lock else ""),
+        (operator_id, provider, environment),
+    ).fetchall()
+    live = {str(label): value for label, value in rows}
+    if "api_key" not in live or "user_key" not in live:
+        raise CoreEligibilityError(
+            f"no live {provider} {environment} credential pair for this operator; "
+            "an eligibility proof cannot be attributed to an account that has none"
+        )
+    return live["api_key"], live["user_key"]
+
+
+def live_credential_ids(
     conn: psycopg.Connection[Any],
     *,
     operator_id: UUID,
     provider: str,
     environment: str,
 ) -> tuple[UUID, UUID]:
-    """The live ``(api_key, user_key)`` credential ids for this account.
+    """The live ``(api_key, user_key)`` credential ids for this account, LOCKED.
 
     ``broker_credentials_unique_active`` (sql/019) is unique on
     ``(operator_id, provider, label, environment) WHERE revoked_at IS NULL``, so
@@ -392,23 +424,31 @@ def _live_credential_ids(
     partial unique index refuses a second live row per label, blocking the revoke
     blocks the whole swap.  Shared, not exclusive: concurrent readers of the same
     account are not a hazard, only a writer is.
+
+    ⚠ Use :func:`live_credential_ids_unlocked` from an ADVISORY reader.  ``FOR
+    SHARE`` cannot run in a read-only transaction and it blocks a revoking UPDATE
+    until this transaction ends -- neither is acceptable for a read-only screen
+    that authorises nothing (#2947).
     """
-    rows = conn.execute(
-        """
-        SELECT label, id FROM broker_credentials
-        WHERE operator_id = %s AND provider = %s AND environment = %s
-          AND revoked_at IS NULL AND label IN ('api_key','user_key')
-        FOR SHARE
-        """,
-        (operator_id, provider, environment),
-    ).fetchall()
-    live = {str(label): value for label, value in rows}
-    if "api_key" not in live or "user_key" not in live:
-        raise CoreEligibilityError(
-            f"no live {provider} {environment} credential pair for this operator; "
-            "an eligibility proof cannot be attributed to an account that has none"
-        )
-    return live["api_key"], live["user_key"]
+    return _credential_pair(conn, operator_id=operator_id, provider=provider, environment=environment, lock=True)
+
+
+def live_credential_ids_unlocked(
+    conn: psycopg.Connection[Any],
+    *,
+    operator_id: UUID,
+    provider: str,
+    environment: str,
+) -> tuple[UUID, UUID]:
+    """Same pair, no row lock -- for ADVISORY readers only (#2947).
+
+    ⚠ The result can be stale the instant it returns: a credential swap committing
+    right after this read is not blocked.  That is acceptable for a screen whose
+    output authorises nothing and which records the scope it used in its artifact,
+    and it is NOT acceptable for anything that writes a proof-backed authority.
+    Those callers take :func:`live_credential_ids`.
+    """
+    return _credential_pair(conn, operator_id=operator_id, provider=provider, environment=environment, lock=False)
 
 
 def require_core_eligibility(
@@ -450,7 +490,7 @@ def require_core_eligibility(
         raise CoreEligibilityError(
             f"instrument {instrument_id} eligibility proof {proof.proof_id} is {proof.verdict} ({proof.reason_code})"
         )
-    api_key_id, user_key_id = _live_credential_ids(
+    api_key_id, user_key_id = live_credential_ids(
         conn, operator_id=operator_id, provider=provider, environment=environment
     )
     if (proof.api_key_credential_id, proof.user_key_credential_id) != (api_key_id, user_key_id):
@@ -476,6 +516,8 @@ __all__ = [
     "CoreEligibilityError",
     "CoreEligibilityProof",
     "evaluate_core_eligibility",
+    "live_credential_ids",
+    "live_credential_ids_unlocked",
     "load_latest_core_eligibility_proof",
     "record_core_eligibility_proof",
     "require_core_eligibility",
