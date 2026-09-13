@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -56,6 +57,7 @@ import pytest
 
 from app.providers.broker import BrokerOrderResult, OrderParams
 from app.services.order_client import (
+    SubmissionControlsRevokedError,
     _load_approved_recommendation,
     _load_latest_quote_price,
     _load_position_units,
@@ -123,6 +125,19 @@ def _patch_runtime_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.services.order_client._assert_transaction_cost_complete_for_buy_add",
         lambda _conn, _action, _instrument_id: None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _patch_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2943: the submission-control re-check opens its own cursor for the
+    kill_switch row, which would consume a mock conn from every sequenced
+    cursor list in this file. Stub it inactive by default; the dedicated
+    refusal tests below override it.
+    """
+    monkeypatch.setattr(
+        "app.services.order_client.load_kill_switch",
+        lambda _conn: {"is_active": False, "activated_at": None, "reason": None},
     )
 
 
@@ -1384,6 +1399,167 @@ class TestExecuteOrderRuntimeConfigCorrupt:
 
         # No order should have been persisted, no audit row written.
         conn.transaction.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestSubmissionControls (#2943)
+# ---------------------------------------------------------------------------
+
+
+def _audit_insert_calls(conn: MagicMock) -> list[Any]:
+    """conn.execute calls that wrote a decision_audit row."""
+    return [c for c in conn.execute.call_args_list if "INSERT INTO decision_audit" in c.args[0]]
+
+
+class TestSubmissionControls:
+    """#2943: an approved recommendation must not reach the broker after the
+    operator closes a control. The guard checked these at approval time; these
+    tests cover the window between approval and submission.
+    """
+
+    @pytest.fixture
+    def _force_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+
+    @pytest.mark.usefixtures("_force_live")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_kill_switch_activated_after_approval_refuses(
+        self, _mock_now: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kill switch flipped on after approval: no broker call at all."""
+        monkeypatch.setattr(
+            "app.services.order_client.load_kill_switch",
+            lambda _conn: {"is_active": True, "activated_at": _NOW, "reason": "operator halt"},
+        )
+        broker = MagicMock()
+        conn = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
+
+        with pytest.raises(SubmissionControlsRevokedError) as exc:
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        assert exc.value.failed_rules == ["kill_switch"]
+        assert "operator halt" in str(exc.value)
+        broker.place_order.assert_not_called()
+        broker.close_position.assert_not_called()
+        # Nothing was staged: the intent INSERT happens after this gate.
+        conn.transaction.assert_not_called()
+
+    @pytest.mark.usefixtures("_force_live")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_refusal_is_audited_and_committed(self, _mock_now: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The refusal row must be committed BEFORE the raise — the scheduler's
+        ``with connect_job()`` rolls back on exception, so an uncommitted audit
+        row would disappear exactly when the operator needs it.
+        """
+        monkeypatch.setattr(
+            "app.services.order_client.load_kill_switch",
+            lambda _conn: {"is_active": True, "activated_at": _NOW, "reason": None},
+        )
+        conn = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
+
+        with pytest.raises(SubmissionControlsRevokedError):
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=MagicMock())
+
+        audits = _audit_insert_calls(conn)
+        assert len(audits) == 1
+        params = audits[0].args[1]
+        assert params["stage"] == "order_client"
+        assert params["pf"] == "FAIL"
+        assert params["rid"] == 42
+        conn.commit.assert_called_once()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_auto_trading_disabled_after_approval_refuses(
+        self, _mock_now: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """enable_auto_trading turned off after approval: refuse."""
+        runtime = replace(_RUNTIME_LIVE, enable_auto_trading=False)
+        monkeypatch.setattr("app.services.order_client.get_runtime_config", lambda _conn: runtime)
+        broker = MagicMock()
+        conn = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
+
+        with pytest.raises(SubmissionControlsRevokedError) as exc:
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        assert exc.value.failed_rules == ["auto_trading"]
+        broker.place_order.assert_not_called()
+
+    @pytest.mark.usefixtures("_force_live")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_missing_kill_switch_row_refuses(self, _mock_now: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A missing kill_switch row is configuration corruption, not consent."""
+        monkeypatch.setattr("app.services.order_client.load_kill_switch", lambda _conn: None)
+        conn = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
+
+        with pytest.raises(SubmissionControlsRevokedError) as exc:
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=MagicMock())
+
+        assert exc.value.failed_rules == ["kill_switch_config_corrupt"]
+
+    @pytest.mark.usefixtures("_force_live")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_exit_is_refused_on_the_same_controls(self, _mock_now: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+        """EXIT is gated identically — which PRESERVES the exit policy rather
+        than tightening it. The guard already applies kill switch / config
+        rules to every action; "EXIT is never blocked" governs thesis,
+        coverage and spread only.
+        """
+        monkeypatch.setattr(
+            "app.services.order_client.load_kill_switch",
+            lambda _conn: {"is_active": True, "activated_at": _NOW, "reason": None},
+        )
+        broker = MagicMock()
+        conn = _make_conn(
+            [_rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None), _position_cursor(5.0)]
+        )
+
+        with pytest.raises(SubmissionControlsRevokedError):
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        broker.close_position.assert_not_called()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_controls_are_read_per_order_not_per_batch(
+        self, _mock_now: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Toggling a control between two orders of the same batch must stop
+        the second one. A batch-level check would let it through — that shape
+        is the defect, so the read has to happen per submission.
+        """
+        kill_switch_active = {"value": False}
+        monkeypatch.setattr(
+            "app.services.order_client.load_kill_switch",
+            lambda _conn: {
+                "is_active": kill_switch_active["value"],
+                "activated_at": None,
+                "reason": None,
+            },
+        )
+
+        first = _make_conn(
+            [
+                _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+                _cash_cursor(balance=10_000.0),
+                _quote_cursor(last=100.0, spread_pct=0.20),
+                _order_returning_cursor(order_id=7),
+                _cost_config_cursor(),
+                _cost_model_cursor(),
+                _cost_record_write_cursor(),
+                _fill_returning_cursor(fill_id=3),
+            ]
+        )
+        assert execute_order(first, recommendation_id=42, decision_id=10).outcome == "filled"
+
+        kill_switch_active["value"] = True
+
+        second = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
+        with pytest.raises(SubmissionControlsRevokedError):
+            execute_order(second, recommendation_id=43, decision_id=11)
+
+        assert _audit_insert_calls(second)
 
 
 # ---------------------------------------------------------------------------

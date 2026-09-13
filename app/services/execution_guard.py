@@ -51,7 +51,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.budget import BudgetConfigCorrupt, BudgetState, FxRateUnavailable, compute_budget_state
 from app.services.portfolio import _load_mirror_equity
-from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
+from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt, get_runtime_config
 from app.services.transaction_cost import (
     TransactionCostConfigCorrupt,
     estimate_cost,
@@ -157,7 +157,7 @@ def _load_recommendation(
     return dict(row)
 
 
-def _load_kill_switch(conn: psycopg.Connection[Any]) -> dict[str, Any] | None:
+def load_kill_switch(conn: psycopg.Connection[Any]) -> dict[str, Any] | None:
     """
     Load the kill_switch row.  Returns None if the row is missing (treated as
     configuration corruption by the caller — fail closed).
@@ -365,6 +365,42 @@ def _check_live_trading(enabled: bool) -> RuleResult:
             detail="runtime_config.enable_live_trading is False",
         )
     return RuleResult(rule="live_trading", passed=True)
+
+
+def decide_submission_controls(
+    ks_row: dict[str, Any] | None,
+    runtime: RuntimeConfig | None,
+    runtime_corrupt: bool,
+) -> list[RuleResult]:
+    """The operator's standing trading authority, as a pure decision (#2943).
+
+    These are the controls an operator can revoke at any moment: the kill
+    switch, ``enable_auto_trading``, and the integrity of the row both live
+    in.  They are evaluated TWICE against live state — once by the guard at
+    approval time, and again by ``order_client.execute_order`` immediately
+    before it takes any entry authority.  Sharing one function is the point:
+    an approval granted minutes ago is not evidence the operator still
+    consents, and two hand-copied rule blocks drift.
+
+    ``enable_live_trading`` is deliberately NOT here.  It selects the
+    execution MODE (``execute_order`` consumes it to choose broker vs
+    synthetic fill), it is not a standing authority — so the guard appends
+    it separately below.  See the module docstring's rule table.
+
+    Fail-closed on a missing runtime_config row: no defaults are assumed.
+    """
+    results: list[RuleResult] = [_check_kill_switch(ks_row)]
+    if runtime_corrupt or runtime is None:
+        results.append(
+            RuleResult(
+                rule="runtime_config_corrupt",
+                passed=False,
+                detail="runtime_config singleton row missing — configuration corrupt",
+            )
+        )
+    else:
+        results.append(_check_auto_trading(runtime.enable_auto_trading))
+    return results
 
 
 def _check_safety_layers_enabled(
@@ -710,7 +746,7 @@ def evaluate_recommendation(
 
     # --- Step 2: load all state (no transaction open yet) ---
     # Always load kill switch and runtime config (apply to every action).
-    ks_row = _load_kill_switch(conn)
+    ks_row = load_kill_switch(conn)
     try:
         runtime = get_runtime_config(conn)
         runtime_corrupt = False
@@ -780,21 +816,18 @@ def evaluate_recommendation(
     # --- Step 3: evaluate rules ---
     rule_results: list[RuleResult] = []
 
-    # Rules that apply to every action
-    rule_results.append(_check_kill_switch(ks_row))
-    if runtime_corrupt or runtime is None:
-        # Fail closed: missing runtime_config singleton row.  We do NOT fall
-        # through to the auto/live checks with default values — that would
-        # silently bypass operator intent.  Prevention-log #46.
-        rule_results.append(
-            RuleResult(
-                rule="runtime_config_corrupt",
-                passed=False,
-                detail="runtime_config singleton row missing — configuration corrupt",
-            )
-        )
-    else:
-        rule_results.append(_check_auto_trading(runtime.enable_auto_trading))
+    # Rules that apply to every action.
+    #
+    # kill_switch / runtime_config_corrupt / auto_trading come from the SHARED
+    # submission-control rule (#2943) — order_client re-evaluates the identical
+    # function immediately before it submits, so the two cannot drift.  Fail
+    # closed on a missing runtime_config row: we do NOT fall through to the
+    # auto/live checks with default values, which would silently bypass
+    # operator intent (prevention-log #46).
+    rule_results.extend(decide_submission_controls(ks_row, runtime, runtime_corrupt))
+    if not runtime_corrupt and runtime is not None:
+        # Mode requirement, guard-only: execute_order consumes this flag to
+        # choose broker vs synthetic fill rather than treating it as authority.
         rule_results.append(_check_live_trading(runtime.enable_live_trading))
 
     # Rules that apply to BUY / ADD only

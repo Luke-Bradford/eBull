@@ -73,7 +73,7 @@ from app.services.ops_monitor import (
     record_job_skip,
     record_job_start,
 )
-from app.services.order_client import execute_order
+from app.services.order_client import SubmissionControlsRevokedError, execute_order
 from app.services.portfolio import run_portfolio_review
 from app.services.portfolio_sync import sync_portfolio
 from app.services.position_monitor import (
@@ -4919,6 +4919,7 @@ def execute_approved_orders() -> None:
             executed = 0
             pending = 0
             failed = 0
+            refused = 0
             for row in approved:
                 rec_id, decision_id = row[0], row[1]
                 try:
@@ -4954,6 +4955,17 @@ def execute_approved_orders() -> None:
                             result.order_id,
                             result.explanation,
                         )
+                except SubmissionControlsRevokedError as exc:
+                    # #2943: the operator closed a control between approval and
+                    # submission. Not an error — a refusal, already audited by
+                    # execute_order. Counted apart from `failed` so a kill-switch
+                    # batch does not read as a broker outage.
+                    refused += 1
+                    logger.warning(
+                        "execute_approved_orders: recommendation_id=%d refused rules=%s",
+                        rec_id,
+                        exc.failed_rules,
+                    )
                 except Exception:
                     failed += 1
                     logger.error(
@@ -4963,7 +4975,15 @@ def execute_approved_orders() -> None:
                     )
 
             tracker.row_count = (
-                timing_passed + timing_deferred + timing_skipped + guarded + rejected + executed + pending + failed
+                timing_passed
+                + timing_deferred
+                + timing_skipped
+                + guarded
+                + rejected
+                + executed
+                + pending
+                + failed
+                + refused
             )
 
         finally:
@@ -4974,7 +4994,7 @@ def execute_approved_orders() -> None:
         "execute_approved_orders complete: "
         "timing(passed=%d deferred=%d skipped=%d) "
         "guard(proposed=%d approved=%d rejected=%d) "
-        "exec(approved=%d executed=%d pending=%d failed=%d)",
+        "exec(approved=%d executed=%d pending=%d failed=%d refused=%d)",
         timing_passed,
         timing_deferred,
         timing_skipped,
@@ -4985,6 +5005,7 @@ def execute_approved_orders() -> None:
         executed,
         pending,
         failed,
+        refused,
     )
 
 
