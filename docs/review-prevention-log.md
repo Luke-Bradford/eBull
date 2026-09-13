@@ -5584,3 +5584,51 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Enforced in: this prevention log;
   `scripts/screen_portfolio_feasibility.py::main` (the trailing `except BaseException`) +
   `tests/test_2947_feasibility_loader.py::test_an_unexpected_error_still_removes_the_stale_artifact`.
+
+---
+
+### A row lock cannot claim work that outlives its transaction — `FOR UPDATE SKIP LOCKED` is not a queue claim when the worker must commit before doing the work
+
+- First seen in: #2964 item 2 (2026-09-13). The ticket proposed `FOR UPDATE SKIP LOCKED` on
+  `reconcile_backlog`'s selection so two reconcilers would pick disjoint rows. It cannot work:
+  `reconcile_strategy_order` refuses a non-idle connection on purpose — broker I/O must never run
+  inside a DB transaction — so the selection MUST `conn.commit()` before the first broker call, and
+  the row lock dies at that commit. The claim would have been released before any of the work it
+  was supposed to claim began, while reading exactly like a working claim in review.
+- Symptom: a batch worker that (1) selects candidates, (2) commits, (3) performs network or
+  long-running work per candidate, with `FOR UPDATE`/`SKIP LOCKED` in step 1. The lock covers only
+  step 1. Every symptom of the unclaimed race survives, and the SQL looks correct.
+- Prevention: before writing `FOR UPDATE SKIP LOCKED` as a claim, ask **"does the transaction that
+  takes this lock still exist when the work runs?"** If the worker commits first (it must, whenever
+  it does network I/O), a row lock is the wrong primitive. The options that survive a commit are a
+  **session** advisory lock (`pg_advisory_lock`/`pg_advisory_unlock`, released automatically on
+  connection death, so no lease column and no stale-claim reaper) or a **claim column** with a lease
+  and a reaper. Prefer the advisory lock: the reaper exists only to emulate the crash release
+  Postgres already performs. Self-review prompt: grep the function for `conn.commit()` between the
+  locking SELECT and the loop that uses its rows.
+- Enforced in: this prevention log; `app/services/strategy_order_reconciliation.py` (the
+  `reconciliation_order_lock` / `try_reconciliation_order_lock` block comment states the reason at
+  the definition) + `tests/test_2964_reconciliation_order_lock_db.py::test_the_lock_key_is_equal_across_sessions_and_survives_commit`.
+
+### A NESTED `pg_advisory_lock` acquire silently destroys mutual exclusion — the inner release returns TRUE and releases nothing
+
+- First seen in: #2964 items 2-4 (2026-09-13), caught at Codex checkpoint 1 and then measured
+  against the dev server rather than reasoned about. A session advisory lock is **reference
+  counted**: a second acquire on the same connection returns `true`, and the first
+  `pg_advisory_unlock` also returns `true` while leaving the lock HELD. So a nested context manager
+  reports a clean acquire-and-release, the unlock-ownership assertion passes, and the lock is
+  quietly still held for the life of the session — every later contender is refused or blocks
+  forever, on a connection that believes it holds nothing.
+- Symptom: two `with <advisory_lock>(conn, key)` scopes for the same key on one connection, however
+  far apart in the call stack (a helper that takes the lock, called from a path that already holds
+  it). Neither the acquire nor the release fails, so nothing in the test suite or in production
+  logs marks the moment mutual exclusion stopped being real.
+- Prevention: a session-advisory-lock helper must be explicitly **non-re-entrant and loud about it**
+  — track held keys in a process-local `ContextVar` (the shape of `app/jobs/locks.py::_HELD_SOURCES`)
+  and raise on a nested acquire, rather than relying on the unlock's return value, which cannot
+  distinguish "released" from "decremented". ⚠ `pg_locks` does not expose the reference count
+  either, so `core_lock_held`-style verification cannot catch this. If nesting is genuinely wanted,
+  make it re-entrant deliberately (skip the inner acquire AND the inner release), never by accident.
+  Self-review prompt: "can any caller of this function already hold this key?"
+- Enforced in: this prevention log; `app/services/strategy_order_reconciliation.py::_HELD_ORDER_LOCKS`
+  + `tests/test_2964_reconciliation_order_lock_db.py::test_a_nested_acquire_raises_rather_than_silently_double_counting`.

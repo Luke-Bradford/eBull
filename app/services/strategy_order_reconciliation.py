@@ -4,6 +4,33 @@ The submission UUID is committed before broker I/O and is never rotated.  A
 restart can therefore resolve an accepted order through eToro's documented v2
 ``orders:lookup?referenceId=...`` contract.  This module never places or closes
 an order and never infers position ownership from an instrument match.
+
+Lock ordering (#2964 item 3) -- ONE order, stated once, for every writer of a
+strategy order's identity, reconciliation state, executions or trade::
+
+    advisory  1. PAPER_ALLOCATOR -> CORE_MANDATE -> CORE_SUBMISSION
+    advisory  2. _position_lock(broker_position_id)
+    advisory  3. reconciliation_order_lock(order_id)   <- ALWAYS acquired last
+    rows      4. orders
+              5. strategy_order_position_executions    (ascending position id)
+              6. strategy_position_ownership           (ascending position id)
+              7. strategy_order_reconciliation_state
+              8. strategy_trades
+
+The row order is ``_apply_detail``'s, transcribed rather than chosen: it writes
+executions and ownership before the reconciliation row.  ``strategy_trades`` is
+last because it is the only row two DIFFERENT orders of one trade both touch --
+with it last a wait is a queue, not a cycle.  Ascending position id matters for
+the same reason one level down: two orders whose broker details name the same
+two positions in opposite order would each insert one ownership row and then
+block on the other's unique-index conflict, a deadlock across two different
+per-order locks.
+
+⚠ Inserting a ``strategy_order_reconciliation_state`` row takes a ``KEY SHARE``
+FK lock on its ``orders`` row, which conflicts with ``FOR UPDATE``.  A writer
+that created state WITHOUT first locking ``orders`` could deadlock against
+``_apply_detail``.  ``ensure_strategy_request_id`` -- the only such initialiser --
+already takes ``FOR UPDATE OF o`` first, which is why rule 4 precedes rule 7.
 """
 
 from __future__ import annotations
@@ -11,6 +38,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, cast
@@ -97,6 +127,165 @@ _TERMINAL_RECONCILIATION_STATES = frozenset({"resolved", "rejected"})
 
 class StrategyReconciliationError(StrategyControlError):
     """The broker response cannot safely advance a strategy order."""
+
+
+class StrategyReconciliationBusy(StrategyReconciliationError):
+    """Another reconciler or submitter already holds this order's lock.
+
+    Retryable and expected under contention -- NOT a broker fault and not a
+    reason to record a reconciliation failure. ``reconcile_backlog`` skips the
+    row; the core-resume endpoint maps it to HTTP 409.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Per-order reconciliation lock (#2964 items 2-4)
+# ---------------------------------------------------------------------------
+#
+# ⚠⚠ Why a SESSION advisory lock and not the ``FOR UPDATE SKIP LOCKED`` the
+# ticket proposed: ``reconcile_strategy_order`` refuses a non-idle connection
+# (broker I/O must never run inside a DB transaction), so ``reconcile_backlog``
+# MUST commit after selecting. A row lock dies at that commit, before a single
+# broker call. The claim has to outlive commits, which is what a session
+# advisory lock is and a row lock is not.
+#
+# ⚠ The key is ``hashtextextended`` over a namespaced identity, following
+# ``strategy_position_manager._position_lock``. ``orders.order_id`` is BIGINT and
+# the prevention log is explicit -- "Never cast a BIGINT id to int4 in a lock
+# key" -- so the two-int4 shape used by ``core_submission_lock`` is unavailable.
+# A hash collision makes two UNRELATED orders serialise (a reconciler skips one
+# row for one cycle); it can never put two reconcilers on one order.
+#
+# ⚠ One key expression, spelled once. The prevention-log entry "Two writers
+# sharing an advisory lock must use a BYTE-IDENTICAL lock-key SQL" is satisfied
+# structurally here rather than by a grep tripwire: acquire (both flavours) and
+# release all interpolate ``_ORDER_LOCK_KEY_SQL``.
+_RECONCILIATION_ORDER_LOCK_SEED = 2964
+_ORDER_LOCK_KEY_SQL = "hashtextextended(%s, %s)"
+_ORDER_LOCK_TRY_SQL = f"SELECT pg_try_advisory_lock({_ORDER_LOCK_KEY_SQL})"
+_ORDER_LOCK_WAIT_SQL = f"SELECT pg_advisory_lock({_ORDER_LOCK_KEY_SQL})"
+_ORDER_LOCK_UNLOCK_SQL = f"SELECT pg_advisory_unlock({_ORDER_LOCK_KEY_SQL})"
+
+# ⚠ Nesting is a silent correctness hole, not a no-op. Measured against the dev
+# server: a second ``pg_try_advisory_lock`` on the same session returns TRUE and
+# bumps the hold count, and the first ``pg_advisory_unlock`` returns TRUE while
+# leaving the lock HELD. An inner context manager exiting would therefore report
+# success and release nothing. No path nests today; this ContextVar (the shape of
+# ``app/jobs/locks.py::_HELD_SOURCES``) makes a future one fail loudly instead.
+_HELD_ORDER_LOCKS: ContextVar[frozenset[tuple[int, int]]] = ContextVar(
+    "_reconciliation_held_order_locks", default=frozenset()
+)
+
+
+def _order_lock_params(order_id: int) -> tuple[str, int]:
+    return (f"strategy-order-reconciliation:{order_id}", _RECONCILIATION_ORDER_LOCK_SEED)
+
+
+@contextmanager
+def _order_lock(conn: psycopg.Connection[Any], order_id: int, *, wait: bool) -> Iterator[None]:
+    # ⚠ The helper owns its transaction. Under ``autocommit=False`` the acquire
+    # SELECT itself opens one (measured: transaction_status INTRANS after it), so
+    # without these commits the caller's next statement runs inside a stray
+    # transaction and ``reconcile_strategy_order``'s idle check fails. The
+    # CONTENTION path needs the commit just as much as the success path.
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise StrategyReconciliationError("the reconciliation order lock requires an idle connection")
+    # ⚠ Keyed on (connection, order), not order alone. The hazard the guard exists
+    # for is ONE session acquiring twice; two different connections taking the same
+    # order's lock in one call context is the ordinary contention this module
+    # handles at the server, and refusing it here would invent a conflict Postgres
+    # does not have. ``id(conn)`` is sound as the key precisely because the
+    # connection object is alive for the whole hold, so it cannot be reused while
+    # the entry is in the set.
+    key = (id(conn), order_id)
+    held = _HELD_ORDER_LOCKS.get()
+    if key in held:
+        raise StrategyReconciliationError(
+            f"reconciliation order lock for {order_id} is already held on this connection"
+        )
+    params = _order_lock_params(order_id)
+    acquired = conn.execute(_ORDER_LOCK_WAIT_SQL if wait else _ORDER_LOCK_TRY_SQL, params).fetchone()
+    conn.commit()
+    if not wait and acquired != (True,):
+        raise StrategyReconciliationBusy(f"order {order_id} is already being reconciled")
+    token = _HELD_ORDER_LOCKS.set(held | {key})
+    try:
+        yield
+    except BaseException:
+        # ⚠ The body's exception WINS. Raising a lost-ownership error from a
+        # `finally` while another exception is propagating replaces it -- the
+        # broker or persistence failure the caller actually needs would surface as
+        # a lock-ownership message, which is strictly less informative and points
+        # at the wrong subsystem. Release, log loudly, and let the original
+        # propagate. `BaseException` and not `Exception`: a `KeyboardInterrupt`
+        # must still release the lock.
+        #
+        # ⚠ The release is itself wrapped, and not belt-and-braces: a dropped
+        # connection makes `conn.execute` / `conn.commit` raise, and that NEW
+        # exception would replace the body's just as surely as the deliberate
+        # lost-ownership raise did (review nitpick, PR #2975 round 2). Suppressing
+        # it costs nothing real -- Postgres releases every advisory lock held by a
+        # connection when that connection dies, so the failure mode this hides is
+        # also the one that has already released the lock.
+        try:
+            _release_order_lock(conn, params=params, order_id=order_id, raise_on_loss=False)
+        except Exception:
+            logger.exception("releasing the reconciliation order lock for %s failed", order_id)
+        raise
+    else:
+        _release_order_lock(conn, params=params, order_id=order_id, raise_on_loss=True)
+    finally:
+        _HELD_ORDER_LOCKS.reset(token)
+
+
+def _release_order_lock(
+    conn: psycopg.Connection[Any],
+    *,
+    params: tuple[str, int],
+    order_id: int,
+    raise_on_loss: bool,
+) -> None:
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.rollback()
+    released = conn.execute(_ORDER_LOCK_UNLOCK_SQL, params).fetchone()
+    conn.commit()
+    if released == (True,):
+        return
+    message = f"reconciliation order lock ownership for {order_id} was lost"
+    if raise_on_loss:
+        raise StrategyReconciliationError(message)
+    # A lost lock means the critical section was not what it claimed to be, so it
+    # must be loud even when it cannot be raised.
+    logger.error("%s while another exception was propagating", message)
+
+
+def reconciliation_order_lock(conn: psycopg.Connection[Any], order_id: int) -> AbstractContextManager[None]:
+    """Block until this order's reconciliation lock is free -- for SUBMITTERS.
+
+    ⚠⚠ Submitters BLOCK and reconcilers TRY, and the asymmetry is the design.
+    A reconciler that loses can skip: the row is re-selected next cycle. A
+    submitter that loses cannot. Its ``orders`` and reconciliation rows are
+    already committed -- that is the crash-safe durable-before-I/O design -- and
+    ``resume_core_submission`` is deliberately forbidden to resubmit, so refusing
+    here would abandon a durable authority and wedge the arm permanently.
+
+    The wait is bounded by the only thing that can hold this lock against a
+    submitter: one reconciler's broker lookup, i.e. the provider HTTP timeout.
+    No ``lock_timeout`` is set on purpose -- ``lock_timeout`` DOES apply to an
+    advisory wait (measured: ``LockNotAvailable`` after 300ms), but converting
+    the wait into a failure re-creates exactly the stranded authority this
+    blocking acquire exists to prevent.
+    """
+    return _order_lock(conn, order_id, wait=True)
+
+
+def try_reconciliation_order_lock(conn: psycopg.Connection[Any], order_id: int) -> AbstractContextManager[None]:
+    """Take this order's reconciliation lock or raise -- for RECONCILERS.
+
+    Raises :class:`StrategyReconciliationBusy` rather than waiting, so a batch
+    never blocks behind an attended request holding one order.
+    """
+    return _order_lock(conn, order_id, wait=False)
 
 
 def classify_broker_order_status(broker_status: str) -> tuple[ReconciliationState, str]:
@@ -481,7 +670,12 @@ def _apply_detail(
     if state == "resolved" and purpose == "entry" and not detail.position_executions:
         raise StrategyReconciliationError("filled strategy entry has no exact position executions")
 
-    for execution in detail.position_executions:
+    # ⚠ Ascending position id, not the broker's order. Two orders whose details
+    # name the same two positions in OPPOSITE order would each insert one
+    # `strategy_position_ownership` row and then block on the other's unique-index
+    # conflict -- a deadlock across two DIFFERENT per-order locks, which the
+    # per-order lock cannot prevent. A deterministic order makes it a queue.
+    for execution in sorted(detail.position_executions, key=lambda item: item.position_id):
         _record_execution(conn, order_id=order_id, execution=execution)
         if purpose == "entry":
             _claim_entry_execution(
@@ -533,7 +727,9 @@ def _apply_detail(
         state,
         detail.broker_order_ref,
         broker_status,
-        tuple(execution.position_id for execution in detail.position_executions),
+        # Sorted, to match both the write order above and the `ORDER BY
+        # broker_position_id` every other result path reads back.
+        tuple(sorted(execution.position_id for execution in detail.position_executions)),
     )
 
 
@@ -543,11 +739,30 @@ def reconcile_strategy_order(
     broker: BrokerProvider,
     order_id: int,
 ) -> ReconciliationResult:
-    """Poll and reconcile one linked strategy order without any broker write."""
+    """Poll and reconcile one linked strategy order without any broker write.
+
+    Raises :class:`StrategyReconciliationBusy` if another reconciler or a
+    submitter already holds this order (#2964 item 2).
+    """
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyReconciliationError(
             "reconciliation requires an idle connection so broker I/O cannot run inside a DB transaction"
         )
+    # ⚠ The lock is taken BEFORE the identity read, not around the writes. That
+    # ordering is what makes two workers which selected the same due row safe:
+    # the loser reads the state the winner just wrote and short-circuits on the
+    # terminal branch below, instead of re-polling the broker for an order that
+    # is already settled.
+    with try_reconciliation_order_lock(conn, order_id):
+        return _reconcile_locked_strategy_order(conn, broker=broker, order_id=order_id)
+
+
+def _reconcile_locked_strategy_order(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    order_id: int,
+) -> ReconciliationResult:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -696,10 +911,20 @@ def reconcile_backlog(
         rows = cur.fetchall()
     conn.commit()
     results: list[ReconciliationResult] = []
+    skipped_busy = 0
     for row in rows:
         order_id = int(row["order_id"])
         try:
             results.append(reconcile_strategy_order(conn, broker=broker, order_id=order_id))
+        except StrategyReconciliationBusy:
+            # Someone else holds this order: an attended resume, or a submitter
+            # mid-flight. There is nothing to record -- `_record_failure` here
+            # would invent an error that did not happen -- and `last_attempt_at`
+            # is deliberately left alone, so the row keeps its place at the front
+            # of the next rotation rather than being pushed to the back for
+            # somebody else's work.
+            skipped_busy += 1
+            continue
         except Exception:  # noqa: BLE001 - one poison order must not abort the batch
             # ``reconcile_strategy_order`` models four failure classes; anything
             # else (a psycopg error, an unmodelled broker exception) used to
@@ -709,15 +934,35 @@ def reconcile_backlog(
             # ``reconcile_required`` and the SLO block still fires on age.
             # The escaping exception may have left an aborted transaction.
             conn.rollback()
-            with conn.transaction():
-                results.append(
-                    _record_failure(
-                        conn,
-                        order_id=order_id,
-                        state="error",
-                        error_code="reconcile_unexpected_error",
-                    )
-                )
+            # ⚠ RE-ACQUIRE. `reconcile_strategy_order`'s context manager has
+            # already unwound and released by the time this handler runs, so
+            # without this the fallback would write the reconciliation row
+            # unlocked -- the exact race the lock exists to close. A busy
+            # re-acquire means somebody else took the order the instant we
+            # failed; skip rather than race them.
+            try:
+                with try_reconciliation_order_lock(conn, order_id):
+                    with conn.transaction():
+                        results.append(
+                            _record_failure(
+                                conn,
+                                order_id=order_id,
+                                state="error",
+                                error_code="reconcile_unexpected_error",
+                            )
+                        )
+            except StrategyReconciliationBusy:
+                skipped_busy += 1
+    if skipped_busy:
+        # ⚠ #2948's absorbing-state lesson applies to contention too: with `b`
+        # busy rows the declared selection bound degrades to
+        # `ceil(due_rows / (limit - b))`, and an all-busy batch returns empty --
+        # which is indistinguishable from an empty backlog unless it is said.
+        logger.info(
+            "reconciliation backlog skipped %s of %s selected order(s) held by another reconciler",
+            skipped_busy,
+            len(rows),
+        )
     return tuple(results)
 
 
@@ -782,9 +1027,12 @@ def enforce_reconciliation_slo(
 __all__ = [
     "ReconciliationHealth",
     "ReconciliationResult",
+    "StrategyReconciliationBusy",
     "StrategyReconciliationError",
     "enforce_reconciliation_slo",
     "ensure_strategy_request_id",
     "reconcile_backlog",
     "reconcile_strategy_order",
+    "reconciliation_order_lock",
+    "try_reconciliation_order_lock",
 ]

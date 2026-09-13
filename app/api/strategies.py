@@ -132,6 +132,7 @@ from app.services.strategy_operator_promotion import (
     recent_evidence_refusals,
     select_latest_rows,
 )
+from app.services.strategy_order_reconciliation import StrategyReconciliationBusy
 from app.services.strategy_position_manager import (
     StrategyPositionManagerError,
     manage_owned_position,
@@ -3853,6 +3854,12 @@ def rebalance_core_sleeve(
                     user_key_credential_id=user_key.id,
                     recorded_by=session.username,
                 )
+    except StrategyReconciliationBusy as exc:
+        # #2964 item 2. Contention is retryable, not a server fault: another
+        # reconciler holds this order right now. Without this arm it would have
+        # surfaced as a 500, because StrategyReconciliationBusy is not a
+        # StrategyCoreExecutionError.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (CoreEligibilityError, CoreSelectionError, StrategyCoreExecutionError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _core_rebalance_response(result)

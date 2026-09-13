@@ -71,6 +71,7 @@ from app.services.strategy_order_reconciliation import (
     enforce_reconciliation_slo,
     ensure_strategy_request_id,
     reconcile_strategy_order,
+    reconciliation_order_lock,
 )
 
 _NY = ZoneInfo("America/New_York")
@@ -1041,9 +1042,28 @@ def _resume_uncertain_submission(
     broker: BrokerProvider,
     existing: PaperExecutionResult,
 ) -> PaperExecutionResult:
-    """Retry a committed intent with its original idempotency identity."""
+    """Retry a committed intent with its original idempotency identity.
+
+    ⚠ #2964 item 2. Holds this order's reconciliation lock across the retry:
+    the order and its reconciliation row were committed before the original
+    broker call, so the scheduled backlog can be polling this very order while
+    the retry runs. It BLOCKS rather than refusing -- a refusal would abandon a
+    durable authority this function exists to resolve.
+    """
     if existing.order_id is None or existing.strategy_trade_id is None or existing.amount is None:
         raise StrategyPaperExecutionError("uncertain strategy submission is missing durable authority")
+    with reconciliation_order_lock(conn, existing.order_id):
+        return _resume_uncertain_submission_locked(conn, broker=broker, existing=existing)
+
+
+def _resume_uncertain_submission_locked(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    existing: PaperExecutionResult,
+) -> PaperExecutionResult:
+    assert existing.order_id is not None and existing.strategy_trade_id is not None
+    assert existing.amount is not None
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -1079,12 +1099,10 @@ def _resume_uncertain_submission(
     except BrokerOrderSubmissionError as exc:
         if isinstance(exc, BrokerOrderSubmissionUncertain):
             return existing
+        # Stated lock ordering (strategy_order_reconciliation module docstring):
+        # orders -> reconciliation state -> strategy_trades.
         with conn.transaction():
             conn.execute("UPDATE orders SET status='rejected' WHERE order_id=%s", (existing.order_id,))
-            conn.execute(
-                "UPDATE strategy_trades SET status='failed', updated_at=now() WHERE strategy_trade_id=%s",
-                (existing.strategy_trade_id,),
-            )
             conn.execute(
                 """
                 UPDATE strategy_order_reconciliation_state
@@ -1094,6 +1112,10 @@ def _resume_uncertain_submission(
                 WHERE order_id=%s
                 """,
                 (existing.order_id,),
+            )
+            conn.execute(
+                "UPDATE strategy_trades SET status='failed', updated_at=now() WHERE strategy_trade_id=%s",
+                (existing.strategy_trade_id,),
             )
         return PaperExecutionResult(
             existing.signal_id,
@@ -1334,70 +1356,81 @@ def _execute_fired_paper_signal_locked(
                 take_rate,
             ),
         )
-    # The transaction context commits before this broker call.
-    try:
-        submission = broker.place_demo_strategy_order(
-            BrokerStrategyOrder(
-                instrument_id=intent.instrument_id,
-                amount=amount,
-                settlement_type="real",
-                stop_loss_rate=stop_rate,
-                take_profit_rate=take_rate,
-            ),
-            request_id=request_id,
-        )
-    except BrokerOrderSubmissionError as exc:
-        uncertain = isinstance(exc, BrokerOrderSubmissionUncertain)
-        with conn.transaction():
-            if uncertain:
+    # ⚠ #2964 item 2. The order and its reconciliation row are already
+    # committed (the durable-before-I/O design), so the scheduled backlog can
+    # be polling this exact order while the broker call is in flight. Hold its
+    # reconciliation lock across the call and the post-call writes.
+    #
+    # ⚠ BLOCKS rather than trying: a refusal here would abandon a durable
+    # authority, which is the one outcome this path must never produce.
+    with reconciliation_order_lock(conn, order_id):
+        # The transaction context commits before this broker call.
+        try:
+            submission = broker.place_demo_strategy_order(
+                BrokerStrategyOrder(
+                    instrument_id=intent.instrument_id,
+                    amount=amount,
+                    settlement_type="real",
+                    stop_loss_rate=stop_rate,
+                    take_profit_rate=take_rate,
+                ),
+                request_id=request_id,
+            )
+        except BrokerOrderSubmissionError as exc:
+            uncertain = isinstance(exc, BrokerOrderSubmissionUncertain)
+            with conn.transaction():
+                if uncertain:
+                    conn.execute(
+                        "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() "
+                        "WHERE strategy_trade_id=%s",
+                        (trade_id,),
+                    )
+                else:
+                    # Stated lock ordering: orders -> reconciliation state -> trades.
+                    conn.execute("UPDATE orders SET status='rejected' WHERE order_id=%s", (order_id,))
+                    conn.execute(
+                        """
+                        UPDATE strategy_order_reconciliation_state
+                        SET state='rejected', reconciled_at=now(), last_attempt_at=now(),
+                            attempt_count=attempt_count+1,
+                            last_error_code='broker_submission_rejected', updated_at=now()
+                        WHERE order_id=%s
+                        """,
+                        (order_id,),
+                    )
+                    conn.execute(
+                        "UPDATE strategy_trades SET status='failed', updated_at=now() WHERE strategy_trade_id=%s",
+                        (trade_id,),
+                    )
+            return PaperExecutionResult(
+                signal_id,
+                "submission_uncertain" if uncertain else "broker_rejected",
+                "submission_uncertain" if uncertain else "broker_submission_rejected",
+                amount,
+                trade_id,
+                order_id,
+            )
+        except Exception:
+            # The broker contract translates transport/response uncertainty into
+            # BrokerOrderSubmissionUncertain. Preserve exact reconciliation
+            # authority here, but let programming/contract bugs fail loudly.
+            with conn.transaction():
                 conn.execute(
                     "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() "
                     "WHERE strategy_trade_id=%s",
                     (trade_id,),
                 )
-            else:
-                conn.execute("UPDATE orders SET status='rejected' WHERE order_id=%s", (order_id,))
-                conn.execute(
-                    "UPDATE strategy_trades SET status='failed', updated_at=now() WHERE strategy_trade_id=%s",
-                    (trade_id,),
-                )
-                conn.execute(
-                    """
-                    UPDATE strategy_order_reconciliation_state
-                    SET state='rejected', reconciled_at=now(), last_attempt_at=now(),
-                        attempt_count=attempt_count+1, last_error_code='broker_submission_rejected', updated_at=now()
-                    WHERE order_id=%s
-                    """,
-                    (order_id,),
-                )
-        return PaperExecutionResult(
-            signal_id,
-            "submission_uncertain" if uncertain else "broker_rejected",
-            "submission_uncertain" if uncertain else "broker_submission_rejected",
-            amount,
-            trade_id,
-            order_id,
-        )
-    except Exception:
-        # The broker contract translates transport/response uncertainty into
-        # BrokerOrderSubmissionUncertain. Preserve exact reconciliation
-        # authority here, but let programming/contract bugs fail loudly.
+            raise
         with conn.transaction():
             conn.execute(
-                "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() WHERE strategy_trade_id=%s",
+                "UPDATE orders SET broker_order_ref=%s WHERE order_id=%s",
+                (submission.broker_order_ref, order_id),
+            )
+            conn.execute(
+                "UPDATE strategy_trades SET status='submitted', updated_at=now() WHERE strategy_trade_id=%s",
                 (trade_id,),
             )
-        raise
-    with conn.transaction():
-        conn.execute(
-            "UPDATE orders SET broker_order_ref=%s WHERE order_id=%s",
-            (submission.broker_order_ref, order_id),
-        )
-        conn.execute(
-            "UPDATE strategy_trades SET status='submitted', updated_at=now() WHERE strategy_trade_id=%s",
-            (trade_id,),
-        )
-    return PaperExecutionResult(signal_id, "submitted", "broker_accepted", amount, trade_id, order_id)
+        return PaperExecutionResult(signal_id, "submitted", "broker_accepted", amount, trade_id, order_id)
 
 
 def execute_fired_paper_signal(
