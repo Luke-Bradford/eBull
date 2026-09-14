@@ -147,6 +147,60 @@ class TestB4RevertingSpike:
         nxt = flat(date(2025, 1, 8), "100")
         assert rule_b4(prev, dip, nxt, self.params) is False
 
+    def test_fires_across_a_two_holiday_weekend(self) -> None:
+        # CEA.DE 2026-04-02 (#3028): 4.80 -> 0.25 -> 4.80, reverting to exactly
+        # its prior close, with Good Friday AND Easter Monday on the out side so
+        # the next session is 5 calendar days later. The old 4-day contiguity
+        # constant declined to evaluate this, T2's 10-day hole rule also declined,
+        # and the 0.25 stayed range_usable for every price_masked_bars consumer.
+        prev = flat(date(2026, 4, 1), "4.80")
+        spike = flat(date(2026, 4, 2), "0.25")
+        nxt = flat(date(2026, 4, 7), "4.80")
+        assert rule_b4(prev, spike, nxt, self.params) is True
+
+    @pytest.mark.parametrize("asset_class", ["us_equity", "crypto"])
+    def test_b4s_gap_tolerance_IS_hole_days_with_no_band_between(self, asset_class: str) -> None:
+        # The structural pin for #3028, written against hole_days rather than a
+        # literal so it cannot drift back into two constants: a gap AT the hole
+        # tolerance is evaluated by B4, and one past it is T2's. Any tighter
+        # second tolerance re-opens a band that neither rule owns, which is the
+        # whole defect — and a test naming 4 and 10 could not tell the two
+        # designs apart.
+        params = params_for(asset_class)
+        hole = params.hole_days
+        start = date(2025, 1, 6)
+        assert (
+            rule_b4(
+                flat(start, "100"),
+                flat(start + timedelta(days=hole), "1"),
+                flat(start + timedelta(days=2 * hole), "100"),
+                params,
+            )
+            is True
+        )
+        assert (
+            rule_b4(
+                flat(start, "100"),
+                flat(start + timedelta(days=hole + 1), "1"),
+                flat(start + timedelta(days=2 * (hole + 1)), "100"),
+                params,
+            )
+            is False
+        )
+
+    def test_does_not_fire_on_a_spike_that_does_not_come_back(self) -> None:
+        # SRXH 2025-12-09 (#3028): 25.71 -> 0.4466 -> 35.538. BOTH transitions are
+        # extreme and T3 quarantines both, yet the round trip is 1.3823 — outside
+        # [0.8, 1.25] — so B4 correctly keeps the bar. The band is deliberately
+        # NOT widened to reach this class: it is dominated by Q-suffix bankruptcy
+        # and sub-penny names where one tick is a multiple, so masking the bar
+        # would be the survivorship filter research_corpus_ingest refuses to
+        # apply at ingest, arriving through the back door.
+        prev = flat(date(2025, 12, 5), "25.71")
+        spike = flat(date(2025, 12, 9), "0.4466")
+        nxt = flat(date(2025, 12, 10), "35.538")
+        assert rule_b4(prev, spike, nxt, self.params) is False
+
 
 class TestTwoVerdictsPerBar:
     """B1/B4 -> both false. B2/B3 -> range only.
@@ -202,7 +256,14 @@ class TestAssetClassParameters:
     def test_non_us_equity_gets_equity_parameters_not_the_strict_default(self, asset_class: str) -> None:
         # Documented deviation from S7 §5, which listed only the five classes
         # that had bars to measure. These are known equities, not unknown
-        # metadata, and they carry ~0 bars until #2262's seeding lands.
+        # metadata.
+        #
+        # ⚠ This assertion used to be justified by "they carry ~0 bars until
+        # #2262's seeding lands". The seeding HAS landed and #3028 re-ran S7 §5's
+        # calibration on the real population: T=2 would fall BELOW eu_equity's and
+        # uk_equity's measured p99.99 and so violate S7's floor, and T=5 clears it
+        # for all four. The assertion is unchanged; only its reason is, which is
+        # why the reason is written here and not left to the git history.
         assert params_for(asset_class) == params_for("us_equity")
 
     def test_seven_day_markets_get_a_tighter_hole_threshold(self) -> None:
