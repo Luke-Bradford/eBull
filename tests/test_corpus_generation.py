@@ -22,6 +22,8 @@ from app.services.corpus_generation import (
     encode_value,
 )
 from app.services.indicator_series import BarSeries
+from app.services.market_regime import Regime
+from app.services.price_masked_bars import InstrumentBarSpan
 from app.services.technical_analysis import OHLCVRow
 
 
@@ -53,15 +55,14 @@ def _builder() -> CorpusGenerationBuilder:
     builder.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
     builder.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
     builder.add_unresolved_breaks({2: (date(2025, 1, 2),)})
-    builder.add_regime([(date(2026, 9, 10), "quiet"), (date(2026, 9, 11), None)])
+    builder.add_regime([(date(2026, 9, 10), Regime.BULL_QUIET), (date(2026, 9, 11), None)])
     return builder
 
 
-class _Span:
-    def __init__(self, last_bar: date, bars: int) -> None:
-        self.last_bar = last_bar
-        self.bars = bars
-
+#: ⚠ The REAL `InstrumentBarSpan`, not a stub. The builder takes the concrete
+#: type (review NITPICK on PR #3054), and a stub here would let the fixture drift
+#: from the shape the scan actually hands it.
+_Span = InstrumentBarSpan
 
 BARS_A: Sequence[tuple[date, str | None]] = [
     (date(2026, 9, 10), "10.500000"),
@@ -180,35 +181,35 @@ class TestBuilder:
         moved_span.add_spans({1: _Span(date(2026, 9, 11), 11), 2: _Span(date(2026, 9, 10), 4)})
         moved_span.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
         moved_span.add_unresolved_breaks({2: (date(2025, 1, 2),)})
-        moved_span.add_regime([(date(2026, 9, 10), "quiet"), (date(2026, 9, 11), None)])
+        moved_span.add_regime([(date(2026, 9, 10), Regime.BULL_QUIET), (date(2026, 9, 11), None)])
         variants["spans"] = moved_span
 
         resolved_break = CorpusGenerationBuilder(frontier_date=date(2026, 9, 11), quarantine_rule_set_version="q-v1")
         resolved_break.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
         resolved_break.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
         resolved_break.add_unresolved_breaks({})
-        resolved_break.add_regime([(date(2026, 9, 10), "quiet"), (date(2026, 9, 11), None)])
+        resolved_break.add_regime([(date(2026, 9, 10), Regime.BULL_QUIET), (date(2026, 9, 11), None)])
         variants["breaks"] = resolved_break
 
         reclassified = CorpusGenerationBuilder(frontier_date=date(2026, 9, 11), quarantine_rule_set_version="q-v1")
         reclassified.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
         reclassified.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
         reclassified.add_unresolved_breaks({2: (date(2025, 1, 2),)})
-        reclassified.add_regime([(date(2026, 9, 10), "volatile"), (date(2026, 9, 11), None)])
+        reclassified.add_regime([(date(2026, 9, 10), Regime.BULL_VOLATILE), (date(2026, 9, 11), None)])
         variants["regime"] = reclassified
 
         moved_frontier = CorpusGenerationBuilder(frontier_date=date(2026, 9, 10), quarantine_rule_set_version="q-v1")
         moved_frontier.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
         moved_frontier.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
         moved_frontier.add_unresolved_breaks({2: (date(2025, 1, 2),)})
-        moved_frontier.add_regime([(date(2026, 9, 10), "quiet"), (date(2026, 9, 11), None)])
+        moved_frontier.add_regime([(date(2026, 9, 10), Regime.BULL_QUIET), (date(2026, 9, 11), None)])
         variants["frontier_date"] = moved_frontier
 
         rerouted_mask = CorpusGenerationBuilder(frontier_date=date(2026, 9, 11), quarantine_rule_set_version="q-v2")
         rerouted_mask.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
         rerouted_mask.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
         rerouted_mask.add_unresolved_breaks({2: (date(2025, 1, 2),)})
-        rerouted_mask.add_regime([(date(2026, 9, 10), "quiet"), (date(2026, 9, 11), None)])
+        rerouted_mask.add_regime([(date(2026, 9, 10), Regime.BULL_QUIET), (date(2026, 9, 11), None)])
         variants["quarantine_rule_set_version"] = rerouted_mask
 
         for name, builder in variants.items():
@@ -224,7 +225,7 @@ class TestBuilder:
         dropped.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
         dropped.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
         dropped.add_unresolved_breaks({2: (date(2025, 1, 2),)})
-        dropped.add_regime([(date(2026, 9, 10), "quiet")])
+        dropped.add_regime([(date(2026, 9, 10), Regime.BULL_QUIET)])
         dropped.add_series(1, _series(BARS_A))
 
         kept = _builder()
@@ -242,7 +243,7 @@ class TestBuilder:
         bumped.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
         bumped.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
         bumped.add_unresolved_breaks({2: (date(2025, 1, 2),)})
-        bumped.add_regime([(date(2026, 9, 10), "quiet"), (date(2026, 9, 11), None)])
+        bumped.add_regime([(date(2026, 9, 10), Regime.BULL_QUIET), (date(2026, 9, 11), None)])
         bumped.add_series(1, _series(BARS_A))
 
         base = _builder()
@@ -344,7 +345,7 @@ class TestPanelCalendarGap:
         builder.add_spans({1: _Span(date(2026, 2, 4), 3), 2: _Span(date(2026, 2, 3), 3)})
         builder.add_panel_calendars({"s2-cross-sectional-momentum": calendar})
         builder.add_unresolved_breaks({})
-        builder.add_regime([(date(2026, 2, 4), "quiet")])
+        builder.add_regime([(date(2026, 2, 4), Regime.BULL_QUIET)])
         builder.add_series(1, _series(BARS_A))
         return builder.finish()
 

@@ -85,6 +85,8 @@ from decimal import Decimal
 from typing import Final
 
 from app.services.indicator_series import BarSeries
+from app.services.market_regime_provider import Regime
+from app.services.price_masked_bars import InstrumentBarSpan
 
 #: ⚠ IN THE PAYLOAD, not merely beside it. The parent spec's checkpoint 1 caught
 #: exactly this gap in its first draft: a ``..._RULE_VERSION`` constant that
@@ -242,7 +244,7 @@ class CorpusGenerationBuilder:
             raise RuntimeError(f"corpus generation component {name!r} was already recorded")
         self._components[name] = value
 
-    def add_spans(self, spans: Mapping[int, object]) -> None:
+    def add_spans(self, spans: Mapping[int, InstrumentBarSpan]) -> None:
         """Every **loadable** instrument's span, not only the eligible ones.
 
         ⚠ ALL LOADABLE, because a stale name excluded from ``eligible`` still
@@ -263,7 +265,7 @@ class CorpusGenerationBuilder:
         self._set(
             "spans",
             _digest(
-                f"{instrument_id}{_FIELD_SEP}{getattr(span, 'last_bar')}{_FIELD_SEP}{getattr(span, 'bars')}"
+                f"{instrument_id}{_FIELD_SEP}{span.last_bar.isoformat()}{_FIELD_SEP}{span.bars}"
                 for instrument_id, span in sorted(spans.items())
             ),
         )
@@ -305,7 +307,7 @@ class CorpusGenerationBuilder:
             ),
         )
 
-    def add_regime(self, classification: Sequence[tuple[date, object]]) -> None:
+    def add_regime(self, classification: Sequence[tuple[date, Regime | None]]) -> None:
         """The benchmark classification, WITH its membership.
 
         ⚠⚠ MEMBERSHIP IS HASHED, NOT JUST THE VALUES. ``for_dates`` separates
