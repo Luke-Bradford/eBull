@@ -22,6 +22,7 @@ import psycopg
 import pytest
 
 from app.services.order_client import _deduct_closed_exit_lot, _load_exit_lot
+from tests.fixtures.ebull_test_db import test_database_url
 
 INSTRUMENT_ID = 990_020
 POSITION_ID = 3_308_442_058
@@ -74,9 +75,7 @@ def test_a_whole_close_empties_the_lot_and_its_amount(
 ) -> None:
     _seed_lot(ebull_test_conn)
 
-    _deduct_closed_exit_lot(
-        ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW
-    )
+    _deduct_closed_exit_lot(ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW)
 
     units, amount = _read_lot(ebull_test_conn)
     assert units == Decimal("0.00000000")
@@ -98,9 +97,7 @@ def test_the_closed_lot_is_no_longer_selectable_by_the_next_exit(
     before = _load_exit_lot(ebull_test_conn, INSTRUMENT_ID)
     assert before is not None and before.position_id == POSITION_ID
 
-    _deduct_closed_exit_lot(
-        ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW
-    )
+    _deduct_closed_exit_lot(ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW)
 
     after = _load_exit_lot(ebull_test_conn, INSTRUMENT_ID)
     assert after is not None
@@ -115,9 +112,7 @@ def test_a_partial_close_leaves_the_remainder_selectable(
     cost of exactly what is left."""
     _seed_lot(ebull_test_conn, units="1000", amount="20000")
 
-    _deduct_closed_exit_lot(
-        ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("400"), now=_NOW
-    )
+    _deduct_closed_exit_lot(ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("400"), now=_NOW)
 
     units, amount = _read_lot(ebull_test_conn)
     assert units == Decimal("600.00000000")
@@ -137,11 +132,9 @@ def test_a_missing_lot_warns_and_does_not_raise(
     ``_update_position_exit`` (#3013), which raises because ``positions`` is the
     ledger, not the mirror."""
     with caplog.at_level("WARNING", logger="app.services.order_client"):
-        _deduct_closed_exit_lot(
-            ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW
-        )
+        _deduct_closed_exit_lot(ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW)
 
-    assert "no broker_positions row exists" in caplog.text
+    assert "absent or locked by a concurrent sync" in caplog.text
 
 
 def test_a_lot_holding_fewer_units_than_the_fill_warns_and_deducts_nothing(
@@ -153,9 +146,7 @@ def test_a_lot_holding_fewer_units_than_the_fill_warns_and_deducts_nothing(
     _seed_lot(ebull_test_conn, units="300", amount="6000")
 
     with caplog.at_level("WARNING", logger="app.services.order_client"):
-        _deduct_closed_exit_lot(
-            ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW
-        )
+        _deduct_closed_exit_lot(ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW)
 
     units, amount = _read_lot(ebull_test_conn)
     assert units == Decimal("300.00000000")
@@ -182,3 +173,88 @@ def test_a_ninth_decimal_fill_does_not_leave_the_lot_selectable(
     units, _amount = _read_lot(ebull_test_conn)
     assert units == Decimal("0.00000000")
     assert _load_exit_lot(ebull_test_conn, INSTRUMENT_ID) is None
+
+
+def test_a_lot_locked_by_a_concurrent_sync_is_skipped_not_waited_on(
+    ebull_test_conn: psycopg.Connection[tuple],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The deadlock Codex found at checkpoint 2, driven rather than argued.
+
+    ``portfolio_sync`` reaches ``broker_positions`` (L797, where it DELETEs lots
+    absent from the payload) BEFORE the ``positions`` row of an instrument that
+    disappeared (L810) — and an instrument whose last lot an EXIT just closed is
+    exactly one that disappears. With a plain ``FOR UPDATE`` this transaction,
+    already holding ``positions``, would wait on the mirror row and close the
+    cycle; Postgres would abort one side, and aborting this one rolls back the
+    fill, cash credit and audit for a close the broker already executed.
+
+    ``SKIP LOCKED`` means it never waits. The assertion that matters is that this
+    call RETURNS at all — under ``FOR UPDATE`` it would block until the other
+    transaction ended.
+    """
+    _seed_lot(ebull_test_conn, units="1000", amount="20000")
+    ebull_test_conn.commit()
+
+    rival = psycopg.connect(test_database_url())
+    try:
+        rival.execute(
+            "SELECT units FROM broker_positions WHERE position_id = %s FOR UPDATE",
+            (POSITION_ID,),
+        )
+        with caplog.at_level("WARNING", logger="app.services.order_client"):
+            _deduct_closed_exit_lot(
+                ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW
+            )
+        assert "absent or locked by a concurrent sync" in caplog.text
+    finally:
+        rival.rollback()
+        rival.close()
+
+    # Untouched — the sync holding the row is the one that resolves it.
+    units, amount = _read_lot(ebull_test_conn)
+    assert units == Decimal("1000.00000000")
+    assert amount == Decimal("20000.00000000")
+
+
+def test_the_same_row_would_have_blocked_without_skip_locked(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Pins WHY the clause is there, so removing it fails rather than hanging.
+
+    The test above shows the deduction returns under contention; on its own that
+    is also what a lock-free implementation would do. This one shows the
+    counterfactual on the same row: a plain ``FOR UPDATE`` WAITS (it is cancelled
+    by the statement timeout), which is the wait that closes the deadlock cycle
+    against ``portfolio_sync``. A revert of ``SKIP LOCKED`` therefore turns the
+    test above into a hang, and a hang is the one failure mode a suite reports
+    badly — so the mechanism is asserted directly.
+    """
+    _seed_lot(ebull_test_conn, units="1000", amount="20000")
+    ebull_test_conn.commit()
+
+    rival = psycopg.connect(test_database_url())
+    probe = psycopg.connect(test_database_url())
+    try:
+        rival.execute(
+            "SELECT units FROM broker_positions WHERE position_id = %s FOR UPDATE",
+            (POSITION_ID,),
+        )
+        probe.execute("SET statement_timeout = '250ms'")
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            probe.execute(
+                "SELECT units FROM broker_positions WHERE position_id = %s FOR UPDATE",
+                (POSITION_ID,),
+            ).fetchone()
+        probe.rollback()
+        probe.execute("SET statement_timeout = '250ms'")
+        skipped = probe.execute(
+            "SELECT units FROM broker_positions WHERE position_id = %s FOR UPDATE SKIP LOCKED",
+            (POSITION_ID,),
+        ).fetchone()
+        assert skipped is None
+    finally:
+        probe.rollback()
+        probe.close()
+        rival.rollback()
+        rival.close()

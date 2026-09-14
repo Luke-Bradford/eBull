@@ -828,10 +828,20 @@ def _deduct_closed_exit_lot(
     transaction would both build a fill, and the loser's UPDATE would match zero
     rows while its fill, cash and audit rows still committed.
 
-    ⚠ Lock ORDER: ``positions`` is updated before this runs, which is the order
-    ``portfolio_sync`` acquires (``portfolio_sync.py`` L694 then L797). Reversing
-    it would form a deadlock cycle against a concurrent sync on the same
-    instrument.
+    ⚠⚠ ``SKIP LOCKED``, and it is the whole reason this cannot deadlock. The
+    tempting claim — "``positions`` first, then ``broker_positions``, matching
+    ``portfolio_sync``" — is FALSE for the case this function exists to serve.
+    The sync's order is positions (L694) → broker_positions (L797, which DELETEs
+    lots absent from the payload) → positions again (L810, zeroing the
+    instruments that disappeared). An instrument whose last lot an EXIT just
+    closed is exactly one that disappears, so the sync reaches its mirror row
+    BEFORE its ``positions`` row while this transaction holds ``positions`` and
+    would be waiting on the mirror — a cycle. Postgres would abort one side, and
+    if it aborts this one the fill, cash credit and audit roll back for a close
+    the broker has already executed. ``SKIP LOCKED`` means this transaction never
+    WAITS on a mirror row, so no cycle can form; a contended row is left to the
+    sync that holds it, which is the right outcome for a best-effort mirror
+    write. (Codex, checkpoint 2.)
 
     ⚠ A mismatch WARNS and returns; it does not raise, and the difference from
     ``_update_position_exit`` is deliberate. ``positions`` is the ledger — a
@@ -852,14 +862,19 @@ def _deduct_closed_exit_lot(
     filled_units = filled_units.quantize(_BROKER_UNITS_STEP, rounding=ROUND_HALF_UP)
     with conn.cursor() as lock_cur:
         lock_cur.execute(
-            "SELECT units FROM broker_positions WHERE position_id = %(pid)s FOR UPDATE",
+            "SELECT units FROM broker_positions WHERE position_id = %(pid)s FOR UPDATE SKIP LOCKED",
             {"pid": position_id},
         )
         locked_row = lock_cur.fetchone()
     if locked_row is None:
+        # Deliberately one branch for two causes: the row is gone, or a
+        # concurrent sync holds it. Both mean "the mirror is not ours to move
+        # right now", both are resolved by that same sync, and distinguishing
+        # them would cost a second read that could only be stale by the time it
+        # returned.
         logger.warning(
-            "EXIT fill closed broker lot %d but no broker_positions row exists — "
-            "mirror left to the next portfolio sync",
+            "EXIT fill closed broker lot %d but its broker_positions row is absent or "
+            "locked by a concurrent sync — mirror left to the next portfolio sync",
             position_id,
         )
         return
