@@ -12,6 +12,8 @@ Pure tier: no database, no fixtures, no IO.
 
 from __future__ import annotations
 
+import bisect
+
 import numpy as np
 import pytest
 
@@ -343,8 +345,6 @@ class TestSegmentationMemoIsExactUnderAMovingTolerance:
         equal the tolerance never moved a bracket, and the walk would be
         exercising only the prefix half of the key.
         """
-        import bisect
-
         keys: set[tuple[str, int, int]] = set()
         prefixes: set[tuple[str, int]] = set()
         for index, atr in enumerate(atrs):
