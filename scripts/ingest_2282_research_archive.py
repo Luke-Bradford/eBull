@@ -6,6 +6,7 @@ Run from repo root:
     uv run python -m scripts.ingest_2282_research_archive --load
     uv run python -m scripts.ingest_2282_research_archive --quarantine
     uv run python -m scripts.ingest_2282_research_archive --verify
+    uv run python -m scripts.ingest_2282_research_archive --attribute
     uv run python -m scripts.ingest_2282_research_archive --link-delistings
 
 ⚠ Long-running (~20-40 min end to end on 25.8M rows). Launch it with the
@@ -21,12 +22,21 @@ basis. It compares this corpus against ``price_daily`` (eToro, split-adjusted)
 over every overlapping instrument, not a hand-picked panel: if the archive's
 OHLC were unadjusted, the two return series would diverge on every name that
 split inside the overlap window.
+
+``--attribute`` explains ``--verify``'s tail (#2293). ⚠⚠ The low-correlation
+tail is NOT a data-quality signal: it is a LIQUIDITY signal. A tape close
+carries forward when a thin name does not trade, a broker quote moves every
+day, and the gap between them is the same order as the daily return. It bands
+the tail rate by archive dollar volume, crossed with overlap length, and
+DERIVES its reading from that table — figures are printed, never written here,
+and a corpus that produces the opposite gradient says so in the output.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import statistics
 import sys
 import time
 from datetime import date
@@ -297,12 +307,189 @@ def verify(conn: psycopg.Connection[tuple]) -> int:
     return 0
 
 
+_ATTRIBUTE_SQL = """
+WITH overlap AS (
+    SELECT s.series_id,
+           s.instrument_id,
+           r.close  AS research_close,
+           r.volume AS research_volume,
+           p.close  AS etoro_close,
+           lag(r.close) OVER w AS research_prev,
+           lag(p.close) OVER w AS etoro_prev
+    FROM research_price_series s
+    JOIN research_price_daily r ON r.series_id = s.series_id
+    JOIN price_daily p
+      ON p.instrument_id = s.instrument_id AND p.price_date = r.bar_date
+    WHERE s.vendor = %(vendor)s
+      AND s.instrument_id IS NOT NULL
+    WINDOW w AS (PARTITION BY s.series_id ORDER BY r.bar_date)
+),
+rets AS (
+    SELECT instrument_id,
+           research_close,
+           research_volume,
+           (research_close / research_prev - 1)::float8 AS research_ret,
+           (etoro_close / etoro_prev - 1)::float8       AS etoro_ret
+    FROM overlap
+    WHERE research_prev > 0 AND etoro_prev > 0 AND etoro_close > 0
+)
+SELECT instrument_id,
+       count(*)                          AS n,
+       corr(research_ret, etoro_ret)     AS ret_corr,
+       -- The ARCHIVE's volume, deliberately. price_daily.volume is NULL for
+       -- every bar of a large minority of instruments and for the median
+       -- member of the tail itself, so banding on it would beg the question.
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY research_close * research_volume)
+                                         AS med_dollar_volume
+FROM rets
+GROUP BY instrument_id
+HAVING count(*) >= 60
+"""
+
+# Display bands for overlap length. These label the rows of a diagnostic table;
+# no decision is taken on them, and nothing downstream reads them.
+_OVERLAP_BANDS: tuple[tuple[str, int, int], ...] = (
+    ("< 200", 0, 200),
+    ("200-499", 200, 500),
+    ("500-799", 500, 800),
+    (">= 800", 800, 1 << 30),
+)
+
+# #2240 §0 / sql/251: the archive is split-adjusted, so a healthy pair correlates
+# tightly. 0.90 is the cut --verify already reports its tail on; reused here so
+# the two commands describe the same population rather than two similar ones.
+_TAIL_CORR = 0.90
+
+
+def attribute(conn: psycopg.Connection[tuple]) -> int:
+    """#2293 — explain ``--verify``'s low-correlation tail.
+
+    The ticket proposed three causes (frozen-snapshot split epoch, ticker reuse
+    on the archive side, wrong bars in ``price_daily``). Measured on the full
+    overlap, the tail is dominated by a FOURTH thing that is not a defect on
+    either side: the two sources do not measure the same quantity on a name
+    that barely trades. The archive close is a consolidated-tape last trade and
+    carries forward through a no-trade session; the eToro close is a broker
+    quote that moves daily. On a deep name the two coincide; on a thin one the
+    difference is the same order as the daily return and the correlation
+    collapses without either series being wrong.
+
+    So this prints the tail rate against archive dollar volume, CROSSED with
+    overlap length — because the two co-move, and reporting the liquidity
+    gradient alone would not distinguish "thin names disagree" from "short
+    series estimate a correlation badly". The gradient holds inside the
+    longest-overlap band, which is what makes the liquidity reading the load-
+    bearing one.
+
+    ⚠ Band membership is not per-instrument attribution. A thin name can ALSO
+    carry a genuine ``price_daily`` corporate-action break; the deep-quintile
+    tail members are where such a break is separable from this artefact.
+    """
+    rows = conn.execute(_ATTRIBUTE_SQL, {"vendor": ingest.VENDOR}).fetchall()
+    scored = [(int(r[0]), int(r[1]), float(r[2]), r[3]) for r in rows if r[2] is not None]
+    banded = [(iid, n, c, float(dv)) for iid, n, c, dv in scored if dv is not None]
+    banded.sort(key=lambda row: row[3])
+
+    tail = [row for row in scored if row[2] < _TAIL_CORR]
+    print("\n=== stage 2b tail attribution (#2293) ===")
+    print(f"  instruments compared        : {len(scored):,}")
+    print(f"  tail, return corr < {_TAIL_CORR}    : {len(tail):,}")
+    print(f"  archive dollar volume usable: {len(banded):,}")
+    if not banded:
+        print("  nothing to band — no instrument has a usable archive volume")
+        return 0
+
+    size = len(banded) // 5
+    quintile = {iid: min(4, i // size) if size else 0 for i, (iid, *_) in enumerate(banded)}
+    by_id = {iid: (n, c, dv) for iid, n, c, dv in banded}
+
+    def rate(members: list[int]) -> float | None:
+        """Tail rate, or None when the cell is empty.
+
+        A quintile CAN be empty — with fewer than five banded instruments
+        ``size`` collapses and everything lands in Q1. That is a partially
+        loaded corpus, not a bug, and it must print rather than raise.
+        """
+        if not members:
+            return None
+        return sum(1 for iid in members if by_id[iid][1] < _TAIL_CORR) / len(members)
+
+    print(f"\n  {'quintile':<10}{'n':>8}{'corr<' + str(_TAIL_CORR):>10}{'rate':>8}{'median $vol/day':>20}")
+    for q in range(5):
+        members = [iid for iid, qq in quintile.items() if qq == q]
+        if not members:
+            print(f"  Q{q + 1:<9}{0:>8}{'-':>10}{'-':>8}{'-':>20}")
+            continue
+        bad = sum(1 for iid in members if by_id[iid][1] < _TAIL_CORR)
+        med = statistics.median(by_id[iid][2] for iid in members)
+        print(f"  Q{q + 1:<9}{len(members):>8}{bad:>10}{bad / len(members):>8.1%}{med:>20,.0f}")
+
+    print("\n  tail rate by overlap length x archive-liquidity quintile")
+    print(f"  {'overlap n':<12}" + "".join(f"{'Q' + str(q + 1):>14}" for q in range(5)))
+    deepest_band = _OVERLAP_BANDS[-1]
+    for label, lo, hi in _OVERLAP_BANDS:
+        cells = []
+        for q in range(5):
+            members = [iid for iid, qq in quintile.items() if qq == q and lo <= by_id[iid][0] < hi]
+            cell_rate = rate(members)
+            if cell_rate is None:
+                cells.append(f"{'-':>14}")
+                continue
+            bad = sum(1 for iid in members if by_id[iid][1] < _TAIL_CORR)
+            cells.append(f"{f'{bad}/{len(members)} {cell_rate:.0%}':>14}")
+        print(f"  {label:<12}" + "".join(cells))
+
+    # ⚠ The reading is DERIVED, not printed as a constant. #2293's conclusion was
+    # measured on one load; a later corpus can produce the opposite gradient, and a
+    # fixed sentence would then explain a distribution it does not describe. This is
+    # the "never hardcode a derived statistic" rule applied to the conclusion rather
+    # than to a number.
+    overall = [rate([iid for iid, qq in quintile.items() if qq == q]) for q in range(5)]
+    lo_band, hi_band = overall[0], overall[4]
+    deep = [
+        rate([iid for iid, qq in quintile.items() if qq == q and deepest_band[1] <= by_id[iid][0] < deepest_band[2]])
+        for q in (0, 4)
+    ]
+    print("\n  Reading, derived from the table above:")
+    if lo_band is None or hi_band is None:
+        print("    not enough banded instruments to compare the extreme quintiles.")
+    elif lo_band > hi_band:
+        print(f"    the tail concentrates in the THINNEST quintile ({lo_band:.1%} vs {hi_band:.1%} in the deepest).")
+        if deep[0] is None or deep[1] is None:
+            print(
+                f"    ⚠ the '{deepest_band[0]}' overlap band cannot be compared, so "
+                "a short-series\n    artefact is NOT excluded — treat the gradient as unconfirmed."
+            )
+        elif deep[0] > deep[1]:
+            print(
+                f"    it survives inside the '{deepest_band[0]}' overlap band "
+                f"({deep[0]:.1%} vs {deep[1]:.1%}), so it is a\n    liquidity signal rather "
+                "than a short-series estimation artefact. A low\n    correlation here is NOT "
+                "by itself evidence of a defect on either side."
+            )
+        else:
+            print(
+                f"    ⚠ it does NOT survive inside the '{deepest_band[0]}' overlap band "
+                f"({deep[0]:.1%} vs\n    {deep[1]:.1%}) — on this corpus the tail tracks overlap "
+                "LENGTH, not liquidity.\n    #2293's reading does not apply; re-attribute before "
+                "citing it."
+            )
+    else:
+        print(
+            f"    ⚠ the tail does NOT concentrate in the thinnest quintile ({lo_band:.1%} vs "
+            f"{hi_band:.1%}\n    in the deepest). #2293's liquidity reading does not describe this "
+            "corpus —\n    the tail needs re-attributing before any figure from it is cited."
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--load", action="store_true")
     parser.add_argument("--quarantine", action="store_true")
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--attribute", action="store_true")
     parser.add_argument("--link-delistings", action="store_true")
     parser.add_argument("--cache", type=Path, default=_DEFAULT_CACHE)
     parser.add_argument(
@@ -321,13 +508,15 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    if not any((args.download, args.load, args.quarantine, args.verify, args.link_delistings)):
-        parser.error("pick at least one of --download / --load / --quarantine / --verify / --link-delistings")
+    if not any((args.download, args.load, args.quarantine, args.verify, args.attribute, args.link_delistings)):
+        parser.error(
+            "pick at least one of --download / --load / --quarantine / --verify / --attribute / --link-delistings"
+        )
 
     if args.download:
         download(args.cache)
 
-    if not any((args.load, args.quarantine, args.verify, args.link_delistings)):
+    if not any((args.load, args.quarantine, args.verify, args.attribute, args.link_delistings)):
         return 0
 
     with psycopg.connect(settings.database_url) as conn:
@@ -336,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.quarantine and (rc := quarantine(conn, args.as_of)):
             return rc
         if args.verify and (rc := verify(conn)):
+            return rc
+        if args.attribute and (rc := attribute(conn)):
             return rc
         if args.link_delistings and (rc := link_delistings(conn)):
             return rc

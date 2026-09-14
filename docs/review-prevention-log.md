@@ -6336,3 +6336,63 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Enforced in: this prevention log;
   `docs/proposals/ta/2026-09-14-2414-signal-ledger-corpus-stamp.md` ("If a content digest
   is ever revisited" records the reproduction).
+
+### `lag()` placed after a join windows over the SURVIVING rows, so "yesterday" silently becomes "the previous row that matched"
+
+- First seen in: #2293 (2026-09-14), at Codex checkpoint 1, on a cross-source attribution
+  memo. The query joined `research_price_daily` to `price_daily` on the bar date and took
+  `lag(close) OVER (PARTITION BY series_id ORDER BY bar_date)` in the same SELECT. Every
+  number downstream was described as a "daily return"; it is a return between consecutive
+  **shared observations**, which for an instrument present on only a fraction of the
+  calendar is a multi-session return on a varying horizon.
+- ⚠ **The confound was real in principle and empirically null here** — median gap between
+  consecutive shared observations is 1.0 calendar day across the whole population, and
+  restricting to pairs ≤ 4 calendar days apart left 686 of 693 tail members in place. The
+  lesson is not "this broke it"; it is that the claim was unfalsifiable until the control
+  ran, and the memo asserted "daily" as though it had been.
+- The general shape: a window function reads the rows the FROM/JOIN/WHERE clause produced,
+  never the source series. An inner join, a `WHERE close > 0`, a `HAVING` — each one
+  redefines "previous row" without touching the `lag()` call, so the expression keeps
+  reading correct while its meaning moves.
+- Prevention: when a window function expresses a *time* relationship, either compute it in
+  a CTE over the ungated series and join afterwards, or **measure the realised step** and
+  report it (`percentile_cont(0.5) … ORDER BY bar_date - prev_date`). One extra column
+  turns an assumption into evidence.
+- Caught by: Codex checkpoint 1 on the judgement artefact. No test could have — the SQL is
+  valid, the numbers are plausible, and the defect is in what the numbers are called.
+- Enforced in: this prevention log; `scripts/ingest_2282_research_archive.py::attribute`
+  (its docstring records why the liquidity gradient is crossed with overlap length).
+
+### A cross-source agreement metric is a LIQUIDITY metric before it is a quality metric
+
+- First seen in: #2293 (2026-09-14). `--verify` reports every instrument whose return
+  correlation against `price_daily` falls below 0.90, and the ticket read that tail as
+  three kinds of data defect. Measured on the full overlap, **613 of 693 tail members sit
+  in the bottom two quintiles of archive dollar volume**, where the tail rate is 46.5% and
+  12.8% against 2.4% in the deepest quintile.
+- Mechanism, and neither side is at fault: a consolidated-tape close **carries forward
+  through a no-trade session** (`IOR`: unchanged on 57.4% of 745 sessions, nine
+  consecutive at exactly 18.00) while a broker quote moves every day. On a thin name that
+  difference is the same order as the daily return, so the correlation collapses.
+- ⚠ Two controls were needed before the reading held, and both are the general lesson:
+  **band on the INDEPENDENT source's volume** (`price_daily.volume` is NULL for every bar
+  of 3,010 of 12,284 instruments — banding on it begs the question), and **cross the
+  liquidity band with overlap length**, because short series both are thinner names and
+  estimate a correlation badly. The gradient surviving inside the ≥ 800-bar band (24% →
+  2%) is what makes it a liquidity reading rather than a small-sample one.
+- The general shape: before calling a disagreement statistic a quality signal, ask what
+  else varies across the population in the same direction. Agreement between two price
+  sources is bounded above by how often the cheaper-to-observe one actually updates.
+- Prevention: never wire a cross-source agreement threshold into an acceptance check,
+  quarantine rule or promotion gate without the liquidity banding alongside it. It will
+  fire on microcaps in bulk and read as a corpus regression.
+- Enforced in: this prevention log;
+  `scripts/ingest_2282_research_archive.py --attribute`, which prints the banding against
+  today's corpus so no figure here has to be trusted.
+- ⚠ **The matching `research-price-corpus.md` skill edit could NOT be made from this
+  worktree** — `.claude/skills/**` writes prompt for permission in the loop worktrees
+  (#2403). The skill still carries the ticker-reuse guard "require the series' first bar to
+  precede the instrument's known listing date", which has **no operand**: `instruments`
+  carries only `first_seen_at` (the universe-sync stamp), `information_schema` has no
+  `ipo_date` column, and `to_regclass('instrument_profile')` is NULL although
+  `sql/024_fundamentals_enrichment.sql:43` declares it. Apply both there when #2403 lands.
