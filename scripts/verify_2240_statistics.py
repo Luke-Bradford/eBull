@@ -721,7 +721,15 @@ def panel() -> int:
     with psycopg.connect(settings.database_url) as conn:
         universe = load_validated_universe(conn)
         selection = load_universe_selection(conn, universe=UNIVERSE, validated_ids=frozenset(universe))
-        pairs = admitted_pairs(selection)
+        # ⚠ The helper RAISES (it is pure, and that is what makes it testable
+        # without a connection), but this script's contract is "every arm prints
+        # and returns an exit code" — a traceback out of the middle of a run is
+        # not that. Translated here rather than softened there. (Review bot.)
+        try:
+            pairs = admitted_pairs(selection)
+        except RuntimeError as exc:
+            print(f"  *** {exc}")
+            return 1
         bounds = {
             "series_ids": [series_id for _, series_id in pairs],
             "start": EVALUATION_WINDOW_START,
@@ -768,7 +776,12 @@ def curve(*, limit: int | None) -> int:
     with psycopg.connect(settings.database_url) as conn:
         universe = load_validated_universe(conn)
         selection = load_universe_selection(conn, universe=UNIVERSE, validated_ids=frozenset(universe))
-        pairs = admitted_pairs(selection)
+        # Same translation as `panel` — see the note there.
+        try:
+            pairs = admitted_pairs(selection)
+        except RuntimeError as exc:
+            print(f"  *** {exc}")
+            return 1
         print(f"  admitted series  {len(pairs):,} on vendor {selection.vendor}", flush=True)
         bounds = {
             "series_ids": [series_id for _, series_id in pairs],
