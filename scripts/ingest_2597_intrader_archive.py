@@ -164,6 +164,17 @@ def main(argv: list[str] | None = None) -> int:
             if rc:
                 return rc
         if args.quarantine:
+            # ⚠ Fail fast on an unloaded archive, EXPLICITLY. This used to be
+            # implicit: the as_of was measured as max(last_bar), so an empty
+            # archive returned NULL and the error wrote itself. #3040 reads a
+            # declared constant instead, which cannot fail that way — so
+            # without this check, --quarantine on an empty archive loops over
+            # zero series and prints a 0-series census, which is exactly what a
+            # healthy no-op prints.
+            if ingest.loaded_series_count(conn, ingest.INTRADER_ARCHIVE) == 0:
+                logger.error("no bars loaded for %s — run --load first", ingest.INTRADER_ARCHIVE.vendor)
+                return 1
+
             as_of = args.as_of
             if as_of is None:
                 # The capture date. Passing today's date would have every series

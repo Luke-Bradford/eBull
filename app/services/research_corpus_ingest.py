@@ -1140,6 +1140,28 @@ _UNCOVERED_SERIES_SQL = """
 """
 
 
+def loaded_series_count(conn: psycopg.Connection[Any], archive: ArchiveProvenance) -> int:
+    """How many of ``archive``'s series actually hold bars.
+
+    ⚠ Exists because #3040 replaced a MEASURED ``as_of`` (``max(last_bar)``)
+    with a DECLARED constant, and the measurement carried an implicit guard the
+    constant does not: a query over an unloaded archive returns NULL, which the
+    script turned into *"run --load first"*. Reading a literal instead cannot
+    fail that way, so the emptiness check has to be made explicit — otherwise
+    ``--quarantine`` on an empty archive loops over zero series and prints a
+    0-series census, which is also what a healthy no-op prints.
+    """
+    row = conn.execute(
+        """
+        SELECT count(*)
+        FROM research_price_series
+        WHERE vendor = %s AND bar_count IS NOT NULL
+        """,
+        (archive.vendor,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def uncovered_series_count(conn: psycopg.Connection[Any], archive: ArchiveProvenance) -> int:
     """How many of ``archive``'s series are not at its declared quarantine policy.
 
@@ -1206,6 +1228,19 @@ def refresh_research_quarantine(conn: psycopg.Connection[Any]) -> ResearchQuaran
     skipped: list[str] = []
 
     for archive in RESEARCH_ARCHIVES:
+        if loaded_series_count(conn, archive) == 0:
+            # Not an error for the JOB — there is genuinely nothing to
+            # quarantine — but it must not read as "covered". An unloaded
+            # archive satisfies the coverage reconciliation vacuously, so
+            # without this line a declared archive that was never loaded is
+            # indistinguishable from one that is fully current.
+            logger.warning(
+                "research quarantine: %s has no loaded series — nothing to evaluate (run the archive's --load stage)",
+                archive.vendor,
+            )
+            skipped.append(archive.vendor)
+            continue
+
         outstanding = uncovered_series_count(conn, archive)
         if outstanding == 0:
             skipped.append(archive.vendor)

@@ -95,6 +95,12 @@ def _uncovered(monkeypatch: pytest.MonkeyPatch, counts: dict[str, int]) -> None:
         "app.services.research_corpus_ingest.uncovered_series_count",
         lambda conn, archive: counts.get(archive.vendor, 0),
     )
+    # Default every archive to "loaded" so the emptiness guard below is only
+    # exercised by the test that sets out to exercise it.
+    monkeypatch.setattr(
+        "app.services.research_corpus_ingest.loaded_series_count",
+        lambda conn, archive: 1,
+    )
 
 
 def test_a_vendor_already_at_policy_is_skipped_not_rewritten(
@@ -148,3 +154,51 @@ def test_the_declared_as_of_is_what_reaches_run_quarantine(
         HF_ARCHIVE.vendor: HF_ARCHIVE.quarantine_as_of,
         INTRADER_ARCHIVE.vendor: INTRADER_ARCHIVE.quarantine_as_of,
     }
+
+
+def test_an_unloaded_archive_is_skipped_and_never_evaluated(
+    monkeypatch: pytest.MonkeyPatch, ran: list[tuple[str, date]]
+) -> None:
+    """An archive with no loaded series satisfies the reconciliation VACUOUSLY.
+
+    ``uncovered_series_count`` counts loaded series that lack coverage, so an
+    archive that was never loaded returns 0 — indistinguishable from one that is
+    fully current. The job must not evaluate it (there is nothing to evaluate)
+    and must not let it read as healthy either.
+    """
+    monkeypatch.setattr(
+        "app.services.research_corpus_ingest.uncovered_series_count",
+        lambda conn, archive: 0,
+    )
+    monkeypatch.setattr(
+        "app.services.research_corpus_ingest.loaded_series_count",
+        lambda conn, archive: 0 if archive.vendor == HF_ARCHIVE.vendor else 1,
+    )
+    result = refresh_research_quarantine(_StubConn())  # type: ignore[arg-type]
+
+    assert ran == []
+    assert HF_ARCHIVE.vendor in result.skipped_vendors
+    assert result.refreshed_vendors == ()
+
+
+def test_an_unloaded_archive_is_reported_distinctly_in_the_log(
+    monkeypatch: pytest.MonkeyPatch, ran: list[tuple[str, date]], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The distinction the census cannot carry has to be in the log.
+
+    ``skipped_vendors`` says "no work"; only the WARNING says which of the two
+    reasons applies.
+    """
+    monkeypatch.setattr(
+        "app.services.research_corpus_ingest.uncovered_series_count",
+        lambda conn, archive: 0,
+    )
+    monkeypatch.setattr(
+        "app.services.research_corpus_ingest.loaded_series_count",
+        lambda conn, archive: 0 if archive.vendor == HF_ARCHIVE.vendor else 1,
+    )
+    with caplog.at_level("WARNING", logger="app.services.research_corpus_ingest"):
+        refresh_research_quarantine(_StubConn())  # type: ignore[arg-type]
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any(HF_ARCHIVE.vendor in m and "no loaded series" in m for m in warnings), warnings

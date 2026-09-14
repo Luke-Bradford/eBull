@@ -110,6 +110,14 @@ def load(conn: psycopg.Connection[tuple], cache: Path) -> int:
 
 
 def quarantine(conn: psycopg.Connection[tuple], as_of: date) -> int:
+    # ⚠ Same explicit emptiness guard as the Intrader script. This archive
+    # never measured its as_of, so it never had the implicit version either —
+    # a --quarantine before --load printed a 0-series census, which is what a
+    # healthy no-op prints. #3040.
+    if ingest.loaded_series_count(conn, ingest.HF_ARCHIVE) == 0:
+        print(f"no bars loaded for {ingest.HF_ARCHIVE.vendor} — run --load first")
+        return 1
+
     started = time.time()
     census = ingest.run_quarantine(conn, as_of=as_of)
     print("\n=== stage 2b quarantine census ===")

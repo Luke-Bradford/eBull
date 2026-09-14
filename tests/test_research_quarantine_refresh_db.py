@@ -24,6 +24,7 @@ from app.services.price_quarantine import RULE_SET_VERSION
 from app.services.research_corpus_ingest import (
     HF_ARCHIVE,
     ArchiveProvenance,
+    loaded_series_count,
     uncovered_series_count,
 )
 
@@ -177,3 +178,35 @@ def test_the_declared_as_of_round_trips_through_the_column(
         quarantine_as_of=as_of,
     )
     assert uncovered_series_count(ebull_test_conn, archive) == 0
+
+
+def test_loaded_series_count_ignores_registered_but_unloaded_series(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The explicit emptiness guard the declared ``as_of`` removed implicitly.
+
+    Before #3040 the Intrader script measured ``max(last_bar)``, so an unloaded
+    archive returned NULL and the error wrote itself. Reading a declared literal
+    cannot fail that way, so this is the check that has to stand in its place —
+    and it must count LOADED series, not registered ones.
+    """
+    ebull_test_conn.execute(
+        """
+        INSERT INTO research_price_series
+            (vendor, vendor_symbol, upstream_source, licence, adjustment_basis)
+        VALUES (%s, %s, 'unknown', 'test-fixture', 'unadjusted')
+        """,
+        (HF_ARCHIVE.vendor, "T3040-registered-only"),
+    )
+    assert loaded_series_count(ebull_test_conn, HF_ARCHIVE) == 0
+
+    _seed_series(ebull_test_conn, vendor=HF_ARCHIVE.vendor, tag="loaded")
+    assert loaded_series_count(ebull_test_conn, HF_ARCHIVE) == 1
+
+
+def test_an_unloaded_archive_reads_as_covered_which_is_why_the_guard_exists(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """Codex checkpoint-1 finding 8, pinned: universal coverage passes vacuously."""
+    assert uncovered_series_count(ebull_test_conn, HF_ARCHIVE) == 0
+    assert loaded_series_count(ebull_test_conn, HF_ARCHIVE) == 0
