@@ -705,12 +705,64 @@ def _update_position_exit(
     """
     Update the position for an EXIT fill.
 
-    Subtracts filled_units and computes realized P&L based on avg_cost.
+    Subtracts filled_units, withdraws the disposed share of the cost pool, and
+    computes realized P&L based on avg_cost.
+
+    **Source rule — HMRC s104 part disposal from an average-cost pool**, which
+    this repo already implements for the tax layer in
+    ``app/services/tax_ledger.py`` (``_match_disposals``): the cost withdrawn is
+    the PROPORTIONAL fraction of the pool, ``(u / U) * cost``, not ``avg * u``.
+    The fraction is used deliberately — ``avg = cost / U`` can be
+    non-terminating, so multiplying it back re-introduces a rounding error that
+    accumulates over repeated disposals. Full depletion takes the exact
+    remainder (here: zero) rather than a computed value, which is what
+    guarantees cost conservation over a sequence of part disposals.
+
+    ``avg_cost`` is deliberately NOT recomputed. Under an average-cost pool a
+    part disposal leaves the per-unit cost unchanged, and the arithmetic agrees:
+    ``cost_basis * (1 - u/U) = avg * (U - u) = avg * units_after``. The
+    ``realized_pnl`` line below already denominates the disposal at ``avg_cost``,
+    so this is the treatment the statement was half-applying, not a new choice
+    (#3008).
+
+    ⚠ That identity holds to ROUNDING, not exactly, and the bound is measured:
+    each ``round(…, 6)`` can move the basis by up to one unit in the column's
+    last place, so after ``n`` part disposals the gap against
+    ``avg_cost * current_units`` is at most ``n`` ULP (1.2e-6 after six, in
+    ``tests/test_3008_partial_exit_cost_basis_db.py``). It does not compound into
+    the final state: full depletion takes the exact remainder. For scale, the
+    positions held on dev already sit up to 5e-4 from the same identity, because
+    ``avg_cost`` is itself stored rounded — so this is well inside the noise the
+    table already carries.
+
+    ⚠ Until #3008 this statement moved ``current_units`` and left ``cost_basis``
+    at its full original value, so a partial EXIT broke
+    ``cost_basis = avg_cost * current_units`` — the invariant every row in the
+    table actually satisfies. The stale-high basis then inflated ``avg_cost`` on
+    the next ADD (``_update_position_buy`` recomputes it from
+    ``positions.cost_basis``) and overstated the no-quote market-value fallback
+    in ``app/services/portfolio.py`` and the ``pnl_pct`` denominator in
+    ``app/services/reporting.py``. ``portfolio_sync`` does not repair it: for an
+    existing local position it refreshes units and P&L only, by design.
+
+    ⚠ Every SET expression reads the PRE-update row, so ``current_units`` inside
+    the ``cost_basis`` expression is the value before the subtraction above it.
+    SET is not sequential assignment — see
+    https://www.postgresql.org/docs/current/sql-update.html.
     """
     conn.execute(
         """
         UPDATE positions SET
             current_units  = current_units - %(units)s,
+            cost_basis     = CASE
+                -- Full (or over-) disposal: take the exact remainder. Also the
+                -- guard that makes the division below unreachable at
+                -- current_units = 0.
+                WHEN current_units <= %(units)s THEN 0
+                ELSE round(
+                    cost_basis - (%(units)s / current_units) * cost_basis, 6
+                )
+            END,
             realized_pnl   = realized_pnl
                              + (%(price)s - COALESCE(avg_cost, 0)) * %(units)s,
             updated_at     = %(now)s
