@@ -465,9 +465,13 @@ def decide_core_preflight(
 
     # Feed health BEFORE the halt itself: reporting "halted" on the strength of a
     # feed we have just failed to trust blames the instrument for an infrastructure
-    # fault.  `fetched_at` is the right column -- `strategy_halts.py:142-151` raises
-    # unless `|source_pub_at - fetched_at| <= 5 min` AND `source_pub_at` has not
-    # regressed, so a stored row's `fetched_at` transitively bounds source recency.
+    # fault.  `fetched_at` is the right column -- `strategy_halts.store_halt_snapshot`
+    # raises unless `|source_pub_at - fetched_at| <= 5 min`, so a stored row's
+    # `fetched_at` transitively bounds source recency.  ⚠ #3049 relaxed the companion
+    # monotonicity rule: a regressed stamp carrying UNCHANGED halt content is now
+    # accepted as a CDN re-serve.  The bound above survives it, because the stored
+    # `source_pub_at` is held at the maximum (`GREATEST`) and every accepted stamp
+    # passed the 5-minute lag check against the `fetched_at` written with it.
     if observation.halt_feed_at is None:
         return refuse("core_halt_feed_missing")
     if not _age_ok(observation.halt_feed_at, now=now, max_seconds=CORE_MAX_HALT_FEED_AGE_SECONDS):

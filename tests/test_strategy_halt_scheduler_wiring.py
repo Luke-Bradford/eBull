@@ -53,6 +53,7 @@ def test_halt_job_tracks_provider_publication_and_item_count() -> None:
     snapshot = HaltSnapshot(
         source_pub_at=datetime(2026, 8, 10, 13, 50, tzinfo=UTC),
         payload_sha256="0" * 64,
+        content_sha256="1" * 64,
         halts=(),
     )
     tracker = MagicMock()
