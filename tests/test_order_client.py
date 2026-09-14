@@ -2091,3 +2091,66 @@ class TestLoadExitLot:
         assert lot is not None
         assert lot.position_id == 3308442058
         assert lot.units == Decimal("1000.00000000")
+
+
+class TestExitLotUnitsPrecision:
+    """#3006 review NITPICK: the numeric(20,8) → numeric(18,6) copy must not be silent."""
+
+    def _exit_cursors(self, lot_units: float | Decimal) -> list[MagicMock]:
+        return [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=1500.0),
+            _make_cursor([{"position_id": 3308442058, "units": lot_units}]),
+            _order_returning_cursor(order_id=11),
+            _update_cursor(rowcount=1),
+            _fill_returning_cursor(fill_id=7),
+            _make_cursor([{"current_units": 500}]),
+        ]
+
+    def _run(self, lot_units: float | Decimal, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.close_position.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-456",
+            status="filled",
+            filled_price=Decimal("20"),
+            filled_units=Decimal("1000"),
+            fees=Decimal("0"),
+            raw_payload={},
+        )
+        conn = _make_conn(self._exit_cursors(lot_units))
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_genuine_seventh_decimal_is_logged(
+        self,
+        _mock_now: MagicMock,
+        _mock_attr: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level("WARNING", logger="app.services.order_client"):
+            self._run(Decimal("1000.12345678"), monkeypatch)
+        assert "do not survive the numeric(18,6) orders column" in caplog.text
+        assert "1000.123457" in caplog.text
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_trailing_zeros_are_not_a_loss(
+        self,
+        _mock_now: MagicMock,
+        _mock_attr: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Every lot currently held stores 8 decimals of which the last two are
+        zero (e.g. 1305.05709600). Decimal compares by value, so those must not
+        raise a precision warning — a warning that fires on every EXIT would be
+        noise, not a signal."""
+        with caplog.at_level("WARNING", logger="app.services.order_client"):
+            self._run(Decimal("1305.05709600"), monkeypatch)
+        assert "numeric(18,6)" not in caplog.text

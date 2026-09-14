@@ -67,6 +67,11 @@ OrderOutcome = Literal["filled", "pending", "failed"]
 
 _DEFAULT_ORDER_TYPE = "market"
 
+# The scale of ``orders.requested_units`` (numeric(18,6)). ``broker_positions.units``
+# is numeric(20,8), so an EXIT lot can carry two decimals the order row cannot
+# hold; #3006 logs the loss rather than letting it happen silently.
+_REQUESTED_UNITS_STEP = Decimal("0.000001")
+
 # decision_audit.stage for every row this module writes.
 #
 # Must stay equal to the "order_client" literal in the audit filter vocabulary
@@ -1409,13 +1414,26 @@ def execute_order(
                 # ⚠ Descriptive only. ``close_position`` is called with
                 # ``units_to_deduct=None``, i.e. close the lot WHOLE; sending a
                 # units figure derived from a possibly-stale ``broker_positions``
-                # row would only add a rejection mode. ⚠
-                # ``broker_positions.units`` is numeric(20,8) and
-                # ``orders.requested_units`` is numeric(18,6), so this copy
-                # rounds — acceptable because nothing consumes it as a control
-                # input.
+                # row would only add a rejection mode.
                 requested_units = exit_lot.units
                 exit_pos_id = exit_lot.position_id
+                # ``broker_positions.units`` is numeric(20,8) and
+                # ``orders.requested_units`` is numeric(18,6), so the column
+                # rounds this on the way in. Tolerable — nothing consumes it as
+                # a control input — but a SILENT loss of precision in an audit
+                # record is the part worth refusing, so say so when it actually
+                # happens rather than only in a comment. Decimal compares by
+                # VALUE, so a lot that is merely stored with trailing zeros
+                # (1305.05709600) does not trip this; one with genuine 7th/8th
+                # decimals does.
+                if requested_units != requested_units.quantize(_REQUESTED_UNITS_STEP):
+                    logger.warning(
+                        "execute_order: EXIT lot %d units %s do not survive the "
+                        "numeric(18,6) orders column — recording %s",
+                        exit_lot.position_id,
+                        requested_units,
+                        requested_units.quantize(_REQUESTED_UNITS_STEP),
+                    )
                 # #243: persist the order intent BEFORE the broker
                 # side effect, then commit so a crash mid-call leaves
                 # a durable ``status='submitted'`` row that a
