@@ -115,7 +115,10 @@ def quarantine(conn: psycopg.Connection[tuple], as_of: date) -> int:
     # a --quarantine before --load printed a 0-series census, which is what a
     # healthy no-op prints. #3040.
     if ingest.loaded_series_count(conn, ingest.HF_ARCHIVE) == 0:
-        print(f"no bars loaded for {ingest.HF_ARCHIVE.vendor} — run --load first")
+        # logger.error, matching this file's own `missing shard(s) … run
+        # --download first` guard above — `print` here is for census OUTPUT, and
+        # a refusal is not output. Same surface as the Intrader script's twin.
+        logger.error("no bars loaded for %s — run --load first", ingest.HF_ARCHIVE.vendor)
         return 1
 
     started = time.time()
