@@ -688,13 +688,57 @@ def sync_portfolio(
     for agg in broker_positions.values():
         if agg.instrument_id in local_instrument_ids:
             # Existing local position — update from broker.
-            # Only refresh units and PnL; leave avg_cost/cost_basis
-            # untouched — for eBull-originated positions, the local
-            # cost basis is authoritative for tax-lot and P&L history.
+            # Never import the broker's avg_cost: for eBull-originated
+            # positions, the local cost basis is authoritative for
+            # tax-lot and P&L history.
+            #
+            # #3017: but a broker-side units DECREASE is a disposal, and
+            # leaving the pool behind breaks the identity every other
+            # writer maintains — `cost_basis = avg_cost * current_units`
+            # (`_update_position_buy`, `_update_position_exit`,
+            # `app/api/orders.py`'s manual close). The stale-high pool is
+            # silent until the NEXT acquisition, which recomputes
+            # `avg_cost` from `positions.cost_basis` and books an average
+            # above every price paid (#3008, same shape, other writer).
+            #
+            # Withdraw the proportional share, which is the s104 part-
+            # disposal rule already implemented in
+            # `app/services/tax_ledger.py` and used by both siblings. It
+            # needs no price, which is why it applies to a broker-observed
+            # units change where we hold no fill. `avg_cost` is therefore
+            # unchanged by construction: cost * (u/U) = avg * u.
+            #
+            # ⚠ An INCREASE is deliberately left alone. The added units
+            # were bought at a price we do not have; scaling the pool at
+            # our `avg_cost` would invent a cost, and using the broker's
+            # `avg_open_price` would overwrite local tax-lot history with
+            # a broker figure. The identity stays broken on that path —
+            # stated on #3017 rather than silently papered over.
+            #
+            # ⚠ In an UPDATE's SET list every expression reads the
+            # PRE-update row, so `current_units` inside the CASE is the
+            # old value, not `%(units)s`.
+            #
+            # ⚠⚠ `::numeric(18,6)` on EVERY use of the parameter, and it is
+            # load-bearing rather than cosmetic. `positions.current_units`
+            # is `numeric(18,6)` while `broker_positions.units` is
+            # `numeric(20,8)` and the parser keeps the incoming precision,
+            # so an 8-dp holding is STORED rounded. Comparing the raw
+            # parameter against the stored value then reads a rounding
+            # artefact as a disposal: 1.23456789 stores as 1.234568, the
+            # `<` is true on an unchanged portfolio, and the pool ratchets
+            # down a little on every sync forever. Normalising to the
+            # column's own grain makes "decrease" mean a change the column
+            # can actually represent (caught by Codex at checkpoint 2).
             conn.execute(
                 """
                 UPDATE positions SET
-                    current_units  = %(units)s,
+                    cost_basis     = CASE
+                        WHEN current_units > 0 AND %(units)s::numeric(18,6) < current_units
+                        THEN ROUND(cost_basis * (%(units)s::numeric(18,6) / current_units), 6)
+                        ELSE cost_basis
+                    END,
+                    current_units  = %(units)s::numeric(18,6),
                     unrealized_pnl = %(upnl)s,
                     updated_at     = %(now)s
                 WHERE instrument_id = %(iid)s
@@ -810,10 +854,28 @@ def sync_portfolio(
     for row in local_rows:
         iid = row["instrument_id"]
         if iid not in broker_positions:
+            # #3017: deplete the cost pool with the units. A full
+            # disposal empties an s104 pool exactly, which is what both
+            # sibling writers encode as their `ELSE 0` branch. Leaving
+            # `cost_basis` behind on a zero-unit row is the defect three
+            # readers already work around with `WHERE current_units > 0`
+            # (`budget.py::_load_deployed_capital`,
+            # `valuation.py::_POSITIONS_SQL`) and that
+            # `_update_position_buy` then ADDS to when the position is
+            # re-opened.
+            #
+            # ⚠ `realized_pnl` is NOT accrued here and cannot be: this
+            # branch fires because the position is absent from the broker
+            # payload, so there is no close price. The disposal belongs to
+            # the trade-events / return-attribution layer (#2602).
+            # `avg_cost` is left as the historical per-unit cost; with a
+            # zero pool on zero units the identity holds either way, and
+            # a re-open recomputes it from the sums.
             conn.execute(
                 """
                 UPDATE positions SET
                     current_units  = 0,
+                    cost_basis     = 0,
                     unrealized_pnl = 0,
                     updated_at     = %(now)s
                 WHERE instrument_id = %(iid)s
