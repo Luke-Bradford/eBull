@@ -22,7 +22,7 @@ import type {
 } from "@/api/reportSnapshot";
 import { DegradedBadge, Fn, NilLine, ScopeCaveat, type NoteIndex } from "@/components/reports/StatementChrome";
 import { dec } from "@/components/reports/snapshotMath";
-import { formatDate, formatMoney, formatNumber, formatPct } from "@/lib/format";
+import { formatDate, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
 
 const ROLLING_WINDOWS: ReadonlyArray<readonly [keyof RollingReturnsV2, string]> = [
   ["1m", "1 month"],
@@ -164,7 +164,7 @@ export function RiskStatsSection({
         <Row label="Volatility">
           {risk.insufficient_history
             ? `Insufficient history (${risk.observations} period${risk.observations === 1 ? "" : "s"})`
-            : formatPct(dec(risk.volatility))}
+            : formatUnsignedPct(dec(risk.volatility))}
           {marker.smallN !== undefined ? <Fn n={marker.smallN} /> : null}
         </Row>
         <Row label="Max drawdown">

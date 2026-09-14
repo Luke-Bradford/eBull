@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useAsync } from "@/lib/useAsync";
 import { fetchRecommendation } from "@/api/recommendations";
 import type { RecommendationListItem } from "@/api/types";
-import { formatDateTime, formatNumber, formatPct } from "@/lib/format";
+import { formatDateTime, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
 import { actionTone, completenessTone, statusTone } from "@/lib/badgeTone";
 import { SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
@@ -202,7 +202,7 @@ function RecommendationRow({
         </td>
         <td className="max-w-xs truncate px-2 py-2 text-slate-600">{item.rationale}</td>
         <td className="px-2 py-2 text-right tabular-nums text-slate-700">
-          {formatPct(item.suggested_size_pct)}
+          {formatUnsignedPct(item.suggested_size_pct)}
         </td>
         <td className="px-2 py-2 text-xs text-slate-500">{formatDateTime(item.created_at)}</td>
       </tr>
