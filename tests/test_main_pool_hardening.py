@@ -84,8 +84,18 @@ def test_get_conn_maps_pool_timeout_to_503() -> None:
             raise PoolTimeout("checkout timed out")
             yield None  # pragma: no cover — unreachable, satisfies generator protocol
 
+    from app.db import get_conn
+
     saved = getattr(app.state, "db_pool", None)
     app.state.db_pool = _BrokenPool()
+    # This test exercises the REAL `get_conn` — the 503 mapping lives inside it.
+    # Eleven API test modules install a fallback `get_conn` override at import
+    # time, and any of them collected alongside this file puts one in the shared
+    # `app.dependency_overrides`, which would short-circuit the code under test.
+    # Before #2224 that key's presence here was luck of the xdist draw; it is now
+    # deterministic, so the removal has to be explicit. No manual restore needed:
+    # conftest's `_restore_dependency_overrides` puts it back after this test.
+    app.dependency_overrides.pop(get_conn, None)
     try:
         client = TestClient(app, raise_server_exceptions=False)
         # `/health/db` is the smallest endpoint that uses `Depends(get_conn)`.
