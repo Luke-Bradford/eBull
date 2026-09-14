@@ -7,13 +7,14 @@ THREE ARMS, per ``.claude/skills/engineering/full-population-ab.md``:
                   ``contiguous_days``: 4 on a 5-day venue, 2 on a 7-day one).
 * ``treatment`` — the rules exactly as they ship, B4's tolerance being ``hole_days``.
 
-⚠ ``stored`` vs ``control`` is the arm that earns its keep. It is not a restatement
-of the treatment: it proves the harness reproduces PRODUCTION before the treatment
-is believed at all, which is the one thing a simulated control can never do. Keep it
-even after the verdict lands — re-running this script against a later corpus is only
-meaningful while that arm still reconciles. ⚠ It reconciles against the stored rows
-only while they carry the PRE-#3028 rule-set version; once the corpus is re-evaluated
-the stored side becomes the treatment and the two diffs swap sides.
+⚠ The ``stored`` reconciliation is the arm that earns its keep. It is not a
+restatement of the treatment: it proves the harness reproduces PRODUCTION before the
+treatment is believed at all, which is the one thing a simulated control can never
+do. WHICH arm it reconciles against is read off the corpus, not assumed — the
+coverage table is asked for its rule-set version, and before the re-evaluation that
+is the control while after it is the treatment. Assuming the current
+``RULE_SET_VERSION`` instead matches zero rows the moment the rules are edited, and
+then reports "stored holds nothing", which reads exactly like agreement.
 
 WHY THAT TREATMENT. B4 used to decline to evaluate when either neighbour sat more
 than ``contiguous_days`` away (4 for a 5-day-week venue), while T2 quarantines a
@@ -52,6 +53,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
+from typing import LiteralString
 
 import psycopg
 
@@ -108,6 +110,43 @@ FROM price_bar_quarantine
 WHERE rule_set_version = %(v)s AND 'B4' = ANY(rules)
 """
 
+#: The version the stored rows were actually produced at, asked of the corpus rather
+#: than assumed. ⚠ Pinning this to ``RULE_SET_VERSION`` is the trap Codex caught at
+#: checkpoint 2: that constant hashes the CURRENT source, so the moment the rules are
+#: edited it stops matching the rows the reconciliation exists to compare against —
+#: and the arm then reports "stored holds nothing", which reads like agreement.
+#: Written out per table rather than interpolated: psycopg types ``execute`` against
+#: ``LiteralString`` precisely so a table name cannot arrive through ``.format``, and
+#: two short literals are cheaper than earning an exemption from that.
+PRICE_VERSION_SQL = "SELECT DISTINCT rule_set_version FROM price_quarantine_coverage ORDER BY 1"
+RESEARCH_VERSION_SQL = "SELECT DISTINCT rule_set_version FROM research_price_quarantine_coverage ORDER BY 1"
+
+
+def stored_version(conn: psycopg.Connection, table: str, sql: LiteralString) -> str:  # type: ignore[type-arg]
+    """The single rule-set version present in a coverage table, or refuse.
+
+    A corpus mid-re-evaluation holds two, and averaging over both would compare
+    each arm against a mixture of itself and the other. That is not a state this
+    script can report on, so it stops instead of reporting on it.
+    """
+    found = [r[0] for r in conn.execute(sql).fetchall()]
+    if len(found) != 1:
+        raise SystemExit(
+            f"{table} holds {len(found)} rule-set versions {found}; re-run once the corpus is evaluated at exactly one"
+        )
+    return found[0]
+
+
+def arm_of(version: str) -> str:
+    """Which arm the stored rows represent: they are evidence either way.
+
+    Before the re-evaluation the corpus IS the control, and the diff proves the
+    harness reproduces production. After it, the corpus IS the treatment, and the
+    same diff proves the backfill actually landed what this script predicted. Both
+    are worth having; silently mislabelling one as the other is not.
+    """
+    return "treatment" if version == RULE_SET_VERSION else "control"
+
 
 #: B4's gap tolerance as it stood before #3028, keyed on the class's hole tolerance
 #: because that is the pairing the module shipped: hole 10 <-> contiguous 4 (exchange
@@ -149,8 +188,10 @@ def b4_dates(bars: list[Bar], params: ClassParams, as_of: date) -> set[date]:
 
 
 def run_ab(conn: psycopg.Connection, as_of: date, sample_limit: int) -> int:  # type: ignore[type-arg]
+    baseline = stored_version(conn, "price_quarantine_coverage", PRICE_VERSION_SQL)
+    baseline_arm = arm_of(baseline)
     stored: dict[int, set[date]] = defaultdict(set)
-    for iid, pdate in conn.execute(STORED_SQL, {"v": RULE_SET_VERSION}).fetchall():
+    for iid, pdate in conn.execute(STORED_SQL, {"v": baseline}).fetchall():
         stored[int(iid)].add(pdate)
 
     tallies: dict[str, ClassTally] = defaultdict(ClassTally)
@@ -169,10 +210,11 @@ def run_ab(conn: psycopg.Connection, as_of: date, sample_limit: int) -> int:  # 
         t.control_b4 += len(control)
         t.treatment_b4 += len(treatment)
 
-        # parse-vs-STORED arm: the control must reproduce production exactly.
+        # parse-vs-STORED arm, reconciled against whichever arm the corpus holds.
         stored_set = stored.get(iid, set())
-        stored_only += len(stored_set - control)
-        control_only += len(control - stored_set)
+        reparsed = control if baseline_arm == "control" else treatment
+        stored_only += len(stored_set - reparsed)
+        control_only += len(reparsed - stored_set)
 
         gain = treatment - control
         if gain:
@@ -202,9 +244,10 @@ def run_ab(conn: psycopg.Connection, as_of: date, sample_limit: int) -> int:  # 
 
     print(f"\n[A/B] rule set {RULE_SET_VERSION}   as_of {as_of}", flush=True)
     print(
-        "\n[parse-vs-STORED] control must reproduce production before treatment is believed"
-        f"\n  stored B4 not reproduced by control: {stored_only}"
-        f"\n  control B4 absent from stored:       {control_only}",
+        f"\n[parse-vs-STORED] corpus is at {baseline}"
+        f"\n  -> those rows are the {baseline_arm.upper()} arm; reconciling against it"
+        f"\n  stored B4 not reproduced: {stored_only}"
+        f"\n  reparsed B4 not stored:   {control_only}",
         flush=True,
     )
 
@@ -250,8 +293,8 @@ def run_ab(conn: psycopg.Connection, as_of: date, sample_limit: int) -> int:  # 
     return 0
 
 
-# A gain requires a neighbour gap in ``(contiguous_days, hole_days]`` — that band IS
-# the treatment. Selecting series that hold such a gap is therefore a superset of the
+# A gain requires a neighbour gap in the formerly-unowned band — that band IS the
+# treatment. Selecting series that hold such a gap is therefore a superset of the
 # gain set, decided on the calendar alone, with no rule re-expressed in SQL.
 RESEARCH_SCOPE_SQL = """
 WITH g AS (
@@ -283,9 +326,11 @@ def run_research(conn: psycopg.Connection, as_of: date, sample_limit: int) -> in
 
     params = params_for(_ASSET_CLASS)
     ctrl = control_params(params)
+    baseline = stored_version(conn, "research_price_quarantine_coverage", RESEARCH_VERSION_SQL)
+    baseline_arm = arm_of(baseline)
 
     stored: dict[int, set[date]] = defaultdict(set)
-    for sid, bdate in conn.execute(RESEARCH_STORED_SQL, {"v": RULE_SET_VERSION}).fetchall():
+    for sid, bdate in conn.execute(RESEARCH_STORED_SQL, {"v": baseline}).fetchall():
         stored[int(sid)].add(bdate)
 
     conn.execute("SET statement_timeout = '1800s'")
@@ -335,8 +380,9 @@ def run_research(conn: psycopg.Connection, as_of: date, sample_limit: int) -> in
         treatment_b4 += len(treatment)
 
         stored_set = stored.get(sid, set())
-        stored_only += len(stored_set - control)
-        control_only += len(control - stored_set)
+        reparsed = control if baseline_arm == "control" else treatment
+        stored_only += len(stored_set - reparsed)
+        control_only += len(reparsed - stored_set)
 
         gain = treatment - control
         if gain:
@@ -366,9 +412,10 @@ def run_research(conn: psycopg.Connection, as_of: date, sample_limit: int) -> in
             )
 
     print(
-        f"\n[research parse-vs-STORED] (scoped series only)"
-        f"\n  stored B4 not reproduced by control: {stored_only}"
-        f"\n  control B4 absent from stored:       {control_only}",
+        f"\n[research parse-vs-STORED] (scoped series only) corpus is at {baseline}"
+        f"\n  -> those rows are the {baseline_arm.upper()} arm; reconciling against it"
+        f"\n  stored B4 not reproduced: {stored_only}"
+        f"\n  reparsed B4 not stored:   {control_only}",
         flush=True,
     )
     print(
