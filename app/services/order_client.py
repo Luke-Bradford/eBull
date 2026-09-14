@@ -1396,9 +1396,7 @@ def execute_order(
                     filled_units=None,
                     fees=Decimal("0"),
                     raw_payload={
-                        "error": (
-                            f"No broker-closeable long broker_positions row for instrument {instrument_id}"
-                        )
+                        "error": (f"No broker-closeable long broker_positions row for instrument {instrument_id}")
                     },
                 )
             else:

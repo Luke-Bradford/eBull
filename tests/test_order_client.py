@@ -2041,9 +2041,7 @@ class TestExitLotSelection:
 
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
-    def test_demo_exit_carries_no_lot_completion_claim(
-        self, _mock_now: MagicMock, _mock_attr: MagicMock
-    ) -> None:
+    def test_demo_exit_carries_no_lot_completion_claim(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
         """Demo never resolves a lot, so it must make no completion claim.
 
         The synthetic path has no ``broker_positions`` handle to be partial
