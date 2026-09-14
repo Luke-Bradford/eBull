@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from tests.fixtures.ebull_test_db import (
+    _SEED_SNAPSHOT_VERSION,
     TemplateWorktreeMismatch,
     _assert_template_matches_this_worktree,
     _migration_hash,
@@ -68,14 +69,24 @@ class _StubConn:
         return _StubCursor(self)
 
 
-def _stamped(migration_hash: str, built_from: str = SIBLING) -> _StubConn:
-    payload = json.dumps({"migration_hash": migration_hash, "built_from": built_from})
+def _stamped(
+    migration_hash: str,
+    built_from: str = SIBLING,
+    seed_snapshot_version: int = _SEED_SNAPSHOT_VERSION,
+) -> _StubConn:
+    payload = json.dumps(
+        {
+            "migration_hash": migration_hash,
+            "built_from": built_from,
+            "seed_snapshot_version": seed_snapshot_version,
+        }
+    )
     return _StubConn((payload,))
 
 
-def test_a_well_formed_stamp_reads_back_as_hash_and_origin() -> None:
+def test_a_well_formed_stamp_reads_back_as_hash_origin_and_seed_version() -> None:
     conn = _stamped("abc123", built_from=SIBLING)
-    assert _read_template_stamp(conn) == ("abc123", SIBLING)  # type: ignore[arg-type]
+    assert _read_template_stamp(conn) == ("abc123", SIBLING, _SEED_SNAPSHOT_VERSION)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -85,9 +96,13 @@ def test_a_well_formed_stamp_reads_back_as_hash_and_origin() -> None:
         (None,),  # database exists, never stamped
         ("not json",),  # a comment we did not write
         ('{"migration_hash": "abc"}',),  # our shape, missing a key
+        # #2224 cause 3 — a template built before the seed snapshots exist. Its
+        # migration hash can still MATCH, so only the missing key forces the
+        # rebuild that creates them.
+        ('{"migration_hash": "abc", "built_from": "/x"}',),
         ("[]",),  # valid JSON, wrong type
     ],
-    ids=["no-row", "unstamped", "not-json", "missing-key", "wrong-type"],
+    ids=["no-row", "unstamped", "not-json", "missing-key", "pre-seed-snapshot", "wrong-type"],
 )
 def test_an_unreadable_stamp_is_unknown_and_never_a_match(row: tuple[Any, ...] | None) -> None:
     # Reading "unknown" as "matches" is the failure this ticket is about: it
@@ -107,6 +122,19 @@ def test_a_sibling_worktrees_stamp_refuses_the_clone_and_names_the_sibling() -> 
     assert SIBLING in str(excinfo.value)
 
 
+def test_a_stale_seed_snapshot_version_refuses_even_when_the_migrations_match() -> None:
+    """Presence of the key is not enough — the VALUE gates the clone.
+
+    A recipe or exclusion change moves no ``sql/`` file, so the migration hash
+    is identical while the seed baseline in the template is the old one. Cloning
+    it would leave per-test cleanup unable to restore seeded tables (#2224).
+    """
+    conn = _stamped(_migration_hash(), seed_snapshot_version=_SEED_SNAPSHOT_VERSION - 1)
+    with pytest.raises(TemplateWorktreeMismatch) as excinfo:
+        _assert_template_matches_this_worktree(conn)  # type: ignore[arg-type]
+    assert "seed-snapshot version" in str(excinfo.value)
+
+
 def test_an_unstamped_template_refuses_rather_than_assuming_it_is_ours() -> None:
     with pytest.raises(TemplateWorktreeMismatch) as excinfo:
         _assert_template_matches_this_worktree(_StubConn((None,)))  # type: ignore[arg-type]
@@ -117,7 +145,13 @@ def test_the_stamp_check_refuses_to_run_without_the_template_lock() -> None:
     # The check is a read-then-act. Without the lock a sibling can rebuild the
     # template between the read and the CREATE, so a stamp that matched no
     # longer describes what gets copied — silently.
-    payload = json.dumps({"migration_hash": _migration_hash(), "built_from": SIBLING})
+    payload = json.dumps(
+        {
+            "migration_hash": _migration_hash(),
+            "built_from": SIBLING,
+            "seed_snapshot_version": _SEED_SNAPSHOT_VERSION,
+        }
+    )
     conn = _StubConn((payload,), holds_lock=False)
     with pytest.raises(RuntimeError, match="EBULL_TEMPLATE_LOCK"):
         _assert_template_matches_this_worktree(conn)  # type: ignore[arg-type]

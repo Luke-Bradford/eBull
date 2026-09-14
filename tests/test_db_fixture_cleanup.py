@@ -10,7 +10,9 @@ ordering logic itself is unit-tested in ``test_db_fixture_delete_order.py``).
 from __future__ import annotations
 
 import psycopg
+import psycopg.errors
 import pytest
+from psycopg import sql
 
 from tests.fixtures.ebull_test_db import (
     _CLEANUP_PLANS,
@@ -20,6 +22,8 @@ from tests.fixtures.ebull_test_db import (
     _cleanup_plan,
     _janitor_conn,
     _reset_planner_tables,
+    _snapshot_name,
+    _truncate_planner_tables,
     test_database_url,
     test_db_available,
     test_db_name,
@@ -256,3 +260,126 @@ def test_no_standalone_strategy_table_is_invisible_to_the_cleanup_planner(
         f"cannot discover them and their committed rows outlive the test that wrote them: {unlisted}. "
         "Add each to _PLANNER_TABLES with the reason it is standalone."
     )
+
+
+# ---------------------------------------------------------------------------
+# #2224 cause 3 — seeded tables are RESTORED to their template content, not
+# emptied and not left alone. The defect this replaces was a committed synthetic
+# `exchanges` row surviving into a later module that asserts over every row.
+# ---------------------------------------------------------------------------
+
+
+def _differs_from_snapshot(conn: psycopg.Connection[tuple], table: str) -> bool:
+    """True when ``table`` is not multiset-equal to its pristine snapshot."""
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                "SELECT EXISTS ((TABLE {t} EXCEPT ALL TABLE {s}) UNION ALL (TABLE {s} EXCEPT ALL TABLE {t}))"
+            ).format(t=sql.Identifier(table), s=sql.Identifier(_snapshot_name(table)))
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return bool(row[0])
+
+
+def test_seed_set_is_derived_and_disjoint_from_the_wipe_set(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The restore set comes from the cloned manifest, not a hand-list.
+
+    ``exchanges`` must be in it (the reproduced defect) and
+    ``institutional_filers`` must NOT be: it is seeded too, but it sits inside
+    the FK closure, so it is deliberately still emptied. A table cannot be both.
+    """
+    plan = _cleanup_plan(ebull_test_conn)
+    assert "exchanges" in plan.seed_tables
+    assert "institutional_filers" not in plan.seed_tables
+    assert not set(plan.seed_tables) & set(plan.delete_order)
+
+
+def test_reset_removes_a_foreign_row_and_undoes_a_mutated_seed_row(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The exact shape of the #2224 cause-3 reproduction.
+
+    ``test_migration_159_currency_backfill`` both INSERTs a synthetic
+    ``us_equity`` row and UPDATEs a currency. A count-only dirty probe would see
+    the insert and miss the update, so both halves are asserted.
+    """
+    conn = ebull_test_conn
+    conn.execute("INSERT INTO exchanges (exchange_id, asset_class) VALUES ('zz9593', 'us_equity')")
+    conn.execute("UPDATE exchanges SET currency = 'CHF' WHERE asset_class = 'us_equity' AND exchange_id <> 'zz9593'")
+    conn.commit()
+    assert _differs_from_snapshot(conn, "exchanges"), "precondition: the table must be dirty"
+
+    _reset_planner_tables(conn)
+
+    assert not _differs_from_snapshot(conn, "exchanges")
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM exchanges WHERE exchange_id = 'zz9593'")
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0, "foreign seed row survived cleanup"
+
+
+def test_reset_restores_seed_rows_a_test_deleted(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Emptying a seed table must be undone, not accepted as the new baseline."""
+    conn = ebull_test_conn
+    conn.execute("DELETE FROM sec_8k_item_codes")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM sec_8k_item_codes")
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0, "precondition: the seed must be gone"
+
+    _reset_planner_tables(conn)
+
+    assert not _differs_from_snapshot(conn, "sec_8k_item_codes")
+
+
+def test_reset_restores_a_seed_table_guarded_by_an_immutability_trigger(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """``sql/299`` refuses to delete an active/retired universe version.
+
+    Restoring this table therefore requires the ``session_replication_role =
+    replica`` bypass — a plain ``DELETE`` raises "active/retired intraday
+    universe versions are immutable". The control assertion pins that, so a
+    future refactor that drops the bypass fails here rather than silently
+    dropping the table out of the restore set.
+    """
+    conn = ebull_test_conn
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException, match="immutable"):
+            cur.execute("DELETE FROM strategy_intraday_universe_versions")
+    conn.rollback()
+
+    conn.execute(
+        "INSERT INTO strategy_intraday_universe_versions "
+        "(universe_version, provider, session_rule, rationale, status) "
+        "VALUES ('ZZ-2224-V1', 'etoro', 'nyse_rth', 'cause 3 fixture', 'draft')"
+    )
+    conn.commit()
+    assert _differs_from_snapshot(conn, "strategy_intraday_universe_versions")
+
+    _reset_planner_tables(conn)
+
+    assert not _differs_from_snapshot(conn, "strategy_intraday_universe_versions")
+
+
+def test_truncate_fallback_also_restores_seed_tables(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The slow path must reach the same end state as the fast one.
+
+    ``TRUNCATE`` restores nothing, so a fallback that skipped the seed restore
+    would leave the leak in place exactly when the probe had already failed.
+    """
+    conn = ebull_test_conn
+    conn.execute("INSERT INTO exchanges (exchange_id, asset_class) VALUES ('zz9594', 'us_equity')")
+    conn.commit()
+
+    _truncate_planner_tables(conn)
+
+    assert not _differs_from_snapshot(conn, "exchanges")

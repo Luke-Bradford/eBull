@@ -6625,3 +6625,47 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   (`test_a_regressed_stamp_with_identical_content_is_accepted_as_a_reserve`,
   `test_payload_sha256_cannot_stand_in_for_the_content_fingerprint`,
   `test_content_fingerprint_moves_on_a_resumption`).
+
+## 2026-09-14 — #2224 cause 3: the test-DB cleanup planner is blind in BOTH directions
+
+- ⚠⚠ **`_reset_planner_tables` derives its wipe set from `pg_constraint`, so it can only see
+  a table that is a parent or a child of something.** That blind spot has now produced two
+  opposite defects. Cause 2 (`strategy_signal_daily_counts`, `strategy_outcome_cursor`) was a
+  standalone table that should have been EMPTIED. Cause 3 (`exchanges`) is a standalone table
+  that must be **RESTORED** — its rows come from the migrations, so adding it to
+  `_PLANNER_TABLES` breaks `test_migration_071` from the other side (*"no us_equity rows
+  seeded — migration 067 didn't run?"*). **Before reaching for the wipe list, ask where the
+  rows came from.** Migration-seeded → restore; test-written → wipe.
+- ⚠⚠ **A "restore the seed" fix cannot assume the write will be ACCEPTED.** The first design
+  was a plain `DELETE` + re-`INSERT`. Codex checkpoint 1 killed it: four of the eleven seed
+  tables carry BEFORE triggers that refuse the statement outright — `sql/299` makes an
+  active/retired `strategy_intraday_universe_versions` row undeletable, and `sql/372` puts
+  safety triggers on `kill_switch` / `runtime_config`. Verified with a CONTROL before
+  designing around it (`DELETE` raises *"active/retired intraday universe versions are
+  immutable"*; the same statement succeeds under `SET LOCAL session_replication_role =
+  replica`, which also suspends FK enforcement and so makes the restore order-free). **A
+  control assertion belongs in the test, not just in the session** — otherwise a later
+  refactor that drops the bypass silently drops the table out of the restore set.
+- ⚠ **Derive the set, then measure the WHOLE population before writing the scope sentence.**
+  "Restore `exchanges`" would have been a per-case patch for the third time. The catalog
+  answers it: 252 `public` roots, **15 non-empty in a pristine template**, of which 3 sit
+  INSIDE the wipe closure (their seed is already destroyed every test — deterministic, a
+  separate defect) and 12 outside. Excluding the schema ledger leaves **11**, every one with
+  at least one test writer (`exchanges` 31 files, `bootstrap_state` 25, `kill_switch` 12).
+  `exchanges` was simply the pair that surfaced.
+- ⚠ **A baseline snapshot must provably predate every writer.** Taking it per-worker at first
+  cleanup would capture whatever a fixture had already written. It goes in the TEMPLATE, which
+  `CREATE DATABASE ... TEMPLATE` then clones by page — and the manifest is a TABLE, not a
+  Python list, because a controller-local list does not reach an xdist worker.
+- ⚠ **Adding a field to a cache stamp is the invalidation mechanism, not extra work.** A
+  template built before this change carries no `seed_snapshot_version`, so `_read_template_stamp`
+  returns `None` on `KeyError` and it is rebuilt — even though its migration hash still matches.
+  The VALUE is then checked too: a recipe change moves no `sql/` file, so the hash alone is blind.
+- ⚠ **A fallback path must reach the same END STATE, not merely "clean up".** `TRUNCATE`
+  restores nothing, so the slow path repeats the seed restore unconditionally — the probe that
+  decides "dirty" is exactly the thing that just failed.
+- Enforced in: `tests/fixtures/ebull_test_db.py` (`_SEED_SNAPSHOT_*`, `_snapshot_seed_tables`,
+  `_read_seed_manifest`, `_restore_seed_tables`); `tests/test_db_fixture_cleanup.py`
+  (five `#2224 cause 3` tests, including the immutability-trigger control);
+  `tests/test_template_staleness_stamp.py`
+  (`test_a_stale_seed_snapshot_version_refuses_even_when_the_migrations_match`).
