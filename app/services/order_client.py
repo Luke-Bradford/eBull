@@ -208,6 +208,30 @@ class ExitLot:
     units: Decimal
 
 
+#: The lots a recommendation EXIT could close at the broker, before ownership.
+#: ⚠ Shared by :func:`_load_exit_lot` and :func:`_engine_owned_long_lot_count`
+#: rather than written twice: the second reports what the first REFUSED, so a
+#: divergence would not fail — it would quietly describe a different set to the
+#: operator than the one that was actually excluded (review NITPICK on PR #3026).
+#: Contains no caller-supplied text; ``%(iid)s`` stays a bound parameter.
+#: The ``bp.`` alias is load-bearing, not cosmetic — ``own`` and ``bp`` both
+#: carry a position id, so an unqualified reference inside the correlated
+#: ``EXISTS`` below would resolve to the wrong one.
+_BROKER_CLOSEABLE_LONG_LOT_SQL = """bp.instrument_id = %(iid)s
+          AND bp.units > 0
+          AND bp.is_buy
+          AND bp.position_id > 0"""
+
+#: The lot is claimed by the strategy engine RIGHT NOW (#3025). ``active`` only —
+#: a ``released`` row means the engine has given the lot up, and matching on the
+#: row's mere existence would strand every lot the engine ever touched.
+_ENGINE_OWNED_SQL = """EXISTS (
+              SELECT 1 FROM strategy_position_ownership own
+              WHERE own.broker_position_id = bp.position_id
+                AND own.status = 'active'
+          )"""
+
+
 def _load_exit_lot(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -239,18 +263,38 @@ def _load_exit_lot(
     existing audited failure path, which is fail-closed — it refuses to submit,
     it does not de-risk the short.
 
+    A third filter, added by #3025:
+
+    ``NOT EXISTS`` an ACTIVE ``strategy_position_ownership`` row — the lot belongs
+    to the strategy engine, and this path must not close it. The blindness was
+    one-directional: ``strategy_engine_capital`` joins that table in five places
+    so the engine only ever counts what it owns, and
+    ``strategy_position_manager`` closes by exact ``broker_position_id``, so the
+    engine can never reach a legacy lot; nothing in ``order_client`` read the
+    table at all. ``position_id > 0`` partitions synthetic ids from
+    broker-assigned ones and says nothing about ownership, so an engine lot
+    imported by ``portfolio_sync`` satisfied every filter above.
+
+    ⚠ Closing one would be the #2979 wedge reached from the other side: the
+    broker no longer carries the position, nothing here releases the ownership
+    row, and ``resolve_engine_capital_usage`` then refuses the join for every
+    later ``execute_core_rebalance`` cycle.
+
+    ⚠ ``status='active'`` only. A ``released`` row means the engine has given the
+    lot up, so excluding it too would over-narrow.
+    ``strategy_position_ownership.broker_position_id`` is ``UNIQUE`` and
+    ``CHECK (> 0)``, so the anti-join is exact and cannot fan out.
+
     The lot's ``units`` come back with it so the caller can record what it
     actually asked the broker to close rather than the aggregate ledger position.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
-            SELECT position_id, units FROM broker_positions
-            WHERE instrument_id = %(iid)s
-              AND units > 0
-              AND is_buy
-              AND position_id > 0
-            ORDER BY open_date_time ASC, position_id ASC
+            f"""
+            SELECT position_id, units FROM broker_positions bp
+            WHERE {_BROKER_CLOSEABLE_LONG_LOT_SQL}
+              AND NOT {_ENGINE_OWNED_SQL}
+            ORDER BY bp.open_date_time ASC, bp.position_id ASC
             LIMIT 1
             """,
             {"iid": instrument_id},
@@ -259,6 +303,36 @@ def _load_exit_lot(
     if row is None:
         return None
     return ExitLot(position_id=int(row["position_id"]), units=Decimal(str(row["units"])))
+
+
+def _engine_owned_long_lot_count(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> int:
+    """How many otherwise-closeable long lots #3025's filter excluded.
+
+    Called ONLY when :func:`_load_exit_lot` returns ``None``, so the success path
+    still costs one query. It exists so the refusal names the actual cause:
+    "every candidate lot is engine-owned" and "there is no broker-closeable long
+    lot at all" are different operator situations with different fixes, and
+    #3003 settled that a backstop must not pre-empt the specific diagnosis.
+
+    Shares :data:`_BROKER_CLOSEABLE_LONG_LOT_SQL` and :data:`_ENGINE_OWNED_SQL`
+    with :func:`_load_exit_lot` and differs from it ONLY by dropping the ``NOT``,
+    so the two cannot drift into disagreeing about what was excluded — which
+    would make the operator-facing count describe a different set from the one
+    actually refused.
+    """
+    row = conn.execute(
+        f"""
+        SELECT count(*) FROM broker_positions bp
+        WHERE {_BROKER_CLOSEABLE_LONG_LOT_SQL}
+          AND {_ENGINE_OWNED_SQL}
+        """,
+        {"iid": instrument_id},
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def _load_cash(conn: psycopg.Connection[Any]) -> Decimal | None:
@@ -1579,20 +1653,29 @@ def execute_order(
             if exit_lot is None:
                 # Pre-024 position without broker_positions row, or no
                 # broker-closeable LONG lot — a synthetic-id row or a short
-                # lot is not something this path can close (#3006).
-                logger.error(
-                    "EXIT for instrument_id=%d: no broker-closeable long lot found",
-                    instrument_id,
-                )
+                # lot is not something this path can close (#3006) — or every
+                # candidate lot belongs to the strategy engine (#3025).
+                # Distinguish the last case: it is the only one an operator
+                # fixes by closing through the engine rather than by waiting
+                # for a sync.
+                engine_owned = _engine_owned_long_lot_count(conn, instrument_id)
+                if engine_owned:
+                    error = (
+                        f"All {engine_owned} broker-closeable long broker_positions rows for "
+                        f"instrument {instrument_id} are owned by the strategy engine "
+                        f"(strategy_position_ownership.status='active'); a recommendation EXIT "
+                        f"must not close an engine-owned lot — close it through the engine"
+                    )
+                else:
+                    error = f"No broker-closeable long broker_positions row for instrument {instrument_id}"
+                logger.error("EXIT for instrument_id=%d: %s", instrument_id, error)
                 broker_result = BrokerOrderResult(
                     broker_order_ref=None,
                     status="failed",
                     filled_price=None,
                     filled_units=None,
                     fees=Decimal("0"),
-                    raw_payload={
-                        "error": (f"No broker-closeable long broker_positions row for instrument {instrument_id}")
-                    },
+                    raw_payload={"error": error, "engine_owned_long_lots": engine_owned},
                 )
             else:
                 # #3006: record what is actually asked of the broker. Step 2

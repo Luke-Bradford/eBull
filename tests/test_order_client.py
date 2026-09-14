@@ -2094,17 +2094,28 @@ class TestLoadExitLot:
 
         ``is_buy`` keeps a short lot out of a path whose accounting is a long
         sale; ``position_id > 0`` keeps out ``-order_id`` synthetic rows, which
-        are our record of a fill rather than a broker-closeable handle.
+        are our record of a fill rather than a broker-closeable handle; and
+        #3025's anti-join keeps out a lot the strategy engine actively owns.
+
+        ⚠ Columns are ``bp.``-qualified since #3025 added a correlated subquery —
+        the alias is load-bearing, not cosmetic, because ``own`` and ``bp`` both
+        carry a position id and an unqualified reference inside the ``EXISTS``
+        would resolve to the wrong one.
         """
         cur = _make_cursor([])
         conn = _make_conn([cur])
         assert _load_exit_lot(conn, 1699) is None
 
         sql = " ".join(str(cur.execute.call_args.args[0]).split())
-        assert "AND is_buy" in sql
-        assert "AND position_id > 0" in sql
+        assert "AND bp.is_buy" in sql
+        assert "AND bp.position_id > 0" in sql
+        # #3025: the engine-ownership anti-join. Asserted here only as text — what
+        # it actually EXCLUDES is in tests/test_3025_exit_lot_engine_ownership_db.py,
+        # against rows.
+        assert "strategy_position_ownership" in sql
+        assert "own.status = 'active'" in sql
         # Deterministic FIFO: age first, id as the tie-break.
-        assert "ORDER BY open_date_time ASC, position_id ASC" in sql
+        assert "ORDER BY bp.open_date_time ASC, bp.position_id ASC" in sql
 
     def test_selector_returns_the_lot_units(self) -> None:
         cur = _make_cursor([{"position_id": 3308442058, "units": Decimal("1000.00000000")}])
