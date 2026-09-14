@@ -190,21 +190,57 @@ def _load_position_units(
     return Decimal(str(row["current_units"]))
 
 
-def _load_position_id_for_exit(
+@dataclass(frozen=True)
+class ExitLot:
+    """The single broker lot an EXIT recommendation will close (#3006)."""
+
+    position_id: int
+    units: Decimal
+
+
+def _load_exit_lot(
     conn: psycopg.Connection[Any],
     instrument_id: int,
-) -> int | None:
-    """Return the broker position_id for an instrument, or None if not found.
+) -> ExitLot | None:
+    """Return the broker lot an EXIT will close, or None if there is none.
 
-    For EXIT via recommendation, the instrument may have multiple broker_positions.
-    We close the oldest (earliest open_date_time) — this matches FIFO semantics.
+    For EXIT via recommendation, the instrument may have multiple
+    ``broker_positions``. We close the oldest (earliest ``open_date_time``) —
+    this matches FIFO semantics. ``position_id`` breaks ties so the choice is
+    deterministic when two lots share a timestamp.
+
+    Two filters beyond ``units > 0``, both added by #3006:
+
+    ``position_id > 0`` — ``_persist_broker_position`` writes ``-order_id`` as a
+    synthetic id for every eBull-originated BUY/ADD fill, live branch included,
+    because the broker's real position id is not in the order response. Those
+    rows describe OUR record of a fill, not a position the broker can close;
+    posting to ``…/market-close-orders/positions/-123`` addresses nothing. The
+    sign is the documented partition between the two namespaces (see
+    ``_persist_broker_position``), so requiring a positive id selects exactly
+    the broker-assigned lots.
+
+    ``is_buy`` — this path's accounting assumes a long throughout:
+    ``_update_position_exit`` accrues ``(price - avg_cost) * units`` and
+    ``_record_cash_ledger`` CREDITS cash on EXIT, which is a sale, not a
+    buy-to-close. Shorting is permitted for research and paper trading, so
+    ``portfolio_sync`` can import a short lot; selected by age it would be closed
+    and booked against a long basis. Returning None instead lands on the caller's
+    existing audited failure path, which is fail-closed — it refuses to submit,
+    it does not de-risk the short.
+
+    The lot's ``units`` come back with it so the caller can record what it
+    actually asked the broker to close rather than the aggregate ledger position.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT position_id FROM broker_positions
-            WHERE instrument_id = %(iid)s AND units > 0
-            ORDER BY open_date_time ASC
+            SELECT position_id, units FROM broker_positions
+            WHERE instrument_id = %(iid)s
+              AND units > 0
+              AND is_buy
+              AND position_id > 0
+            ORDER BY open_date_time ASC, position_id ASC
             LIMIT 1
             """,
             {"iid": instrument_id},
@@ -212,7 +248,7 @@ def _load_position_id_for_exit(
         row = cur.fetchone()
     if row is None:
         return None
-    return int(row["position_id"])
+    return ExitLot(position_id=int(row["position_id"]), units=Decimal(str(row["units"])))
 
 
 def _load_cash(conn: psycopg.Connection[Any]) -> Decimal | None:
@@ -597,10 +633,14 @@ def _persist_broker_position(
     pulled in by a future portfolio sync. Pairs with the matching
     convention in ``app/api/orders._persist_order_and_fill``.
 
-    The row is immediately visible to ``_load_position_id_for_exit``
-    (which filters by ``units > 0`` only — sign-agnostic) so a
-    subsequent EXIT recommendation does not have to wait for the next
-    broker sync cycle.
+    ⚠ Since #3006 this row is NOT visible to ``_load_exit_lot``, which
+    requires ``position_id > 0``. That is deliberate and corrects the
+    previous behaviour: a synthetic id is our record of a fill, not a
+    handle the broker can close, so an EXIT that selected one would post
+    to a position that does not exist. The cost is that an EXIT
+    recommendation following an eBull BUY must wait for the next broker
+    sync to learn the real lot id; the previous alternative was a
+    guaranteed-invalid close request.
 
     ON CONFLICT: if the same synthetic id ever recurs (e.g. a re-run
     of the same order), update units/amount/updated_at.
@@ -753,6 +793,37 @@ def _record_cash_ledger(
     )
 
 
+def describe_exit_completion(
+    *,
+    lot_units_selected: Decimal,
+    units_closed: Decimal,
+    units_open_after: Decimal,
+) -> dict[str, Any]:
+    """Describe how much of the POSITION an EXIT actually closed (#3006).
+
+    An EXIT recommendation expresses an instrument-wide intent, but the broker
+    call closes ONE lot. Without this the audit trail records a successful order
+    and says nothing about the exposure still open, so a partial de-risk is
+    indistinguishable from a complete one.
+
+    Pure on purpose: the caller supplies the three quantities it has already
+    measured, and it is only called on a path where all three are known — a
+    close the broker acknowledged without reporting units tells us nothing about
+    completion and must not be described as if it did.
+
+    ``units_open_after`` is the LOCAL ledger's ``positions.current_units`` after
+    the fill was applied. It is our record of remaining exposure, not a broker
+    observation; the two can disagree until the next portfolio sync.
+    """
+    return {
+        "exit_scope": "lot",
+        "lot_units_selected": str(lot_units_selected),
+        "units_closed": str(units_closed),
+        "units_open_after": str(units_open_after),
+        "position_fully_closed": units_open_after <= Decimal("0"),
+    }
+
+
 def _write_execution_audit(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -762,6 +833,7 @@ def _write_execution_audit(
     explanation: str,
     raw_payload: dict[str, Any],
     now: datetime,
+    exit_completion: dict[str, Any] | None = None,
 ) -> None:
     """
     Write a decision_audit row recording the execution outcome.
@@ -769,7 +841,14 @@ def _write_execution_audit(
     Uses the same PASS/FAIL vocabulary as the execution guard so the
     pass_fail column is semantically consistent across stages.  The
     detailed execution status goes into explanation.
+
+    ``exit_completion`` carries ``describe_exit_completion``'s reading when the
+    order was an EXIT that produced a fill; it is absent on every other path
+    because completion is unknown there (#3006).
     """
+    evidence: dict[str, Any] = {"order_id": order_id, "raw_payload": raw_payload}
+    if exit_completion is not None:
+        evidence["exit_completion"] = exit_completion
     conn.execute(
         """
         INSERT INTO decision_audit
@@ -786,7 +865,7 @@ def _write_execution_audit(
             "stage": STAGE,
             "pf": "PASS" if passed else "FAIL",
             "expl": explanation,
-            "ev": Jsonb({"order_id": order_id, "raw_payload": raw_payload}),
+            "ev": Jsonb(evidence),
         },
     )
 
@@ -1293,16 +1372,21 @@ def execute_order(
 
     quote_data: dict[str, Any] | None = None
     submitted_order_id: int | None = None
+    # #3006: set only on the live EXIT path, and only once a lot is resolved.
+    exit_lot: ExitLot | None = None
+    exit_completion: dict[str, Any] | None = None
 
     if is_live:
         if broker is None:
             raise ValueError("enable_live_trading is True but no broker provider supplied")
         if action == "EXIT":
-            exit_pos_id = _load_position_id_for_exit(conn, instrument_id)
-            if exit_pos_id is None:
-                # Pre-024 position without broker_positions row.
+            exit_lot = _load_exit_lot(conn, instrument_id)
+            if exit_lot is None:
+                # Pre-024 position without broker_positions row, or no
+                # broker-closeable LONG lot — a synthetic-id row or a short
+                # lot is not something this path can close (#3006).
                 logger.error(
-                    "EXIT for instrument_id=%d: no broker_positions row found",
+                    "EXIT for instrument_id=%d: no broker-closeable long lot found",
                     instrument_id,
                 )
                 broker_result = BrokerOrderResult(
@@ -1311,9 +1395,29 @@ def execute_order(
                     filled_price=None,
                     filled_units=None,
                     fees=Decimal("0"),
-                    raw_payload={"error": f"No broker_positions row for instrument {instrument_id}"},
+                    raw_payload={
+                        "error": (
+                            f"No broker-closeable long broker_positions row for instrument {instrument_id}"
+                        )
+                    },
                 )
             else:
+                # #3006: record what is actually asked of the broker. Step 2
+                # sized this from ``positions.current_units``, the aggregate
+                # across every open lot, while the call below closes exactly
+                # ONE lot — so the aggregate described a request the broker
+                # never received.
+                #
+                # ⚠ Descriptive only. ``close_position`` is called with
+                # ``units_to_deduct=None``, i.e. close the lot WHOLE; sending a
+                # units figure derived from a possibly-stale ``broker_positions``
+                # row would only add a rejection mode. ⚠
+                # ``broker_positions.units`` is numeric(20,8) and
+                # ``orders.requested_units`` is numeric(18,6), so this copy
+                # rounds — acceptable because nothing consumes it as a control
+                # input.
+                requested_units = exit_lot.units
+                exit_pos_id = exit_lot.position_id
                 # #243: persist the order intent BEFORE the broker
                 # side effect, then commit so a crash mid-call leaves
                 # a durable ``status='submitted'`` row that a
@@ -1563,6 +1667,28 @@ def execute_order(
                 units_after = Decimal(str(pos_row["current_units"])) if pos_row else Decimal("0")
                 _maybe_trigger_attribution(conn, instrument_id, units_after)
 
+                # #3006: an EXIT closes ONE lot but expresses an
+                # instrument-wide intent. Record how much of the position is
+                # still open so a partial de-risk is visible in the audit trail
+                # instead of reading as a completed one. Only on the live path,
+                # where a lot was resolved — demo has no lot to be partial about.
+                if exit_lot is not None:
+                    exit_completion = describe_exit_completion(
+                        lot_units_selected=exit_lot.units,
+                        units_closed=fu,
+                        units_open_after=units_after,
+                    )
+                    if not exit_completion["position_fully_closed"]:
+                        logger.warning(
+                            "execute_order: EXIT recommendation_id=%d instrument_id=%d closed lot %d "
+                            "(%s units) but %s units remain open — the position is NOT fully exited",
+                            recommendation_id,
+                            instrument_id,
+                            exit_lot.position_id,
+                            fu,
+                            units_after,
+                        )
+
             gross_amount = fp * fu
             _record_cash_ledger(conn, action, gross_amount, broker_result.fees, now)
 
@@ -1594,6 +1720,7 @@ def execute_order(
             explanation=f"status={exec_status} order_status={order_status} broker_ref={broker_result.broker_order_ref}",
             raw_payload=broker_result.raw_payload,
             now=now,
+            exit_completion=exit_completion,
         )
 
         # Filled trade → queue an immediate portfolio sync so the
@@ -1609,6 +1736,10 @@ def execute_order(
             f"units={broker_result.filled_units} "
             f"ref={broker_result.broker_order_ref}"
         )
+        # #3006: never let an instrument-wide EXIT read as complete when it
+        # closed one lot and left exposure open.
+        if exit_completion is not None and not exit_completion["position_fully_closed"]:
+            explanation += f"; POSITION NOT FULLY EXITED — {exit_completion['units_open_after']} units still open"
     elif order_status == "filled" and fill_id is None:
         explanation = "order reported filled but zero units — no fill persisted"
     elif order_status == "pending":
