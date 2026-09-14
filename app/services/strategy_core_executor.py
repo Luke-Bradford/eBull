@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID, uuid4
 
 import psycopg
@@ -46,6 +46,42 @@ from app.services.strategy_order_reconciliation import (
 )
 
 CoreExecutionState = Literal["held", "refused", "submitted", "submission_uncertain"]
+
+CoreOrderLinkPurpose = Literal["entry", "exit"]
+
+#: The ``(orders.action, strategy_trade_orders.purpose)`` pair each allocator action has a
+#: BUILT submission path for.  Keyed by action so the write derives its side instead of
+#: asserting one, and an action with no path refuses rather than borrowing another's.
+_CORE_ORDER_SHAPE: Final[dict[str, tuple[str, CoreOrderLinkPurpose]]] = {
+    "buy_core": ("BUY", "entry"),
+}
+
+
+def core_order_shape_for(action: str) -> tuple[str, CoreOrderLinkPurpose] | None:
+    """The order side and link purpose to persist for an allocator ``action``.
+
+    ``None`` means the action has no submission path and MUST be refused before durable
+    order authority exists.
+
+    ⚠⚠ This is a fail-closed backstop, and the reason it is needed is that every other
+    layer here is buy-shaped while the gates ahead of it are sell-AWARE.
+    ``admit_core_rebalance_intent`` admits ``sell_core`` (it spends a dedicated
+    ``core_partial_close_unproved`` check on it), ``preflight_core_submission`` accepts it
+    as a known action, and ``orders.action`` is bare ``TEXT`` with no CHECK -- so the only
+    thing refusing a sell is one ``return`` in ``strategy_core_broker_preflight``, upstream
+    of the write.  Lifting that refusal is step one of the sell leg (#2603 item 3), and
+    without this map the next layer down would persist the sell as a ``'BUY'`` linked
+    ``purpose="entry"`` and hand it to ``place_demo_core_order`` -- whose
+    ``BrokerCoreOrder`` says in its own docstring that it is the buy-only shape.  A
+    rebalance meant to REDUCE exposure would increase it, every field internally
+    consistent and no refusal reachable (#3003).
+
+    ⚠ Today this changes nothing: ``sell_core`` never reaches the caller's check, because
+    the broker preflight refuses it first with the more informative
+    ``core_close_side_cost_quote_unavailable``.  That ordering is deliberate -- a backstop
+    that pre-empts the specific refusal would cost the operator the diagnosis.
+    """
+    return _CORE_ORDER_SHAPE.get(action)
 
 
 class StrategyCoreExecutionError(RuntimeError):
@@ -636,6 +672,13 @@ def execute_core_rebalance(
             if drawdown_refusal is not None:
                 return _result("refused", drawdown_refusal, intent_id=intent_id)
 
+            # Last gate before durable authority: the write derives its own side.  See
+            # `core_order_shape_for` for why an upstream-only refusal is not enough.
+            order_shape = core_order_shape_for(intent.decision.action)
+            if order_shape is None:
+                return _result("refused", "core_submission_action_unbuilt", intent_id=intent_id)
+            order_action, order_purpose = order_shape
+
             amount = broker_verdict.amount
             request_id = uuid4()
             trade_row = conn.execute(
@@ -656,15 +699,15 @@ def execute_core_rebalance(
                 INSERT INTO orders (
                     instrument_id, action, order_type, requested_amount, status,
                     raw_payload_json, execution_origin, strategy_request_id
-                ) VALUES (%s, 'BUY', 'MARKET', %s, 'submitted', NULL, 'strategy', %s)
+                ) VALUES (%s, %s, 'MARKET', %s, 'submitted', NULL, 'strategy', %s)
                 RETURNING order_id
                 """,
-                (current.core_instrument_id, amount, request_id),
+                (current.core_instrument_id, order_action, amount, request_id),
             ).fetchone()
             if order_row is None:
                 raise StrategyCoreExecutionError("core order INSERT did not return an id")
             order_id = int(order_row[0])
-            link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose="entry")
+            link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose=order_purpose)
             conn.execute(
                 "INSERT INTO strategy_order_reconciliation_state (order_id) VALUES (%s)",
                 (order_id,),
@@ -693,8 +736,10 @@ def execute_core_rebalance(
 
 __all__ = [
     "CoreExecutionResult",
+    "CoreOrderLinkPurpose",
     "CoreResumeAuthority",
     "StrategyCoreExecutionError",
+    "core_order_shape_for",
     "execute_core_rebalance",
     "load_core_resume_authority",
     "resume_core_submission",

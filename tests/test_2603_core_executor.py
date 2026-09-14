@@ -24,6 +24,7 @@ from app.services.strategy_core_executor import (
     CoreExecutionResult,
     CoreResumeAuthority,
     _observe_core_portfolio_drawdown,
+    core_order_shape_for,
     execute_core_rebalance,
     resume_core_submission,
 )
@@ -69,6 +70,11 @@ class FakeConn:
             return FakeResult((21,))
         if normalized.startswith("INSERT INTO orders"):
             self.events.append("persist_order")
+            # #3003. The side is a PARAMETER now, not a literal in the statement, so the
+            # assertion has to read the bound value -- matching on the SQL text would
+            # pass for a sell persisted as a buy.
+            assert isinstance(_params, tuple)
+            self.events.append(f"order_action={_params[1]}")
             return FakeResult((31,))
         if normalized.startswith("INSERT INTO strategy_order_reconciliation_state"):
             self.events.append("persist_reconciliation")
@@ -185,7 +191,7 @@ def _run(
         ),
         patch(
             "app.services.strategy_core_executor.link_strategy_order",
-            side_effect=lambda *_a, **_k: events.append("link"),
+            side_effect=lambda *_a, **_k: events.extend(["link", f"link_purpose={_k['purpose']}"]),
         ),
     ):
         kwargs = {} if clock is None else {"clock": clock}
@@ -257,6 +263,32 @@ def test_hold_advances_the_shared_drawdown_high_water() -> None:
     assert "persist_order" not in events
 
 
+def test_only_a_buy_has_a_built_order_shape() -> None:
+    assert core_order_shape_for("buy_core") == ("BUY", "entry")
+    # `sell_core` is the one that matters; the rest guard against a caller reaching the
+    # map with an allocator verdict that is not a trade at all, or with the order side
+    # already resolved (which would mask a double-mapping).
+    for unbuilt in ("sell_core", "hold", "refused", "BUY", ""):
+        assert core_order_shape_for(unbuilt) is None
+
+
+def test_a_sell_refuses_at_the_write_even_when_every_upstream_gate_admits() -> None:
+    # #3003. `_run` patches `assess_core_broker_preflight` to ADMIT, which is exactly the
+    # state the sell leg creates the moment it lifts
+    # `core_close_side_cost_quote_unavailable` -- so this is not a hypothetical future.
+    # Before the derived order shape this reached the INSERT and persisted the sell as a
+    # 'BUY' linked `purpose="entry"`, then submitted it as an OPEN.
+    result, events = _run(AssertionError("must not submit"), action="sell_core")
+
+    assert result.state == "refused"
+    assert result.reason_code == "core_submission_action_unbuilt"
+    assert result.order_id is None
+    assert result.trade_id is None
+    assert "persist_trade" not in events
+    assert "persist_order" not in events
+    assert "broker_submit" not in events
+
+
 def test_acceptance_identity_is_persisted_after_authority_commits() -> None:
     result, events = _run(
         BrokerCoreOrderSubmission(
@@ -268,6 +300,10 @@ def test_acceptance_identity_is_persisted_after_authority_commits() -> None:
 
     assert result.state == "submitted"
     assert result.reason_code == "broker_accepted_pending_reconciliation"
+    # #3003. Both are DERIVED from the allocator action now. Asserted on the bound
+    # parameter and the passed kwarg, because the statement text no longer carries them.
+    assert "order_action=BUY" in events
+    assert "link_purpose=entry" in events
     assert events.index("persist_order") < events.index("broker_submit") < events.index("persist_acceptance")
     assert events.index("lock_enter") < events.index("broker_submit") < events.index("lock_exit")
     # #2964 item 4. The per-order reconciliation lock spans the broker call AND

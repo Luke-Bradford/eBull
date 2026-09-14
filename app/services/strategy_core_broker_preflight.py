@@ -176,12 +176,33 @@ can only buy is half an allocator.  ``BrokerWhatIfOrder``'s docstring carries th
 measurements that force it (#2712, 2026-08-14): the close arm REQUIRES ``position_ids``
 (400 without them) and an open-arm quote does NOT bound the close-arm cost -- measured
 dearer on 4 of 5 held positions by 5.7x, 8.5x, 13.0x and 18.5x.  Neither
-``CoreSleeveState`` nor ``BrokerInstrumentInvestment`` carries a position id, so no close
-quote is constructible from this module's inputs, and the one substitution available
-would under-state a cost bound by an order of magnitude -- the single direction a cost
-bound must never be wrong in.  What unblocks it: position ids threaded from
-``broker_positions``, plus a close-side floor rule, which the portal does NOT document
-(``effective_open_minimum`` states both minimums for OPENING only).
+``CoreSleeveState`` nor ``BrokerInstrumentInvestment`` carries a position id, and the one
+substitution available would under-state a cost bound by an order of magnitude -- the
+single direction a cost bound must never be wrong in.
+
+⚠⚠ What unblocks it is NOT the cost quote, and an earlier version of this docstring said
+it was (corrected 2026-09-14, #3003).  Both halves of the stated blocker have since been
+answered: the position ids are already a PARAMETER here --
+``capital_authority.core_active_position_ids`` is the proved exact-ownership set -- and
+the close-side floor is settled as "none documented" against a STRUCTURED source rather
+than a rendered page: every minimum in ``tests/fixtures/etoro/openapi_v1.375.0.json`` is
+open-side (``InstrumentEligibility.minPositionExposure``,
+``LeverageConfiguration.minPositionAmount``, ``LeverageConfig.minPositionAmountAbsolute``,
+all worded *"required to open"*), so ``broker_minimum=None`` on a sell is literally
+correct in the allocator's declared sense and the mandate's ``min_rebalance_amount`` is
+the floor.  ``BrokerWhatIfOrder`` already carries ``action="close"`` + ``position_ids``,
+and #2712 measured it returning 200 with real cost rows.
+
+The ACTUAL blocker is the SUBMISSION half, which is why this refusal is load-bearing as a
+safety guard and not merely a limitation: ``admit_core_rebalance_intent`` already admits
+``sell_core`` and ``preflight_core_submission`` does not refuse it, so this ``return`` is
+the only thing ahead of the executor's write.  That write derives its side through
+``core_order_shape_for`` and refuses an unbuilt action (#3003), but a sell still has no
+provider mutation to reach: ``close_demo_strategy_position`` closes one WHOLE position,
+whereas a rebalance sell is a partial close by amount possibly spanning several owned
+positions.  Lifting this needs that new mutation, its quota-lane entry, unattended-guard
+wiring and close-side reconciliation -- which lands on top of #2979 and #2965.  Do it as
+ONE slice, preflight quote plus submission, and expect an operator-attended demo close.
 
 ``core_broker_open_minimum_unquoted`` fails CLOSED, and the distinction matters:
 ``effective_open_minimum`` returning ``None`` means the broker quoted no usable
