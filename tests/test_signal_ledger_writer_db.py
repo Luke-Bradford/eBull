@@ -90,7 +90,7 @@ def test_stored_fill_price_is_open_of_the_next_bar_in_price_daily(
         identity=_IDENTITY,
         instrument_id=instrument_id,
     )
-    report = store_strategy_observations(ebull_test_conn, rows)
+    report = store_strategy_observations(ebull_test_conn, rows, corpus_generation="0123456789abcdef")
     assert report.logical_rows == len(rows)
     assert report.fired_rows == 3
     assert report.retained_observation_rows == 1
@@ -163,10 +163,10 @@ def test_the_writer_refuses_to_overwrite_a_recorded_signal(
         instrument_id=instrument_id,
     )
     with ebull_test_conn.transaction():
-        assert store_signals(ebull_test_conn, rows) == 1
+        assert store_signals(ebull_test_conn, rows, corpus_generation="0123456789abcdef") == 1
 
     with pytest.raises(psycopg.errors.UniqueViolation), ebull_test_conn.transaction():
-        store_signals(ebull_test_conn, rows)
+        store_signals(ebull_test_conn, rows, corpus_generation="0123456789abcdef")
 
     # ...but a genuinely different strategy is a different key and inserts
     # cleanly, so the old decision survives alongside it rather than under it.
@@ -184,7 +184,7 @@ def test_the_writer_refuses_to_overwrite_a_recorded_signal(
     )
     assert changed[0].strategy_version != rows[0].strategy_version
     with ebull_test_conn.transaction():
-        assert store_signals(ebull_test_conn, changed) == 1
+        assert store_signals(ebull_test_conn, changed, corpus_generation="0123456789abcdef") == 1
 
     versions = ebull_test_conn.execute(
         "SELECT count(DISTINCT strategy_version) FROM strategy_signals "
@@ -192,3 +192,60 @@ def test_the_writer_refuses_to_overwrite_a_recorded_signal(
         (instrument_id, date(2024, 1, 4)),
     ).fetchone()
     assert versions is not None and versions[0] == 2
+
+
+def test_the_corpus_stamp_reaches_all_three_tiers_and_the_check_refuses_a_bad_one(
+    ebull_test_conn: psycopg.Connection[tuple], instrument_with_a_calendar_gap: int
+) -> None:
+    """#2414 — the writer/constraint mirror, in the direction only a DB can show.
+
+    ``tests/test_corpus_generation.py`` asserts the Python refusal. This asserts
+    the other half: a stamp the writer accepts is a stamp the column accepts, it
+    lands on the durable tier, the retained tier AND the census, and a value the
+    writer would have let through is still stopped by ``sql/382``'s CHECK.
+    """
+    # ⚠ Its OWN identity. The tests above commit rows under `_IDENTITY`, and a
+    # second batch on the same logical key is the collision the ledger exists to
+    # raise on — which would fail this test for a reason that has nothing to do
+    # with the stamp.
+    identity = StrategyIdentity(
+        strategy_id="S-TEST-DB-GENERATION",
+        params={"period": 14},
+        universe="survivor_only",
+        cost_model_id="static-v1",
+        source_hash="deadbeef",
+    )
+    instrument_id = instrument_with_a_calendar_gap
+    series = _series_from_db(ebull_test_conn, instrument_id)
+    rows = resolve_fills(
+        [StrategySignal(verdict="fired", signal_index=i) for i in range(len(series))],
+        series=series,
+        identity=identity,
+        instrument_id=instrument_id,
+    )
+    store_strategy_observations(ebull_test_conn, rows, corpus_generation="0123456789abcdef")
+    ebull_test_conn.commit()
+
+    for table in ("strategy_signals", "strategy_signal_observations", "strategy_signal_daily_counts"):
+        counted = ebull_test_conn.execute(  # noqa: S608 — fixed literal tuple, never input
+            f"SELECT count(*), count(*) FILTER (WHERE corpus_generation = '0123456789abcdef') "
+            f"FROM {table} WHERE strategy_id = %s",
+            (identity.strategy_id,),
+        ).fetchone()
+        assert counted is not None, table
+        total, stamped = counted
+        # ⚠ Both halves. `count(corpus_generation)` alone on a freshly-seeded
+        # table would equal the row count whatever the VALUE was — the
+        # prevention log's "count(col) on a NOT NULL DEFAULT column is the row
+        # count, always" one table over.
+        assert total > 0, table
+        assert stamped == total, table
+
+    # ⚠ A direct writer, not `store_signals` — the point is that the CHECK holds
+    # for a writer that never went through the Python mirror.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        ebull_test_conn.execute(
+            "UPDATE strategy_signals SET corpus_generation = 'NOT-A-DIGEST' WHERE strategy_id = %s",
+            (identity.strategy_id,),
+        )
+    ebull_test_conn.rollback()

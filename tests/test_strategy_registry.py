@@ -432,6 +432,12 @@ class TestTheEngineIsWalkedTooNotJustTheStrategies:
     #: inputs, each with the reason. Keyed by the OWNING constant; the check
     #: compares values, so a re-export of one of these is excluded with it.
     _NOT_IDENTITY_INPUTS: dict[str, str] = {
+        "app.services.corpus_generation.CORPUS_GENERATION_RULE_VERSION": (
+            "#2414 — it versions how a pass's PROVENANCE stamp is computed, never what a strategy decides. "
+            "Hashing it into strategy_version would rotate every identity (and empty the 76M-bar backtest "
+            "substrate, #3031) for a change that moves no verdict. It rotates corpus_generation instead, "
+            "which is where it belongs and is asserted by tests/test_corpus_generation.py"
+        ),
         "app.services.outcome_resolver.RULE_SET_VERSION": (
             "sql/256 makes it a KEY member of strategy_outcomes, deliberately outside the strategy hash"
         ),

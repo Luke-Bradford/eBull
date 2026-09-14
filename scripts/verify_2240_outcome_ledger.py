@@ -84,6 +84,19 @@ _IDENTITY = StrategyIdentity(
     source_hash="outcome-ledger-roundtrip",
 )
 
+#: ⚠ A FIXTURE STAMP, NOT A MEASURED ONE (#2414). This harness builds a synthetic
+#: ledger to exercise outcome resolution; it never runs a scan pass, so it has no
+#: corpus provenance to record. ``store_signals`` requires the argument — that is
+#: the #2288 "a field with a default is a field a writer can forget" rule — so the
+#: honest move is a constant that says "fixture" in the stored value rather than a
+#: plausible-looking digest borrowed from somewhere.
+#:
+#: It is all-``f`` so a reader can tell at a glance, and ``--cleanup`` deletes this
+#: harness's rows by ``strategy_id`` anyway. A real pass could in principle emit
+#: this digest (probability 2**-64); nothing depends on it not doing so, because
+#: the stamp is not key material and these rows are already isolated by identity.
+_FIXTURE_CORPUS_GENERATION = "f" * 16
+
 #: 4a's equivalence cell. ⚠ The census below is NOT directly comparable to
 #: 4a's: the cell is the same, the SIGNAL SET is not — 4a takes every bar as a
 #: hypothetical entry, this arm takes a strided sample plus the tail, and the
@@ -167,7 +180,7 @@ def _write_signals(conn: psycopg.Connection[tuple], series_by_instrument: dict[i
             identity=_IDENTITY,
             instrument_id=instrument_id,
         )
-        written += store_signals(conn, rows)
+        written += store_signals(conn, rows, corpus_generation=_FIXTURE_CORPUS_GENERATION)
         if (k + 1) % 500 == 0:
             conn.commit()
             print(

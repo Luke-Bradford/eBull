@@ -49,11 +49,13 @@ from typing import Any, Literal
 
 import psycopg
 
+from app.services.corpus_generation import CorpusGenerationBuilder
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries, Universe
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.price_masked_bars import (
     MASKED_REASON,
+    QUARANTINE_RULE_SET_VERSION,
     InstrumentBarSpan,
     load_bar_spans,
     load_masked_bars,
@@ -388,10 +390,11 @@ _READ_WATERMARKS = """
 #: move would make the next run rewrite rows that already exist, and under a key
 #: with no ``ON CONFLICT`` that is an aborted batch.
 _ADVANCE_WATERMARK = """
-    INSERT INTO strategy_scan_watermark (strategy_id, strategy_version, frontier_date, updated_at)
-    VALUES (%(strategy_id)s, %(strategy_version)s, %(frontier_date)s, now())
+    INSERT INTO strategy_scan_watermark (strategy_id, strategy_version, frontier_date, corpus_generation, updated_at)
+    VALUES (%(strategy_id)s, %(strategy_version)s, %(frontier_date)s, %(corpus_generation)s, now())
     ON CONFLICT (strategy_id, strategy_version) DO UPDATE
        SET frontier_date = EXCLUDED.frontier_date,
+           corpus_generation = EXCLUDED.corpus_generation,
            updated_at = now()
      WHERE EXCLUDED.frontier_date > strategy_scan_watermark.frontier_date
 """
@@ -409,6 +412,7 @@ def advance_watermark(
     strategy_id: str,
     strategy_version: str,
     frontier_date: date,
+    corpus_generation: str,
 ) -> None:
     """Record that this identity has completed ``frontier_date``.
 
@@ -417,6 +421,16 @@ def advance_watermark(
     distinguishable, and the watermark alone cannot carry both."* The
     distinction is preserved by calling this inside the same transaction as the
     insert, so a failure rolls both back together.
+
+    ⚠ ``corpus_generation`` (#2414) is UPDATED here while it is write-once on the
+    signal rows, and the difference is the point. A ledger row records the corpus
+    that produced THAT decision and must never move; the watermark records where
+    this identity got to and against WHICH corpus it last got there. That second
+    fact is what makes "has the corpus moved under this strategy since it last
+    scanned?" answerable by comparing one stored value against the next pass's
+    stamp — without re-deciding anything, which spec §11 forbids. A run that
+    writes zero rows still advances both, so the comparison does not go stale on
+    quiet days.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -425,6 +439,7 @@ def advance_watermark(
                 "strategy_id": strategy_id,
                 "strategy_version": strategy_version,
                 "frontier_date": frontier_date,
+                "corpus_generation": corpus_generation,
             },
         )
         moved = cur.rowcount
@@ -794,6 +809,29 @@ def run_signal_scan(
     # verdict.
     regime_provider = MarketRegimeProvider.load(conn)
 
+    # ⚠ #2414. Built here, fed in the loop below, and finished before the first
+    # commit — the stamp is a property of the PASS, so it cannot be known while
+    # `resolve_fills` is still running. Only reached when `plans` is non-empty:
+    # an `up_to_date` pass writes no signal rows and needs no provenance.
+    #
+    # ⚠ `spans` and not `eligible`: `_publish_decision_calendars` builds the
+    # cross-sectional union calendar from every LOADABLE instrument, so a stale
+    # name excluded from `eligible` still shapes which dates a panel ranks on.
+    generation_builder = CorpusGenerationBuilder(
+        frontier_date=frontier.bar_date,
+        quarantine_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+    )
+    generation_builder.add_spans(spans)
+    # ⚠ THE PUBLISHED CALENDARS, not just the spans. A stale instrument's
+    # INTERIOR dates can move while its bar count and last bar hold, which shifts
+    # a cross-sectional rebalance date and therefore a verdict — and its bars are
+    # never folded in below, because it is not eligible. Caught at checkpoint 2
+    # with a reproduction (two stale-date sets, rebalance dates 02-02 and 02-03,
+    # one identical stamp).
+    generation_builder.add_panel_calendars(panel_dates_by_plan)
+    generation_builder.add_unresolved_breaks(unresolved_breaks)
+    generation_builder.add_regime(regime_provider.classification_items())
+
     for instrument_id in eligible:
         series = load_masked_bars(conn, instrument_id).series
         # ⚠ The span query and this load are two reads of a corpus
@@ -809,6 +847,10 @@ def run_signal_scan(
             moved_mid_scan += 1
             continue
         evaluated += 1
+        # ⚠ AFTER the `moved_mid_scan` skip, so an instrument that fed no
+        # decision contributes nothing to the stamp. `eligible` is sorted, which
+        # is what satisfies the builder's ascending-order requirement.
+        generation_builder.add_series(instrument_id, series)
 
         for plan in plans:
             window = write_window_indices(series.dates, watermark=plan.watermark, frontier=frontier.bar_date)
@@ -850,6 +892,8 @@ def run_signal_scan(
                 out=rows[plan.entry.strategy_id],
             )
 
+    corpus_generation = generation_builder.finish()
+
     for plan in plans:
         strategy_id = plan.entry.strategy_id
         results.append(
@@ -861,6 +905,7 @@ def run_signal_scan(
                 instruments_evaluated=evaluated,
                 eligible_instruments=len(eligible),
                 frontier=frontier,
+                corpus_generation=corpus_generation,
             )
         )
 
@@ -1144,6 +1189,7 @@ def _commit_strategy(
     instruments_evaluated: int,
     eligible_instruments: int,
     frontier: Frontier,
+    corpus_generation: str,
 ) -> StrategyScanResult:
     """Check the census, then write rows and watermark in ONE transaction.
 
@@ -1162,12 +1208,13 @@ def _commit_strategy(
             eligible_instruments=eligible_instruments,
         )
         with conn.transaction():
-            storage = store_strategy_observations(conn, rows)
+            storage = store_strategy_observations(conn, rows, corpus_generation=corpus_generation)
             advance_watermark(
                 conn,
                 strategy_id=plan.entry.strategy_id,
                 strategy_version=plan.version,
                 frontier_date=frontier.bar_date,
+                corpus_generation=corpus_generation,
             )
     except Exception as exc:  # noqa: BLE001 — isolation is the contract, see the docstring
         logger.exception("strategy_signal_scan: %s failed at frontier %s", plan.entry.strategy_id, frontier.bar_date)
