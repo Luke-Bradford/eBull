@@ -749,8 +749,22 @@ def _update_position_exit(
     the ``cost_basis`` expression is the value before the subtraction above it.
     SET is not sequential assignment — see
     https://www.postgresql.org/docs/current/sql-update.html.
+    ⚠ Raises ``RuntimeError`` if the UPDATE matched zero rows (#3013). Without
+    it, a missing ``positions`` row is silent and everything downstream proceeds
+    as though the disposal booked: ``_persist_fill`` has already written the
+    fill, ``_record_cash_ledger`` CREDITS the full proceeds, the post-fill read
+    returns no row so ``units_after`` defaults to zero and
+    ``_maybe_trigger_attribution`` reads that as "fully closed", and the
+    recommendation goes ``executed`` with a PASS audit row. The ledger would
+    book a disposal of a position it never held and credit the cash.
+
+    The raise aborts the caller's enclosing ``with conn.transaction()``, so the
+    fill, the cash credit and the recommendation status roll back together and
+    the order is left for a reconciler — the correct outcome when the ledger
+    cannot account for what the broker did. Same guard, and the same reasoning,
+    as ``_update_order_with_broker_result``.
     """
-    conn.execute(
+    result = conn.execute(
         """
         UPDATE positions SET
             current_units  = current_units - %(units)s,
@@ -775,6 +789,13 @@ def _update_position_exit(
             "now": now,
         },
     )
+    if result.rowcount != 1:
+        raise RuntimeError(
+            f"_update_position_exit: expected to update exactly 1 positions row "
+            f"for instrument_id={instrument_id}, matched {result.rowcount}. "
+            f"The broker closed a lot the ledger has no position for — refusing "
+            f"to credit the proceeds or mark the recommendation executed."
+        )
 
 
 def _maybe_trigger_attribution(

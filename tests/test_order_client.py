@@ -177,6 +177,11 @@ def _make_conn(cursor_sequence: list[MagicMock]) -> MagicMock:
     conn = MagicMock()
     conn.cursor.side_effect = cursor_sequence
     conn.execute.return_value = MagicMock()
+    # #3013: _update_position_exit asserts its UPDATE matched exactly one row.
+    # A bare MagicMock's rowcount is a MagicMock and compares unequal to 1, so
+    # the default here has to be the HEALTHY value; the zero-row case is set
+    # explicitly by the test that wants it.
+    conn.execute.return_value.rowcount = 1
     conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
     conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
     return conn
@@ -2154,3 +2159,61 @@ class TestExitLotUnitsPrecision:
         with caplog.at_level("WARNING", logger="app.services.order_client"):
             self._run(Decimal("1305.05709600"), monkeypatch)
         assert "numeric(18,6)" not in caplog.text
+
+
+class TestExitPositionRowcountGuard:
+    """#3013: the EXIT ledger write must not proceed on a missing positions row."""
+
+    def _live_exit(self, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.close_position.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-456",
+            status="filled",
+            filled_price=Decimal("20"),
+            filled_units=Decimal("1000"),
+            fees=Decimal("0"),
+            raw_payload={},
+        )
+        return broker
+
+    def _cursors(self) -> list[MagicMock]:
+        return [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=1500.0),
+            _make_cursor([{"position_id": 3308442058, "units": 1000.0}]),
+            _order_returning_cursor(order_id=11),
+            _update_cursor(rowcount=1),
+            _fill_returning_cursor(fill_id=7),
+            _make_cursor([{"current_units": 500}]),
+        ]
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_a_zero_row_position_update_raises(
+        self, _mock_now: MagicMock, _mock_attr: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The broker closed a lot the ledger has no position for.
+
+        The raise aborts the caller's transaction, so the fill, the cash credit
+        and the `executed` status roll back together rather than booking a
+        disposal of something never held.
+        """
+        conn = _make_conn(self._cursors())
+        conn.execute.return_value.rowcount = 0
+
+        with pytest.raises(RuntimeError, match="expected to update exactly 1 positions row"):
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=self._live_exit(monkeypatch))
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_the_healthy_single_row_case_still_completes(
+        self, _mock_now: MagicMock, _mock_attr: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pins that the guard is a rowcount check and not a blanket refusal."""
+        conn = _make_conn(self._cursors())
+        result = execute_order(conn, recommendation_id=42, decision_id=10, broker=self._live_exit(monkeypatch))
+        assert result.outcome == "filled"
