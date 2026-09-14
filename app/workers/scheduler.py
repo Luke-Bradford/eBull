@@ -2737,14 +2737,51 @@ class _JobTracker:
         self.progress: JobProgress | None = None
 
     def checkpoint_progress(self) -> None:
-        """Persist an in-flight aggregate before a long, partial-commit sweep."""
+        """Persist an in-flight aggregate before a long, partial-commit sweep.
+
+        ⚠⚠ THE COMMIT IS THE WHOLE POINT, AND IT WAS MISSING (#2274).
+        ``background_write_connection(autocommit=False)`` yields a POOLED
+        connection whose seam rolls back any non-IDLE transaction on exit
+        (``app/db/background_write.py``: *"Return only an idle,
+        autocommit-restored connection to this shared pool"*). So without an
+        explicit commit this UPDATE was **discarded on the pooled path** — the
+        path the jobs process always takes — while the raw fallback, which
+        ``psycopg.connect`` commits on clean exit, made it land in a CLI run.
+        Same code, opposite outcome, decided by whether a pool is registered.
+
+        Measured on the dev DB before the fix: over 60 days ``daily_candle_refresh``
+        carried ``progress_json`` on 105 of 262 successes and on **0 of 105
+        failures, 0 of 21 skips and 0 of 1 running** — every stored value written
+        by the TERMINAL path, none by this one.
+
+        That falsified the guarantee its own call site claims: *"Persist the
+        denominator first so an orphaned sweep cannot leave partial bars with no
+        population identity"* (#2572). An orphaned sweep is precisely the run with
+        no terminal write, and ``_resolve_candle_offset``
+        (``app/services/processes/watermarks.py``) then falls back to raw
+        ``MAX(price_date)`` — which its docstring warns "can be a forming or
+        partial newest date after an orphaned per-instrument-commit sweep". The
+        guard was called, and did nothing on the one path it exists for.
+
+        ``record_job_start`` and ``record_job_finish`` (``ops_monitor.py:637`` and
+        ``:714``) both commit internally; this was the one writer in the family
+        that did not.
+
+        ⚠ ``AND status = 'running'`` mirrors the strategy-evidence telemetry
+        writer's guard: a checkpoint that lands after the run has terminalised
+        must not stamp a finished row with in-flight state.
+        """
         if self.run_id <= 0 or self.progress is None:
             return
         with background_write_connection(autocommit=False) as conn:
             conn.execute(
-                "UPDATE job_runs SET progress_json = %(progress)s WHERE run_id = %(run_id)s",
+                """
+                UPDATE job_runs SET progress_json = %(progress)s
+                 WHERE run_id = %(run_id)s AND status = 'running'
+                """,
                 {"progress": Jsonb(self.progress.as_json()), "run_id": self.run_id},
             )
+            conn.commit()
 
 
 def _finish_tracked(conn: psycopg.Connection[Any], tracker: _JobTracker) -> None:
