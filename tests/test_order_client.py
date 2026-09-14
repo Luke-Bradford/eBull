@@ -65,11 +65,13 @@ from app.services.order_client import (
     PriorSubmissionUnresolvedError,
     SubmissionControlsRevokedError,
     _load_approved_recommendation,
+    _load_exit_lot,
     _load_latest_quote_price,
     _load_position_units,
     _persist_broker_position,
     _synthetic_fill,
     _update_position_buy,
+    describe_exit_completion,
     execute_order,
 )
 from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt
@@ -1047,8 +1049,8 @@ class TestExecuteOrderLiveMode:
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
-            # _load_position_id_for_exit resolves instrument_id → position_id
-            _make_cursor([{"position_id": 98765}]),
+            # _load_exit_lot resolves instrument_id → (position_id, units)
+            _make_cursor([{"position_id": 98765, "units": 5.0}]),
             # #243 pre-broker durable intent INSERT
             _order_returning_cursor(order_id=11),
             # broker called (no cursor)
@@ -1081,7 +1083,7 @@ class TestExecuteOrderLiveMode:
         cursors = [
             _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
             _position_cursor(current_units=5.0),
-            # _load_position_id_for_exit returns None — no broker_positions row
+            # _load_exit_lot returns None — no broker-closeable long lot
             _make_cursor([]),
             # broker NOT called — broker_result is constructed inline as failed
             # No cost recording for EXIT
@@ -1916,3 +1918,239 @@ class TestUncertainSubmission:
         # The recommendation is untouched — it stays approved and retryable.
         assert "trade_recommendations" not in joined
         assert conn.commit.called
+
+
+# ---------------------------------------------------------------------------
+# #3006 — an EXIT closes ONE broker lot, not "the position"
+# ---------------------------------------------------------------------------
+
+
+class TestDescribeExitCompletion:
+    """Pure: how much of the POSITION did an EXIT actually close?"""
+
+    @pytest.mark.parametrize(
+        ("lot", "closed", "after", "fully_closed"),
+        [
+            # Single-lot instrument: the lot IS the position.
+            ("5", "5", "0", True),
+            # GME as measured on dev: 1000 of 1500 closed, 500 still open.
+            ("1000", "1000", "500", False),
+            # Dust left by rounding still counts as open exposure.
+            ("1000", "1000", "0.000001", False),
+            # A negative remainder is over-subtraction, not "extra closed" —
+            # it must still read as closed rather than as open exposure.
+            ("5", "5", "-0.5", True),
+        ],
+    )
+    def test_completion_flag_tracks_remaining_exposure(
+        self, lot: str, closed: str, after: str, fully_closed: bool
+    ) -> None:
+        result = describe_exit_completion(
+            lot_units_selected=Decimal(lot),
+            units_closed=Decimal(closed),
+            units_open_after=Decimal(after),
+        )
+        assert result["position_fully_closed"] is fully_closed
+        assert result["exit_scope"] == "lot"
+        # Quantities are stringified for JSONB, never floated.
+        assert result["lot_units_selected"] == lot
+        assert result["units_closed"] == closed
+        assert result["units_open_after"] == after
+
+
+class TestExitLotSelection:
+    """#3006: the live EXIT path must record the LOT, not the aggregate."""
+
+    def _multi_lot_exit_cursors(self) -> list[MagicMock]:
+        return [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            # Aggregate ledger position across both GME lots.
+            _position_cursor(current_units=1500.0),
+            # _load_exit_lot picks the oldest broker-closeable long lot.
+            _make_cursor([{"position_id": 3308442058, "units": 1000.0}]),
+            _order_returning_cursor(order_id=11),
+            _update_cursor(rowcount=1),
+            _fill_returning_cursor(fill_id=7),
+            # Post-fill read of positions.current_units — 500 still open.
+            _make_cursor([{"current_units": 500}]),
+        ]
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_requested_units_is_the_lot_not_the_aggregate(
+        self, _mock_now: MagicMock, _mock_attr: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The durable intent must record what the broker was actually asked to close.
+
+        Before #3006 this row carried 1500 — ``positions.current_units`` summed
+        across every lot — while ``close_position`` closed the 1000-unit lot
+        whole. Asserted on the BOUND PARAMETER, not on the SQL text.
+        """
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.close_position.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-456",
+            status="filled",
+            filled_price=Decimal("20"),
+            filled_units=Decimal("1000"),
+            fees=Decimal("0"),
+            raw_payload={},
+        )
+        cursors = self._multi_lot_exit_cursors()
+        conn = _make_conn(cursors)
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        intent_params = cursors[3].execute.call_args.args[1]
+        assert intent_params["units"] == Decimal("1000")
+        assert intent_params["units"] != Decimal("1500")
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_partial_exit_is_recorded_as_not_fully_exited(
+        self, _mock_now: MagicMock, _mock_attr: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A one-lot close of a multi-lot position must not read as a complete exit."""
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.close_position.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-456",
+            status="filled",
+            filled_price=Decimal("20"),
+            filled_units=Decimal("1000"),
+            fees=Decimal("0"),
+            raw_payload={},
+        )
+        conn = _make_conn(self._multi_lot_exit_cursors())
+        result = execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        assert "POSITION NOT FULLY EXITED" in result.explanation
+        assert "500" in result.explanation
+
+        audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c.args[0])]
+        assert len(audit_calls) == 1
+        completion = audit_calls[0].args[1]["ev"].obj["exit_completion"]
+        assert completion["position_fully_closed"] is False
+        assert completion["units_closed"] == "1000"
+        assert completion["units_open_after"] == "500"
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_exit_carries_no_lot_completion_claim(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
+        """Demo never resolves a lot, so it must make no completion claim.
+
+        The synthetic path has no ``broker_positions`` handle to be partial
+        about; asserting completion there would invent an observation.
+        """
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=10.0),
+            _quote_cursor(last=100.0, bid=99.0, ask=101.0),
+            _order_returning_cursor(order_id=13),
+            _fill_returning_cursor(fill_id=8),
+            _make_cursor([{"current_units": 0}]),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(conn, recommendation_id=42, decision_id=10)
+
+        assert "POSITION NOT FULLY EXITED" not in result.explanation
+        audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c.args[0])]
+        assert len(audit_calls) == 1
+        assert "exit_completion" not in audit_calls[0].args[1]["ev"].obj
+
+
+class TestLoadExitLot:
+    """#3006: which broker_positions rows are eligible to be closed."""
+
+    def test_selector_excludes_shorts_and_synthetic_ids(self) -> None:
+        """The predicate is the fix, so the predicate is what is asserted.
+
+        ``is_buy`` keeps a short lot out of a path whose accounting is a long
+        sale; ``position_id > 0`` keeps out ``-order_id`` synthetic rows, which
+        are our record of a fill rather than a broker-closeable handle.
+        """
+        cur = _make_cursor([])
+        conn = _make_conn([cur])
+        assert _load_exit_lot(conn, 1699) is None
+
+        sql = " ".join(str(cur.execute.call_args.args[0]).split())
+        assert "AND is_buy" in sql
+        assert "AND position_id > 0" in sql
+        # Deterministic FIFO: age first, id as the tie-break.
+        assert "ORDER BY open_date_time ASC, position_id ASC" in sql
+
+    def test_selector_returns_the_lot_units(self) -> None:
+        cur = _make_cursor([{"position_id": 3308442058, "units": Decimal("1000.00000000")}])
+        conn = _make_conn([cur])
+        lot = _load_exit_lot(conn, 1699)
+        assert lot is not None
+        assert lot.position_id == 3308442058
+        assert lot.units == Decimal("1000.00000000")
+
+
+class TestExitLotUnitsPrecision:
+    """#3006 review NITPICK: the numeric(20,8) → numeric(18,6) copy must not be silent."""
+
+    def _exit_cursors(self, lot_units: float | Decimal) -> list[MagicMock]:
+        return [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=1500.0),
+            _make_cursor([{"position_id": 3308442058, "units": lot_units}]),
+            _order_returning_cursor(order_id=11),
+            _update_cursor(rowcount=1),
+            _fill_returning_cursor(fill_id=7),
+            _make_cursor([{"current_units": 500}]),
+        ]
+
+    def _run(self, lot_units: float | Decimal, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.close_position.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-456",
+            status="filled",
+            filled_price=Decimal("20"),
+            filled_units=Decimal("1000"),
+            fees=Decimal("0"),
+            raw_payload={},
+        )
+        conn = _make_conn(self._exit_cursors(lot_units))
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_genuine_seventh_decimal_is_logged(
+        self,
+        _mock_now: MagicMock,
+        _mock_attr: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level("WARNING", logger="app.services.order_client"):
+            self._run(Decimal("1000.12345678"), monkeypatch)
+        assert "do not survive the numeric(18,6) orders column" in caplog.text
+        assert "1000.123457" in caplog.text
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_trailing_zeros_are_not_a_loss(
+        self,
+        _mock_now: MagicMock,
+        _mock_attr: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Every lot currently held stores 8 decimals of which the last two are
+        zero (e.g. 1305.05709600). Decimal compares by value, so those must not
+        raise a precision warning — a warning that fires on every EXIT would be
+        noise, not a signal."""
+        with caplog.at_level("WARNING", logger="app.services.order_client"):
+            self._run(Decimal("1305.05709600"), monkeypatch)
+        assert "numeric(18,6)" not in caplog.text
