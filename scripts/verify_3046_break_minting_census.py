@@ -227,7 +227,27 @@ def _load_transitions(conn: psycopg.Connection[Any]) -> list[tuple[Any, ...]]:
     ).fetchall()
 
 
-def _bucket(rules: list[str], clears: bool, provisional: bool) -> str:
+def magnitude_or_none(ratio: Decimal | None) -> Decimal | None:
+    """Symmetric magnitude of a stored ``observed_ratio``, or None if unmeasurable.
+
+    ⚠ ZERO IS THE SAME STATE AS NULL HERE, and it is reachable even though
+    ``_usable_close`` refuses a non-positive close: ``observed_ratio`` is
+    ``NUMERIC(24,12)``, so a genuine ratio below 5e-13 STORES as exactly 0 and
+    ``Decimal(1) / ratio`` would raise ``DivisionByZero`` and take the caller
+    down instead of reporting one row as unmeasurable. The corpus carries none
+    today, which is exactly why the guard has to be written rather than observed.
+
+    Public because ``verify_3046_archive_continuity`` adjudicates the same
+    population: two spellings of "which transitions are in the blind spot" is
+    how the two scripts would come to disagree without either being wrong.
+    """
+    if ratio is None or Decimal(ratio) == 0:
+        return None
+    value = Decimal(ratio)
+    return max(value, Decimal(1) / value)
+
+
+def bucket_for(rules: list[str], clears: bool, provisional: bool) -> str:
     """Which census bucket a transition falls in.
 
     ⚠ Order matters: ``T3 ∈ rules`` wins outright because that is the arm the
@@ -262,7 +282,8 @@ _BUCKET_NOTES: dict[str, str] = {
 #: The buckets the segment model cannot see AND which were never adjudicated.
 #: ``admitted_back`` is excluded deliberately: T3 did run and said "real move",
 #: which is an answer, not a blind spot.
-_BLIND: tuple[str, ...] = ("t1_suppressed", "t2_suppressed", "t1_t2_suppressed")
+BLIND_BUCKETS: tuple[str, ...] = ("t1_suppressed", "t2_suppressed", "t1_t2_suppressed")
+_BLIND = BLIND_BUCKETS
 
 
 def run_census(conn: psycopg.Connection[Any]) -> int:
@@ -281,24 +302,15 @@ def run_census(conn: psycopg.Connection[Any]) -> int:
 
     for instrument_id, price_date, rules, ratio, provisional, _corr, asset_class in rows:
         iid = int(instrument_id)
-        # ⚠ ZERO IS THE SAME STATE AS NULL HERE, and it is reachable even though
-        # `_usable_close` refuses a non-positive close: `observed_ratio` is
-        # `NUMERIC(24,12)`, so a genuine ratio below 5e-13 STORES as exactly 0
-        # and `Decimal(1) / ratio` would raise `DivisionByZero` and take the
-        # whole census down instead of reporting one row as unmeasurable. The
-        # corpus carries none today (smallest non-zero magnitude is ~3.3e-7),
-        # which is exactly why the guard has to be written rather than observed.
-        if ratio is None or Decimal(ratio) == 0:
+        magnitude = magnitude_or_none(ratio)
+        if magnitude is None:
             # Unmeasurable, not clean. Reported on its own line so it cannot be
             # read as either side of the census.
             unmeasurable += 1
             unmeasurable_instruments.add(iid)
             continue
-        ratio = Decimal(ratio)
-        # Symmetric magnitude with an inclusive bound, mirroring the classifier.
-        magnitude = max(ratio, Decimal(1) / ratio)
         threshold = params_for(asset_class).magnitude_threshold
-        bucket = _bucket(list(rules), magnitude >= threshold, bool(provisional))
+        bucket = bucket_for(list(rules), magnitude >= threshold, bool(provisional))
         counts[bucket] += 1
         instruments.setdefault(bucket, set()).add(iid)
         if recent_cut is not None and price_date >= recent_cut:
