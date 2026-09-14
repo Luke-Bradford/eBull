@@ -23,6 +23,7 @@ from scripts.verify_3046_archive_continuity import (
 )
 
 PRIOR = date(2025, 6, 2)
+SPAN = (date(2000, 1, 1), date(2030, 1, 1))
 LATER = date(2025, 8, 26)
 
 
@@ -232,7 +233,7 @@ class TestIsObserved:
 class TestLevelProvenance:
     def test_an_observed_bar_is_its_own_level(self) -> None:
         bars = [_bar(date(2025, 1, 2), close="10", volume="5")]
-        assert classify_level_provenance(bars, 0, range_verdict_known=True) == ("observed", date(2025, 1, 2))
+        assert classify_level_provenance(bars, 0, evaluated_span=SPAN) == ("observed", date(2025, 1, 2))
 
     def test_a_repeat_run_reaching_an_observed_bar_is_STALE_not_fabricated(self) -> None:
         """⚠ The class revision 1 of the spec did not have. ``observed 100 ->
@@ -243,24 +244,24 @@ class TestLevelProvenance:
             _bar(date(2025, 1, 3), close="100"),
             _bar(date(2025, 1, 6), close="100"),
         ]
-        assert classify_level_provenance(bars, 2, range_verdict_known=True) == (
+        assert classify_level_provenance(bars, 2, evaluated_span=SPAN) == (
             "stale_observed_level",
             date(2025, 1, 2),
         )
 
     def test_a_repeat_run_reaching_the_series_start_is_fabricated(self) -> None:
         bars = [_bar(date(2025, 6, 28), close="20"), _bar(date(2025, 6, 29), close="20")]
-        assert classify_level_provenance(bars, 1, range_verdict_known=True) == ("fabricated_level", None)
+        assert classify_level_provenance(bars, 1, evaluated_span=SPAN) == ("fabricated_level", None)
 
     def test_a_lone_unobserved_first_bar_is_fabricated_too(self) -> None:
         bars = [_bar(date(2025, 6, 28), close="20")]
-        assert classify_level_provenance(bars, 0, range_verdict_known=True) == ("fabricated_level", None)
+        assert classify_level_provenance(bars, 0, evaluated_span=SPAN) == ("fabricated_level", None)
 
     def test_a_zero_range_bar_at_a_NEW_level_is_undecided(self) -> None:
         """A one-quote session on a thin name has this shape and so does a
         placeholder. Neither reading is asserted."""
         bars = [_bar(date(2025, 1, 2), close="10", volume="7"), _bar(date(2025, 1, 3), close="12")]
-        assert classify_level_provenance(bars, 1, range_verdict_known=True) == ("zero_range_new_level", None)
+        assert classify_level_provenance(bars, 1, evaluated_span=SPAN) == ("zero_range_new_level", None)
 
     def test_the_walk_stops_at_the_first_observed_bar_not_the_oldest(self) -> None:
         bars = [
@@ -268,7 +269,33 @@ class TestLevelProvenance:
             _bar(date(2025, 1, 3), close="100", volume="9"),
             _bar(date(2025, 1, 6), close="100"),
         ]
-        assert classify_level_provenance(bars, 2, range_verdict_known=True)[1] == date(2025, 1, 3)
+        assert classify_level_provenance(bars, 2, evaluated_span=SPAN)[1] == date(2025, 1, 3)
+
+    def test_a_repeat_run_that_stops_at_a_PRICE_CHANGE_stays_undecided(self) -> None:
+        """⚠ Codex checkpoint 2. The verdict is where the walk STOPPED, not
+        whether it moved: ``observed 10 -> 12 -> 12`` exhausts nothing — 12 is an
+        undecided new level that happens to have been repeated, and reading it as
+        fabricated would label a thin-session quote a level the market never set."""
+        bars = [
+            _bar(date(2025, 1, 2), close="10", volume="7"),
+            _bar(date(2025, 1, 3), close="12"),
+            _bar(date(2025, 1, 6), close="12"),
+        ]
+        assert classify_level_provenance(bars, 2, evaluated_span=SPAN) == ("zero_range_new_level", None)
+
+    def test_a_bar_backfilled_OUTSIDE_the_evaluated_span_has_no_range_verdict(self) -> None:
+        """⚠ Codex checkpoint 2. price_quarantine_coverage records first_bar/last_bar
+        because a later backfill adds bars the rules never saw; their missing
+        price_bar_quarantine row is absence-of-evaluation, not a clean verdict."""
+        bars = [_bar(date(2019, 1, 2), high="11", low="10", close="10")]
+        assert classify_level_provenance(bars, 0, evaluated_span=(date(2020, 1, 1), date(2030, 1, 1))) == (
+            "fabricated_level",
+            None,
+        )
+        assert classify_level_provenance(bars, 0, evaluated_span=(date(2019, 1, 1), date(2030, 1, 1))) == (
+            "observed",
+            date(2019, 1, 2),
+        )
 
 
 class TestTier:

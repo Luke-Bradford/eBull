@@ -103,7 +103,7 @@ import sys
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, NamedTuple
 
 import psycopg
@@ -493,7 +493,7 @@ def is_observed(bar: StoredBar, *, range_verdict_known: bool) -> bool:
 
 
 def classify_level_provenance(
-    bars: Sequence[StoredBar], index: int, *, range_verdict_known: bool
+    bars: Sequence[StoredBar], index: int, *, evaluated_span: tuple[date, date] | None
 ) -> tuple[str, date | None]:
     """Where did ``bars[index]``'s close come from? Pure; see the spec addendum.
 
@@ -506,21 +506,30 @@ def classify_level_provenance(
     carry-forward into "not a level claim" silently exonerates
     ``observed 100 -> carried 100 -> hole -> observed 10``, where the 10x can be
     a real scale error and only the earlier operand's DATE is wrong.
+
+    ``evaluated_span`` is the instrument's ``price_quarantine_coverage`` interval
+    at the current rule set, or ``None`` if it has none. It is checked PER BAR,
+    not per instrument: a bar backfilled outside that interval carries no range
+    verdict and never did.
     """
-    if is_observed(bars[index], range_verdict_known=range_verdict_known):
+
+    def known(bar: StoredBar) -> bool:
+        return evaluated_span is not None and evaluated_span[0] <= bar.price_date <= evaluated_span[1]
+
+    if is_observed(bars[index], range_verdict_known=known(bars[index])):
         return "observed", bars[index].price_date
     cursor = index
     while cursor > 0 and bars[cursor].close is not None and bars[cursor].close == bars[cursor - 1].close:
         cursor -= 1
-        if is_observed(bars[cursor], range_verdict_known=range_verdict_known):
+        if is_observed(bars[cursor], range_verdict_known=known(bars[cursor])):
             return "stale_observed_level", bars[cursor].price_date
-    # ⚠ ``cursor == index`` alone is NOT "the close differs from its
-    # predecessor" — it is also true for the FIRST stored bar, which has no
-    # predecessor to differ from. Reading a lone unobserved series-start bar as
-    # a new level would admit the one operand with nothing behind it at all.
-    if cursor == index and index > 0:
-        return "zero_range_new_level", None
-    return "fabricated_level", None
+    # ⚠ THE VERDICT IS WHERE THE WALK STOPPED, NOT WHETHER IT MOVED. Codex
+    # checkpoint 2: ``cursor != index`` was reading ``observed 10 -> 12 -> 12``
+    # as fabricated, because the run moved — but it stopped at a PRICE CHANGE,
+    # not at the series start, so 12 is an undecided new level that happens to
+    # have been repeated. Only reaching bar 0 exhausts the history behind the
+    # level; anything else leaves a differing predecessor standing.
+    return ("fabricated_level", None) if cursor == 0 else ("zero_range_new_level", None)
 
 
 #: Tier precedence. First matching entry wins, so a transition is in exactly one.
@@ -579,16 +588,26 @@ def _load_stored_bars(conn: psycopg.Connection[Any], instrument_ids: list[int]) 
     return dict(grouped)
 
 
-def _load_evaluated_instruments(conn: psycopg.Connection[Any], instrument_ids: list[int]) -> set[int]:
-    """Instruments carrying a coverage row at THIS rule set — see ``is_observed``."""
+def _load_evaluated_spans(conn: psycopg.Connection[Any], instrument_ids: list[int]) -> dict[int, tuple[date, date]]:
+    """The DATE INTERVAL each instrument was evaluated over, at this rule set.
+
+    ⚠ INSTRUMENT-LEVEL COVERAGE IS NOT ENOUGH, and Codex checkpoint 2 caught the
+    difference. ``price_quarantine_coverage`` records ``first_bar``/``last_bar``
+    precisely because a later backfill can add bars OUTSIDE the evaluated span:
+    those carry no ``price_bar_quarantine`` row and never did, so reading their
+    absence as "clean" would admit an unchecked range as evidence. The
+    provenance walk visits arbitrarily old history, which is exactly where
+    backfilled bars live.
+    """
     if not instrument_ids:
-        return set()
+        return {}
     return {
-        int(i)
-        for (i,) in conn.execute(
+        int(instrument_id): (first_bar, last_bar)
+        for instrument_id, first_bar, last_bar in conn.execute(
             """
-            SELECT instrument_id FROM price_quarantine_coverage
+            SELECT instrument_id, first_bar, last_bar FROM price_quarantine_coverage
             WHERE instrument_id = ANY(%(ids)s) AND rule_set_version = %(ver)s
+              AND first_bar IS NOT NULL AND last_bar IS NOT NULL
             """,
             {"ids": sorted(set(instrument_ids)), "ver": RULE_SET_VERSION},
         ).fetchall()
@@ -598,12 +617,12 @@ def _load_evaluated_instruments(conn: psycopg.Connection[Any], instrument_ids: l
 def _stratify(
     t2: list[tuple[Transition, str]],
     bars: dict[int, list[StoredBar]],
-    evaluated: set[int],
+    evaluated_spans: dict[int, tuple[date, date]],
 ) -> list[Stratified]:
     out: list[Stratified] = []
     for transition, verdict in t2:
         series = bars.get(transition.instrument_id, [])
-        known = transition.instrument_id in evaluated
+        span = evaluated_spans.get(transition.instrument_id)
         index_of = {bar.price_date: i for i, bar in enumerate(series)}
         provenances: list[tuple[str, date | None]] = []
         for endpoint in (transition.prior_date, transition.price_date):
@@ -611,7 +630,7 @@ def _stratify(
             if position is None:
                 provenances.append(("absent", None))
                 continue
-            provenances.append(classify_level_provenance(series, position, range_verdict_known=known))
+            provenances.append(classify_level_provenance(series, position, evaluated_span=span))
         (prior_provenance, prior_level_date), (resume_provenance, _) = provenances
         # ⚠ Era-local, NOT lifetime. One populated bar years later would flip a
         # "never" instrument to "partial" and change nothing about this date.
@@ -714,9 +733,13 @@ def _reconcile_provenance(
         if prior is None or later is None:
             mismatches += 1
             continue
-        # Stored at the column's own precision; compare at it rather than exactly,
-        # or every row fails on the last digit of a stored quotient.
-        recomputed = (later / prior).quantize(row.transition.ratio)
+        # Stored at the column's own precision (NUMERIC(24,12)); compare at it
+        # rather than exactly, or every row fails on the last digit of a stored
+        # quotient. ⚠ ROUND_HALF_UP, not Decimal's default ROUND_HALF_EVEN:
+        # Postgres numeric rounds half AWAY FROM ZERO, so an exact tie at the
+        # twelfth decimal would fail reconciliation on data that never moved and
+        # void the whole report (Codex checkpoint 2).
+        recomputed = (later / prior).quantize(row.transition.ratio, rounding=ROUND_HALF_UP)
         if recomputed != row.transition.ratio:
             mismatches += 1
     ok = len(rows) == t2_count and unclassified == 0 and resume_repeat_hits == 0 and mismatches == 0
@@ -787,8 +810,8 @@ def run(conn: psycopg.Connection[Any]) -> int:
     # came from would pool two rule classes the parent section keeps apart.
     t2 = [(t, v) for t, v, _ in results if t.rule_class == "T2"]
     stored_bars = _load_stored_bars(conn, [t.instrument_id for t, _ in t2])
-    evaluated = _load_evaluated_instruments(conn, [t.instrument_id for t, _ in t2])
-    stratified = _stratify(t2, stored_bars, evaluated)
+    evaluated_spans = _load_evaluated_spans(conn, [t.instrument_id for t, _ in t2])
+    stratified = _stratify(t2, stored_bars, evaluated_spans)
     _print_provenance(stratified)
 
     ok, unresolved_hits, resolved_hits, off_version = _reconcile(conn, blind)
