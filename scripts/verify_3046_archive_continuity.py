@@ -658,7 +658,6 @@ def _print_provenance(rows: list[Stratified]) -> None:
     print("  A T2 ratio is a claim about a LEVEL SHIFT only if both its operands were")
     print("  observed. A, B and C below are UNRESOLVED, not safe.")
     print()
-    by_tier: Counter[str] = Counter(r.tier for r in rows)
     print(f"  {'tier':<28}{'rows':>7}{'instruments':>13}{'no vol <= prior':>17}   note")
     for tier in (*(name for name, _ in _TIERS), "D_both_endpoints_observed"):
         members = [r for r in rows if r.tier == tier]
@@ -695,16 +694,20 @@ def _print_provenance(rows: list[Stratified]) -> None:
             f"{(row.transition.asset_class or 'NULL'):<12}{row.verdict}"
         )
     print()
-    _ = by_tier
 
 
 def _reconcile_provenance(
     rows: list[Stratified], bars: dict[int, list[StoredBar]], t2_count: int
 ) -> tuple[bool, int, int, int]:
-    """Arms 4 and 5. Returns (ok, unclassified, resume_repeat_hits, ratio_mismatches).
+    """Arms 4 and 5. Returns (ok, absent_endpoints, resume_repeat_hits, ratio_mismatches).
 
-    Arm 4 — PARTITION. Tiers must sum to the T2 population and every endpoint must
-    classify. ``absent`` is counted into tier A and printed, never dropped.
+    Arm 4 — PARTITION. Tiers must sum to the T2 population, and no endpoint may be
+    ABSENT from ``price_daily``. ⚠ Counting "rows whose tier is not a known tier"
+    would be a tautology — ``tier_for`` returns nothing else — and the review bot
+    said so. The condition with content is the one the tautology was standing in
+    for: an ``absent`` endpoint folds into tier A, where it is indistinguishable
+    from a fabricated level, so it is counted and printed in its own right. A hit
+    means a transition references a bar that is no longer stored.
 
     Arm 4b — STRUCTURAL. ``prior_date`` is by construction the immediately preceding
     stored bar, so the resume endpoint's predecessor IS the prior endpoint. A resume
@@ -720,7 +723,9 @@ def _reconcile_provenance(
     only) and compare against the stored ``observed_ratio``. A mismatch voids the
     residual counts — the bars classified are not the bars that minted the transition.
     """
-    unclassified = sum(1 for r in rows if r.tier not in _TIER_NOTES)
+    absent_endpoints = sum(
+        1 for r in rows for provenance in (r.prior_provenance, r.resume_provenance) if provenance == "absent"
+    )
     resume_repeat_hits = sum(1 for r in rows if r.resume_provenance in {"stale_observed_level", "fabricated_level"})
     mismatches = 0
     for row in rows:
@@ -742,8 +747,8 @@ def _reconcile_provenance(
         recomputed = (later / prior).quantize(row.transition.ratio, rounding=ROUND_HALF_UP)
         if recomputed != row.transition.ratio:
             mismatches += 1
-    ok = len(rows) == t2_count and unclassified == 0 and resume_repeat_hits == 0 and mismatches == 0
-    return ok, unclassified, resume_repeat_hits, mismatches
+    ok = len(rows) == t2_count and absent_endpoints == 0 and resume_repeat_hits == 0 and mismatches == 0
+    return ok, absent_endpoints, resume_repeat_hits, mismatches
 
 
 def _reconcile(conn: psycopg.Connection[Any], blind: list[Transition]) -> tuple[bool, int, int, int]:
@@ -815,7 +820,9 @@ def run(conn: psycopg.Connection[Any]) -> int:
     _print_provenance(stratified)
 
     ok, unresolved_hits, resolved_hits, off_version = _reconcile(conn, blind)
-    prov_ok, unclassified, resume_repeats, ratio_mismatches = _reconcile_provenance(stratified, stored_bars, len(t2))
+    prov_ok, absent_endpoints, resume_repeats, ratio_mismatches = _reconcile_provenance(
+        stratified, stored_bars, len(t2)
+    )
     print("=" * 84)
     print("RECONCILIATION")
     print("=" * 84)
@@ -823,7 +830,7 @@ def run(conn: psycopg.Connection[Any]) -> int:
     print(f"  …carrying a RESOLVED one                           {_fmt(resolved_hits)}   (reported, not failed)")
     print(f"  coverage rows at another rule-set version           {_fmt(off_version)}   <- must be 0")
     print(f"  T2 transitions stratified                          {_fmt(len(stratified))}   of {_fmt(len(t2))}")
-    print(f"  endpoints that did not classify                    {_fmt(unclassified)}   <- must be 0")
+    print(f"  endpoints absent from price_daily                  {_fmt(absent_endpoints)}   <- must be 0")
     print(f"  resume endpoints reading as a repeat               {_fmt(resume_repeats)}   <- must be 0 (ratio 1)")
     print(f"  stored observed_ratio vs recomputed mismatches     {_fmt(ratio_mismatches)}   <- must be 0")
     if ok and prov_ok:
