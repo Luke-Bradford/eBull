@@ -38,6 +38,49 @@ import { useAsync } from "@/lib/useAsync";
 const CORE_CANDIDATE_RENDER_CAP = 10;
 
 /**
+ * One badge per sleeve state (#3037).
+ *
+ * ⚠⚠ The badge this replaced was `state === "ready" ? "Ready" : "Cash"`, so every
+ * non-ready state rendered as **Cash** — and `cash` is not "not ready", it is one of the
+ * two TERMINAL answers the sealed #2833 verifier emits. At 1 of 5 common dates the card
+ * was asserting the study's result before the study could be opened.
+ *
+ * Derived state is the trap here: a verdict must be REPORTED, never inferred from the
+ * absence of readiness.
+ */
+const CORE_SLEEVE_BADGE: Record<CoreSleeveResponse["state"], { label: string; tone: "ok" | "warn" }> = {
+  ready: { label: "Ready", tone: "ok" },
+  cash: { label: "Cash", tone: "warn" },
+  awaiting_verdict: { label: "Verdict due", tone: "warn" },
+  evidence_collecting: { label: "Collecting evidence", tone: "warn" },
+  unavailable: { label: "Unavailable", tone: "warn" },
+};
+
+/**
+ * Whether #2833's declared window has CLOSED — a fact about coverage, deliberately
+ * independent of `state`.
+ *
+ * ⚠ Keying the window copy on `state !== "evidence_collecting"` is wrong (caught at Codex
+ * checkpoint 2): `unavailable` is reachable with the window still OPEN — a missing
+ * candidate row, or inconsistent verdict constants — and would then render "Window closed"
+ * over a bound in the future. Server-side the window is closed iff the REQUIRED-th common
+ * date exists, which is exactly `observed_trading_days >= required_trading_days`: both
+ * derive from the same `common_dates` CTE, and both are zeroed when a candidate is missing.
+ */
+function coreWindowClosed(sleeve: CoreSleeveResponse): boolean {
+  return sleeve.observed_trading_days >= sleeve.required_trading_days;
+}
+
+/** The `Instrument` tile says "Cash" only when the verdict actually said cash. */
+function coreInstrumentTile(sleeve: CoreSleeveResponse): { value: string; hint: string } {
+  if (sleeve.selected_symbol) return { value: sleeve.selected_symbol, hint: "Evidence-selected" };
+  if (sleeve.state === "cash") return { value: "Cash", hint: "#2833 adopted no sleeve" };
+  if (sleeve.state === "awaiting_verdict") return { value: "—", hint: "Verdict can be opened now" };
+  if (sleeve.state === "unavailable") return { value: "—", hint: "Selection cannot be used" };
+  return { value: "—", hint: "Decided when the verdict opens" };
+}
+
+/**
  * The fenced-off pot — a control panel, not a status page (#2868, reshaped on
  * operator feedback 2026-08-23: *"This looks more like a wiki, a guide, not a
  * user interface. Toggles and summaries. What can be configured, not
@@ -221,7 +264,10 @@ function CoreSleeveControl({
       <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
         {!sleeve.can_configure ? (
           <p className="mb-3 text-xs text-slate-500">
-            Save these values as a disabled draft now. Enabling and demo rebalancing remain locked until the core instrument passes #2833.
+            Save these values as a disabled draft now.{" "}
+            {sleeve.state === "cash"
+              ? "#2833 returned cash, so no core instrument is adopted and enabling stays locked."
+              : "Enabling and demo rebalancing remain locked until a core instrument passes #2833."}
           </p>
         ) : null}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -470,8 +516,8 @@ export function StrategyPortfolioLens() {
                   >
                     {coreSleeve.isRevalidating ? "Refreshing…" : "Refresh status"}
                   </button>
-                  <Badge tone={coreSleeve.data.state === "ready" ? "ok" : "warn"}>
-                    {coreSleeve.data.state === "ready" ? "Ready" : "Cash"}
+                  <Badge tone={CORE_SLEEVE_BADGE[coreSleeve.data.state].tone}>
+                    {CORE_SLEEVE_BADGE[coreSleeve.data.state].label}
                   </Badge>
                 </div>
               </div>
@@ -480,19 +526,22 @@ export function StrategyPortfolioLens() {
                   size="md"
                   label="Common dates seen"
                   value={`${coreSleeve.data.observed_trading_days} / ${coreSleeve.data.required_trading_days}`}
-                  hint="Provisional until the sealed verifier opens"
+                  hint={
+                    coreWindowClosed(coreSleeve.data)
+                      ? "The declared window is complete"
+                      : "Provisional until the sealed verifier opens"
+                  }
                 />
+                <StatTile size="md" label="Instrument" {...coreInstrumentTile(coreSleeve.data)} />
                 <StatTile
                   size="md"
-                  label="Instrument"
-                  value={coreSleeve.data.selected_symbol ?? "Cash"}
-                  hint={coreSleeve.data.selected_symbol ? "Evidence-selected" : "No sleeve adopted"}
-                />
-                <StatTile
-                  size="md"
-                  label="Earliest verdict"
+                  label={coreWindowClosed(coreSleeve.data) ? "Window closed" : "Earliest verdict"}
                   value={formatDate(coreSleeve.data.earliest_possible_verdict_at)}
-                  hint="Lower bound if all five common sessions complete"
+                  hint={
+                    coreWindowClosed(coreSleeve.data)
+                      ? "The fifth common session closed here"
+                      : "Lower bound if all five common sessions complete"
+                  }
                 />
                 <StatTile
                   size="md"

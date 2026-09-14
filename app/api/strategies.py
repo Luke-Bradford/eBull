@@ -1019,6 +1019,8 @@ class CoreCandidateCoverageResponse(BaseModel):
 class CoreSleeveBlockerResponse(BaseModel):
     code: Literal[
         "core_evidence_collecting",
+        "core_verdict_untranscribed",
+        "core_verdict_cash",
         "core_candidates_missing",
         "core_selection_invalid",
         "core_mandate_unconfigured",
@@ -1038,7 +1040,13 @@ class CoreSleeveBlockerResponse(BaseModel):
 
 
 class CoreSleeveResponse(BaseModel):
-    state: Literal["evidence_collecting", "ready", "unavailable"]
+    state: Literal["evidence_collecting", "awaiting_verdict", "ready", "cash", "unavailable"]
+    declared_outcome: Literal["pass", "cash"] | None = None
+    """What #2833's reviewed verdict ANSWERED, on its own axis (#3037).
+
+    Separate from ``state`` because the two come apart: a reviewed ``pass`` naming a venue
+    the execution path cannot session-check is operationally ``unavailable``, and a single
+    axis could not then say a verdict had been reached at all."""
     selected_instrument_id: int | None
     selected_symbol: str | None
     evidence_ref: str | None
@@ -3640,7 +3648,38 @@ def read_core_sleeve(
                 )
             )
     if not selection.ready:
-        if selection.configuration_error is not None:
+        # ⚠ `cash` is checked FIRST, before missing coverage (Codex checkpoint 2). A cash
+        # verdict deliberately SURVIVES a missing candidate row -- the study already
+        # answered "no sleeve", so nothing about the answer depends on the row any more --
+        # and letting `core_candidates_missing` win told the operator a completed study
+        # "cannot collect evidence". Coverage is still reported, as an additional fact.
+        if selection.state == "cash":
+            # Not "failed the cost bar": `verify_2833_core_selection.py` also refuses on
+            # `incomplete_population`, `spread_unmeasured`, `fx_unmodelled` and
+            # `not_proved_real_long_x1`, so a candidate can be cheap and still fail.
+            # ⚠ This blocks new core ENTRY only. Recovery of a pending order does not key
+            # on selection readiness, so `execution_action="resume"` stays reachable.
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_verdict_cash",
+                    detail=(
+                        "#2833's reviewed verdict is cash: no candidate passed every declared rule, so no "
+                        "core sleeve is adopted. Recovery of an already-submitted order is unaffected."
+                    ),
+                )
+            )
+            if selection.missing_candidate_ids:
+                blockers.append(
+                    CoreSleeveBlockerResponse(
+                        code="core_candidates_missing",
+                        detail=(
+                            "Candidate instrument ids are missing, so coverage cannot be described: "
+                            + ", ".join(str(value) for value in selection.missing_candidate_ids)
+                            + ". This does not change the recorded verdict."
+                        ),
+                    )
+                )
+        elif selection.configuration_error is not None:
             blockers.append(
                 CoreSleeveBlockerResponse(
                     code="core_selection_invalid",
@@ -3655,6 +3694,17 @@ def read_core_sleeve(
                         "#2833 cannot collect evidence because candidate instrument ids are missing: "
                         + ", ".join(str(value) for value in selection.missing_candidate_ids)
                         + "."
+                    ),
+                )
+            )
+        elif selection.state == "awaiting_verdict":
+            blockers.append(
+                CoreSleeveBlockerResponse(
+                    code="core_verdict_untranscribed",
+                    detail=(
+                        f"#2833's five-date window closed at "
+                        f"{selection.earliest_possible_verdict_at.isoformat()}. The sealed verifier can be "
+                        "opened; no reviewed outcome has been recorded yet."
                     ),
                 )
             )
@@ -3756,6 +3806,7 @@ def read_core_sleeve(
     )
     return CoreSleeveResponse(
         state=selection.state,
+        declared_outcome=selection.declared_outcome,
         selected_instrument_id=selection.selected_instrument_id,
         selected_symbol=selection.selected_symbol,
         evidence_ref=selection.evidence_ref,

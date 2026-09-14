@@ -95,6 +95,10 @@ def core_world(
     """
     from app.services import strategy_core_selection
 
+    # ⚠ All THREE constants must be registered for restoration. `select_core_instrument`
+    # sets the outcome too (#3037); leaving it out leaks `SELECTED_CORE_OUTCOME="pass"`
+    # into every later test in the process, as a declaration with no instrument id.
+    monkeypatch.setattr(strategy_core_selection, "SELECTED_CORE_OUTCOME", None, raising=False)
     monkeypatch.setattr(strategy_core_selection, "SELECTED_CORE_INSTRUMENT_ID", None, raising=False)
     monkeypatch.setattr(strategy_core_selection, "SELECTED_CORE_EVIDENCE_REF", None, raising=False)
     select_core_instrument()

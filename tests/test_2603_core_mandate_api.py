@@ -135,6 +135,7 @@ class TestTheRouteTable:
 def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
     selection = CoreSelection(
         state="evidence_collecting",
+        declared_outcome=None,
         selected_instrument_id=None,
         selected_symbol=None,
         evidence_ref=None,
@@ -172,6 +173,78 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
         "core_evidence_collecting",
         "core_mandate_unconfigured",
     ]
+
+
+@pytest.mark.parametrize("missing", [(), (3434,)])
+def test_a_cash_verdict_is_reported_as_a_verdict_even_when_coverage_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    missing: tuple[int, ...],
+) -> None:
+    """#3037, Codex checkpoint 2: `core_candidates_missing` must not SUPPRESS the verdict.
+
+    A cash verdict deliberately survives a missing candidate row -- the study already
+    answered "no sleeve". Letting the coverage blocker win told the operator a completed
+    study "cannot collect evidence", which is the opposite of what happened.
+    """
+    selection = CoreSelection(
+        state="cash",
+        declared_outcome="cash",
+        selected_instrument_id=None,
+        selected_symbol=None,
+        evidence_ref="docs/proposals/ta/2026-09-18-core-selection-result.json",
+        required_trading_days=5,
+        observed_trading_days=5,
+        max_cost_bps=60,
+        candidates=(CoreCandidateCoverage(3417, "SPY.RTH", 5, None, None, "us_equity"),),
+        missing_candidate_ids=missing,
+        configuration_error=None,
+        earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+    monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", lambda _conn: None)
+    response = read_core_sleeve(cast(Any, MagicMock()))
+    codes = [blocker.code for blocker in response.blockers]
+    assert response.state == "cash"
+    assert response.declared_outcome == "cash"
+    # The verdict is retained, and so is its pointer to the study that produced it.
+    assert response.evidence_ref is not None
+    assert "core_verdict_cash" in codes
+    assert ("core_candidates_missing" in codes) is bool(missing)
+    if missing:
+        assert codes.index("core_verdict_cash") < codes.index("core_candidates_missing")
+    assert "core_evidence_collecting" not in codes
+
+
+def test_a_closed_window_with_no_transcription_says_so_rather_than_still_collecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3037's certain-to-fire case: 5 of 5, bound passed, nothing recorded."""
+    selection = CoreSelection(
+        state="awaiting_verdict",
+        declared_outcome=None,
+        selected_instrument_id=None,
+        selected_symbol=None,
+        evidence_ref=None,
+        required_trading_days=5,
+        observed_trading_days=5,
+        max_cost_bps=60,
+        candidates=(CoreCandidateCoverage(3417, "SPY.RTH", 5, None, None, "us_equity"),),
+        missing_candidate_ids=(),
+        configuration_error=None,
+        earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
+    )
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+    monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", lambda _conn: None)
+    response = read_core_sleeve(cast(Any, MagicMock()))
+    codes = [blocker.code for blocker in response.blockers]
+    assert response.state == "awaiting_verdict"
+    assert "core_verdict_untranscribed" in codes
+    assert "core_evidence_collecting" not in codes
+    assert response.can_configure is False
 
 
 def test_rebalance_passes_the_exact_loaded_credential_ids_to_the_executor(
@@ -221,6 +294,7 @@ def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
 
     selection = CoreSelection(
         state="ready",
+        declared_outcome="pass",
         selected_instrument_id=3417,
         selected_symbol="SPY.RTH",
         evidence_ref="#2833 verdict",
@@ -278,6 +352,7 @@ def test_operator_view_does_not_promise_resolution_for_a_stranded_authority(
 
     selection = CoreSelection(
         state="ready",
+        declared_outcome="pass",
         selected_instrument_id=3417,
         selected_symbol="SPY.RTH",
         evidence_ref="#2833 verdict",
@@ -345,6 +420,7 @@ def test_operator_view_does_not_advertise_unavailable_core_headroom(
 ) -> None:
     selection = CoreSelection(
         state="ready",
+        declared_outcome="pass",
         selected_instrument_id=3417,
         selected_symbol="SPY.RTH",
         evidence_ref="#2833 verdict",
@@ -378,6 +454,7 @@ def test_operator_view_refuses_a_mandate_for_the_previous_reviewed_selection(
 ) -> None:
     selection = CoreSelection(
         state="ready",
+        declared_outcome="pass",
         selected_instrument_id=3434,
         selected_symbol="CSPX.L",
         evidence_ref="#2833 revised verdict",
@@ -406,6 +483,7 @@ def test_operator_view_refuses_a_mandate_for_the_previous_reviewed_selection(
 def test_operator_view_refuses_a_superseded_mandate_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     selection = CoreSelection(
         state="ready",
+        declared_outcome="pass",
         selected_instrument_id=3417,
         selected_symbol="SPY.RTH",
         evidence_ref="#2833 verdict",

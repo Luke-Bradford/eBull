@@ -42,6 +42,7 @@ def _selection_with_verdict(
     conn: psycopg.Connection[Any] | None = None,
 ) -> Any:
     """Load the selection as if #2833's verdict constants named ``instrument_id``."""
+    monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_OUTCOME", "pass")
     monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_INSTRUMENT_ID", instrument_id)
     monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_EVIDENCE_REF", "#2833 verdict")
     return load_core_selection(conn if conn is not None else _candidate_connection())
@@ -71,6 +72,23 @@ def test_overall_progress_counts_common_dates_not_the_minimum_individual_count()
 
 def test_mandate_enablement_refuses_before_2833_verdict() -> None:
     with pytest.raises(CoreSelectionError, match="five-trading-day cost verdict"):
+        require_selected_core_instrument(_candidate_connection(), instrument_id=3417)
+
+
+def test_the_refusal_names_the_state_it_is_in_not_a_generic_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3037: "until #2833 completes" is FALSE once the verdict is complete and says cash.
+
+    One sentence for every non-ready state meant the operator was told to keep waiting
+    for a study that had already finished.
+    """
+    monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_OUTCOME", "cash")
+    monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_EVIDENCE_REF", "#2833 verdict")
+    with pytest.raises(CoreSelectionError, match="reviewed verdict is cash"):
+        require_selected_core_instrument(_candidate_connection(), instrument_id=3417)
+
+
+def test_absent_candidate_rows_refuse_on_coverage_not_on_a_pending_verdict() -> None:
+    with pytest.raises(CoreSelectionError, match="candidate coverage is incomplete"):
         require_selected_core_instrument(_empty_connection(), instrument_id=3417)
 
 
@@ -97,7 +115,11 @@ def test_a_verdict_naming_a_venue_we_cannot_session_check_is_refused_at_declarat
     # names the CLASS, not which selection is at fault.
     assert str(unexecutable_id) in selection.configuration_error
     assert "uk_equity" in selection.configuration_error
-    with pytest.raises(CoreSelectionError, match="five-trading-day cost verdict"):
+    # ⚠ The refusal names the VENUE fault, not a pending verdict (#3037). Saying "until
+    # #2833 completes" here would point the operator at a wait that will never clear it --
+    # the study has answered; its answer is one this repo cannot execute.
+    assert selection.declared_outcome == "pass"
+    with pytest.raises(CoreSelectionError, match="has no trading-session calendar"):
         require_selected_core_instrument(_candidate_connection(), instrument_id=unexecutable_id)
 
 
@@ -135,6 +157,7 @@ def test_partial_or_foreign_verdict_constants_fail_closed(
     instrument_id: int,
     evidence_ref: str | None,
 ) -> None:
+    monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_OUTCOME", "pass")
     monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_INSTRUMENT_ID", instrument_id)
     monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_EVIDENCE_REF", evidence_ref)
     selection = load_core_selection(_candidate_connection())
