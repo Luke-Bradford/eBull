@@ -29,12 +29,28 @@ CORE_SELECTION_VERDICT_BOUND_VERSION: Final = "core-verdict-bound-v1"
 #: comparison is the whole of what this module models about a venue calendar.
 _SATURDAY: Final = 5
 
+#: The verifier's own terminal vocabulary, and the reason this is a closed set: #2833 has
+#: exactly two answers, and a surface that can encode only one of them reports the other
+#: as a configuration fault (#3037).
+CoreSelectionOutcome = Literal["pass", "cash"]
+#: Recognised at RUNTIME as well as by pyright.  ``Literal`` is a typecheck-time claim, and
+#: a typo'd outcome constant that fell through to ``evidence_collecting`` would be exactly
+#: the silent-wrong-state this module exists to prevent.
+_RECOGNISED_OUTCOMES: Final = frozenset({"pass", "cash"})
+
 # Populated only by the reviewed #2833 verdict. Choosing here before the
 # prospective five-day gate completes would be adoption before measurement.
+#
+# ``SELECTED_CORE_OUTCOME`` names which of the verifier's two terminal answers was
+# transcribed (`scripts/verify_2833_core_selection.py` emits `"pass"` or `"cash"`).  It is
+# STATED, never inferred from "an evidence ref exists but an instrument id does not" --
+# that encoding makes a genuine mis-edit indistinguishable from a declared cash verdict,
+# which is #3037's defect turned inside out.
+SELECTED_CORE_OUTCOME: Final[CoreSelectionOutcome | None] = None
 SELECTED_CORE_INSTRUMENT_ID: Final[int | None] = None
 SELECTED_CORE_EVIDENCE_REF: Final[str | None] = None
 
-CoreSelectionState = Literal["evidence_collecting", "ready", "unavailable"]
+CoreSelectionState = Literal["evidence_collecting", "awaiting_verdict", "ready", "cash", "unavailable"]
 
 
 class CoreSelectionError(RuntimeError):
@@ -58,6 +74,14 @@ class CoreCandidateCoverage:
 @dataclass(frozen=True)
 class CoreSelection:
     state: CoreSelectionState
+    declared_outcome: CoreSelectionOutcome | None
+    """What the reviewed verdict ANSWERED, independent of whether it can be acted on.
+
+    A second axis, because ``state`` was carrying two facts that come apart (#3037, found
+    at Codex checkpoint 1).  A reviewed ``pass`` naming an LSE candidate is operationally
+    ``unavailable`` -- its venue is not session-checkable (#2603/#2312) -- and under a
+    single axis the surface could not then say a verdict had been reached at all.
+    ``None`` means nothing has been transcribed, never "the study found nothing"."""
     selected_instrument_id: int | None
     selected_symbol: str | None
     evidence_ref: str | None
@@ -171,6 +195,109 @@ def _midnight_after(day: date) -> datetime:
     return datetime.combine(day + timedelta(days=1), time.min, tzinfo=UTC)
 
 
+@dataclass(frozen=True)
+class CoreSelectionVerdict:
+    """The classified verdict: which state, which outcome, and why if it is refused."""
+
+    state: CoreSelectionState
+    declared_outcome: CoreSelectionOutcome | None
+    configuration_error: str | None
+
+
+def classify_core_selection(
+    *,
+    outcome: object,
+    instrument_id: int | None,
+    evidence_ref: str | None,
+    selected_asset_class: str | None,
+    selected_symbol: str | None,
+    missing_candidate_ids: tuple[int, ...],
+    verdict_window_closed: bool,
+    verdict_window_open_at: datetime,
+    now: datetime,
+) -> CoreSelectionVerdict:
+    """Resolve the transcribed constants and the coverage read to one operational state.
+
+    Pure, so every row of #3037's table is table-testable without a database -- the
+    combinations that matter most (a `pass` whose OTHER candidate is missing, a `cash`
+    carrying an instrument id, an undeclared outcome with a stray evidence ref) are
+    unreachable from a realistic DB fixture and are exactly where precedence decides.
+
+    ⚠ **The rows are not disjoint, and first-match is load-bearing.** Each of the three
+    combinations above matches two rows; all three must resolve to ``unavailable``.  Order
+    that is true only by reading order is order a later edit silently reverses, so each
+    has its own test rather than relying on this docstring.
+
+    ⚠ **``verdict_window_closed`` is not inferred from the clock.** With a single ``now``
+    an incomplete window always yields a strictly future ``verdict_window_open_at``, so
+    the term is defensive today -- but the fact being asserted is "the fifth common date
+    exists", which is what :func:`earliest_possible_verdict_at` and the sealed verifier's
+    ``evaluate`` both branch on.  A guard correct only via an argument about the other
+    branch's arithmetic is one refactor away from being wrong.
+
+    ⚠ **No rule here gates transcription on our own coverage read** -- deliberately, and
+    it was asked for at Codex checkpoint 1.  The sealed declaration is the authority for
+    what was measured; this read is not.  Pruned, re-ingested or re-bucketed observations
+    must never RETRACT a reviewed verdict, because a verdict that evaporates when a row
+    moves is strictly worse than one transcribed early.
+    """
+    declared: CoreSelectionOutcome | None = outcome if outcome in _RECOGNISED_OUTCOMES else None  # type: ignore[assignment]
+
+    def refuse(detail: str) -> CoreSelectionVerdict:
+        return CoreSelectionVerdict(state="unavailable", declared_outcome=declared, configuration_error=detail)
+
+    # Rule order IS the diagnostic order: a half-written verdict must report one specific
+    # fault, not whichever check happened to run last.
+    if outcome is not None and declared is None:
+        return refuse(
+            f"the reviewed core selection names an unrecognised outcome {outcome!r} "
+            f"(expected one of: {', '.join(sorted(_RECOGNISED_OUTCOMES))})"
+        )
+    if declared is None:
+        if instrument_id is not None or evidence_ref is not None:
+            return refuse(
+                "the reviewed core selection records an instrument or evidence ref without naming "
+                "the verdict outcome it came from"
+            )
+        if missing_candidate_ids:
+            return CoreSelectionVerdict(state="unavailable", declared_outcome=None, configuration_error=None)
+        if verdict_window_closed and now >= verdict_window_open_at:
+            return CoreSelectionVerdict(state="awaiting_verdict", declared_outcome=None, configuration_error=None)
+        return CoreSelectionVerdict(state="evidence_collecting", declared_outcome=None, configuration_error=None)
+    if evidence_ref is None or not evidence_ref.strip():
+        return refuse(f"the reviewed core selection declares outcome {declared!r} with no evidence ref")
+    if declared == "cash":
+        if instrument_id is not None:
+            return refuse(
+                f"the reviewed core selection declares outcome 'cash' but also names instrument {instrument_id}"
+            )
+        # A missing candidate makes the COVERAGE undescribable; it says nothing about a
+        # verdict that has already answered "no sleeve".  Reporting `unavailable` here
+        # would let an instruments-table gap retract a completed study.
+        return CoreSelectionVerdict(state="cash", declared_outcome="cash", configuration_error=None)
+    if instrument_id is None or instrument_id not in CORE_SELECTION_CANDIDATE_IDS:
+        return refuse(
+            f"the reviewed core selection declares outcome 'pass' but instrument {instrument_id} "
+            "is not one of #2833's declared candidates"
+        )
+    if selected_symbol is None:
+        return refuse(f"the reviewed core selection names instrument {instrument_id}, which has no coverage row")
+    if missing_candidate_ids:
+        return refuse(
+            "#2833's candidate coverage is incomplete, so a selection cannot be trusted: missing "
+            + ", ".join(str(value) for value in missing_candidate_ids)
+        )
+    unsupported_venue = session_support_reason(selected_asset_class)
+    if unsupported_venue is not None:
+        # The wrap adds ONLY the identity half -- which selection is at fault.  The
+        # consequence is already the last clause of `unsupported_venue`, and saying it
+        # twice is how an operator string starts drifting from the predicate.
+        return refuse(
+            f"the reviewed core selection names {selected_symbol} (instrument {instrument_id}): {unsupported_venue}"
+        )
+    return CoreSelectionVerdict(state="ready", declared_outcome="pass", configuration_error=None)
+
+
 _COVERAGE_SQL: Final = """
 WITH candidate_dates AS (
     SELECT o.instrument_id,
@@ -260,68 +387,85 @@ def load_core_selection(conn: psycopg.Connection[Any], *, now: datetime | None =
     selected = SELECTED_CORE_INSTRUMENT_ID
     selected_candidate = None if selected is None else coverage_by_id.get(selected)
     evidence_ref = SELECTED_CORE_EVIDENCE_REF
-    selection_declared = selected is not None or evidence_ref is not None
-    selection_complete = (
-        selected in CORE_SELECTION_CANDIDATE_IDS
-        and selected_candidate is not None
-        and evidence_ref is not None
-        and bool(evidence_ref.strip())
+    # ONE clock for both the classification and the bound.  Two `datetime.now()` calls
+    # could straddle midnight and report `evidence_collecting` beside a bound that has
+    # passed -- the disagreement `CoreSelection.earliest_possible_verdict_at`'s docstring
+    # already forbids ("a row cannot report 3/5 next to a bound derived from a later
+    # population").
+    stamped_now = datetime.now(UTC) if now is None else now
+    verdict_open_at = earliest_possible_verdict_at(
+        observed_trading_days=observed_days,
+        last_common_observed_date=last_common_date,
+        verdict_window_close_date=window_close_date,
+        now=stamped_now,
     )
-    configuration_error = None
-    # A sleeve the core EXECUTION path would refuse must not read as `ready` here.
-    # Both `require_selected_core_instrument` callers (the mandate writer and the
-    # executor) key on `ready`, so refusing at DECLARATION time moves the failure
-    # from the operator-attended session -- the most expensive moment available --
-    # to the moment somebody writes the verdict constant.  Measured 2026-09-14:
-    # `CSPX.L` (3434) and `IUSA.L` (3075) are exchange `7` = LSE / `uk_equity`, and
-    # `decide_core_preflight` refuses both `core_unsupported_market_session` with
-    # every other input healthy.
-    if selection_complete and selected_candidate is not None:
-        unsupported_venue = session_support_reason(selected_candidate.asset_class)
-        if unsupported_venue is not None:
-            selection_complete = False
-            # The wrap adds ONLY the identity half -- which selection is at fault.  The
-            # consequence is already the last clause of `unsupported_venue`, and saying
-            # it twice is how an operator string starts drifting from the predicate.
-            configuration_error = (
-                f"the reviewed core selection names {selected_candidate.symbol} "
-                f"(instrument {selected}): {unsupported_venue}"
-            )
-    if selection_declared and not selection_complete and configuration_error is None:
-        configuration_error = "the reviewed core selection must name a declared candidate and a non-blank evidence ref"
+    # A sleeve the core EXECUTION path would refuse must not read as `ready`.  Both
+    # `require_selected_core_instrument` callers (the mandate writer and the executor)
+    # key on `ready`, so refusing at DECLARATION time moves the failure from the
+    # operator-attended session -- the most expensive moment available -- to the moment
+    # somebody writes the verdict constant.  Measured 2026-09-14: `CSPX.L` (3434) and
+    # `IUSA.L` (3075) are exchange `7` = LSE / `uk_equity`, and `decide_core_preflight`
+    # refuses both `core_unsupported_market_session` with every other input healthy.
+    verdict = classify_core_selection(
+        outcome=SELECTED_CORE_OUTCOME,
+        instrument_id=selected,
+        evidence_ref=evidence_ref,
+        selected_asset_class=None if selected_candidate is None else selected_candidate.asset_class,
+        selected_symbol=None if selected_candidate is None else selected_candidate.symbol,
+        missing_candidate_ids=missing_candidate_ids,
+        verdict_window_closed=window_close_date is not None,
+        verdict_window_open_at=verdict_open_at,
+        now=stamped_now,
+    )
+    # `cash` RETAINS its evidence ref while carrying no instrument: the ref is the only
+    # pointer to the study that produced the answer, and dropping it (as the previous
+    # "complete or nothing" materialisation did) erases a completed result.  Identity
+    # fields stay null outside `ready`, because they are by definition not trustworthy
+    # in any state that refused them.
     return CoreSelection(
-        state=(
-            "unavailable"
-            if missing_candidate_ids or configuration_error is not None
-            else "ready"
-            if selection_complete
-            else "evidence_collecting"
-        ),
-        selected_instrument_id=selected if selection_complete else None,
-        selected_symbol=selected_candidate.symbol if selection_complete and selected_candidate is not None else None,
-        evidence_ref=evidence_ref if selection_complete else None,
+        state=verdict.state,
+        declared_outcome=verdict.declared_outcome,
+        selected_instrument_id=selected if verdict.state == "ready" else None,
+        selected_symbol=selected_candidate.symbol if verdict.state == "ready" and selected_candidate else None,
+        evidence_ref=evidence_ref if verdict.state in ("ready", "cash") else None,
         required_trading_days=CORE_SELECTION_REQUIRED_TRADING_DAYS,
         observed_trading_days=observed_days,
         max_cost_bps=CORE_SELECTION_MAX_COST_BPS,
         candidates=candidates,
         missing_candidate_ids=missing_candidate_ids,
-        configuration_error=configuration_error,
-        earliest_possible_verdict_at=earliest_possible_verdict_at(
-            observed_trading_days=observed_days,
-            last_common_observed_date=last_common_date,
-            verdict_window_close_date=window_close_date,
-            now=datetime.now(UTC) if now is None else now,
-        ),
+        configuration_error=verdict.configuration_error,
+        earliest_possible_verdict_at=verdict_open_at,
     )
+
+
+def core_selection_refusal(selection: CoreSelection) -> str:
+    """Why this selection cannot authorise a core sleeve, in its own terms.
+
+    One message per non-ready state.  The single sentence this replaced -- "the core
+    sleeve cannot be enabled until #2833 completes its five-trading-day cost verdict" --
+    is FALSE once the verdict is complete and says cash, which is precisely the state it
+    would have been read in (#3037, Codex checkpoint 1).
+    """
+    if selection.state == "cash":
+        return "#2833's reviewed verdict is cash: no candidate passed every declared rule, so no core sleeve is adopted"
+    if selection.state == "unavailable":
+        return (
+            "the reviewed core selection cannot be used: "
+            f"{selection.configuration_error or 'candidate coverage is incomplete'}"
+        )
+    if selection.state == "awaiting_verdict":
+        return (
+            "#2833's five-date window has closed and the sealed verifier can be opened, "
+            "but no reviewed outcome has been recorded yet"
+        )
+    return "the core sleeve cannot be enabled until #2833 completes its five-trading-day cost verdict"
 
 
 def require_selected_core_instrument(conn: psycopg.Connection[Any], *, instrument_id: int) -> CoreSelection:
     """Require the reviewed sleeve selection below every mandate writer."""
     selection = load_core_selection(conn)
     if not selection.ready or selection.selected_instrument_id is None:
-        raise CoreSelectionError(
-            "the core sleeve cannot be enabled until #2833 completes its five-trading-day cost verdict"
-        )
+        raise CoreSelectionError(core_selection_refusal(selection))
     if instrument_id != selection.selected_instrument_id:
         raise CoreSelectionError(
             f"instrument {instrument_id} is not the evidence-approved core sleeve ({selection.selected_instrument_id})"
@@ -335,9 +479,14 @@ __all__ = [
     "CORE_SELECTION_MAX_COST_BPS",
     "CORE_SELECTION_REQUIRED_TRADING_DAYS",
     "CORE_SELECTION_VERDICT_BOUND_VERSION",
+    "SELECTED_CORE_OUTCOME",
     "CoreCandidateCoverage",
     "CoreSelection",
     "CoreSelectionError",
+    "CoreSelectionOutcome",
+    "CoreSelectionVerdict",
+    "classify_core_selection",
+    "core_selection_refusal",
     "earliest_possible_verdict_at",
     "load_core_selection",
     "require_selected_core_instrument",

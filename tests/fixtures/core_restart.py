@@ -713,6 +713,7 @@ def select_core_instrument() -> None:
     """
     from app.services import strategy_core_selection
 
+    strategy_core_selection.SELECTED_CORE_OUTCOME = "pass"  # type: ignore[misc]
     strategy_core_selection.SELECTED_CORE_INSTRUMENT_ID = CORE_INSTRUMENT_ID  # type: ignore[misc]
     strategy_core_selection.SELECTED_CORE_EVIDENCE_REF = "#2949 acceptance harness"  # type: ignore[misc]
 

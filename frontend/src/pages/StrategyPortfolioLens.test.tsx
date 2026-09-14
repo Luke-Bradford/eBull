@@ -103,6 +103,7 @@ const BLOCKED = {
 
 const CORE_COLLECTING = {
   state: "evidence_collecting",
+  declared_outcome: null,
   selected_instrument_id: null,
   selected_symbol: null,
   evidence_ref: null,
@@ -157,6 +158,7 @@ const CORE_COLLECTING = {
 const CORE_READY = {
   ...CORE_COLLECTING,
   state: "ready",
+  declared_outcome: "pass",
   selected_instrument_id: 3417,
   selected_symbol: "SPY.RTH",
   evidence_ref: "#2833 verdict",
@@ -204,7 +206,7 @@ describe("StrategyPortfolioLens", () => {
     expect(screen.getByText("Common dates seen")).toBeInTheDocument();
     expect(screen.getByText("Provisional until the sealed verifier opens")).toBeInTheDocument();
     expect(screen.getAllByText("1 / 5")).toHaveLength(2);
-    expect(screen.getByText("No sleeve adopted")).toBeInTheDocument();
+    expect(screen.getByText("Decided when the verdict opens")).toBeInTheDocument();
     expect(screen.getByText("02 Sept 2026")).toBeInTheDocument();
     expect(screen.getByText(/Lower bound if all five common sessions complete/i)).toBeInTheDocument();
     expect(screen.getByText(/cash remains the fallback/i)).toBeInTheDocument();
@@ -218,6 +220,67 @@ describe("StrategyPortfolioLens", () => {
     expect(within(coverage).getByText("SPY.RTH")).toBeInTheDocument();
     expect(within(coverage).getByText("25 Aug 2026 – 25 Aug 2026")).toBeInTheDocument();
     expect(within(coverage).getAllByText("Awaiting first date")).toHaveLength(2);
+  });
+
+  // #3037: the badge used to be `state === "ready" ? "Ready" : "Cash"`, so every
+  // non-ready state asserted `Cash` — one of the two TERMINAL answers #2833's sealed
+  // verifier emits — while the study was still sealed at 1 of 5 common dates.
+  it.each([
+    ["evidence_collecting", "Collecting evidence", null],
+    ["awaiting_verdict", "Verdict due", null],
+    ["cash", "Cash", "cash"],
+    ["unavailable", "Unavailable", null],
+    ["ready", "Ready", "pass"],
+  ])("badges the %s state as %s rather than deriving it from readiness", async (state, label, outcome) => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue({
+      ...(state === "ready" ? CORE_READY : CORE_COLLECTING),
+      state,
+      declared_outcome: outcome,
+    } as never);
+    renderLens();
+    const heading = await screen.findByRole("heading", { name: "Core & cash" });
+    // Scoped to the card header: in the `cash` state the Instrument tile ALSO reads
+    // "Cash", which is correct — the badge is the assertion under test.
+    const header = heading.parentElement?.parentElement as HTMLElement;
+    expect(within(header).getByText(label)).toBeInTheDocument();
+  });
+
+  // Codex checkpoint 2: `unavailable` is reachable with the window still OPEN (a missing
+  // candidate row, or inconsistent constants), so window copy keyed on `state` rendered
+  // "Window closed" over a bound in the FUTURE.
+  it("keeps provisional window copy when an unavailable state has not closed the window", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue({
+      ...CORE_COLLECTING,
+      state: "unavailable",
+      observed_trading_days: 1,
+    } as never);
+    renderLens();
+    expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
+    expect(screen.getByText("Provisional until the sealed verifier opens")).toBeInTheDocument();
+    expect(screen.queryByText("Window closed")).not.toBeInTheDocument();
+  });
+
+  it("says the window closed once the declared dates are complete", async () => {
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue({
+      ...CORE_COLLECTING,
+      state: "awaiting_verdict",
+      observed_trading_days: 5,
+    } as never);
+    renderLens();
+    expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
+    expect(screen.getByText("Window closed")).toBeInTheDocument();
+    expect(screen.getByText("The declared window is complete")).toBeInTheDocument();
+    expect(screen.queryByText("Provisional until the sealed verifier opens")).not.toBeInTheDocument();
+  });
+
+  it("never says Cash while the verdict is still sealed", async () => {
+    renderLens();
+    expect(await screen.findByRole("heading", { name: "Core & cash" })).toBeInTheDocument();
+    // ⚠ Scoped to the card's verdict surfaces, NOT the page: "Cash reserve" is a
+    // legitimate mandate label elsewhere, and a page-wide assertion would fail for the
+    // wrong reason and get deleted rather than fixed.
+    expect(screen.queryByText("Cash")).not.toBeInTheDocument();
+    expect(screen.getByText("Collecting evidence")).toBeInTheDocument();
   });
 
   it("refreshes the evidence status without hiding the current coverage", async () => {

@@ -26,7 +26,7 @@ over-refusal on purpose and names the fix: *"run it from the main checkout"*. Th
 (`:8000`) and vite (`:5173`) already serve `~/Dev/eBull`, so this is satisfied by using
 the normal dev stack and violated by pointing at a worktree's API.
 
-⚠ The selection verdict is **two Python constants**, so the serving process must be
+⚠ The selection verdict is **three Python constants**, so the serving process must be
 running the code that carries them. Editing them in a branch that the API has not loaded
 changes nothing the endpoint reports.
 
@@ -34,21 +34,39 @@ changes nothing the endpoint reports.
 
 ```python
 # app/services/strategy_core_selection.py
+SELECTED_CORE_OUTCOME: Final[CoreSelectionOutcome | None] = None   # "pass" | "cash"
 SELECTED_CORE_INSTRUMENT_ID: Final[int | None] = None
 SELECTED_CORE_EVIDENCE_REF: Final[str | None] = None
 CORE_SELECTION_REQUIRED_TRADING_DAYS: Final = 5
 ```
 
-`state: "ready"` requires only that `SELECTED_CORE_INSTRUMENT_ID` is one of the declared
-candidates, that a coverage row exists for it, and that `SELECTED_CORE_EVIDENCE_REF` is
-non-blank. **It does not re-check the five dates, the elapsed boundary, the cost bar or
-the contents of the evidence ref.** Setting the constants is the act of *recording* a
-verdict; it is not proof of one.
+Transcribe **the outcome the verifier printed**, not an inference from it (#3037):
+
+| verifier `outcome` | `SELECTED_CORE_OUTCOME` | `SELECTED_CORE_INSTRUMENT_ID` | resulting `state` |
+| --- | --- | --- | --- |
+| `pass` | `"pass"` | the selected id | `ready` (or `unavailable` if its venue is not session-checkable) |
+| `cash` | `"cash"` | **leave `None`** | `cash` |
+
+`SELECTED_CORE_EVIDENCE_REF` is non-blank in both cases — a cash verdict keeps its
+pointer to the study that produced it.
+
+⚠ Leaving all three `None` after the window closes is **not** neutral: the endpoint then
+reports `state: "awaiting_verdict"`, which is the correct "openable, not yet transcribed"
+state and blocks enablement. Setting the outcome without the matching instrument id (or
+vice versa) reports `unavailable` with a `configuration_error` naming the specific fault.
+
+`state: "ready"` requires that the outcome is `"pass"`, that `SELECTED_CORE_INSTRUMENT_ID`
+is one of the declared candidates, that a coverage row exists for it, and that
+`SELECTED_CORE_EVIDENCE_REF` is non-blank. **It does not re-check the five dates, the
+elapsed boundary, the cost bar or the contents of the evidence ref.** Setting the constants
+is the act of *recording* a verdict; it is not proof of one.
 
 The verdict itself comes from `scripts/verify_2833_core_selection.py`, which checks
 population completeness, spreads, FX, real/long/x1 eligibility and the 60-bps bar — and
 **may select cash**, i.e. "no candidate qualifies" is a legitimate outcome that leaves
-this runbook unused.
+this runbook unused. ⚠ Cash does not mean "everything was too expensive": a candidate can
+be cheap and still fail on `incomplete_population`, `fx_unmodelled` or
+`not_proved_real_long_x1`.
 
 ⚠ `earliest_possible_verdict_at` is a **lower bound** computed from observed dates and the
 current clock, modelling weekends only. It is not a promise that the window closes then.

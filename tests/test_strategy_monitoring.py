@@ -1392,6 +1392,7 @@ def test_shared_paper_pool_accepts_evidence_ready_core_without_an_alpha_candidat
         "app.api.strategies.load_core_selection",
         lambda _conn: CoreSelection(
             state="ready",
+            declared_outcome="pass",
             selected_instrument_id=3417,
             selected_symbol="SPY.RTH",
             evidence_ref="#2833 verdict",
