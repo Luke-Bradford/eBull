@@ -28,10 +28,12 @@ const RISK: RiskV2 = {
 const TRADE_STATS: TradeStatsV2 = {
   total_closed: 0,
   winners: 0,
+  losers: 0,
   win_rate_pct: null,
   payoff_ratio: null,
   avg_win_pct: null,
   avg_loss_pct: null,
+  avg_holding_days: null,
 };
 
 function renderRisk(risk: RiskV2 = RISK) {
@@ -42,7 +44,7 @@ function renderRisk(risk: RiskV2 = RISK) {
         tradeStats={TRADE_STATS}
         bestTrade={null as MonthlySnapshotV2["best_trade"]}
         worstTrade={null as MonthlySnapshotV2["worst_trade"]}
-        marker={{}}
+        marker={{ dietz: 1, benchmark: 2, fx: 3, scope1593: 4 }}
       />
     </MemoryRouter>,
   );

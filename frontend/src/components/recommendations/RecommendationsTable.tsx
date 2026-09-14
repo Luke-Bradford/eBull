@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useAsync } from "@/lib/useAsync";
 import { fetchRecommendation } from "@/api/recommendations";
 import type { RecommendationListItem } from "@/api/types";
-import { formatDateTime, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
+import { formatDateTime, formatNumber, formatUnsignedPct } from "@/lib/format";
 import { actionTone, completenessTone, statusTone } from "@/lib/badgeTone";
 import { SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
