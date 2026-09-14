@@ -6550,3 +6550,75 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   the coverage limits in the module docstring); `tests/test_finra_ingest_sentinels.py`
   (`test_a_none_floor_omits_the_arm_rather_than_loosening_it`);
   `docs/proposals/etl/2026-09-14-2795-regsho-daily-sentinels.md`.
+
+## A SEQUENTIAL probe cannot reproduce a CONCURRENCY defect — and its clean result reads as "no bug" (#3049, 2026-09-14)
+
+- Symptom: `strategy_halts.store_halt_snapshot` refused ~20% of in-window halt-feed polls
+  with "halt feed publication time regressed", parking a **safety** feed's operator status
+  on NEEDS ATTENTION for a fifth of every session. The ticket's scope said to deploy a
+  richer error message and read the distribution after one session.
+- The measurement was obtainable client-side with no deploy, because **the guard's two
+  operands are both observable from outside the database**: `fetched` is the payload's own
+  `<pubDate>`, and `stored` is nothing but the `fetched` of the last poll the guard
+  ACCEPTED. A guard of that shape is a pure function of a poll series and replays offline.
+  Generalise the test: *before writing "deploy logging and wait", ask whether the compared
+  values can be reconstructed from outside.* A stateful comparison against a value your own
+  code wrote is usually replayable.
+- ⚠⚠ **The first probe was sequential and returned 0 refusals in 32 polls.** That is a
+  clean, self-consistent, entirely wrong answer — a single client keeps hitting one CDN
+  cache entry and sees a monotonic stamp. Two CONCURRENT clients reproduced the defect on
+  the FIRST round and 21 times in 60 polls. **A probe that does not reproduce the
+  concurrency is measuring a different system, and it fails in the direction that looks
+  like health.** Same family as the `count(col)` on a `NOT NULL` column entry: a
+  measurement can be internally consistent and still have the wrong subject.
+- The production concurrency was not exotic and was findable by reading: **two jobs call
+  the same refresher.** `strategy_halt_feed_refresh` (every 5 min) and
+  `strategy_paper_cycle` (deliberately, so entry evaluation reads fresh halt state) both
+  call `_refresh_strategy_halt_feed`, and their ticks coincide. Full population, halt-job
+  runs bucketed by gap to the nearest paper-cycle start: within 10s, 10–15% failed; beyond
+  60s, **0 of 39**. ⚠ Grep for other callers of a refresher before concluding a poll is
+  solitary.
+- ⚠ **The blast radius was in the OTHER caller.** The ticket was filed off an `/admin` badge
+  on the halt job's 56 failures; `strategy_paper_cycle` carries **111** from the same
+  message, and each one aborts a whole demo lifecycle tick (no reconciliation, no position
+  management, no signal evaluation). A shared helper's refusal surfaces under whichever job
+  happened to call it, so counting one job's failures understates the class. **Group the
+  error message across jobs, not within one.**
+- ⚠⚠ **A hash over raw bytes cannot answer "did the content change" when the field that
+  changes is INSIDE those bytes.** The ticket proposed reusing the stored `payload_sha256`
+  to tell a re-serve from a real rollback. It cannot: `<pubDate>` is in the hashed payload,
+  so a re-serve differs by construction. Measured — 12 distinct pubDates gave **12** distinct
+  `payload_sha256` and **2** distinct fingerprints over the parsed content, one served under
+  8 stamps spanning 421 seconds. **Hash the SEMANTIC content you actually store, and make
+  the fingerprint cover exactly the stored columns** — then "fingerprints equal" is a proof
+  that the write is a no-op, which is what lets a refusal be dropped without weakening it.
+- Prevention on the fix shape: this was a candidate for a seconds-valued tolerance, which
+  is #2795's uncalibratable-constant defect one ticket later. It was avoided by making the
+  discriminator structural (content identity) rather than temporal. ⚠ The measured magnitude
+  (min 5s / median 6s / max 54s, bounded inside a minute) was still worth taking, because it
+  is what **excludes** the competing reading — "a 6-hour stale cache, and the guard is
+  right" — that the ticket could not rule out. Measure the magnitude even when you do not
+  intend to threshold on it; it is how you falsify the other hypothesis.
+- ⚠ Relaxing a guard invalidates comments that CITED it. `strategy_core_preflight` argued
+  its freshness bound partly from "`source_pub_at` has not regressed". The argument survived
+  (the stored stamp is held at `GREATEST`, and every accepted stamp passed the 5-minute lag
+  check against the `fetched_at` written with it) — but it had to be re-derived and the
+  comment rewritten. **Grep for prose that cites the invariant you are about to change.**
+- Caught by: Codex checkpoint 2, which found that the probe recorded concurrent polls in
+  request-START order (`executor.map` preserves submission order, and the start timestamp is
+  when the request was ISSUED) where the guard sees each poll at its STORE, i.e. at
+  completion. That can invent regressions and hide real ones. ⚠⚠ **A concurrent measurement
+  needs an explicit completion timestamp; file order and start order are both wrong.** The
+  run was repeated from scratch afterwards and the earlier window DISCARDED rather than
+  reconciled — it predated the field and could not be replayed correctly.
+- ⚠ A test pinned the defect again, one ticket after #2795 recorded that class.
+  `test_feed_publication_time_cannot_regress` regressed the stamp via
+  `replace(snapshot, source_pub_at=...)`, leaving content identical — i.e. it asserted the
+  re-serve MUST be refused. Replaced by its inverse, not deleted.
+- Enforced in: this entry; `scripts/probe_3049_halt_pubdate_skew.py` (the `--clients`
+  arm, with `clients=1` documented as unable to reproduce, and `Poll.completed_at` as the
+  ordering key); `app/services/strategy_halts.py::content_sha256`;
+  `sql/381_halt_feed_content_sha.sql`; `tests/test_strategy_halts.py`
+  (`test_a_regressed_stamp_with_identical_content_is_accepted_as_a_reserve`,
+  `test_payload_sha256_cannot_stand_in_for_the_content_fingerprint`,
+  `test_content_fingerprint_moves_on_a_resumption`).
