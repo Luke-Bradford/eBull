@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.verify_3046_break_minting_census import _BLIND, _BUCKET_NOTES, _bucket
+from scripts.verify_3046_break_minting_census import _BUCKET_NOTES, BLIND_BUCKETS, bucket_for
 
 
 @pytest.mark.parametrize(
@@ -44,7 +44,7 @@ from scripts.verify_3046_break_minting_census import _BLIND, _BUCKET_NOTES, _buc
     ],
 )
 def test_bucket_assignment(rules: list[str], clears: bool, provisional: bool, expected: str) -> None:
-    assert _bucket(rules, clears, provisional) == expected
+    assert bucket_for(rules, clears, provisional) == expected
 
 
 def test_admitted_back_is_not_counted_as_blind() -> None:
@@ -53,15 +53,15 @@ def test_admitted_back_is_not_counted_as_blind() -> None:
     Folding it in would inflate the suppression figure with the one population
     the classifier DID adjudicate.
     """
-    assert "admitted_back" not in _BLIND
-    assert "deferred" not in _BLIND
-    assert set(_BLIND) == {"t1_suppressed", "t2_suppressed", "t1_t2_suppressed"}
+    assert "admitted_back" not in BLIND_BUCKETS
+    assert "deferred" not in BLIND_BUCKETS
+    assert set(BLIND_BUCKETS) == {"t1_suppressed", "t2_suppressed", "t1_t2_suppressed"}
 
 
 def test_every_bucket_the_classifier_can_emit_has_a_printed_note() -> None:
     """A bucket with no note prints a KeyError instead of a census."""
     emitted = {
-        _bucket(rules, clears, provisional)
+        bucket_for(rules, clears, provisional)
         for rules in ([], ["T1"], ["T2"], ["T3"], ["T1", "T2"], ["T1", "T3"])
         for clears in (True, False)
         for provisional in (True, False)
