@@ -97,7 +97,7 @@ def test_signal_batch_keeps_only_fired_detail_durable_and_census_matches(
         _ledger_row(instrument_id=first, verdict="not_evaluable", signal_bar_date=date(2026, 8, 6)),
     ]
 
-    report = store_strategy_observations(ebull_test_conn, rows)
+    report = store_strategy_observations(ebull_test_conn, rows, corpus_generation="0123456789abcdef")
 
     assert report.logical_rows == 3
     assert report.fired_rows == 1
@@ -123,14 +123,14 @@ def test_signal_split_preserves_one_terminal_verdict_per_logical_key(
     fired = _ledger_row(instrument_id=first, verdict="fired")
 
     with pytest.raises(ValueError, match="duplicate logical signal"):
-        store_strategy_observations(ebull_test_conn, [routine, fired])
+        store_strategy_observations(ebull_test_conn, [routine, fired], corpus_generation="0123456789abcdef")
     assert ebull_test_conn.execute(
         "SELECT count(*) FROM strategy_signal_daily_counts WHERE strategy_id = 's-storage-test'"
     ).fetchone() == (0,)
 
-    store_strategy_observations(ebull_test_conn, [routine])
+    store_strategy_observations(ebull_test_conn, [routine], corpus_generation="0123456789abcdef")
     with pytest.raises(ValueError, match="conflicts with a verdict in the other storage tier"):
-        store_strategy_observations(ebull_test_conn, [fired])
+        store_strategy_observations(ebull_test_conn, [fired], corpus_generation="0123456789abcdef")
     assert ebull_test_conn.execute(
         "SELECT sum(row_count) FROM strategy_signal_daily_counts WHERE strategy_id = 's-storage-test'"
     ).fetchone() == (Decimal("1"),)
@@ -306,6 +306,7 @@ def test_retention_drops_whole_expired_partitions_and_keeps_current(
     store_strategy_observations(
         ebull_test_conn,
         [_ledger_row(instrument_id=first, verdict="not_fired", signal_bar_date=date(2020, 1, 1))],
+        corpus_generation="0123456789abcdef",
     )
     # Deliberate raw fixture: production writes reject already-expired bars, but
     # retention still needs to prove it can clean legacy data and its watermark.
@@ -365,6 +366,7 @@ def test_retention_drops_whole_expired_partitions_and_keeps_current(
         store_strategy_observations(
             ebull_test_conn,
             [_ledger_row(instrument_id=first, verdict="fired", signal_bar_date=date(2020, 1, 1))],
+            corpus_generation="0123456789abcdef",
         )
     assert ebull_test_conn.execute(
         "SELECT count(*) FROM strategy_intraday_watermarks WHERE timeframe = '1m' AND instrument_id = %s",

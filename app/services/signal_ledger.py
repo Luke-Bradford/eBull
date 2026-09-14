@@ -25,6 +25,7 @@ would invent a fill on a day the instrument did not trade.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -33,6 +34,7 @@ from decimal import Decimal
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.services.corpus_generation import GENERATION_PATTERN
 from app.services.indicator_series import BarSeries, Universe
 from app.services.strategy_registry import (
     NOT_EVALUABLE_REASONS,
@@ -296,17 +298,32 @@ _INSERT = """
     INSERT INTO strategy_signals (
         strategy_id, strategy_version, instrument_id, signal_bar_date,
         signal_kind, verdict, not_evaluable_reason, fill_bar_date,
-        fill_price, universe, input_rule_set_versions
+        fill_price, universe, input_rule_set_versions, corpus_generation
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(signal_bar_date)s,
         %(signal_kind)s, %(verdict)s, %(not_evaluable_reason)s, %(fill_bar_date)s,
-        %(fill_price)s, %(universe)s, %(input_rule_set_versions)s
+        %(fill_price)s, %(universe)s, %(input_rule_set_versions)s, %(corpus_generation)s
     )
 """
 
 
-def store_signals(conn: psycopg.Connection[tuple], rows: Sequence[LedgerRow]) -> int:
+def store_signals(conn: psycopg.Connection[tuple], rows: Sequence[LedgerRow], *, corpus_generation: str) -> int:
     """Insert durable FIRED ``rows``, returning the number written.
+
+    ⚠ ``corpus_generation`` is KEYWORD-ONLY AND HAS NO DEFAULT (#2414), for the
+    reason ``LedgerRow.universe`` has none (#2288): *"a field with a default is
+    a field a writer can forget"*. It is a property of the scan PASS rather than
+    of a decision, so it is an argument here and not a ``LedgerRow`` field —
+    the digest is only complete after the scan's instrument loop, and
+    ``resolve_fills`` is called inside it.
+
+    ⚠⚠ IT IS NOT KEY MATERIAL AND NOTHING BELOW CHANGED BECAUSE OF IT. The scan
+    spec's §12 names two candidate fixes for the corrected-historical-bar problem
+    — *"a corpus version in the key, or an explicit supersede-and-record path"* —
+    and both need a computable corpus identity first. This ships that identity and
+    stores it beside the key rather than in it, so neither shape is prejudged. The
+    ``ON CONFLICT`` discussion below is therefore unchanged and still governs.
+    See ``app/services/corpus_generation.py``.
 
     Routine negative decisions go through
     ``strategy_observation_storage.store_strategy_observations`` so they reach
@@ -329,6 +346,16 @@ def store_signals(conn: psycopg.Connection[tuple], rows: Sequence[LedgerRow]) ->
     A deliberate re-run bumps the version, which is a different key and inserts
     cleanly. That is the intended path.
     """
+    # ⚠ BEFORE the empty-batch return. A malformed stamp on an empty batch is
+    # still a malformed stamp, and letting it through here means the refusal
+    # fires only on the runs that happen to have rows — which is the shape that
+    # makes a writer bug look intermittent.
+    if not re.fullmatch(GENERATION_PATTERN, corpus_generation):
+        raise ValueError(
+            f"corpus_generation {corpus_generation!r} is not 16 lowercase hex characters — "
+            "an EXACT mirror of sql/382's CHECK, so a row this function accepts is a row the "
+            "constraint accepts"
+        )
     if not rows:
         return 0
     non_fired = [row.verdict for row in rows if row.verdict != "fired"]
@@ -357,6 +384,7 @@ def store_signals(conn: psycopg.Connection[tuple], rows: Sequence[LedgerRow]) ->
                     # to cast — and a `MappingProxyType` is not JSON-adaptable
                     # without the explicit wrapper either way.
                     "input_rule_set_versions": Jsonb(dict(row.input_rule_set_versions)),
+                    "corpus_generation": corpus_generation,
                 }
                 for row in rows
             ],

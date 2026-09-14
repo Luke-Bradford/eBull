@@ -295,6 +295,22 @@ class MarketRegimeProvider:
         """How many benchmark days carry a regime — for run reporting."""
         return sum(1 for value in self._by_date.values() if value is not None)
 
+    def classification_items(self) -> tuple[tuple[date, Regime | None], ...]:
+        """Every benchmark day this provider observed, in date order.
+
+        ⚠ MEMBERSHIP, not just the values — which is the whole reason this
+        returns items rather than a values tuple. ``for_dates`` above separates
+        a date the benchmark traded but could not yet classify (present, value
+        ``None``) from one it did not trade at all (absent, and therefore
+        ``not_evaluable``), and only this map can tell them apart. A consumer
+        that took the values alone would lose exactly that distinction.
+
+        Added for #2414's ``corpus_generation``: the regime is an input to every
+        gated strategy, so a benchmark revision must rotate the pass's stamp even
+        when no subject instrument's bars moved.
+        """
+        return tuple(sorted(self._by_date.items()))
+
 
 def load_research_closes(
     conn: psycopg.Connection[Any],

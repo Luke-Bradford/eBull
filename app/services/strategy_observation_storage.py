@@ -137,20 +137,20 @@ class RetentionPlan:
 _INSERT_OBSERVATION = """
     INSERT INTO strategy_signal_observations (
         strategy_id, strategy_version, instrument_id, signal_bar_date,
-        signal_kind, verdict, reason_code
+        signal_kind, verdict, reason_code, corpus_generation
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(signal_bar_date)s,
-        %(signal_kind)s, %(verdict)s, %(reason_code)s
+        %(signal_kind)s, %(verdict)s, %(reason_code)s, %(corpus_generation)s
     )
 """
 
 _INSERT_DAILY_COUNT = """
     INSERT INTO strategy_signal_daily_counts (
         strategy_id, strategy_version, signal_bar_date,
-        signal_kind, verdict, reason_code, row_count
+        signal_kind, verdict, reason_code, row_count, corpus_generation
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(signal_bar_date)s,
-        %(signal_kind)s, %(verdict)s, %(reason_code)s, %(row_count)s
+        %(signal_kind)s, %(verdict)s, %(reason_code)s, %(row_count)s, %(corpus_generation)s
     )
 """
 
@@ -299,12 +299,23 @@ def _logical_signal_key(row: LedgerRow) -> tuple[str, str, int, date, str]:
     )
 
 
-def store_strategy_observations(conn: psycopg.Connection[Any], rows: Sequence[LedgerRow]) -> SignalStorageReport:
+def store_strategy_observations(
+    conn: psycopg.Connection[Any], rows: Sequence[LedgerRow], *, corpus_generation: str
+) -> SignalStorageReport:
     """Persist one complete census without durable negative-decision bloat.
 
     No conflict is ignored. The scan watermark makes a normal repeat a no-op;
     any collision here means recorded evidence drifted and must abort the same
     transaction as the watermark advance.
+
+    ⚠ ``corpus_generation`` (#2414) is keyword-only with no default and reaches
+    BOTH tiers plus the census — 813,194 of the 871,905 stored decisions are
+    routine ones, and a ``not_fired`` computed against revised bars is exactly as
+    provenance-free as a ``fired`` one. It is write-once provenance and NOT key
+    material: no primary key here changes, and the cross-table conflict below
+    keeps raising. Admitting a re-decided historical bar is the scan spec's §12
+    residual and is still open on #2414 — this ships the corpus identity both of
+    §12's candidate shapes need, and prejudges neither.
     """
     if not rows:
         return SignalStorageReport(0, 0, 0, 0, 0)
@@ -376,7 +387,7 @@ def store_strategy_observations(conn: psycopg.Connection[Any], rows: Sequence[Le
 
         for month in sorted({row.signal_bar_date.replace(day=1) for row in observations}):
             ensure_signal_partition(conn, month)
-        fired_written = store_signals(cast(psycopg.Connection[tuple], conn), fired)
+        fired_written = store_signals(cast(psycopg.Connection[tuple], conn), fired, corpus_generation=corpus_generation)
         with conn.cursor() as cur:
             if observations:
                 cur.executemany(
@@ -390,6 +401,7 @@ def store_strategy_observations(conn: psycopg.Connection[Any], rows: Sequence[Le
                             "signal_kind": row.signal_kind,
                             "verdict": row.verdict,
                             "reason_code": row.not_evaluable_reason or "",
+                            "corpus_generation": corpus_generation,
                         }
                         for row in observations
                     ],
@@ -410,6 +422,7 @@ def store_strategy_observations(conn: psycopg.Connection[Any], rows: Sequence[Le
                         "verdict": key[4],
                         "reason_code": key[5],
                         "row_count": count,
+                        "corpus_generation": corpus_generation,
                     }
                     for key, count in counts.items()
                 ],
