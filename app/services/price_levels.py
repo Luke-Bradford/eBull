@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
 
@@ -231,6 +231,110 @@ class _ClusterSegments:
         return np.maximum.reduceat(self.order, self.bounds[:-1])
 
 
+@dataclass(frozen=True)
+class _SortedPivots:
+    """A pivot prefix in price order — everything ``_segment`` does BEFORE it
+    reads ``tolerance`` (#2780 item 3).
+
+    ⚠⚠ THE SPLIT IS THE WHOLE POINT, AND IT IS A PROPERTY OF THE ARITHMETIC,
+    NOT A REFACTOR. ``at`` asks for levels at every bar, so ``tolerance``
+    (``CLUSTER_ATR_TOLERANCE * atr``) moves every bar — but the argsort, the
+    two gathers and the price gaps depend only on WHICH PIVOTS ARE CONFIRMED,
+    which changes only when a new pivot confirms. Measured over 40 validated
+    instruments (37,048 ``at`` calls, 73,845 ``_segment`` calls): the confirmed
+    prefix is unchanged from the previous bar **93.9%** of the time.
+
+    ``sorted_gaps`` is what makes the SECOND cache exact — see ``bracket``.
+    """
+
+    order: npt.NDArray[np.int64]
+    ordered_prices: npt.NDArray[np.float64]
+    ordered_weights: npt.NDArray[np.float64] | None
+    #: ``np.diff(ordered_prices)`` ASCENDING. Empty for a single pivot.
+    sorted_gaps: npt.NDArray[np.float64]
+
+    def bracket(self, tolerance: float) -> int:
+        """The equivalence class of ``tolerance`` over this prefix's gaps.
+
+        ⚠⚠ EQUAL BRACKET ⇒ BIT-IDENTICAL ``_ClusterSegments``, by construction
+        and not by tolerance. The cluster cut is ``np.diff(ordered_prices) >
+        tolerance`` — a boolean mask over FIXED gaps — so two tolerances
+        produce the same mask exactly when the same gaps fall on each side of
+        them. ``searchsorted(..., side="right")`` counts the gaps ``<=
+        tolerance`` INCLUDING ties, so equal counts cannot hide a tie that
+        moved: a gap exactly equal to one tolerance and above another would
+        change the count. Same mask → same ``group`` → same ``bincount``
+        inputs in the same order → same floats in the last bit, which is the
+        standard this module holds itself to (see ``price``).
+
+        ⚠ NaN gaps cannot arise — ``swing_pivots`` confirms a pivot only where
+        the whole window is finite, so every pivot price is finite. If one ever
+        did, ``np.sort`` puts NaN last and ``NaN > tolerance`` is False for
+        every tolerance, so it would sit outside every bracket consistently
+        rather than aliasing two different masks together.
+        """
+        return int(np.searchsorted(self.sorted_gaps, tolerance, side="right"))
+
+
+def _sort_pivots(
+    idx: npt.NDArray[np.int64],
+    prices: npt.NDArray[np.float64],
+    volumes: npt.NDArray[np.float64] | None,
+) -> _SortedPivots | None:
+    """The tolerance-free half of ``_segment``. ``None`` for an empty prefix."""
+    if idx.size == 0:
+        return None
+    order = idx[np.argsort(prices[idx], kind="stable")]
+    ordered_prices = prices[order]
+    gaps = np.diff(ordered_prices) if order.size > 1 else np.zeros(0, dtype=np.float64)
+    return _SortedPivots(
+        order=order,
+        ordered_prices=ordered_prices,
+        # ⚠ Bound unconditionally so the fallback in ``_segment_at`` narrows on
+        # THIS name rather than re-testing ``volumes``. Two separate
+        # ``volumes is None`` checks are equivalent at runtime but not to a
+        # type checker, and the pre-push gate was right to refuse that version.
+        ordered_weights=None if volumes is None else np.maximum(volumes[order], 0.0),
+        sorted_gaps=np.sort(gaps),
+    )
+
+
+def _segment_at(sorted_pivots: _SortedPivots, *, tolerance: float) -> _ClusterSegments:
+    """The tolerance-dependent half of ``_segment``."""
+    order = sorted_pivots.order
+    ordered_prices = sorted_pivots.ordered_prices
+    ordered_weights = sorted_pivots.ordered_weights
+
+    if order.size == 1:
+        starts_cluster = np.zeros(0, dtype=np.bool_)
+    else:
+        starts_cluster = np.diff(ordered_prices) > tolerance
+    group = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(starts_cluster, dtype=np.int64)))
+    sizes = np.bincount(group)
+    bounds = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sizes, dtype=np.int64)))
+
+    if ordered_weights is None:
+        totals = np.bincount(group, weights=ordered_prices)
+        fast_prices = totals / sizes
+    else:
+        weight_totals = np.bincount(group, weights=ordered_weights)
+        value_totals = np.bincount(group, weights=ordered_prices * ordered_weights)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            fast_prices = value_totals / weight_totals
+        # ``weights.sum() > 0`` fell back to the unweighted mean; reproduced here.
+        unweighted = np.bincount(group, weights=ordered_prices) / sizes
+        fast_prices = np.where(weight_totals > 0.0, fast_prices, unweighted)
+
+    return _ClusterSegments(
+        order=order,
+        bounds=bounds,
+        sizes=sizes,
+        ordered_prices=ordered_prices,
+        ordered_weights=ordered_weights,
+        fast_prices=fast_prices,
+    )
+
+
 def _segment(
     idx: npt.NDArray[np.int64],
     prices: npt.NDArray[np.float64],
@@ -269,46 +373,20 @@ def _segment(
     nothing — whereas the previous shape built a Python list of the whole prefix
     on every bar and handed it straight back to ``np.asarray``, which the
     profile counted 918,324 times over 300 series.
+
+    ⚠⚠ UNCACHED ON PURPOSE (#2780 item 3). ``LevelScan.at`` no longer calls
+    this — it holds the two halves separately so it can reuse each — but
+    ``_cluster`` and therefore ``verify_2437_level_scan --equivalence`` still
+    do. That is what keeps the differential harness honest: if the memo in
+    ``at`` ever disagreed with the arithmetic, the two sides would be running
+    different code and the sweep could see it. Collapsing this into ``at``'s
+    path would make the arm tautological, which is the exact failure
+    ``_reference_at`` was written to undo.
     """
-    if idx.size == 0:
+    sorted_pivots = _sort_pivots(idx, prices, volumes)
+    if sorted_pivots is None:
         return None
-
-    order = idx[np.argsort(prices[idx], kind="stable")]
-    ordered_prices = prices[order]
-    if order.size == 1:
-        starts_cluster = np.zeros(0, dtype=np.bool_)
-    else:
-        starts_cluster = np.diff(ordered_prices) > tolerance
-    group = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(starts_cluster, dtype=np.int64)))
-    sizes = np.bincount(group)
-    bounds = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sizes, dtype=np.int64)))
-
-    # ⚠ Bound unconditionally so the fallback below narrows on THIS name rather
-    # than re-testing ``volumes``. Two separate ``volumes is None`` checks are
-    # equivalent at runtime but not to a type checker, and the pre-push gate was
-    # right to refuse the version that had them.
-    ordered_weights = None if volumes is None else np.maximum(volumes[order], 0.0)
-
-    if ordered_weights is None:
-        totals = np.bincount(group, weights=ordered_prices)
-        fast_prices = totals / sizes
-    else:
-        weight_totals = np.bincount(group, weights=ordered_weights)
-        value_totals = np.bincount(group, weights=ordered_prices * ordered_weights)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            fast_prices = value_totals / weight_totals
-        # ``weights.sum() > 0`` fell back to the unweighted mean; reproduced here.
-        unweighted = np.bincount(group, weights=ordered_prices) / sizes
-        fast_prices = np.where(weight_totals > 0.0, fast_prices, unweighted)
-
-    return _ClusterSegments(
-        order=order,
-        bounds=bounds,
-        sizes=sizes,
-        ordered_prices=ordered_prices,
-        ordered_weights=ordered_weights,
-        fast_prices=fast_prices,
-    )
+    return _segment_at(sorted_pivots, tolerance=tolerance)
 
 
 def _cluster(
@@ -400,6 +478,23 @@ class LevelScan:
     #: per-call ``nansum(volumes[: index + 1])`` produced, not an approximation.
     volume_cumsum: npt.NDArray[np.float64] | None
     rule_set_version: str = LEVEL_RULE_VERSION
+    #: ⚠⚠ THE ONLY MUTABLE STATE ON THIS FROZEN CLASS, and it is a CACHE in the
+    #: strict sense: dropping it changes nothing but the clock (#2780 item 3).
+    #: Keyed ``kind -> (confirmed-prefix length, bracket, segments)`` and holding
+    #: the LAST entry per kind only, because ``at`` is walked forward over a
+    #: series and a one-slot cache already takes 78.0% of calls (measured, 40
+    #: validated instruments). A keep-everything dict would grow with the pivot
+    #: count per series and buy the tail of that distribution.
+    #: ``compare=False`` because two scans built from the same arrays ARE the
+    #: same scan whatever either has memoised, and an ndarray in a generated
+    #: ``__eq__`` raises rather than answering.
+    _segment_cache: dict[str, tuple[int, int, _ClusterSegments]] = field(
+        default_factory=dict, compare=False, repr=False
+    )
+    #: Same shape, one level up: ``kind -> (prefix length, sorted pivots)``. Hit
+    #: on 93.9% of calls, i.e. whenever no new pivot confirmed since the last
+    #: bar, which is the majority even when the tolerance moved a cluster.
+    _sorted_cache: dict[str, tuple[int, _SortedPivots]] = field(default_factory=dict, compare=False, repr=False)
 
     @classmethod
     def build(
@@ -423,6 +518,50 @@ class LevelScan:
             low_index_array=np.asarray(pivots.low_indices, dtype=np.int64),
             volume_cumsum=None if volumes is None else np.nancumsum(volumes),
         )
+
+    def _segments_for(
+        self,
+        kind: str,
+        idxs: npt.NDArray[np.int64],
+        prices: npt.NDArray[np.float64],
+        *,
+        tolerance: float,
+    ) -> _ClusterSegments | None:
+        """``_segment``, memoised on the two things it actually varies with.
+
+        ⚠⚠ THIS RETURNS THE SAME FLOATS AS ``_segment``, NOT CLOSE ONES. The
+        keys are exact: the prefix length fixes the sorted pivots (a prefix of a
+        fixed ascending array, so equal length ⇒ equal slice ⇒ equal argsort),
+        and ``bracket`` fixes the gap mask (see ``_SortedPivots.bracket``).
+        Nothing here rounds, snaps or tolerates. If either key were approximate
+        this would be a silent change to which trades exist, which is why the
+        equivalence sweep compares whole ``PriceLevel`` tuples with ``==``.
+
+        ⚠ The cache is NOT keyed on ``prices``/``self.volumes`` because a
+        ``LevelScan`` is built once per series and those arrays are its own
+        fields; ``kind`` already separates the highs arm from the lows arm.
+        Mutating ``highs``/``lows``/``volumes`` under a live scan would defeat
+        it — as it would already defeat ``pivots`` and ``volume_cumsum``, which
+        ``build`` derives once for the same reason.
+        """
+        length = int(idxs.size)
+        cached_sorted = self._sorted_cache.get(kind)
+        if cached_sorted is not None and cached_sorted[0] == length:
+            sorted_pivots: _SortedPivots | None = cached_sorted[1]
+        else:
+            sorted_pivots = _sort_pivots(idxs, prices, self.volumes)
+            if sorted_pivots is not None:
+                self._sorted_cache[kind] = (length, sorted_pivots)
+        if sorted_pivots is None:
+            return None
+
+        bracket = sorted_pivots.bracket(tolerance)
+        cached = self._segment_cache.get(kind)
+        if cached is not None and cached[0] == length and cached[1] == bracket:
+            return cached[2]
+        segments = _segment_at(sorted_pivots, tolerance=tolerance)
+        self._segment_cache[kind] = (length, bracket, segments)
+        return segments
 
     def at(self, *, atr: float, index: int) -> tuple[PriceLevel, ...]:
         """Live support/resistance levels as known at bar ``index``.
@@ -457,7 +596,7 @@ class LevelScan:
         total = 0.0 if self.volume_cumsum is None else float(self.volume_cumsum[index])
         out: list[PriceLevel] = []
         for kind, idxs, prices in (("resistance", hi_idx, self.highs), ("support", lo_idx, self.lows)):
-            segments = _segment(idxs, prices, self.volumes, tolerance=tolerance)
+            segments = self._segments_for(kind, idxs, prices, tolerance=tolerance)
             if segments is None:
                 continue
             last_touches = segments.last_touch()
