@@ -44,6 +44,7 @@ from typing import Literal, Protocol, get_args
 from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import IndicatorSeries, MultiIndicatorSeries, Universe
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
+from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION
 
@@ -115,6 +116,29 @@ INPUT_RULE_SETS: Mapping[str, str] = MappingProxyType(
         # every entry in this mapping makes.
         "series_termination": TERMINATION_RULE_VERSION,
         "universe_selection": UNIVERSE_SELECTION_RULE_VERSION,
+        # ⚠ #3031 — the FOURTH hand-maintained entry, and the one the comment
+        # above already named ("the trade this epic has already taken three
+        # times (``price_quarantine``, …)") without the mapping ever carrying
+        # it. Strategies do not import it; ``price_masked_bars`` — the ENGINE's
+        # loader — binds this exact constant into ``_LOAD_SQL``'s
+        # ``cov.rule_set_version = %(quarantine_version)s``, so it decides which
+        # bars every strategy sees.
+        #
+        # ⚠ Why the HASH and not a key member, which is what ``sql/267`` looks
+        # like it says: 267's "NOT hashed" sentence is about ``quarantine_arm``
+        # — criterion 9's masked/admitted HANDLING — on ``strategy_results_store``,
+        # whose ``result_version`` is a second hash this ledger does not have.
+        # ``sql/257`` settles it for THIS table: input rule sets go inside
+        # ``strategy_version`` and never into the uniqueness key. And the scan
+        # has ONE arm (``price_masked_bars``: *"Adding the arm here would put a
+        # switch on the production path whose only correct setting is the
+        # default"*), so what varies here is the rule set, not the handling.
+        #
+        # ⚠ Consequence, accepted: every future quarantine edit now rotates
+        # every strategy identity with no registry edit — the same
+        # over-invalidation ``universe_selection`` above accepts, and the thing
+        # that makes the corrected row storable at all.
+        "price_quarantine": QUARANTINE_RULE_SET_VERSION,
     }
 )
 

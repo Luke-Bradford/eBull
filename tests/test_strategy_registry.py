@@ -22,6 +22,7 @@ from app.services.indicator_series import (
     sma_series,
 )
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
+from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.strategy_registry import (
     INPUT_RULE_SETS,
@@ -252,7 +253,38 @@ class TestIdentityCoversMoreThanSource:
             "market_regime_provider": BENCHMARK_SOURCE_RULE_SET_VERSION,
             "series_termination": TERMINATION_RULE_VERSION,
             "universe_selection": UNIVERSE_SELECTION_RULE_VERSION,
+            "price_quarantine": QUARANTINE_RULE_SET_VERSION,
         }
+
+    def test_the_quarantine_rule_set_changes_the_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#3031. The live scan's loader masks bars on this rule set, so a
+        change to it changes what every strategy sees. Before this entry it did
+        so under an unchanged version, and all four signal-ledger tables key on
+        that version.
+
+        ⚠ The mapping is replaced wholesale with one differing ONLY in the
+        quarantine value, so a pass cannot come from some other member moving.
+        """
+        before = self._identity().version
+        monkeypatch.setattr(
+            strategy_registry,
+            "INPUT_RULE_SETS",
+            {**INPUT_RULE_SETS, "price_quarantine": "price-quarantine-v1+ffffffffffff"},
+        )
+        assert self._identity().version != before
+
+    def test_the_loader_binds_the_registry_value(self) -> None:
+        """The stamp must name the rule set the scan actually masked on.
+
+        ⚠ Asserting the constants are the same object proves nothing about the
+        executed query, so this checks the bind: ``price_masked_bars`` selects
+        coverage on ``cov.rule_set_version = %(quarantine_version)s`` and passes
+        that same constant.
+        """
+        from app.services import price_masked_bars
+
+        assert INPUT_RULE_SETS["price_quarantine"] == price_masked_bars.QUARANTINE_RULE_SET_VERSION
+        assert "cov.rule_set_version = %(quarantine_version)s" in price_masked_bars._LOAD_SQL
 
     def test_the_registry_constant_is_read_only(self) -> None:
         """A plain dict would let any importer mutate the identity of every
@@ -362,6 +394,161 @@ class TestInputRuleSetsAreComplete:
             "these versioned rule sets are read by a strategy but absent from "
             f"strategy_registry.INPUT_RULE_SETS, so a change to them would reuse the old "
             f"strategy_version (#2333): {missing}"
+        )
+
+
+class TestTheEngineIsWalkedTooNotJustTheStrategies:
+    """#3031 — the defect lived in the class above's DOCUMENTED blind spot.
+
+    ``TestInputRuleSetsAreComplete`` walks ``app.services.strategies`` for DIRECT
+    imports and says so. ``price_quarantine`` escaped because no strategy imports
+    it: the ENGINE does. ``price_masked_bars`` binds its ``RULE_SET_VERSION``
+    into the loader's ``cov.rule_set_version = %(quarantine_version)s``, so it
+    decides which bars every strategy sees, and a documented blind spot is still
+    a blind spot.
+
+    Three design choices, each answering a way the obvious version of this test
+    would pass while blind:
+
+    ⚠ **Keyed on the VALUE, not the constant name.** ``RULE_SET_VERSION`` is not
+    the only spelling in the closure — ``LEVEL_RULE_VERSION``,
+    ``REGIME_RULE_VERSION``, ``TERMINATION_RULE_VERSION``,
+    ``AMBIGUITY_RULE_VERSION`` and ``METRIC_AXIS_RULE_VERSION`` all exist. The
+    name pattern finds candidates; comparing VALUES is what makes a re-export
+    collapse into the thing it re-exports rather than needing its own entry
+    (``price_masked_bars``, ``research_corpus_ingest`` and
+    ``research_price_structure_store`` all re-export the quarantine version).
+
+    ⚠ **Covered means hashed ANYWHERE in the identity.** ``price-levels-v1+…``
+    and ``market-regime-v1+…`` are hashed through per-strategy ``params``, not
+    through ``INPUT_RULE_SETS``, and both are correct as they stand.
+
+    ⚠ **Fails closed.** A reachable rule set in neither the covered set nor
+    ``_NOT_IDENTITY_INPUTS`` fails, so the next engine-only input is a test
+    failure rather than a silently mixed ledger.
+    """
+
+    #: Rule sets the engine can reach that are deliberately NOT strategy-identity
+    #: inputs, each with the reason. Keyed by the OWNING constant; the check
+    #: compares values, so a re-export of one of these is excluded with it.
+    _NOT_IDENTITY_INPUTS: dict[str, str] = {
+        "app.services.outcome_resolver.RULE_SET_VERSION": (
+            "sql/256 makes it a KEY member of strategy_outcomes, deliberately outside the strategy hash"
+        ),
+        "app.services.position_builder.RULE_SET_VERSION": "backtest position construction — a property of a RESULT",
+        "app.services.price_structure.RULE_SET_VERSION": (
+            "reached only via backtest_run / research_price_structure_store; no live-scan path reads it"
+        ),
+        "app.services.strategies.validated_universe.VALIDATED_UNIVERSE_RULE_VERSION": (
+            "a universe LABEL; universe_selection carries the versioned admission rule and is in INPUT_RULE_SETS"
+        ),
+        "app.services.strategy_ambiguity_policy.AMBIGUITY_RULE_VERSION": (
+            "result-ambiguity policy — #2747 owns versioning it into result identity"
+        ),
+        "app.services.strategy_ambiguity_policy.LEGACY_AMBIGUITY_RULE_VERSION": (
+            "the superseded ambiguity policy, retained for stored results"
+        ),
+        "app.services.strategy_result.METRIC_AXIS_RULE_VERSION": "the result METRIC axis — a property of a result",
+    }
+
+    _ROOT = "app.services.strategy_signal_scan"
+
+    @classmethod
+    def _closure(cls) -> set[str]:
+        """Every ``app.services`` module reachable from the scan by import.
+
+        ⚠ Limits, stated rather than implied: it reads ``from app.services.x
+        import …``, ``import app.services.x`` and ``from app.services import x``.
+        A dynamic import, or a rule set reached through a non-``app.services``
+        intermediary, is not found. ``test_the_walk_reaches_the_engine`` guards
+        the failure where it matches nothing at all.
+        """
+        services = Path(strategy_registry.__file__).parent
+
+        def imports_of(dotted: str) -> set[str]:
+            path = services.joinpath(*dotted.removeprefix("app.services.").split(".")).with_suffix(".py")
+            if not path.exists():
+                return set()
+            found: set[str] = set()
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.ImportFrom) and node.module == "app.services":
+                    found.update(f"app.services.{alias.name}" for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("app.services."):
+                    found.add(node.module)
+                elif isinstance(node, ast.Import):
+                    found.update(alias.name for alias in node.names if alias.name.startswith("app.services."))
+            return found
+
+        seen: set[str] = set()
+        pending = [cls._ROOT]
+        while pending:
+            dotted = pending.pop()
+            if dotted in seen:
+                continue
+            seen.add(dotted)
+            pending.extend(imports_of(dotted))
+        return seen
+
+    @staticmethod
+    def _rule_versions(dotted: str) -> dict[str, str]:
+        """``{constant name: value}`` for this module's rule-set versions."""
+        module = importlib.import_module(dotted)
+        return {
+            name: value
+            for name in dir(module)
+            if not name.startswith("_") and (name.endswith("RULE_VERSION") or name.endswith("RULE_SET_VERSION"))
+            if isinstance(value := getattr(module, name), str)
+        }
+
+    @classmethod
+    def _covered_values(cls) -> set[str]:
+        """Every version string already inside some ``StrategyIdentity`` hash."""
+        from app.services.strategy_manifest import STRATEGY_MANIFEST
+        from app.services.strategy_signal_scan import COST_MODEL_ID, SCAN_UNIVERSE
+
+        covered = set(INPUT_RULE_SETS.values())
+        for entry in STRATEGY_MANIFEST.values():
+            identity = entry.identity(universe=SCAN_UNIVERSE, cost_model_id=COST_MODEL_ID)
+            covered.update(value for value in identity.params.values() if isinstance(value, str))
+        return covered
+
+    def test_the_walk_reaches_the_engine(self) -> None:
+        """⚠ A completeness test that silently matched nothing passes forever."""
+        closure = self._closure()
+        assert self._ROOT in closure
+        assert "app.services.price_masked_bars" in closure
+        assert "app.services.price_quarantine" in closure
+        assert len(closure) > 20
+
+    def test_the_quarantine_is_reached_only_through_the_engine(self) -> None:
+        """The reason the sibling class could not see it, pinned as a fact.
+
+        If a strategy ever imports the quarantine directly this fails, and the
+        sibling walk becomes sufficient for it — worth knowing either way.
+        """
+        strategy_imports = TestInputRuleSetsAreComplete._imported_service_modules()
+        assert not [name for name, imported in strategy_imports.items() if "app.services.price_quarantine" in imported]
+
+    def test_every_rule_set_the_engine_reaches_is_hashed_or_excluded(self) -> None:
+        covered = self._covered_values()
+        excluded = set()
+        for qualified, reason in self._NOT_IDENTITY_INPUTS.items():
+            assert reason.strip(), f"{qualified} is excluded with no reason"
+            dotted, _, name = qualified.rpartition(".")
+            module = importlib.import_module(dotted)
+            assert hasattr(module, name), f"{qualified} is excluded but no longer exists — the exclusion is stale"
+            excluded.add(getattr(module, name))
+
+        uncovered = sorted(
+            f"{dotted}.{name} = {value}"
+            for dotted in self._closure()
+            for name, value in self._rule_versions(dotted).items()
+            if value not in covered and value not in excluded
+        )
+        assert not uncovered, (
+            "these versioned rule sets are reachable from the signal scan but are hashed into no strategy "
+            "identity, so a change to them would reuse the old strategy_version (#3031). Add them to "
+            f"strategy_registry.INPUT_RULE_SETS, or to _NOT_IDENTITY_INPUTS with a reason: {uncovered}"
         )
 
 
