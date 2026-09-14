@@ -6230,3 +6230,42 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Enforced in: this prevention log;
   `tests/test_3037_core_selection_verdict_states.py::test_the_recovery_fixture_restores_every_constant_it_sets`;
   `tests/test_2949_core_restart_recovery_db.py` + `tests/test_2949_core_close_recovery_db.py`.
+
+### Replacing a MEASURED value with a DECLARED constant removes the guard the measurement carried (#3040, 2026-09-14)
+
+- Symptom: `scripts/ingest_2597_intrader_archive.py --quarantine` derived its `as_of` from
+  `SELECT max(last_bar) … WHERE vendor = %s` and returned 1 with *"no bars loaded for X —
+  run --load first"* when that came back NULL. #3040 replaced the query with a declared
+  literal on `ArchiveProvenance`, for good reasons — a single later-ending or future-dated
+  series would otherwise silently re-date a whole vendor's policy. The emptiness check went
+  with it, unnoticed: reading a constant cannot return NULL, so `--quarantine` on an
+  never-loaded archive now looped over zero series and printed a **0-series census**, which
+  is byte-identical to what a healthy no-op prints.
+- Root cause: the guard was never written down. It was a **side effect of the value being
+  measured** — the query's NULL case happened to coincide with "the archive is empty" — so
+  the diff that removed the measurement contained no line that looked like a guard being
+  deleted.
+- ⚠ The replacement was CORRECT and still caused this. The lesson is not "keep measuring";
+  it is that a measurement and a constant differ in their **failure modes**, not only in
+  their values, and the failure mode is the part nobody diffs.
+- ⚠ The same substitution also made the coverage reconciliation pass **vacuously** for an
+  unloaded archive: `uncovered_series_count` counts loaded series lacking coverage, so zero
+  loaded series returns 0 — "fully current" and "never loaded" become the same answer.
+  One removal, two silent-success paths.
+- Prevention: when swapping a queried value for a declared one, enumerate what the QUERY
+  could return that the constant cannot — NULL, empty set, zero rows — and ask what each of
+  those was implicitly deciding. Re-express every one as an explicit check. The tell is a
+  diff that deletes a `SELECT` whose result fed an `if`.
+- Generalises to: config values replacing probes, pinned capture dates replacing
+  `max(timestamp)`, hardcoded universes replacing a count, any `COALESCE(measure, default)`
+  that becomes `default`. Same family as *"a default value is not a measurement"*, arriving
+  from the opposite direction.
+- Caught by: the Claude review bot on the first round (WARNING), not by Codex checkpoint 2
+  and not by any test — every test exercised a loaded archive, because that is the only
+  state the dev DB has ever been in.
+- Enforced in: this prevention log;
+  `app/services/research_corpus_ingest.py::loaded_series_count` (docstring states the
+  implicit-guard history) and `refresh_research_quarantine`'s unloaded-archive WARNING;
+  both `scripts/ingest_*_archive.py` quarantine paths;
+  `tests/test_research_quarantine_refresh.py::test_an_unloaded_archive_is_skipped_and_never_evaluated`;
+  `tests/test_research_quarantine_refresh_db.py::test_an_unloaded_archive_reads_as_covered_which_is_why_the_guard_exists`.

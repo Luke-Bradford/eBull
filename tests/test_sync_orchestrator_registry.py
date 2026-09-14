@@ -28,6 +28,10 @@ class TestLayerRegistry:
             # price_quarantine added #2261 (impossible-bar quarantine DAG
             # layer, tier 2, depends on candles).
             "price_quarantine",
+            # research_price_quarantine added #3040 (the same recompute for the
+            # frozen research corpus, tier 2, NO dependencies — the corpus is
+            # two archive files loaded by script, not a layer any job produces).
+            "research_price_quarantine",
             "weekly_reports",
             "monthly_reports",
         }
@@ -45,6 +49,11 @@ class TestLayerRegistry:
             # is keyed on rule_set_version). Nothing downstream is unsafe
             # because of it, so it must not block the sync walk.
             "price_quarantine",
+            # #3040 — same argument as price_quarantine, and stronger: a failed
+            # research re-quarantine leaves the previous verdicts standing and
+            # the read path is keyed on rule_set_version, so nothing downstream
+            # reads a stale verdict as current. It must not block the walk.
+            "research_price_quarantine",
             "weekly_reports",
             "monthly_reports",
         }

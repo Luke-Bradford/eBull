@@ -94,6 +94,7 @@ Lane = Literal[
     "risk_metrics",
     "fair_value_band",
     "price_quarantine",
+    "research_price_quarantine",
     "strategy_scan",
     "strategy_execution",
     "strategy_backtest",
@@ -575,6 +576,17 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # (#1526/#1527 class). Companion empty params in
     # MANUAL_TRIGGER_JOB_METADATA; invoker in app/jobs/runtime.py::_INVOKERS.
     "price_quarantine_refresh": "price_quarantine",
+    # research_price_quarantine_refresh — #3040 re-quarantine of the 76M-bar
+    # research corpus. Own write-disjoint lane (sole writer of
+    # research_bar_quarantine / research_transition_quarantine /
+    # research_price_quarantine_coverage; reads research_price_daily
+    # MVCC-safe). Orchestrator-driven (DAG layer "research_price_quarantine")
+    # + manual-trigger-only; NOT in SCHEDULED_JOBS. Own lane rather than the
+    # catch-all "db" for the price_quarantine_refresh reason: a full-corpus
+    # pass over 75.97M bars must not starve the db-lane orchestrator sync
+    # (#1526/#1527 class). Companion empty params in
+    # MANUAL_TRIGGER_JOB_METADATA; invoker in app/jobs/runtime.py::_INVOKERS.
+    "research_price_quarantine_refresh": "research_price_quarantine",
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.

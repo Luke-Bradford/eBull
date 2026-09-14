@@ -110,6 +110,17 @@ def load(conn: psycopg.Connection[tuple], cache: Path) -> int:
 
 
 def quarantine(conn: psycopg.Connection[tuple], as_of: date) -> int:
+    # ⚠ Same explicit emptiness guard as the Intrader script. This archive
+    # never measured its as_of, so it never had the implicit version either —
+    # a --quarantine before --load printed a 0-series census, which is what a
+    # healthy no-op prints. #3040.
+    if ingest.loaded_series_count(conn, ingest.HF_ARCHIVE) == 0:
+        # logger.error, matching this file's own `missing shard(s) … run
+        # --download first` guard above — `print` here is for census OUTPUT, and
+        # a refusal is not output. Same surface as the Intrader script's twin.
+        logger.error("no bars loaded for %s — run --load first", ingest.HF_ARCHIVE.vendor)
+        return 1
+
     started = time.time()
     census = ingest.run_quarantine(conn, as_of=as_of)
     print("\n=== stage 2b quarantine census ===")
@@ -297,8 +308,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--as-of",
         type=date.fromisoformat,
-        default=date.today(),
-        help="Quarantine 'today' — sets which trailing bars count as provisional.",
+        default=ingest.HF_ARCHIVE.quarantine_as_of,
+        help=(
+            "Quarantine 'today' — sets which trailing bars count as provisional. "
+            "Defaults to this archive's declared quarantine_as_of so a manual run "
+            "and the scheduled job cannot write different verdicts (#3040); pass a "
+            "value only to investigate, and expect the next scheduled run to "
+            "restore the declared policy."
+        ),
     )
     args = parser.parse_args(argv)
 

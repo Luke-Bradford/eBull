@@ -83,3 +83,29 @@ def fundamentals_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
             f"fundamentals_snapshot rows (write-through gap)",
         )
     return True, "snapshot write-through consistent with normalized periods"
+
+
+def research_price_quarantine_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    """Every archive series carries coverage at its declared quarantine policy.
+
+    This is #3028's addendum made executable: *"a coverage RECONCILIATION
+    before any scan is allowed, not a counter read afterwards"*. The counter it
+    replaces — ``ScanReport.excluded_no_bars`` — reads ``0`` on a wholly empty
+    loader, which is the value a healthy run prints.
+
+    ⚠ Matches on ``(rule_set_version, quarantine_as_of)``. A version match alone
+    cannot tell a declared-policy run from an operator ``--as-of`` override,
+    which writes different ``provisional`` verdicts under an unchanged version.
+    """
+    from app.services.research_corpus_ingest import RESEARCH_ARCHIVES, uncovered_series_count
+
+    outstanding = {archive.vendor: uncovered_series_count(conn, archive) for archive in RESEARCH_ARCHIVES}
+    off_policy = {vendor: n for vendor, n in outstanding.items() if n}
+    if off_policy:
+        detail = ", ".join(f"{vendor}: {n} series" for vendor, n in sorted(off_policy.items()))
+        return (
+            False,
+            f"research corpus not at the current quarantine rule set / as_of ({detail}) — "
+            "masked reads return zero bars for those series until re-evaluated",
+        )
+    return True, f"research corpus covered at the current quarantine policy ({len(outstanding)} archives)"

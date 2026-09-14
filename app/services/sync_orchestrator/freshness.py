@@ -368,3 +368,39 @@ def monthly_reports_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
             f"last monthly_report {_format_age(age)} ago — before the start of the current calendar month UTC",
         )
     return True, f"last monthly_report {_format_age(age)} ago (this calendar month)"
+
+
+def research_price_quarantine_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    """Audit age AND content for the research-corpus quarantine layer (#3040).
+
+    ⚠⚠ The first draft made this CONTENT-ONLY, on the reasoning that both
+    archives are frozen files so their verdicts cannot go stale on a clock. The
+    reasoning was right and the conclusion was wrong, because ``is_fresh`` is
+    not the only thing reading the clock. ``layer_state.py`` rule 9 marks a
+    layer DEGRADED once ``age_seconds > cadence * grace`` (30 h here) whatever
+    the content says, and a layer the planner SKIPS writes no new
+    ``sync_layer_progress`` row — so a perfectly covered corpus would age past
+    30 h, be skipped for being fresh, and sit falsely DEGRADED on the admin
+    surface until somebody rebooted the jobs process (``SyncScope.behind()`` has
+    exactly two callers: ``boot_sweep`` and the operator API). Caught by Codex
+    checkpoint 2.
+
+    The age term is affordable precisely BECAUSE the expensive guard moved into
+    the service: ``refresh_research_quarantine`` skips a vendor already at its
+    declared ``(RULE_SET_VERSION, quarantine_as_of)``, so the daily fire this
+    predicate now allows costs two queries, not the eight-minute rewrite the
+    content-only shape was invented to avoid. The corpus rewrite is gated by
+    coverage; the audit timestamp is what keeps the health model honest.
+
+    Ordered age-then-content so the detail names the more actionable cause: a
+    stale audit means the walk has not reached this layer, which is a different
+    operator action from a corpus that is off its rule set.
+    """
+    from app.services.sync_orchestrator.content_predicates import (
+        research_price_quarantine_content_ok,
+    )
+
+    fresh, detail = _fresh_by_audit(conn, "research_price_quarantine_refresh", timedelta(hours=24))
+    if not fresh:
+        return False, detail
+    return research_price_quarantine_content_ok(conn)

@@ -23,6 +23,7 @@ from app.services.sync_orchestrator.adapters import (
     refresh_monthly_reports,
     refresh_portfolio_sync,
     refresh_price_quarantine,
+    refresh_research_price_quarantine,
     refresh_risk_metrics,
     refresh_scoring_and_recommendations,
     refresh_universe,
@@ -31,6 +32,7 @@ from app.services.sync_orchestrator.adapters import (
 from app.services.sync_orchestrator.content_predicates import (
     candles_content_ok,
     fundamentals_content_ok,
+    research_price_quarantine_content_ok,
 )
 from app.services.sync_orchestrator.freshness import (
     candles_is_fresh,
@@ -42,6 +44,7 @@ from app.services.sync_orchestrator.freshness import (
     portfolio_sync_is_fresh,
     price_quarantine_is_fresh,
     recommendations_is_fresh,
+    research_price_quarantine_is_fresh,
     risk_metrics_is_fresh,
     scoring_is_fresh,
     universe_is_fresh,
@@ -263,6 +266,30 @@ LAYERS: dict[str, DataLayer] = {
         is_blocking=False,
         plain_language_sla="Recomputed daily after candles refresh.",
     ),
+    "research_price_quarantine": DataLayer(
+        name="research_price_quarantine",
+        display_name="Research Corpus Quarantine",
+        # Tier 2 alongside price_quarantine, but with NO dependencies: the
+        # research corpus is two frozen archive files loaded by operator script,
+        # so no layer produces it and there is nothing for it to run after.
+        # An empty requires_layer_initialized also keeps it out of INIT_CHECKS,
+        # which raises on a named dep with no entry.
+        tier=2,
+        # 24h, and the daily fire is DELIBERATE rather than tolerated: the
+        # corpus rewrite is gated inside refresh_research_quarantine (which
+        # skips a vendor already at its declared rule set + as_of), so a fire
+        # against a current corpus costs two queries. Letting it fire also keeps
+        # the audit timestamp moving, without which layer_state rule 9 would
+        # park a perfectly covered corpus at DEGRADED — see
+        # research_price_quarantine_is_fresh.
+        cadence=Cadence(interval=timedelta(hours=24)),
+        is_fresh=research_price_quarantine_is_fresh,
+        content_predicate=research_price_quarantine_content_ok,
+        refresh=refresh_research_price_quarantine,
+        dependencies=(),
+        is_blocking=False,
+        plain_language_sla="Recomputed only when the quarantine rule set changes.",
+    ),
     "weekly_reports": DataLayer(
         name="weekly_reports",
         display_name="Weekly Performance Report",
@@ -309,6 +336,7 @@ JOB_TO_LAYERS: dict[str, tuple[str, ...]] = {
     "fx_rates_refresh": ("fx_rates",),
     "risk_metrics_refresh": ("risk_metrics",),
     "price_quarantine_refresh": ("price_quarantine",),
+    "research_price_quarantine_refresh": ("research_price_quarantine",),
     "fair_value_band_refresh": ("fair_value_band",),
     # Outside-DAG (6 entries, empty tuples):
     "execute_approved_orders": (),

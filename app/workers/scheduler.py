@@ -419,6 +419,13 @@ JOB_FAIR_VALUE_BAND_REFRESH = "fair_value_band_refresh"
 # Must follow candles: the verdicts are derived from price_daily and a refresh
 # that rewrote bars leaves them describing a series that no longer exists.
 JOB_PRICE_QUARANTINE_REFRESH = "price_quarantine_refresh"
+# #3040 — the same recompute for the 76M-bar research corpus, which had no job
+# at all: two operator scripts were the only callers of run_quarantine, so a
+# RULE_SET_VERSION bump left the whole backtest substrate reading zero bars
+# until somebody ran one by hand. Orchestrator-driven (DAG layer
+# "research_price_quarantine") + manual-trigger-only. NO candles dependency —
+# the corpus is two frozen archive files, not a layer any job produces.
+JOB_RESEARCH_PRICE_QUARANTINE_REFRESH = "research_price_quarantine_refresh"
 # #2394 §3.1 — the daily signal scan. SCHEDULED (not orchestrator-driven): its
 # "after the candle refresh" prerequisite is structural rather than a DAG edge —
 # if candles have not moved, the frontier has not moved, and the watermark makes
@@ -5732,6 +5739,42 @@ def price_quarantine_refresh() -> None:
     with _tracked_job(JOB_PRICE_QUARANTINE_REFRESH) as tracker:
         with connect_job() as conn:
             tracker.row_count = refresh_price_quarantine(conn).instruments
+
+
+def research_price_quarantine_refresh() -> None:
+    """Re-evaluate the research corpus when it is off its declared policy (#3040).
+
+    DB-only producer (no external I/O): reads ``research_price_daily``, runs the
+    same pure rule set as ``price_quarantine_refresh``, and replaces the derived
+    verdicts in ``research_bar_quarantine`` / ``research_transition_quarantine``
+    / ``research_price_quarantine_coverage``. Orchestrator-driven via the
+    ``research_price_quarantine`` DAG layer and operator-triggerable via the
+    ``research_price_quarantine`` manual lane.
+
+    ⚠ The service SKIPS a vendor already at the current
+    ``(RULE_SET_VERSION, quarantine_as_of)``, so the steady state is two cheap
+    queries rather than an eight-minute rewrite. That guard is inside the
+    service and not in the layer's freshness predicate on purpose — a ``behind``
+    scope bypasses ``is_fresh``, and a layer degrades on age alone, so a
+    predicate-only guard would be skipped exactly when the job fires.
+
+    ``row_count`` counts SERIES evaluated, and **0 is a success**: the archives
+    are frozen, so "nothing to do" is the healthy state. It is not a row count
+    for the same reason ``price_quarantine_refresh`` gives — the verdict tables
+    are sparse (66,887 rows over 75.97M bars), so rows-written would read as
+    NO_WORK on a completely successful run.
+
+    ⚠ No transaction wrapper. ``run_quarantine`` commits per series, so this
+    publishes incrementally and an interruption leaves a partially re-evaluated
+    vendor — safe under the fail-closed reader, but the reason the gate before a
+    signal scan is the coverage reconciliation rather than a counter (#3028).
+    """
+    from app.services.research_corpus_ingest import refresh_research_quarantine
+
+    with _tracked_job(JOB_RESEARCH_PRICE_QUARANTINE_REFRESH) as tracker:
+        with connect_job() as conn:
+            result = refresh_research_quarantine(conn)
+            tracker.row_count = result.series_evaluated
 
 
 def strategy_signal_scan() -> None:

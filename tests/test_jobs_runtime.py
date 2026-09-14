@@ -793,6 +793,14 @@ class TestProductionInvokerRegistry:
             # cadence/freshness gate the DAG walk). Source-lock
             # "price_quarantine" + empty param metadata complete the triangle.
             "price_quarantine_refresh",
+            # #3040 — research_price_quarantine_refresh. Same triangle as
+            # price_quarantine_refresh (invoker + own source-lock + empty param
+            # metadata, absent from SCHEDULED_JOBS), for the frozen research
+            # corpus. The job that did NOT exist before #3040 is why a
+            # RULE_SET_VERSION bump left 30,572 series reading zero bars with
+            # no alarm; the two operator scripts were run_quarantine's only
+            # callers.
+            "research_price_quarantine_refresh",
             # #2394 §3.2 — strategy_backtest_run. MANUAL-TRIGGER-ONLY, and the
             # absence from SCHEDULED_JOBS is the deliberate visible choice this
             # test exists to force: criterion 5 requires a hold-out purpose and
