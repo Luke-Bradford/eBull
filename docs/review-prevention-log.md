@@ -6396,3 +6396,76 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   carries only `first_seen_at` (the universe-sync stamp), `information_schema` has no
   `ipo_date` column, and `to_regclass('instrument_profile')` is NULL although
   `sql/024_fundamentals_enrichment.sql:43` declares it. Apply both there when #2403 lands.
+
+### A detector that only runs when another one did NOT fire leaves a blind spot in every consumer of its output table
+
+- First seen in: #3046 (2026-09-14). `price_quarantine.py:486` is
+  `if magnitude >= params.magnitude_threshold and not rules:` — **T3 (level break) is
+  evaluated only when neither T1 nor T2 has already fired.** The rationale for the T2 half
+  is written directly above it and is sound on its own terms: *"a `price_series_break`
+  minted from a gap would strand history behind a break that never happened."*
+- The consequence nobody had measured is the other direction. A transition whose magnitude
+  clears its own class threshold, but which also spans a hole (T2) or sits beside a
+  return-unusable close (T1), is stored as `{T2}` / `{T1}`, mints **no**
+  `price_series_break`, and is therefore invisible to `app/services/price_segments.py` —
+  the model `outcome_resolver` and every strategy consumer segment on. That is the capital
+  path, not a research surface.
+- Measured, full population, thresholds imported from `params_for` rather than copied
+  (`scripts/verify_3046_break_minting_census.py`, which computes every figure so none has
+  to be trusted from here): the suppressed population is of the **same order as the entire
+  break table**, and it is overwhelmingly recent. The census reconciles its `t3_minted`
+  arm key-for-key against `price_series_break` before reporting anything, so the
+  suppression figure is not a restatement of the rules it is measuring.
+- ⚠ **This is a suppression census, NOT a missed-split count.** Whether a large move across
+  a three-month hole is a scale change or a real move is exactly the question the
+  classifier declines to answer, and the census does not answer it either. What it
+  establishes is the SIZE of the population the segment model cannot see.
+- The general shape, and the reason a sparse-table `coverage` row does not save you here:
+  `price_quarantine_coverage` exists precisely because absence of a verdict row is
+  ambiguous between "evaluated and clean" and "never evaluated" — but it answers that
+  question **per bar**, not per rule. There is no coverage axis for "this transition was
+  never adjudicated for a level break", so on the suppression axis the table is back to
+  the failure mode the coverage table was built to remove.
+- Prevention: when detector B is gated on detector A not having fired, B's output table
+  under-reports by exactly the overlap, and **no consumer of B's table can see that**.
+  Either record the declined verdict explicitly, or measure the overlap and publish it
+  beside the table — the way T3's containment bias is already published
+  (`price_quarantine.py:28-33`). Do not let the gate exist only as an `and not rules:`.
+- ⚠ Fixing the suppression is not a small change and was deliberately not attempted:
+  `price_quarantine` sits in `INPUT_RULE_SETS` (#3031), so editing the rules rotates
+  strategy identity **and** empties the 76M-bar backtest substrate, and only the first is
+  visible.
+- Caught by: Codex checkpoint 1 on the spec, which falsified the spec's central claim
+  ("only T3 changes the unit regime") in one line of source. No test could have — the
+  suppression is intended behaviour with a written rationale, and the defect is in what
+  downstream readers are entitled to conclude from its output.
+- Enforced in: this prevention log;
+  `docs/proposals/ta/2026-09-14-3046-raw-price-consumer-exposure.md`;
+  `scripts/verify_3046_break_minting_census.py`.
+
+### Two tables reconcile by COUNT only until one of them gains a preservation rule — key-match instead
+
+- First seen in: #3046 (2026-09-14). The census's reconciliation arm compared
+  `count(T3 verdicts)` against `count(price_series_break WHERE resolved_by IS NULL)`. It
+  passed, and it passed **by luck**: nothing in that table is resolved yet.
+- `price_quarantine_store.py:142` deletes only `resolved_by IS NULL` rows on refresh —
+  *"an OPERATOR- or #2231-set resolution must survive it"*. So the moment anything is
+  resolved, a valid corpus has a resolved break whose T3 verdict was rewritten, the two
+  counts differ, and the harness reports a mismatch that exists nowhere in the data. The
+  failure is in the direction that matters: a reconciliation arm that cries wolf gets
+  ignored, and the arm is the only thing standing between a suppression figure and a
+  number nobody checked.
+- Fix: compare on the key the WRITER uses — `(instrument_id, break_date)`, where
+  `break_date` is the transition's own `price_date` (`price_quarantine_store.py:195`) —
+  with a `FULL OUTER JOIN`, and report the three cells separately. `break_only` is
+  EXPECTED to be non-zero once anything is resolved and is reported, not failed;
+  `t3_only` is the cell that means the harness is not reproducing production.
+- The general shape: a count comparison between two tables is only sound while their row
+  sets are maintained by the same rule. Any preservation, tombstone, soft-delete or
+  operator-override clause on one side silently converts it into a different population,
+  and the count still looks like an assertion. **If the writer has a key, reconcile on the
+  key.**
+- Caught by: Codex checkpoint 2 on the diff.
+- Enforced in: this prevention log;
+  `scripts/verify_3046_break_minting_census.py::_reconcile` (its docstring carries the
+  precedent).
