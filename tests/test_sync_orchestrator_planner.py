@@ -10,6 +10,7 @@ from app.services.sync_orchestrator.planner import (
     _build_layer_plan,
     build_execution_plan,
 )
+from app.services.sync_orchestrator.registry import JOB_TO_LAYERS
 from app.services.sync_orchestrator.types import SyncScope
 
 
@@ -86,6 +87,13 @@ class TestBuildLayerPlan:
         assert "recommendations" not in plan.dependencies
 
 
+#: Layers the full DAG walk covers, and the jobs that emit them. Derived so a
+#: new layer updates both counts by existing, not by somebody remembering to
+#: bump a literal.
+_IN_DAG_JOBS = {job for job, emits in JOB_TO_LAYERS.items() if emits}
+_IN_DAG_LAYERS = {layer for emits in JOB_TO_LAYERS.values() for layer in emits}
+
+
 class TestBuildExecutionPlanFull:
     def test_all_fresh_yields_empty_refresh_set(self) -> None:
         from app.services.sync_orchestrator.registry import LAYERS
@@ -93,19 +101,21 @@ class TestBuildExecutionPlanFull:
         _make_conn_with_freshness(set(LAYERS.keys()))
         plan = build_execution_plan(MagicMock(), SyncScope.full())
         assert plan.layers_to_refresh == ()
-        # 13 in-DAG layers (risk_metrics added #591 PR-B; fair_value_band #2009;
-        # price_quarantine #2261).
-        assert len(plan.layers_skipped) == 13
+        # Every in-DAG layer, DERIVED from the registry rather than pinned to a
+        # literal. The count was hand-maintained (9 → 10 → 11 → 12 → 13 across
+        # #591 / #2009 / #2261 / #3040) and a hand-maintained count is a comment
+        # that goes stale on the next append — prevention log: a test pinning a
+        # generic capability must not couple to a churnable registry entry.
+        assert len(plan.layers_skipped) == len(_IN_DAG_LAYERS)
 
     def test_all_stale_yields_every_in_dag_layer(self) -> None:
         _make_conn_with_freshness(set())
         plan = build_execution_plan(MagicMock(), SyncScope.full())
-        # 13 in-DAG layers, but scoring + recommendations collapse into one
-        # producing job (morning_candidate_review) → 12 LayerPlan entries.
-        # risk_metrics added its own job in #591 PR-B (9 → 10); fair_value_band
-        # added its own job in #2009 (10 → 11); price_quarantine in #2261
-        # (11 → 12).
-        assert len(plan.layers_to_refresh) == 12
+        # One LayerPlan per in-DAG JOB, not per layer: scoring + recommendations
+        # collapse into one producing job (morning_candidate_review), which is
+        # why this is derived from JOB_TO_LAYERS and is one fewer than the layer
+        # count above.
+        assert len(plan.layers_to_refresh) == len(_IN_DAG_JOBS)
 
     def test_topological_order_roots_first(self) -> None:
         _make_conn_with_freshness(set())

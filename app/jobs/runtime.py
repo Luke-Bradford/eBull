@@ -137,6 +137,7 @@ from app.workers.scheduler import (
     JOB_PRICE_QUARANTINE_REFRESH,
     JOB_QUOTES_REFRESH,
     JOB_RAW_DATA_RETENTION_SWEEP,
+    JOB_RESEARCH_PRICE_QUARANTINE_REFRESH,
     JOB_RETRY_DEFERRED,
     JOB_RETRY_SWEEPER,
     JOB_RISK_METRICS_REFRESH,
@@ -217,6 +218,7 @@ from app.workers.scheduler import (
     price_quarantine_refresh,
     quotes_refresh,
     raw_data_retention_sweep,
+    research_price_quarantine_refresh,
     retry_deferred_recommendations_job,
     risk_metrics_refresh,
     sec_8k_events_ingest,
@@ -382,6 +384,12 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # double-fire). Source-lock "risk_metrics" in MANUAL_TRIGGER_JOB_SOURCES;
     # empty params in MANUAL_TRIGGER_JOB_METADATA.
     JOB_PRICE_QUARANTINE_REFRESH: _adapt_zero_arg(price_quarantine_refresh),
+    # #3040 — research-corpus re-quarantine. Orchestrator-driven (DAG layer
+    # "research_price_quarantine") + manual-trigger-only; NOT in SCHEDULED_JOBS
+    # (the layer gates the DAG walk — a scheduled row would double-fire).
+    # Source-lock "research_price_quarantine" in MANUAL_TRIGGER_JOB_SOURCES;
+    # empty params in MANUAL_TRIGGER_JOB_METADATA.
+    JOB_RESEARCH_PRICE_QUARANTINE_REFRESH: _adapt_zero_arg(research_price_quarantine_refresh),
     JOB_RISK_METRICS_REFRESH: _adapt_zero_arg(risk_metrics_refresh),
     # #2009 — fair-value band recompute. Orchestrator-driven (DAG layer
     # "fair_value_band") + manual-trigger-only; NOT in SCHEDULED_JOBS (the

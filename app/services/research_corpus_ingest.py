@@ -129,16 +129,32 @@ class ArchiveProvenance:
     upstream_source: str
     licence: str
     adjustment_basis: str
+    #: The ``as_of`` this archive's quarantine is evaluated at (#3040).
+    #:
+    #: ⚠ An INPUT to the stored verdicts, not a label: ``price_quarantine``
+    #: computes ``provisional_from = as_of - PROVISIONAL_WINDOW_DAYS`` and a
+    #: provisional bar suppresses T3's volume read. So it sits here beside the
+    #: archive's other pinned facts, and it is a LITERAL rather than
+    #: ``max(last_bar)`` — a single later-ending or future-dated series would
+    #: otherwise silently re-date the whole vendor's policy while existing
+    #: coverage still read as current.
+    quarantine_as_of: date
 
 
 #: ⚠ ``split_adjusted`` is VERIFIED for this archive, not assumed. sql/251's
 #: header carries the evidence: AAPL 2020-08-27 close = 125.01 against an
 #: unadjusted ~$500 and a 4:1 split settling 2020-08-31.
+#: ⚠ ``quarantine_as_of`` is capture (2026-07-08, ``max(last_bar)``) +
+#: ``PROVISIONAL_WINDOW_DAYS`` + 1 — the smallest date that marks nothing in
+#: this archive provisional. That reproduces what the script's historical
+#: ``date.today()`` default produced for a frozen archive whose last bar is
+#: months old, without a scheduled job ever reading a clock.
 HF_ARCHIVE = ArchiveProvenance(
     vendor=VENDOR,
     upstream_source=UPSTREAM_SOURCE,
     licence=LICENCE,
     adjustment_basis=ADJUSTMENT_BASIS,
+    quarantine_as_of=date(2026, 7, 14),
 )
 
 #: ⚠ ``unadjusted`` is MEASURED, and it is the opposite of what #2398 recorded
@@ -155,7 +171,24 @@ INTRADER_ARCHIVE = ArchiveProvenance(
     upstream_source="yahoo_derivative",
     licence="other/unspecified",
     adjustment_basis="unadjusted",
+    #: ⚠ The archive's own capture date, so its trailing 2024-09-22→27 bars
+    #: are provisional — the basis ``market_regime_provider``'s freeze-time
+    #: declaration was written against. Deliberately NOT harmonised with
+    #: HF_ARCHIVE: making both "capture date" would mark HF's 2026-07-03→08
+    #: bars provisional across 7,693 series, which is a corpus change needing
+    #: its own A/B, not a tidy-up.
+    quarantine_as_of=date(2024, 9, 27),
 )
+
+#: Every archive the scheduled re-quarantine covers, in run order.
+#:
+#: ⚠ The refresh iterates THIS, so a new archive cannot be added without a
+#: declared ``quarantine_as_of`` — which is the point. Deliberately excludes
+#: ``cboe`` and ``etoro/etoro-comparators-*``: those 19 series have never had a
+#: coverage row, and covering them is a data-treatment decision rather than a
+#: registration one, because ``_ASSET_CLASS`` below is hardcoded ``us_equity``
+#: and a VIX index series is not an equity (#3040 non-goal).
+RESEARCH_ARCHIVES: tuple[ArchiveProvenance, ...] = (HF_ARCHIVE, INTRADER_ARCHIVE)
 
 
 # ---------------------------------------------------------------------------
@@ -1034,11 +1067,12 @@ def run_quarantine(
             cur.execute(
                 """
                 INSERT INTO research_price_quarantine_coverage
-                    (series_id, rule_set_version, first_bar, last_bar,
-                     bars_evaluated, transitions_evaluated)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (series_id, rule_set_version, quarantine_as_of, first_bar,
+                     last_bar, bars_evaluated, transitions_evaluated)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (series_id) DO UPDATE SET
                     rule_set_version      = EXCLUDED.rule_set_version,
+                    quarantine_as_of      = EXCLUDED.quarantine_as_of,
                     first_bar             = EXCLUDED.first_bar,
                     last_bar              = EXCLUDED.last_bar,
                     bars_evaluated        = EXCLUDED.bars_evaluated,
@@ -1048,6 +1082,10 @@ def run_quarantine(
                 (
                     series_id,
                     RULE_SET_VERSION,
+                    # The as_of ACTUALLY used, never the declared constant — an
+                    # operator --as-of override must be visible as a divergence
+                    # rather than be recorded as though it were policy (#3040).
+                    as_of,
                     bars[0].price_date,
                     bars[-1].price_date,
                     len(bars),
@@ -1069,6 +1107,130 @@ def run_quarantine(
             )
 
     return census
+
+
+# ---------------------------------------------------------------------------
+# Scheduled re-quarantine (#3040)
+# ---------------------------------------------------------------------------
+
+#: Series a vendor holds that are NOT covered at the given (version, as_of).
+#:
+#: ⚠ Written as a COUNT over a LEFT JOIN with an explicit ``IS NULL`` rather
+#: than a ``NOT (…)`` over the joined columns. A missing coverage row makes
+#: every ``cov.*`` comparison UNKNOWN, and ``NOT UNKNOWN`` is UNKNOWN, so the
+#: negated form drops exactly the rows this check exists to find.
+#:
+#: ⚠ Containment, not equality: a coverage row whose evaluated range no longer
+#: spans the series' own range describes a corpus that has since grown. Same
+#: predicate ``research_price_read_canary`` already uses for eligibility.
+_UNCOVERED_SERIES_SQL = """
+    SELECT count(*)
+    FROM research_price_series s
+    LEFT JOIN research_price_quarantine_coverage cov
+      ON cov.series_id = s.series_id
+     AND cov.rule_set_version = %(rule_set_version)s
+     AND cov.quarantine_as_of = %(quarantine_as_of)s
+     AND cov.first_bar <= s.first_bar
+     AND cov.last_bar  >= s.last_bar
+    WHERE s.vendor = %(vendor)s
+      AND s.bar_count IS NOT NULL
+      AND s.first_bar IS NOT NULL
+      AND s.last_bar IS NOT NULL
+      AND cov.series_id IS NULL
+"""
+
+
+def uncovered_series_count(conn: psycopg.Connection[Any], archive: ArchiveProvenance) -> int:
+    """How many of ``archive``'s series are not at its declared quarantine policy.
+
+    Zero means the vendor is current: every loaded series carries a coverage row
+    at the live ``RULE_SET_VERSION`` AND at the archive's declared
+    ``quarantine_as_of``, spanning at least the series' own bar range.
+
+    ⚠ Both halves of that pair are load-bearing. The version alone cannot tell a
+    declared-policy run from an operator ``--as-of`` override, which writes
+    different ``provisional`` verdicts — and therefore different T3 corroboration
+    — under an unchanged version (#3040).
+    """
+    row = conn.execute(
+        _UNCOVERED_SERIES_SQL,
+        {
+            "vendor": archive.vendor,
+            "rule_set_version": RULE_SET_VERSION,
+            "quarantine_as_of": archive.quarantine_as_of,
+        },
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+@dataclass
+class ResearchQuarantineRefresh:
+    """What the scheduled re-quarantine did, per vendor.
+
+    ``series_evaluated`` is 0 on a healthy no-op run and that is a SUCCESS, not
+    NO_WORK — the archives are frozen, so the steady state is "nothing to do".
+    ``skipped`` names the vendors that were already current so the reason is in
+    the log rather than inferred from a zero.
+    """
+
+    series_evaluated: int = 0
+    bars_evaluated: int = 0
+    refreshed_vendors: tuple[str, ...] = ()
+    skipped_vendors: tuple[str, ...] = ()
+
+
+def refresh_research_quarantine(conn: psycopg.Connection[Any]) -> ResearchQuarantineRefresh:
+    """Re-evaluate any archive whose coverage is not at its declared policy.
+
+    The work condition lives HERE and not only in the layer's freshness
+    predicate, deliberately. ``sync_orchestrator/planner.py`` sets
+    ``bypass_freshness_for_all = scope.kind == "behind"``, and a ``behind`` walk
+    selects exactly the DEGRADED layers — so the predicate is NOT consulted on
+    the path that fires this job. A layer also degrades on age alone
+    (``layer_state.py`` rule 9: ``age_seconds > cadence * grace``), which for a
+    frozen corpus would mean re-writing 76M bars' worth of verdicts nightly for
+    no reason. Guarding inside the job holds on every path — cron, forced scope,
+    ``behind`` scope and manual "Run now" — because it does not depend on the
+    planner agreeing with it.
+
+    ⚠ NOT wrapped in a transaction. ``run_quarantine`` commits per series, so
+    publication is incremental by construction and an interrupted run leaves a
+    partially re-evaluated vendor. That is safe under the fail-closed reader
+    (series not yet reached read EMPTY, never unmasked) but it is the
+    partially-refreshed state that must not be confused with a healthy one —
+    which is why the gate before a signal scan is the coverage reconciliation,
+    never a counter.
+    """
+    result = ResearchQuarantineRefresh()
+    refreshed: list[str] = []
+    skipped: list[str] = []
+
+    for archive in RESEARCH_ARCHIVES:
+        outstanding = uncovered_series_count(conn, archive)
+        if outstanding == 0:
+            skipped.append(archive.vendor)
+            logger.info(
+                "research quarantine: %s already at %s / as_of %s — skipped",
+                archive.vendor,
+                RULE_SET_VERSION,
+                archive.quarantine_as_of,
+            )
+            continue
+
+        logger.info(
+            "research quarantine: %s has %d series off policy — re-evaluating at as_of %s",
+            archive.vendor,
+            outstanding,
+            archive.quarantine_as_of,
+        )
+        census = run_quarantine(conn, vendor=archive.vendor, as_of=archive.quarantine_as_of)
+        refreshed.append(archive.vendor)
+        result.series_evaluated += census.series_evaluated
+        result.bars_evaluated += census.bars_evaluated
+
+    result.refreshed_vendors = tuple(refreshed)
+    result.skipped_vendors = tuple(skipped)
+    return result
 
 
 # ---------------------------------------------------------------------------

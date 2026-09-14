@@ -166,18 +166,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.quarantine:
             as_of = args.as_of
             if as_of is None:
-                # The capture date, MEASURED. Passing today's date would have
-                # every series in the archive read as ~2 years stale and turn
-                # the staleness rule into a blanket verdict.
-                row = conn.execute(
-                    "SELECT max(last_bar) FROM research_price_series WHERE vendor = %s",
-                    (ingest.INTRADER_ARCHIVE.vendor,),
-                ).fetchone()
-                if row is None or row[0] is None:
-                    logger.error("no bars loaded for %s — run --load first", ingest.INTRADER_ARCHIVE.vendor)
-                    return 1
-                as_of = row[0]
-                logger.info("quarantine as-of = %s (measured archive capture date)", as_of)
+                # The capture date. Passing today's date would have every series
+                # in the archive read as ~2 years stale and turn the staleness
+                # rule into a blanket verdict.
+                #
+                # ⚠ Read from the DECLARED constant, not from max(last_bar) as
+                # this did before #3040. The measurement was right about the
+                # date and wrong about the source: one later-ending or
+                # future-dated series silently re-dates the whole vendor's
+                # policy, and the coverage rows written under the old date keep
+                # reading as current. The declared value is also what the
+                # scheduled job uses, so the two paths cannot disagree.
+                as_of = ingest.INTRADER_ARCHIVE.quarantine_as_of
+                logger.info("quarantine as-of = %s (declared archive capture date)", as_of)
             return quarantine(conn, as_of)
     return 0
 

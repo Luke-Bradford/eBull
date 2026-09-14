@@ -297,8 +297,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--as-of",
         type=date.fromisoformat,
-        default=date.today(),
-        help="Quarantine 'today' — sets which trailing bars count as provisional.",
+        default=ingest.HF_ARCHIVE.quarantine_as_of,
+        help=(
+            "Quarantine 'today' — sets which trailing bars count as provisional. "
+            "Defaults to this archive's declared quarantine_as_of so a manual run "
+            "and the scheduled job cannot write different verdicts (#3040); pass a "
+            "value only to investigate, and expect the next scheduled run to "
+            "restore the declared policy."
+        ),
     )
     args = parser.parse_args(argv)
 

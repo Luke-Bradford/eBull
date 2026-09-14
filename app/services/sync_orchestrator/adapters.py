@@ -327,6 +327,24 @@ def refresh_price_quarantine(
     )
 
 
+def refresh_research_price_quarantine(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    # #3040 — re-quarantine of the research corpus, skipped per vendor when
+    # already at the declared (rule_set_version, quarantine_as_of).
+    from app.workers.scheduler import research_price_quarantine_refresh
+
+    return _wrap_single(
+        job_name="research_price_quarantine_refresh",
+        layer_name="research_price_quarantine",
+        legacy_fn=research_price_quarantine_refresh,
+        progress=progress,
+    )
+
+
 def refresh_fair_value_band(
     *,
     sync_run_id: int,

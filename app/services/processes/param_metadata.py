@@ -238,6 +238,10 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # price_quarantine_refresh — #2261 full-corpus quarantine recompute. No
     # operator params: scope is the whole priced universe.
     "price_quarantine_refresh": (),
+    # research_price_quarantine_refresh — #3040 research-corpus re-quarantine.
+    # No parameters: the vendors and their as_of policies are declared in
+    # research_corpus_ingest.RESEARCH_ARCHIVES, not chosen per invocation.
+    "research_price_quarantine_refresh": (),
     # strategy_backtest_run — #2394 §3.2. Five params. ``evidence_window`` is
     # an enum over code-pinned dates, not an operator-tunable date range. The
     # hold-out pair controls audited access; the enum selects a reproducible
