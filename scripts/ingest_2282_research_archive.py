@@ -399,8 +399,12 @@ def attribute(conn: psycopg.Connection[tuple]) -> int:
         print("  nothing to band — no instrument has a usable archive volume")
         return 0
 
-    size = len(banded) // 5
-    quintile = {iid: min(4, i // size) if size else 0 for i, (iid, *_) in enumerate(banded)}
+    # (i * 5) // total, not i // (total // 5): the latter dumps the whole
+    # remainder into Q5, so on a population not divisible by 5 the deepest
+    # quintile is the odd-sized one — and Q5 is exactly where this diagnostic's
+    # signal is thinnest and a few instruments move the rate most.
+    total = len(banded)
+    quintile = {iid: (i * 5) // total for i, (iid, *_) in enumerate(banded)}
     by_id = {iid: (n, c, dv) for iid, n, c, dv in banded}
 
     def rate(members: list[int]) -> float | None:
