@@ -6269,3 +6269,70 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   both `scripts/ingest_*_archive.py` quarantine paths;
   `tests/test_research_quarantine_refresh.py::test_an_unloaded_archive_is_skipped_and_never_evaluated`;
   `tests/test_research_quarantine_refresh_db.py::test_an_unloaded_archive_reads_as_covered_which_is_why_the_guard_exists`.
+
+### A rule you are about to implement at the READER may already be implemented at the WRITER
+
+- First seen in: #2575 (2026-09-14), at Codex checkpoint 1 — twice, on two successive
+  drafts of the same spec.
+- Symptom: the ticket said three consumers of a global `MAX(price_date)` were unsafe
+  because a forming or partial newest date could reach them. Draft 1 invented a shared
+  modal-coverage resolver with a completeness floor. Draft 2 replaced it with the repo's
+  own `market_calendar.latest_completed_us_session`. **Both were unnecessary for two of the
+  three consumers**, because `2d1b4e8d` (2026-08-12) already applies that exact function at
+  INGEST — `market_data.py:644` filters `bars = [b for b in bars if b.price_date <=
+  fresh_through]`. A forming bar cannot reach `price_daily` at all, so no reader can be
+  handed one.
+- ⚠ **The "evidence" that the defect had fired was mis-dated, and that is the part that
+  nearly shipped.** One stored `fair_value_cohort_members` batch is anchored on Saturday
+  `2026-08-08` — four days BEFORE the ingest clamp existed. A pre-fix artefact reads
+  exactly like a live defect in a `select`, because rows carry no provenance for the code
+  that wrote them.
+- Root cause: the investigation started at the consumer named in the ticket and worked
+  outward through the consumer's own module. The writer is not in that module, and nothing
+  in the reader's code says "someone upstream already guarantees this".
+- The general shape: **an invariant can be enforced at the writer, at the reader, or at the
+  schema, and a ticket naming a reader tells you only where the symptom was noticed.**
+  Fixing it at the reader when the writer already holds it is not harmless — here it would
+  have moved stored valuation output (anchor choice reaches cohort width through
+  `peer_pct_for`'s FRESH-peer requirement) for a defect that does not exist.
+- Prevention, two checks, both cheap:
+  1. Before fixing a read-side invariant, **grep the WRITER for the same predicate** — the
+     ingest path, the upsert, the CHECK constraint. `rg` the function you were about to
+     call; if it already appears at the write site, the reader is not the fix.
+  2. **Date every piece of "the defect has fired" evidence against the commit that would
+     have prevented it** (`git log -S '<the predicate>'`). Stored rows have no provenance
+     for the code that wrote them, so a row older than the fix is not evidence about today.
+- Same family as *"source-rule before design"*, arriving from the other side: that rule
+  says find the governing rule before inventing one; this one says **find where the rule is
+  already ENFORCED before adding a second enforcement point.**
+- Caught by: Codex checkpoint 1, on the judgement artefact, both times. Neither the review
+  bot nor any test could have — the code would have been correct, just redundant and
+  output-moving.
+- Enforced in: this prevention log;
+  `docs/proposals/ops/2026-09-14-2575-population-safe-price-frontiers.md` (the "Bullets 1
+  and 2 are ALREADY CLOSED" section records the commit, the predicate and the mis-dating).
+
+### `Decimal.normalize()` is context-dependent and lossy — never use it to canonicalise a value for hashing or comparison
+
+- First seen in: #2414 (2026-09-14), at Codex checkpoint 1, on a spec that proposed
+  `format(value.normalize(), 'f')` as the canonical rendering of an OHLCV field inside a
+  content digest.
+- Symptom, reproduced rather than argued: at the default `getcontext().prec = 28`,
+  `Decimal('1.0000000000000000000000000000001')` and `Decimal('1.0000000000000000000000000000002')`
+  are distinct values that both render `1`. `normalize()` rounds to the ACTIVE context, so
+  two different stored numbers can serialise identically — and the same number can
+  serialise differently in two processes whose context differs.
+- ⚠ It happens not to bite on `price_daily` today: the columns are `numeric(18,6)` and
+  `numeric(20,4)`, so no stored value reaches 28 significant digits. That is a property of
+  the current schema, not of the function — which is exactly the kind of accidental safety
+  that survives until a column widens.
+- The general shape: **`getcontext()` is process-global and mutable, so any function that
+  consults it is not a pure canonicaliser.** A digest input has to be a function of the
+  value alone.
+- Prevention: build the canonical form from `as_tuple()` — sign, digits, exponent — and
+  strip trailing zeros explicitly if you want `10.50` and `10.5` to agree. Normalise `-0`
+  and refuse non-finite values by name. If you catch yourself reaching for `normalize()` in
+  a hashing path, that is the tell.
+- Enforced in: this prevention log;
+  `docs/proposals/ta/2026-09-14-2414-signal-ledger-corpus-stamp.md` ("If a content digest
+  is ever revisited" records the reproduction).
