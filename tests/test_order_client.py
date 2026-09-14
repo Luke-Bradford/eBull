@@ -167,6 +167,19 @@ def _make_cursor(rows: list[dict[str, Any]]) -> MagicMock:
     return cur
 
 
+def _exit_lot_lock_cursor(units: float | Decimal = 1000.0) -> MagicMock:
+    """#3020: the ``SELECT units ... FOR UPDATE`` on the lot an EXIT closed.
+
+    A plain cursor with no ``row_factory``, so the row is a TUPLE — matching
+    ``_deduct_closed_exit_lot``, which reads ``locked_row[0]``.
+    """
+    cur = MagicMock()
+    cur.fetchone.return_value = (units,)
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    return cur
+
+
 def _make_conn(cursor_sequence: list[MagicMock]) -> MagicMock:
     """
     Build a fake psycopg connection.
@@ -1063,6 +1076,8 @@ class TestExecuteOrderLiveMode:
             _update_cursor(rowcount=1),
             # No cost recording for EXIT
             _fill_returning_cursor(fill_id=7),
+            # #3020: lock the broker lot before deducting the close
+            _exit_lot_lock_cursor(5.0),
             # Post-fill: read current_units for attribution check
             _make_cursor([{"current_units": 0}]),
         ]
@@ -1976,6 +1991,8 @@ class TestExitLotSelection:
             _order_returning_cursor(order_id=11),
             _update_cursor(rowcount=1),
             _fill_returning_cursor(fill_id=7),
+            # #3020: lock the broker lot before deducting the close
+            _exit_lot_lock_cursor(1000.0),
             # Post-fill read of positions.current_units — 500 still open.
             _make_cursor([{"current_units": 500}]),
         ]
@@ -2109,6 +2126,7 @@ class TestExitLotUnitsPrecision:
             _order_returning_cursor(order_id=11),
             _update_cursor(rowcount=1),
             _fill_returning_cursor(fill_id=7),
+            _exit_lot_lock_cursor(1000.0),
             _make_cursor([{"current_units": 500}]),
         ]
 
@@ -2188,6 +2206,7 @@ class TestExitPositionRowcountGuard:
             _order_returning_cursor(order_id=11),
             _update_cursor(rowcount=1),
             _fill_returning_cursor(fill_id=7),
+            _exit_lot_lock_cursor(1000.0),
             _make_cursor([{"current_units": 500}]),
         ]
 
@@ -2217,3 +2236,95 @@ class TestExitPositionRowcountGuard:
         conn = _make_conn(self._cursors())
         result = execute_order(conn, recommendation_id=42, decision_id=10, broker=self._live_exit(monkeypatch))
         assert result.outcome == "filled"
+
+
+class TestExitLotMirrorDeduction:
+    """#3020: a filled EXIT must deduct the broker lot it closed.
+
+    Wiring only — that the deduction is reached on the live path with the right
+    bound arguments, and NOT reached on demo. The behaviour of the statement
+    itself (proration, the ``FOR UPDATE`` re-read, and that ``_load_exit_lot``
+    stops returning the lot) is in ``tests/test_3020_exit_lot_deduction_db.py``,
+    because a mocked cursor cannot evaluate any of it.
+    """
+
+    @staticmethod
+    def _mirror_update_params(conn: MagicMock) -> dict[str, Any] | None:
+        """The bound parameters of the broker_positions UPDATE, or None.
+
+        Keyed on the parameter SHAPE rather than the SQL text (#3003): a
+        substring match on ``"UPDATE broker_positions"`` passes identically for a
+        statement that binds the wrong lot.
+        """
+        for call in conn.execute.call_args_list:
+            if len(call.args) > 1 and isinstance(call.args[1], dict) and "pid" in call.args[1]:
+                return call.args[1]
+        return None
+
+    def _live_exit_broker(self, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+        broker = MagicMock()
+        broker.close_position.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-456",
+            status="filled",
+            filled_price=Decimal("20"),
+            filled_units=Decimal("1000"),
+            fees=Decimal("0"),
+            raw_payload={},
+        )
+        return broker
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_a_live_exit_deducts_the_lot_it_closed(
+        self, _mock_now: MagicMock, _mock_attr: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        broker = self._live_exit_broker(monkeypatch)
+        conn = _make_conn(
+            [
+                _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+                _position_cursor(current_units=1500.0),
+                _make_cursor([{"position_id": 3308442058, "units": 1000.0}]),
+                _order_returning_cursor(order_id=11),
+                _update_cursor(rowcount=1),
+                _fill_returning_cursor(fill_id=7),
+                _exit_lot_lock_cursor(1000.0),
+                _make_cursor([{"current_units": 500}]),
+            ]
+        )
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        params = self._mirror_update_params(conn)
+        assert params is not None, "the closed lot was never deducted from broker_positions"
+        # The lot the broker was actually asked to close, and the units it filled.
+        assert params["pid"] == 3308442058
+        assert params["units"] == Decimal("1000.00000000")
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_a_demo_exit_writes_nothing_to_the_mirror(
+        self, _mock_now: MagicMock, _mock_attr: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Demo resolves no lot, and its own ``broker_positions`` rows carry the
+        synthetic negative ids ``_load_exit_lot`` already excludes — there is
+        nothing the broker could have closed, so there is nothing to deduct."""
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_DEMO,
+        )
+        conn = _make_conn(
+            [
+                _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+                _position_cursor(current_units=5.0),
+                _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
+                _order_returning_cursor(order_id=11),
+                _fill_returning_cursor(fill_id=7),
+                _make_cursor([{"current_units": 0}]),
+            ]
+        )
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=None)
+
+        assert self._mirror_update_params(conn) is None
