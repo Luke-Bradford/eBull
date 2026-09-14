@@ -68,9 +68,11 @@ class CoreSelection:
     missing_candidate_ids: tuple[int, ...]
     configuration_error: str | None
     earliest_possible_verdict_at: datetime
-    """#2833's lower bound, recomputed on every read -- never a completion ETA.
-    A FIELD rather than the property it replaced: the bound is a function of the
-    evidence and the clock, and a property on a frozen row could read neither."""
+    """#2833's lower bound, recomputed by every ``load_core_selection`` call -- never
+    a completion ETA, and never the same twice across a day boundary.  A FIELD rather
+    than the property it replaced because it is EVIDENCE: stamped from the same read
+    that produced the counts beside it, so a row cannot report 3/5 next to a bound
+    derived from a later population."""
 
     @property
     def ready(self) -> bool:
@@ -103,11 +105,27 @@ def earliest_possible_verdict_at(
     earlier than the hand-derived 2026-09-02, because 31 August is an LSE bank
     holiday.  Encoding the calendars (#2312) tightens it; nothing else needs to change.
 
+    ⚠ **Skipping a weekend is safe in the OTHER direction too, and that is not
+    self-evident -- it was challenged at Codex checkpoint 3.** If a weekend date could
+    become a common date, skipping it would push the bound LATER than possible, which
+    is the overstatement the paragraph above forbids.  It cannot: an ``observed`` row
+    needs a quote younger than ``strategy_core_quote_observation.MAX_QUOTE_AGE`` (one
+    hour, the tick cadence), and a shut venue only re-serves its last quote -- the
+    module's own dev-verified note, 2026-08-23, a Sunday.  Measured on the FULL stored
+    population 2026-09-14: by ISO weekday, ``observed`` rows exist on Mon/Tue/Wed only;
+    Saturday is 20 rows and Sunday 420, and **every one of them is ``invalid``**.  A
+    hand-written weekend fixture proves nothing about what the collector can produce.
+
     The walk starts at the LATER of today and the day after the last common date, and
     never before ``CORE_SELECTION_EVIDENCE_NOT_BEFORE`` -- a session before the
     prospective boundary cannot enter the population the sealed verifier opens.  Today
     itself counts when it is a weekday, including when its session has already closed
     un-observed: optimistic in the same safe direction as the holiday omission.
+
+    ⚠ Starting at TODAY assumes a date earlier than today cannot later become common,
+    which holds because ``sample_bucket`` truncates the OBSERVATION instant -- the
+    collector can only ever write the hour it is running in, so there is no backfill
+    path that adds an older common date behind the walk.
 
     ⚠⚠ **A COMPLETE window freezes on its FIFTH common date, not its latest one.**
     ``scripts/verify_2833_core_selection.py:166`` takes ``common_dates[:required_dates]``
@@ -119,6 +137,12 @@ def earliest_possible_verdict_at(
     ``None`` until one exists -- which is also why the completed branch tests it rather
     than ``observed_trading_days``: the date's existence IS the completeness fact.
     """
+    if now.tzinfo is None:
+        # Every other clock-taking module here refuses a naive stamp rather than
+        # letting `astimezone` silently read the HOST timezone -- `sample_bucket` and
+        # `observe_core_sleeve` both do.  A bound computed in the wrong zone is off by
+        # a day at exactly the boundary the whole function exists to name.
+        raise ValueError("now must be timezone-aware")
     if verdict_window_close_date is not None:
         return _midnight_after(verdict_window_close_date)
 

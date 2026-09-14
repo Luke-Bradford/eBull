@@ -7,6 +7,7 @@ import pytest
 
 from app.services.strategy_core_selection import (
     CORE_SELECTION_EVIDENCE_NOT_BEFORE,
+    CORE_SELECTION_VERDICT_BOUND_VERSION,
     CoreSelectionError,
     earliest_possible_verdict_at,
     load_core_selection,
@@ -247,3 +248,43 @@ def test_an_undescribable_population_still_yields_a_future_bound() -> None:
     selection = load_core_selection(_empty_connection(), now=datetime(2026, 9, 14, 0, 46, tzinfo=UTC))
     assert selection.observed_trading_days == 0
     assert selection.earliest_possible_verdict_at == datetime(2026, 9, 19, tzinfo=UTC)
+
+
+def test_a_naive_clock_is_refused_rather_than_read_in_the_host_timezone() -> None:
+    """`astimezone` on a naive stamp assumes LOCAL time, which moves the day boundary
+    this function exists to name. Same refusal `sample_bucket` makes."""
+    with pytest.raises(ValueError, match="timezone-aware"):
+        earliest_possible_verdict_at(
+            observed_trading_days=1,
+            last_common_observed_date=date(2026, 8, 25),
+            verdict_window_close_date=None,
+            now=datetime(2026, 9, 14, 0, 46),
+        )
+
+
+def test_the_frozen_construction_is_pinned_to_its_version() -> None:
+    """The reader that makes `CORE_SELECTION_VERDICT_BOUND_VERSION` mean something.
+
+    No published formulation exists for "when can a five-common-session window close",
+    so `.claude/CLAUDE.md` requires the rule be fixed BY CONSTRUCTION and frozen in a
+    version. A version nothing checks is decoration: this test is the check. The four
+    clauses below ARE v1 -- changing any of them must move the version string, and
+    that is the point of failing here when it does not.
+    """
+    assert CORE_SELECTION_VERDICT_BOUND_VERSION == "core-verdict-bound-v1"
+    friday = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
+    # 1. weekends are skipped; 2. the walk starts no earlier than today;
+    # 3. the boundary is the 00:00 UTC AFTER the fifth session.
+    assert earliest_possible_verdict_at(
+        observed_trading_days=1,
+        last_common_observed_date=date(2026, 8, 25),
+        verdict_window_close_date=None,
+        now=friday,
+    ) == datetime(2026, 9, 17, tzinfo=UTC), "Fri 11th + Mon-Thu = four sessions, boundary the 17th"
+    # 4. a closed window ignores the walk entirely.
+    assert earliest_possible_verdict_at(
+        observed_trading_days=1,
+        last_common_observed_date=date(2026, 8, 25),
+        verdict_window_close_date=date(2026, 9, 4),
+        now=friday,
+    ) == datetime(2026, 9, 5, tzinfo=UTC)
