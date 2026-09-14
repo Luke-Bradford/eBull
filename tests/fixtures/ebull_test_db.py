@@ -446,6 +446,73 @@ _PLANNER_TABLES: tuple[str, ...] = (
 _TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset({"strategy_result_universe"})
 
 
+# ---------------------------------------------------------------------------
+# #2224 cause 3 — migration-SEED tables are RESTORED, not emptied.
+#
+# The wipe set above (and its inbound-FK closure) answers "what must be empty
+# before a test runs". It is derived from ``pg_constraint``, so it is blind to a
+# table that is neither a listed root nor an FK descendant — and some of those
+# tables hold rows the MIGRATIONS put there. Emptying them is as wrong as
+# leaking into them:
+#
+#   tests/test_migration_159_currency_backfill.py COMMITs a synthetic
+#   ``exchanges`` row (asset_class='us_equity', capabilities NULL) and mutates
+#   its currency; tests/test_migration_071_exchanges_capabilities.py then
+#   asserts EVERY us_equity row carries capabilities->'filings' = ["sec_edgar"]
+#   and fails with "filings drift ... got None". Reverse order passes, and the
+#   alphabetical file-chunking used as the ``-m db`` substitute puts the two
+#   modules in different chunks — so 24/24 chunks pass while the pair fails
+#   100% of the time run together.
+#
+# ``exchanges`` may NOT simply join ``_PLANNER_TABLES``: the same 071 module
+# asserts ``rows, "no us_equity rows seeded — migration 067 didn't run?"``, so
+# wiping it breaks the test from the other side. The correct operation is
+# RESTORE-TO-TEMPLATE, and it needs a pristine copy to restore from.
+#
+# Measured on a freshly built template (full population, not a sample): 252
+# ``public`` roots, 15 non-empty. Three of those 15 (``institutional_filers``,
+# ``institutional_filer_seeds``, ``etf_filer_cik_seeds``) are INSIDE the wipe
+# closure, so their seed is already deleted before every test — deterministic,
+# not this ticket's intermittent class, and restoring them would change what
+# their tests observe. They are deliberately left alone; the restore set is
+# "seeded AND outside the wipe closure", which is 11 tables once the ledger
+# below is excluded. Every one of the 11 has at least one test writer
+# (``exchanges`` 31 files, ``bootstrap_state`` 25, ``kill_switch`` 12,
+# ``runtime_config`` 9) — ``exchanges`` is simply the pair that surfaced.
+#
+# The set is DERIVED at template-build time, not hand-listed, so a future
+# migration that seeds a new table is covered without an edit here.
+
+#: Prefix for the per-table pristine copy. ``_pristine_`` + the longest seed
+#: table name must stay inside Postgres' 63-byte identifier limit; asserted at
+#: snapshot time rather than trusted.
+_SEED_SNAPSHOT_PREFIX = "_pristine_"
+
+#: Table listing the restore set, written at template-build time. It is CLONED
+#: into every worker DB along with the snapshots, which is what makes the worker
+#: self-describing — a controller-local Python list would not reach xdist
+#: workers, and re-deriving "non-empty" in a worker would misread a table an
+#: earlier test emptied.
+_SEED_SNAPSHOT_MANIFEST = "_pristine_manifest"
+
+#: Bumped whenever the snapshot recipe or the exclusion set changes. Recorded in
+#: the template stamp, so a template built by an older checkout is rebuilt even
+#: though its migration hash still matches.
+_SEED_SNAPSHOT_VERSION = 1
+
+#: ``schema_migrations`` is the schema LEDGER, not seed data.
+#: ``tests/test_migration_content_drift.py`` runs the real ``run_migrations()``
+#: against the worker DB, so restoring it would delete the row for a migration
+#: that HAS been applied — leaving the ledger disagreeing with the schema, which
+#: is precisely the divergence #1333's content-drift guard exists to catch. That
+#: module cleans up its own probe row; it does not need this mechanism.
+_SEED_SNAPSHOT_EXCLUDED: frozenset[str] = frozenset({"schema_migrations"})
+
+
+def _snapshot_name(table: str) -> str:
+    return f"{_SEED_SNAPSHOT_PREFIX}{table}"
+
+
 # #1401 — worker-DB relation-count tripwire ceiling.
 #
 # The per-worker private DB is cloned from ``ebull_test_template``
@@ -616,8 +683,8 @@ def _migration_hash() -> str:
     return h.hexdigest()
 
 
-def _read_template_stamp(admin: psycopg.Connection[Any]) -> tuple[str, str] | None:
-    """``(migration_hash, built_from)`` recorded on the template, or ``None``.
+def _read_template_stamp(admin: psycopg.Connection[Any]) -> tuple[str, str, int] | None:
+    """``(migration_hash, built_from, seed_snapshot_version)``, or ``None``.
 
     The stamp lives in the template's DATABASE COMMENT, not in a file. That
     matters for two measured reasons (#2342):
@@ -643,10 +710,13 @@ def _read_template_stamp(admin: psycopg.Connection[Any]) -> tuple[str, str] | No
         return None
     try:
         stamp = json.loads(row[0])
-        return str(stamp["migration_hash"]), str(stamp["built_from"])
+        return str(stamp["migration_hash"]), str(stamp["built_from"]), int(stamp["seed_snapshot_version"])
     except ValueError, KeyError, TypeError:
         # A comment we did not write (or an older format) means "unknown", which
-        # forces a rebuild. Never treat an unparseable stamp as a match.
+        # forces a rebuild. Never treat an unparseable stamp as a match. A
+        # template built before #2224 cause 3 carries no ``seed_snapshot_version``
+        # and lands here by KeyError, which is how it gets rebuilt WITH the seed
+        # snapshots even though its migration hash still matches.
         return None
 
 
@@ -657,7 +727,13 @@ def _write_template_stamp(admin: psycopg.Connection[Any], migration_hash: str) -
     as a ``sql.Literal``. It runs on the admin connection (a different database),
     which is permitted and was verified against the cluster.
     """
-    payload = json.dumps({"migration_hash": migration_hash, "built_from": str(_REPO_ROOT)})
+    payload = json.dumps(
+        {
+            "migration_hash": migration_hash,
+            "built_from": str(_REPO_ROOT),
+            "seed_snapshot_version": _SEED_SNAPSHOT_VERSION,
+        }
+    )
     with admin.cursor() as cur:
         cur.execute(
             sql.SQL("COMMENT ON DATABASE {} IS {}").format(sql.Identifier(TEMPLATE_DB_NAME), sql.Literal(payload))
@@ -866,7 +942,12 @@ def build_template_if_stale() -> None:
             # template currently holds.
             if template_exists:
                 stamp = _read_template_stamp(admin)
-                if stamp is not None and stamp[0] == current:
+                # Both halves gate reuse: the migration hash says the SCHEMA
+                # matches, the snapshot version says the seed baseline this
+                # checkout expects is actually present (#2224 cause 3). A
+                # recipe/exclusion change moves no SQL file, so the hash alone
+                # cannot see it.
+                if stamp is not None and stamp[0] == current and stamp[2] == _SEED_SNAPSHOT_VERSION:
                     return
 
             if template_exists:
@@ -882,6 +963,11 @@ def build_template_if_stale() -> None:
                 with tpl_conn.cursor() as cur:
                     cur.execute("CREATE EXTENSION IF NOT EXISTS pgstattuple")
                 tpl_conn.commit()
+                # #2224 cause 3 — record the pristine copy of every seeded table
+                # while the template is guaranteed untouched. Inside the lock and
+                # BEFORE the stamp: an interrupted snapshot leaves an unstamped
+                # template, which the next controller rebuilds rather than clones.
+                _snapshot_seed_tables(tpl_conn)
             _write_template_stamp(admin, current)
         finally:
             with admin.cursor() as cur:
@@ -962,7 +1048,15 @@ def _assert_template_matches_this_worktree(admin: psycopg.Connection[Any]) -> No
     stamp = _read_template_stamp(admin)
     current = _migration_hash()
     if stamp is not None and stamp[0] == current:
-        return
+        if stamp[2] == _SEED_SNAPSHOT_VERSION:
+            return
+        raise TemplateWorktreeMismatch(
+            f"{TEMPLATE_DB_NAME!r} carries seed-snapshot version {stamp[2]}, but this checkout "
+            f"expects {_SEED_SNAPSHOT_VERSION}. Its migrations match, so the schema is right and "
+            f"the SEED BASELINE is not — cloning it would leave per-test cleanup unable to restore "
+            f"seeded tables (#2224 cause 3). A sibling pytest run rebuilt the template after this "
+            f"one started; re-run pytest."
+        )
     built_from = "an unknown checkout (no readable stamp)" if stamp is None else stamp[1]
     raise TemplateWorktreeMismatch(
         f"{TEMPLATE_DB_NAME!r} was built from {built_from}, whose migrations differ "
@@ -1157,13 +1251,24 @@ def _truncate_planner_tables(conn: psycopg.Connection[tuple]) -> None:
     configured at 1024 (``docker-compose.yml`` ``postgres-test``), and
     CASCADE reaches 450 relations — under the real ceiling, and one shot
     measured ~20% faster than six chunks (#1568).
+
+    ⚠ It must meet the SAME end state as the fast path, seeded tables included
+    (#2224 cause 3). TRUNCATE restores nothing, so the seed restore is repeated
+    here — unconditionally, since the probe that decides "dirty" is exactly the
+    thing that just failed. The manifest is read straight from the DB rather
+    than from a cleanup plan, because this path runs when there is no usable plan.
     """
     assert_test_db(conn)
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
         query = sql.SQL("TRUNCATE {tables} RESTART IDENTITY CASCADE").format(
             tables=sql.SQL(", ").join(sql.Identifier(t) for t in _PLANNER_TABLES),
         )
         cur.execute(query)
+        cur.execute("SELECT to_regclass(%s)", (f"public.{_SEED_SNAPSHOT_MANIFEST}",))
+        row = cur.fetchone()
+        if row is not None and row[0] is not None:
+            cur.execute(sql.SQL("SELECT table_name FROM {}").format(sql.Identifier(_SEED_SNAPSHOT_MANIFEST)))
+            _restore_seed_tables(cur, tuple(sorted(r[0] for r in cur.fetchall())))
     conn.commit()
 
 
@@ -1214,17 +1319,19 @@ def _truncate_planner_tables(conn: psycopg.Connection[tuple]) -> None:
 class _CleanupPlan:
     """Session-cached derivation of what per-test cleanup must touch."""
 
-    __slots__ = ("delete_order", "owned_sequences", "probe_sql")
+    __slots__ = ("delete_order", "owned_sequences", "probe_sql", "seed_tables")
 
     def __init__(
         self,
         delete_order: tuple[str, ...],
         probe_sql: sql.Composed,
         owned_sequences: frozenset[str],
+        seed_tables: tuple[str, ...],
     ) -> None:
         self.delete_order = delete_order
         self.probe_sql = probe_sql
         self.owned_sequences = owned_sequences
+        self.seed_tables = seed_tables
 
 
 # Keyed by database name: one worker process only ever talks to one test DB,
@@ -1306,30 +1413,156 @@ def _topological_delete_order(
     return tuple(order)
 
 
-def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
-    """Derive the wipe set, delete order and owned sequences from the catalog."""
+def _read_seed_manifest(cur: psycopg.Cursor[tuple], roots: set[str]) -> tuple[str, ...]:
+    """The restore set recorded in this DB's cloned manifest.
+
+    Read from the DB rather than re-derived, for two reasons Codex checkpoint 1
+    named: a controller-local Python list does not reach an xdist worker, and
+    re-deriving "non-empty" inside a worker would misclassify a seed table an
+    earlier test had emptied as "not seeded".
+
+    Every entry is checked to have BOTH its base table and its snapshot present.
+    Trusting the snapshot names alone cannot detect a missing snapshot — the
+    entry would simply vanish from discovery and the table would silently stop
+    being restored.
+    """
+    cur.execute("SELECT to_regclass(%s)", (f"public.{_SEED_SNAPSHOT_MANIFEST}",))
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        raise RuntimeError(
+            f"{_SEED_SNAPSHOT_MANIFEST!r} is absent from {test_db_name()!r}. It is created "
+            f"in {TEMPLATE_DB_NAME!r} and cloned by CREATE DATABASE ... TEMPLATE, so a worker "
+            f"DB without it was cloned from a template built before #2224 cause 3. Drop the "
+            f"template (or bump _SEED_SNAPSHOT_VERSION) and re-run."
+        )
+    cur.execute(sql.SQL("SELECT table_name FROM {}").format(sql.Identifier(_SEED_SNAPSHOT_MANIFEST)))
+    manifest = sorted(r[0] for r in cur.fetchall())
+
+    missing_base = [t for t in manifest if t not in roots]
+    cur.execute(
+        "SELECT name FROM unnest(%s::text[]) AS name WHERE to_regclass('public.' || quote_ident(name)) IS NULL",
+        ([_snapshot_name(t) for t in manifest],),
+    )
+    missing_snapshot = sorted(r[0] for r in cur.fetchall())
+    if missing_base or missing_snapshot:
+        raise RuntimeError(
+            f"Seed-snapshot manifest is inconsistent in {test_db_name()!r}: "
+            f"base tables missing {missing_base}, snapshots missing {missing_snapshot}. "
+            f"Bump _SEED_SNAPSHOT_VERSION so the template is rebuilt (#2224 cause 3)."
+        )
+    return tuple(manifest)
+
+
+def _snapshot_seed_tables(conn: psycopg.Connection[tuple]) -> tuple[str, ...]:
+    """Record the pristine copy of every seeded table. TEMPLATE-BUILD ONLY.
+
+    Runs against the freshly migrated template, where "non-empty" means "the
+    migrations put rows here" and nothing else has run. ``CREATE DATABASE ...
+    TEMPLATE`` then copies both the manifest and the snapshots into every worker
+    DB by page, so the baseline provably predates every test. Snapshotting
+    per-worker instead would capture whatever state existed at the first cleanup.
+
+    Excludes the wipe closure (those tables are meant to be emptied), the schema
+    ledger, and the snapshot relations themselves — without the last one a
+    rebuild would ask for ``_pristine__pristine_*``.
+    """
+    roots, referencing = _read_topology(conn)
+    closure = _wipe_closure(referencing)
+    candidates = sorted(roots - closure - _SEED_SNAPSHOT_EXCLUDED)
+
+    seeded: list[str] = []
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        for table in candidates:
+            if table.startswith(_SEED_SNAPSHOT_PREFIX) or table == _SEED_SNAPSHOT_MANIFEST:
+                continue
+            cur.execute(sql.SQL("SELECT EXISTS (SELECT 1 FROM {})").format(sql.Identifier(table)))
+            row = cur.fetchone()
+            if row is not None and row[0]:
+                seeded.append(table)
+
+        too_long = [t for t in seeded if len(_snapshot_name(t).encode("utf-8")) > 63]
+        if too_long:
+            raise RuntimeError(
+                f"Seed snapshot names exceed Postgres' 63-byte identifier limit for {too_long}; "
+                f"they would be silently truncated into a collision. Shorten "
+                f"_SEED_SNAPSHOT_PREFIX or exclude the table (#2224 cause 3)."
+            )
+
+        cur.execute(
+            sql.SQL("CREATE TABLE {} (table_name TEXT PRIMARY KEY)").format(sql.Identifier(_SEED_SNAPSHOT_MANIFEST))
+        )
+        for table in seeded:
+            cur.execute(
+                sql.SQL("CREATE TABLE {snapshot} AS TABLE {table}").format(
+                    snapshot=sql.Identifier(_snapshot_name(table)),
+                    table=sql.Identifier(table),
+                )
+            )
+            cur.execute(
+                sql.SQL("INSERT INTO {} (table_name) VALUES (%s)").format(sql.Identifier(_SEED_SNAPSHOT_MANIFEST)),
+                (table,),
+            )
+    conn.commit()
+    return tuple(seeded)
+
+
+def _restore_seed_tables(cur: psycopg.Cursor[tuple], tables: tuple[str, ...]) -> None:
+    """Make each named table equal its snapshot again.
+
+    ``SET LOCAL session_replication_role = replica`` is load-bearing and is NOT a
+    shortcut around ordering. Four of the eleven seed tables carry BEFORE
+    triggers that refuse the write outright — ``sql/299`` makes an active or
+    retired ``strategy_intraday_universe_versions`` row undeletable and its
+    members mutable only while the version is draft, and ``sql/372`` puts safety
+    triggers on ``kill_switch`` and ``runtime_config``. Measured: a plain
+    ``DELETE`` raises *"active/retired intraday universe versions are
+    immutable"*, and under ``replica`` the same statement succeeds. It also
+    suspends FK enforcement, which makes the restore order-free — otherwise
+    ``strategy_intraday_universe_versions`` could not be emptied while its four
+    FK children (two of them seed tables themselves) still held rows.
+
+    ``SET LOCAL`` scopes this to the enclosing transaction, so the error path
+    needs no unwind — a failed statement aborts the transaction and the setting
+    dies with it. The explicit reset on the success path is what stops anything
+    LATER in the same transaction running unguarded, and it is deliberately not
+    in a ``finally``: on an aborted transaction it would raise
+    ``InFailedSqlTransaction`` and mask the real error.
+    """
+    if not tables:
+        return
+    cur.execute("SET LOCAL session_replication_role = replica")
+    for table in tables:
+        cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table)))
+        cur.execute(
+            sql.SQL("INSERT INTO {table} TABLE {snapshot}").format(
+                table=sql.Identifier(table),
+                snapshot=sql.Identifier(_snapshot_name(table)),
+            )
+        )
+    cur.execute("SET LOCAL session_replication_role = origin")
+
+
+def _read_topology(conn: psycopg.Connection[tuple]) -> tuple[set[str], dict[str, set[str]]]:
+    """``(roots, referencing)`` — partition-collapsed tables and their FK edges.
+
+    ``referencing[parent]`` is the set of roots holding an FK to ``parent``, which
+    is the direction both the CASCADE closure and the delete order need.
+    """
     with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
         cur.execute(_ROOT_TABLES_SQL)
         roots = {row[0] for row in cur.fetchall()}
         cur.execute(_FK_EDGES_SQL)
         edges = [(row[0], row[1]) for row in cur.fetchall()]
-        cur.execute(_OWNED_SEQUENCES_SQL)
-        sequence_owners = [(row[0], row[1]) for row in cur.fetchall()]
-    conn.rollback()
 
     referencing: dict[str, set[str]] = {}
     for child, parent in edges:
         if child in roots and parent in roots:
             referencing.setdefault(parent, set()).add(child)
+    return roots, referencing
 
-    missing = sorted(t for t in _PLANNER_TABLES if t not in roots)
-    if missing:
-        raise RuntimeError(
-            f"_PLANNER_TABLES names tables absent from the worker DB: {missing}. "
-            f"A migration renamed or dropped them without updating the list."
-        )
 
-    # CASCADE closure: everything TRUNCATE would reach from the planner set.
+def _wipe_closure(referencing: dict[str, set[str]]) -> set[str]:
+    """Everything ``TRUNCATE ... CASCADE`` would reach from ``_PLANNER_TABLES``."""
     closure = set(_PLANNER_TABLES)
     stack = list(closure)
     while stack:
@@ -1338,19 +1571,66 @@ def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
             if child not in closure:
                 closure.add(child)
                 stack.append(child)
+    return closure
 
+
+def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
+    """Derive the wipe set, delete order, owned sequences and seed set."""
+    roots, referencing = _read_topology(conn)
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(_OWNED_SEQUENCES_SQL)
+        sequence_owners = [(row[0], row[1]) for row in cur.fetchall()]
+        seed_tables = _read_seed_manifest(cur, roots)
+    conn.rollback()
+
+    missing = sorted(t for t in _PLANNER_TABLES if t not in roots)
+    if missing:
+        raise RuntimeError(
+            f"_PLANNER_TABLES names tables absent from the worker DB: {missing}. "
+            f"A migration renamed or dropped them without updating the list."
+        )
+
+    closure = _wipe_closure(referencing)
     delete_order = _topological_delete_order(closure, referencing)
     assert set(delete_order) == closure, "delete order must cover the whole wipe set"
 
-    probe_sql = sql.SQL(" UNION ALL ").join(
+    overlap = sorted(set(seed_tables) & closure)
+    if overlap:
+        raise RuntimeError(
+            f"Seed-restore set overlaps the wipe set on {overlap}. A table cannot be both "
+            f"emptied and restored; a migration added an FK that pulled a seeded table into "
+            f"the closure. Rebuild the template (bump _SEED_SNAPSHOT_VERSION) and decide "
+            f"which side it belongs on — see #2224 cause 3."
+        )
+
+    probe_branches = [
         sql.SQL("SELECT {name} WHERE EXISTS (SELECT 1 FROM {table})").format(
             name=sql.Literal(table),
             table=sql.Identifier(table),
         )
         for table in delete_order
+    ]
+    # A seed table is never empty, so "has rows" says nothing. Dirty means "differs
+    # from the snapshot", and the difference must be SYMMETRIC: a count-only or
+    # one-sided check misses both a deleted seed row and a mutated one
+    # (test_migration_159 does `UPDATE exchanges SET currency='CHF'` as well as
+    # inserting). ``EXCEPT ALL`` is multiset difference, so duplicate counts and
+    # NULLs compare correctly.
+    probe_branches.extend(
+        sql.SQL(
+            "SELECT {name} WHERE EXISTS ("
+            "(TABLE {table} EXCEPT ALL TABLE {snapshot}) UNION ALL "
+            "(TABLE {snapshot} EXCEPT ALL TABLE {table}))"
+        ).format(
+            name=sql.Literal(table),
+            table=sql.Identifier(table),
+            snapshot=sql.Identifier(_snapshot_name(table)),
+        )
+        for table in seed_tables
     )
+    probe_sql = sql.SQL(" UNION ALL ").join(probe_branches)
     owned = frozenset(seq for seq, owner in sequence_owners if owner in closure)
-    return _CleanupPlan(delete_order, probe_sql, owned)
+    return _CleanupPlan(delete_order, probe_sql, owned, seed_tables)
 
 
 def _cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
@@ -1427,6 +1707,10 @@ def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
             for table in plan.delete_order:
                 if table in dirty:
                     cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table)))
+            # #2224 cause 3 — seeded tables are restored, not emptied, and only
+            # when the probe says they differ from their snapshot. AFTER the
+            # delete loop so a restored parent cannot be re-orphaned by it.
+            _restore_seed_tables(cur, tuple(t for t in plan.seed_tables if t in dirty))
             # DELETE has no RESTART IDENTITY; reset only sequences that have
             # actually been read (``last_value IS NOT NULL``), which includes
             # ones advanced by a rolled-back INSERT on a now-empty table.
