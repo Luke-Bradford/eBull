@@ -18,14 +18,10 @@ from decimal import Decimal
 
 import pytest
 
-from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import BarSeries
-from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
-from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.signal_ledger import LedgerRow, resolve_fills
-from app.services.strategy_registry import StrategyIdentity, StrategySignal
+from app.services.strategy_registry import INPUT_RULE_SETS, StrategyIdentity, StrategySignal
 from app.services.technical_analysis import OHLCVRow
-from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION
 
 _IDENTITY = StrategyIdentity(
     strategy_id="S-TEST",
@@ -255,12 +251,14 @@ class TestBatchIntegrity:
         object is what stops the column disagreeing with the hash beside it."""
         rows = resolve_fills([_fired_at(0)], series=_series(_CONSECUTIVE), identity=_IDENTITY, instrument_id=7)
         assert rows[0].input_rule_set_versions == _IDENTITY.input_rule_set_versions
-        assert dict(rows[0].input_rule_set_versions) == {
-            "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
-            "market_regime_provider": BENCHMARK_SOURCE_RULE_SET_VERSION,
-            "series_termination": TERMINATION_RULE_VERSION,
-            "universe_selection": UNIVERSE_SELECTION_RULE_VERSION,
-        }
+        # ⚠ Compared against the registry constant, NOT re-listed member by
+        # member. A second literal copy is the closed-vocabulary-in-N-places
+        # defect: #3031 added ``price_quarantine`` and this assertion failed
+        # while nothing about the writer had changed. The mapping's CONTENTS are
+        # pinned once, in
+        # ``test_strategy_registry.py::test_the_stored_mapping_is_the_hashed_one``;
+        # what belongs here is that the row's copy came from the identity.
+        assert dict(rows[0].input_rule_set_versions) == dict(INPUT_RULE_SETS)
 
 
 class TestLedgerRowRejects:
