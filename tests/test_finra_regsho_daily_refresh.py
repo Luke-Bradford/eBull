@@ -376,16 +376,27 @@ def test_run_fnra_empty_body_is_success(
 
 
 # ----------------------------------------------------------------------
-# 9 — Match-rate WARNING below 50%
+# 9 — Per-tape health sentinels (#2795), replacing the pooled match-rate WARNING
+#
+# ⚠ The two tests here USED TO ASSERT THE OPPOSITE. `test_match_rate_warning_
+# logged_below_50pct` seeded one symbol against a five-symbol file and required
+# the WARNING — i.e. it pinned the defect, because a 20% match rate on a tape
+# whose structural match rate is 2% is not a fault at all. Its replacement asserts
+# the same corpus is now SILENT. Deleting it without a replacement would have left
+# the removal untested in the direction that matters.
 # ----------------------------------------------------------------------
 
 
-def test_match_rate_warning_logged_below_50pct(
+def test_low_match_rate_no_longer_warns(
     ebull_test_conn: psycopg.Connection[tuple], caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Seed only 1 panel symbol → match rate 1/5 = 20%.
+    """A low resolved/parsed ratio is not a fault and must not warn (#2795).
+
+    Seeds one panel symbol against a five-row CNMS file — a 20% match rate, which
+    the removed arm treated as an alarm. Every row still parses cleanly and one
+    resolves, so neither surviving arm has anything to say.
+    """
     _seed_instrument(ebull_test_conn, instrument_id=1001, symbol="AAPL")
-    # NotFound everything except a single 5/15 CNMS file.
     notfound = {(d, p) for d in (date(2026, 5, 15), date(2026, 5, 18)) for p in PREFIXES}
     notfound.discard((date(2026, 5, 15), "CNMS"))
     provider = _FakeProvider(notfound=notfound)
@@ -399,14 +410,46 @@ def test_match_rate_warning_logged_below_50pct(
             provider=provider,  # type: ignore[arg-type]
         )
 
-    assert any("match rate" in rec.message and "below 50%" in rec.message for rec in caplog.records)
+    assert not any("match rate" in rec.message for rec in caplog.records)
+    assert not any("row_shape" in rec.message or "no_resolution" in rec.message for rec in caplog.records)
 
 
-def test_match_rate_no_warning_on_zero_parsed(
+def test_zero_resolution_warns_per_tape(
     ebull_test_conn: psycopg.Connection[tuple], caplog: pytest.LogCaptureFixture
 ) -> None:
-    """All files empty (FNRA-shape) → total_parsed=0; no division-by-zero
-    + no false WARNING.
+    """Zero rows resolved on a non-empty file IS a fault, and names its tape.
+
+    The counterpart to the test above: the arm that replaced the ratio still
+    fires on the boundary case, and its message carries ``{trade_date}/{prefix}``
+    rather than a pooled figure — pooling was itself part of the defect.
+    """
+    # No instruments seeded at all, so nothing in the file can resolve.
+    notfound = {(d, p) for d in (date(2026, 5, 15), date(2026, 5, 18)) for p in PREFIXES}
+    notfound.discard((date(2026, 5, 15), "CNMS"))
+    provider = _FakeProvider(notfound=notfound)
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
+
+    with caplog.at_level(logging.WARNING, logger="app.jobs.finra_regsho_daily_refresh"):
+        run_finra_regsho_daily_refresh(
+            ebull_test_conn,
+            now=now,
+            backfill_window_days=3,
+            provider=provider,  # type: ignore[arg-type]
+        )
+
+    hits = [rec.message for rec in caplog.records if "no_resolution" in rec.message]
+    assert hits, f"expected a no_resolution finding, got {[r.message for r in caplog.records]}"
+    assert "2026-05-15/CNMS" in hits[0]
+
+
+def test_empty_bodies_produce_no_findings(
+    ebull_test_conn: psycopg.Connection[tuple], caplog: pytest.LogCaptureFixture
+) -> None:
+    """An empty body parses 0 rows and yields nothing — for EVERY prefix.
+
+    ⚠ The fixture is named for the ADF tape because that is the feed FINRA most
+    often serves empty, but a header-plus-``0``-footer body is a success path on
+    any prefix, so this drives all six rather than one.
     """
     _seed_panel(ebull_test_conn)
     files = {(d, p): _EMPTY_FNRA.read_bytes() for d in (date(2026, 5, 15), date(2026, 5, 18)) for p in PREFIXES}
@@ -422,6 +465,7 @@ def test_match_rate_no_warning_on_zero_parsed(
         )
 
     assert not any("match rate" in rec.message for rec in caplog.records)
+    assert not any("row_shape" in rec.message or "no_resolution" in rec.message for rec in caplog.records)
 
 
 # ----------------------------------------------------------------------
