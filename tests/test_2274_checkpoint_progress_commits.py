@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -43,14 +44,16 @@ def _registered_pool(url: str) -> Iterator[None]:
             self._conn = psycopg.connect(url)
 
         @contextmanager
-        def connection(self) -> Iterator[psycopg.Connection[object]]:
+        def connection(self) -> Iterator[psycopg.Connection[Any]]:
             yield self._conn
 
         def close(self) -> None:
             self._conn.close()
 
     pool = _Pool()
-    set_background_pool(pool)
+    # cast: the seam only ever calls ``.connection()`` on the registered pool, and a
+    # real BackgroundConnectionPool would need a running jobs process to construct.
+    set_background_pool(cast(Any, pool))
     try:
         yield
     finally:
@@ -58,7 +61,7 @@ def _registered_pool(url: str) -> Iterator[None]:
         pool.close()
 
 
-def _insert_run(conn: psycopg.Connection[object], status: str) -> int:
+def _insert_run(conn: psycopg.Connection[Any], status: str) -> int:
     row = conn.execute(
         """
         INSERT INTO job_runs (job_name, status, started_at)
@@ -88,9 +91,7 @@ def test_a_checkpoint_survives_the_pooled_seam() -> None:
         tracker.progress = _progress()
         with _registered_pool(url):
             tracker.checkpoint_progress()
-        stored = reader.execute(
-            "SELECT progress_json FROM job_runs WHERE run_id = %s", (run_id,)
-        ).fetchone()
+        stored = reader.execute("SELECT progress_json FROM job_runs WHERE run_id = %s", (run_id,)).fetchone()
         assert stored is not None
         assert stored[0] is not None, "the in-flight checkpoint was rolled back by the pooled seam"
         assert stored[0]["candidates_seen"] == 17
@@ -108,9 +109,7 @@ def test_a_late_checkpoint_does_not_stamp_a_terminal_row() -> None:
         tracker.progress = _progress()
         with _registered_pool(url):
             tracker.checkpoint_progress()
-        stored = reader.execute(
-            "SELECT progress_json FROM job_runs WHERE run_id = %s", (run_id,)
-        ).fetchone()
+        stored = reader.execute("SELECT progress_json FROM job_runs WHERE run_id = %s", (run_id,)).fetchone()
         assert stored is not None
         assert stored[0] is None
 
@@ -131,8 +130,6 @@ def test_an_untracked_or_progressless_checkpoint_is_a_no_op() -> None:
             no_progress = _JobTracker("test_2274_checkpoint")
             no_progress.run_id = run_id
             no_progress.checkpoint_progress()
-        stored = reader.execute(
-            "SELECT progress_json FROM job_runs WHERE run_id = %s", (run_id,)
-        ).fetchone()
+        stored = reader.execute("SELECT progress_json FROM job_runs WHERE run_id = %s", (run_id,)).fetchone()
         assert stored is not None
         assert stored[0] is None
