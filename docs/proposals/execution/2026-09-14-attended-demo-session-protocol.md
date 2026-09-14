@@ -221,11 +221,23 @@ alone — a difference in the #2993 diff that the session did not cause. The obs
 every relative window `history_min_date_is_absolute: false` rather than letting that pass
 silently.
 
-### Step 0a — `--phase negative-control` — **unattended, run this before the session**
+### Step 0a — `--phase negative-control` — ✅ **ALREADY RUN, 2026-09-14. Do not re-run.**
 
 Arm N. Costs one request, needs no configuration change, and if it fails the session
 should not be scheduled: an endpoint that does not cleanly answer "no" cannot support
 #2961's discriminator whatever else is observed.
+
+**Result: PASS.** `tests/fixtures/etoro/attended_negative_control_2026-09-14.json`.
+Two independently minted, never-submitted UUIDs both returned HTTP 404 on
+`GET /api/v2/trading/info/demo/orders:lookup?referenceId=…`, decoding to
+`BrokerOrderNotFound` → `outcome: not_found`. So the endpoint does distinguish
+"no such order" from a 200 or an error, and the session is worth booking.
+
+⚠ **What this does NOT establish, stated because it is the easy over-read:** that a 404
+for a *submitted* UUID means non-acceptance. It rules out the failure mode where the
+endpoint 200s or errors on an identity it has never seen — which would have killed
+#2961's discriminator outright — and nothing more. Arms P and L remain required, and
+without arm L a 404 observed shortly after submission is still uninterpretable.
 
 ### Step 0b — `--phase baseline`, before any mutation
 

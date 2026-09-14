@@ -131,6 +131,20 @@ def classify_lookup_pair(reference_outcome: str, order_outcome: str) -> dict[str
                 f"not-found. No P3 row applies; re-run the arm."
             ),
         }
+    if "absent" in (reference_outcome, order_outcome):
+        # ⚠ An arm DELIBERATELY not run is not the same as an unmodelled result, and the
+        # difference is visible in the artefact an operator reads. The negative-control
+        # phase runs no orderId arm by design; labelling that "unmodelled outcome pair"
+        # makes a correct run look like a defect in the instrument, which is how a clean
+        # measurement gets re-taken or discarded.
+        return {
+            "reading": "single_arm",
+            "note": (
+                f"reference={reference_outcome} order={order_outcome}: only one arm was run, "
+                f"so no P3 row applies. Expected for --phase negative-control, which asks "
+                f"only whether the endpoint cleanly answers 'no' to a UUID it has never seen."
+            ),
+        }
     reading = _LOOKUP_READINGS.get((reference_outcome, order_outcome))
     if reading is None:
         return {

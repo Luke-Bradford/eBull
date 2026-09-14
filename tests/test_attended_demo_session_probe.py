@@ -57,9 +57,22 @@ def test_an_error_on_either_arm_is_inconclusive_not_a_not_found(reference: str, 
     assert classify_lookup_pair(reference, order)["reading"] == "inconclusive"
 
 
-def test_a_missing_arm_is_inconclusive_rather_than_silently_modelled() -> None:
-    """`absent` arises from the negative-control phase, which runs no orderId arm."""
-    assert classify_lookup_pair("not_found", "absent")["reading"] == "inconclusive"
+def test_a_deliberately_unrun_arm_reads_as_single_arm_not_as_a_defect() -> None:
+    """`absent` arises from the negative-control phase, which runs no orderId arm.
+
+    ⚠ Distinct from `inconclusive`. Both decline to pick a P3 row, but one says "this
+    run did not ask" and the other says "this run asked and could not tell" — and the
+    artefact is read by an operator deciding whether to re-take the measurement. The
+    2026-09-14 arm-N observation is exactly this shape and is a clean pass.
+    """
+    result = classify_lookup_pair("not_found", "absent")
+    assert result["reading"] == "single_arm"
+    assert "negative-control" in result["note"]
+
+
+def test_an_error_still_outranks_a_missing_arm() -> None:
+    """A real error must not be softened to `single_arm` just because a peer is absent."""
+    assert classify_lookup_pair("error", "absent")["reading"] == "inconclusive"
 
 
 def test_every_reading_states_what_remains_uncontrolled() -> None:
