@@ -6469,3 +6469,29 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Enforced in: this prevention log;
   `scripts/verify_3046_break_minting_census.py::_reconcile` (its docstring carries the
   precedent).
+
+### A stored ratio can be exactly 0 by ROUNDING even when its producer refuses a zero input — guard `1/ratio`, do not observe it
+
+- First seen in: #3046 / PR #3047 (2026-09-14), review bot WARNING.
+  `scripts/verify_3046_break_minting_census.py` computed the symmetric magnitude as
+  `max(ratio, Decimal(1) / ratio)` on `price_transition_quarantine.observed_ratio` with no
+  zero guard.
+- The tempting rebuttal is that it cannot happen: `price_quarantine._usable_close` refuses
+  a non-positive close, so the producer never divides by zero and never yields zero.
+  **The column is `NUMERIC(24,12)`.** A genuine ratio below 5e-13 — two valid positive
+  closes, nothing wrong with either — STORES as exactly `0.000000000000`, and the reader
+  then raises `DivisionByZero` and takes the whole run down instead of reporting one row
+  as unmeasurable.
+- Measured on today's corpus: **0** rows at `observed_ratio = 0`, smallest non-zero
+  magnitude ~3.3e-7. That is the point — the guard is unreachable today, which is exactly
+  why it has to be WRITTEN rather than confirmed by a query. A corpus that grows into the
+  case fails loudly in a harness whose output nobody is watching.
+- The general shape: **a producer's input validity does not survive the column's
+  precision.** Whenever a stored numeric is used as a divisor, the zero case belongs with
+  the NULL case — same bucket, same "unmeasurable" label — regardless of what the writer
+  guarantees about its inputs. The writer guarantees things about VALUES; the column
+  guarantees things about DIGITS.
+- Caught by: the review bot. Neither Codex checkpoint saw it, and no test could have
+  without a fixture nobody would think to write.
+- Enforced in: this prevention log; `scripts/verify_3046_break_minting_census.py`
+  (the guard carries the precision argument and the measured smallest magnitude).

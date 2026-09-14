@@ -281,7 +281,14 @@ def run_census(conn: psycopg.Connection[Any]) -> int:
 
     for instrument_id, price_date, rules, ratio, provisional, _corr, asset_class in rows:
         iid = int(instrument_id)
-        if ratio is None:
+        # ⚠ ZERO IS THE SAME STATE AS NULL HERE, and it is reachable even though
+        # `_usable_close` refuses a non-positive close: `observed_ratio` is
+        # `NUMERIC(24,12)`, so a genuine ratio below 5e-13 STORES as exactly 0
+        # and `Decimal(1) / ratio` would raise `DivisionByZero` and take the
+        # whole census down instead of reporting one row as unmeasurable. The
+        # corpus carries none today (smallest non-zero magnitude is ~3.3e-7),
+        # which is exactly why the guard has to be written rather than observed.
+        if ratio is None or Decimal(ratio) == 0:
             # Unmeasurable, not clean. Reported on its own line so it cannot be
             # read as either side of the census.
             unmeasurable += 1
@@ -318,7 +325,7 @@ def run_census(conn: psycopg.Connection[Any]) -> int:
         )
     if unmeasurable:
         print(
-            f"  {'ratio IS NULL':<20}{_fmt(unmeasurable):>9}{_fmt(len(unmeasurable_instruments)):>8}"
+            f"  {'ratio NULL or 0':<20}{_fmt(unmeasurable):>9}{_fmt(len(unmeasurable_instruments)):>8}"
             f"{'-':>12}   unmeasurable; excluded from both sides"
         )
     print()
