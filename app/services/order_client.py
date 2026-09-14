@@ -208,6 +208,30 @@ class ExitLot:
     units: Decimal
 
 
+#: The lots a recommendation EXIT could close at the broker, before ownership.
+#: ⚠ Shared by :func:`_load_exit_lot` and :func:`_engine_owned_long_lot_count`
+#: rather than written twice: the second reports what the first REFUSED, so a
+#: divergence would not fail — it would quietly describe a different set to the
+#: operator than the one that was actually excluded (review NITPICK on PR #3026).
+#: Contains no caller-supplied text; ``%(iid)s`` stays a bound parameter.
+#: The ``bp.`` alias is load-bearing, not cosmetic — ``own`` and ``bp`` both
+#: carry a position id, so an unqualified reference inside the correlated
+#: ``EXISTS`` below would resolve to the wrong one.
+_BROKER_CLOSEABLE_LONG_LOT_SQL = """bp.instrument_id = %(iid)s
+          AND bp.units > 0
+          AND bp.is_buy
+          AND bp.position_id > 0"""
+
+#: The lot is claimed by the strategy engine RIGHT NOW (#3025). ``active`` only —
+#: a ``released`` row means the engine has given the lot up, and matching on the
+#: row's mere existence would strand every lot the engine ever touched.
+_ENGINE_OWNED_SQL = """EXISTS (
+              SELECT 1 FROM strategy_position_ownership own
+              WHERE own.broker_position_id = bp.position_id
+                AND own.status = 'active'
+          )"""
+
+
 def _load_exit_lot(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -266,17 +290,10 @@ def _load_exit_lot(
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT position_id, units FROM broker_positions bp
-            WHERE bp.instrument_id = %(iid)s
-              AND bp.units > 0
-              AND bp.is_buy
-              AND bp.position_id > 0
-              AND NOT EXISTS (
-                  SELECT 1 FROM strategy_position_ownership own
-                  WHERE own.broker_position_id = bp.position_id
-                    AND own.status = 'active'
-              )
+            WHERE {_BROKER_CLOSEABLE_LONG_LOT_SQL}
+              AND NOT {_ENGINE_OWNED_SQL}
             ORDER BY bp.open_date_time ASC, bp.position_id ASC
             LIMIT 1
             """,
@@ -300,21 +317,17 @@ def _engine_owned_long_lot_count(
     lot at all" are different operator situations with different fixes, and
     #3003 settled that a backstop must not pre-empt the specific diagnosis.
 
-    Predicate is :func:`_load_exit_lot`'s admit set with the ownership clause
-    INVERTED, so the two cannot drift into disagreeing about what was excluded.
+    Shares :data:`_BROKER_CLOSEABLE_LONG_LOT_SQL` and :data:`_ENGINE_OWNED_SQL`
+    with :func:`_load_exit_lot` and differs from it ONLY by dropping the ``NOT``,
+    so the two cannot drift into disagreeing about what was excluded — which
+    would make the operator-facing count describe a different set from the one
+    actually refused.
     """
     row = conn.execute(
-        """
+        f"""
         SELECT count(*) FROM broker_positions bp
-        WHERE bp.instrument_id = %(iid)s
-          AND bp.units > 0
-          AND bp.is_buy
-          AND bp.position_id > 0
-          AND EXISTS (
-              SELECT 1 FROM strategy_position_ownership own
-              WHERE own.broker_position_id = bp.position_id
-                AND own.status = 'active'
-          )
+        WHERE {_BROKER_CLOSEABLE_LONG_LOT_SQL}
+          AND {_ENGINE_OWNED_SQL}
         """,
         {"iid": instrument_id},
     ).fetchone()
