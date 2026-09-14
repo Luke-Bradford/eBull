@@ -831,9 +831,11 @@ def _deduct_closed_exit_lot(
     ⚠⚠ ``SKIP LOCKED``, and it is the whole reason this cannot deadlock. The
     tempting claim — "``positions`` first, then ``broker_positions``, matching
     ``portfolio_sync``" — is FALSE for the case this function exists to serve.
-    The sync's order is positions (L694) → broker_positions (L797, which DELETEs
-    lots absent from the payload) → positions again (L810, zeroing the
-    instruments that disappeared). An instrument whose last lot an EXIT just
+    The sync's order is: the upsert loop over the aggregated broker positions
+    writes ``positions``; then ``_upsert_broker_positions`` writes the mirror and
+    DELETEs lots absent from the payload; then the ``for row in local_rows`` loop
+    returns to ``positions`` to zero the instruments that disappeared. An
+    instrument whose last lot an EXIT just
     closed is exactly one that disappears, so the sync reaches its mirror row
     BEFORE its ``positions`` row while this transaction holds ``positions`` and
     would be waiting on the mirror — a cycle. Postgres would abort one side, and

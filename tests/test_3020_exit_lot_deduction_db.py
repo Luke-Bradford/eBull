@@ -181,9 +181,10 @@ def test_a_lot_locked_by_a_concurrent_sync_is_skipped_not_waited_on(
 ) -> None:
     """The deadlock Codex found at checkpoint 2, driven rather than argued.
 
-    ``portfolio_sync`` reaches ``broker_positions`` (L797, where it DELETEs lots
-    absent from the payload) BEFORE the ``positions`` row of an instrument that
-    disappeared (L810) — and an instrument whose last lot an EXIT just closed is
+    ``portfolio_sync`` reaches ``broker_positions`` (in ``_upsert_broker_positions``,
+    which DELETEs lots absent from the payload) BEFORE the ``positions`` row of an
+    instrument that disappeared (its ``for row in local_rows`` zeroing loop, which
+    runs after) — and an instrument whose last lot an EXIT just closed is
     exactly one that disappears. With a plain ``FOR UPDATE`` this transaction,
     already holding ``positions``, would wait on the mirror row and close the
     cycle; Postgres would abort one side, and aborting this one rolls back the
