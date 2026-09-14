@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -71,6 +71,11 @@ _DEFAULT_ORDER_TYPE = "market"
 # is numeric(20,8), so an EXIT lot can carry two decimals the order row cannot
 # hold; #3006 logs the loss rather than letting it happen silently.
 _REQUESTED_UNITS_STEP = Decimal("0.000001")
+
+# The scale of ``broker_positions.units`` / ``.amount`` (numeric(20,8)). A fill
+# is normalised to this before it is compared against, or subtracted from, a
+# STORED lot — see ``_deduct_closed_exit_lot`` and #3017.
+_BROKER_UNITS_STEP = Decimal("0.00000001")
 
 # decision_audit.stage for every row this module writes.
 #
@@ -795,6 +800,101 @@ def _update_position_exit(
             f"for instrument_id={instrument_id}, matched {result.rowcount}. "
             f"The broker closed a lot the ledger has no position for — refusing "
             f"to credit the proceeds or mark the recommendation executed."
+        )
+
+
+def _deduct_closed_exit_lot(
+    conn: psycopg.Connection[Any],
+    *,
+    position_id: int,
+    filled_units: Decimal,
+    now: datetime,
+) -> None:
+    """Deduct a filled EXIT from the ``broker_positions`` lot it closed (#3020).
+
+    Until this existed the EXIT path resolved a lot, closed it at the broker and
+    left the mirror row untouched, so for up to one sync interval the closed
+    position was still listed as open by ``app/api/portfolio.py`` (both trade
+    lists select ``WHERE bp.units > 0``) and was still the FIFO-oldest row
+    ``_load_exit_lot`` would hand to the NEXT EXIT — a close addressed to a
+    position the broker no longer has.
+
+    ``enqueue_post_trade_sync`` does queue a refresh, but it is asynchronous and
+    best-effort: its own docstring says the scheduled tick (5 min) covers a lost
+    enqueue, and a broker outage extends that indefinitely.
+
+    The lock-and-re-read is the sibling's, and so is its reason (#245,
+    ``app/api/orders.py``): two closes that both read ``units > 0`` outside the
+    transaction would both build a fill, and the loser's UPDATE would match zero
+    rows while its fill, cash and audit rows still committed.
+
+    ⚠ Lock ORDER: ``positions`` is updated before this runs, which is the order
+    ``portfolio_sync`` acquires (``portfolio_sync.py`` L694 then L797). Reversing
+    it would form a deadlock cycle against a concurrent sync on the same
+    instrument.
+
+    ⚠ A mismatch WARNS and returns; it does not raise, and the difference from
+    ``_update_position_exit`` is deliberate. ``positions`` is the ledger — a
+    missed update there credits cash for a position never held, so it must abort
+    the transaction. ``broker_positions`` is the broker MIRROR, replaced wholesale
+    by the next sync, so a failed deduction is self-healing; raising would roll
+    back a durable record of a fill the broker has already executed, which is
+    strictly worse than a stale row that heals itself.
+
+    ⚠ #3017's lesson, applied where it actually bites: the fill is normalised to
+    the column's own grain ONCE, in Python, before either the guard or the
+    statement sees it. A SQL-side cast alone would not be enough — the
+    fewer-units guard below is a Python comparison between a raw fill and a
+    STORED value, and a 9-dp fill against an 8-dp lot fails it on an exact whole
+    close, silently leaving the closed lot selectable. ``ROUND_HALF_UP`` because
+    that is how Postgres rounded the stored value on the way in.
+    """
+    filled_units = filled_units.quantize(_BROKER_UNITS_STEP, rounding=ROUND_HALF_UP)
+    with conn.cursor() as lock_cur:
+        lock_cur.execute(
+            "SELECT units FROM broker_positions WHERE position_id = %(pid)s FOR UPDATE",
+            {"pid": position_id},
+        )
+        locked_row = lock_cur.fetchone()
+    if locked_row is None:
+        logger.warning(
+            "EXIT fill closed broker lot %d but no broker_positions row exists — "
+            "mirror left to the next portfolio sync",
+            position_id,
+        )
+        return
+    locked_units = Decimal(str(locked_row[0]))
+    if locked_units < filled_units:
+        logger.warning(
+            "EXIT fill closed broker lot %d for %s units but the row holds only %s — "
+            "not deducting; mirror left to the next portfolio sync",
+            position_id,
+            filled_units,
+            locked_units,
+        )
+        return
+
+    result = conn.execute(
+        """
+        UPDATE broker_positions SET
+            amount     = CASE
+                WHEN units > 0
+                THEN amount * (1 - %(units)s / units)
+                ELSE 0
+            END,
+            units      = units - %(units)s,
+            updated_at = %(now)s
+        WHERE position_id = %(pid)s
+          AND units >= %(units)s
+        """,
+        {"units": filled_units, "pid": position_id, "now": now},
+    )
+    if result.rowcount != 1:
+        logger.warning(
+            "EXIT fill deduction on broker lot %d matched %d rows despite the locked "
+            "re-read — mirror left to the next portfolio sync",
+            position_id,
+            result.rowcount,
         )
 
 
@@ -1746,6 +1846,18 @@ def execute_order(
                     filled_units=fu,
                     now=now,
                 )
+                # #3020: the mirror row for the lot the broker just closed.
+                # Only on the live path — a demo EXIT resolves no lot, and its
+                # `broker_positions` rows carry synthetic negative ids that
+                # `_load_exit_lot` already excludes. AFTER `positions`, to keep
+                # the lock order `portfolio_sync` uses.
+                if exit_lot is not None:
+                    _deduct_closed_exit_lot(
+                        conn,
+                        position_id=exit_lot.position_id,
+                        filled_units=fu,
+                        now=now,
+                    )
                 # Check if position is fully closed → trigger attribution
                 with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                     cur.execute(
