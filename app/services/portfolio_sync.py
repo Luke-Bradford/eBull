@@ -718,15 +718,27 @@ def sync_portfolio(
             # ⚠ In an UPDATE's SET list every expression reads the
             # PRE-update row, so `current_units` inside the CASE is the
             # old value, not `%(units)s`.
+            #
+            # ⚠⚠ `::numeric(18,6)` on EVERY use of the parameter, and it is
+            # load-bearing rather than cosmetic. `positions.current_units`
+            # is `numeric(18,6)` while `broker_positions.units` is
+            # `numeric(20,8)` and the parser keeps the incoming precision,
+            # so an 8-dp holding is STORED rounded. Comparing the raw
+            # parameter against the stored value then reads a rounding
+            # artefact as a disposal: 1.23456789 stores as 1.234568, the
+            # `<` is true on an unchanged portfolio, and the pool ratchets
+            # down a little on every sync forever. Normalising to the
+            # column's own grain makes "decrease" mean a change the column
+            # can actually represent (caught by Codex at checkpoint 2).
             conn.execute(
                 """
                 UPDATE positions SET
                     cost_basis     = CASE
-                        WHEN current_units > 0 AND %(units)s < current_units
-                        THEN ROUND(cost_basis * (%(units)s / current_units), 6)
+                        WHEN current_units > 0 AND %(units)s::numeric(18,6) < current_units
+                        THEN ROUND(cost_basis * (%(units)s::numeric(18,6) / current_units), 6)
                         ELSE cost_basis
                     END,
-                    current_units  = %(units)s,
+                    current_units  = %(units)s::numeric(18,6),
                     unrealized_pnl = %(upnl)s,
                     updated_at     = %(now)s
                 WHERE instrument_id = %(iid)s

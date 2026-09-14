@@ -130,6 +130,29 @@ def test_a_reopen_after_an_external_close_prices_only_the_new_units(
     assert cost_basis == Decimal("600.000000")
 
 
+def test_repeated_syncs_of_an_unchanged_fractional_holding_do_not_erode_the_pool(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The ratchet Codex found at checkpoint 2.
+
+    ``positions.current_units`` is ``numeric(18,6)``; ``broker_positions.units``
+    is ``numeric(20,8)`` and the parser keeps the incoming precision. So an 8-dp
+    holding is STORED rounded, and comparing the raw parameter against the stored
+    value reads the rounding artefact as a disposal — on an unchanged portfolio,
+    every sync forever. Three syncs is enough to see it ratchet.
+    """
+    _open(ebull_test_conn, price="100", units="1.23456789")
+    _, _, opening_pool = _read(ebull_test_conn)
+
+    for _ in range(3):
+        _sync(ebull_test_conn, [_broker_position(INSTRUMENT_ID, "1.23456789", "100")])
+
+    units, avg_cost, cost_basis = _read(ebull_test_conn)
+    assert units == Decimal("1.234568")
+    assert cost_basis == opening_pool
+    assert avg_cost == Decimal("100.000000")
+
+
 def test_a_broker_side_increase_leaves_the_pool_alone(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
