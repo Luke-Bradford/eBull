@@ -1059,6 +1059,20 @@ describe("StrategiesPage", () => {
     expect(screen.getByText("This account cannot run strategy automation. Connect the demo account, or complete real-money activation first.")).toBeInTheDocument();
   });
 
+  // #3032. A win/success rate is a COMPOSITION, not a return, so it must render
+  // through formatUnsignedPct. formatPct's `exceptZero` sign printed "+60.00%"
+  // beside a signed expectancy, which made the one honest figure look like the
+  // bad news. Asserting the absence of the signed form is the load-bearing half:
+  // the unsigned string is a substring-free exact match either way, so a revert
+  // to formatPct would still satisfy a presence-only assertion.
+  it("renders a success rate unsigned, never as a signed return", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
+    renderStrategies();
+
+    expect(await screen.findByText("60.00%")).toBeInTheDocument();
+    expect(screen.queryByText("+60.00%")).not.toBeInTheDocument();
+  });
+
   it("shows compact prospective evidence when automation is ready", async () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
     renderStrategies();
@@ -1159,7 +1173,12 @@ describe("StrategiesPage", () => {
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("US$50.00")).toBeInTheDocument();
     expect(within(performance).getByText("+1.25%")).toBeInTheDocument();
-    expect(within(performance).getByText("+60.00%")).toBeInTheDocument();
+    // #3032: the win rate is UNSIGNED while the expectancy beside it keeps its
+    // sign. This line asserted "+60.00%" before, which pinned the defect rather
+    // than a decision — there was no rationale for signing a composition, and
+    // the pairing made a negative expectancy read as the worse of two numbers.
+    expect(within(performance).getByText("60.00%")).toBeInTheDocument();
+    expect(within(performance).queryByText("+60.00%")).not.toBeInTheDocument();
     // The chart's explanatory paragraph was removed when the portfolio lens
     // became a control panel (operator, 2026-08-23: "toggles and summaries…
     // what can be configured, not narrated"). The figures it described are

@@ -26,7 +26,7 @@ import {
 } from "@/components/strategies/StrategyPortfolioPanels";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
-import { formatDate, formatMoney, formatNumber, formatPct } from "@/lib/format";
+import { formatDate, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
 import { aggregate } from "@/lib/strategyAggregate";
 import { number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
@@ -547,7 +547,13 @@ export function StrategyPortfolioLens() {
         <div className="mt-3 grid grid-cols-2 gap-x-6 sm:grid-cols-3">
           <StatTile size="md" label="Total P&L" value={formatMoney(summary.totalPnl, pool.currency)} hint="Realised + open" />
           <StatTile size="md" label="Average / trade" value={formatPct(summary.averageReturn)} hint="Completed outcomes" />
-          <StatTile size="md" label="Win rate" value={formatPct(summary.successRate)} hint={`${formatNumber(summary.resolved, 0)} completed`} />
+          {/* UNSIGNED, and it sits beside a SIGNED expectancy on purpose. A win
+              rate is the share of completed outcomes that won — a composition,
+              not a return — so `formatPct`'s `exceptZero` sign rendered it
+              "+27.97%" next to "Average / trade -0.03%", making the one honest
+              figure look like the bad news (#3032). Tile presence is compliant:
+              ta-operator-surface bans win rate only as a LONE headline. */}
+          <StatTile size="md" label="Win rate" value={formatUnsignedPct(summary.successRate)} hint={`${formatNumber(summary.resolved, 0)} completed`} />
         </div>
         {pnlHistory.loading ? (
           <div className="flex h-52 items-center justify-center text-xs text-slate-500">Loading…</div>
