@@ -72,6 +72,25 @@ archives are US-centric; the unadjudicable buckets are printed BESIDE the verdic
 and never under them, and no conclusion about the whole blind spot is drawn from
 the adjudicable subset.
 
+AND THEN: HOW BIG IS THE T2 BLIND SPOT ACTUALLY? (#3046 residual 1, added 2026-09-14.)
+The T2 count above is the number the ticket quotes, and it is the wrong order of
+magnitude. A T2 ratio is ``close(price_date) / close(prior_date)`` where
+``prior_date`` is by construction the immediately preceding STORED bar — so it is
+a claim about a level shift only if both closes were observed. eToro carries the
+last close forward after a name stops quoting (zero range, ``volume IS NULL``,
+repeating the previous close), and a ratio measured to one of those is arithmetic
+over a level the market never set.
+
+``T2 LEVEL PROVENANCE`` stratifies the class by where each operand's level came
+from — see ``classify_level_provenance`` — into four tiers. A, B and C are
+UNRESOLVED, NOT SAFE; only D is two observed levels. Spec addendum in the same
+document.
+
+⚠ The operand does NOT refuse, delete or re-classify any bar. The same predicate
+was falsified as an INGEST-refusal rule on #3046 (2026-09-14) — its weekday
+population is large and uncharacterised. Describing a stored ratio's operands and
+refusing a bar are different acts.
+
 Usage::
 
     PYTHONPATH=. uv run python -m scripts.verify_3046_archive_continuity
@@ -82,8 +101,9 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, NamedTuple
 
 import psycopg
@@ -95,6 +115,12 @@ from scripts.verify_3046_break_minting_census import (
     bucket_for,
     magnitude_or_none,
 )
+
+#: Identity of the T2 level-provenance stratification below. ``RULE_SET_VERSION``
+#: cannot move when only this classification changes, so without a version of its
+#: own two runs reporting different residuals would be indistinguishable from a
+#: corpus change.
+STRATIFIER_VERSION = "t2-level-provenance-v1"
 
 #: Rule-class label for a blind-spot transition. Derived from the census bucket
 #: so the two scripts cannot drift apart on what "T1" means.
@@ -167,6 +193,31 @@ class Adjudication(NamedTuple):
     """``max(d, 1/d)`` for ``d = our_ratio / archive_ratio`` — the scale factor
     our series carries that the independent source does not."""
     disagrees: bool
+
+
+class StoredBar(NamedTuple):
+    """One ``price_daily`` row plus its stored RANGE verdict (never its return one)."""
+
+    price_date: date
+    high: Decimal | None
+    low: Decimal | None
+    close: Decimal | None
+    volume: Decimal | None
+    range_usable: bool | None
+
+
+class Stratified(NamedTuple):
+    """One T2 transition with the provenance of each of its two operands."""
+
+    transition: Transition
+    verdict: str
+    prior_provenance: str
+    resume_provenance: str
+    prior_level_date: date | None
+    """Where the prior operand's LEVEL was actually observed, when it was."""
+    tier: str
+    volume_ever_seen_by_prior: bool
+    """Era-local: does any bar at or before ``prior_date`` carry positive volume?"""
 
 
 def _fmt(n: int) -> str:
@@ -412,6 +463,294 @@ def _print_detail(results: list[tuple[Transition, str, list[Adjudication]]]) -> 
     print()
 
 
+def is_observed(bar: StoredBar, *, range_verdict_known: bool) -> bool:
+    """Did this date carry an observation, by our OWN rules?
+
+    ⚠ POSITIVE volume, not merely non-NULL. ``price_quarantine._usable_volume``
+    (``app/services/price_quarantine.py:302``) rejects ``<= 0``, and eToro's
+    normaliser ``_int_or_none`` (``app/providers/implementations/etoro.py:861``)
+    stores a ZERO volume AS NULL — so NULL and zero are already
+    indistinguishable at rest, and reading NULL as anything but "no evidence"
+    would be reading a normalisation artefact as a fact.
+
+    ⚠ RANGE AND RETURN ARE SEPARATE VERDICT AXES AND ARE NOT CROSSED HERE.
+    ``sql/247_price_quarantine.sql:10-17`` — B2 (containment) and B3 (phantom
+    wick) set ``range_usable = false`` and leave ``return_usable`` true, because
+    "one verdict class = one column". So ``high > low`` on a B2/B3 bar is a
+    KNOWN-BAD range, not evidence that the session traded.
+
+    ⚠ FAIL-CLOSED ON AN UNEVALUATED INSTRUMENT. ``sql/247``'s own header: the
+    verdict tables are SPARSE, so absence of a row means "clean" only where a
+    ``price_quarantine_coverage`` row says the instrument was evaluated. Without
+    one, ``range_usable`` is UNKNOWN and range is not admitted as evidence —
+    volume alone can carry the bar.
+    """
+    if bar.volume is not None and bar.volume > 0:
+        return True
+    if bar.range_usable is False or not range_verdict_known:
+        return False
+    return bar.high is not None and bar.low is not None and bar.high > bar.low
+
+
+def classify_level_provenance(
+    bars: Sequence[StoredBar], index: int, *, evaluated_span: tuple[date, date] | None
+) -> tuple[str, date | None]:
+    """Where did ``bars[index]``'s close come from? Pure; see the spec addendum.
+
+    ``bars`` MUST be the instrument's complete stored history in ascending date
+    order. Walking a filtered or joined subset would invent first bars and skip
+    intervening rows, which is a different question wearing the same name.
+
+    ⚠ ``stale_observed_level`` is the class revision 1 of this spec did not have,
+    and its absence is what made that revision wrong: folding every
+    carry-forward into "not a level claim" silently exonerates
+    ``observed 100 -> carried 100 -> hole -> observed 10``, where the 10x can be
+    a real scale error and only the earlier operand's DATE is wrong.
+
+    ``evaluated_span`` is the instrument's ``price_quarantine_coverage`` interval
+    at the current rule set, or ``None`` if it has none. It is checked PER BAR,
+    not per instrument: a bar backfilled outside that interval carries no range
+    verdict and never did.
+    """
+
+    def known(bar: StoredBar) -> bool:
+        return evaluated_span is not None and evaluated_span[0] <= bar.price_date <= evaluated_span[1]
+
+    if is_observed(bars[index], range_verdict_known=known(bars[index])):
+        return "observed", bars[index].price_date
+    cursor = index
+    while cursor > 0 and bars[cursor].close is not None and bars[cursor].close == bars[cursor - 1].close:
+        cursor -= 1
+        if is_observed(bars[cursor], range_verdict_known=known(bars[cursor])):
+            return "stale_observed_level", bars[cursor].price_date
+    # ⚠ THE VERDICT IS WHERE THE WALK STOPPED, NOT WHETHER IT MOVED. Codex
+    # checkpoint 2: ``cursor != index`` was reading ``observed 10 -> 12 -> 12``
+    # as fabricated, because the run moved — but it stopped at a PRICE CHANGE,
+    # not at the series start, so 12 is an undecided new level that happens to
+    # have been repeated. Only reaching bar 0 exhausts the history behind the
+    # level; anything else leaves a differing predecessor standing.
+    return ("fabricated_level", None) if cursor == 0 else ("zero_range_new_level", None)
+
+
+#: Tier precedence. First matching entry wins, so a transition is in exactly one.
+_TIERS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("A_fabricated_prior_level", frozenset({"fabricated_level", "absent"})),
+    ("B_stale_level", frozenset({"stale_observed_level"})),
+    ("C_degenerate_endpoint", frozenset({"zero_range_new_level"})),
+)
+
+_TIER_NOTES: dict[str, str] = {
+    "A_fabricated_prior_level": "an operand is a level the market never set",
+    "B_stale_level": "the level is real; its DATE is not — the true span is longer",
+    "C_degenerate_endpoint": "zero range at a NEW level — thin session or placeholder, undecided",
+    "D_both_endpoints_observed": "the genuine residual: two observed levels",
+}
+
+
+def tier_for(prior_provenance: str, resume_provenance: str) -> str:
+    """Tier from the two endpoint provenances. A, B and C are UNRESOLVED, not safe."""
+    pair = {prior_provenance, resume_provenance}
+    for tier, members in _TIERS:
+        if pair & members:
+            return tier
+    return "D_both_endpoints_observed"
+
+
+def _load_stored_bars(conn: psycopg.Connection[Any], instrument_ids: list[int]) -> dict[int, list[StoredBar]]:
+    """Complete stored history for each instrument, ascending, with its range verdict."""
+    if not instrument_ids:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT p.instrument_id, p.price_date, p.high, p.low, p.close, p.volume, q.range_usable
+        FROM price_daily p
+        LEFT JOIN price_bar_quarantine q
+          ON q.instrument_id = p.instrument_id
+         AND q.price_date = p.price_date
+         AND q.rule_set_version = %(ver)s
+        WHERE p.instrument_id = ANY(%(ids)s)
+        ORDER BY p.instrument_id, p.price_date
+        """,
+        {"ids": sorted(set(instrument_ids)), "ver": RULE_SET_VERSION},
+    ).fetchall()
+    grouped: dict[int, list[StoredBar]] = defaultdict(list)
+    for instrument_id, price_date, high, low, close, volume, range_usable in rows:
+        grouped[int(instrument_id)].append(
+            StoredBar(
+                price_date=price_date,
+                high=None if high is None else Decimal(high),
+                low=None if low is None else Decimal(low),
+                close=None if close is None else Decimal(close),
+                volume=None if volume is None else Decimal(volume),
+                range_usable=None if range_usable is None else bool(range_usable),
+            )
+        )
+    return dict(grouped)
+
+
+def _load_evaluated_spans(conn: psycopg.Connection[Any], instrument_ids: list[int]) -> dict[int, tuple[date, date]]:
+    """The DATE INTERVAL each instrument was evaluated over, at this rule set.
+
+    ⚠ INSTRUMENT-LEVEL COVERAGE IS NOT ENOUGH, and Codex checkpoint 2 caught the
+    difference. ``price_quarantine_coverage`` records ``first_bar``/``last_bar``
+    precisely because a later backfill can add bars OUTSIDE the evaluated span:
+    those carry no ``price_bar_quarantine`` row and never did, so reading their
+    absence as "clean" would admit an unchecked range as evidence. The
+    provenance walk visits arbitrarily old history, which is exactly where
+    backfilled bars live.
+    """
+    if not instrument_ids:
+        return {}
+    return {
+        int(instrument_id): (first_bar, last_bar)
+        for instrument_id, first_bar, last_bar in conn.execute(
+            """
+            SELECT instrument_id, first_bar, last_bar FROM price_quarantine_coverage
+            WHERE instrument_id = ANY(%(ids)s) AND rule_set_version = %(ver)s
+              AND first_bar IS NOT NULL AND last_bar IS NOT NULL
+            """,
+            {"ids": sorted(set(instrument_ids)), "ver": RULE_SET_VERSION},
+        ).fetchall()
+    }
+
+
+def _stratify(
+    t2: list[tuple[Transition, str]],
+    bars: dict[int, list[StoredBar]],
+    evaluated_spans: dict[int, tuple[date, date]],
+) -> list[Stratified]:
+    out: list[Stratified] = []
+    for transition, verdict in t2:
+        series = bars.get(transition.instrument_id, [])
+        span = evaluated_spans.get(transition.instrument_id)
+        index_of = {bar.price_date: i for i, bar in enumerate(series)}
+        provenances: list[tuple[str, date | None]] = []
+        for endpoint in (transition.prior_date, transition.price_date):
+            position = index_of.get(endpoint)
+            if position is None:
+                provenances.append(("absent", None))
+                continue
+            provenances.append(classify_level_provenance(series, position, evaluated_span=span))
+        (prior_provenance, prior_level_date), (resume_provenance, _) = provenances
+        # ⚠ Era-local, NOT lifetime. One populated bar years later would flip a
+        # "never" instrument to "partial" and change nothing about this date.
+        volume_seen = any(
+            bar.volume is not None and bar.volume > 0 and bar.price_date <= transition.prior_date for bar in series
+        )
+        out.append(
+            Stratified(
+                transition=transition,
+                verdict=verdict,
+                prior_provenance=prior_provenance,
+                resume_provenance=resume_provenance,
+                prior_level_date=prior_level_date,
+                tier=tier_for(prior_provenance, resume_provenance),
+                volume_ever_seen_by_prior=volume_seen,
+            )
+        )
+    return out
+
+
+def _print_provenance(rows: list[Stratified]) -> None:
+    print("=" * 84)
+    print(f"T2 LEVEL PROVENANCE — stratifier {STRATIFIER_VERSION}")
+    print("=" * 84)
+    print("  A T2 ratio is a claim about a LEVEL SHIFT only if both its operands were")
+    print("  observed. A, B and C below are UNRESOLVED, not safe.")
+    print()
+    print(f"  {'tier':<28}{'rows':>7}{'instruments':>13}{'no vol <= prior':>17}   note")
+    for tier in (*(name for name, _ in _TIERS), "D_both_endpoints_observed"):
+        members = [r for r in rows if r.tier == tier]
+        novol = sum(1 for r in members if not r.volume_ever_seen_by_prior)
+        print(
+            f"  {tier:<28}{_fmt(len(members)):>7}"
+            f"{_fmt(len({r.transition.instrument_id for r in members})):>13}{_fmt(novol):>17}   {_TIER_NOTES[tier]}"
+        )
+    print(f"  {'TOTAL':<28}{_fmt(len(rows)):>7}")
+    print()
+    print("  endpoint provenance x archive verdict, per tier")
+    for tier in (*(name for name, _ in _TIERS), "D_both_endpoints_observed"):
+        members = [r for r in rows if r.tier == tier]
+        if not members:
+            continue
+        print(f"\n    {tier}")
+        cross: Counter[tuple[str, str, str]] = Counter(
+            (r.prior_provenance, r.resume_provenance, r.verdict) for r in members
+        )
+        for (prior, resume, verdict), count in sorted(cross.items()):
+            print(f"      {prior:<22}{resume:<22}{verdict:<22}{_fmt(count):>6}")
+    print()
+    genuine = sorted(
+        (r for r in rows if r.tier == "D_both_endpoints_observed"),
+        key=lambda r: -float(r.transition.magnitude),
+    )
+    print(f"  THE GENUINE RESIDUAL — all {_fmt(len(genuine))} rows, no cut")
+    print(f"    {'instrument':>11}  {'prior -> date':<26}{'T':>3}{'magnitude':>11}  {'asset':<12}verdict")
+    for row in genuine:
+        print(
+            f"    {row.transition.instrument_id:>11}  "
+            f"{str(row.transition.prior_date)} -> {str(row.transition.price_date):<12}"
+            f"{float(row.transition.threshold):>3.0f}{float(row.transition.magnitude):>11.2f}  "
+            f"{(row.transition.asset_class or 'NULL'):<12}{row.verdict}"
+        )
+    print()
+
+
+def _reconcile_provenance(
+    rows: list[Stratified], bars: dict[int, list[StoredBar]], t2_count: int
+) -> tuple[bool, int, int, int]:
+    """Arms 4 and 5. Returns (ok, absent_endpoints, resume_repeat_hits, ratio_mismatches).
+
+    Arm 4 — PARTITION. Tiers must sum to the T2 population, and no endpoint may be
+    ABSENT from ``price_daily``. ⚠ Counting "rows whose tier is not a known tier"
+    would be a tautology — ``tier_for`` returns nothing else — and the review bot
+    said so. The condition with content is the one the tautology was standing in
+    for: an ``absent`` endpoint folds into tier A, where it is indistinguishable
+    from a fabricated level, so it is counted and printed in its own right. A hit
+    means a transition references a bar that is no longer stored.
+
+    Arm 4b — STRUCTURAL. ``prior_date`` is by construction the immediately preceding
+    stored bar, so the resume endpoint's predecessor IS the prior endpoint. A resume
+    endpoint reading ``stale_observed_level``/``fabricated_level`` therefore requires
+    ``close(price_date) == close(prior_date)`` — a ratio of exactly 1, which clears no
+    magnitude threshold and cannot be in the blind spot. A hit means the stored
+    transition and ``price_daily`` have drifted apart.
+
+    Arm 5 — STORED RATIO. ``REPEATABLE READ`` gives one snapshot; it does NOT give
+    agreement between a quarantine row minted at an earlier refresh and the
+    ``price_daily`` this classifier reads now. Recompute
+    ``close(price_date) / close(prior_date)`` (``_usable_close`` semantics: positive
+    only) and compare against the stored ``observed_ratio``. A mismatch voids the
+    residual counts — the bars classified are not the bars that minted the transition.
+    """
+    absent_endpoints = sum(
+        1 for r in rows for provenance in (r.prior_provenance, r.resume_provenance) if provenance == "absent"
+    )
+    resume_repeat_hits = sum(1 for r in rows if r.resume_provenance in {"stale_observed_level", "fabricated_level"})
+    mismatches = 0
+    for row in rows:
+        closes = {
+            bar.price_date: bar.close
+            for bar in bars.get(row.transition.instrument_id, [])
+            if bar.close is not None and bar.close > 0
+        }
+        prior, later = closes.get(row.transition.prior_date), closes.get(row.transition.price_date)
+        if prior is None or later is None:
+            mismatches += 1
+            continue
+        # Stored at the column's own precision (NUMERIC(24,12)); compare at it
+        # rather than exactly, or every row fails on the last digit of a stored
+        # quotient. ⚠ ROUND_HALF_UP, not Decimal's default ROUND_HALF_EVEN:
+        # Postgres numeric rounds half AWAY FROM ZERO, so an exact tie at the
+        # twelfth decimal would fail reconciliation on data that never moved and
+        # void the whole report (Codex checkpoint 2).
+        recomputed = (later / prior).quantize(row.transition.ratio, rounding=ROUND_HALF_UP)
+        if recomputed != row.transition.ratio:
+            mismatches += 1
+    ok = len(rows) == t2_count and absent_endpoints == 0 and resume_repeat_hits == 0 and mismatches == 0
+    return ok, absent_endpoints, resume_repeat_hits, mismatches
+
+
 def _reconcile(conn: psycopg.Connection[Any], blind: list[Transition]) -> tuple[bool, int, int, int]:
     """Three arms. Returns (ok, unresolved_break_hits, resolved_break_hits, coverage_off_version).
 
@@ -471,21 +810,39 @@ def run(conn: psycopg.Connection[Any]) -> int:
     _print_verdicts(results)
     _print_detail(results)
 
+    # T2 ONLY, deliberately. A T1 endpoint is already `return_usable = false`, so
+    # its ratio is not a return whatever the calendar did — asking where its level
+    # came from would pool two rule classes the parent section keeps apart.
+    t2 = [(t, v) for t, v, _ in results if t.rule_class == "T2"]
+    stored_bars = _load_stored_bars(conn, [t.instrument_id for t, _ in t2])
+    evaluated_spans = _load_evaluated_spans(conn, [t.instrument_id for t, _ in t2])
+    stratified = _stratify(t2, stored_bars, evaluated_spans)
+    _print_provenance(stratified)
+
     ok, unresolved_hits, resolved_hits, off_version = _reconcile(conn, blind)
+    prov_ok, absent_endpoints, resume_repeats, ratio_mismatches = _reconcile_provenance(
+        stratified, stored_bars, len(t2)
+    )
     print("=" * 84)
     print("RECONCILIATION")
     print("=" * 84)
     print(f"  blind-spot keys carrying an UNRESOLVED break row    {_fmt(unresolved_hits)}   <- must be 0")
     print(f"  …carrying a RESOLVED one                           {_fmt(resolved_hits)}   (reported, not failed)")
     print(f"  coverage rows at another rule-set version           {_fmt(off_version)}   <- must be 0")
-    if ok:
-        print("  OK — the adjudicated population IS the blind spot, at one rule-set version.")
+    print(f"  T2 transitions stratified                          {_fmt(len(stratified))}   of {_fmt(len(t2))}")
+    print(f"  endpoints absent from price_daily                  {_fmt(absent_endpoints)}   <- must be 0")
+    print(f"  resume endpoints reading as a repeat               {_fmt(resume_repeats)}   <- must be 0 (ratio 1)")
+    print(f"  stored observed_ratio vs recomputed mismatches     {_fmt(ratio_mismatches)}   <- must be 0")
+    if ok and prov_ok:
+        print("  OK — the adjudicated population IS the blind spot, at one rule-set version,")
+        print("  and the bars stratified are the bars that minted its transitions.")
     else:
-        print("  MISMATCH — this run is not adjudicating the census's population. Do not")
-        print("  quote its verdicts: either a break row exists for a supposedly suppressed")
-        print("  transition, or the asset classes that picked the thresholds are stale.")
+        print("  MISMATCH — do not quote this run's verdicts or its residual counts: either")
+        print("  a break row exists for a supposedly suppressed transition, the asset classes")
+        print("  that picked the thresholds are stale, or price_daily has moved under the")
+        print("  quarantine rows being classified.")
     print()
-    return 0 if ok else 1
+    return 0 if (ok and prov_ok) else 1
 
 
 def main(argv: list[str] | None = None) -> int:

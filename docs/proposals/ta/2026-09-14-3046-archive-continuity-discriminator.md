@@ -177,3 +177,168 @@ not answered here.
 - **Resolution is symbol-level.** `research_price_series.instrument_id` links by symbol or
   CIK; ticker reuse, relisting and share-class changes are not re-verified here, and the
   corpus skill records that limitation.
+
+
+---
+
+# Addendum — sizing the GENUINE T2 residual (#3046 residual 1)
+
+Status: spec for the `T2 LEVEL PROVENANCE` section added to the same script. Read-only,
+writes nothing, proposes no rule change — `price_quarantine` stays in `INPUT_RULE_SETS`
+(#3031), so its rules are not touched here.
+
+Revision 2. **Revision 1 is recorded below under "What Codex checkpoint 1 killed", because
+three of its errors would each have produced a smaller, wronger answer.**
+
+## The question
+
+The close-out of the parent section left residual 1 open in these words: *"236 of 244
+unadjudicable. Subtracting the weekend-sentinel cluster leaves a much smaller genuine
+population; sizing it needs the cluster excluded first."*
+
+The count that section printed is what the ticket, the board and the next session will
+quote. A T2 transition is `close(price_date) / close(prior_date)` across a calendar hole,
+and `prior_date` is by construction the **immediately preceding stored bar**. It is a claim
+about a level shift between two observed prices only if both closes were observed. Where
+the prior close is a carried-forward repeat of a bar that was itself never observed, the
+ratio's operand is a number the feed emitted and the market never set — and
+`sources_disagree` on it adjudicates a bar's provenance, not a level.
+
+So the residual is not "the count minus one Nordic cluster". It is the whole T2 class
+stratified by the **provenance of each endpoint's level**, which subsumes that cluster
+without naming a date, a venue or a constant.
+
+## Source rule
+
+No published formulation exists for "is this stored bar an observation", so the rule is
+fixed **by construction** over columns and verdicts we already own, and every clause below
+cites the thing that fixes it rather than reasoning it out.
+
+- **Volume must be POSITIVE, not merely non-NULL.** `price_quarantine._usable_volume`
+  (`app/services/price_quarantine.py:302`) is `volume is None or volume <= 0 -> None`.
+  Using `IS NOT NULL` would admit a zero as evidence of trading against our own rule set.
+- **A stored NULL volume does not mean "the feed omitted the field".** eToro's normaliser
+  `_int_or_none` (`app/providers/implementations/etoro.py:861`) returns `None` for a
+  **zero** as well as for a missing or malformed value, so NULL and zero are already
+  indistinguishable at rest. That is why the operand below never reads NULL as a positive
+  claim about anything — only positive volume is evidence.
+- **Range and return are separate verdict axes and must not be crossed.**
+  `sql/247_price_quarantine.sql:10-17`: B2 (containment) and B3 (phantom wick) set
+  `range_usable = false` and leave `return_usable` true, because "one verdict class = one
+  column". So `high > low` on a bar carrying B2/B3 is a **known-bad range** and is not
+  evidence that the session traded. The classifier consults
+  `price_bar_quarantine.range_usable` before using range at all.
+- **Our bars are Bid quotes, not trade prints** (`.claude/skills/data-sources/etoro-api.md`,
+  the −0.15%..−0.22% level-bias table corroborating S3 / #2243). The classifier therefore
+  says "the feed reported a distinct quote", never "somebody printed a trade".
+- **eToro carries the last close forward** after a name stops quoting: a zero-range,
+  volume-NULL bar repeating the previous stored close. Measured on #3046 on 2026-09-14
+  against a live `OneDay` candle probe (`NCSM`). ⚠ That same session **falsified** the
+  same predicate as an *ingest-refusal* operand — its weekday population is large and
+  uncharacterised. Nothing here refuses, deletes or re-classifies a bar; the operand
+  describes a stored ratio's operands, not a bar's right to exist.
+
+## The classification
+
+**Step 1 — is the endpoint bar observed?**
+
+```
+observed(bar) := (volume > 0)
+              OR (range_usable IS NOT false AND high > low)
+```
+
+**Step 2 — if not observed, where did its level come from?** Walk backwards through the
+instrument's **complete** stored history (never through a filtered or joined subset) while
+each bar's close exactly equals its predecessor's:
+
+| provenance | reached | meaning |
+| --- | --- | --- |
+| `observed` | — | the endpoint itself carries positive volume or a usable range |
+| `stale_observed_level` | an observed bar inside the repeat run | the LEVEL is real; its DATE is not. The true span is longer than the transition claims |
+| `fabricated_level` | the start of the series with no observed bar in the run — including a lone unobserved FIRST bar, which has nothing behind it at all | the operand is a level the market never set |
+| `zero_range_new_level` | the close differs from its predecessor's | degenerate but new — a one-quote session on a thin name has this shape and so does a placeholder; **not decided** |
+| `absent` | no `price_daily` row | cannot occur for a stored transition endpoint; **counted and printed**, never assumed away |
+
+⚠ `stale_observed_level` exists **because revision 1 did not have it**, and that is the
+correction that mattered most: revision 1 folded every carry-forward into "not a level
+claim", which silently exonerated `observed 100 -> carried 100 -> hole -> observed 10`.
+The 10x there can be a real scale error; only the DATE of the earlier operand is wrong.
+The class is small on today's corpus and the script prints its size — which is the point,
+because revision 1 would have made it invisible.
+
+**Step 3 — tier, by precedence**, from the two endpoint provenances:
+
+- **A — fabricated prior level.** Either endpoint is `fabricated_level` or `absent`.
+- **B — stale level.** Not A, and either endpoint is `stale_observed_level`.
+- **C — degenerate endpoint.** Not A or B, and either endpoint is `zero_range_new_level`.
+- **D — both endpoints observed.** The genuine residual.
+
+A, B and C are each **unresolved, not safe**. Only D is a claim about two observed levels,
+and even D is a claim about the transition's *operands*, never about which consumer reads
+it — that is the separate exposure question this ticket's step 1 owns.
+
+## Structural invariant worth asserting, not assuming
+
+`prior_date` is the immediately preceding stored bar, so the resume endpoint's predecessor
+IS the prior endpoint. A resume endpoint classified `stale_observed_level` or
+`fabricated_level` therefore requires `close(price_date) = close(prior_date)`, i.e. a ratio
+of exactly 1 — which cannot clear any magnitude threshold and cannot be in the blind spot.
+The script asserts zero such rows. A hit means the stored transition and `price_daily` have
+drifted apart, which is a finding in its own right.
+
+## Reconciliation — the existing arms plus two
+
+1-3 unchanged (unresolved-break scoping, coverage rule-set version, `REPEATABLE READ`).
+
+4. **Partition arm.** The tier counts must sum to the T2 transition count, every endpoint
+   must classify, and no transition may appear in two tiers.
+5. **Stored-ratio arm.** `REPEATABLE READ` gives one snapshot; it does not give agreement
+   between a quarantine row computed at some earlier refresh and the `price_daily` this
+   classifier reads now. For every T2 transition, recompute
+   `_usable_close(price_date) / _usable_close(prior_date)` and compare against the stored
+   `observed_ratio` within the column's stored precision. A mismatch means the classified
+   bars are not the bars that minted the transition, and the residual counts are void.
+
+## Confounds — reported, not assumed away
+
+- ⚠ **Volume coverage is era-local, not lifetime.** One populated bar years later would
+  turn a "never" instrument into a "partial" one and change nothing about the endpoint.
+  Each endpoint therefore reports whether any bar **at or before its own date** carries
+  positive volume; where none does, the volume half of `observed` was unavailable on that
+  date and the classification rests on range alone. Printed per tier, so a tier that is an
+  artefact of blanket volume absence is visible as one.
+- ⚠ **A halted session is indistinguishable from carry-forward** on a bar with no positive
+  volume whose close repeats. In both cases no new level was set, which is the property the
+  tier is about — but it is a limit, not a proof.
+- ⚠ **Tier D is not "confirmed defects".** It is the population whose `sources_disagree`
+  rows mean what the parent section says they mean; it still contains archive-unreachable
+  rows, and its disagreements still carry the parent section's adjustment-basis caveat (a
+  disagreement against an `unadjusted` archive can be a split we healed).
+- ⚠ **Exchange test issues are not excluded here.** `research-price-corpus.md` requires
+  intersecting vendor symbols against the Nasdaq directory `Test Issue = Y` flag before
+  treating an extreme return as a market observation. That exclusion belongs to the archive
+  corpus, not to this stratification, and is named as an outstanding qualifier on the
+  archive verdicts rather than silently inherited.
+
+## What Codex checkpoint 1 killed in revision 1
+
+1. **`volume IS NOT NULL` as evidence of trading** — contradicted
+   `_usable_volume`'s own `<= 0` rejection, and eToro stores a zero AS NULL.
+2. **`high > low` without consulting `range_usable`** — would have promoted a known B2/B3
+   phantom wick to "observed", crossing the two verdict axes `sql/247` separates by design.
+3. **Carry-forward treated as exonerating** — see `stale_observed_level` above.
+
+Each of the three shrinks the "genuine" residual, which is the direction that reads as a
+result. That is why they are recorded here rather than only in the commit.
+
+## Output
+
+Every figure is computed at run time; none is written into this spec or into the script.
+Tier D is printed in full — every row with its magnitude, threshold, asset class, endpoint
+provenances and archive verdict, no top-N cut. A, B and C print their own per-verdict and
+per-provenance breakdowns plus a sample-free count, so the population being set aside is
+auditable rather than merely subtracted.
+
+A `STRATIFIER_VERSION` constant is printed beside `RULE_SET_VERSION`: the quarantine
+version cannot move when only this classification changes, so without it two runs reporting
+different residuals would be indistinguishable from a corpus change.

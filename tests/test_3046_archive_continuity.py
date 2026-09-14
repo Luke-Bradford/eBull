@@ -12,9 +12,18 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from scripts.verify_3046_archive_continuity import Series, Transition, _adjudicate
+from scripts.verify_3046_archive_continuity import (
+    Series,
+    StoredBar,
+    Transition,
+    _adjudicate,
+    classify_level_provenance,
+    is_observed,
+    tier_for,
+)
 
 PRIOR = date(2025, 6, 2)
+SPAN = (date(2000, 1, 1), date(2030, 1, 1))
 LATER = date(2025, 8, 26)
 
 
@@ -42,6 +51,26 @@ def _series(series_id: int = 1, *, vendor: str = "vendorA", basis: str = "split_
         adjustment_basis=basis,
         first_bar=date(2000, 1, 1),
         last_bar=date(2026, 1, 1),
+    )
+
+
+def _bar(
+    price_date: date = PRIOR,
+    *,
+    high: str = "10",
+    low: str = "10",
+    close: str = "10",
+    volume: str | None = None,
+    range_usable: bool | None = None,
+) -> StoredBar:
+    """Zero-range, volume-less by default — the shape carry-forward takes."""
+    return StoredBar(
+        price_date=price_date,
+        high=Decimal(high),
+        low=Decimal(low),
+        close=Decimal(close),
+        volume=None if volume is None else Decimal(volume),
+        range_usable=range_usable,
     )
 
 
@@ -171,3 +200,114 @@ class TestOneUpstreamOneObservation:
         closes = {(1, PRIOR): Decimal("10"), (2, LATER): Decimal("100")}
         verdict, readings = _adjudicate(_transition(ratio="10"), [_series(1), _series(2, vendor="vendorB")], closes)
         assert (verdict, readings) == ("archive_bar_missing", [])
+
+
+class TestIsObserved:
+    """⚠ Every clause here is a SOURCE RULE, not a preference. See the spec addendum."""
+
+    def test_positive_volume_is_an_observation(self) -> None:
+        assert is_observed(_bar(volume="1000"), range_verdict_known=True)
+
+    def test_zero_volume_is_not(self) -> None:
+        """``price_quarantine._usable_volume`` rejects ``<= 0``; ``IS NOT NULL``
+        would admit a zero as evidence of trading against our own rule set."""
+        assert not is_observed(_bar(volume="0"), range_verdict_known=True)
+
+    def test_a_usable_intrabar_range_is_an_observation(self) -> None:
+        assert is_observed(_bar(high="11", low="10"), range_verdict_known=True)
+
+    def test_a_range_the_quarantine_condemned_is_not(self) -> None:
+        """sql/247: B2/B3 set ``range_usable=false`` and leave the return axis
+        alone. A known phantom wick is not evidence that the session traded."""
+        assert not is_observed(_bar(high="11", low="10", range_usable=False), range_verdict_known=True)
+
+    def test_range_is_not_evidence_on_an_unevaluated_instrument(self) -> None:
+        """Fail-closed: the verdict tables are SPARSE, so absence of a row means
+        'clean' only where a coverage row says the instrument was evaluated."""
+        assert not is_observed(_bar(high="11", low="10"), range_verdict_known=False)
+
+    def test_volume_still_carries_an_unevaluated_bar(self) -> None:
+        assert is_observed(_bar(high="10", low="10", volume="5"), range_verdict_known=False)
+
+
+class TestLevelProvenance:
+    def test_an_observed_bar_is_its_own_level(self) -> None:
+        bars = [_bar(date(2025, 1, 2), close="10", volume="5")]
+        assert classify_level_provenance(bars, 0, evaluated_span=SPAN) == ("observed", date(2025, 1, 2))
+
+    def test_a_repeat_run_reaching_an_observed_bar_is_STALE_not_fabricated(self) -> None:
+        """⚠ The class revision 1 of the spec did not have. ``observed 100 ->
+        carried 100 -> hole -> observed 10`` can be a real scale error; only the
+        earlier operand's DATE is wrong, so exonerating it would be the defect."""
+        bars = [
+            _bar(date(2025, 1, 2), close="100", volume="7"),
+            _bar(date(2025, 1, 3), close="100"),
+            _bar(date(2025, 1, 6), close="100"),
+        ]
+        assert classify_level_provenance(bars, 2, evaluated_span=SPAN) == (
+            "stale_observed_level",
+            date(2025, 1, 2),
+        )
+
+    def test_a_repeat_run_reaching_the_series_start_is_fabricated(self) -> None:
+        bars = [_bar(date(2025, 6, 28), close="20"), _bar(date(2025, 6, 29), close="20")]
+        assert classify_level_provenance(bars, 1, evaluated_span=SPAN) == ("fabricated_level", None)
+
+    def test_a_lone_unobserved_first_bar_is_fabricated_too(self) -> None:
+        bars = [_bar(date(2025, 6, 28), close="20")]
+        assert classify_level_provenance(bars, 0, evaluated_span=SPAN) == ("fabricated_level", None)
+
+    def test_a_zero_range_bar_at_a_NEW_level_is_undecided(self) -> None:
+        """A one-quote session on a thin name has this shape and so does a
+        placeholder. Neither reading is asserted."""
+        bars = [_bar(date(2025, 1, 2), close="10", volume="7"), _bar(date(2025, 1, 3), close="12")]
+        assert classify_level_provenance(bars, 1, evaluated_span=SPAN) == ("zero_range_new_level", None)
+
+    def test_the_walk_stops_at_the_first_observed_bar_not_the_oldest(self) -> None:
+        bars = [
+            _bar(date(2025, 1, 2), close="100", volume="9"),
+            _bar(date(2025, 1, 3), close="100", volume="9"),
+            _bar(date(2025, 1, 6), close="100"),
+        ]
+        assert classify_level_provenance(bars, 2, evaluated_span=SPAN)[1] == date(2025, 1, 3)
+
+    def test_a_repeat_run_that_stops_at_a_PRICE_CHANGE_stays_undecided(self) -> None:
+        """⚠ Codex checkpoint 2. The verdict is where the walk STOPPED, not
+        whether it moved: ``observed 10 -> 12 -> 12`` exhausts nothing — 12 is an
+        undecided new level that happens to have been repeated, and reading it as
+        fabricated would label a thin-session quote a level the market never set."""
+        bars = [
+            _bar(date(2025, 1, 2), close="10", volume="7"),
+            _bar(date(2025, 1, 3), close="12"),
+            _bar(date(2025, 1, 6), close="12"),
+        ]
+        assert classify_level_provenance(bars, 2, evaluated_span=SPAN) == ("zero_range_new_level", None)
+
+    def test_a_bar_backfilled_OUTSIDE_the_evaluated_span_has_no_range_verdict(self) -> None:
+        """⚠ Codex checkpoint 2. price_quarantine_coverage records first_bar/last_bar
+        because a later backfill adds bars the rules never saw; their missing
+        price_bar_quarantine row is absence-of-evaluation, not a clean verdict."""
+        bars = [_bar(date(2019, 1, 2), high="11", low="10", close="10")]
+        assert classify_level_provenance(bars, 0, evaluated_span=(date(2020, 1, 1), date(2030, 1, 1))) == (
+            "fabricated_level",
+            None,
+        )
+        assert classify_level_provenance(bars, 0, evaluated_span=(date(2019, 1, 1), date(2030, 1, 1))) == (
+            "observed",
+            date(2019, 1, 2),
+        )
+
+
+class TestTier:
+    def test_fabricated_wins_over_every_other_shape(self) -> None:
+        assert tier_for("fabricated_level", "observed") == "A_fabricated_prior_level"
+        assert tier_for("observed", "absent") == "A_fabricated_prior_level"
+
+    def test_stale_outranks_degenerate(self) -> None:
+        assert tier_for("stale_observed_level", "zero_range_new_level") == "B_stale_level"
+
+    def test_one_degenerate_endpoint_is_enough_to_leave_the_residual(self) -> None:
+        assert tier_for("observed", "zero_range_new_level") == "C_degenerate_endpoint"
+
+    def test_only_two_observed_endpoints_are_the_genuine_residual(self) -> None:
+        assert tier_for("observed", "observed") == "D_both_endpoints_observed"
