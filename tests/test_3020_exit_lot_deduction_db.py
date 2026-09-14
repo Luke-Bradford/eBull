@@ -203,9 +203,7 @@ def test_a_lot_locked_by_a_concurrent_sync_is_skipped_not_waited_on(
             (POSITION_ID,),
         )
         with caplog.at_level("WARNING", logger="app.services.order_client"):
-            _deduct_closed_exit_lot(
-                ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW
-            )
+            _deduct_closed_exit_lot(ebull_test_conn, position_id=POSITION_ID, filled_units=Decimal("1000"), now=_NOW)
         assert "absent or locked by a concurrent sync" in caplog.text
     finally:
         rival.rollback()
