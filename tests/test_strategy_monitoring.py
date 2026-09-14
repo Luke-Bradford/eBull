@@ -47,6 +47,17 @@ from app.services.strategy_position_manager import PositionManagerResult
 from app.services.strategy_signal_scan import SCAN_UNIVERSE
 from tests.fixtures.ebull_test_db import seed_universe_anchor
 
+# #2224 — pinned like `tests/test_strategy_live_gate.py`; see the long note
+# there for the mechanism. In short: this module's shared-paper-pool tests read
+# and write `runtime_config` and `strategy_paper_pool`, which are SINGLETON rows
+# per-test cleanup does not wipe, and the live gate's kill drills write the same
+# rows. Unpinned, xdist scatters both modules across four workers and a drill
+# lands inside this module's precondition.
+#
+# ⚠ Measured before/after on the two-file pair: 2 of 3 runs failed unpinned
+# (a DIFFERENT test each time — #2224's signature), 4 of 4 green pinned.
+pytestmark = pytest.mark.xdist_group("test_strategy_monitoring")
+
 
 def _scan_version(strategy_id: str) -> str:
     """The version the SCANNER stamps on a ``strategy_signals`` row.
