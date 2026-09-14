@@ -23,6 +23,8 @@ from app.services.price_levels import (
     LevelScan,
     PriceLevel,
     _cluster,
+    _segment,
+    _sort_pivots,
     levels_at,
     swing_pivots,
 )
@@ -310,3 +312,158 @@ class TestAtFiltersBeforeMaterialisingWithoutMovingAVerdict:
         assert scan.at(atr=-1.0, index=100) == ()
         assert scan.at(atr=1.5, index=scan.highs.size) == ()
         assert scan.at(atr=1.5, index=-1) == ()
+
+
+class TestSegmentationMemoIsExactUnderAMovingTolerance:
+    """#2780 item 3 — ``at`` memoises ``_segment`` on (prefix length, bracket).
+
+    ⚠⚠ THE SWEEP ABOVE CANNOT SEE THIS CHANGE and that is why this class exists.
+    ``test_it_matches_the_materialising_form_at_every_bar`` holds ``atr`` FIXED
+    for a whole series, so the bracket never moves and every call after the
+    first is a cache hit — the memo would pass that test even if the bracket key
+    were wrong, because the key is never exercised. Every test here varies the
+    tolerance bar to bar and asserts the key actually moved.
+
+    Pure tier: no database, no fixtures, no IO.
+    """
+
+    @staticmethod
+    def _series(rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        steps = rng.normal(0.0, 1.0, n).cumsum()
+        mid = 100.0 + 6.0 * np.sin(np.arange(n) / 7.0) + 0.6 * steps
+        return mid + rng.uniform(0.05, 1.2, n), mid - rng.uniform(0.05, 1.2, n), rng.uniform(0.0, 5e6, n)
+
+    @staticmethod
+    def _keys_seen(scan: LevelScan, atrs: list[float]) -> tuple[int, int]:
+        """``(distinct full keys, distinct prefix-only keys)`` over the walk.
+
+        A memo tested on one key is untested, so both are asserted rather than
+        assumed — the #2780 "fixture that refuses everything" trap, one layer on.
+        The SECOND number is what makes the first meaningful: if the two were
+        equal the tolerance never moved a bracket, and the walk would be
+        exercising only the prefix half of the key.
+        """
+        import bisect
+
+        keys: set[tuple[str, int, int]] = set()
+        prefixes: set[tuple[str, int]] = set()
+        for index, atr in enumerate(atrs):
+            tolerance = CLUSTER_ATR_TOLERANCE * atr
+            last_confirmed = index - scan.pivots.half_window
+            for name, array, tup, prices in (
+                ("r", scan.high_index_array, scan.pivots.high_indices, scan.highs),
+                ("s", scan.low_index_array, scan.pivots.low_indices, scan.lows),
+            ):
+                idxs = array[: bisect.bisect_right(tup, last_confirmed)]
+                sorted_pivots = _sort_pivots(idxs, prices, scan.volumes)
+                if sorted_pivots is None:
+                    continue
+                prefixes.add((name, int(idxs.size)))
+                keys.add((name, int(idxs.size), sorted_pivots.bracket(tolerance)))
+        return len(keys), len(prefixes)
+
+    def test_a_bar_by_bar_tolerance_never_returns_a_stale_segmentation(self) -> None:
+        """The memo must be invisible: same levels as the uncached reference.
+
+        ⚠ Compared with ``==`` on whole ``PriceLevel`` tuples, never ``approx``.
+        A level price feeds a threshold comparison, so a last-bit difference
+        changes which trades exist — the standard the rest of this file holds.
+        """
+        rng = np.random.default_rng(20260914)
+        bars = levels = 0
+        for _ in range(12):
+            n = int(rng.integers(300, 700))
+            highs, lows, volumes = self._series(rng, n)
+            scan = LevelScan.build(highs=highs, lows=lows, volumes=volumes)
+            # A wandering ATR, so the tolerance crosses gap values repeatedly
+            # instead of sitting in one bracket for the whole series.
+            atrs = [float(v) for v in np.abs(rng.normal(2.5, 1.4, n)) + 0.05]
+            # ⚠ A GATE, not a claim: the floor sits below the measured minimum
+            # rather than being invented. Over these 12 series the walk visits
+            # 35-164 distinct full keys (run the assertion's own expression to
+            # re-derive), so 30 fails loudly if the fixture ever goes degenerate
+            # and does not fail on ordinary variation between seeds.
+            full_keys, prefix_keys = self._keys_seen(scan, atrs)
+            assert full_keys > 30, f"only {full_keys} distinct memo keys — the memo is barely exercised"
+            assert full_keys > prefix_keys, "the tolerance never moved a bracket — only the prefix half is tested"
+            fresh = LevelScan.build(highs=highs, lows=lows, volumes=volumes)
+            for index, atr in enumerate(atrs):
+                actual = scan.at(atr=atr, index=index)
+                # ⚠ A NEW scan per bar, so its caches are empty and it runs the
+                # uncached path — the memo cannot mask its own error.
+                expected = LevelScan.build(highs=highs, lows=lows, volumes=volumes).at(atr=atr, index=index)
+                assert actual == expected
+                assert actual == _reference_at(fresh, atr=atr, index=index)
+                bars += 1
+                levels += len(actual)
+        assert bars > 3_000
+        assert levels > 500, f"only {levels} levels survived — the memo is being compared on nothing"
+
+    def test_a_tolerance_exactly_on_a_gap_is_not_aliased_with_one_below_it(self) -> None:
+        """⚠⚠ THE TIE CASE IS THE ONE THAT WOULD FAIL SILENTLY.
+
+        The cut is ``gap > tolerance``, so a tolerance exactly equal to a gap
+        keeps that pair together while any tolerance below it splits them.
+        ``searchsorted(..., side="right")`` counts ties into the lower bracket,
+        which is what makes the two distinguishable; ``side="left"`` would put
+        them in the same bracket and return a segmentation from the wrong side
+        of the boundary. Constructed from real gap values rather than guessed.
+        """
+        highs, lows, volumes = self._series(np.random.default_rng(31), 500)
+        scan = LevelScan.build(highs=highs, lows=lows, volumes=volumes)
+        index = 480
+        last_confirmed = index - scan.pivots.half_window
+        idxs = scan.low_index_array[: np.searchsorted(scan.low_index_array, last_confirmed, side="right")]
+        sorted_pivots = _sort_pivots(idxs, scan.lows, scan.volumes)
+        assert sorted_pivots is not None
+        gaps = sorted_pivots.sorted_gaps
+        assert gaps.size > 3, "fixture has too few gaps to sit a tolerance exactly on one"
+
+        checked = 0
+        for gap in (float(gaps[1]), float(gaps[gaps.size // 2]), float(gaps[-2])):
+            below = np.nextafter(gap, 0.0)
+            assert sorted_pivots.bracket(gap) != sorted_pivots.bracket(below), (
+                f"tolerance {gap!r} and the float just below it share a bracket — ties are being aliased"
+            )
+            on = _segment(idxs, scan.lows, scan.volumes, tolerance=gap)
+            under = _segment(idxs, scan.lows, scan.volumes, tolerance=below)
+            assert on is not None and under is not None
+            assert not np.array_equal(on.sizes, under.sizes), (
+                "the two tolerances segment identically, so this gap proves nothing about the boundary"
+            )
+            checked += 1
+        assert checked == 3
+
+    def test_out_of_order_bars_do_not_serve_a_neighbours_segmentation(self) -> None:
+        """``at`` is public and nothing forces a forward walk.
+
+        The cache holds ONE entry per kind, so a backward or shuffled access
+        pattern is a miss rather than a wrong answer — asserted, because a
+        one-slot cache that keyed on the wrong thing would look correct on the
+        forward walk every caller actually uses and be wrong only here.
+        """
+        rng = np.random.default_rng(77)
+        highs, lows, volumes = self._series(rng, 420)
+        scan = LevelScan.build(highs=highs, lows=lows, volumes=volumes)
+        order = list(range(120, 420))
+        rng.shuffle(order)
+        atrs = {index: float(abs(rng.normal(2.5, 1.4)) + 0.05) for index in order}
+        levels = 0
+        for index in order:
+            expected = LevelScan.build(highs=highs, lows=lows, volumes=volumes).at(atr=atrs[index], index=index)
+            assert scan.at(atr=atrs[index], index=index) == expected
+            levels += len(expected)
+        assert levels > 100, "the shuffled walk produced almost no levels — it proves nothing"
+
+    def test_the_cache_is_dropped_without_changing_an_answer(self) -> None:
+        """A cache is only a cache if clearing it is invisible (#2780 item 3)."""
+        highs, lows, volumes = self._series(np.random.default_rng(5), 400)
+        scan = LevelScan.build(highs=highs, lows=lows, volumes=volumes)
+        atrs = [float(abs(v) + 0.05) for v in np.random.default_rng(6).normal(2.5, 1.4, 400)]
+        warm = [scan.at(atr=atr, index=index) for index, atr in enumerate(atrs)]
+        assert scan._segment_cache, "nothing was ever memoised — the cache is not on the path"
+        scan._segment_cache.clear()
+        scan._sorted_cache.clear()
+        cold = [scan.at(atr=atr, index=index) for index, atr in enumerate(atrs)]
+        assert warm == cold
+        assert sum(len(x) for x in warm) > 100
