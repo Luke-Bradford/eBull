@@ -11,6 +11,7 @@ which rejects multiple statements in a single execute() call.
 
 import hashlib
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 import psycopg
@@ -102,6 +103,33 @@ def _already_applied(conn: psycopg.Connection) -> dict[str, str | None]:  # type
     return {row[0]: row[1] for row in conn.execute("SELECT filename, content_sha256 FROM schema_migrations")}
 
 
+def orphaned_ledger_filenames(ledger: Iterable[str], files: Iterable[str]) -> list[str]:
+    """Ledger rows naming a file that no longer exists in ``sql/`` (#2362 item 2).
+
+    ``schema_migrations`` keys on FILENAME, so renumbering an already-applied
+    migration (routine when two loops pick the same free number) leaves the old
+    row behind. Nothing surfaced those rows before this function: both
+    :func:`run_migrations` and :func:`migration_status` iterate the FILES and
+    look each one up in the ledger, so a row with no file is invisible by
+    construction. Four were standing on the dev DB when this was written, the
+    oldest from 2026-07-05.
+
+    ⚠ Reported, never repaired, and never fatal. An orphan is a stale audit
+    record, not a broken schema — the change it recorded is still applied under
+    the new name — so deleting it would destroy the only evidence of when that
+    DDL actually ran, and refusing to boot on one would block every install
+    carrying historical renames.
+
+    ⚠ The dangerous descendant of an orphan is already fail-closed elsewhere: if
+    a NEW file later reuses an orphan's filename, it is no longer an orphan but
+    an "already applied" row, and the runner would skip the file silently. The
+    #1333 content-drift guard catches exactly that, because the new file's
+    SHA-256 cannot match the stored one.
+    """
+    present = set(files)
+    return sorted(name for name in ledger if name not in present)
+
+
 def _content_sha256(path: Path) -> str:
     """SHA-256 of the migration file's raw bytes.
 
@@ -172,6 +200,18 @@ def run_migrations() -> list[str]:
                 )
         reader.commit()
 
+    orphans = orphaned_ledger_filenames(done, (path.name for path in files))
+    if orphans:
+        # WARNING, not a raise: see `orphaned_ledger_filenames` for why an
+        # orphan is a stale record rather than a broken schema. This is the
+        # only place it is ever said out loud on a boot.
+        logger.warning(
+            "schema_migrations has %d row(s) with no matching file in %s (renamed or deleted migrations): %s",
+            len(orphans),
+            MIGRATIONS_DIR,
+            ", ".join(orphans),
+        )
+
     for path in files:
         if path.name in done:
             logger.debug("Migration already applied: %s", path.name)
@@ -228,13 +268,19 @@ def run_migrations() -> list[str]:
 
 
 def migration_status(conn: psycopg.Connection[object] | None = None) -> list[dict[str, str]]:
-    """Return status of every migration file: applied or pending.
+    """Return status of every migration file: applied, pending or orphaned.
 
     If *conn* is provided, uses that connection.  Otherwise opens a raw
     connection (for CLI/startup contexts where no pool exists yet).
 
     Raises psycopg.OperationalError if the database is unreachable.
     Callers are responsible for handling connection failures.
+
+    ⚠ ``orphaned`` rows are appended AFTER the file rows and name a ledger
+    entry, not a file on disk (#2362 item 2 — see
+    :func:`orphaned_ledger_filenames`). A caller that treats every entry as a
+    file in ``sql/`` was already wrong about a renumbered migration; it now has
+    something to read instead of nothing.
     """
     files = _migration_files()
 
@@ -253,7 +299,7 @@ def migration_status(conn: psycopg.Connection[object] | None = None) -> list[dic
         with psycopg.connect(settings.database_url) as fallback_conn:
             applied = _query_applied(fallback_conn)
 
-    return [
+    rows = [
         {
             "file": p.name,
             "status": "applied" if p.name in applied else "pending",
@@ -261,3 +307,8 @@ def migration_status(conn: psycopg.Connection[object] | None = None) -> list[dic
         }
         for p in files
     ]
+    rows.extend(
+        {"file": name, "status": "orphaned", "applied_at": applied[name]}
+        for name in orphaned_ledger_filenames(applied, (p.name for p in files))
+    )
+    return rows
