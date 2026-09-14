@@ -27,6 +27,12 @@ import pytest
 from app.api.auth import require_session_or_service_token
 from app.main import app
 
+# ``TestEvenAfterClear`` asserts an ORDERING contract — its second test only
+# means anything if it runs after the first, in the same process. Unpinned,
+# xdist distributes the two individually and the assertion can pass on a
+# worker that never saw the clear (#2224).
+pytestmark = pytest.mark.xdist_group("test_auth_bypass_isolation")
+
 
 def test_auth_bypass_present_at_test_start() -> None:
     """Conftest's autouse fixture re-installs the bypass before each
