@@ -72,10 +72,23 @@ class ClassParams:
     """T — a same-scale move this large is a level-break TRIGGER (never a verdict)."""
 
     hole_days: int
-    """T2 — a calendar gap wider than this is a series hole, not a one-day return."""
+    """The one calendar tolerance: a gap wider than this is a series HOLE.
 
-    contiguous_days: int
-    """B4 — how far apart two bars may sit and still count as adjacent sessions."""
+    Read by T2 (quarantine the transition) and by B4 (decline to treat the two
+    bars as adjacent sessions). ONE constant, deliberately — #3028. There used
+    to be a second, ``contiguous_days`` (4 against T2's 10), and the band
+    between the two was owned by NOTHING: B4 declined to evaluate a bar whose
+    neighbour sat 5-10 days away, while T2 also declined because the gap was
+    not a hole. A reverting one-bar spike beside a two-holiday weekend — CEA.DE
+    2026-04-02 went 4.80 -> 0.25 -> 4.80 across Good Friday and Easter Monday —
+    therefore kept ``range_usable = true`` and reached every
+    ``price_masked_bars`` consumer as a real, touchable price level. Above
+    ``hole_days`` T2 owns the pair; at or below it B4 does; no band is unowned.
+
+    The fix is by CONSTRUCTION and removes a constant rather than choosing one,
+    which matters because there is no published formulation for "sessions our
+    venues actually hold" — ``exchanges`` carries no calendar at all (#2312).
+    """
 
     calendar_days_per_bar: Decimal
     """W2 — nominal calendar days one trading bar spans (7/5 for exchange
@@ -86,13 +99,21 @@ _FIVE_DAY = Decimal("1.4")  # 7 calendar days / 5 trading days
 _SEVEN_DAY = Decimal("1")
 
 # Thresholds sit ABOVE the p99.99 daily move measured on the POST-quarantine
-# population (S7 §5), so they are not calibrated on the defects they exist to
-# catch: us_equity p99.99 = 2.93x (T=5), crypto 1.88x (T=5), commodity 1.31x
-# (T=2), index 1.16x (T=2), fx 1.05x (T=2).
-_EQUITY = ClassParams(Decimal(5), hole_days=10, contiguous_days=4, calendar_days_per_bar=_FIVE_DAY)
-_SEVEN_DAY_LAX = ClassParams(Decimal(5), hole_days=4, contiguous_days=2, calendar_days_per_bar=_SEVEN_DAY)
-_SEVEN_DAY_STRICT = ClassParams(Decimal(2), hole_days=4, contiguous_days=2, calendar_days_per_bar=_SEVEN_DAY)
-_EXCHANGE_STRICT = ClassParams(Decimal(2), hole_days=10, contiguous_days=4, calendar_days_per_bar=_FIVE_DAY)
+# population (S7 §5) — a FLOOR the chosen T must clear, not a target it should
+# approach. S7's own table clears it by very different margins (us_equity 2.93x
+# at T=5, crypto 1.88x at T=5, commodity 1.31x at T=2, index 1.16x at T=2, fx
+# 1.05x at T=2), because the 5-vs-2 choice is by asset KIND — a single name can
+# genuinely gap on news, an index or an FX cross cannot — and the percentile is
+# the sanity check on that choice.
+#
+# Reproduce the floor check, per class, against today's population:
+#     PYTHONPATH=. uv run python -m scripts.verify_3028_b4_contiguity --thresholds
+# It prints n, p99.9, p99.99 and a pass/fail against each class's live T. Do not
+# copy its numbers back into this comment — they move with every ingest.
+_EQUITY = ClassParams(Decimal(5), hole_days=10, calendar_days_per_bar=_FIVE_DAY)
+_SEVEN_DAY_LAX = ClassParams(Decimal(5), hole_days=4, calendar_days_per_bar=_SEVEN_DAY)
+_SEVEN_DAY_STRICT = ClassParams(Decimal(2), hole_days=4, calendar_days_per_bar=_SEVEN_DAY)
+_EXCHANGE_STRICT = ClassParams(Decimal(2), hole_days=10, calendar_days_per_bar=_FIVE_DAY)
 
 # DEFAULT IS STRICT, DELIBERATELY. Unknown metadata gets the 2x gate, not the
 # 5x one: an instrument we cannot classify is one whose normal move size we do
@@ -102,16 +123,25 @@ _DEFAULT = _EXCHANGE_STRICT
 
 _CLASS_PARAMS: dict[str, ClassParams] = {
     "us_equity": _EQUITY,
-    # DEVIATION FROM S7 §5, STATED EXPLICITLY. S7's table lists only the five
-    # classes that had bars to measure: us_equity, crypto, commodity, index, fx.
-    # The non-US equity classes are given the EQUITY parameters rather than
-    # falling to the strict default, because they are known equities, not
-    # unknown metadata, and a 2x gate on an asset class whose measured p99.99 is
-    # 2.93x would quarantine an enormous amount of legitimate data.
-    # They carry ~0 bars today (the 4,749 non-US equities are exactly the
-    # population #2262 admits), so this changes nothing in the S7 reproduction —
-    # but it WILL matter the moment #2262's seeding lands, at which point
-    # per-class p99.99 recalibration is the follow-up.
+    # DEVIATION FROM S7 §5, STATED EXPLICITLY — and since MEASURED. S7's table
+    # lists only the five classes that had bars: us_equity, crypto, commodity,
+    # index, fx. The non-US equity classes are given the EQUITY parameters
+    # rather than falling to the strict default, because they are known
+    # equities, not unknown metadata.
+    #
+    # ⚠ This block used to say they "carry ~0 bars today" and name per-class
+    # recalibration as the follow-up once #2262's seeding landed. The seeding
+    # HAS landed — they are now about a third of price_daily — so #3028 ran the
+    # recalibration S7's own way. The verdict is that the EQUITY parameters
+    # STAY, and the reason is worth keeping because it is not the reason that
+    # was guessed here: T=2 would sit BELOW eu_equity's and uk_equity's
+    # measured p99.99 and so would VIOLATE S7 §5's floor, while T=5 clears the
+    # floor for all four. asia_equity and mena_equity measure low enough that
+    # either value clears, and they keep 5 on the asset-KIND argument above —
+    # they are single names, which can gap on news.
+    #
+    # Re-check rather than trust this paragraph; the population keeps growing:
+    #     PYTHONPATH=. uv run python -m scripts.verify_3028_b4_contiguity --thresholds
     "eu_equity": _EQUITY,
     "uk_equity": _EQUITY,
     "asia_equity": _EQUITY,
@@ -318,11 +348,24 @@ def rule_b3(bar: Bar) -> bool:
 def rule_b4(prev: Bar, bar: Bar, nxt: Bar, params: ClassParams) -> bool:
     """B4 — reverting spike. Verdict: BOTH false.
 
-    ``r_in >= T or r_in <= 1/T``, both sides contiguous, and
+    ``r_in >= T or r_in <= 1/T``, neither neighbour across a series HOLE, and
     ``r_in * r_out`` back inside [0.8, 1.25]. The reversion term is what
     separates a one-bar sentinel/misprint (class 1) from a genuine level change
     (class 3) — the latter does NOT come back, and is a transition-level concern
     handled by T3, not a bar defect.
+
+    ⚠ THE REVERSION TERM IS THE PRECISION, NOT THE MAGNITUDE TERM (#3028). On
+    the 64 bars this rule set already isolates with a T3 quarantine on BOTH
+    adjacent transitions — i.e. a level unreachable at the same scale from
+    either side — the round trip runs from 0.006x to 9.0x, and the names are
+    overwhelmingly ``Q``-suffix bankruptcy and sub-penny tickers where one tick
+    IS a multiple and a wild round trip is real. Widening [0.8, 1.25] to reach
+    them would mask genuine distressed prints, which is the survivorship filter
+    ``research_corpus_ingest`` refuses to apply at ingest, arriving by the back
+    door. The band stays as written: exactly symmetric in log space.
+
+    The gap tolerance is ``hole_days`` and NOT a second, tighter constant — see
+    ``ClassParams.hole_days`` for the band that second constant left unowned.
 
     Defined on CLOSES only, as written. A bar whose close is sound but whose
     high is NULL is B1's business, not B4's, and B1 has already both-falsed it.
@@ -330,9 +373,9 @@ def rule_b4(prev: Bar, bar: Bar, nxt: Bar, params: ClassParams) -> bool:
     prev_close, close, next_close = _usable_close(prev), _usable_close(bar), _usable_close(nxt)
     if prev_close is None or close is None or next_close is None:
         return False
-    if (bar.price_date - prev.price_date).days > params.contiguous_days:
+    if (bar.price_date - prev.price_date).days > params.hole_days:
         return False
-    if (nxt.price_date - bar.price_date).days > params.contiguous_days:
+    if (nxt.price_date - bar.price_date).days > params.hole_days:
         return False
     r_in = close / prev_close
     if not (r_in >= params.magnitude_threshold or r_in <= 1 / params.magnitude_threshold):
