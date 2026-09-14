@@ -352,10 +352,14 @@ def test_the_session_allow_list_names_only_classes_this_repo_has_a_calendar_for(
     the REFUSE side with no code change.  This test pins the *shape* of that
     argument — if a second calendar is ever added, the allow-list must grow
     deliberately rather than by a reviewer's assumption that it already did.
-    """
-    from app.services import strategy_core_preflight as module
 
-    assert module._SESSION_SUPPORTED_ASSET_CLASSES == frozenset({"us_equity"})
+    ⚠ The set itself moved to ``app/services/market_session_support.py`` (#2312) so
+    the #2833 SELECTION path can share it; what this test still owns is that the
+    PREFLIGHT actually refuses on it, which the leaf-module test cannot see.
+    """
+    from app.services.market_session_support import SESSION_SUPPORTED_ASSET_CLASSES
+
+    assert SESSION_SUPPORTED_ASSET_CLASSES == frozenset({"us_equity"})
     for other in ("eu_equity", "uk_equity", "asia_equity", "mena_equity", "crypto", "fx", "index", "unknown"):
         assert _decide(_healthy(asset_class=other)).reason_code == "core_unsupported_market_session"
 

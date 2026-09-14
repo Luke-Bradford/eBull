@@ -142,9 +142,9 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
         observed_trading_days=1,
         max_cost_bps=60,
         candidates=(
-            CoreCandidateCoverage(3417, "SPY.RTH", 1, None, None),
-            CoreCandidateCoverage(3434, "CSPX.L", 1, None, None),
-            CoreCandidateCoverage(3075, "IUSA.L", 1, None, None),
+            CoreCandidateCoverage(3417, "SPY.RTH", 1, None, None, "us_equity"),
+            CoreCandidateCoverage(3434, "CSPX.L", 1, None, None, "uk_equity"),
+            CoreCandidateCoverage(3075, "IUSA.L", 1, None, None, "uk_equity"),
         ),
         missing_candidate_ids=(),
         configuration_error=None,
