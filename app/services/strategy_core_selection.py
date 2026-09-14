@@ -241,7 +241,13 @@ def classify_core_selection(
     must never RETRACT a reviewed verdict, because a verdict that evaporates when a row
     moves is strictly worse than one transcribed early.
     """
-    declared: CoreSelectionOutcome | None = outcome if outcome in _RECOGNISED_OUTCOMES else None  # type: ignore[assignment]
+    # ``outcome`` is typed ``object`` on purpose: the value is a HAND-EDITED module
+    # constant, and pyright only protects the edit if somebody runs it.  At the gate this
+    # module exists for, the runtime refusal is the layer that actually holds -- so the
+    # parameter must be able to RECEIVE the bad value, or the check below is unreachable
+    # and reads as dead code to the next person.  Narrowed by equality rather than by
+    # membership so no cast is needed.
+    declared: CoreSelectionOutcome | None = "pass" if outcome == "pass" else "cash" if outcome == "cash" else None
 
     def refuse(detail: str) -> CoreSelectionVerdict:
         return CoreSelectionVerdict(state="unavailable", declared_outcome=declared, configuration_error=detail)
