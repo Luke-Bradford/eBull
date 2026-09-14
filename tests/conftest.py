@@ -140,6 +140,36 @@ def _reassert_auth_bypass() -> None:
     app.dependency_overrides[require_session_or_service_token] = _noop_auth
 
 
+# #2224 cause 1 — the same defect class as #655 above, for a key that has no
+# single correct value, so re-asserting one is not available.
+#
+# ``app.dependency_overrides`` is a plain dict on the process-global ``app``.
+# Eleven API test modules install their own ``get_conn`` fallback at IMPORT
+# time via ``setdefault``, and their non-overriding tests (the 4xx validation
+# cases) depend on that key still being there when they run. Nine other
+# modules ``pop(get_conn, None)`` in teardown. Under xdist, ungrouped tests
+# from different modules are distributed individually to the same worker, so
+# a popping test can land immediately before a victim — which then falls
+# through to the REAL ``get_conn`` and gets 503 "db pool absent" instead of
+# its expected 4xx. That is the issue's "~2 failures per full run, different
+# tests each time".
+#
+# Snapshot-and-restore rather than re-assert: each module's fallback is its
+# own, and the fixture must not impose one module's choice on another. It
+# tears down AFTER ``teardown_method``, so it undoes teardown damage too, and
+# it holds for mutation dialects nobody has written yet — which is why the
+# fix is here and not 11 module rewrites or 61 ``xdist_group`` pins.
+#
+# ⚠ Function-scoped, so it runs INSIDE any module/class-scoped fixture that
+# installs an override: that install is already in the snapshot and survives.
+@pytest.fixture(autouse=True)
+def _restore_dependency_overrides() -> Iterator[None]:
+    saved = dict(app.dependency_overrides)
+    yield
+    app.dependency_overrides.clear()
+    app.dependency_overrides.update(saved)
+
+
 @pytest.fixture(autouse=True)
 def _disarm_unattended_broker_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """#2645 — pin the unattended-worktree refusal OFF for the suite.

@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api.auth import require_session_or_service_token
@@ -24,6 +25,23 @@ from app.main import app
 from app.security.sessions import SessionRow
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_client_cookies() -> None:
+    """#2224 — the module-level ``client`` has a persistent cookie jar.
+
+    ``TestLogin::test_happy_path_sets_cookie_and_returns_operator`` leaves a
+    real session cookie in it, and every test that *wants* a cookie passes one
+    per-request instead. Sequentially the jar happens to be emptied again by
+    ``test_logout_clears_cookie_even_without_session``; under xdist that test
+    can land on a different worker, so ``test_me_without_cookie_returns_401``
+    then sends a cookie, reaches ``get_active_session``, and dies on
+    ``'<=' not supported between instances of 'MagicMock' and 'datetime'``
+    rather than returning the 401 it asserts. One of #2224's original four.
+    """
+    client.cookies.clear()
+
 
 _OPERATOR_ID = uuid4()
 _USERNAME = "alice"
