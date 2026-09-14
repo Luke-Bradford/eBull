@@ -25,7 +25,7 @@ import { ApiError } from "@/api/client";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Badge } from "@/components/ui/Badge";
-import { formatDate, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
+import { formatDate, formatNumber, formatUnsignedPct } from "@/lib/format";
 import { aggregate } from "@/lib/strategyAggregate";
 import { money, number, pctPoints } from "@/lib/strategyFormat";
 import { useAsync } from "@/lib/useAsync";
@@ -1143,7 +1143,10 @@ function ApprovedStrategy({
       </div>
       <div><span className="text-xs text-slate-500">P&amp;L</span><strong className="block tabular-nums">{money(strategy.pnl.total_pnl)}</strong></div>
       <div><span className="text-xs text-slate-500">Completed</span><strong className="block tabular-nums">{formatNumber(strategy.attribution.resolved_entries, 0)}</strong></div>
-      <div><span className="text-xs text-slate-500">Success</span><strong className="block tabular-nums">{formatPct(number(strategy.attribution.win_rate))}</strong></div>
+      {/* UNSIGNED — a success/win rate is a composition, not a return, so
+          `formatPct`'s `exceptZero` sign misreads it as a gain (#3032). Same
+          metric and same fix as StrategyPortfolioLens's "Win rate" tile. */}
+      <div><span className="text-xs text-slate-500">Success</span><strong className="block tabular-nums">{formatUnsignedPct(number(strategy.attribution.win_rate))}</strong></div>
       <div><span className="text-xs text-slate-500">Average / trade</span><strong className="block tabular-nums">{pctPoints(strategy.attribution.shadow_average_return_pct)}</strong></div>
       <StrategyToggle strategy={strategy} poolLimit={poolLimit} onUpdated={onUpdated} />
     </article>
