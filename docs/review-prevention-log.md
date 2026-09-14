@@ -5985,3 +5985,54 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - Enforced in: this prevention log; the #2602 item-1 close-out comment, which records the
   build and the pending watch condition (`select count(*) from broker_positions where
   total_fees <> 0;`) as two separate facts.
+
+### A hardcoded derived statistic in a SERVED FIELD goes stale worse than one in prose (#2833, 2026-09-14)
+
+- Symptom: `/strategies` rendered **"Earliest verdict — 02 Sept 2026"** on 2026-09-14, beside
+  its own **"Common dates seen — 1 / 5"**. The date came from
+  `CORE_SELECTION_EARLIEST_POSSIBLE_VERDICT_AT`, derived by hand on 2026-08-24 and frozen
+  into the module. A collection gap stalled the window, the constant could not follow, and
+  the operator card spent twelve days telling the person watching it that a verdict was
+  overdue. The ticket's own gap comment had recorded the correct figure two days earlier;
+  only the code was never changed.
+- Root cause: `.claude/CLAUDE.md`'s "never hardcode a derived statistic — compute it, or
+  omit it" is written about prose, comments and docstrings, and was read as applying there.
+  A served UI field is the same defect in the place a reader trusts most, and it is the one
+  place nobody greps when the derivation changes.
+- ⚠⚠ **The label being honest did not save it.** The hint said "Lower bound if all five
+  common sessions complete" — never "ETA" — and the value still misinformed, because a
+  bound the clock has PASSED stops reading as a bound at all. **Test: would this value
+  still be true tomorrow? If a date, a count or a rate is rendered to an operator and its
+  inputs can move, it must be computed at read time.** A stale bound in the past is a
+  stronger false claim than a stale ETA, not a weaker one.
+- Generalises to: any served countdown, deadline, "earliest/latest", quota, streak or
+  progress denominator — every field whose truth is a function of a clock plus a
+  population.
+- Enforced in: this prevention log;
+  `app/services/strategy_core_selection.py::earliest_possible_verdict_at` (computed per
+  read, with `CORE_SELECTION_VERDICT_BOUND_VERSION` pinned by
+  `tests/test_2603_core_selection.py::test_the_frozen_construction_is_pinned_to_its_version`).
+
+### A hand-written fixture proves what a fixture can CONTAIN, never what the producer can EMIT (#2833, 2026-09-14)
+
+- Symptom: a review pass argued a projection was unsafe because it skipped weekends while
+  "the collector and verifier accept weekend dates if fresh quotes arrive", and supported it
+  by pointing at a verifier fixture that contains a Saturday. The claim was plausible and
+  would have broken the change's whole safety argument. It was false: the collector cannot
+  write an `observed` row on a weekend, because such a row needs a quote younger than
+  `MAX_QUOTE_AGE` (one hour) and a shut venue only re-serves its last quote.
+- Root cause: a fixture is an ASSERTION about the world written by whoever needed a test to
+  pass. Reading it as evidence about the producer inverts the direction of proof — the
+  fixture exists downstream of the collector and is not constrained by it.
+- Prevention: when a fixture is offered as evidence that some state is REACHABLE, go to the
+  producer and measure the stored population instead. Here one query settled it on the full
+  corpus: by ISO weekday, `observed` rows exist Mon/Tue/Wed only, while Saturday (20 rows)
+  and Sunday (420) are **every one `invalid`**. Then put the measurement in the docstring,
+  so the next reader does not re-litigate it from the fixture.
+- ⚠ Symmetric to the existing full-population rule: a fixture is a population of one that
+  nobody sampled — worse than a sample, because it was authored to be convenient.
+- Generalises to: any "but the schema/fixture/type allows X" objection about data a
+  pipeline produces; also to golden files, seeded demo rows and `factory`-built objects.
+- Enforced in: this prevention log; the weekend paragraph in
+  `app/services/strategy_core_selection.py::earliest_possible_verdict_at`, which carries the
+  census rather than the argument.
