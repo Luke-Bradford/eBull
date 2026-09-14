@@ -23,7 +23,7 @@
  *     SEC ingest process rows in ProcessesTable.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
@@ -288,8 +288,38 @@ describe("AdminPage — top-level composition", () => {
       expect(screen.getByText("Tradable universe")).toBeInTheDocument();
     });
     expect(screen.getByText("Analysable")).toBeInTheDocument();
-    // Tier/score/thesis pending placeholders.
-    expect(screen.getByText("Tier 1/2/3")).toBeInTheDocument();
+    // #3050 — score/thesis are wired to `/system/status` layers now, and the
+    // "Tier 1/2/3" placeholder is gone rather than pending: nothing stores a
+    // tier, so it was a decision never made, not an endpoint owed.
+    expect(screen.getByText("Latest score")).toBeInTheDocument();
+    expect(screen.getByText("Latest thesis")).toBeInTheDocument();
+    expect(screen.queryByText("Tier 1/2/3")).not.toBeInTheDocument();
+  });
+
+  it("#3050: the refresh loop re-polls /system/status, which now backs two cells", async () => {
+    // Before #3050 `/system/status` was fetched on mount only. That was
+    // survivable while it fed credential_health and engine_down; it is not now
+    // that FundDataRow renders per-layer freshness from it — a card asserting
+    // staleness must not itself be stale.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderPage();
+      await waitFor(() => {
+        expect(screen.getByText("Tradable universe")).toBeInTheDocument();
+      });
+      const systemBefore = mockedSystem.mock.calls.length;
+      const coverageBefore = mockedCoverage.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(61_000);
+      });
+      // ⚠ Assert the loop FIRED as well, so "the interval never ran" and
+      // "systemStatus is not in the loop" cannot be confused — a test-harness
+      // fault would otherwise read as the defect.
+      expect(mockedCoverage.mock.calls.length).toBeGreaterThan(coverageBefore);
+      expect(mockedSystem.mock.calls.length).toBeGreaterThan(systemBefore);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("hides the problems panel when no sources surface any problem", async () => {
