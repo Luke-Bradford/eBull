@@ -6156,3 +6156,77 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
 - ⚠ The first session cited `sql/255` and `sql/257` and missed `sql/267`; the second read `sql/267` and had not re-read `sql/257`. Both were one file short, in opposite directions, and both wrote a confident recommendation.
 - Prevention: before a migration header is used to settle a design question, state the subject of the sentence and the table it alters, and confirm both match the change in hand. A quote from a migration that alters a DIFFERENT table is evidence about that table's convention only. Self-review prompt: `rg -l '<the column or concept>' sql/` and read EVERY hit before quoting one of them — a decision recorded on the sibling ledger is the likeliest thing to be mistaken for a decision on yours.
 - Enforced in: this prevention log; `app/services/strategy_registry.py::INPUT_RULE_SETS` (the `price_quarantine` comment names the subject of `sql/267`'s sentence inline); `docs/proposals/ta/2026-09-14-3031-quarantine-in-strategy-identity.md` § "Source rule — and the reconciliation, not a dismissal".
+
+### Rendering a verdict as the COMPLEMENT of "ready" asserts an outcome that has not happened (#3037, 2026-09-14)
+
+- Symptom: `/strategies` → Core & cash rendered a badge reading **`Cash`** at **1 of 5**
+  common dates, while #2833's verifier was still sealed. The code was
+  `state === "ready" ? "Ready" : "Cash"` — a binary render of a five-valued state, where
+  the false arm happens to be the name of a **real terminal outcome**
+  (`verify_2833_core_selection.py` emits `"pass"` or `"cash"`). So "not ready yet" and
+  "the study answered cash" were the same pixels, and the card stated a result that could
+  not yet exist.
+- Root cause: the surface could not represent what it was being asked to report.
+  `CoreSelectionState` had three values against five distinguishable outcomes, so the two
+  that exist at the gate — *window closed, verdict not transcribed* and *verdict is cash* —
+  had no encoding. The first reported `evidence_collecting` at 5/5 beside a bound in the
+  past; the second was only expressible as `unavailable` + "must name a declared candidate",
+  i.e. a correct reviewed outcome reported as somebody mis-editing a constant.
+- ⚠⚠ **This is the sibling of the entry four sections up** — *"A hardcoded derived
+  statistic in a SERVED FIELD goes stale worse than one in prose (#2833, 2026-09-14)"*,
+  whose ⚠⚠ line is *"the label being honest did not save it"*. That entry fixed the
+  `earliest_possible_verdict_at` **value**; the **state label** reproduced the same
+  misreport in the field an operator reads first. Its own *"generalises to … every field
+  whose truth is a function of a clock plus a population"* already covered `state` — the
+  gap was in application, not in the rule. A fix that corrects a value and leaves the label
+  deriving the same claim has fixed half of it.
+- ⚠ **Two axes, not one** (Codex checkpoint 1's deepest finding). `state` was carrying both
+  *what the study answered* and *whether the result can be acted on*, and those come apart:
+  a reviewed `pass` naming an LSE candidate is operationally `unavailable`
+  (`market_session_support`, #2312), and under one axis the surface could not then say a
+  verdict had been reached at all. `declared_outcome` is now separate.
+- ⚠ **A terminal outcome must be STATED, never inferred from the absence of its sibling.**
+  Encoding cash as "evidence ref present, instrument id absent" was rejected: it makes a
+  genuine mis-edit indistinguishable from a declared cash verdict — the same defect
+  inverted.
+- Prevention: when a rendered label names one branch of a study/verdict/decision that has
+  its own vocabulary, **enumerate the producer's outcome set first and check the render is
+  total over it**. Tell: a ternary on a state field whose type is a `Literal` of more than
+  two values, or `x ?? "<a real outcome name>"`. Test shape that catches it: assert the
+  losing outcome's string is **ABSENT** in the states that are not it, not merely present
+  in the one that is.
+- Generalises to: any "pending vs decided" surface — verdicts, gates, approvals, migration
+  status, health checks. Also to any copy keyed on operational state that is really a claim
+  about a POPULATION (here "Window closed" keyed on `state`, when `unavailable` is
+  reachable with the window still open — caught at Codex checkpoint 2; it now keys on
+  `observed_trading_days >= required_trading_days`, which is the fact itself).
+- Enforced in: this prevention log;
+  `app/services/strategy_core_selection.py::classify_core_selection` (the five-row table
+  with its non-disjoint rows tested individually);
+  `frontend/src/pages/StrategyPortfolioLens.tsx::CORE_SLEEVE_BADGE` + `coreWindowClosed`;
+  `tests/test_3037_core_selection_verdict_states.py`;
+  `StrategyPortfolioLens.test.tsx::"never says Cash while the verdict is still sealed"`.
+
+### A fixture helper that assigns N module constants needs all N registered for restoration (#3037, 2026-09-14)
+
+- Symptom: `tests/fixtures/core_restart.py::select_core_instrument` gained a third
+  assignment (`SELECTED_CORE_OUTCOME`), but both `core_world` fixtures that call it
+  registered only the original two with `monkeypatch.setattr(..., None)`. The third leaked
+  into every later test in the process — as a declaration naming an outcome with no
+  instrument id, i.e. exactly the half-written state the module refuses. Reproducing the
+  teardown made an unrelated test fail on a message it had never asserted before.
+- Root cause: the restore list is written at one site and the assignment list at another,
+  so adding an assignment is silently a two-file change. Nothing connects them.
+- ⚠ The leak is invisible in the touched test and appears in a DIFFERENT file, so the
+  normal signal ("I changed X, X's tests fail") does not fire. Caught by Codex at
+  checkpoint 2 by reproducing the teardown in isolation, not by the suite.
+- Prevention: when a shared helper sets module-level state, have the restore assertion
+  **derive** the set from the helper's source rather than restating it —
+  `inspect.getsource(helper)` scanned for `module.NAME =`, then assert each name appears in
+  every fixture's restore block. A restated list is a copy that goes stale on the next
+  assignment; a derived one fails the moment they diverge.
+- Generalises to: any monkeypatch/teardown pair, `setUp`/`tearDown`, context managers that
+  stash globals, and env-var fixtures.
+- Enforced in: this prevention log;
+  `tests/test_3037_core_selection_verdict_states.py::test_the_recovery_fixture_restores_every_constant_it_sets`;
+  `tests/test_2949_core_restart_recovery_db.py` + `tests/test_2949_core_close_recovery_db.py`.
