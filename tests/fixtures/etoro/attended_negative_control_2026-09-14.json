@@ -1,0 +1,30 @@
+{
+  "_meta": {
+    "refs": "#2961 #2965 #2979 #2942 #2993 #3007 #2949",
+    "protocol": "docs/proposals/execution/2026-09-14-attended-demo-session-protocol.md",
+    "session_id": "2026-09-14-armN",
+    "phase": "negative-control",
+    "started_at": "2026-09-14T04:11:23.570834+00:00",
+    "finished_at": "2026-09-14T04:11:23.779057+00:00",
+    "environment": "demo",
+    "mutations_performed": "none \u2014 this script is read-only by construction"
+  },
+  "observation": {
+    "arm": "N_negative_control",
+    "minted_reference_id": "fa0ead1d-ec83-445c-b1e5-6ce1d5b71842",
+    "expectation": "not_found \u2014 a UUID that was never submitted must resolve to nothing",
+    "arms": {
+      "by_reference_id": {
+        "call": "lookup_order(reference_id=fa0ead1d-ec83-445c-b1e5-6ce1d5b71842)",
+        "at": "2026-09-14T04:11:23.619334+00:00",
+        "outcome": "not_found",
+        "error": "BrokerOrderNotFound: broker order was not found"
+      },
+      "reading": {
+        "reading": "single_arm",
+        "note": "reference=not_found order=absent: only one arm was run, so no P3 row applies. Expected for --phase negative-control, which asks only whether the endpoint cleanly answers 'no' to a UUID it has never seen."
+      }
+    },
+    "note": "\u26a0 If this is not a clean not_found, #2961's fail-closed discriminator is unsupportable whatever the attended session observes, and the session should not be booked on it."
+  }
+}
