@@ -50,6 +50,31 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.usefixtures("registered_strategy_test_candidates"),
     pytest.mark.usefixtures("assume_trial_registered"),
+    # #2224 — pin this module to one xdist worker. Its kill drills mutate
+    # SINGLETON rows (`runtime_config`, the kill switch, `strategy_paper_pool`)
+    # which per-test cleanup does NOT wipe: they are bootstrap state, not
+    # per-test fixtures, so they persist across every test on a worker. Under
+    # `--dist=loadgroup` an unpinned module's tests scatter across all four
+    # workers, so a drill here can land between a sibling module's
+    # precondition and its assertion and change its premise.
+    #
+    # ⚠⚠ PER-FILE group name, and that is load-bearing — do NOT "improve" this
+    # by giving both contending modules ONE shared group. That was tried and
+    # measured: a single shared group puts all 52 tests of both files on one
+    # worker in fixed collection order, which CONCENTRATES the bad adjacency
+    # instead of removing it — 4 failures on every one of 5 runs, deterministic.
+    # Per-file groups keep each module's tests CONTIGUOUS, which is the property
+    # that actually matters: a drill can no longer land between a sibling
+    # module's precondition and its assertion.
+    #
+    # ⚠ The group name is per-FILE, so this does not serialise the suite —
+    # other modules keep running in parallel on other workers.
+    #
+    # ⚠ Same remedy as #904 (`tests/test_api_instruments.py`) but NOT the same
+    # mechanism: #904 is a shared `app.dependency_overrides` object, this is a
+    # shared database ROW. Pinning fixes both because both are "unsynchronised
+    # global mutated by two modules at once".
+    pytest.mark.xdist_group("test_strategy_live_gate"),
 ]
 
 _STRATEGY_ID = "S-LIVE-GATE"
