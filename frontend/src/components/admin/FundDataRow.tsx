@@ -1,16 +1,30 @@
 /**
  * Fund-data-at-a-glance stat row (AdminPage #323, spec §6).
  *
- * Renders four live cells backed by existing endpoints and three
- * `"–" (pending)` placeholders for summaries we don't yet expose.
- * Tooltips on pending cells name the blocking tech-debt.
+ * Six live cells backed by existing endpoints. Each tolerates its backing
+ * fetch failing in isolation — a dead fetch renders `–` with a red error
+ * tone but does NOT wipe any other cell.
  *
- * Each cell tolerates its backing fetch failing in isolation — a
- * dead fetch renders `–` with an amber error tone but does NOT wipe
- * any other cell.
+ * #3050 — "Latest score" and "Latest thesis" used to be hardcoded
+ * `"–" / "endpoint pending"`, which asserts "not built yet" about layers
+ * that both have rows. Worse for `theses`, which had simply STOPPED: a
+ * placeholder and a stale value are different operator facts and the card
+ * could not tell them apart (the #3037 shape).
+ *
+ * ⚠ Both read `/system/status`, which the page already fetches — NOT a new
+ * endpoint. `ops_monitor` already tracks both as data layers with a
+ * documented SLA (`app/services/ops_monitor.py`: theses 3 days, scores 2
+ * days) and already returns the `ok | stale | empty | error` verdict, so
+ * the staleness tone here is READ, never re-derived and never thresholded
+ * against a number invented in the frontend.
+ *
+ * ⚠ A third placeholder, "Tier 1/2/3", was DELETED rather than wired:
+ * there is no tier column and no tier table, so it was not pending, it was
+ * a decision never made. The grid divides evenly at six.
  */
 import type {
   CoverageSummaryResponse,
+  LayerHealthResponse,
   RecommendationsListResponse,
 } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
@@ -20,13 +34,16 @@ export interface FundDataRowProps {
   readonly coverageError: boolean;
   readonly recommendations: RecommendationsListResponse | null;
   readonly recommendationsError: boolean;
+  /** `/system/status` layers; `null` while the fetch is in flight. */
+  readonly layers: readonly LayerHealthResponse[] | null;
+  readonly layersError: boolean;
 }
 
 interface Cell {
   readonly label: string;
   readonly value: string;
   readonly hint?: string;
-  readonly tone: "ok" | "pending" | "error";
+  readonly tone: "ok" | "pending" | "stale" | "error";
 }
 
 export function FundDataRow({
@@ -34,6 +51,8 @@ export function FundDataRow({
   coverageError,
   recommendations,
   recommendationsError,
+  layers,
+  layersError,
 }: FundDataRowProps): JSX.Element {
   const cells: Cell[] = [];
 
@@ -97,28 +116,14 @@ export function FundDataRow({
             },
   );
 
-  cells.push({
-    label: "Tier 1/2/3",
-    value: "–",
-    hint: "endpoint pending",
-    tone: "pending",
-  });
-  cells.push({
-    label: "Latest score",
-    value: "–",
-    hint: "endpoint pending",
-    tone: "pending",
-  });
-  cells.push({
-    label: "Latest thesis",
-    value: "–",
-    hint: "endpoint pending",
-    tone: "pending",
-  });
+  cells.push(layerCell("Latest score", "scores", layers, layersError));
+  cells.push(layerCell("Latest thesis", "theses", layers, layersError));
 
   return (
     <div
-      className="grid grid-cols-2 gap-x-6 gap-y-3 border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-2 sm:grid-cols-4 lg:grid-cols-7"
+      // Six cells, so the track counts all divide it evenly: 3 rows / 2 rows /
+      // 1 row. The old seven left a ragged 4+3 at `sm`.
+      className="grid grid-cols-2 gap-x-6 gap-y-3 border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-2 sm:grid-cols-3 lg:grid-cols-6"
       data-testid="fund-data-row"
     >
       {cells.map((c) => (
@@ -128,13 +133,61 @@ export function FundDataRow({
   );
 }
 
+/**
+ * One cell backed by an `/system/status` data layer.
+ *
+ * ⚠ The `ok | stale | empty | error` vocabulary is mapped 1:1 rather than
+ * collapsed. Collapsing `empty` into `stale` (or either into `pending`) is
+ * how #3050 happened: three distinct operator facts — "never ran", "stopped
+ * N days ago" and "not wired" — rendered as one placeholder.
+ *
+ * ⚠ A layer absent from the response is NOT reported as healthy or as empty.
+ * It is unknown, and says so.
+ */
+function layerCell(
+  label: string,
+  layerName: string,
+  layers: readonly LayerHealthResponse[] | null,
+  layersError: boolean,
+): Cell {
+  if (layersError) return { label, value: "–", hint: "status unavailable", tone: "error" };
+  if (layers === null) return { label, value: "–", tone: "pending" };
+  const layer = layers.find((l) => l.layer === layerName);
+  if (layer === undefined) {
+    return { label, value: "–", hint: "layer not reported", tone: "pending" };
+  }
+  if (layer.status === "error") {
+    return { label, value: "–", hint: layer.detail || "layer error", tone: "error" };
+  }
+  if (layer.status === "empty" || layer.latest === null) {
+    return { label, value: "never", hint: "no rows yet", tone: "pending" };
+  }
+  return {
+    label,
+    value: formatDateTime(layer.latest),
+    // Derived from the payload, never written down: a hardcoded "23 days"
+    // would go stale in the one place a reader trusts most.
+    hint: layer.status === "stale" ? stalenessHint(layer) : undefined,
+    tone: layer.status === "stale" ? "stale" : "ok",
+  };
+}
+
+function stalenessHint(layer: LayerHealthResponse): string {
+  const age = layer.age_seconds === null ? null : Math.floor(layer.age_seconds / 86_400);
+  const sla = layer.max_age_seconds === null ? null : Math.floor(layer.max_age_seconds / 86_400);
+  if (age === null) return "stale";
+  return sla === null ? `stale — ${age}d` : `stale — ${age}d, SLA ${sla}d`;
+}
+
 function StatCell({ cell }: { cell: Cell }): JSX.Element {
   const valueTone =
     cell.tone === "ok"
       ? "text-slate-800 dark:text-slate-100"
       : cell.tone === "error"
         ? "text-red-700"
-        : "text-slate-400 dark:text-slate-500";
+        : cell.tone === "stale"
+          ? "text-amber-600 dark:text-amber-400"
+          : "text-slate-400 dark:text-slate-500";
   return (
     <div title={cell.hint ?? undefined}>
       <div className="text-[10px] font-medium uppercase tracking-wider text-slate-400 dark:text-slate-500">

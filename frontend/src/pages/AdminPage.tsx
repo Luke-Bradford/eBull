@@ -103,6 +103,14 @@ export function AdminPage() {
   // reload. Without this the operator stays in bootstrap-only render
   // mode after a successful Re-run all (Codex pre-push round 1).
   const refetchBootstrap = bootstrap.refetch;
+  // #3050 — `/system/status` was fetched on mount only and left out of the
+  // refresh loop. That was survivable while it fed `credential_health` and
+  // `engine_down`, which change rarely; it is not now that FundDataRow renders
+  // its per-layer freshness verdicts. Without this, a page left open shows the
+  // score/thesis timestamps from whenever it was opened, and an initial fetch
+  // failure pins both cells on "status unavailable" until a reload — a card
+  // asserting staleness that is itself stale. (Codex checkpoint 2.)
+  const refetchSystemStatus = systemStatus.refetch;
 
   const refetchAll = useCallback(() => {
     refetchV2();
@@ -112,6 +120,7 @@ export function AdminPage() {
     refetchJobs();
     refetchRecs();
     refetchBootstrap();
+    refetchSystemStatus();
   }, [
     refetchV2,
     refetchStatus,
@@ -120,6 +129,7 @@ export function AdminPage() {
     refetchJobs,
     refetchRecs,
     refetchBootstrap,
+    refetchSystemStatus,
   ]);
 
   const isRunning = status.data?.is_running ?? false;
@@ -209,6 +219,8 @@ export function AdminPage() {
         coverageError={coverage.error !== null}
         recommendations={recs.data}
         recommendationsError={recs.error !== null}
+        layers={systemStatus.data?.layers ?? null}
+        layersError={systemStatus.error !== null}
       />
 
       <CollapsibleSection
