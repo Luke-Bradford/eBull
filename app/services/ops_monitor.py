@@ -21,8 +21,12 @@ Data layers monitored:
   - theses     — theses.created_at
   - scores     — scores.scored_at
 
-Each layer has an expected maximum age.  If the most recent row is older
+Most layers have an expected maximum age: if the most recent row is older
 than that threshold, the layer is flagged as stale.
+
+⚠ ``prices`` is the exception and is SESSION-anchored, not wall-clock
+anchored — ``price_date`` is a trading date, so a wall-clock threshold over
+it is unsatisfiable by construction. See ``_SESSION_ANCHORED_LAYERS`` (#2575).
 """
 
 from __future__ import annotations
@@ -30,12 +34,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal, LiteralString
 
 import psycopg
 import psycopg.rows
 from psycopg.types.json import Jsonb
+
+from app.services.market_calendar import latest_completed_us_session
 
 # Back-compat re-export. Canonical home is
 # ``app.services.processes.json_safe.to_jsonsafe_params`` (#1064 PR2).
@@ -91,7 +97,6 @@ ALL_LAYERS: list[LayerName] = [
 # Maximum acceptable age per data layer before it is considered stale.
 # These thresholds represent normal operational expectations:
 #   - universe syncs nightly → 2 days allows for a missed night
-#   - prices refresh hourly → 4 hours gives comfortable margin
 #   - quotes refresh hourly alongside prices → same window
 #   - fundamentals refresh daily → 3 days allows for weekends
 #   - filings refresh daily → 3 days allows for weekends
@@ -122,7 +127,6 @@ _STALENESS_THRESHOLDS: dict[LayerName, timedelta] = {
     #        exactly what this alert should mean.
     # `tests/test_2407_universe_staleness_contract.py` fails if the two drift.
     "universe": timedelta(days=9),
-    "prices": timedelta(hours=4),
     "quotes": timedelta(hours=4),
     "fundamentals": timedelta(days=3),
     "filings": timedelta(days=3),
@@ -130,6 +134,37 @@ _STALENESS_THRESHOLDS: dict[LayerName, timedelta] = {
     "theses": timedelta(days=3),
     "scores": timedelta(days=2),
 }
+
+#: Layers whose freshness is a TRADING-SESSION question, not a wall-clock one.
+#:
+#: ⚠⚠ `prices` is here because a wall-clock threshold over `price_daily` cannot
+#: be satisfied. `_LAYER_QUERIES["prices"]` is `MAX(price_date)::timestamptz` —
+#: *midnight of the last trading date* — so on any weekday afternoon it is
+#: already ~14h+ old and over a weekend ~60h+, while the pipeline is healthy.
+#: Against the previous 4-hour threshold the layer could read `ok` only in the
+#: few hours after a session's bars landed, and `_derive_overall_status` maps
+#: any stale layer to `degraded`, so `/system/status` could effectively never
+#: report `ok`.
+#:
+#: Measured on dev 2026-09-14 12:5x UTC with `daily_candle_refresh` succeeding
+#: seven times that day:
+#:     prices  stale  latest=2026-09-11 00:00:00+00:00  age=3 days, 13:13:27  max=4:00:00
+#: `docs/review-prevention-log.md` records the same measurement from 2026-08-13
+#: (#2624 scope 3) as a reason not to REUSE this signal; the signal itself was
+#: never fixed.
+#:
+#: The replacement invents no constant. It composes two quantities this repo
+#: already declares:
+#:   - `market_calendar.latest_completed_us_session`, the NYSE session whose
+#:     official close has passed (observes closures and 13:00 ET half-days); and
+#:   - the orchestrator's own declared cadence for the layer that writes these
+#:     rows — `LAYERS["candles"].cadence.interval` — as the grace an ingest is
+#:     allowed before its absence is a fault.
+#: A layer is fresh when its newest bar is at or after the session that was
+#: already complete one cadence ago. That is tight (it alerts about one cadence
+#: after the pipeline stops) and it has no false alarm at the closing bell,
+#: because the just-closed session is not yet required.
+_SESSION_ANCHORED_LAYERS: Final[frozenset[LayerName]] = frozenset({"prices"})
 
 # Queries to find the most recent timestamp for each data layer.
 # Each returns a single row with a nullable 'latest' column.
@@ -365,6 +400,35 @@ def _retry_plan(
     return attempt, now + timedelta(seconds=_backoff_seconds(attempt, category))
 
 
+def required_completed_session(now: datetime) -> tuple[date, timedelta]:
+    """The NYSE session a session-anchored layer must already hold, and the grace.
+
+    ``(session, grace)`` where ``grace`` is the orchestrator's OWN declared
+    cadence for the candle layer — read from the registry, never re-declared
+    here. A second copy of a cadence is the #2407 defect one layer over, where
+    ``prices``' comment claimed an hourly refresh the orchestrator never
+    promised.
+
+    Imported inside the function on purpose: ``sync_orchestrator.registry``
+    imports this module, so a top-level import is a cycle. Same reason the
+    ``TYPE_CHECKING`` guard exists at the top of the file.
+    """
+    from app.services.sync_orchestrator.registry import LAYERS
+
+    cadence = LAYERS["candles"].cadence
+    grace = cadence.interval
+    if grace is None:
+        # `Cadence` is interval XOR calendar_months, and a calendar-month
+        # cadence has no fixed width to use as a grace. Refuse rather than
+        # substitute one: an invented grace is exactly the constant this fix
+        # exists to avoid, and it would silently set the alert's sensitivity.
+        raise RuntimeError(
+            "the candles layer declares a calendar-month cadence, which has no fixed grace "
+            "width — the prices staleness anchor needs an interval cadence"
+        )
+    return latest_completed_us_session(now - grace), grace
+
+
 def check_layer_staleness(
     conn: psycopg.Connection[Any],
     layer: LayerName,
@@ -373,7 +437,11 @@ def check_layer_staleness(
 ) -> LayerHealth:
     """Check whether a single data layer is stale, empty, or healthy."""
     now = now or _utcnow()
-    threshold = _STALENESS_THRESHOLDS[layer]
+    # ⚠ Session-anchored layers have NO wall-clock threshold, so this is a
+    # `.get` and not a subscript. `max_age` is reported as None for them rather
+    # than as a number the verdict does not use — an `ok` beside
+    # `age > max_age` reads as a bug to whoever is looking at the panel.
+    threshold = _STALENESS_THRESHOLDS.get(layer)
     query = _LAYER_QUERIES[layer]
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -398,6 +466,43 @@ def check_layer_staleness(
         latest = latest.replace(tzinfo=UTC)
 
     age = now - latest
+
+    if layer in _SESSION_ANCHORED_LAYERS:
+        required, grace = required_completed_session(now)
+        # ⚠ `latest` for these layers is a DATE cast to midnight UTC, so the
+        # comparison is between two calendar dates and never between an instant
+        # and a duration. Taking `.date()` of a midnight-UTC timestamp is
+        # exact; it is not a timezone conversion.
+        held = latest.date()
+        if held < required:
+            return LayerHealth(
+                layer=layer,
+                status="stale",
+                latest=latest,
+                age=age,
+                detail=(
+                    f"{layer}: newest bar {held.isoformat()} is behind the completed "
+                    f"NYSE session {required.isoformat()} (grace={grace})"
+                ),
+            )
+        return LayerHealth(
+            layer=layer,
+            status="ok",
+            latest=latest,
+            age=age,
+            detail=(
+                f"{layer}: newest bar {held.isoformat()} is at or after the completed "
+                f"NYSE session {required.isoformat()} (grace={grace})"
+            ),
+        )
+
+    if threshold is None:
+        # Not reachable: a layer is either session-anchored or has a threshold,
+        # and `tests/test_2575_prices_layer_session_anchor.py` proves the two
+        # sets partition `LAYERS`. Raised rather than asserted because `python
+        # -O` deletes an assert, and this is the guard that keeps the partition
+        # honest if someone adds a layer to neither.
+        raise RuntimeError(f"layer {layer!r} has neither a staleness threshold nor a session anchor")
     if age > threshold:
         return LayerHealth(
             layer=layer,

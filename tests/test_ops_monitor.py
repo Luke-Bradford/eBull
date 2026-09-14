@@ -23,6 +23,7 @@ import psycopg
 import pytest
 
 from app.services.ops_monitor import (
+    _SESSION_ANCHORED_LAYERS,
     _STALENESS_THRESHOLDS,
     LAYER_QUERY_FAILED_DETAIL_TEMPLATE,
     activate_kill_switch,
@@ -145,7 +146,14 @@ class TestCheckLayerStaleness:
         ],
     )
     def test_every_layer_has_threshold(self, layer: str) -> None:
-        assert layer in _STALENESS_THRESHOLDS
+        # ⚠ #2575 — "has a threshold" became "has EXACTLY ONE freshness rule"
+        # when `prices` moved to a session anchor. Asserting only the threshold
+        # side would fail on `prices`; asserting only membership in either set
+        # would let a layer join both and leave the verdict order deciding.
+        # The partition test lives in
+        # `tests/test_2575_prices_layer_session_anchor.py`; this parametrised
+        # case keeps the per-layer coverage it always had.
+        assert (layer in _STALENESS_THRESHOLDS) != (layer in _SESSION_ANCHORED_LAYERS)
 
 
 # ---------------------------------------------------------------------------
