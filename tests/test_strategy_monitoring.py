@@ -1390,6 +1390,7 @@ def test_shared_paper_pool_accepts_evidence_ready_core_without_an_alpha_candidat
             candidates=(),
             missing_candidate_ids=(),
             configuration_error=None,
+            earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
         ),
     )
     monkeypatch.setattr(
