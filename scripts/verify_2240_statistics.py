@@ -123,6 +123,11 @@ from app.services.strategy_statistics import (
     compute_metrics,
 )
 from app.services.trial_register import TRIAL_REGISTER
+from app.services.universe_selection import (
+    UNIVERSE_SELECTION_RULE_VERSION,
+    UniverseSelection,
+    load_universe_selection,
+)
 
 # ⚠ REUSED, not re-derived. Phase 5a built the corpus→positions path and 5b the
 # costing on top of it; a second copy here would be a second place for the fill
@@ -136,26 +141,66 @@ from scripts.verify_2240_position_builder import (
     _to_series,
 )
 
+
+def admitted_pairs(selection: UniverseSelection) -> tuple[tuple[int, int], ...]:
+    """``(name_key, series_id)`` for every admitted series, ascending.
+
+    ⚠ ``name_key``, not ``instrument_id``. For ``survivor_only`` the two are the
+    same on every admitted row, but the engine's per-name key is the one that
+    stays correct if this script is ever pointed at ``survivorship_free``, where
+    an admitted series may carry no link at all and keys as ``-series_id``.
+    ⚠ IN-PASS ONLY — nothing here is persisted, which is what makes a negative
+    key safe (``AdmittedSeries`` docstring; the write boundary is walked by
+    ``tests/test_2721_universe_selection.py``).
+
+    Raises on a duplicate name key. That cannot happen under a vendor pin, and
+    it is asserted rather than assumed because the whole of #2686 was one name
+    silently acquiring a second series on a different adjustment basis.
+    ⚠ The old message counted ``len(pairs) - len(instruments)`` — the number of
+    EXCESS SERIES — while naming instruments (4,546 against 4,550). This one
+    counts the thing it names.
+    """
+    pairs = tuple(sorted((series.name_key, series.series_id) for series in selection.admitted))
+    keys = Counter(name_key for name_key, _ in pairs)
+    repeated = {key: count for key, count in keys.items() if count > 1}
+    if repeated:
+        worst = max(repeated.values())
+        raise RuntimeError(
+            f"{len(repeated)} name keys carry more than one admitted series (worst: {worst}) under vendor "
+            f"{selection.vendor!r} — the vendor pin is not holding and a cross-basis splice would follow"
+        )
+    return pairs
+
+
 #: The declared RNG seed for this script's criterion-3 arm. ⚠ A DECLARED input
 #: under criterion 11, written down rather than defaulted: a run that cannot name
 #: its seed cannot reproduce its own interval. Any fixed value is as good as any
 #: other; what matters is that it is stated and does not drift.
 BOOTSTRAP_SEED: Final = 20260807
 
+# ⚠⚠ BOTH QUERIES KEY ON series_id, NOT instrument_id, AND THAT IS THE FIX FOR
+# #2686. Selecting on `instrument_id = ANY(validated)` held one series per name
+# only while one vendor was linked; #2597 linked a second archive and the same
+# predicate started returning both — on DIFFERENT adjustment bases. `--curve`
+# noticed and refused outright, so it had no passing run at all; `--panel` did
+# NOT notice and quietly reported an axis, a bar count and a density computed
+# across two corpora at once, which is the more dangerous half.
+#
+# The admitted set now comes from `universe_selection.load_universe_selection`
+# under this script's already-declared `UNIVERSE` — one place, vendor-pinned,
+# and versioned into every strategy identity. It is not a rule invented here.
 _AXIS_SQL = """
     SELECT DISTINCT d.bar_date
-    FROM research_price_series s
-    JOIN research_price_daily d ON d.series_id = s.series_id
-    WHERE s.instrument_id = ANY(%(ids)s)
+    FROM research_price_daily d
+    WHERE d.series_id = ANY(%(series_ids)s)
       AND d.bar_date BETWEEN %(start)s AND %(end)s
     ORDER BY 1
 """
 
 _BAR_COUNT_SQL = """
     SELECT count(*)
-    FROM research_price_series s
-    JOIN research_price_daily d ON d.series_id = s.series_id
-    WHERE s.instrument_id = ANY(%(ids)s)
+    FROM research_price_daily d
+    WHERE d.series_id = ANY(%(series_ids)s)
       AND d.bar_date BETWEEN %(start)s AND %(end)s
 """
 
@@ -675,20 +720,25 @@ def panel() -> int:
     print("\n[panel] the evaluation axis, and how dense a matrix simulator would find it", flush=True)
     with psycopg.connect(settings.database_url) as conn:
         universe = load_validated_universe(conn)
-        bounds = {"ids": list(universe), "start": EVALUATION_WINDOW_START, "end": EVALUATION_WINDOW_END}
+        selection = load_universe_selection(conn, universe=UNIVERSE, validated_ids=frozenset(universe))
+        pairs = admitted_pairs(selection)
+        bounds = {
+            "series_ids": [series_id for _, series_id in pairs],
+            "start": EVALUATION_WINDOW_START,
+            "end": EVALUATION_WINDOW_END,
+        }
         axis = [row[0] for row in conn.execute(_AXIS_SQL, bounds).fetchall()]
         bars = conn.execute(_BAR_COUNT_SQL, bounds).fetchone()
-        series_count = conn.execute(
-            "SELECT count(*) FROM research_price_series WHERE instrument_id = ANY(%(ids)s)",
-            {"ids": list(universe)},
-        ).fetchone()
-    assert bars is not None and series_count is not None
+    assert bars is not None
+    series_count = len(pairs)
+    print(f"  universe                   {UNIVERSE}   vendor {selection.vendor}")
+    print(f"  universe selection rule    {UNIVERSE_SELECTION_RULE_VERSION}")
     print(f"  validated universe (§4.0)  {len(universe):>12,} instruments")
-    print(f"  research series in it      {series_count[0]:>12,}")
+    print(f"  admitted series            {series_count:>12,}   (vendor-pinned, one per name)")
     print(f"  window                     {EVALUATION_WINDOW_START} … {EVALUATION_WINDOW_END}")
     print(f"  distinct trading dates     {len(axis):>12,}")
     print(f"  bars                       {bars[0]:>12,}")
-    cells = series_count[0] * len(axis)
+    cells = series_count * len(axis)
     density = 100.0 * bars[0] / cells if cells else 0.0
     print(f"  dense panel cells          {cells:>12,}")
     print(f"  density                    {density:>12.1f}%   NaN padding {100.0 - density:.1f}%")
@@ -708,25 +758,27 @@ def curve(*, limit: int | None) -> int:
         flush=True,
     )
     print(f"        sizing rule {SIZING_RULE_ID}   metric set {METRIC_SET_ID}", flush=True)
+    # ⚠ Stamped, not implicit (#2686 acceptance). A run that cannot name which
+    # series it admitted cannot say which adjustment basis its metrics describe,
+    # and a cross-basis splice is the failure this file refuses elsewhere.
+    print(f"        universe {UNIVERSE}   selection {UNIVERSE_SELECTION_RULE_VERSION}", flush=True)
     window = Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
     print(f"        window {window.start} … {window.end}", flush=True)
 
     with psycopg.connect(settings.database_url) as conn:
         universe = load_validated_universe(conn)
-        bounds = {"ids": list(universe), "start": EVALUATION_WINDOW_START, "end": EVALUATION_WINDOW_END}
+        selection = load_universe_selection(conn, universe=UNIVERSE, validated_ids=frozenset(universe))
+        pairs = admitted_pairs(selection)
+        print(f"  admitted series  {len(pairs):,} on vendor {selection.vendor}", flush=True)
+        bounds = {
+            "series_ids": [series_id for _, series_id in pairs],
+            "start": EVALUATION_WINDOW_START,
+            "end": EVALUATION_WINDOW_END,
+        }
         axis = tuple(row[0] for row in conn.execute(_AXIS_SQL, bounds).fetchall())
         axis_pos = {when: index for index, when in enumerate(axis)}
         print(f"  evaluation axis  {len(axis):,} trading dates", flush=True)
 
-        pairs = conn.execute(
-            "SELECT instrument_id, series_id FROM research_price_series "
-            "WHERE instrument_id = ANY(%(ids)s) ORDER BY instrument_id, series_id",
-            {"ids": list(universe)},
-        ).fetchall()
-        instruments = {int(row[0]) for row in pairs}
-        if len(instruments) != len(pairs):
-            print(f"  *** {len(pairs) - len(instruments)} instruments carry more than one research series — refusing")
-            return 1
         if limit is not None:
             pairs = pairs[:limit]
             print(f"  ⚠ LIMITED to the first {len(pairs)} series — NOT a full-population figure", flush=True)
@@ -735,7 +787,9 @@ def curve(*, limit: int | None) -> int:
         benchmark = LegBook()
         empty = 0
 
-        for n, (instrument_id, series_id) in enumerate(pairs, start=1):
+        # ⚠ `name_key`, not `instrument_id` — see `admitted_pairs`. Nothing in
+        # this loop is persisted, which is what makes the in-pass key safe here.
+        for n, (name_key, series_id) in enumerate(pairs, start=1):
             masked = load_masked_series(conn, series_id)
             if not masked.bars:
                 empty += 1
@@ -787,9 +841,9 @@ def curve(*, limit: int | None) -> int:
                     signals,
                     series=series,
                     identity=identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID),
-                    instrument_id=int(instrument_id),
+                    instrument_id=name_key,
                 )
-                entries, exits = _fills(rows, int(instrument_id))
+                entries, exits = _fills(rows, name_key)
                 built = build_positions(
                     strategy_id=strategy_id,
                     strategy_version=version,
@@ -797,7 +851,7 @@ def curve(*, limit: int | None) -> int:
                     exits=exits,
                     outcomes=[],
                     outcome_pin=None,
-                    series={int(instrument_id): series},
+                    series={name_key: series},
                     regime=regime,
                     window=window,
                 )
@@ -805,8 +859,7 @@ def curve(*, limit: int | None) -> int:
                 # P6 — conservation across the layer boundary.
                 if len(costed) != len(built.positions):
                     sleeves[label].problems.append(
-                        f"{label}/{instrument_id}: P6 {len(built.positions)} positions produced {len(costed)} "
-                        "costed rows"
+                        f"{label}/{name_key}: P6 {len(built.positions)} positions produced {len(costed)} costed rows"
                     )
                 sleeves[label].absorb(
                     costed,
