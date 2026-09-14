@@ -188,6 +188,26 @@ class TestB4RevertingSpike:
             is False
         )
 
+    def test_a_wide_gap_alone_cannot_fire_b4_however_wide_the_tolerance(self) -> None:
+        # The review bot's question on #3028: does widening the tolerance from 4 to
+        # 10 days flag legitimate moves across extended closures that used to fall
+        # outside B4's scope? It cannot, and the reason is structural rather than
+        # empirical — the gap test only decides whether B4 LOOKS. Firing still needs
+        # both the magnitude trigger and the round trip back inside [0.8, 1.25].
+        #
+        # Three shapes across the widest gap the exchange classes now admit, none
+        # of which the old 4-day constant would have reached either:
+        params = params_for("us_equity")
+        start = date(2025, 1, 6)
+        wide = timedelta(days=params.hole_days)
+
+        # 1. a real move over a long closure that does NOT come back — T3's business
+        assert rule_b4(flat(start, "100"), flat(start + wide, "9.9"), flat(start + 2 * wide, "10.0"), params) is False
+        # 2. ordinary volatility over a long closure — never reaches the trigger
+        assert rule_b4(flat(start, "100"), flat(start + wide, "60"), flat(start + 2 * wide, "100"), params) is False
+        # 3. a flat series over a long closure — no anomaly of any kind
+        assert rule_b4(flat(start, "100"), flat(start + wide, "100"), flat(start + 2 * wide, "100"), params) is False
+
     def test_does_not_fire_on_a_spike_that_does_not_come_back(self) -> None:
         # SRXH 2025-12-09 (#3028): 25.71 -> 0.4466 -> 35.538. BOTH transitions are
         # extreme and T3 quarantines both, yet the round trip is 1.3823 — outside
