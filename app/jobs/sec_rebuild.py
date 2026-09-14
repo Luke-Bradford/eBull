@@ -75,13 +75,25 @@ class RebuildScope:
     source: ManifestSource | None = None
 
 
-class EmptyRebuildScopeError(RuntimeError):
+class EmptyRebuildScopeError(ValueError):
     """A rebuild scope matched no ``data_freshness_index`` triple (#2379).
 
     Carries the scope and, when ``filer_cik`` was supplied, the one
     correction that fixes the overwhelmingly common case -- because the
     trap that produced this ticket is invisible from the payload alone:
     an ISSUER's CIK looks exactly like a filer's, and matches nothing.
+
+    ⚠ ``ValueError``, matching :func:`_resolve_scope`'s sibling refusal for
+    the empty-PAYLOAD case. Both are "the caller named a scope that cannot
+    identify work", and two sibling refusals in one module with different
+    base classes is a distinction with no meaning behind it.
+
+    ⚠ The choice is semantic, not behavioural -- measured, the two bases are
+    indistinguishable to every consumer on this path: ``_tracked_job``
+    catches bare ``Exception``, ``classify_exception`` names neither (both
+    fall to ``INTERNAL_ERROR``), and ``POST /jobs/{name}/run`` has already
+    returned ``202`` via ``publish_manual_job_request`` before the invoker
+    runs, so no HTTP status depends on it either.
     """
 
     def __init__(self, scope: RebuildScope) -> None:
@@ -229,9 +241,10 @@ def run_sec_rebuild(
     ``_INVOKERS[JOB_SEC_REBUILD]``). No scheduled caller exists, so there
     is no automated zero-scope case a raise could start failing on a
     cadence -- a rebuild that resets nothing is always an operator error.
-    It also reuses the path ``_resolve_scope``'s own ``ValueError``
-    already takes (``job_runs.status='error'``) instead of inventing a
-    third request status.
+    It also reuses the failure-recording path ``_resolve_scope``'s own
+    ``ValueError`` already takes -- ``_tracked_job`` catches bare
+    ``Exception`` and writes ``job_runs.status='error'`` -- instead of
+    inventing a third request status.
     """
     triples = _resolve_scope(conn, scope)
     if not triples:
