@@ -21,7 +21,23 @@ Scope payloads:
     { "instrument_id": int }
         # all issuer-scoped sources for that instrument
     { "filer_cik": str, "source": str }
-        # all filings under that filer's CIK for the source
+        # filings for the source under that filer's CIK, where the CIK
+        # names an INSTITUTIONAL or BLOCKHOLDER filer subject.
+        #
+        # ⚠⚠ An ISSUER's CIK never matches, for ANY source (#2379). It
+        # is not that some sources are "issuer-scoped" — measured on the
+        # full `data_freshness_index`, every SEC source carries
+        # filer-scoped rows too (`sec_def14a`: 3,979 issuer / 79
+        # institutional / 7 blockholder), so this scope is legitimate
+        # for all of them. The reason is the SUBJECT, not the source:
+        # `_resolve_scope` matches `subject_id`, and on an issuer row
+        # `subject_id` is the INSTRUMENT_ID -- the CIK sits in a
+        # separate `cik` column nothing here reads. Use the
+        # `instrument_id` form for an issuer.
+        #
+        # The previous wording here ("all filings under that filer's
+        # CIK for the source") carried no such restriction, was
+        # followed literally, and cost six silent no-op rebuilds.
     { "source": str }
         # universe-wide for that source
     { "instrument_id": int, "source": str }
@@ -57,6 +73,34 @@ class RebuildScope:
     instrument_id: int | None = None
     filer_cik: str | None = None
     source: ManifestSource | None = None
+
+
+class EmptyRebuildScopeError(RuntimeError):
+    """A rebuild scope matched no ``data_freshness_index`` triple (#2379).
+
+    Carries the scope and, when ``filer_cik`` was supplied, the one
+    correction that fixes the overwhelmingly common case -- because the
+    trap that produced this ticket is invisible from the payload alone:
+    an ISSUER's CIK looks exactly like a filer's, and matches nothing.
+    """
+
+    def __init__(self, scope: RebuildScope) -> None:
+        self.scope = scope
+        parts = [
+            f"instrument_id={scope.instrument_id!r}",
+            f"filer_cik={scope.filer_cik!r}",
+            f"source={scope.source!r}",
+        ]
+        hint = ""
+        if scope.filer_cik is not None:
+            hint = (
+                " — filer_cik matches institutional_filer / blockholder_filer subjects only;"
+                " an issuer's CIK never matches, for any source, because an issuer row's"
+                " subject_id is its instrument_id. Use {'instrument_id': <id>, ...} for an issuer."
+            )
+        super().__init__(
+            f"sec_rebuild scope matched no data_freshness_index rows ({', '.join(parts)}): nothing was reset{hint}"
+        )
 
 
 @dataclass(frozen=True)
@@ -170,16 +214,28 @@ def run_sec_rebuild(
 
     Returns RebuildStats. The worker (#869) drains the resulting
     pending rows.
+
+    ⚠⚠ Raises :class:`EmptyRebuildScopeError` when the scope resolves to
+    zero triples, rather than returning a zero-valued ``RebuildStats``
+    (#2379). Previously that path logged ``no-op`` and the request row
+    ended ``status='completed'``, so an operator running six per-CIK
+    rebuilds saw six successes and reset nothing; the only thing that
+    noticed was a ``Row-count spike detected`` WARNING in a log. This is
+    the class ``.claude/CLAUDE.md`` names -- *"a job that no-ops and
+    reports success is invisible to every automated check we have"*.
+
+    Raising is safe BECAUSE ``sec_rebuild`` is manual-trigger-only
+    (``app/jobs/runtime.py``: *"sec_rebuild is manual-trigger-only"*;
+    ``_INVOKERS[JOB_SEC_REBUILD]``). No scheduled caller exists, so there
+    is no automated zero-scope case a raise could start failing on a
+    cadence -- a rebuild that resets nothing is always an operator error.
+    It also reuses the path ``_resolve_scope``'s own ``ValueError``
+    already takes (``job_runs.status='error'``) instead of inventing a
+    third request status.
     """
     triples = _resolve_scope(conn, scope)
     if not triples:
-        logger.info("sec rebuild: scope resolved to 0 triples — no-op")
-        return RebuildStats(
-            scope_triples=0,
-            manifest_rows_reset=0,
-            scheduler_rows_reset=0,
-            discovery_new_manifest_rows=0,
-        )
+        raise EmptyRebuildScopeError(scope)
 
     sched_reset = _reset_scheduler_rows(conn, triples)
     manifest_reset = _reset_manifest_rows(conn, triples)

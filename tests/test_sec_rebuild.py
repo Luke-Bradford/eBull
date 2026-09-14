@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import psycopg
 import pytest
 
-from app.jobs.sec_rebuild import RebuildScope, run_sec_rebuild
+from app.jobs.sec_rebuild import EmptyRebuildScopeError, RebuildScope, run_sec_rebuild
 from app.services.data_freshness import get_freshness_row, record_poll_outcome
 from app.services.sec_manifest import (
     get_manifest_row,
@@ -116,18 +116,60 @@ class TestRebuildScope:
             run_sec_rebuild(ebull_test_conn, RebuildScope(), discover=False)
         ebull_test_conn.rollback()
 
-    def test_unmatched_scope_no_op(
+    def test_unmatched_scope_raises_instead_of_reporting_success(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        stats = run_sec_rebuild(
-            ebull_test_conn,
-            RebuildScope(instrument_id=99999),
-            discover=False,
-        )
-        ebull_test_conn.commit()
-        assert stats.scope_triples == 0
-        assert stats.manifest_rows_reset == 0
+        """#2379: a scope that resets nothing must not end ``status='completed'``.
+
+        This test previously asserted the opposite — ``scope_triples == 0``
+        returned as success — which is precisely the behaviour that let six
+        per-CIK operator rebuilds report six successes and reset nothing.
+        """
+        with pytest.raises(EmptyRebuildScopeError, match="matched no data_freshness_index rows"):
+            run_sec_rebuild(
+                ebull_test_conn,
+                RebuildScope(instrument_id=99999),
+                discover=False,
+            )
+        ebull_test_conn.rollback()
+
+    def test_an_issuer_cik_passed_as_filer_cik_names_the_correction(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The trap is invisible from the payload, so the error carries the fix.
+
+        An issuer's CIK is indistinguishable from a filer's by inspection, and
+        ``_resolve_scope`` matches ``subject_id`` — which on an issuer row is the
+        instrument_id, never the CIK. Without the hint the operator sees only
+        "matched nothing" and has no reason to suspect the key rather than the
+        data.
+        """
+        with pytest.raises(EmptyRebuildScopeError) as excinfo:
+            run_sec_rebuild(
+                ebull_test_conn,
+                RebuildScope(filer_cik="0000043920", source="sec_def14a"),
+                discover=False,
+            )
+        ebull_test_conn.rollback()
+        message = str(excinfo.value)
+        assert "institutional_filer / blockholder_filer" in message
+        assert "instrument_id" in message
+
+    def test_a_scope_without_filer_cik_omits_the_filer_hint(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The hint is conditional — an instrument_id miss is a different problem.
+
+        Appending the filer advice unconditionally would point an operator whose
+        instrument_id is simply untracked at a key they did not use.
+        """
+        with pytest.raises(EmptyRebuildScopeError) as excinfo:
+            run_sec_rebuild(ebull_test_conn, RebuildScope(instrument_id=99999), discover=False)
+        ebull_test_conn.rollback()
+        assert "institutional_filer" not in str(excinfo.value)
 
 
 class TestDiscoveryPass:
