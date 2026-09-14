@@ -48,7 +48,29 @@ class MarketHalt:
 class HaltSnapshot:
     source_pub_at: datetime
     payload_sha256: str
+    content_sha256: str
     halts: tuple[MarketHalt, ...]
+
+
+def content_sha256(halts: tuple[MarketHalt, ...]) -> str:
+    """Fingerprint the published halt identities, excluding the publication stamp.
+
+    ⚠ NOT interchangeable with ``payload_sha256``. That one hashes the raw bytes and
+    ``<pubDate>`` is inside them, so it changes on every republication whether or not
+    a single halt did — measured on 2026-09-14, one 10-minute window carried 12
+    distinct pubDates, 12 distinct ``payload_sha256`` and 2 distinct fingerprints
+    (``scripts/probe_3049_halt_pubdate_skew.py``). This is the hash that answers
+    "did the safety content change", and it covers exactly the columns
+    ``strategy_market_halts`` stores, so an equal fingerprint guarantees the upsert
+    is a no-op.
+    """
+    digest = hashlib.sha256()
+    for halt in sorted(halts, key=lambda row: (row.symbol, row.halt_at)):
+        digest.update(
+            f"{halt.symbol}|{halt.halt_at.isoformat()}|{halt.market}|{halt.reason_code}|"
+            f"{halt.resumed_at.isoformat() if halt.resumed_at else ''}\n".encode()
+        )
+    return digest.hexdigest()
 
 
 def _text(item: ET.Element, name: str, *, required: bool = False) -> str | None:
@@ -126,6 +148,7 @@ def parse_halt_rss(payload: bytes) -> HaltSnapshot:
     return HaltSnapshot(
         source_pub_at=source_pub_at,
         payload_sha256=hashlib.sha256(payload).hexdigest(),
+        content_sha256=content_sha256(tuple(rows)),
         halts=tuple(rows),
     )
 
@@ -144,11 +167,33 @@ def store_halt_snapshot(
     if snapshot.source_pub_at < fetched_at - _MAX_SOURCE_LAG:
         raise HaltFeedError("halt feed pubDate is stale")
     current = conn.execute(
-        "SELECT source_pub_at FROM strategy_halt_feed_state WHERE source = %s FOR UPDATE",
+        "SELECT source_pub_at, content_sha256 FROM strategy_halt_feed_state WHERE source = %s FOR UPDATE",
         (SOURCE,),
     ).fetchone()
     if current is not None and snapshot.source_pub_at < current[0]:
-        raise HaltFeedError("halt feed publication time regressed")
+        # ⚠ The origin publishes on two lineages ~21s apart behind a 60-second Imperva
+        # cache, so two pollers firing in the same tick routinely see stamps in either
+        # order. Measured 2026-09-14: within 10s of a `strategy_paper_cycle` poll,
+        # `strategy_halt_feed_refresh` failed on 10-15% of runs; beyond 60s, 0 of 39.
+        #
+        # An older stamp carrying the SAME halt content overwrites nothing — the
+        # `strategy_market_halts` upsert below is byte-identical — so refusing it
+        # discarded a healthy observation and, through the shared refresher, aborted
+        # the whole `strategy_paper_cycle` tick 111 times. It is accepted as a
+        # re-serve; `source_pub_at` is held at the maximum by the upsert, so the
+        # stored stamp never goes backwards and `strategy_core_preflight`'s recency
+        # argument still holds.
+        #
+        # ⚠ Changed content under an older stamp is a genuine divergence and still
+        # refuses: accepting it could drop a halt the newer lineage had already
+        # published. Fail-closed, deliberately, on exactly that case.
+        if snapshot.content_sha256 != current[1]:
+            raise HaltFeedError(
+                "halt feed publication time regressed with changed content: "
+                f"stored={current[0].isoformat()} fetched={snapshot.source_pub_at.isoformat()} "
+                f"delta={(current[0] - snapshot.source_pub_at).total_seconds():.0f}s "
+                f"items={len(snapshot.halts)}"
+            )
     with conn.cursor() as cur:
         cur.executemany(
             """
@@ -169,15 +214,28 @@ def store_halt_snapshot(
     conn.execute(
         """
         INSERT INTO strategy_halt_feed_state (
-            source, fetched_at, source_pub_at, item_count, payload_sha256
-        ) VALUES (%s, %s, %s, %s, %s)
+            source, fetched_at, source_pub_at, item_count, payload_sha256, content_sha256
+        ) VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (source) DO UPDATE SET
             fetched_at = EXCLUDED.fetched_at,
-            source_pub_at = EXCLUDED.source_pub_at,
+            -- ⚠ GREATEST, not EXCLUDED: an accepted re-serve carries an older stamp
+            -- and must not drag the stored one backwards, or the next poll from the
+            -- newer lineage would compare against a value it has already passed.
+            source_pub_at = GREATEST(
+                strategy_halt_feed_state.source_pub_at, EXCLUDED.source_pub_at
+            ),
             item_count = EXCLUDED.item_count,
-            payload_sha256 = EXCLUDED.payload_sha256
+            payload_sha256 = EXCLUDED.payload_sha256,
+            content_sha256 = EXCLUDED.content_sha256
         """,
-        (SOURCE, fetched_at, snapshot.source_pub_at, len(snapshot.halts), snapshot.payload_sha256),
+        (
+            SOURCE,
+            fetched_at,
+            snapshot.source_pub_at,
+            len(snapshot.halts),
+            snapshot.payload_sha256,
+            snapshot.content_sha256,
+        ),
     )
     deleted = conn.execute(
         "DELETE FROM strategy_market_halts WHERE resumed_at IS NOT NULL AND halt_at < %s RETURNING 1",
@@ -224,6 +282,7 @@ __all__ = [
     "NASDAQ_HALT_RSS_URL",
     "SOURCE",
     "active_halt_symbols",
+    "content_sha256",
     "fetch_halt_snapshot",
     "parse_halt_rss",
     "refresh_halt_feed",
