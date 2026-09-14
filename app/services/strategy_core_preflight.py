@@ -38,6 +38,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 
 from app.services.market_calendar import us_market_status
+from app.services.market_session_support import session_support_reason
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 from app.services.strategy_core_mandate import CORE_MANDATE_ADVISORY_LOCK
 from app.services.strategy_core_submission_gate import (
@@ -57,17 +58,13 @@ CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v2"
 #: (``app/services/market_calendar.py::us_market_status``), so the only asset class
 #: whose session we can honestly evaluate is ``us_equity``.
 #:
-#: ⚠ An ALLOW-list, and that direction is the whole point: ``exchanges.asset_class``
-#: is a CHECK vocabulary that has already grown once (``mena_equity``, added by
-#: ``sql/068`` over ``sql/067``'s original nine).  A value added later lands on the
-#: REFUSE side with no code change here.  An exclusion list would have admitted it.
-#:
-#: ⚠ This does NOT contradict ``docs/settled-decisions.md`` ("core allocation
-#: (#2603) -- a non-US-listed core instrument is permitted if its eligibility proof
-#: passes").  That governs what the mandate may DECLARE; this governs what we can
-#: session-check at submission time.  A non-US core instrument is a legal mandate
-#: whose submissions refuse here until a calendar for its venue exists.
-_SESSION_SUPPORTED_ASSET_CLASSES: Final = frozenset({"us_equity"})
+#: ⚠ The allow-list and its rationale moved to ``app/services/market_session_support.py``
+#: (#2312, 2026-09-14) so the #2833 SELECTION path can refuse a sleeve this module
+#: would refuse at submission time.  It could not import the predicate from here:
+#: ``strategy_core_selection`` -> this module -> ``strategy_core_mandate`` ->
+#: ``strategy_core_selection`` is a real cycle.  A second copy of the allow-list
+#: would drift, and the drift direction is "selection says ready, submission
+#: refuses" -- discovered only in an operator-attended session.
 
 _NY: Final = ZoneInfo("America/New_York")
 
@@ -460,8 +457,9 @@ def decide_core_preflight(
         return refuse("core_instrument_missing", f"instrument_id={core_instrument_id}")
     if not observation.is_tradable:
         return refuse("core_instrument_not_tradable", f"symbol={observation.symbol}")
-    if observation.asset_class not in _SESSION_SUPPORTED_ASSET_CLASSES:
-        return refuse("core_unsupported_market_session", f"asset_class={observation.asset_class!r}")
+    unsupported_venue = session_support_reason(observation.asset_class)
+    if unsupported_venue is not None:
+        return refuse("core_unsupported_market_session", unsupported_venue)
     if not _session_is_open(now):
         return refuse("core_market_session_closed", now.astimezone(_NY).isoformat())
 

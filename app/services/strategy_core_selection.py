@@ -8,6 +8,8 @@ from typing import Any, Final, Literal
 
 import psycopg
 
+from app.services.market_session_support import session_support_reason
+
 CORE_SELECTION_CANDIDATE_IDS: Final = (3417, 3434, 3075)
 CORE_SELECTION_REQUIRED_TRADING_DAYS: Final = 5
 CORE_SELECTION_MAX_COST_BPS: Final = 60
@@ -42,6 +44,11 @@ class CoreCandidateCoverage:
     observed_trading_days: int
     first_observed_date: date | None
     last_observed_date: date | None
+    asset_class: str | None
+    """``exchanges.asset_class`` for the candidate's venue, or ``None`` when the
+    instrument has no ``exchanges`` row.  Carried so the selected sleeve can be
+    checked against what the core EXECUTION path can actually session-check;
+    ``None`` is a refusal, not a pass."""
 
 
 @dataclass(frozen=True)
@@ -86,13 +93,20 @@ SELECT i.instrument_id, i.symbol,
        count(d.observation_date) AS observed_days,
        min(d.observation_date) AS first_observed_date,
        max(d.observation_date) AS last_observed_date,
-       (SELECT count(*) FROM common_dates) AS common_observed_days
+       (SELECT count(*) FROM common_dates) AS common_observed_days,
+       e.asset_class
 FROM instruments i
+LEFT JOIN exchanges e ON e.exchange_id = i.exchange
 LEFT JOIN candidate_dates d ON d.instrument_id = i.instrument_id
 WHERE i.instrument_id = ANY(%s)
-GROUP BY i.instrument_id, i.symbol
+GROUP BY i.instrument_id, i.symbol, e.asset_class
 ORDER BY array_position(%s::bigint[], i.instrument_id)
 """
+# ⚠ The exchange join is `e.exchange_id = i.exchange` -- `exchanges` is keyed by a
+# TEXT id that `instruments` stores in a column of a DIFFERENT name, and `i` has no
+# `exchange_id` column at all.  Same join `strategy_core_preflight._PREFLIGHT_SQL`
+# uses, and a LEFT JOIN so a candidate with no `exchanges` row yields NULL and is
+# refused below rather than disappearing from the coverage list.
 
 
 def load_core_selection(conn: psycopg.Connection[Any]) -> CoreSelection:
@@ -114,6 +128,7 @@ def load_core_selection(conn: psycopg.Connection[Any]) -> CoreSelection:
             observed_trading_days=int(row[2]),
             first_observed_date=row[3],
             last_observed_date=row[4],
+            asset_class=row[6],
         )
         for row in rows
     )
@@ -136,7 +151,26 @@ def load_core_selection(conn: psycopg.Connection[Any]) -> CoreSelection:
         and bool(evidence_ref.strip())
     )
     configuration_error = None
-    if selection_declared and not selection_complete:
+    # A sleeve the core EXECUTION path would refuse must not read as `ready` here.
+    # Both `require_selected_core_instrument` callers (the mandate writer and the
+    # executor) key on `ready`, so refusing at DECLARATION time moves the failure
+    # from the operator-attended session -- the most expensive moment available --
+    # to the moment somebody writes the verdict constant.  Measured 2026-09-14:
+    # `CSPX.L` (3434) and `IUSA.L` (3075) are exchange `7` = LSE / `uk_equity`, and
+    # `decide_core_preflight` refuses both `core_unsupported_market_session` with
+    # every other input healthy.
+    if selection_complete and selected_candidate is not None:
+        unsupported_venue = session_support_reason(selected_candidate.asset_class)
+        if unsupported_venue is not None:
+            selection_complete = False
+            # The wrap adds ONLY the identity half -- which selection is at fault.  The
+            # consequence is already the last clause of `unsupported_venue`, and saying
+            # it twice is how an operator string starts drifting from the predicate.
+            configuration_error = (
+                f"the reviewed core selection names {selected_candidate.symbol} "
+                f"(instrument {selected}): {unsupported_venue}"
+            )
+    if selection_declared and not selection_complete and configuration_error is None:
         configuration_error = "the reviewed core selection must name a declared candidate and a non-blank evidence ref"
     return CoreSelection(
         state=(
