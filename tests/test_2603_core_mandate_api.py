@@ -148,6 +148,7 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
         ),
         missing_candidate_ids=(),
         configuration_error=None,
+        earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
     monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
     monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: None)
@@ -157,7 +158,7 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     assert response.state == "evidence_collecting"
     assert response.selected_instrument_id is None
     assert response.observed_trading_days == 1
-    assert response.earliest_possible_verdict_at == datetime(2026, 9, 2, tzinfo=UTC)
+    assert response.earliest_possible_verdict_at == datetime(2026, 9, 18, tzinfo=UTC)
     assert response.can_configure is False
     assert response.can_enable_pool is False
     assert response.can_rebalance is False
@@ -229,6 +230,7 @@ def test_operator_view_labels_an_unresolved_order_as_resume_not_rebalance(
         candidates=(),
         missing_candidate_ids=(),
         configuration_error=None,
+        earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
     authority = CoreResumeAuthority(
         intent_id=11,
@@ -285,6 +287,7 @@ def test_operator_view_does_not_promise_resolution_for_a_stranded_authority(
         candidates=(),
         missing_candidate_ids=(),
         configuration_error=None,
+        earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
     authority = CoreResumeAuthority(
         intent_id=11,
@@ -351,6 +354,7 @@ def test_operator_view_does_not_advertise_unavailable_core_headroom(
         candidates=(),
         missing_candidate_ids=(),
         configuration_error=None,
+        earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
     monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
     monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
@@ -383,6 +387,7 @@ def test_operator_view_refuses_a_mandate_for_the_previous_reviewed_selection(
         candidates=(),
         missing_candidate_ids=(),
         configuration_error=None,
+        earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
     monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
     monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
@@ -410,6 +415,7 @@ def test_operator_view_refuses_a_superseded_mandate_policy(monkeypatch: pytest.M
         candidates=(),
         missing_candidate_ids=(),
         configuration_error=None,
+        earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
     monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
     monkeypatch.setattr(
