@@ -6495,3 +6495,58 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   without a fixture nobody would think to write.
 - Enforced in: this prevention log; `scripts/verify_3046_break_minting_census.py`
   (the guard carries the precision argument and the measured smallest magnitude).
+
+### A replacement alarm can be UNCONSTRUCTIBLE — ship it ABSENT, never permissive
+
+- First seen in: #2795 (2026-09-14), the RegSHO sibling of #2337's uncalibratable match-rate
+  sentinel. The ticket's own fix shape said to lift all three of #2337's arms and run them
+  per tape. Arms 1 and 2 transfer — they are boundaries at none-at-all. **Arm 3, the
+  retention floor, does not, and reusing #2337's `0.90` would have re-created the defect one
+  level down.** Per-tape consecutive-day ratios: CNMS 0.9956 / FNSQ 0.9951 / FNYX 0.9769 /
+  FNQC 0.9139 / **FORF 0.8611**, where FORF carries 54-75 rows a day and ±10 rows is ±15%.
+  A 0.90 floor fires on FORF three times in 90 days; 0.95 fires 24 times.
+- **Three candidate constructions were tried and all three failed, which is the finding:**
+  1. a fitted per-tape floor — the miscalibration being fixed, one level down;
+  2. a `sqrt(n)` counting-noise band, `1 - k/sqrt(n_prev)`, which would be knowable by
+     construction — falsified by FNQC, whose worst pair needs `k = 5.60` (≈3.96σ once the
+     variance of a *difference* of two Poisson counts, ~`2n`, is used rather than `n`; the
+     first write-up got that arithmetic wrong and the conclusion survived the correction);
+  3. a "half the previous day" floor, argued from "a resolver break removes a large
+     fraction". ⚠ **A dressed-up pick.** It names no detection requirement, and the failure
+     model is unsupported — a universe sync flipping `is_tradable` on one exchange or one
+     share class is a few percent. It is also defeated by count preservation and by four
+     successive 20% losses, which leave 41% of the population with no fire.
+- Prevention, and this is the transferable half: **when the replacement for a broken alarm
+  turns out to be unconstructible, ship the arm ABSENT rather than set to a permissive
+  number.** In code that means an explicit `retention_floor: float | None = None` that omits
+  the arm, not a loose constant — because a loose constant is indistinguishable from a
+  calibrated one to the next reader, and it re-enters the corpus of "thresholds someone
+  chose" that this whole class of defect comes from. Name what would be needed to build it
+  (here: a stated detection requirement plus a replayed `rows_resolved` series) on the
+  ticket, so the gap is a known gap rather than a silent one.
+- ⚠ **Say what the surviving arms do NOT cover, in the code.** An alarm's silence is read as
+  health. Here: a syntactically valid row with a wrong symbol or swapped numeric columns; a
+  file that never arrived (a provider 403/404 creates no stats entry, so a tape disappearing
+  permanently is a successful run); and the moderate resolved-row loss the deleted pooled
+  arm nominally covered. That last one is not a detection regression — the old arm fired on
+  ~38% of days with no relationship to anything wrong, so a fire carried no information —
+  but it is a gap and saying so is the difference between a bounded alarm and a false one.
+- ⚠ Dropping the arm also deleted an entire imported risk class the earlier design carried:
+  no per-tape baseline lookup means no mutable denominator, no partition-scan query, no
+  first-date-revision hole, and no chance of the #2269 transaction trap (a baseline `SELECT`
+  between the raw-payload `conn.commit()` and `with conn.transaction()` opens an outer
+  transaction on a non-autocommit connection and silently degrades the per-file transaction
+  to a savepoint). **The simpler arm was also the safer one; that is not a coincidence.**
+- ⚠ **A test can pin the DEFECT.** `test_match_rate_warning_logged_below_50pct` seeded one
+  symbol against a five-row file and REQUIRED the warning — encoding "a 20% match rate is an
+  alarm" as the contract, on a tape whose structural match rate is 2%. Deleting such a test
+  without an inverted replacement leaves the removal untested in the direction that matters;
+  it was replaced by an assertion that the same corpus is now silent.
+- Caught by: Codex checkpoint 1, across two passes (32 findings, then 30). The first killed
+  the "construct the floor from the failure it must catch" argument; the second found the
+  test that pinned the defect and that arm 1's predicate is four branches, not one
+  (`len(parts) != 6`, blank symbol, any volume failing `Decimal`, blank market).
+- Enforced in: this entry; `app/services/finra_ingest_sentinels.py` (the arms, once, with
+  the coverage limits in the module docstring); `tests/test_finra_ingest_sentinels.py`
+  (`test_a_none_floor_omits_the_arm_rather_than_loosening_it`);
+  `docs/proposals/etl/2026-09-14-2795-regsho-daily-sentinels.md`.

@@ -97,6 +97,65 @@ def _opt_decimal(v: str | None) -> Decimal | None:
         return None
 
 
+#: One body row that passed every shape check, in FINRA's column order.
+@dataclass(frozen=True)
+class RegShoBodyRow:
+    body_date: str
+    symbol: str
+    short_volume: Decimal
+    short_exempt_volume: Decimal
+    total_volume: Decimal
+    market: str
+
+
+def split_regsho_body_row(raw_line: str) -> list[str] | None:
+    """Column-shape check. ``None`` is the FIRST ``skipped_invalid_row`` branch.
+
+    ⚠ Extracted so the health sentinel's corpus replay calls the SAME predicate
+    production counts, never a re-implementation (#2795, following #2337's
+    ``required_row_fields``). A census that classifies rows even slightly
+    differently from ingest mis-measures the alarm it exists to validate, and the
+    divergence is invisible in both outputs.
+
+    Kept SEPARATE from ``validate_regsho_body_fields`` because the body-date gate
+    runs BETWEEN them and raises rather than skipping — folding the two together
+    would let a row with six columns, a wrong date and a blank symbol be skipped
+    where production raises.
+    """
+    parts = raw_line.split("|")  # BARE split — no maxsplit.
+    return parts if len(parts) == 6 else None
+
+
+def validate_regsho_body_fields(parts: list[str]) -> RegShoBodyRow | None:
+    """Field-shape checks, run AFTER the body-date gate.
+
+    ``None`` covers the remaining three ``skipped_invalid_row`` branches: a blank
+    symbol, ANY of the three volume columns failing ``Decimal`` conversion, or a
+    blank market. Each has a healthy value of zero by construction; none is a
+    threshold.
+    """
+    body_date_str, symbol_raw, short_vol_raw, short_exempt_raw, total_vol_raw, market = parts
+    symbol = symbol_raw.strip()
+    if not symbol:
+        return None
+    short_vol = _opt_decimal(short_vol_raw)
+    short_exempt = _opt_decimal(short_exempt_raw)
+    total_vol = _opt_decimal(total_vol_raw)
+    if short_vol is None or short_exempt is None or total_vol is None:
+        return None
+    market_stripped = market.strip()
+    if not market_stripped:
+        return None
+    return RegShoBodyRow(
+        body_date=body_date_str,
+        symbol=symbol,
+        short_volume=short_vol,
+        short_exempt_volume=short_exempt,
+        total_volume=total_vol,
+        market=market_stripped,
+    )
+
+
 def ingest_regsho_daily_file(
     conn: psycopg.Connection[Any],
     trade_date: date,
@@ -165,38 +224,37 @@ def ingest_regsho_daily_file(
             # WARNING (Codex 1b r2 MED).
             rows_parsed += 1
 
-            parts = raw_line.split("|")  # BARE split — no maxsplit.
-            if len(parts) != 6:
+            parts = split_regsho_body_row(raw_line)
+            if parts is None:
                 skipped_invalid_row += 1
                 continue
-            body_date_str, symbol_raw, short_vol_raw, short_exempt_raw, total_vol_raw, market = parts
 
             # Body-Date validation (spec §7.2 step 6) — file-level fatal.
             # A CDN path mistake or fixture seeded under the wrong date
             # would silently write facts under the caller's trade_date
             # while the body's date column is ignored. Raise so the
             # caller's txn rolls back.
-            if body_date_str != expected_date_str:
+            #
+            # ⚠ This gate sits BETWEEN the two extracted predicates and that
+            # ordering is load-bearing: it raises where they skip, so a row with
+            # six columns, a wrong date AND a blank symbol must reach here rather
+            # than being counted as a shape fault.
+            if parts[0] != expected_date_str:
                 raise HeaderCorruptionError(
                     f"RegSHO body-date mismatch at trade_date={trade_date} "
-                    f"prefix={prefix}: row date={body_date_str!r} != "
+                    f"prefix={prefix}: row date={parts[0]!r} != "
                     f"expected {expected_date_str!r}"
                 )
 
-            symbol = symbol_raw.strip()
-            if not symbol:
+            row = validate_regsho_body_fields(parts)
+            if row is None:
                 skipped_invalid_row += 1
                 continue
-            short_vol = _opt_decimal(short_vol_raw)
-            short_exempt = _opt_decimal(short_exempt_raw)
-            total_vol = _opt_decimal(total_vol_raw)
-            if short_vol is None or short_exempt is None or total_vol is None:
-                skipped_invalid_row += 1
-                continue
-            market_stripped = market.strip()
-            if not market_stripped:
-                skipped_invalid_row += 1
-                continue
+            symbol = row.symbol
+            short_vol = row.short_volume
+            short_exempt = row.short_exempt_volume
+            total_vol = row.total_volume
+            market_stripped = row.market
 
             # Ambiguity check BEFORE resolver call (resolver returns
             # None for both unknown + ambiguous; disambiguate for the

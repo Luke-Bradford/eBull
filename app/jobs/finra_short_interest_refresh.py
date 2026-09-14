@@ -58,6 +58,7 @@ from app.providers.implementations.finra_short_interest import (
     FinraShortInterestProvider,
 )
 from app.services import raw_filings
+from app.services.finra_ingest_sentinels import evaluate_ingest_sentinels
 from app.services.finra_short_interest_ingest import (
     SettlementIngestStats,
     build_preloaded_symbol_resolver,
@@ -184,48 +185,28 @@ def evaluate_file_sentinels(
     A file that failed, or that parsed no rows at all, yields nothing — those
     are already surfaced as per-file failures and by the ``RuntimeError``
     partial-failure contract, and re-reporting them here would be noise.
+
+    ⚠ THE ARMS THEMSELVES MOVED to ``app/services/finra_ingest_sentinels.py``
+    (#2795), because the RegSHO sibling needed the same two boundary arms and a
+    second copy is how #1955's sibling-drift class recurs. This function is now a
+    thin adapter and nothing about the bimonthly's behaviour changed: the same
+    arms fire in the same order with the same detail strings, and the finding
+    still carries ``settlement_date`` because ``_log_sentinels`` reads it. The
+    only translation is the shared helper's ``key``, which this job formats as
+    the settlement date exactly as before.
     """
-    if stats.failed or stats.rows_parsed == 0:
-        return []
-
-    findings: list[SentinelFinding] = []
-    if stats.skipped_invalid_row > 0:
-        findings.append(
-            SentinelFinding(
-                stats.settlement_date,
-                "row_shape",
-                f"{stats.skipped_invalid_row} of {stats.rows_parsed} rows failed the "
-                "required-field check (healthy value is 0) — FINRA column-shape "
-                "regression suspected",
-            )
+    return [
+        SentinelFinding(stats.settlement_date, finding.kind, finding.detail)
+        for finding in evaluate_ingest_sentinels(
+            key=stats.settlement_date.isoformat(),
+            failed=stats.failed,
+            rows_parsed=stats.rows_parsed,
+            rows_resolved=stats.rows_resolved,
+            skipped_invalid_row=stats.skipped_invalid_row,
+            previous=None if previous is None else (previous[0].isoformat(), previous[1]),
+            retention_floor=_RESOLVED_RETENTION_FLOOR,
         )
-
-    if stats.rows_resolved == 0:
-        # Total resolution failure. Retention would fire too (0 / anything is
-        # below any floor), so return here rather than reporting one fault twice.
-        findings.append(
-            SentinelFinding(
-                stats.settlement_date,
-                "no_resolution",
-                f"0 of {stats.rows_parsed} rows resolved to an instrument — the "
-                "symbol resolver or the tradable universe is broken",
-            )
-        )
-        return findings
-
-    if previous is not None and previous[1] > 0:
-        retention = stats.rows_resolved / previous[1]
-        if retention < _RESOLVED_RETENTION_FLOOR:
-            findings.append(
-                SentinelFinding(
-                    stats.settlement_date,
-                    "universe_drift",
-                    f"resolved {stats.rows_resolved} against {previous[1]} stored at "
-                    f"{previous[0].isoformat()} = {retention:.4f} retention, below the "
-                    f"{_RESOLVED_RETENTION_FLOOR:.2f} floor",
-                )
-            )
-    return findings
+    ]
 
 
 def _previous_stored_resolved(

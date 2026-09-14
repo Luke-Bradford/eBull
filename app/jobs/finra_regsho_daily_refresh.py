@@ -29,8 +29,12 @@ ScheduledJob body. Per-fire flow:
           ingest_regsho_daily_file. Clean exit commits observations +
           manifest + freshness atomically. Exception triggers
           automatic rollback; raw payload stays durable.
-  6. Match-rate WARNING log if < 50% (universe drift / FINRA shape
-     regression sentinel).
+  6. PER-TAPE health sentinels (#2795) — `evaluate_ingest_sentinels` with
+     `retention_floor=None`: row-shape and zero-resolution, each with a
+     healthy value of 0 by construction. These replace a pooled match-rate
+     WARNING that fired on ~38% of stored days for nothing; see the block at
+     the call site for why the ratio was uncalibratable and why pooling made
+     it worse.
   7. RuntimeError on partial failure so _tracked_job records
      job_runs.status='failure' (mirror G6/#915 + G12).
 """
@@ -51,6 +55,7 @@ from app.providers.implementations.finra_regsho import (
 )
 from app.providers.implementations.finra_short_interest import FinraNotFound
 from app.services import raw_filings
+from app.services.finra_ingest_sentinels import evaluate_ingest_sentinels
 from app.services.finra_regsho_ingest import (
     RegShoDailyIngestStats,
     ingest_regsho_daily_file,
@@ -316,19 +321,46 @@ def run_finra_regsho_daily_refresh(
         stats.failed_files,
     )
 
-    # Match-rate WARNING — universe drift or FINRA shape regression
-    # sentinel (#915 spec §4 + Codex 1b r2 MED on this plan). Skip on
-    # zero-parsed so the FNRA-only / empty-day case doesn't false-fire.
-    if stats.total_parsed > 0:
-        match_rate = stats.total_resolved / stats.total_parsed
-        if match_rate < 0.50:
+    # Per-file health sentinels (#2795), replacing the pooled match-rate
+    # WARNING that used to sit here.
+    #
+    # WHY THE OLD ARM WENT. It warned when `total_resolved / total_parsed <
+    # 0.50`. Its two sides are governed by DIFFERENT POPULATIONS — the numerator
+    # is bounded by OUR universe (`build_preloaded_symbol_resolver` selects
+    # `instruments WHERE is_tradable`), the denominator by FINRA's — so the ratio
+    # has no healthy value anyone could write down. #2337 measured and removed
+    # the byte-equivalent copy in the bimonthly sibling.
+    #
+    # ⚠ IT WAS WORSE HERE, because it also POOLED the tapes. Their structural
+    # match rates differ by more than an order of magnitude (FORF, the OTC
+    # Reporting Facility, against FNQC), so the pooled ratio straddled the floor
+    # and fired on roughly 38% of stored days with no relationship to anything
+    # being wrong. An alarm that is silent most of the time LOOKS discriminating,
+    # which is the more dangerous failure: a fire reads as signal when it is the
+    # aggregate drifting a few tenths of a point across a floor it sits on.
+    #
+    # So the arms run PER TAPE — pooling was itself part of the defect — and only
+    # the two whose healthy value is knowable by construction run at all.
+    # `retention_floor=None` omits the third: #2795 §3 measured three candidate
+    # constructions for it and all three failed, so the arm is ABSENT rather than
+    # set to a permissive number nobody could later mistake for a calibrated one.
+    #
+    # The pooled counts remain in the logger.info line above, as context.
+    for s in stats_list:
+        for finding in evaluate_ingest_sentinels(
+            key=f"{s.trade_date.isoformat()}/{s.prefix}",
+            failed=s.failed,
+            rows_parsed=s.rows_parsed,
+            rows_resolved=s.rows_resolved,
+            skipped_invalid_row=s.skipped_invalid_row,
+            previous=None,
+            retention_floor=None,
+        ):
             logger.warning(
-                "finra_regsho_daily_refresh: match rate %.2f%% below 50%% threshold "
-                "(parsed=%d resolved=%d) — universe drift or FINRA column-shape "
-                "regression suspected",
-                100 * match_rate,
-                stats.total_parsed,
-                stats.total_resolved,
+                "finra_regsho_daily_refresh: %s at %s — %s",
+                finding.kind,
+                finding.key,
+                finding.detail,
             )
 
     if stats.failed_files > 0:
