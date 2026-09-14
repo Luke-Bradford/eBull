@@ -21,6 +21,7 @@ from tests.fixtures.ebull_test_db import (
     _janitor_conn,
     _reset_planner_tables,
     test_database_url,
+    test_db_available,
     test_db_name,
 )
 
@@ -206,3 +207,52 @@ def test_reset_recovers_when_the_connection_it_was_given_is_dead(
         row = cur.fetchone()
     assert row is not None and row[0] == 0, "fallback did not clean the database"
     assert not _janitor_conn().closed
+
+
+@pytest.mark.skipif(not test_db_available(), reason="ebull_test DB unavailable")
+def test_no_standalone_strategy_table_is_invisible_to_the_cleanup_planner(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2224 cause 2 — the guard that catches the NEXT one.
+
+    The planner derives its dirty set from ``pg_constraint``, so a table with no
+    foreign key in EITHER direction can only be cleaned if it is named in
+    ``_PLANNER_TABLES`` explicitly. Two have now been missed this way —
+    ``strategy_results_store`` (collision) and ``strategy_signal_daily_counts``
+    (a whole-database census refusing on a predecessor's aggregate rows) — and
+    both presented as flake rather than leakage, because the symptom lands in a
+    different module from the writer.
+
+    ⚠ Scoped to ``strategy_*`` deliberately, and the scope is measured rather
+    than assumed: 1,034 standalone base tables corpus-wide are unlisted, so a
+    blanket assertion would be a 1,034-entry allowlist that nobody maintains.
+    Within the strategy ledger the set is small enough to be EMPTY, which is the
+    only form of this check worth having — an allowlist would absorb the next
+    miss silently.
+
+    ⚠ Partitions are excluded: a partition carries no constraint of its own and
+    is emptied with its parent, so counting one would be a false positive that
+    grows every month.
+    """
+    orphans = ebull_test_conn.execute(
+        """
+        SELECT c.relname
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relkind = 'r'
+           AND NOT c.relispartition
+           AND c.relname LIKE 'strategy\\_%'
+           AND NOT EXISTS (SELECT 1 FROM pg_constraint k
+                            WHERE k.conrelid = c.oid AND k.contype = 'f')
+           AND NOT EXISTS (SELECT 1 FROM pg_constraint k
+                            WHERE k.confrelid = c.oid AND k.contype = 'f')
+         ORDER BY 1
+        """
+    ).fetchall()
+    unlisted = sorted(row[0] for row in orphans if row[0] not in set(_PLANNER_TABLES))
+    assert unlisted == [], (
+        "these strategy tables have no FK in either direction, so the cleanup planner "
+        f"cannot discover them and their committed rows outlive the test that wrote them: {unlisted}. "
+        "Add each to _PLANNER_TABLES with the reason it is standalone."
+    )

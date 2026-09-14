@@ -277,6 +277,29 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #2448/#2449 — bounded strategy current-state roots have no FKs. Their
     # signal/deployment children are derived by the planner from roots above.
     "strategy_scan_watermark",
+    # #2224 cause 2 — the signal ledger's AGGREGATE tier, and the one sibling of
+    # `strategy_scan_watermark` that was missed. `pg_constraint` on it is CHECKs
+    # and a PK: no FK to `instruments` and none to `strategy_signals`, so unlike
+    # the DETAIL tiers it is invisible to the planner's FK derivation and its
+    # committed rows outlive the test that wrote them.
+    #
+    # ⚠ The failure that follows is NOT a collision, which is why it read as
+    # flake rather than leakage. `test_signal_ledger_writer_db` commits 8
+    # aggregate rows; `test_strategy_observation_storage::test_retention_drops_
+    # whole_expired_partitions_and_keeps_current` then runs the production census
+    # (`verify_2437_observation_storage`), which compares the aggregate tier
+    # against the detail tiers OVER THE WHOLE DATABASE — correct in production,
+    # where another test's rows do not exist. Leaked aggregates with no surviving
+    # detail read as 6 parity mismatches and the census refuses. Order-dependent
+    # by construction: writer-then-storage fails, the reverse passes, and a
+    # file-chunked run splits the two modules apart and sees neither.
+    "strategy_signal_daily_counts",
+    # #2224 cause 2, same class, found by asking the catalog rather than waiting
+    # for the next failure: the outcome-resolution round-robin cursor
+    # (`app/services/strategy_outcome_resolution.py`) is standalone for the same
+    # reason its forecast sibling above is. `test_strategy_outcome_resolution`
+    # asserts `count(*) == 1` on it, which a leaked predecessor row would break.
+    "strategy_outcome_cursor",
     "strategy_halt_feed_state",
     "strategy_market_halts",
     "strategy_paper_account_risk_state",
