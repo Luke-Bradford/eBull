@@ -162,14 +162,29 @@ function layerCell(
   if (layer.status === "empty" || layer.latest === null) {
     return { label, value: "never", hint: "no rows yet", tone: "pending" };
   }
-  return {
-    label,
-    value: formatDateTime(layer.latest),
-    // Derived from the payload, never written down: a hardcoded "23 days"
-    // would go stale in the one place a reader trusts most.
-    hint: layer.status === "stale" ? stalenessHint(layer) : undefined,
-    tone: layer.status === "stale" ? "stale" : "ok",
-  };
+  if (layer.status === "stale") {
+    return {
+      label,
+      value: formatDateTime(layer.latest),
+      // Derived from the payload, never written down: a hardcoded "23 days"
+      // would go stale in the one place a reader trusts most.
+      hint: stalenessHint(layer),
+      tone: "stale",
+    };
+  }
+  // ⚠ `ok` is asserted, not defaulted. `LayerStatus` is a compile-time union over
+  // a JSON body, so a status the backend adds later arrives as a string this
+  // build has never seen — and falling through to the healthy tone would render
+  // it as fine. That is this ticket's own defect one branch over (review NITPICK).
+  if (layer.status !== "ok") {
+    return {
+      label,
+      value: formatDateTime(layer.latest),
+      hint: `unrecognised status "${String(layer.status)}"`,
+      tone: "stale",
+    };
+  }
+  return { label, value: formatDateTime(layer.latest), tone: "ok" };
 }
 
 function stalenessHint(layer: LayerHealthResponse): string {

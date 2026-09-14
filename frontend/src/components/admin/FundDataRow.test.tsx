@@ -101,6 +101,21 @@ describe("FundDataRow — layer-backed cells (#3050)", () => {
     expect(cellFor("Latest score").textContent).toContain("status unavailable");
   });
 
+  it("does not render a status this build has never seen as healthy", () => {
+    // `LayerStatus` is a compile-time union over a JSON body, so a status the
+    // backend adds later arrives as an unknown string at runtime. Defaulting it
+    // to the healthy tone is this ticket's own defect one branch over.
+    renderRow([
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      layer({ layer: "scores", status: "quarantined" as any }),
+    ]);
+    const cell = cellFor("Latest score");
+    expect(cell.textContent).toContain("unrecognised status");
+    expect(cell.textContent).toContain("quarantined");
+    // Still shows the timestamp — the layer did run, we just cannot judge it.
+    expect(valueFor("Latest score")).not.toBe("–");
+  });
+
   it("drops the Tier 1/2/3 placeholder and leaves six cells", () => {
     renderRow([layer({ layer: "scores" }), layer({ layer: "theses" })]);
     expect(screen.queryByText("Tier 1/2/3")).not.toBeInTheDocument();
