@@ -163,9 +163,12 @@ def load_core_selection(conn: psycopg.Connection[Any]) -> CoreSelection:
         unsupported_venue = session_support_reason(selected_candidate.asset_class)
         if unsupported_venue is not None:
             selection_complete = False
+            # The wrap adds ONLY the identity half -- which selection is at fault.  The
+            # consequence is already the last clause of `unsupported_venue`, and saying
+            # it twice is how an operator string starts drifting from the predicate.
             configuration_error = (
                 f"the reviewed core selection names {selected_candidate.symbol} "
-                f"(instrument {selected}), which the core execution path cannot trade: {unsupported_venue}"
+                f"(instrument {selected}): {unsupported_venue}"
             )
     if selection_declared and not selection_complete and configuration_error is None:
         configuration_error = "the reviewed core selection must name a declared candidate and a non-blank evidence ref"

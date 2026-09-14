@@ -91,7 +91,9 @@ def test_a_verdict_naming_a_venue_we_cannot_session_check_is_refused_at_declarat
     assert selection.selected_instrument_id is None
     assert selection.selected_symbol is None
     assert selection.configuration_error is not None
-    assert "the core execution path cannot trade" in selection.configuration_error
+    # The identity half is what the wrap exists for -- `session_support_reason` alone
+    # names the CLASS, not which selection is at fault.
+    assert str(unexecutable_id) in selection.configuration_error
     assert "uk_equity" in selection.configuration_error
     with pytest.raises(CoreSelectionError, match="five-trading-day cost verdict"):
         require_selected_core_instrument(_candidate_connection(), instrument_id=unexecutable_id)
