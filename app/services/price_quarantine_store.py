@@ -78,8 +78,21 @@ class QuarantineCensus:
 
     Published, not incidental. T3 is the only rule that can reject legitimate
     data, and it does so at ~10:1 against split-like breaks at every threshold,
-    with turnover corroboration reaching only ~30% of the population. Every
-    backtest number downstream inherits that bias, so the figure ships with it.
+    with turnover corroboration reaching only a MINORITY of the trigger
+    population. Every backtest number downstream inherits that bias, so the
+    figure ships with it.
+
+    ⚠ NO REACHABILITY PERCENTAGE IS WRITTEN HERE ON PURPOSE (#3046 residual 3).
+    This docstring used to carry a hand-written "~30%", which is the shape that
+    goes stale in the place a reader trusts most. ``t3_corroboration`` below is
+    the live derivation; the drivers and their full-population split are in
+    ``app/api/price_quarantine.py``'s module docstring, reproduced by::
+
+        PYTHONPATH=. uv run python -m scripts.verify_3046_t3_corroboration_ceiling
+
+    ⚠ ``reachable`` (anything but ``unclassifiable``) and ``admitted back``
+    (``spike`` only) are different numbers — ``collapse`` and ``flat`` are
+    classified AND still quarantined. Quote the bucket, never a single rate.
     """
 
     rule_set_version: str = RULE_SET_VERSION
@@ -393,8 +406,11 @@ def census(conn: psycopg.Connection) -> QuarantineCensus:  # type: ignore[type-a
     # THE NARROWING-GATE CENSUS. A narrowing gate is measured by what it
     # REJECTS, so this counts the T3 TRIGGER population (every transition whose
     # magnitude passed T and whose endpoints were usable), split by what the
-    # turnover signal said — including the ~70% it could not classify at all.
-    # Counting only the admitted side would be silent about the regression.
+    # turnover signal said — including the majority it could not classify at
+    # all. Counting only the admitted side would be silent about the regression.
+    # ⚠ The unclassifiable share is NOT written here (#3046 residual 3): it is
+    # this query's own output, and a hand-written copy of a number computed three
+    # lines below is the staleness this census exists to prevent.
     corroboration = conn.execute(
         """
         SELECT corroboration, COUNT(*)

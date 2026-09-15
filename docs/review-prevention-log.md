@@ -6763,3 +6763,41 @@ side-session connects). The correction never travelled the ten lines to the next
 - Enforced in: `tests/test_2274_job_heartbeat_db.py` (the producer now exists and both
   `_tracked_job` branches are pinned); `scripts/verify_2274_heartbeat_exposure.py` prints the
   per-job `with_heartbeat` count, so the zero is reproducible rather than remembered.
+
+### A published-bias figure inside a HASHED or CHECKSUMMED artefact cannot be corrected at the price of a sentence — compute it at the PUBLISHER from the start
+
+- First seen in: #3046 residual 3 (2026-09-15). Four sites stated that T3's turnover
+  corroboration *"reaches only ~30% of the population (volume is equity-only, S3)"*. Both
+  halves were wrong on the corpus they describe, and the number was hand-written.
+- **The trap is where the sentence lives, not that it is wrong.** Two of the four sites are
+  immutable, for two independently sufficient mechanisms that do not imply each other:
+  1. `app/services/price_quarantine.py:30,430` — the module's own source is sha256'd into
+     `RULE_SET_VERSION` (`:52-59`) and that constant is a member of
+     `strategy_registry.INPUT_RULE_SETS`. A **docstring** edit therefore rotates strategy
+     identity and invalidates every stored verdict: 12,284 `price_quarantine_coverage` rows,
+     4,340 `price_transition_quarantine` rows, and 30,572 research coverage rows over
+     75,972,665 bars.
+  2. `sql/247_price_quarantine.sql:102` — `app/db/migrations.py:188-199` raises
+     `RuntimeError("Migration content drift")` **at boot** when an applied file's sha256 moves.
+     Editing a COMMENT in an applied migration breaks the app until the ledger row is reset.
+- ⚠ The correct reading is a COST argument, not an impossibility argument, and the first draft
+  of this entry wrote it as the latter. The prose *can* be corrected — by an intentional
+  rotation plus recomputation, which a real rule change will eventually pay for anyway.
+  Writing "cannot be corrected" converts a maintenance cost into permanent permission for a
+  known-false sentence, which is strictly worse than the cost.
+- Prevention: **a figure that discloses a bias belongs to the thing that PUBLISHES it, computed
+  at run time — never to the thing that CAUSES it, written by hand.** The rule module had
+  already designated the publisher (*"its bias must be PUBLISHED: see `census`"*), and had the
+  number lived only there from the start there would have been nothing to correct. Where a
+  superseded copy is stranded in an immutable artefact, the publisher's docstring must name the
+  superseded `file:line` explicitly — a reader who lands on the stale line has no other way to
+  find out, and silence reads as agreement.
+- ⚠ Generalises beyond prose. Any derived statistic reachable from a hashed module is in the
+  same position: `price_quarantine`, `indicator_series`, `position_builder`, `outcome_resolver`
+  and `strategy_registry`'s per-strategy `source_hash` all hash their own source. Before
+  writing a measured number into one of them, ask **"what does correcting this later cost?"**
+- Enforced in: this prevention log; `app/api/price_quarantine.py` (module docstring — the
+  publisher, naming what it supersedes); `app/services/price_quarantine_store.py`
+  (`QuarantineCensus` docstring + the corroboration-census comment, both now figure-free);
+  `scripts/verify_3046_t3_corroboration_ceiling.py` (six arms, every figure computed at run
+  time, `--probe` for the source-side observation).

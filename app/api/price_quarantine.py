@@ -5,11 +5,49 @@
 WHY THIS IS AN ENDPOINT AND NOT A NUMBER IN A PR DESCRIPTION. T3 is the only
 quarantine rule that can reject legitimate data, and it does so at roughly 10:1
 against split-like breaks at every threshold, while turnover corroboration
-reaches only ~30% of the population (volume is equity-only, S3 #2243). "No
-volume -> quarantine" therefore embeds an asset-class bias against non-equity
-and illiquid names. Every backtest win rate the platform ever reports inherits
-that bias, so the figure that discloses it has to be live and standing, not a
-one-off in a spike comment.
+reaches only a minority of the trigger population. Every backtest win rate the
+platform ever reports inherits that bias, so the figure that discloses it has to
+be live and standing, not a one-off in a spike comment.
+
+⚠⚠ WHAT THAT MINORITY IS DRIVEN BY — AND THE CAUSE THIS FILE USED TO GIVE, WHICH
+IS SUPERSEDED (#3046 residual 3). The line here read *"reaches only ~30% of the
+population (volume is equity-only, S3 #2243)"*, and the same sentence still
+stands verbatim at ``price_quarantine.py:30,430`` and
+``sql/247_price_quarantine.sql:102``. Both of those are immutable for independent
+reasons — the rule module's source is hashed into ``RULE_SET_VERSION`` and thence
+into ``strategy_registry.INPUT_RULE_SETS``, and an applied migration's content is
+sha256-checked at boot (``app/db/migrations.py:188``) — so the correction lands
+HERE, at the publisher, and supersedes them. Measured on the full corpus, no
+figure repeated by hand:
+
+    PYTHONPATH=. uv run python -m scripts.verify_3046_t3_corroboration_ceiling
+
+- "Equity-only" is a real per-instrument TENDENCY and is NOT the explanation. The
+  structurally volume-free classes do have a far higher all-null rate than the
+  equity classes, but they are a small minority of instruments and the T3 trigger
+  population is overwhelmingly ONE equity class.
+- The dominant carrier of blindness is instruments that DO report volume
+  elsewhere — volume-free RUNS inside an otherwise-covered series. The
+  never-any-volume instruments and the pre-onset era are 100% blind but are both
+  SMALL, so they set the floor, not the total.
+- ⚠ **Blindness is NOT uniform, and an earlier draft of this paragraph said it
+  was.** The narrow ~67-78% band holds only for the two cohort splits in the
+  script's arm 6 (series ended vs live, symbol cohort). Across ASSET CLASS and
+  across the ONSET ERA the spread is wide — one equity class runs far blinder
+  than another, and the never-volume and pre-onset strata are totally blind.
+  Excluding the never-volume stratum alone moves reachability by several points,
+  so "no sub-population whose exclusion would raise it" is false. Read the arms;
+  do not carry a single band.
+- "Reachable" and "admitted back" are DIFFERENT figures — ``collapse`` and
+  ``flat`` are classified and still quarantined. ``t3_corroboration`` below
+  carries both; do not quote one as the other.
+- The blind set is measured with PROVISIONAL transitions excluded. A forming bar
+  is stored ``unclassifiable`` without its volume ever being read
+  (``price_quarantine.py:486-492`` defers the verdict), so counting it as
+  blindness would attribute a deferral to a data gap.
+
+The bias disclosure therefore stands, and is larger than the superseded sentence
+claimed. What changes is the CAUSE a reader should carry away from it.
 
 Auth: operator-only, mounted on the router — the census exposes data-quality
 gaps across the universe.

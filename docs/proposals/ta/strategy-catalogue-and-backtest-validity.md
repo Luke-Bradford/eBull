@@ -372,13 +372,26 @@ stated on the surface, not buried. It also argues strongly for **few, simple,
 theory-backed strategies with few free parameters** over a large search across
 parameterised variants — the latter needs data we do not have and will not get.
 
-### 2.3 Volume is equity-only
+### 2.3 Volume absence is broader than "equity-only"
 
 Zero volume on crypto and FX, 1.2% on index. So anchored VWAP, volume-confirmed
 breakouts, OBV and relative-volume filters are **equity-only signals**, covering
 ~75% of even those bars. Any strategy depending on volume must declare
 `not_evaluable` elsewhere rather than silently treating NULL as zero — the
 vacuous-truth class already in the prevention log and in the parent design's §5.
+
+⚠ **Corrected 2026-09-15 (#3046 residual 3): the heading's original framing —
+"volume is equity-only" — understates the gap and points at the wrong
+population.** Asset class is a strong per-instrument *tendency*, but a large
+minority of **equity** instruments carry no volume on any bar, and the dominant
+shape is volume-free **runs inside otherwise-covered series** rather than whole
+classes being dark. So "restrict volume signals to equities" does NOT make them
+evaluable — the declaration must be per instrument *and per window*, checked at
+the bar, never inferred from the asset class. Reproduce the split with::
+
+    PYTHONPATH=. uv run python -m scripts.verify_3046_t3_corroboration_ceiling
+
+(No figure is copied here deliberately; the script computes every one of them.)
 
 ---
 
