@@ -6764,9 +6764,24 @@ side-session connects). The correction never travelled the ten lines to the next
 - ⚠ Related but distinct from the #1955 class ("a contract field wired into one model not its
   sibling"). There, both halves exist and one call site was missed. Here the half was never
   built, so grepping for call sites of the *consumer* finds nothing wrong.
+- ⚠⚠ **The INVERSE direction is the same defect and it is easier to commit: reading a ZERO in a
+  producerless column as evidence that the EVENT never happened.** Second instance on this same
+  ticket (2026-09-15, `24bf7e46`). To argue that a new per-item heartbeat could not be stalled
+  past its threshold by an SEC 429, I ran
+  `count(*) FILTER (WHERE warning_classes ? 'RateLimited')` on `sec_filing_documents_ingest` and
+  got **0** — which establishes nothing, because that column has no producer for that job
+  either. The prevention above ("a zero there is the finding") was being applied only when the
+  zero was unwelcome; here the zero was convenient, and convenience is exactly when it goes
+  unchecked. **A zero is evidence of non-occurrence only after you have shown the writer exists
+  and runs.** Recorded as vacuous on the ticket rather than quoted as a measurement, and the
+  claim it was offered for was re-argued from control flow instead (`resilient_client.py:361-362`
+  returns 429's `Retry-After` uncapped, so the gap path is real and the honest statement is that
+  it degrades to the pre-change behaviour).
 - Enforced in: `tests/test_2274_job_heartbeat_db.py` (the producer now exists and both
   `_tracked_job` branches are pinned); `scripts/verify_2274_heartbeat_exposure.py` prints the
-  per-job `with_heartbeat` count, so the zero is reproducible rather than remembered.
+  per-job `with_heartbeat` count, so the zero is reproducible rather than remembered;
+  `docs/proposals/ops/2026-09-15-2274-filing-documents-tick.md` §3.1 (the vacuous-zero note
+  written next to the claim it failed to support).
 
 ### A published-bias figure inside a HASHED or CHECKSUMMED artefact cannot be corrected at the price of a sentence — compute it at the PUBLISHER from the start
 
