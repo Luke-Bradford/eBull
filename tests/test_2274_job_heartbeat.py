@@ -119,7 +119,7 @@ def test_the_default_install_still_ticks() -> None:
     """The suppression is opt-in, so the orchestrator's own install
     (``adapters.py``) is unchanged."""
     seen: list[tuple[int, int | None]] = []
-    token = set_active_progress(lambda done, total=None: seen.append((done, total)))
+    token = set_active_progress(lambda items_done, items_total=None: seen.append((items_done, items_total)))
     clear_active_progress(token)
     assert seen == [(0, None)]
 
@@ -186,7 +186,7 @@ def test_it_chains_to_the_callback_it_replaced() -> None:
     progress surface for the whole job."""
     conn = _StubConnection()
     seen: list[tuple[int, int | None]] = []
-    token = set_active_progress(lambda done, total=None: seen.append((done, total)))
+    token = set_active_progress(lambda items_done, items_total=None: seen.append((items_done, items_total)))
     try:
         with _pool(conn), job_heartbeat(42):
             report_progress(7, 99, force=True)
@@ -203,7 +203,7 @@ def test_it_chains_PAST_a_heartbeat_rather_than_to_it() -> None:
     fabricated measurement of a different unit of work."""
     conn = _StubConnection()
     seen: list[tuple[int, int | None]] = []
-    token = set_active_progress(lambda done, total=None: seen.append((done, total)))
+    token = set_active_progress(lambda items_done, items_total=None: seen.append((items_done, items_total)))
     try:
         with _pool(conn), job_heartbeat(10):  # parent
             with job_heartbeat(20):  # child
@@ -218,7 +218,7 @@ def test_it_chains_PAST_a_heartbeat_rather_than_to_it() -> None:
 def test_a_raising_inner_callback_does_not_cost_the_heartbeat() -> None:
     conn = _StubConnection()
 
-    def _boom(done: int, total: int | None = None) -> None:
+    def _boom(items_done: int, items_total: int | None = None) -> None:
         raise RuntimeError("orchestrator side failed")
 
     token = set_active_progress(_boom)
