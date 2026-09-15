@@ -174,9 +174,12 @@ def _run(conn: psycopg.Connection[Any], *, limit: int | None) -> int:
     # consumer makes, timed on its own. The control's cost is the remainder, which is
     # the base ranked-pair query — not a second hand-written copy of that SQL.
     started = time.perf_counter()
-    load_window_inputs(conn, ids, since=min(dc.prior_date for dc in treatment.values()))
+    load_window_inputs(conn, {iid: dc.prior_date for iid, dc in treatment.items()})
     verdict_load_secs = time.perf_counter() - started
-    control_query_secs = max(treatment_secs - verdict_load_secs, 0.0)
+    # ⚠ NOT a measured baseline for the OLD query, and labelled accordingly below.
+    # It is the treatment total minus a SECOND, already-warmed loader run, so it still
+    # contains ``bar_count`` and the assessment loop (Codex checkpoint 3).
+    residual_secs = max(treatment_secs - verdict_load_secs, 0.0)
 
     verdicts: Counter[str] = Counter()
     reasons: Counter[str] = Counter()
@@ -282,10 +285,11 @@ def _run(conn: psycopg.Connection[Any], *, limit: int | None) -> int:
             fp == 0,
         ),
         (
-            f"the verdict load costs less than the base query it joins "
-            f"({verdict_load_secs:.2f}s added to {control_query_secs:.2f}s; "
-            f"{treatment_secs:.2f}s total for {len(treatment)} instruments)",
-            verdict_load_secs <= control_query_secs,
+            f"the verdict load costs no more than the REST of the call "
+            f"({verdict_load_secs:.2f}s vs {residual_secs:.2f}s residual — the residual is "
+            f"NOT an old-query baseline; {treatment_secs:.2f}s total for {len(treatment)} "
+            f"instruments, which is far above any real page)",
+            verdict_load_secs <= residual_secs,
         ),
     ]
     for label, passed in checks:

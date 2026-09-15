@@ -284,14 +284,13 @@ def load_day_changes(
     # and what 11 of the summary-endpoint tests hand this function — passes
     # ``if not rows`` and then empties ``min()``. Materialising the operands once
     # settles it for any container, and is one pass instead of two.
-    windows = [(int(r["instrument_id"]), r["prior_date"]) for r in rows]  # type: ignore[arg-type]
+    windows = {int(r["instrument_id"]): r["prior_date"] for r in rows}  # type: ignore[arg-type,misc]
     if not windows:
         return {}
-    inputs = load_window_inputs(
-        conn,
-        [iid for iid, _ in windows],
-        since=min(prior_date for _, prior_date in windows),
-    )
+    # ⚠ Each instrument is bounded at ITS OWN window start, not at the batch minimum:
+    # one instrument with a 2020 window must not drag every other instrument's scan
+    # back with it (measured 4x on the worst page — see ``load_window_inputs``).
+    inputs = load_window_inputs(conn, windows)
 
     out: dict[int, DayChange] = {}
     for r in rows:
