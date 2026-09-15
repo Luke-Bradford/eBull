@@ -288,13 +288,66 @@ def test_seed_set_is_derived_and_disjoint_from_the_wipe_set(
     """The restore set comes from the cloned manifest, not a hand-list.
 
     ``exchanges`` must be in it (the reproduced defect) and
-    ``institutional_filers`` must NOT be: it is seeded too, but it sits inside
-    the FK closure, so it is deliberately still emptied. A table cannot be both.
+    ``institutional_filers`` must NOT be: it is seeded too, but it is a named
+    ``_PLANNER_TABLES`` entry, so it is deliberately still emptied. A table
+    cannot be both.
+
+    ⚠ This docstring used to say ``institutional_filers`` "sits inside the FK
+    closure". It does not — the table has no outgoing foreign key at all, so
+    nothing reaches it transitively and it is in the wipe set only because
+    ``_PLANNER_TABLES`` names it. Corrected under #2224 residual 1; the
+    distinction matters because "swept in by topology" reads as an accident to
+    be undone, and this one is a decision (see the next test).
     """
     plan = _cleanup_plan(ebull_test_conn)
     assert "exchanges" in plan.seed_tables
     assert "institutional_filers" not in plan.seed_tables
     assert not set(plan.seed_tables) & set(plan.delete_order)
+
+
+def test_seeded_fixture_surface_tables_stay_in_the_wipe_set(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2224 residual 1 — three migration-seeded tables are wiped ON PURPOSE.
+
+    ``institutional_filers`` / ``institutional_filer_seeds`` /
+    ``etf_filer_cik_seeds`` carry migration seed rows, which makes them look
+    exactly like the cause-3 class that must be RESTORED. They are the
+    exception, because they are the ownership tests' fixture surface: tests
+    populate them through the production ``seed_filer`` helper immediately
+    before each walk, and ``ingest_all_active_filers`` walks every active seed
+    against a stub fetcher built for the one CIK the test seeded. Restoring the
+    migration seed would feed that walk six CIKs the fixture cannot answer for.
+
+    This test exists so that moving them to the restore set fails HERE, next to
+    the reason, rather than as a scatter of unrelated ownership failures.
+    """
+    fixture_surface = ("institutional_filers", "institutional_filer_seeds", "etf_filer_cik_seeds")
+    plan = _cleanup_plan(ebull_test_conn)
+
+    for table in fixture_surface:
+        assert table in plan.delete_order, (
+            f"{table!r} left the wipe set. It is migration-seeded, so the obvious next step is to "
+            f"restore it instead — do not. See the comment on _PLANNER_TABLES in "
+            f"tests/fixtures/ebull_test_db.py (#2224 residual 1)."
+        )
+        assert table not in plan.seed_tables, f"{table!r} must not be restored; it is wiped by design."
+
+    # The premise of the decision: none of the three is reachable by FK, so it
+    # is in the wipe set only by being named. If a migration ever gives one of
+    # them an outgoing FK, the "not swept in by topology" argument above stops
+    # holding and the decision deserves a re-read.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT conrelid::regclass::text FROM pg_constraint "
+            "WHERE contype = 'f' AND conrelid::regclass::text = ANY(%s)",
+            (list(fixture_surface),),
+        )
+        with_outgoing_fk = sorted(row[0] for row in cur.fetchall())
+    assert not with_outgoing_fk, (
+        f"{with_outgoing_fk} gained an outgoing FK. #2224 residual 1's reasoning assumed these "
+        f"three are in the wipe set only because _PLANNER_TABLES names them; re-read that decision."
+    )
 
 
 def test_reset_removes_a_foreign_row_and_undoes_a_mutated_seed_row(

@@ -338,6 +338,29 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "unresolved_13f_cusips",
     "institutional_holdings_ingest_log",
     "institutional_holdings",
+    # ⚠ These three are ALSO migration-seeded (5 / 6 / 1 rows in a pristine
+    # template), which makes them the one case that looks like #2224 cause 3
+    # and is not. They stay WIPED, deliberately (#2224 residual 1, settled
+    # 2026-09-15 — do not "fix" this by moving them to the restore set):
+    #
+    #  * They are not swept in by FK topology. None of the three has a single
+    #    OUTGOING foreign key, so nothing reaches them transitively; they are in
+    #    the wipe set only because these lines name them.
+    #  * They are the ownership tests' FIXTURE SURFACE. Tests set them up
+    #    through the production ``seed_filer`` helper immediately before each
+    #    walk, so nothing passes vacuously against the empty table — verified by
+    #    reading every full-walk call site, not inferred.
+    #  * Restoring would BREAK those tests rather than protect them.
+    #    ``ingest_all_active_filers(conn, fetcher)`` walks every active seed;
+    #    its stub fetchers are built for the one CIK the test seeded, so six
+    #    restored CIKs would be fetched and are not in the fixture.
+    #  * The dependence is documented on the other side too:
+    #    ``tests/test_filer_seed_drift_fix_migration.py``'s module docstring
+    #    says it re-seeds the pre-drift state itself precisely BECAUSE the
+    #    fixture empties this table between tests.
+    #
+    # Pinned by ``test_seeded_fixture_surface_tables_stay_in_the_wipe_set`` in
+    # tests/test_db_fixture_cleanup.py.
     "institutional_filers",
     "institutional_filer_seeds",
     "etf_filer_cik_seeds",
@@ -470,15 +493,22 @@ _TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset({"strategy_result_universe"}
 # RESTORE-TO-TEMPLATE, and it needs a pristine copy to restore from.
 #
 # Measured on a freshly built template (full population, not a sample): 252
-# ``public`` roots, 15 non-empty. Three of those 15 (``institutional_filers``,
-# ``institutional_filer_seeds``, ``etf_filer_cik_seeds``) are INSIDE the wipe
-# closure, so their seed is already deleted before every test — deterministic,
-# not this ticket's intermittent class, and restoring them would change what
-# their tests observe. They are deliberately left alone; the restore set is
-# "seeded AND outside the wipe closure", which is 11 tables once the ledger
-# below is excluded. Every one of the 11 has at least one test writer
-# (``exchanges`` 31 files, ``bootstrap_state`` 25, ``kill_switch`` 12,
-# ``runtime_config`` 9) — ``exchanges`` is simply the pair that surfaced.
+# ``public`` roots, 15 non-empty. The restore set is "seeded AND outside the
+# wipe closure", which is 11 tables once the ledger below is excluded. Every one
+# of the 11 has at least one test writer (``exchanges`` 31 files,
+# ``bootstrap_state`` 25, ``kill_switch`` 12, ``runtime_config`` 9) —
+# ``exchanges`` is simply the pair that surfaced.
+#
+# The other three of the 15 — ``institutional_filers``,
+# ``institutional_filer_seeds``, ``etf_filer_cik_seeds`` — STAY WIPED, and that
+# is a decision, not an omission (#2224 residual 1, settled 2026-09-15). See
+# ``_PLANNER_TABLES`` above for the evidence; the short version is that these
+# three are the ownership tests' own FIXTURE SURFACE (they set them up through
+# the production ``seed_filer`` helper), so restoring a migration seed into them
+# injects CIKs the tests' stub fetchers do not know about. The refined rule:
+#
+#     migration-seeded AND a test-fixture surface -> WIPE (tests own the state)
+#     migration-seeded AND not a fixture surface  -> RESTORE (migrations own it)
 #
 # The set is DERIVED at template-build time, not hand-listed, so a future
 # migration that seeds a new table is covered without an edit here.
