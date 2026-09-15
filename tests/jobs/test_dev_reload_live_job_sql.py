@@ -21,6 +21,7 @@ import psycopg
 import pytest
 
 from app.jobs import dev_reload
+from app.services.processes.stale_detection import RUNTIME_CEILING_S
 from app.services.processes.stale_thresholds import (
     DEFAULT_THRESHOLD_S,
     get_threshold,
@@ -89,9 +90,11 @@ def test_a_fresh_heartbeat_blocks_a_reload(conn: Any) -> None:
 def test_a_stale_heartbeat_stops_blocking_on_its_own(conn: Any) -> None:
     """Why this needs no watchdog: a wedged job ages out of protection.
 
-    Deferral is unbounded in wall-clock but bounded by liveness, so a job
-    that dies without a terminal status cannot hold the daemon on stale
-    code forever.
+    Deferral is bounded by liveness, so a job that dies without a terminal
+    status cannot hold the daemon on stale code forever. It is ALSO bounded
+    in wall-clock by ``RUNTIME_CEILING_S`` — see the ceiling tests at the
+    bottom of this module, which cover the other case: a job that keeps
+    ticking and therefore never ages out on liveness alone.
 
     Aged past the WIDEST threshold in the registry, so this stays true
     whatever `stale_thresholds.py` says about this job name.
@@ -137,6 +140,39 @@ def test_a_stale_fast_tick_row_cannot_mask_a_live_slow_tick_one(conn: Any) -> No
     described = dev_reload.live_job()
     assert described is not None, "a live slow-tick job was masked by a stale fast-tick one"
     assert _SLOW_TICK_JOB in described
+
+
+_SEED_AGED = """
+    INSERT INTO job_runs (job_name, status, started_at, last_progress_at, processed_count, target_count)
+    VALUES (%s, 'running', now() - make_interval(secs => %s), now(), 7, 9)
+"""
+
+
+def test_a_run_past_the_runtime_ceiling_stops_deferring_even_while_ticking(conn: Any) -> None:
+    """⚠⚠ The deferral must be FINITE (#2274).
+
+    Liveness alone bounds nothing for a job that keeps ticking: it stays
+    'provably alive' forever and withholds every automatic reload forever.
+    That was latent while `strategy_backtest_run` was the only producer;
+    installing the heartbeat in `_tracked_job` widens it to every ticking
+    job, so `started_at` is bounded by the same `RUNTIME_CEILING_S` that
+    `stale_detection` rule 5 already reports on.
+    """
+    conn.execute(_SEED_AGED, (_FIXTURE_JOB, RUNTIME_CEILING_S + 3600))
+    assert dev_reload.live_job() is None, "a 25h-old run must not defer a reload, however fresh its heartbeat"
+
+
+def test_a_young_run_with_the_same_fresh_heartbeat_still_defers(conn: Any) -> None:
+    """The other half — the ceiling must not have turned the probe off.
+
+    ⚠ It also pins that age is used as an UPPER BOUND ON DEFERRAL and not as
+    a liveness signal: this row and the one above differ only in `started_at`,
+    and this one is still protected.
+    """
+    conn.execute(_SEED_AGED, (_FIXTURE_JOB, 60))
+    described = dev_reload.live_job()
+    assert described is not None
+    assert _FIXTURE_JOB in described
 
 
 def test_a_running_row_that_never_heartbeats_does_not_block(conn: Any) -> None:

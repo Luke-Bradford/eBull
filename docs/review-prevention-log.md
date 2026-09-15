@@ -6726,3 +6726,40 @@ side-session connects). The correction never travelled the ten lines to the next
   (`_FORBIDDEN_PATTERNS` + `test_every_allowlist_entry_is_still_load_bearing`);
   `tests/test_joblock_per_source.py`, `tests/test_job_lock_reentrancy.py`,
   `tests/test_db_lane_family_split.py` (module headers now carry the measured fact).
+
+## 2026-09-15 — #2274: a shipped CONSUMER whose PRODUCER was never wired is invisible to every test
+
+- **Shape:** a feature lands as two halves in two PRs. The consumer half ships with tests, the
+  tests pass, and the feature has never once applied to anything — because the producer half was
+  deferred and nobody re-checked. Every signal reads green, because the consumer *is* correct;
+  it is simply never reached.
+- **Third instance on ONE surface**, which is why it is worth an entry rather than a fix:
+  1. `app/jobs/dev_reload.py::live_job` (#2144) defers an automatic reload while a `running`
+     `job_runs` row heartbeats — and `_LIVE_JOB_SQL` requires `last_progress_at IS NOT NULL`.
+     Measured over 90 days: **0** rows for `daily_candle_refresh`, `daily_financial_facts`,
+     `thesis_refresh`, `expected_filings_poller`. The protection had only ever applied to
+     `strategy_backtest_run`, whose separate writer happens to exist. Its own docstring already
+     said *"as the pre-#2274 code did"*.
+  2. `app/services/job_telemetry.py::flush_to_job_run` writes the same three columns. `rg` for
+     `JobTelemetryAggregator` / `maybe_flush` / `flush_to_job_run` outside that module returns
+     **one** hit, a docstring mention. A fully-built writer nothing routes through.
+  3. `sync_orchestrator.progress.report_progress` — real tick sites in four job bodies, and
+     `set_active_progress` has exactly ONE caller, so on every APScheduler fire the ContextVar
+     is unset and every tick returns at line one.
+- **Why no test catches it.** The consumer's tests seed the input themselves. `live_job`'s DB
+  test inserts a row *with* `last_progress_at` and asserts the deferral fires — which it does.
+  Nothing in the suite asks whether any PRODUCER ever writes that column, and no assertion can,
+  because "does the corpus contain this shape" is a question about data, not about code.
+- **Prevention:** when a change ships only the CONSUMER of a stored field, the PR must record
+  the producer's population — one `count(*) FILTER (WHERE <field> IS NOT NULL)` over a named
+  window, per producing job. A zero there is the finding. Where the producer is deliberately
+  deferred (it was here, for a researched reason — see
+  `docs/proposals/ops/2026-09-14-2274-tracked-job-heartbeat.md` §3), say so IN THE CONSUMER's
+  own docstring next to the predicate that will never match, not only on the ticket.
+  Self-review prompt: **"what writes the column I just read, and how many rows does it have?"**
+- ⚠ Related but distinct from the #1955 class ("a contract field wired into one model not its
+  sibling"). There, both halves exist and one call site was missed. Here the half was never
+  built, so grepping for call sites of the *consumer* finds nothing wrong.
+- Enforced in: `tests/test_2274_job_heartbeat_db.py` (the producer now exists and both
+  `_tracked_job` branches are pinned); `scripts/verify_2274_heartbeat_exposure.py` prints the
+  per-job `with_heartbeat` count, so the zero is reproducible rather than remembered.

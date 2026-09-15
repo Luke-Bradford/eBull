@@ -40,7 +40,24 @@ class _ProgressState:
 _active: ContextVar[_ProgressState | None] = ContextVar("sync_orchestrator_progress", default=None)
 
 
-def set_active_progress(callback: ProgressCallback) -> Token[_ProgressState | None]:
+def active_progress_callback() -> ProgressCallback | None:
+    """The callback currently installed in this context, or ``None``.
+
+    Exists so a caller that installs its own reporter can CHAIN to the
+    one already active rather than silence it (#2274). The orchestrator
+    installs outside ``legacy_fn()`` and ``_tracked_job`` opens inside
+    it, so an install that did not chain would blank the sync-run
+    progress surface for the whole job.
+    """
+    state = _active.get()
+    return None if state is None else state.callback
+
+
+def set_active_progress(
+    callback: ProgressCallback,
+    *,
+    initial_tick: bool = True,
+) -> Token[_ProgressState | None]:
     """Install ``callback`` as the active progress reporter for the
     current context. Returns a token the caller passes to
     ``clear_active_progress`` to restore the previous state.
@@ -49,6 +66,17 @@ def set_active_progress(callback: ProgressCallback) -> Token[_ProgressState | No
     to 'running' on the first poll after the layer begins — otherwise
     the first visible tick waits for the loop to reach the throttle
     threshold, which may be tens of seconds on slow providers.
+
+    ⚠ ``initial_tick=False`` suppresses that synthetic tick (#2274).
+    ``_tracked_job`` installs a ``job_runs`` heartbeat for EVERY tracked
+    job, and most job bodies never call ``report_progress`` at all — so
+    a synthetic tick there would stamp ``last_progress_at`` and render a
+    live ``0/unbounded`` ticker for a body that reports nothing. That is
+    a fabricated progress claim, which is the one thing #2274 forbids.
+
+    Suppression is a property of the INSTALL SITE, not of the payload:
+    a genuine first tick of ``(0, N)`` is real information, and a
+    callback that sniffed ``(0, None)`` could not tell the two apart.
     """
     state = _ProgressState(
         callback=callback,
@@ -56,10 +84,11 @@ def set_active_progress(callback: ProgressCallback) -> Token[_ProgressState | No
         last_tick_time=time.monotonic(),
     )
     token = _active.set(state)
-    try:
-        callback(0, None)
-    except Exception:
-        pass
+    if initial_tick:
+        try:
+            callback(0, None)
+        except Exception:
+            pass
     return token
 
 
