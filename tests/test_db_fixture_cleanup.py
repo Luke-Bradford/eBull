@@ -18,12 +18,14 @@ from tests.fixtures.ebull_test_db import (
     _CLEANUP_PLANS,
     _JANITOR_CONNS,
     _PLANNER_TABLES,
+    _WIPE_EXCLUDED,
     _admin_database_url,
     _cleanup_plan,
     _janitor_conn,
     _reset_planner_tables,
     _snapshot_name,
     _truncate_planner_tables,
+    is_snapshot_relation,
     test_database_url,
     test_db_available,
     test_db_name,
@@ -227,12 +229,31 @@ def test_no_standalone_strategy_table_is_invisible_to_the_cleanup_planner(
     both presented as flake rather than leakage, because the symptom lands in a
     different module from the writer.
 
-    ⚠ Scoped to ``strategy_*`` deliberately, and the scope is measured rather
-    than assumed: 1,034 standalone base tables corpus-wide are unlisted, so a
-    blanket assertion would be a 1,034-entry allowlist that nobody maintains.
-    Within the strategy ledger the set is small enough to be EMPTY, which is the
-    only form of this check worth having — an allowlist would absorb the next
-    miss silently.
+    ⚠⚠ RETAINED BUT NO LONGER LOAD-BEARING (#2224 residual 4). The wipe set is
+    now the complement of the restore set, so an unlisted standalone table is
+    emptied like any other and this assertion cannot fail for the reason it was
+    written. It is kept because it is cheap and it still catches a ``strategy_*``
+    table that someone removes from ``_PLANNER_TABLES``; the real guarantee now
+    lives in ``test_every_table_is_wiped_restored_or_deliberately_excluded``.
+
+    ⚠⚠ It is also the reason residual 4 took four occurrences to see, and that is
+    worth recording rather than deleting. It failed to catch the fourth twice
+    over. First, the ``strategy_*`` scope: ``runtime_config_audit`` was never in
+    range. Second — and this one would have bitten even inside the scope — the
+    filter matches only a table with NO foreign key in EITHER direction, so an
+    isolated PAIR is invisible to it. Measured: ``strategy_decision_calendar``
+    and ``strategy_decision_calendar_publications`` reference each other and
+    nothing else, so neither passes the filter, and both were leaking under the
+    very guard written for their class.
+
+    The old docstring justified the narrow scope with "1,034 standalone base
+    tables corpus-wide are unlisted, so a blanket assertion would be a
+    1,034-entry allowlist". That number counted standalone tables regardless of
+    whether the closure already reached them. The set that was genuinely
+    unmanaged — neither wiped, nor restored, nor a snapshot relation — was
+    **25**, of which exactly one (``schema_migrations``) is non-empty in a
+    pristine template. The blanket check ruled out as unmaintainable was 24
+    entries and 0.51 ms.
 
     ⚠ Partitions are excluded: a partition carries no constraint of its own and
     is emptied with its parent, so counting one would be a false positive that
@@ -260,6 +281,56 @@ def test_no_standalone_strategy_table_is_invisible_to_the_cleanup_planner(
         f"cannot discover them and their committed rows outlive the test that wrote them: {unlisted}. "
         "Add each to _PLANNER_TABLES with the reason it is standalone."
     )
+
+
+def test_every_table_is_wiped_restored_or_deliberately_excluded(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2224 residual 4 — the guarantee the per-case list could never make.
+
+    Four tables have leaked across tests by being in NEITHER the wipe set nor
+    the restore set, each found by a flaky test rather than by a check:
+    ``strategy_results_store``, ``strategy_signal_daily_counts``,
+    ``strategy_outcome_cursor`` and ``runtime_config_audit``. The last one made
+    ``test_thesis_runs_db.py::TestRuntimeConfigLlmKnobs::test_update_writes_audit_rows_per_changed_field``
+    fail once in three consecutive full-tier runs: it reads every
+    ``runtime_config_audit`` row with no filter, so a row left by an earlier
+    test on the same xdist worker fails its "critic was untouched" assertion.
+
+    "Neither" is now unreachable by construction, and this is the assertion that
+    says so. It is a partition check, not a list: it does not care what the
+    tables are called, so it cannot go stale the way ``_PLANNER_TABLES`` did.
+    """
+    plan = _cleanup_plan(ebull_test_conn)
+
+    rows = ebull_test_conn.execute(
+        """
+        SELECT c.relname
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relkind = 'r'
+           AND NOT c.relispartition
+         ORDER BY 1
+        """
+    ).fetchall()
+    every_table = {r[0] for r in rows}
+
+    machinery = {t for t in every_table if is_snapshot_relation(t)}
+    wiped = set(plan.delete_order)
+    restored = set(plan.seed_tables)
+
+    unmanaged = sorted(every_table - wiped - restored - machinery - _WIPE_EXCLUDED)
+    assert unmanaged == [], (
+        "these tables are cleaned by NOTHING between tests, so rows committed by one test "
+        f"are visible to every later test on the same xdist worker: {unmanaged}. This is the "
+        "#2224 class. A table belongs in exactly one of: the wipe set (the default — it needs "
+        "no action), the restore set (it is migration-seeded, so make sure the template "
+        "snapshot picked it up), or _WIPE_EXCLUDED (with a written reason)."
+    )
+
+    both = sorted(wiped & restored)
+    assert both == [], f"a table cannot be both emptied and restored: {both}"
 
 
 # ---------------------------------------------------------------------------

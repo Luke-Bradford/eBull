@@ -170,6 +170,51 @@ def _restore_dependency_overrides() -> Iterator[None]:
     app.dependency_overrides.update(saved)
 
 
+# #2224 residual 4 — the same shape as the fixture above, on a different global.
+#
+# ``sec_manifest_worker._PARSERS`` is a module-global registry that
+# ``app/main.py`` and ``app/jobs/__main__.py`` both populate at startup by
+# importing ``app.services.manifest_parsers``. ``clear_registered_parsers()``
+# empties it, and 21 test modules call that. Eighteen of them re-register in
+# teardown; THREE never do — ``test_sec_manifest_worker.py``,
+# ``test_def14a_latest_n_cap.py`` and ``test_manifest_topup_exclusion.py`` —
+# so on those workers every later test saw an empty registry.
+#
+# The victim was ``test_stream_a_stream_c_gate_integration.py::
+# test_check_c4_fails_when_a_registered_source_has_no_manifest_drain``, which
+# failed roughly once per three full tier runs with "registered_parser_sources()
+# returned empty frozenset". Exactly the issue's "~2 per run, different tests
+# each time" — and, like the overrides case, only ``clear`` leaks, which is why
+# 18 of the 21 callers are harmless and a blanket module rewrite would be wrong.
+#
+# ⚠ Restore-only, and deliberately NOT "register if empty". Populating would
+# mean importing ``app.services.manifest_parsers`` here, measured at 586 ms per
+# process against 52 ms for the worker module alone — a cost the pure-logic
+# fast tier (the push gate) would pay on every run for a registry it never
+# reads. Restoring the pre-test snapshot contains the leak at its source, which
+# is enough: a test that needs the registry populated on a cold worker imports
+# the package itself, as ``test_manifest_parser_sec_424b.py`` already does.
+# ⚠ Bound through the MODULE, not by importing the dict (review bot WARNING on
+# PR #3065). ``from ... import _PARSERS`` captures the object, so a test that
+# REBINDS ``sec_manifest_worker._PARSERS = {...}`` instead of mutating it would
+# leave this fixture restoring a dict nobody reads any more — the restore would
+# appear to run and the leak would survive, which is the failure mode this
+# fixture exists to make impossible. No test does that today; the point is that
+# the fixture must not depend on none ever doing it.
+@pytest.fixture(autouse=True)
+def _restore_manifest_parser_registry() -> Iterator[None]:
+    from app.jobs import sec_manifest_worker
+
+    original = sec_manifest_worker._PARSERS  # noqa: SLF001 — the registry under restore
+    saved = dict(original)
+    yield
+    if sec_manifest_worker._PARSERS is not original:  # noqa: SLF001
+        sec_manifest_worker._PARSERS = original  # noqa: SLF001
+    if original != saved:
+        original.clear()
+        original.update(saved)
+
+
 @pytest.fixture(autouse=True)
 def _disarm_unattended_broker_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """#2645 — pin the unattended-worktree refusal OFF for the suite.
