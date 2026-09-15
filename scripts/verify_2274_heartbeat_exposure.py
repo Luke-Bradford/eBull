@@ -54,19 +54,26 @@ from app.config import settings
 
 # The jobs whose bodies reach a ``report_progress`` tick site, resolved to
 # the ``_tracked_job`` that owns the row they would write. Derived by
-# inspection (spec §3), NOT by pattern-matching a name — two of the four
+# inspection (spec §3), NOT by pattern-matching a name — two of the five
 # arrive through a call chain rather than their own loop.
 COVERED_JOBS = (
     "daily_candle_refresh",  # market_data.refresh_market_data
     "daily_financial_facts",  # fundamentals.execute_refresh
     "thesis_refresh",  # scheduler thesis batch loop
     "expected_filings_poller",  # -> run_force_refresh -> refresh_financial_facts
+    "sec_filing_documents_ingest",  # filing_documents.ingest_filing_documents
 )
 
 # The parent in the one confirmed nesting (fundamentals_sync ->
 # daily_financial_facts). Included so its zero is visible: §4.4 gives a
 # parent no heartbeat on purpose, and a reader should be able to see that
 # rather than take it on the spec's word.
+#
+# ⚠ ``strategy_backtest_run`` is context and NOT covered, but it is already
+# protected — by its own ``_BacktestProgressWriter``, not by a
+# ``report_progress`` site. So the occupancy figure below, which spans
+# COVERED_JOBS only, UNDERSTATES total protected occupancy. It answers "what
+# does installing tick sites add", which is the question the spec asks of it.
 CONTEXT_JOBS = ("fundamentals_sync", "strategy_backtest_run")
 
 # Long window answers "has this column ever been written"; short window

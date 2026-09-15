@@ -7,6 +7,7 @@ from typing import cast
 import psycopg
 import pytest
 
+from app.services import filing_documents
 from app.services.filing_documents import (
     ingest_filing_documents,
     list_filing_documents,
@@ -217,3 +218,134 @@ class TestIngestFilingDocuments:
         fetcher = _StubIndexFetcher({"0000000506-24-000001": _INDEX_JSON})
         result = ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
         assert result.filings_scanned == 0
+
+
+class _TickRecorder:
+    """Records ``report_progress`` CALL SITES, not callback emissions.
+
+    #2274. The three layers are distinct and this fixture pins only the
+    first: the call site here, the 5-item/10s throttle in
+    ``sync_orchestrator.progress.report_progress``, and the 5s write floor in
+    ``job_heartbeat.JobRunHeartbeat``. Asserting "N rows reached job_runs"
+    from this test would be asserting two other modules' throttles; each
+    owns its own tests. What can only be pinned here is that the ingester
+    ticks once per attempted item on EVERY branch — the #3080 lesson that a
+    probe at the helper's layer cannot see a caller that drops the call.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int | None, bool]] = []
+
+    def __call__(
+        self,
+        items_done: int,
+        items_total: int | None,
+        *,
+        force: bool = False,
+        **_: object,
+    ) -> None:
+        self.calls.append((items_done, items_total, force))
+
+
+# Deliberately NOT a multiple of ``report_progress``'s 5-item throttle: a
+# batch size that aligns with it would let the last iteration emit the final
+# count incidentally, so a missing ``force=True`` tail tick would still pass.
+_OFF_THROTTLE_BATCH = 7
+
+
+def _seed_batch(conn: psycopg.Connection[tuple], n: int, *, iid: int) -> list[str]:
+    _seed_instrument(conn, iid=iid)
+    accessions = [f"{iid:010d}-24-{i:06d}" for i in range(1, n + 1)]
+    for accession in accessions:
+        _seed_filing(conn, instrument_id=iid, accession=accession)
+    return accessions
+
+
+class TestIngestFilingDocumentsHeartbeat:
+    """#2274 — the job's ``job_runs`` heartbeat comes from this loop."""
+
+    def test_ticks_once_per_item_plus_a_forced_final(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        accessions = _seed_batch(ebull_test_conn, _OFF_THROTTLE_BATCH, iid=520)
+        fetcher = _StubIndexFetcher(dict.fromkeys(accessions, _INDEX_JSON))
+        recorder = _TickRecorder()
+        monkeypatch.setattr(filing_documents, "report_progress", recorder)
+
+        result = ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        assert result.filings_parsed == _OFF_THROTTLE_BATCH
+        n = _OFF_THROTTLE_BATCH
+        assert recorder.calls == [(i, n, False) for i in range(1, n + 1)] + [(n, n, True)]
+
+    def test_ticks_on_every_item_when_every_fetch_raises(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A batch whose every fetch fails is still one SEC round trip per
+        item — a live worker, not a wedged one — so it must keep ticking.
+        This is the branch a tick placed on the success path would lose."""
+        accessions = _seed_batch(ebull_test_conn, _OFF_THROTTLE_BATCH, iid=521)
+
+        class _Exploding:
+            def fetch_filing_index(self, accession: str, *, issuer_cik: str | None = None) -> None:
+                raise RuntimeError(f"boom {accession} {issuer_cik}")
+
+        recorder = _TickRecorder()
+        monkeypatch.setattr(filing_documents, "report_progress", recorder)
+
+        result = ingest_filing_documents(ebull_test_conn, cast("object", _Exploding()))  # type: ignore[arg-type]
+
+        assert result.fetch_errors == _OFF_THROTTLE_BATCH
+        assert result.filings_parsed == 0
+        assert len(accessions) == _OFF_THROTTLE_BATCH
+        assert [done for done, _total, _force in recorder.calls] == [
+            *range(1, _OFF_THROTTLE_BATCH + 1),
+            _OFF_THROTTLE_BATCH,
+        ]
+
+    def test_ticks_on_every_item_when_every_upsert_raises(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        accessions = _seed_batch(ebull_test_conn, _OFF_THROTTLE_BATCH, iid=522)
+        fetcher = _StubIndexFetcher(dict.fromkeys(accessions, _INDEX_JSON))
+        recorder = _TickRecorder()
+
+        def _explode(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("upsert boom")
+
+        monkeypatch.setattr(filing_documents, "upsert_filing_documents", _explode)
+        monkeypatch.setattr(filing_documents, "report_progress", recorder)
+
+        result = ingest_filing_documents(ebull_test_conn, cast("object", fetcher))  # type: ignore[arg-type]
+
+        assert result.filings_parsed == 0
+        assert [done for done, _total, _force in recorder.calls] == [
+            *range(1, _OFF_THROTTLE_BATCH + 1),
+            _OFF_THROTTLE_BATCH,
+        ]
+
+    def test_empty_batch_ticks_nothing_at_all(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A run that attempted nothing must not stamp ``last_progress_at``.
+
+        That is the fabricated-progress claim ``set_active_progress``'s
+        ``initial_tick=False`` exists to forbid — a heartbeat on a no-op run
+        would defer a ``dev_reload`` reload and mute ``mid_flight_stuck``
+        while nothing was happening.
+        """
+        recorder = _TickRecorder()
+        monkeypatch.setattr(filing_documents, "report_progress", recorder)
+
+        result = ingest_filing_documents(ebull_test_conn, cast("object", _StubIndexFetcher({})))  # type: ignore[arg-type]
+
+        assert result.filings_scanned == 0
+        assert recorder.calls == []
