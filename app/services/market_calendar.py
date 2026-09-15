@@ -22,6 +22,12 @@ Verified against NYSE's published calendars (2026-06-27): 2025 closures =
 2026 = {Jan 1, Jan 19, Feb 16, Apr 3, May 25, Jun 19, Jul 3, Sep 7, Nov 26,
 Dec 25}.
 
+⚠ Neither of those years exercises a **Saturday New Year's Day**, which is the
+one case where NYSE does not shift a holiday back onto the preceding Friday —
+see ``_NyseHolidayCalendar``. Corrected 2026-09-15 (#3046); until then this
+calendar wrongly closed 2021-12-31 and 2027-12-31, and a test asserted the
+second of those.
+
 **Half-day (early-close) derivation.** Early closes are irregular, so we derive
 the recurring cases by rule and subtract any that are actually full closures
 (closure always wins):
@@ -65,6 +71,7 @@ from pandas.tseries.holiday import (
     USPresidentsDay,
     USThanksgivingDay,
     nearest_workday,
+    sunday_to_monday,
 )
 
 RULE_SET_ID: Final = "nyse-market-calendar-v1"
@@ -80,10 +87,33 @@ RULE_SET_VERSION: Final = f"{RULE_SET_ID}+{_code_hash()}"
 class _NyseHolidayCalendar(AbstractHolidayCalendar):
     """Full-closure rules for the NYSE. ``Juneteenth`` carries a
     ``start_date`` because NYSE first observed it in 2022 — without the
-    bound a ``nearest_workday`` rule wrongly closes 2021-06-18."""
+    bound a ``nearest_workday`` rule wrongly closes 2021-06-18.
+
+    ⚠⚠ NEW YEAR'S DAY IS THE ONE HOLIDAY THAT DOES **NOT** SHIFT BACK ONTO THE
+    PRECEDING FRIDAY, so it takes ``sunday_to_monday`` where every other rule
+    takes ``nearest_workday`` (#3046). NYSE's published rule is that a holiday
+    falling on a Saturday closes the preceding Friday **except** New Year's Day,
+    where the Exchange stays open rather than add a closure to the prior
+    accounting year; its published calendars carry no holiday for Saturday
+    January 1 2022 or Saturday January 1 2028.
+
+    ⚠ This was wrong here until 2026-09-15, and the corpus is the corroboration
+    (not the governing rule): ``us_equity`` bar counts run 289 on 2021-12-31
+    against 287-291 on every neighbouring session, with Dec 24 — the *observed*
+    Christmas closure, which DOES shift back — correctly absent. The module's
+    original verification covered 2025 and 2026 only, and neither year has a
+    Saturday New Year's Day. Christmas and Independence Day keep
+    ``nearest_workday`` deliberately: NYSE really did close Friday 2021-12-24 and
+    really does close Friday 2026-07-03.
+
+    ⚠ Under ``sunday_to_monday`` a Saturday January 1 stays on the Saturday and
+    so still appears in ``full_closures``. That is inert — the day is a weekend
+    and ``us_market_status`` / ``us_market_reason`` both test the weekend first —
+    and it is not a false statement about the market being shut.
+    """
 
     rules = [
-        Holiday("New Year's Day", month=1, day=1, observance=nearest_workday),
+        Holiday("New Year's Day", month=1, day=1, observance=sunday_to_monday),
         USMartinLutherKingJr,
         USPresidentsDay,
         GoodFriday,

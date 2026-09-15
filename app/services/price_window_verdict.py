@@ -4,11 +4,20 @@ Spec: ``docs/proposals/ta/2026-09-15-3046-day-change-window-verdict.md``.
 Contract: ``docs/proposals/ta/2026-09-15-3046-transition-verdict-contract.md``. Refs
 #3046, #2261, #3031.
 
-⚠⚠ THIS MODULE DEFINES NO RULE. ``rule_w1`` and ``rule_w2`` live in
-``app.services.price_quarantine`` and are CALLED here, never mirrored — the
+⚠⚠ THIS MODULE MIRRORS NO BAR-QUARANTINE RULE. ``rule_w1`` and ``rule_w2`` live in
+``app.services.price_quarantine`` and are CALLED here, never re-implemented — the
 measurement script ``verify_3046_consumer_exposure`` made exactly that mirroring
 mistake once with ``rule_w1`` and had it deleted. What is new is the transport (a
 batch loader) and the COMPOSITION (which clauses a windowed consumer owes).
+
+⚠ It DOES own one rule of its own: clause 5's **session gate** (``_is_non_session_bar``,
+#3046 build item 2). An earlier version of this header said "THIS MODULE DEFINES NO
+RULE", which clause 5 falsified. It is here rather than in ``price_quarantine`` for
+exactly the reason in the IDENTITY note below — it stores nothing — and it moves the
+moment that stops being true. Editing ``price_quarantine`` instead would rotate its
+self-hashed ``RULE_SET_VERSION``, which is an ``INPUT_RULE_SETS`` member
+(``strategy_registry.py:141``), marking every strategy's declared inputs and all 7M
+stored bar verdicts stale for a read-time refinement that persists nothing.
 
 WHY IT EXISTS. The contract found four damage kinds that a windowed return consumer
 needs to hold at once, and two of them — ``rule_w1`` (the window SPANS a
@@ -16,12 +25,13 @@ non-return) and ``rule_w2`` (the window's HORIZON is stretched) — had **zero
 production callers**. They were written, unit-tested and versioned, and nothing read
 them. This is the carrier.
 
-⚠ FOUR CLAUSES, AND THEY COMPOSE. They are not alternatives a consumer picks between:
+⚠ FIVE CLAUSES, AND THEY COMPOSE. They are not alternatives a consumer picks between:
 
     1  a bar FIELD is unusable            B1/B4   ``return_unusable_bars``
     2  the two sides cannot be joined     T3      ``unresolved_breaks``
     3  the window SPANS a non-return      W1      ``quarantined_transitions``
     4  the window's HORIZON is stretched  W2      window bounds + stored bar count
+    5  an endpoint bar is on a NON-SESSION date   ``asset_class`` + the NYSE calendar
 
 ⚠ CONTAINMENT, NEVER REPAIR. Every verdict here is a refusal or a flag. There is
 nothing to repair towards: for a level break both bars are valid in their own unit
@@ -54,6 +64,7 @@ from typing import Any
 
 import psycopg
 
+from app.services.market_calendar import us_market_status
 from app.services.price_quarantine import (
     RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION,
 )
@@ -81,6 +92,7 @@ REASON_BAR_RETURN_UNUSABLE = "bar_return_unusable"  # clause 1
 REASON_UNRESOLVED_BREAK = "unresolved_break"  # clause 2
 REASON_QUARANTINED_TRANSITION = "quarantined_transition"  # clause 3
 REASON_HORIZON_STRETCHED = "horizon_stretched"  # clause 4
+REASON_NON_SESSION_BAR = "non_session_bar"  # clause 5
 REASON_COVERAGE_MISSING = "coverage_missing"
 REASON_COVERAGE_BEFORE_FIRST_BAR = "coverage_before_first_bar"
 REASON_COVERAGE_AFTER_LAST_BAR = "coverage_after_last_bar"
@@ -92,8 +104,13 @@ _QUARANTINING_REASONS = frozenset(
         REASON_UNRESOLVED_BREAK,
         REASON_QUARANTINED_TRANSITION,
         REASON_HORIZON_STRETCHED,
+        REASON_NON_SESSION_BAR,
     }
 )
+
+#: The only asset class for which a PUBLISHED session calendar exists in this repo.
+#: Clause 5 fires for this class and no other — see ``_is_non_session_bar``.
+_CALENDARED_ASSET_CLASS = "us_equity"
 
 #: ``rule_w2`` re-asked in TRADING-DAY units. ⚠⚠ BOTH SIDES MOVE, OR THE WEEKEND IS
 #: DEDUCTED TWICE: ``ClassParams.calendar_days_per_bar = 1.4`` IS ``7/5`` and already
@@ -135,6 +152,22 @@ WEEKEND_HABIT_DAYS = 365
 #: false positive Codex checkpoint 1 removed.
 WEEKEND_SESSION_RATIO = Decimal(1) / Decimal(7)
 
+#: ⚠⚠ THE BOUND THE RATIO ABOVE WAS MEASURED UNDER, APPLIED WHERE THE RATIO IS USED —
+#: not a second invented constant (#3046 build item 2). The empty band that justifies
+#: ``WEEKEND_SESSION_RATIO`` is measured *"on 12,157 instruments with >= 20 bars in
+#: their lookback"* (see its own note above), and until 2026-09-15 production applied
+#: no such floor. Measured consequence on ``us_equity``: **7 of the 15 habit-positive
+#: instruments qualified on fewer than 20 bars** — ``PSTX.CVR``, ``FUSN.CVR``,
+#: ``TECX.CVR`` and ``PTRCY`` each scored a ratio of 1.0000 off a SINGLE bar, and
+#: ``GRCL.CVR`` off two. The genuine cohort (the eight ``.24-7`` names) sits at
+#: 0.2256-0.2829, the 2/7 seven-day signature.
+#:
+#: ⚠ Below the floor the habit is UNKNOWN, and every caller must treat it as unknown
+#: rather than as "this venue is shut at weekends" — clause 5 declines to fire, and
+#: ``_stripped_end`` keeps its existing conservative default. One spurious weekend bar
+#: in a two-bar history must not be able to grant OR deny anything.
+WEEKEND_HABIT_MIN_BARS = 20
+
 
 @dataclass(frozen=True)
 class WindowInputs:
@@ -165,6 +198,22 @@ class WindowInputs:
     (Wednesday to Sunday, two stored bars) is talked out of firing. Measured: 6 live
     instruments turn on exactly this.
     """
+
+    asset_class: str | None
+    """``exchanges.asset_class`` for the instrument's listing venue, or ``None``.
+
+    ⚠ Read by clause 5 ONLY, and only to ask "do we hold a published session
+    calendar for this venue". It is NEVER used to decide whether a venue trades
+    weekends — ``_stripped_end``'s docstring records the measurement that killed
+    that idea (28 of 63 FX day-changes wrongly suppressed).
+
+    ⚠ ``None`` — an instrument on an exchange we have no row for — means the
+    question is unanswerable, not that the answer is "five-day". Clause 5 declines.
+    """
+
+    habit_bar_count: int
+    """Bars in the weekend-habit lookback, so a caller can tell a MEASURED habit
+    from one asserted off one or two observations. See ``WEEKEND_HABIT_MIN_BARS``."""
 
     trades_weekends: bool
     """Whether THIS instrument's venue treats weekends as sessions.
@@ -209,9 +258,15 @@ _LOAD_SQL = """
            COALESCE(brk.dates, '{}') AS unresolved_breaks,
            COALESCE(bar.dates, '{}') AS return_unusable_bars,
            COALESCE(wkd.dates, '{}') AS weekend_bar_dates,
-           COALESCE(wke.trades_weekends, false) AS trades_weekends
+           COALESCE(wke.trades_weekends, false) AS trades_weekends,
+           COALESCE(wke.habit_bars, 0) AS habit_bars,
+           ex.asset_class
     FROM unnest(%(instrument_ids)s::bigint[], %(window_starts)s::date[])
            AS ids(instrument_id, since)
+    LEFT JOIN instruments inst
+      ON inst.instrument_id = ids.instrument_id
+    LEFT JOIN exchanges ex
+      ON ex.exchange_id = inst.exchange
     LEFT JOIN price_quarantine_coverage cov
       ON cov.instrument_id = ids.instrument_id
      AND cov.rule_set_version = %(quarantine_version)s
@@ -259,7 +314,12 @@ _LOAD_SQL = """
         -- ``weekend_habit_days`` of history — NOT the window, and NOT ``since``.
         -- Asking the window ("is there a bar this Saturday?") cannot tell a closed
         -- venue from a hole in a 24/7 series; asking the habit can.
-        SELECT coalesce(
+        -- ⚠ The >= WEEKEND_HABIT_MIN_BARS floor is part of the TEST, not a
+        -- post-filter: it is the population bound the ratio was measured under,
+        -- and without it a one-bar history scores a ratio of 1.0.
+        SELECT count(*) AS habit_bars,
+               count(*) >= %(weekend_habit_min_bars)s
+               AND coalesce(
                    count(*) FILTER (WHERE extract(isodow FROM d.price_date) >= 6)::numeric
                      / nullif(count(*), 0),
                    0
@@ -310,10 +370,23 @@ def load_window_inputs(
             "quarantine_version": QUARANTINE_RULE_SET_VERSION,
             "weekend_habit_days": timedelta(days=WEEKEND_HABIT_DAYS),
             "weekend_session_ratio": WEEKEND_SESSION_RATIO,
+            "weekend_habit_min_bars": WEEKEND_HABIT_MIN_BARS,
         },
     ).fetchall()
     out: dict[int, WindowInputs] = {}
-    for instrument_id, first_bar, last_bar, trans, deferred, breaks, bars, weekend, habit in rows:
+    for (
+        instrument_id,
+        first_bar,
+        last_bar,
+        trans,
+        deferred,
+        breaks,
+        bars,
+        weekend,
+        habit,
+        habit_bars,
+        asset_class,
+    ) in rows:
         out[int(instrument_id)] = WindowInputs(
             coverage=(first_bar, last_bar) if first_bar is not None else None,
             quarantined_transitions=tuple(trans),
@@ -321,6 +394,8 @@ def load_window_inputs(
             unresolved_breaks=tuple(breaks),
             return_unusable_bars=tuple(bars),
             weekend_bar_dates=frozenset(weekend),
+            asset_class=asset_class,
+            habit_bar_count=int(habit_bars or 0),
             trades_weekends=bool(habit),
         )
     return out
@@ -376,12 +451,55 @@ def _stripped_end(
     return window_end - timedelta(days=stripped)
 
 
+def _is_non_session_bar(inputs: WindowInputs | None, day: date) -> bool:
+    """Clause 5 — is ``day`` a date on which this instrument's venue held no session?
+
+    ⚠⚠ ANSWERED ONLY WHERE A PUBLISHED CALENDAR EXISTS, WHICH TODAY IS ``us_equity``
+    AND NOTHING ELSE. Every other class returns False — *not* because those venues
+    trade weekends, but because nothing in the tree can say which days they trade.
+    Three separate attempts to generalise it were killed at Codex checkpoint 1:
+
+    - ``ClassParams.calendar_days_per_bar`` is ``rule_w2``'s NOMINAL-SPAN parameter,
+      not calendar authority. Re-parameterising hole tolerance would silently
+      redefine which dates count as sessions.
+    - a five-day declaration does not say WHICH five days. The Saudi Exchange trades
+      **Sunday-Thursday**, inside the same ``mena_equity`` class as the Monday-Friday
+      DFM, so "Sat/Sun is a non-session for a five-day class" is false on our corpus.
+    - ``params_for(None)`` defaults to five-day, so an instrument on an exchange we
+      have no row for would have been quarantined on missing metadata.
+
+    ⚠ NYSE full closures only, never half days: a 13:00 ET early close is a real
+    session. An NYSE *extraordinary* closure missing from
+    ``market_calendar._EXTRAORDINARY_CLOSURE_NAMES`` reads ``open`` and this clause
+    stays silent — the fail-safe direction (a defect is missed; a real session is
+    never suppressed).
+
+    ⚠ Nasdaq / NYSE American / CBOE / OTC observe the same FULL-CLOSURE days as NYSE,
+    which is why one calendar serves the whole class. The claim is left falsifiable
+    rather than asserted: ``scripts/verify_3046_non_session_clause.py`` prints the
+    per-exchange bar count on every closure date.
+
+    ⚠ Missing evidence is never a verdict: absent ``inputs``, an absent
+    ``asset_class`` and a habit below ``WEEKEND_HABIT_MIN_BARS`` all return False.
+    """
+    if inputs is None or inputs.asset_class != _CALENDARED_ASSET_CLASS:
+        return False
+    if inputs.habit_bar_count < WEEKEND_HABIT_MIN_BARS:
+        return False
+    if inputs.trades_weekends:
+        # A measured seven-day product (eToro's ``.24-7`` synthetics are typed
+        # ``us_equity``). The listing venue's calendar does not govern it.
+        return False
+    return us_market_status(day) == "closed"
+
+
 def assess_window(
     inputs: WindowInputs | None,
     *,
     window_start: date,
     window_end: date,
     bar_count: int,
+    endpoint_bar_dates: tuple[date, ...] = (),
 ) -> WindowAssessment:
     """Compose all four clauses over one window. Pure; no I/O.
 
@@ -389,6 +507,24 @@ def assess_window(
     never a rank and never a calendar estimate. ``rule_w2`` takes ``bar_count - 1`` as
     its interval count, and the ``by_rank[r]`` off-by-one that read ``r + 1`` made W2
     under-fire by 6x on the corpus scan.
+
+    ``endpoint_bar_dates`` are the dates of the STORED BARS the caller's quantity is
+    computed from — clause 5's only operand.
+
+    ⚠⚠ DELIBERATELY NOT ``(window_start, window_end)``. A window BOUND is a calendar
+    instant a caller chose; a stored bar is an observation the vendor sent. They
+    coincide for ``load_day_changes`` and need not for anyone else, and firing clause 5
+    on a bound would condemn a window merely for being asked about from a Sunday.
+    Defaulting to ``()`` keeps clause 5 silent for a caller that has not said which
+    bars it read, rather than guessing.
+
+    ⚠ Clause 5 is ENDPOINT-ONLY because its consumer computes an endpoint-to-endpoint
+    quantity. An INTERIOR non-session bar perturbs averages, volatility and every
+    rolling statistic and is NOT covered here. ⚠ It is also NOT covered by ``rule_w2``:
+    extra bars RAISE W2's tolerance rather than trip it (Codex checkpoint 1, with an
+    executed counterexample — 2026-01-08 -> 01-14 is ``quarantined`` on two endpoints
+    and ``ok`` once weekend bars are added). An earlier draft of the spec claimed the
+    opposite.
 
     ⚠ A FIRED CLAUSE OUTRANKS A COVERAGE REASON, and every clause is evaluated
     regardless of coverage: positive evidence beats absence, and an instrument with
@@ -425,6 +561,10 @@ def assess_window(
         if rule_w1(window_start, window_end, inputs.deferred_transitions):
             reasons.append(REASON_VERDICT_DEFERRED)
 
+    # Clause 5. Independent of the clauses above — it ADDS a reason and removes none.
+    if any(_is_non_session_bar(inputs, d) for d in endpoint_bar_dates):
+        reasons.append(REASON_NON_SESSION_BAR)
+
     # ⚠ Absent inputs means the habit is unknown. Defaulting to False (weekends are
     # non-sessions) keeps the span SHORTER, so an unknown instrument is not quarantined
     # on an assumption — the UNKNOWN reasons above already carry that state honestly.
@@ -453,12 +593,14 @@ def assess_window(
 
 __all__ = [
     "WEEKEND_HABIT_DAYS",
+    "WEEKEND_HABIT_MIN_BARS",
     "WEEKEND_SESSION_RATIO",
     "REASON_BAR_RETURN_UNUSABLE",
     "REASON_COVERAGE_AFTER_LAST_BAR",
     "REASON_COVERAGE_BEFORE_FIRST_BAR",
     "REASON_COVERAGE_MISSING",
     "REASON_HORIZON_STRETCHED",
+    "REASON_NON_SESSION_BAR",
     "REASON_QUARANTINED_TRANSITION",
     "REASON_UNRESOLVED_BREAK",
     "REASON_VERDICT_DEFERRED",

@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.providers.implementations.sec_calendar import is_us_federal_holiday
-from app.services.market_calendar import us_market_reason, us_market_specials
+from app.services.market_calendar import us_market_reason, us_market_specials, us_market_status
 
 # NYSE published full closures (https://www.nyse.com/markets/hours-calendars).
 _CLOSURES_2025 = {
@@ -100,10 +100,64 @@ def test_good_friday_is_market_but_not_federal() -> None:
     assert not is_us_federal_holiday(good_friday_2026)
 
 
-def test_observed_new_year_attributed_by_observed_date() -> None:
-    # Jan 1 2028 = Saturday → observed Fri Dec 31 2027. The straddle window
-    # attributes it to 2027 (the year its observed date lands in).
-    assert date(2027, 12, 31) in us_market_specials(2027).full_closures
+def test_a_SATURDAY_new_year_does_NOT_close_the_preceding_friday() -> None:
+    """⚠⚠ THE ONE HOLIDAY THAT DOES NOT SHIFT BACK (#3046).
+
+    This test replaces ``test_observed_new_year_attributed_by_observed_date``,
+    which asserted the OPPOSITE — that Fri 2027-12-31 is a closure — because
+    ``nearest_workday`` produces it. NYSE does not: a Saturday New Year's Day adds
+    no closure to the prior accounting year, and its published calendars carry no
+    holiday for Sat 2022-01-01 or Sat 2028-01-01. The old test's subject was the
+    year-attribution straddle; it happened to pick the one case that is wrong.
+
+    Corroborated on the corpus (not the governing rule): ``us_equity`` bar counts
+    are 289 on 2021-12-31 against 287-291 on every neighbouring session.
+    """
+    assert date(2027, 12, 31) not in us_market_specials(2027).full_closures
+    assert date(2021, 12, 31) not in us_market_specials(2021).full_closures
+    assert us_market_status(date(2021, 12, 31)) == "open"
+    assert us_market_status(date(2027, 12, 31)) == "open"
+
+
+def test_a_SUNDAY_new_year_is_still_observed_on_the_monday() -> None:
+    # Only the Saturday direction is excepted. Jan 1 2023 = Sunday -> Mon Jan 2.
+    assert date(2023, 1, 2) in us_market_specials(2023).full_closures
+
+
+def test_the_saturday_shift_is_UNCHANGED_for_christmas_and_july_4() -> None:
+    # ⚠ The New Year exception is specific. NYSE really did close Fri 2021-12-24
+    # (Christmas Day Sat 2021-12-25) and really does close Fri 2026-07-03
+    # (Independence Day Sat 2026-07-04).
+    assert date(2021, 12, 24) in us_market_specials(2021).full_closures
+    assert date(2026, 7, 3) in us_market_specials(2026).full_closures
+
+
+def test_published_closure_sets_match_nyse_for_the_two_corrected_years() -> None:
+    # NYSE's published 2021 and 2022 holiday calendars, which the pre-fix rule set
+    # got wrong at both ends (a spurious 2021-12-31, and 2022 unaffected).
+    assert sorted(d.isoformat() for d in us_market_specials(2021).full_closures) == [
+        "2021-01-01",
+        "2021-01-18",
+        "2021-02-15",
+        "2021-04-02",
+        "2021-05-31",
+        "2021-07-05",
+        "2021-09-06",
+        "2021-11-25",
+        "2021-12-24",
+    ]
+    assert sorted(d.isoformat() for d in us_market_specials(2022).full_closures) == [
+        "2022-01-01",
+        "2022-01-17",
+        "2022-02-21",
+        "2022-04-15",
+        "2022-05-30",
+        "2022-06-20",
+        "2022-07-04",
+        "2022-09-05",
+        "2022-11-24",
+        "2022-12-26",
+    ]
 
 
 def test_result_is_cached_and_immutable() -> None:
