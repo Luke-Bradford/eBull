@@ -5,7 +5,7 @@ Spec: ``docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md``
       §A1 (operator-amendment round 1, line 11-22) — supersedes the
       legacy §"Stale-detection rule" (line 597-606) v0 sketch.
 
-Four reasons can fire on one row simultaneously:
+Five reasons can fire on one row simultaneously:
 
 1. ``schedule_missed`` — ``mechanism="scheduled_job"`` only. Cron
    should have fired by now and didn't. Negative when the job is
@@ -27,7 +27,7 @@ Four reasons can fire on one row simultaneously:
    without it, a worker that crashes before its first
    ``record_processed`` would never surface as stale.
 5. ``runtime_ceiling`` (#2274) — ``mechanism="scheduled_job"`` only.
-   ``status="running"`` AND ``active_run.started_at < now() -
+   An ACTIVE RUN exists AND ``active_run.started_at < now() -
    RUNTIME_CEILING_S``. Rule 4's sibling, and the difference is the
    whole point: **this one never consults the heartbeat**. Rule 4 is
    muted the moment a producer ticks, so once #2274's heartbeat lands a
@@ -234,7 +234,18 @@ def compute(
     # full wash cannot "reset watermarks under the running worker's feet". A
     # ceiling that rewrote the status would unlock that guard while the
     # worker thread is still alive, and Python cannot kill that thread.
-    if mechanism == "scheduled_job" and status == "running" and active_run_started_at is not None:
+    # ⚠⚠ Gated on the ACTIVE RUN, not on ``status``, and that is deliberate.
+    # ``scheduled_adapter._status_for`` returns ``disabled`` FIRST when the
+    # kill switch is on — before it looks at ``has_running_row`` — so a
+    # ``status == "running"`` gate would silently never fire for a halted
+    # system, and the ``_WEDGE_STALE`` membership that exists to keep this
+    # reason red under the kill switch would be dead code (Codex ckpt-2).
+    # Halting the SCHEDULE does not end a run that started before the halt,
+    # which is exactly when a ceiling breach matters most. ``active_run_
+    # started_at is not None`` already means "a run is in flight": the
+    # adapter builds ``active_run`` from the running row regardless of
+    # status, and every non-running status reaches here with ``None``.
+    if mechanism == "scheduled_job" and active_run_started_at is not None:
         if active_run_started_at < now - _seconds(RUNTIME_CEILING_S):
             reasons.append("runtime_ceiling")
 

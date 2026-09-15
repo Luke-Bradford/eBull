@@ -50,6 +50,28 @@ export interface ProcessRowProps {
 }
 
 /**
+ * True when the verdict-reason line should carry the live
+ * elapsed-since-heartbeat suffix ("running but no progress 7m").
+ *
+ * ⚠ `runtime_ceiling` (#2274) suppresses it, even though `mid_flight_stuck`
+ * usually fires alongside it. That reason is about the RUN'S AGE and
+ * deliberately never consults the heartbeat, so the backend headlines it
+ * ("running past its runtime ceiling") — and appending an elapsed-since-
+ * heartbeat would attach an unrelated duration to the ceiling claim: a
+ * 25-hour run that ticked 10 minutes ago would read "running past its
+ * runtime ceiling 10m". Caught by Codex ckpt-2, not by any test.
+ *
+ * Kept as one predicate so the memo signature and the rendered line can
+ * never disagree about whether the row has a ticking suffix.
+ */
+function hasHeartbeatSuffix(row: ProcessRowResponse): boolean {
+  return (
+    row.stale_reasons.includes("mid_flight_stuck") &&
+    !row.stale_reasons.includes("runtime_ceiling")
+  );
+}
+
+/**
  * Stable content signature for a process row (#1480).
  *
  * Conservative by design: serialise the whole envelope so any field
@@ -61,10 +83,9 @@ export interface ProcessRowProps {
 export function processRowSignature(row: ProcessRowResponse): string {
   const heartbeatBase =
     row.active_run?.last_progress_at ?? row.active_run?.started_at ?? null;
-  const elapsed =
-    row.stale_reasons.includes("mid_flight_stuck") && heartbeatBase !== null
-      ? formatElapsedSince(heartbeatBase)
-      : "";
+  const elapsed = hasHeartbeatSuffix(row) && heartbeatBase !== null
+    ? formatElapsedSince(heartbeatBase)
+    : "";
   return `${JSON.stringify(row)}|${elapsed}`;
 }
 
@@ -272,13 +293,13 @@ function VerdictReason({ row }: { row: ProcessRowResponse }) {
   // but no progress 7m") — the operator's wedge signal (#1474 / #1478),
   // computed client-side from active_run so it keeps advancing between
   // polls. Empty reason (current / plain working) renders nothing.
+  // See `hasHeartbeatSuffix` for why `runtime_ceiling` suppresses it.
   if (!row.verdict_reason) return null;
   const heartbeatBase =
     row.active_run?.last_progress_at ?? row.active_run?.started_at ?? null;
-  const elapsed =
-    row.stale_reasons.includes("mid_flight_stuck") && heartbeatBase !== null
-      ? ` ${formatElapsedSince(heartbeatBase)}`
-      : "";
+  const elapsed = hasHeartbeatSuffix(row) && heartbeatBase !== null
+    ? ` ${formatElapsedSince(heartbeatBase)}`
+    : "";
   return (
     <div
       data-testid="verdict-reason"

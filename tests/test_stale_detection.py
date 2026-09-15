@@ -565,8 +565,12 @@ def test_runtime_ceiling_is_not_muted_by_a_fresh_heartbeat() -> None:
     assert "mid_flight_stuck" not in reasons
 
 
-def test_runtime_ceiling_does_not_fire_on_terminal_status() -> None:
-    for status in ("ok", "idle", "failed", "disabled"):
+def test_runtime_ceiling_does_not_fire_without_an_active_run() -> None:
+    """The gate is the presence of an active run, not the display status:
+    every non-running status reaches ``compute`` with
+    ``active_run_started_at=None`` (the adapter builds ``active_run`` from the
+    running row, and there is none)."""
+    for status in ("ok", "idle", "failed", "disabled", "pending_retry"):
         reasons = compute(
             mechanism="scheduled_job",
             status=status,  # type: ignore[arg-type]
@@ -574,11 +578,32 @@ def test_runtime_ceiling_does_not_fire_on_terminal_status() -> None:
             has_data_freshness_gap=False,
             has_dispatched_queue_age=False,
             last_progress_at=None,
-            active_run_started_at=_seconds_ago(RUNTIME_CEILING_S + 60),
+            active_run_started_at=None,
             process_id="some_job",
             now=NOW,
         )
         assert "runtime_ceiling" not in reasons, status
+
+
+def test_runtime_ceiling_still_fires_when_the_kill_switch_reads_disabled() -> None:
+    """⚠⚠ Codex ckpt-2. ``scheduled_adapter._status_for`` returns ``disabled``
+    FIRST when the kill switch is on — before it looks at ``has_running_row``
+    — so a ``status == 'running'`` gate would make this reason unreachable on
+    a halted system, and its ``_WEDGE_STALE`` membership dead code. Halting
+    the SCHEDULE does not end a run that started before the halt.
+    """
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="disabled",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(RUNTIME_CEILING_S + 60),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert "runtime_ceiling" in reasons
 
 
 def test_runtime_ceiling_is_scheduled_job_only() -> None:

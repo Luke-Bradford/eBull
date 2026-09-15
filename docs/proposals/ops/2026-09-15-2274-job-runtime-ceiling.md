@@ -73,9 +73,19 @@ mid_flight_stuck: status == "running"
 The ceiling is its sibling, and the difference is the whole point:
 
 ```
-runtime_ceiling:  status == "running"
+runtime_ceiling:  active_run_started_at IS NOT NULL
                   AND active_run_started_at      < now() - RUNTIME_CEILING_S
 ```
+
+⚠ Gated on the **active run**, not on `status`. Codex checkpoint 2 found the
+`status == "running"` version unreachable on a halted system:
+`scheduled_adapter._status_for` returns `disabled` FIRST when the kill switch is on,
+*before* it consults `has_running_row`, so the reason would never be emitted and its
+`_WEDGE_STALE` membership (below) would be dead code. Halting the schedule does not end a
+run that started before the halt, which is exactly when a ceiling breach matters. The
+adapter builds `active_run` from the running row regardless of status, and every
+non-running status reaches `compute` with `None`, so this gate is both stricter and
+correct.
 
 **It does not consult the heartbeat.** Rule 4 is muted the moment a producer ticks; rule 5
 cannot be, because it measures the run's age and nothing else. That is precisely the
@@ -103,6 +113,13 @@ keeps the truth.
    promising a reaper that does not exist, and keys on the ceiling.
 5. `frontend/src/api/types.ts`, `frontend/src/components/admin/processStatus.ts` and the
    admin fixtures mirror — the union and the chip label.
+6. `frontend/src/components/admin/ProcessRow.tsx` — the elapsed-since-heartbeat suffix on
+   the verdict-reason line moves behind one `hasHeartbeatSuffix` predicate, and
+   `runtime_ceiling` suppresses it. Codex checkpoint 2 again: `mid_flight_stuck` almost
+   always fires alongside the ceiling, and the old condition keyed only on its presence, so
+   a 25-hour run that ticked ten minutes ago rendered *"running past its runtime ceiling
+   10m"* — an unrelated duration welded to an age claim. One predicate rather than two
+   copies, so the memo signature and the rendered line cannot disagree.
 
 ### Mechanism scope
 
@@ -180,7 +197,9 @@ Pure-logic (`tests/test_stale_detection.py`, no DB):
 - a `running` row under it does not (revert-probe: dropping the age comparison fails this);
 - **a fresh `last_progress_at` does NOT mute it** — the single most important test, because
   it is the property that licenses the later heartbeat;
-- it does not fire when `status != "running"`, nor on `bootstrap` / `ingest_sweep`;
+- **it still fires when the row reads `disabled`** (kill switch on, run still in flight) —
+  the ckpt-2 finding above, and the test that keeps `_WEDGE_STALE` membership meaningful;
+- it does not fire without an active run, nor on `bootstrap` / `ingest_sweep`;
 - exact-boundary behaviour is pinned (strictly older than, consistent with rules 1/2/4).
 
 `tests/test_health_verdict.py`:
@@ -192,6 +211,8 @@ Pure-logic (`tests/test_stale_detection.py`, no DB):
 
 Frontend: the existing admin fixture/label parity tests extend to the new member; the union
 in `types.ts` is what makes a missed label a typecheck failure rather than a blank chip.
+Plus `ProcessRow.test.tsx` — a row with BOTH reasons renders exactly *"running past its
+runtime ceiling"* and matches no `\d+m`.
 
 ## 6. What this does NOT do — so the next session does not inherit it as done
 
