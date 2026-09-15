@@ -211,3 +211,65 @@ def test_every_cause_is_storable_for_a_backdated_insert(cause: str) -> None:
     typed: Any = cause
     market_data._record_backdated_inserts(conn, 1, [date(2026, 1, 10)], frontier_before=date(2026, 1, 20), cause=typed)
     conn.cursor.assert_called_once()
+
+
+def test_an_impossible_classification_keeps_the_bars_and_drops_the_audit_rows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review round 1: the invariant is RESOLVED, not asserted, and not raised.
+
+    ``backdated_insert_dates`` non-empty with ``frontier_before is None`` is
+    unreachable — ``_upsert_candles`` can only classify a bar as backdated by
+    comparing against a frontier. Three ways to handle the unreachable state, and
+    only one is right:
+
+    * bare ``assert`` — stripped under ``-O``, so ``None`` reaches a NOT NULL
+      column (the review's finding);
+    * ``raise`` — inside the bar write's transaction, so a telemetry disagreement
+      destroys a price write, which is the exact thing ``sql/388``'s header
+      refuses a cross-column CHECK for;
+    * log at ERROR and skip the audit write — bars kept, nothing silent.
+
+    This pins the third, because the second is the tempting fix for the first.
+    """
+    import logging
+
+    from app.services.market_data import refresh_market_data
+
+    conn = MagicMock()
+    cursor = MagicMock()
+    # Drives `_candles_are_fresh` (stale -> fetch) AND `_observed_frontier`, which
+    # returns None here: the impossible pairing this test exists to reach.
+    cursor.fetchone.side_effect = [(date(2020, 1, 1),), (date(2020, 1, 1),), (None,), (None,)] + [(None,)] * 20
+    conn.execute.return_value = cursor
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=ctx)
+    ctx.__exit__ = MagicMock(return_value=False)
+    conn.transaction.return_value = ctx
+
+    provider = MagicMock()
+    provider.get_daily_candles.return_value = [MagicMock()]
+
+    outcome = market_data.CandleUpsertOutcome(
+        inserted=1,
+        revised=0,
+        revision_age_days={},
+        revision_max_age_days=None,
+        revised_bar_dates=(),
+        backdated_insert_dates=(date(2019, 12, 31),),
+    )
+    with (
+        pytest.MonkeyPatch.context() as mp,
+        caplog.at_level(logging.ERROR, logger="app.services.market_data"),
+    ):
+        mp.setattr(market_data, "_upsert_candles", lambda *a, **k: outcome)
+        mp.setattr(market_data, "_observed_frontier", lambda *a, **k: None)
+        mp.setattr(market_data, "_compute_and_store_features", lambda *a, **k: 0)
+        recorded: list[object] = []
+        mp.setattr(market_data, "_record_backdated_inserts", lambda *a, **k: recorded.append(a))
+        summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
+
+    assert recorded == [], "the audit write must be skipped, not fed a None frontier"
+    # The bars survived: the instrument is NOT counted as failed.
+    assert summary.candles_failed == 0
+    assert any("#2414" in r.getMessage() for r in caplog.records), "the drop must not be silent"

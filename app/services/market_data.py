@@ -824,15 +824,37 @@ def refresh_market_data(
                     # same rollback property. `frontier_before` is not None
                     # whenever this list is non-empty: `_upsert_candles` can only
                     # classify a bar as backdated by comparing against it.
+                    #
+                    # ⚠ That invariant is RESOLVED, not asserted (review round 1).
+                    # A bare `assert` is stripped under `-O`, which would feed
+                    # `None` into a NOT NULL column; but raising is worse than
+                    # both, because this block is inside the bar write's
+                    # transaction and an audit row must never be able to destroy
+                    # the price write it describes (`sql/388`'s header, and the
+                    # same call this ticket already made against a cross-column
+                    # CHECK). So: keep the bars, drop the telemetry, and say so
+                    # at ERROR — the one outcome that is neither silent nor
+                    # destructive. Same rule `revision_cause` already follows
+                    # ("a telemetry helper that can abort a refresh is a worse
+                    # failure than a mislabelled counter").
                     if outcome.backdated_insert_dates:
-                        assert frontier_before is not None
-                        _record_backdated_inserts(
-                            conn,
-                            instrument_id,
-                            outcome.backdated_insert_dates,
-                            frontier_before=frontier_before,
-                            cause=write_branch,
-                        )
+                        if frontier_before is None:
+                            logger.error(
+                                "#2414: %s (id=%d) produced %d backdated insert(s) with no "
+                                "observed frontier — impossible by construction, so the "
+                                "classifier is broken. Bars kept, audit rows dropped.",
+                                symbol,
+                                instrument_id,
+                                len(outcome.backdated_insert_dates),
+                            )
+                        else:
+                            _record_backdated_inserts(
+                                conn,
+                                instrument_id,
+                                outcome.backdated_insert_dates,
+                                frontier_before=frontier_before,
+                                cause=write_branch,
+                            )
                     computed = _compute_and_store_features(conn, instrument_id)
             # Accumulate the running totals ONLY after the transaction has
             # committed cleanly (#1293 / Codex): incrementing inside the
