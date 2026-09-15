@@ -40,6 +40,7 @@ from app.services.sync_orchestrator.layer_types import (
     LayerState,
 )
 from app.services.sync_orchestrator.registry import JOB_TO_LAYERS, LAYERS
+from app.services.sync_orchestrator.run_liveness import assess_run
 
 # Registry invariant: every layer is emitted by at most one legacy job.
 # Built once at import time; a duplicate emit fails loudly at startup
@@ -254,11 +255,19 @@ def _resolve_auth_expired_suppression(conn: psycopg.Connection[object]) -> datet
 def get_sync_status(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> dict[str, Any]:
-    """Current running sync (if any) + active layer row."""
+    """Current running sync (if any) + active layer row.
+
+    ``last_progress_at`` / ``liveness`` (#2274): the singleton
+    ``idx_sync_runs_single_running`` lets one sync run at a time, so a stranded
+    row blocks every later sync — and before this endpoint carried a judgement,
+    a stranded run and a healthy one rendered identically. ``liveness`` is
+    wall-clock only; see ``run_liveness.assess_run`` for why there is no
+    heartbeat-staleness verdict.
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT sync_run_id, scope, trigger, started_at,
+            SELECT sync_run_id, scope, trigger, started_at, last_progress_at,
                    layers_planned, layers_done, layers_failed, layers_skipped
             FROM sync_runs
             WHERE status = 'running'
@@ -288,6 +297,12 @@ def get_sync_status(
             "scope": row["scope"],
             "trigger": row["trigger"],
             "started_at": row["started_at"].isoformat(),
+            "last_progress_at": (row["last_progress_at"].isoformat() if row["last_progress_at"] else None),
+            "liveness": assess_run(
+                started_at=row["started_at"],
+                last_progress_at=row["last_progress_at"],
+                now=datetime.now(UTC),
+            ),
             "layers_planned": row["layers_planned"],
             "layers_done": row["layers_done"],
             "layers_failed": row["layers_failed"],

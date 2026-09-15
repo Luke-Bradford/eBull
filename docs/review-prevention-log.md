@@ -6857,3 +6857,32 @@ side-session connects). The correction never travelled the ten lines to the next
 - Enforced in: this prevention log;
   `tests/test_market_data_bar_revision_counter_db.py::test_a_stale_reobservation_is_not_labelled_incremental_when_the_lookback_is_three`
   (added because the probe passed, and confirmed red under the same probe afterwards).
+
+### "—" for null and "—" for unparseable are the same pixel, and the reader cannot tell which
+
+- First seen in: #2274 (2026-09-15), review-bot WARNING on PR #3082.
+- The bot's stated failure was wrong — it predicted `"Invalid Date"` from
+  `formatRelativeTime(run.last_progress_at)` on a null heartbeat, and
+  `frontend/src/lib/format.ts:213-216` guards `null` / `undefined` / `""` / `NaN` and
+  returns `"—"`. `frontend/src/lib/format.test.ts:34` already pins that. So the crash
+  class does not exist here.
+- **The readability defect it was pointing at is real, and survives the correction.**
+  Rendered beside the label `last progress`, `"—"` reads as *we do not know*. The truth
+  was *this run has not reached a layer yet* — the ordinary state for a sync's whole
+  prelude and for a plan with zero layers. A panel whose job is to make a wedged run
+  visible cannot spend its one string on an ambiguity.
+- ⚠ The trap is that the guard makes the call SAFE, which is what a reviewer and a
+  type-checker both look for, so the semantic collapse passes every automated gate. The
+  formatters in `format.ts` (`formatRelativeTime`, `formatRate`, `formatEta`) all fold
+  "absent" and "unparseable" into one glyph by design, which is right for a dense table
+  row and wrong for a single-fact banner.
+- Prevention: when a nullable timestamp/quantity is rendered as the SUBJECT of a
+  sentence rather than as a cell in a grid, ask what the null MEANS — never-happened,
+  not-yet, not-applicable, or unknown — and write that phrase. Reach for the shared
+  formatter's em-dash only where the surrounding row already tells the reader which.
+  Self-review prompt: *"if this renders '—', will the operator conclude the right
+  thing?"*
+- Enforced in: this prevention log; `frontend/src/pages/AdminPage.tsx`
+  (`SyncHolderBanner`, with the reasoning inline at the call site);
+  `frontend/src/pages/AdminPage.test.tsx::"distinguishes a not-yet heartbeat from an
+  unrenderable one"`, which asserts the absence of the literal `last progress —`.

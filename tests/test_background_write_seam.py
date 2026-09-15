@@ -113,7 +113,11 @@ def test_executor_audit_writer_routes_through_seam(monkeypatch: pytest.MonkeyPat
     # UPDATE matches 0 rows for a non-existent run/layer — still a real, clean
     # statement; we only assert the writer went through the seam.
     executor._record_layer_started(999_999_999, "no_such_layer")
-    assert calls == [1]
+    # TWO borrows, and the second one is the point (#2274): the layer write, then
+    # _touch_run_heartbeat taking its own. A single borrow here would mean the
+    # heartbeat had been folded into the layer writer's transaction, which is
+    # exactly the coupling its docstring forbids.
+    assert calls == [1, 1]
 
 
 @pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
@@ -140,10 +144,13 @@ def test_all_executor_audit_writers_route_through_the_seam() -> None:
     from pathlib import Path
 
     src = Path(executor.__file__).read_text()
-    # The 8 converted writers: _record_layer_started/result/failed/skipped,
+    # The 9 converted writers: _record_layer_started/result/failed/skipped,
     # _finalize_sync_run, _finalize_cancelled_sync_run, _fail_unfinished_layers,
-    # and the _make_progress_callback closure.
-    assert src.count("background_write_connection() as conn:") == 8
+    # the _make_progress_callback closure, and _touch_run_heartbeat (#2274).
+    # ⚠ _touch_run_heartbeat takes its OWN borrow deliberately — it must not
+    # share a layer writer's transaction, or a heartbeat failure would roll the
+    # authoritative layer result back. See its docstring.
+    assert src.count("background_write_connection() as conn:") == 9
     # No audit-style raw autocommit connect remains (the PR4a gate-check conns
     # use a different binding — `as owned:` / a holder attribute — so this is
     # specific to the audit writers).

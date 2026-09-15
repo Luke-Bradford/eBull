@@ -52,6 +52,16 @@ export interface SyncRunsResponse {
   runs: SyncRun[];
 }
 
+/**
+ * Wall-clock verdict on the in-flight sync run (#2274).
+ *
+ * `live` means "below the runtime ceiling", NOT "a worker is alive" — a run
+ * whose worker died an hour ago still reads `live`. Optional on the wire so a
+ * frontend deployed ahead of the backend reads absent as `live` rather than as
+ * a warning.
+ */
+export type SyncRunLiveness = "live" | "over_ceiling";
+
 export interface SyncStatusResponse {
   is_running: boolean;
   current_run: {
@@ -59,6 +69,8 @@ export interface SyncStatusResponse {
     scope: string;
     trigger: string;
     started_at: string;
+    last_progress_at?: string | null;
+    liveness?: SyncRunLiveness;
     layers_planned: number;
     layers_done: number;
     layers_failed: number;

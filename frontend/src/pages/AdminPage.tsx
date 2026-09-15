@@ -25,6 +25,7 @@ import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchSystemStatus } from "@/api/system";
 import { fetchSyncLayersV2, fetchSyncStatus } from "@/api/sync";
+import type { SyncStatusResponse } from "@/api/sync";
 import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
@@ -42,7 +43,7 @@ import {
 } from "@/components/dashboard/Section";
 import { Badge } from "@/components/ui/Badge";
 import { useAsync } from "@/lib/useAsync";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, formatRelativeTime } from "@/lib/format";
 import { useProcesses } from "@/lib/useProcesses";
 
 type RowState =
@@ -58,7 +59,14 @@ const ORCHESTRATOR_OWNED = new Set([
 
 export function AdminPage() {
   const v2 = useAsync(fetchSyncLayersV2, []);
-  const status = useAsync(fetchSyncStatus, []);
+  // `preserveOnRefetch` (#2274): without it `data` is cleared at the START of
+  // every refetch, so during a running sync `isRunning` flipped false for the
+  // duration of each request and true again on resolution. ⚠ The cadence was
+  // not pinned at idle — it churned: every poll re-armed the interval twice,
+  // and because `useEffect` restarts the timer on each flip the effective
+  // period drifted with request latency rather than holding at 10s. The holder
+  // banner below would have blinked out on the same cycle.
+  const status = useAsync(fetchSyncStatus, [], { preserveOnRefetch: true });
   const coverage = useAsync(fetchCoverageSummary, []);
   const capabilityOverrides = useAsync(fetchCapabilityOverrides, []);
   const jobs = useAsync(fetchJobsOverview, []);
@@ -202,6 +210,8 @@ export function AdminPage() {
       </div>
 
       <KillSwitchSection />
+
+      <SyncHolderBanner status={status.data} unavailable={status.error !== null} />
 
       <ProblemsPanel
         v2={v2.data}
@@ -585,5 +595,72 @@ function RunButton({
     >
       {buttonLabel}
     </button>
+  );
+}
+
+/**
+ * The in-flight sync run, named (#2274).
+ *
+ * The orchestrator's singleton index lets one sync run at a time, so a run that
+ * was stranded by a crashed worker blocks EVERY later sync until the jobs
+ * process next boots — and nothing rendered it, so the operator's only symptom
+ * was ingest quietly stopping.
+ *
+ * ⚠ `over_ceiling` is a wall-clock verdict, not proof the worker is dead, and
+ * `live` is not proof it is alive. The ages are the signal; the verdict only
+ * marks the case that cannot be a legitimately-long run.
+ *
+ * ⚠ Absent `liveness` (frontend deployed ahead of backend) reads as `live`.
+ *
+ * ⚠⚠ `unavailable` is not cosmetic. `useAsync` clears `data` on a failed
+ * refetch even under `preserveOnRefetch` ("stale-while-erroring is
+ * misleading"), so without this branch a single failed poll would silently
+ * remove an over-ceiling warning and leave the page looking exactly like "no
+ * sync is running" — the absence of a signal rendered as the absence of a
+ * problem, which is the shape #2274 is about (Codex checkpoint 3).
+ */
+function SyncHolderBanner({
+  status,
+  unavailable,
+}: {
+  status: SyncStatusResponse | null;
+  unavailable: boolean;
+}) {
+  if (unavailable) {
+    return (
+      <div
+        className="rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
+        data-testid="sync-holder-banner"
+      >
+        Sync status unavailable — this panel cannot tell you whether a run is in flight.
+      </div>
+    );
+  }
+  const run = status?.current_run ?? null;
+  if (run === null) return null;
+  const overCeiling = run.liveness === "over_ceiling";
+  const tone = overCeiling
+    ? "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200"
+    : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300";
+  return (
+    <div className={`rounded border px-3 py-2 text-xs ${tone}`} data-testid="sync-holder-banner">
+      <span className="font-medium">
+        {overCeiling ? "Sync running past its runtime ceiling" : "Sync in flight"}
+      </span>{" "}
+      — run {run.sync_run_id} ({run.scope} / {run.trigger}), started{" "}
+      {formatRelativeTime(run.started_at)}, last progress{" "}
+      {/*
+       * ⚠ `formatRelativeTime` renders null as "—", which is the string it also
+       * uses for a value it could not parse. Beside "last progress" that reads
+       * as missing data when the truth is "this run has not reached a layer
+       * yet" — the ordinary state for the whole prelude, and for a plan with no
+       * layers. A distinct phrase keeps never-happened apart from not-known.
+       */}
+      {run.last_progress_at ? formatRelativeTime(run.last_progress_at) : "not yet — no layer has started"}
+      .
+      {overCeiling
+        ? " No further sync can start while this row holds the orchestrator singleton."
+        : null}
+    </div>
   );
 }

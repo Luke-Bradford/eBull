@@ -530,3 +530,93 @@ describe("AdminPage — PR9 decommission", () => {
     ).toBeNull();
   });
 });
+
+describe("AdminPage — sync holder banner (#2274)", () => {
+  /**
+   * The orchestrator's singleton index lets one sync run at a time, so a run
+   * stranded by a crashed worker blocks every later sync until the jobs process
+   * next boots. Nothing rendered that row before this banner — the operator's
+   * only symptom was ingest quietly stopping.
+   */
+  /**
+   * `liveness: undefined` models an OLDER BACKEND, so it must omit
+   * `last_progress_at` too — both fields ship in the same commit, which is
+   * exactly why both are optional on the wire. A fixture that always sent
+   * `last_progress_at: null` would test a response shape no deployment
+   * produces (Codex checkpoint 3).
+   */
+  function runningStatus(liveness?: "live" | "over_ceiling") {
+    return {
+      is_running: true,
+      current_run: {
+        sync_run_id: 4242,
+        scope: "behind",
+        trigger: "boot_sweep",
+        started_at: "2026-04-19T00:00:00Z",
+        ...(liveness ? { liveness, last_progress_at: null } : {}),
+        layers_planned: 3,
+        layers_done: 1,
+        layers_failed: 0,
+        layers_skipped: 0,
+      },
+      active_layer: null,
+    };
+  }
+
+  it("is absent when no sync is in flight", async () => {
+    renderPage();
+    await waitFor(() => screen.getByText("Admin"));
+    expect(screen.queryByTestId("sync-holder-banner")).toBeNull();
+  });
+
+  it("names the in-flight run so a held singleton has a subject", async () => {
+    mockedStatus.mockResolvedValue(runningStatus("live"));
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("Sync in flight");
+    expect(banner).toHaveTextContent("run 4242");
+    expect(banner).toHaveTextContent("behind");
+    expect(banner).toHaveTextContent("boot_sweep");
+  });
+
+  it("marks a run past its runtime ceiling and says what it blocks", async () => {
+    mockedStatus.mockResolvedValue(runningStatus("over_ceiling"));
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("past its runtime ceiling");
+    expect(banner).toHaveTextContent("No further sync can start");
+  });
+
+  it("distinguishes a not-yet heartbeat from an unrenderable one", async () => {
+    // `formatRelativeTime(null)` is "—", the same string it uses for a value it
+    // could not parse. Beside "last progress" that reads as missing data, when
+    // the truth is that the run has not reached a layer yet — the ordinary
+    // state for the whole prelude and for a plan with no layers.
+    mockedStatus.mockResolvedValue(runningStatus("live"));
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("no layer has started");
+    expect(banner).not.toHaveTextContent("last progress —");
+  });
+
+  it("says so when the status read fails, rather than looking idle", async () => {
+    // `useAsync` clears `data` on a failed refetch even under
+    // `preserveOnRefetch`, so without an explicit error branch a single failed
+    // poll would erase an over-ceiling warning and render identically to "no
+    // sync is running" — absence of signal shown as absence of problem.
+    mockedStatus.mockRejectedValue(new Error("boom"));
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("Sync status unavailable");
+  });
+
+  it("treats an older backend's response as live, not as a warning", async () => {
+    // Frontend deployed ahead of the backend: BOTH new fields are absent, and
+    // a missing verdict must not invent an alarm.
+    mockedStatus.mockResolvedValue(runningStatus());
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("Sync in flight");
+    expect(banner).not.toHaveTextContent("past its runtime ceiling");
+  });
+});
