@@ -763,6 +763,11 @@ class AccountEquityEvidenceView(BaseModel):
     local_eod_currency: str | None
     local_eod_value: Decimal | None
     local_eod_value_in_account_currency: Decimal | None
+    #: The local book re-priced at the broker's own per-position marks — the left operand
+    #: of `difference` since `f0-reconcile-v2` (#3068). Distinct from the field above,
+    #: which stays the stored end-of-day total merely converted; the panel needs both for
+    #: the subtraction to be checkable.
+    local_eod_value_at_official_marks: Decimal | None
     local_eod_positions_priced: int | None
     local_eod_stale_mark_positions: int | None
     difference: Decimal | None
@@ -2813,6 +2818,7 @@ def get_strategy_overview(
             local_eod_currency=account_equity.local_eod_currency,
             local_eod_value=account_equity.local_eod_value,
             local_eod_value_in_account_currency=account_equity.local_eod_value_in_account_currency,
+            local_eod_value_at_official_marks=account_equity.local_eod_value_at_official_marks,
             local_eod_positions_priced=account_equity.local_eod_positions_priced,
             local_eod_stale_mark_positions=account_equity.local_eod_stale_mark_positions,
             difference=account_equity.difference,

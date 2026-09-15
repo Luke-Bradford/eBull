@@ -1573,6 +1573,67 @@ def _parse_account_risk_snapshot(
             raise TradingPreflightParseError("account P&L position units must be positive")
         return value
 
+    def _pnl_operand(pnl_row: dict[str, Any], key: str) -> Decimal:
+        """Read a positive finite ``unrealizedPnL`` operand, failing closed (#3068).
+
+        ``closeRate`` and ``closeConversionRate`` are comparand operands -- the v2
+        reconciliation multiplies our units by the first and the result by the second --
+        so they get exactly the treatment ``units`` gets, and for the same reason: a
+        defaulted or coerced operand produces a number that looks like an observation.
+        ``bool`` is excluded before any numeric coercion because it is an ``int``
+        subclass, and a present-but-bool value is response drift rather than an omission.
+        """
+        if key not in pnl_row:
+            raise TradingPreflightParseError(f"account P&L position {key} is required")
+        if isinstance(pnl_row[key], bool):
+            raise TradingPreflightParseError(f"account P&L position {key} must be numeric")
+        try:
+            value = Decimal(str(pnl_row[key]))
+        except decimal.DecimalException as exc:
+            raise TradingPreflightParseError(f"account P&L position {key} must be numeric") from exc
+        if not value.is_finite():
+            raise TradingPreflightParseError(f"account P&L position {key} must be finite")
+        if value <= 0:
+            raise TradingPreflightParseError(f"account P&L position {key} must be positive")
+        return value
+
+    def _asset_currency_id(pnl_row: dict[str, Any]) -> int:
+        """Read the currency the close rate is quoted in, failing closed (#3068).
+
+        Unlike the ACCOUNT currency id -- which is carried as ``None`` so that its
+        absence cannot take the paper executor's cash checks down -- this one is a
+        precondition of using ``closeRate`` at all: a price whose currency is unknown
+        cannot be compared against a local close whose currency is known. Refusing the
+        parse is narrower than it looks, because the whole object is absent on the
+        non-P&L endpoint and present-and-populated on this one.
+        """
+        if "assetCurrencyId" not in pnl_row:
+            raise TradingPreflightParseError("account P&L position assetCurrencyId is required")
+        value = pnl_row["assetCurrencyId"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TradingPreflightParseError("account P&L position assetCurrencyId must be an integer")
+        if value <= 0:
+            raise TradingPreflightParseError("account P&L position assetCurrencyId must be positive")
+        return value
+
+    def _pnl_timestamp(pnl_row: dict[str, Any]) -> datetime | None:
+        """When the broker struck this mark, or ``None``. Never raises (#3068).
+
+        ⚠ Deliberately the ONLY lenient field in this row. It is evidence and not an
+        operand -- no verdict reads it -- so failing the whole snapshot over an
+        unparseable timestamp would lose the comparand to protect a diagnostic. Absence
+        is logged nowhere per-position on purpose: the value is identical across
+        positions in every observed response, so a per-row warning would be noise.
+        """
+        raw = pnl_row.get("timestamp")
+        if not isinstance(raw, str):
+            return None
+        try:
+            parsed = _parse_iso_datetime(raw)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
     def _is_partially_altered(row: dict[str, Any]) -> bool:
         if "isPartiallyAltered" not in row:
             raise TradingPreflightParseError("account P&L position isPartiallyAltered is required")
@@ -1649,7 +1710,8 @@ def _parse_account_risk_snapshot(
         for item in positions:
             row = _row(item, "positions")
             amount = _money(row, "amount")
-            pnl = _money(_row(row.get("unrealizedPnL"), "positions.unrealizedPnL"), "pnL")
+            pnl_row = _row(row.get("unrealizedPnL"), "positions.unrealizedPnL")
+            pnl = _money(pnl_row, "pnL")
             instrument_id = _instrument_id(row)
             position_id = _position_id(row)
             if position_id in direct_position_ids:
@@ -1669,6 +1731,10 @@ def _parse_account_risk_snapshot(
                     unrealized_pnl=pnl,
                     market_value=market_value,
                     is_partially_altered=is_partially_altered,
+                    close_rate=_pnl_operand(pnl_row, "closeRate"),
+                    close_conversion_rate=_pnl_operand(pnl_row, "closeConversionRate"),
+                    asset_currency_id=_asset_currency_id(pnl_row),
+                    pnl_timestamp=_pnl_timestamp(pnl_row),
                 )
             )
             total_invested += amount
@@ -1749,6 +1815,28 @@ def _parse_account_risk_snapshot(
         raise TradingPreflightParseError(f"malformed account P&L response: {exc}") from exc
 
 
+def _required_position_bool(payload: dict[str, Any], key: str) -> bool:
+    """A boolean the position cannot be stored without. Raises rather than defaults.
+
+    ``bool()`` on a JSON value is a coercion, not a read: it turns ``0``, ``""`` and
+    ``None`` into ``False`` and every other value into ``True``, so a payload that sent
+    the wrong TYPE would be stored as a confident direction. #3068.
+
+    ⚠ Raises ``ValueError``, NOT ``TradingPreflightParseError``, so this is deliberately
+    not the module's existing ``_required_bool``. ``get_portfolio`` wraps
+    ``(KeyError, ValueError, TypeError, DecimalException)`` into a ``PortfolioParseError``
+    carrying the position index and instrument id; a ``TradingPreflightParseError`` is
+    none of those, so it would escape that wrap, lose the attribution, and surface a
+    preflight-shaped error out of a portfolio sync.
+    """
+    if key not in payload:
+        raise ValueError(f"position {key} is required")
+    value = payload[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"position {key} must be a boolean")
+    return value
+
+
 def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:
     """Parse a top-level portfolio position payload into BrokerPosition.
 
@@ -1788,7 +1876,19 @@ def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:
         current_price=open_rate,
         raw_payload=payload,
         position_id=int(payload["positionID"]),
-        is_buy=bool(payload.get("isBuy", True)),
+        # ⚠⚠ FAILS CLOSED, and used to not (#3068). This read `bool(payload.get("isBuy",
+        # True))`: an ABSENT direction became LONG, and `bool()` coerced any truthy value
+        # into one. A default is not a measurement -- and `broker_positions.is_buy` is
+        # what the end-of-day valuation signs its mark-to-market with, and what the v2
+        # reconciliation compares against the broker's OWN `isBuy` as a two-endpoint
+        # check. That check is vacuous if one side can be a default.
+        #
+        # `_parse_account_risk_snapshot._is_buy` already refuses on the same grounds
+        # ("defaulting it would silently book a short as a long"); this is the sibling
+        # that was missed. `isBuy` is documented on the shared `TradingRealAdminApi_
+        # Position` schema and was present on 7/7 live demo positions (2026-09-15), so
+        # this cannot fire on a well-formed payload.
+        is_buy=_required_position_bool(payload, "isBuy"),
         amount=Decimal(str(payload.get("amount", 0))),
         initial_amount_in_dollars=initial_amount,
         open_conversion_rate=Decimal(str(payload.get("openConversionRate", 1))),

@@ -258,3 +258,423 @@ available-cash and the pending-order refusal; per-currency cash scope; `is_parti
 semantics for current-vs-initial units; read consistency when the EOD parent and child rows
 are read in separate queries while a replacement runs; and mixed-version deployment/API-label
 behaviour across the version bump.
+
+---
+
+# Revision 3 — slice 2's implementation design, and two things revision 2 got wrong
+
+Written 2026-09-15 before any slice-2 code. Revision 2's *"Design if D is taken"* is
+amended here, not restated; where the two disagree this section wins.
+
+## ⚠⚠ 1. The local terms cannot come from `broker_positions`
+
+Revision 2 wrote: *"local terms from stored `broker_positions` (`/portfolio`)"*. That is
+wrong, and not marginally.
+
+`broker_positions` is CURRENT state — `sync_portfolio` overwrites it on every run, and it
+has no snapshot date. `load_account_equity_evidence(snapshot_date=D)` is called by
+`account_reconciliation_check` up to `MAX_DECISION_LAG_DAYS = 4` days after D. Reading
+`broker_positions` there would make day D's verdict a function of the book as it stands at
+decision time — so a position opened after D would red a day it was not part of, and the
+same day would verdict differently depending on when the job happened to fire. A
+reconciliation whose inputs move after the fact is not evidence.
+
+The AS-OF record already exists: `portfolio_eod_position_snapshots` (sql/196), written in
+the same transaction as its `portfolio_eod_snapshots` parent, one row per position, holding
+`units`, `close_price`, `native_currency`, `price_status` and `mark_price_date`.
+
+## 2. With as-of local rows, D is reachable as a mark SUBSTITUTION, and needs no new
+##    local money columns
+
+For a long position, `portfolio_eod.compute_eod_equity` stores
+`value_native = amount + units × (close − open_rate)`. Substituting the official mark:
+
+```
+amount + units × (mark_official − open_rate)
+  = [amount + units × (close − open_rate)] + units × (mark_official − close)
+  =  the value already in positions_value      +  a correction term
+```
+
+`close` appears twice with opposite signs at full stored precision and cancels **exactly**
+in `Decimal`; `amount` and `open_rate` never have to be re-read. So
+
+```
+local_at_official_marks = local_total_value + Σ_p  sign(p) × units_p × (mark_official(p) − close_p)
+```
+
+with `sign = +1` long / `−1` short, which is algebraically identical to revision 2's
+formula on every position that priced, and requires only `units`, `close` and the direction
+from the local side. This is what slice 2 implements.
+
+⚠ It is identical only where the local row is `priced`. A `no_price` or `no_fx` position
+contributed nothing to `positions_value`, so there is no value to correct and the
+substitution is undefined for it — refused, not skipped (see 4).
+
+## ⚠ 3. Direction is the one local field that is not stored, and it is not borrowable
+
+The sign above needs `is_buy`. `portfolio_eod_position_snapshots` does not carry it. The
+official child row does — and taking it from there would assume the two endpoints agree on
+the direction of a position, which is precisely the class of unstated premise this ticket
+exists to remove, in a slice whose subject is an unstated premise.
+
+`sql/384` adds `is_buy BOOLEAN` (nullable) to `portfolio_eod_position_snapshots`,
+forward-only, no backfill — the same posture and precedent as `unrealised_pnl_usd`
+(sql/308) and `mark_price_date` (sql/350). NULL means the row predates sql/384 and
+**refuses**; it is never read as long. Once stored, local `is_buy` vs official `is_buy` is a
+real two-endpoint assertion.
+
+## 4. Refusals added (all of them named, none of them silent)
+
+| slug | condition |
+| --- | --- |
+| `official_position_marks_not_recorded` | zero child rows while the parent declares `official_direct_long_positions + official_direct_short_positions > 0`, or either count is NULL. Handoff item 3; 11 of 20 stored dev rows. |
+| `official_position_marks_unusable` | a child's `units` is non-finite or non-positive. ⚠ Not redundant with the table's `CHECK (units > 0)`: PostgreSQL `numeric` admits `NaN`, and orders it ABOVE every non-NaN value, so `NaN > 0` is TRUE and the CHECK passes it. |
+| `official_position_missing_locally` | in the official child set, absent from the local EOD set. |
+| `local_position_missing_officially` | the other side. Recorded separately — a count cannot say which side is short, and the two have different causes. |
+| `local_position_mark_unusable` | a matched local row that is not `priced`, or has a NULL `close_price` / `native_currency`. |
+| `local_eod_position_direction_not_recorded` | matched local row predating sql/384. |
+| `position_identity_mismatch` | same `position_id`, different `instrument_id` or different `is_buy`. |
+
+## 5. FX — one rate load, and the correction converts native → ACCOUNT, not native → display
+
+The correction term is in the position's native currency. It is converted **straight to the
+account currency** and added after `_convert_local_total` has converted the stored total
+from the display currency, rather than being pushed through display first: on the live
+configuration (display GBP, account USD, natives USD) the display round-trip would convert
+a USD correction into GBP and back for no reason.
+
+⚠ Both conversions use ONE rates dict, loaded once at the local snapshot's own
+`fx_rate_date`. Two loads at the same date are not guaranteed to be the same rates (a row
+may be revised between them), and a total and its own correction computed at different rate
+revisions is a defect with no symptom.
+
+## 6. Deliberately NOT changed
+
+- The tolerance formula and `MARK_ROUNDING_PER_UNIT`. Its magnitude is now wider than the
+  residual it guards (division and FX rounding, not a stored mark), which is the safe
+  direction; narrowing it is a measurement nobody has made.
+- `official_comparand`, and the `official_direct_short_positions_unvalued` refusal — the
+  official side still values longs only, so a short book is still undecidable.
+- `direct_position_count_mismatch`. It is NOT a duplicate of the set checks above: it
+  compares the parent's counts, which are summed from the payload's per-INSTRUMENT
+  section (`instrument_investments`), against the local count — while the set checks read
+  the per-POSITION section. Different sources, both real.
+- The units delta. A units disagreement still shows at its own value rather than becoming a
+  refusal, exactly as revision 2 argued, and it is the visible face of the unsolved
+  capture-pairing problem.
+
+## ⚠⚠ 7. The handoff's acceptance expectation is falsified — 2026-09-14 cannot reconcile
+
+#3068's slice-1 comment states: *"2026-09-14 should decide `reconciled` on a difference near
+zero rather than -204.65."* It cannot, and item 3 of the same comment is why:
+
+```sql
+select s.snapshot_date, s.official_direct_long_positions, s.official_direct_short_positions,
+       (select count(*) from broker_account_position_marks m
+         where m.environment=s.environment and m.snapshot_date=s.snapshot_date) as children,
+       (select count(*) from portfolio_eod_position_snapshots p
+         where p.snapshot_date=s.snapshot_date) as local_positions
+  from broker_account_equity_snapshots s where s.environment='demo'
+  order by s.snapshot_date desc limit 2;
+-- 2026-09-15 | 7 | 0 | 7 | 0      children, no local book
+-- 2026-09-14 | 7 | 0 | 0 | 7      local book, no children
+```
+
+09-14 predates the sql/383 writer, so it has no official marks and refuses with
+`official_position_marks_not_recorded`. 09-15 has them but no local EOD row yet
+(`MAX(price_daily.price_date)` over held instruments is still 2026-09-14). **No stored day
+currently carries both sides**, so slice 2 cannot produce a green on merge day and must not
+be written as if it will. The first decidable v2 day is the first date carrying a child set
+AND a local EOD row — 09-15 at the earliest, judged from 09-16 (`pending_reconciliation_
+dates` requires `snapshot_date < as_of`).
+
+⚠ Nothing is frozen in the meantime: the newest stored ledger row is 2026-08-26, so
+09-14's `diverged` was evaluated read-only and never written. The countdown has not in fact
+been reset by this defect — it has not started.
+
+## 8. What CAN be verified on real data now
+
+The official 09-15 child set and the local 09-14 position set have **identical
+`position_id`s and identical `units` on all seven rows**, and the 09-15 official marks are
+the Sep-14 evening marks (the row was written by the 03:34 UTC deploy catch-up). So the
+substitution can be exercised read-only across the two dates as a simulation of the
+comparison 09-14 would have made had children existed — reported as a simulation, never
+stored, and never as a verdict.
+
+---
+
+# Revision 4 — candidate D is WITHDRAWN. The broker publishes the mark.
+
+Written 2026-09-15 after Codex checkpoint 1 on revision 3, which killed the recommendation
+for the second time in this document, and after a read-only measurement of the live demo
+`/pnl` payload. Revisions 2 and 3 are superseded wherever they disagree with this one.
+
+## ⚠⚠ 1. Why D is wrong: `(amount + pnL) / units` is equity per unit, not price
+
+The portal documents `amount` as *"USD amount allocated to the position. This amount
+includes both the initial investment, **and additional margin allocated to the position as
+collateral**"* (`TradingRealAdminApi_Position.amount`). It is the position's capital, not
+`units × openRate`. The two coincide only at leverage 1 with no added collateral, and the
+derived "mark" is a price only under that coincidence.
+
+Worked, at leverage 2 — `amount` 50, `units` 1, `openRate` 100, price 110, `pnL` 10:
+
+| | value |
+| --- | --- |
+| official `amount + pnL` | 60 |
+| local `compute_eod_equity` = `amount + units × (close − open_rate)` | 60 ✅ agrees today |
+| derived "mark" `60 / 1` | 60 |
+| D's substituted local = `50 + 1 × (60 − 100)` | **10** |
+| D's `difference` | **50, on a healthy position** |
+
+**And where D does not produce a false divergence, it produces no signal at all.** With
+`units_local = units_official = u` the per-position difference reduces, algebraically, to
+
+```
+(amount_o + pnL_o) − [amount_l + u × (mark_derived − open_rate_l)]
+  = (amount_o + pnL_o) − amount_l − (amount_o + pnL_o) + u × open_rate_l
+  = u × open_rate_l − amount_l
+```
+
+— which is **identically zero exactly when the position is unleveraged with no added
+margin**, i.e. on the entire live book. Measured on the demo account 2026-09-15: all seven
+positions report `leverage: 1`, and `amount` equals `units × openRate` on every one
+(GME 1000 × 22.59 = 22590.0; IEP 244 × 8.18 = 1995.92; NXH 1305.057096 × 6.09 = 7947.8).
+So D would have shipped a value comparison that **cannot fail**, and a comparison that
+cannot fail reports green. That is strictly worse than the defect it replaces.
+
+Both points are Codex checkpoint-1 findings 1, 2 and 6, reproduced against
+`compute_eod_equity` and then against the live payload.
+
+## ⚠⚠ 2. The mark is a DOCUMENTED, POPULATED field. Third occurrence of one mistake.
+
+`TradingRealAdminApi_Position.unrealizedPnL` — the object whose `pnL` slice-1 already
+reads — documents, and the live demo response populates:
+
+| field | portal description | live 2026-09-15 |
+| --- | --- | --- |
+| `closeRate` | "Current close rate" | populated on 7/7 |
+| `closeConversionRate` | "Current close conversion rate" | 1.0 on 7/7 (USD asset, USD account) |
+| `assetCurrencyId` | "Currency ID for the asset" | 1 on 7/7 |
+| `timestamp` | "Timestamp of the PnL calculation" | `2026-09-15T04:02:27.3169794Z`, identical across positions |
+| `pnlAssetCurrency`, `exposureIn*`, `marginIn*` | — | populated |
+
+GME `closeRate` 21.54 against our 2026-09-14 close of 21.63; IEP 7.03 and NXH 3.60 against
+our 7.03 and 3.60. That is the evening mark, published, per position, with the instant it
+was struck.
+
+⚠ **This is the same error for the third time in one ticket.** Revision 1 asserted `units`
+were absent from the payload because they were absent from our parsed model; checkpoint 1
+falsified it. Revision 2 built candidate D on the field that discovery exposed — and
+asserted, implicitly, that no published mark existed, from the same evidence: our parser
+does not read one. Revision 3 repeated it. **Our parser is not evidence about the payload.**
+The measurement that settles it is one read-only GET, and it should have been the first
+step of the ticket, not the fourth.
+
+## 3. Recommendation — D′: substitute the PUBLISHED close rate
+
+```
+correction(p)            = s(p) × units_local(p) × (close_rate_official(p) − close_local(p))   [asset ccy]
+                           s = +1 long, −1 short
+local_at_official_marks  = convert(local_total_value, display → account)
+                           + Σ_p  correction(p) × close_conversion_rate_official(p)
+difference               = official_comparand − local_at_official_marks
+```
+
+This is the local formula with OUR close replaced by the BROKER's close, and nothing else
+touched. Its properties, each of which D lacked:
+
+- **Leverage- and margin-safe.** `amount` and `open_rate` are never re-derived, so the
+  identity `amount = units × openRate` is never assumed. Codex findings 1 and 2 do not
+  reach it.
+- **`close_local` cancels.** `positions_value` carries `+s·u·close_l` and the correction
+  carries `−s·u·close_l`; the subtraction is exact in `Decimal`. So the comparand does not
+  depend on our marks, which is the whole point and has a consequence in §5.
+  ⚠ Exact in the arithmetic, NOT end to end (Codex finding 7, confirmed by test): the
+  left operand is read back from `portfolio_eod_snapshots.total_value`, a `NUMERIC(20,4)`,
+  so the stored total contributes up to half a unit in its last decimal place. Measured on
+  the 2026-09-14 shape that is **2.9e-5 USD against a 31.55 tolerance**. Stated, not
+  claimed away — "cancels exactly" is the sentence a later reader would build a tighter
+  bound on.
+- **It does not degenerate.** With agreement on all fields the difference is zero; with a
+  disagreement on `units`, `amount`, `open_rate`, or the broker's P&L rule, each shows at
+  its own value. Verified against the live payload: for an unleveraged long the official
+  `amount + pnL` = `units × closeRate` (GME: 22590 − 1050 = 21540 = 1000 × 21.54 ✓), and
+  the substituted local is `units_local × closeRate`, so the residual is
+  `(units_o − units_l) × closeRate` — revision 2's claimed behaviour, which was false for D
+  (Codex finding 4) and is true for D′.
+- **Dimensionally clean.** `close_rate` is an asset-currency price, `close_local` is an
+  asset-currency close, and `close_conversion_rate` is the broker's own asset → account
+  rate. No ECB rate enters the correction, so the correction and the stored total cannot be
+  computed at different rate revisions (Codex findings 9, 12, 13, 14, 15 dissolve rather
+  than being answered).
+
+## 4. Storage and parsing
+
+`sql/385` adds to `broker_account_position_marks`: `close_rate NUMERIC(20,8)`,
+`close_conversion_rate NUMERIC(20,10)`, `asset_currency_id INTEGER` and
+`pnl_timestamp TIMESTAMPTZ`, with `CHECK (col IS NULL OR col > 0)` on the first three.
+
+⚠ **All four are NULLABLE, and an earlier draft of this section said `NOT NULL`.** They
+cannot be `NOT NULL`: seven child rows already exist from the sql/383 writer and there is
+nothing to backfill them with — a close rate is instantaneous and the payload is not
+retained, so any value written now would be a reconstruction wearing an observation's
+clothes. The constraints are therefore written `IS NULL OR ...`: they constrain what may
+be WRITTEN without asserting that every stored row has been. The READER supplies the
+requirement instead, refusing a row with a NULL operand
+(`official_position_marks_unusable`) rather than falling back to the withdrawn derivation.
+
+The first three fail closed AT THE PARSER on absent / non-numeric / non-finite /
+non-positive, on the same grounds as `units`: they are comparand operands, so nothing
+unusable is ever written in the first place.
+
+⚠ `pnl_timestamp` is stored because it is the ONLY record of the instant the mark was
+struck, and the unsolved capture-pairing problem (§7) is unmeasurable without it. It is
+deliberately not yet a refusal input — no threshold for it has been measured.
+
+`sql/384` adds `is_buy BOOLEAN` (nullable) to `portfolio_eod_position_snapshots`, because
+the correction's SIGN is local and `compute_eod_equity` was discarding it. Rationale and
+the forward-only posture are in that migration's header.
+
+⚠⚠ `_parse_direct_position` (the `/portfolio` parser behind `broker_positions`, and hence
+behind the local direction) read `is_buy=bool(payload.get("isBuy", True))` — **an absent
+direction defaulted to LONG**, and `bool()` coerced any truthy value. A stored default is
+not an observation, so the two-endpoint direction check would have been partly vacuous.
+Changed to fail closed, matching `_parse_account_risk_snapshot._is_buy`, which already
+does. `isBuy` is documented on the shared schema and present on 7/7 live positions, so
+this cannot fail on a well-formed payload. Codex finding 23.
+
+## 5. Refusals — the set, and the order they are evaluated in
+
+Precedence is explicit (Codex finding 16): **evidence presence → operand validity →
+identity → set → arithmetic**. Nothing divides before its divisor is validated, and legacy
+absence can never present as a fabricated missing-position finding.
+
+| slug | condition |
+| --- | --- |
+| `official_position_marks_not_recorded` | zero child rows while the parent declares `long + short > 0`, or either count is NULL. |
+| `official_position_marks_incomplete` | child count ≠ parent `long + short`, or child long/short counts ≠ the parent's. Catches PARTIAL child loss, which zero-child checking cannot (Codex findings 18, 19). |
+| `official_position_marks_unusable` | a child operand non-finite or non-positive. ⚠ Not redundant with the table CHECKs: PostgreSQL `numeric` admits `NaN` and orders it ABOVE every value, so `NaN > 0` passes. |
+| `local_eod_position_direction_not_recorded` | a matched local row has NULL `is_buy`. |
+| `local_position_mark_unusable` | a matched local row is not `priced`, or its `close_price` / `native_currency` / `units` is NULL, non-finite or (units) non-positive. |
+| `position_identity_mismatch` | same `position_id`, different `instrument_id`, different `is_buy`, or an `asset_currency_id` that does not map to the local row's `native_currency`. |
+| `official_position_missing_locally` | in the official child set, absent from the local EOD set. |
+| `local_position_missing_officially` | in the local EOD set, absent from the official child set. |
+
+⚠ **The set check is SYMMETRIC — both sides refuse — and an earlier draft of this section
+argued for an asymmetry that would have been a behaviour regression.** The argument was
+that a position present OFFICIALLY but not locally leaves the local total fully priced at
+broker marks, so the difference is that holding's market value and `diverged` is the
+truthful verdict. That is sound in isolation and wrong in context: the existing
+`direct_position_count_mismatch` reason ALREADY refuses that exact row today, by comparing
+the parent's declared counts against the local `positions_total`. Adopting the asymmetry
+would therefore have been a silent widening of an existing gate dressed as a construction
+argument. Both sides refuse, which is what happens now.
+
+The sides are still named SEPARATELY rather than counted, because a count cannot say which
+side is short and the two have different causes — a missing local row is a sync that has
+not run, a missing official row is a position the broker is not pricing.
+
+### Two refusals are RETIRED from this comparand, with the reason
+
+`local_eod_marks_carried_forward` and `local_eod_effective_time_unknown` no longer gate the
+v2 comparison. Both describe `close_local`, and §3 shows `close_local` cancels exactly out
+of the comparand — so they now name a quantity the verdict does not depend on. This is a
+widening and is stated as one: measured on the stored population, **4 of the 10 local
+snapshots carrying recorded mark dates have `stale_mark_positions > 0`**
+
+```sql
+select count(*) filter (where stale_mark_positions > 0), count(*)
+  from portfolio_eod_snapshots where oldest_mark_date is not null;  -- (4, 10)
+```
+
+so retaining them would refuse roughly two days in five for an irrelevance, and five
+consecutive greens would be materially harder for no gain in safety. A test asserts the
+cancellation directly: moving a local close by an arbitrary amount does not move
+`difference`.
+
+⚠ `mark_effectiveness_reasons` is DELETED rather than left unused — this was its only
+caller, so it was dead, not merely bypassed. The magnitude counters it sat beside
+(`local_eod_positions_priced`, `local_eod_stale_mark_positions`) are untouched and still
+reported: the operator keeps the information, it stops being a refusal. The FE labels for
+both slugs are kept so verdicts STORED under `f0-reconcile-v1` keep rendering.
+
+## 6. API surface — `difference` must keep adding up
+
+`local_eod_value_in_account_currency` keeps its current meaning (the stored local total,
+converted). A NEW field `local_eod_value_at_official_marks` carries the substituted
+valuation, and `difference = official_comparand − local_eod_value_at_official_marks`.
+Redefining the existing field in place would silently change a number the panel already
+shows and break its stated relationship to `difference` (Codex finding 31).
+
+## 7. Accepted limitations — recorded, not answered
+
+- **The local EOD rows are as-of at COMPUTE time, and a re-run replaces them.** Revision 3
+  called them immutable; they are not (`_write_snapshot` upserts the parent and replaces
+  the children for its resolved date, and the 2026-09-12 recovery burst re-stamped an
+  18-day-old row). This is still strictly better than `broker_positions`, which has no date
+  at all — but a decided verdict's operands can still change underneath it. Codex findings
+  27 and 29.
+- **The capture-pairing problem is untouched.** The official set is struck at the `/pnl`
+  `timestamp` and the local book at the EOD job's own time; any account activity between
+  them is a real difference on a healthy pipeline. `pnl_timestamp` is now stored so the
+  window can be measured, which is the prerequisite for closing it.
+- **Structural mismatches refuse rather than diverge**, and a refusal is retryable inside
+  the grace window where a divergence is not (Codex finding 17). A persistent structural
+  disagreement therefore never yields a green rather than immediately failing one.
+- **The sided diagnostics revision 2 promised are NOT stored.** The side is carried in the
+  refusal slug; per-position deltas and units deltas have no storage design and none is
+  invented here (Codex finding 30).
+- **`compute_eod_equity` treats the broker's USD `amount` as native currency** and uses the
+  ECB display rate on the resulting value (Codex finding 10). Pre-existing, unchanged here,
+  and harmless while every holding is USD-denominated. Noted on the PR.
+- **`portfolio_eod_*` has no `environment` column**, so the loader's `real` branch would
+  consume the demo local book; the countdown is demo-only and unaffected (Codex finding 32).
+- Deferred and still deferred: partial-close basis, `pnlVersion`, fees/dividends,
+  settlement type, per-currency cash scope, `credit`-vs-documented-available-cash.
+
+## 8. Corrections to revision 3's factual claims
+
+- **The parent counts are NOT an independent source.** `_parse_account_risk_snapshot`
+  accumulates `direct_long_count` / `direct_short_count` and appends `direct_positions`
+  inside the SAME `for item in positions:` loop (`etoro_broker.py:1649`). Revision 3 claimed
+  a separate per-instrument payload section; there is none. `direct_position_count_mismatch`
+  is retained as a storage-consistency check, not as a second source (Codex finding 33).
+- **"11 of 20 rows are missing evidence" understates it.** Eleven lack the parent count
+  columns; every snapshot with populated counts but no sql/383 children also refuses, which
+  on the stored population is every row before 2026-09-15 (Codex finding 34).
+- **"Up to 4 days" is the STREAK bound, not the evaluation bound.** `CALENDAR_LOOKBACK_DAYS`
+  = 4 + 12 + 14 = 30, and the replay scan covers it; `MAX_DECISION_LAG_DAYS` limits whether
+  a decision counts toward the streak (Codex finding 35).
+- Revision 3's §7 conclusion stands but its query does not establish it on its own
+  (`LIMIT 2`, and zero local children does not by itself prove no local parent). The claim
+  that no stored day carries both sides is re-established over the full stored population,
+  not two rows (Codex finding 37).
+
+## 9. Checkpoint 2 — one P2, and it corrected §7's read-consistency reasoning
+
+Codex's pre-push pass returned a single finding, on the multi-query read. §7 had recorded
+read consistency as an accepted limitation on the grounds that the race is structurally
+excluded: `record_account_equity_snapshot` only ever accepts a write for TODAY, and the
+countdown only decides days strictly before today.
+
+That argument covers the OFFICIAL side and **not the local one**, which is the side that
+actually moves. `portfolio_eod._write_snapshot` upserts the parent and replaces the
+children for whatever date it resolves — and that can be a past date: the 2026-09-12
+recovery burst re-stamped a row 18 days old. So a recompute committing between the totals
+statement and the position queries hands the loader one snapshot's TOTAL beside another's
+MARKS, the correction subtracts closes that never contributed to it, and
+`run_reconciliation_check` freezes the result.
+
+Fixed by pairing rather than by isolation: `_reread_write_stamps` re-reads
+`broker_account_equity_snapshots.recorded_at` and `portfolio_eod_snapshots.computed_at`
+after the position reads and refuses with `reconciliation_inputs_changed_during_read` if
+either moved. Both writers bump their stamp in the same transaction as their rows, so an
+unchanged pair proves no version boundary was crossed.
+
+⚠ `snapshot_read` was NOT used, and the reason is specific: it COMMITS the caller's
+pending transaction before switching isolation, and this loader runs inside
+`run_reconciliation_check`'s transaction — buying read consistency that way would commit a
+job's in-flight work as a side effect. A refusal is also the recoverable outcome here: the
+ledger re-decides an undecided day on the next pass, so refusing costs a day and a wrong
+`reconciled` costs the control.

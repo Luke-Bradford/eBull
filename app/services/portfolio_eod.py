@@ -74,6 +74,16 @@ class PositionResult:
     unrealised_pnl_usd: Decimal | None = None
     #: Carried through from ``PositionInput`` unchanged — evidence, not a decision.
     mark_price_date: date | None = None
+    #: Direction as this valuation used it (#3068, sql/384). Stored because the v2
+    #: reconciliation comparand re-prices the position at the broker's own mark and the
+    #: correction's SIGN depends on it — ``compute_eod_equity`` branched on it and then
+    #: discarded it, which left the direction recoverable only from ``broker_positions``,
+    #: a table with no snapshot date that every sync overwrites.
+    #:
+    #: ⚠ Defaults to ``None`` rather than ``True``: a default of "long" would make a
+    #: construction that forgot to pass it indistinguishable from a real long position,
+    #: which is the failure this column exists to make impossible.
+    is_buy: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +214,7 @@ def compute_eod_equity(
                     None,
                     "no_price",
                     mark_price_date=p.mark_price_date,
+                    is_buy=p.is_buy,
                 )
             )
             continue
@@ -232,6 +243,7 @@ def compute_eod_equity(
                     "no_fx",
                     unrealised_pnl_usd,
                     mark_price_date=p.mark_price_date,
+                    is_buy=p.is_buy,
                 )
             )
             continue
@@ -252,6 +264,7 @@ def compute_eod_equity(
                     "no_fx",
                     unrealised_pnl_usd,
                     mark_price_date=p.mark_price_date,
+                    is_buy=p.is_buy,
                 )
             )
             continue
@@ -279,6 +292,7 @@ def compute_eod_equity(
                 "priced",
                 unrealised_pnl_usd,
                 mark_price_date=p.mark_price_date,
+                is_buy=p.is_buy,
             )
         )
 
@@ -520,8 +534,8 @@ def _write_snapshot(
                 INSERT INTO portfolio_eod_position_snapshots (
                     snapshot_date, position_id, instrument_id, units,
                     close_price, native_currency, value_display, price_status,
-                    unrealised_pnl_usd, mark_price_date
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    unrealised_pnl_usd, mark_price_date, is_buy
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     (
@@ -535,6 +549,7 @@ def _write_snapshot(
                         r.price_status,
                         r.unrealised_pnl_usd,
                         r.mark_price_date,
+                        r.is_buy,
                     )
                     for r in equity.position_results
                 ],

@@ -477,6 +477,29 @@ class BrokerDirectPositionInvestment:
     unrealized_pnl: Decimal
     market_value: Decimal
     is_partially_altered: bool
+    #: ⚠⚠ THE MARK. ``(amount + unrealized_pnl) / units`` is NOT one -- that is equity per
+    #: unit, and ``amount`` is documented to include "additional margin allocated to the
+    #: position as collateral", so the two coincide only at leverage 1 with no added
+    #: collateral. Worse, where they do coincide the substitution they feed reduces to
+    #: ``units * open_rate_local - amount_local``, which is identically zero on an
+    #: unleveraged book -- a comparison that cannot fail (#3068 revision 4).
+    #:
+    #: ``unrealizedPnL.closeRate`` -- "Current close rate" -- is the broker's own price
+    #: for this position at the instant the snapshot was taken, in the ASSET currency.
+    #: Populated on 7/7 live demo positions, 2026-09-15.
+    close_rate: Decimal
+    #: ``unrealizedPnL.closeConversionRate``, asset currency -> account currency at the
+    #: SAME instant. Used in preference to our daily ECB rate so a correction and the rate
+    #: applied to it cannot come from two different observations.
+    close_conversion_rate: Decimal
+    #: ``unrealizedPnL.assetCurrencyId``. Carried raw and mapped by the consumer: an id we
+    #: have no documented code for must refuse, not be guessed.
+    asset_currency_id: int
+    #: ``unrealizedPnL.timestamp`` -- when the broker struck the mark. EVIDENCE, not an
+    #: operand: nothing reads it for a verdict. It exists so the gap between this capture
+    #: and the local end-of-day book can be measured. ``None`` when absent or unparseable,
+    #: because a missing timestamp must not take down a comparand that does not use it.
+    pnl_timestamp: datetime | None = None
 
 
 @dataclass(frozen=True)

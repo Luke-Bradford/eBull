@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -52,7 +53,19 @@ class AccountEquityEvidenceError(ValueError):
 #:
 #: ⚠⚠ Widening it is a VERSION BUMP, never an edit to a constant. Editing a constant in
 #: place silently re-verdicts every past comparison, including ones already read.
-RECONCILIATION_RULE_VERSION = "f0-reconcile-v1"
+#:
+#: ⚠⚠ ``v2`` (2026-09-15, #3068) — the COMPARAND changed, not the tolerance. ``v1``
+#: compared the broker's 23:55 UTC valuation against the same holdings marked at the
+#: regular-session close, and its one-cent-per-unit allowance modelled rounding of one
+#: mark against the SAME mark, with no term for the two being struck at different
+#: instants. Measured on 2026-09-14, the countdown's first session: ``diverged``,
+#: ``difference`` −204.65 against ``tolerance`` 31.56, no incomplete reasons, and the
+#: whole of it attributable to two evening-quoted names. ``v2`` re-prices the local book
+#: at the broker's own published ``closeRate`` per position, so our mark cancels out of
+#: the comparand entirely. The bump RESETS THE COUNTDOWN by construction, which is
+#: intended (settled decision 2026-09-13) and free today: both stored greens (08-24,
+#: 08-25) are already outside ``MAX_EVIDENCE_AGE_DAYS``.
+RECONCILIATION_RULE_VERSION = "f0-reconcile-v2"
 
 #: Cash leg of the tolerance. Both sides carry the same ledger in the same currency, so
 #: only rounding is allowed for -- the line `portfolio_sync._CASH_SYNC_TOLERANCE` already
@@ -110,6 +123,16 @@ class AccountEquityEvidence:
     local_eod_currency: str | None
     local_eod_value: Decimal | None
     local_eod_value_in_account_currency: Decimal | None
+    #: The local book RE-PRICED at the broker's own per-position marks — the actual left
+    #: operand of ``difference`` since ``f0-reconcile-v2`` (#3068).
+    #:
+    #: ⚠ A SEPARATE field rather than a redefinition of the one above, deliberately.
+    #: ``local_eod_value_in_account_currency`` is the stored end-of-day total converted,
+    #: and the panel already shows it; silently changing what it means would leave a
+    #: number the operator recognises standing beside a ``difference`` it no longer
+    #: explains. ``difference = official_comparand − local_eod_value_at_official_marks``
+    #: and that subtraction must be checkable on the panel.
+    local_eod_value_at_official_marks: Decimal | None
     local_eod_positions_priced: int | None
     local_eod_stale_mark_positions: int | None
     difference: Decimal | None
@@ -299,8 +322,9 @@ def _replace_position_marks(
             """
             INSERT INTO broker_account_position_marks (
                 environment,snapshot_date,position_id,instrument_id,is_buy,
-                units,amount,unrealized_pnl,market_value,is_partially_altered
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                units,amount,unrealized_pnl,market_value,is_partially_altered,
+                close_rate,close_conversion_rate,asset_currency_id,pnl_timestamp
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             [
                 (
@@ -314,58 +338,14 @@ def _replace_position_marks(
                     position.unrealized_pnl,
                     position.market_value,
                     position.is_partially_altered,
+                    position.close_rate,
+                    position.close_conversion_rate,
+                    position.asset_currency_id,
+                    position.pnl_timestamp,
                 )
                 for position in positions
             ],
         )
-
-
-def mark_effectiveness_reasons(
-    *,
-    snapshot_date: date,
-    oldest_mark_date: date | None,
-    positions_priced: int,
-) -> tuple[str, ...]:
-    """Name what is unknown about WHEN the local valuation's marks were effective.
-
-    #2602 item 4. Until ``sql/350`` this function did not exist and its caller
-    appended ``local_eod_effective_time_unknown`` **unconditionally**, on the
-    reasoning that ``computed_at`` records when the local job ran rather than
-    when its closing prices were effective. That was true, and it was permanent
-    by construction — nothing recorded the marks' dates, so no evidence could
-    ever retire the caveat. ``portfolio_eod`` now stores them, so the caveat is
-    measured and usually absent.
-
-    ⚠ A DATE, not a timestamp, is the defensible effective time here. The marks
-    are daily closes, and "the close of session D" identifies a market instant
-    exactly; a wall-clock stamp would add precision the input does not have.
-    What the date does NOT settle is whether a same-day bar was final when it was
-    read — deliberately not modelled, because on this corpus it does not arise
-    (``max(price_daily.price_date)`` trails ``current_date``, and the EOD job
-    runs after the US close). Inventing a refusal for a state we have never
-    observed would be the mirror of the defect this replaces.
-
-    ⚠ ``local_eod_effective_time_unknown`` keeps its slug rather than gaining a
-    clearer one. It now means exactly one thing — the row predates ``sql/350`` —
-    and renaming it would make the pre-migration rows, which are the only rows it
-    can describe, read as a new condition.
-    """
-    if oldest_mark_date is None:
-        # Two shapes, one of which is not a caveat at all: no priced position
-        # means nothing carried a mark, so there is no effective time to be
-        # unknown (an all-cash snapshot, or one whose positions all failed to
-        # price — the latter already reported by `local_eod_valuation_incomplete`).
-        return ("local_eod_effective_time_unknown",) if positions_priced > 0 else ()
-    if oldest_mark_date < snapshot_date:
-        # The total is stamped `snapshot_date` but at least one of its inputs is
-        # older, so the valuation is a blend of sessions. ⚠ The verdict is taken
-        # from the DATE BOUND alone and not from `stale_mark_positions`, which
-        # would be a second source of truth for the same fact and could disagree
-        # with it. The count is stored for magnitude — "3 of 7 positions" is what
-        # makes the caveat actionable — and is deliberately not a decision input.
-        return ("local_eod_marks_carried_forward",)
-    # Every priced mark is on the snapshot's own session. Nothing to caveat.
-    return ()
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -407,6 +387,273 @@ def official_direct_position_reasons(
         # any are outstanding, and that presents as a valuation error if not named.
         reasons.append("official_pending_orders_outstanding")
     return tuple(dict.fromkeys(reasons))
+
+
+@dataclass(frozen=True)
+class OfficialPositionMark:
+    """One official per-position mark, as stored by ``_replace_position_marks``.
+
+    ⚠ Every operand is OPTIONAL on this type and required by the rule. The columns are
+    nullable because ``sql/385`` could not backfill them, so "the row exists" and "the row
+    is usable" are different questions and the type must be able to express the gap.
+    """
+
+    position_id: int
+    instrument_id: int
+    is_buy: bool
+    close_rate: Decimal | None
+    close_conversion_rate: Decimal | None
+    asset_currency_id: int | None
+
+
+@dataclass(frozen=True)
+class LocalPositionMark:
+    """One local end-of-day position, as ``portfolio_eod._write_snapshot`` stored it."""
+
+    position_id: int
+    instrument_id: int
+    is_buy: bool | None
+    units: Decimal | None
+    close_price: Decimal | None
+    native_currency: str | None
+    price_status: str
+
+
+@dataclass(frozen=True)
+class MarkSubstitution:
+    """The account-currency correction that re-prices the local book at broker marks."""
+
+    #: ``None`` exactly when ``reasons`` is non-empty.
+    correction: Decimal | None
+    reasons: tuple[str, ...]
+
+
+def _usable(value: Decimal | None) -> bool:
+    """A money/price operand that may be multiplied. ⚠ ``is_finite`` is NOT redundant with
+    the table's ``CHECK (... > 0)``: PostgreSQL ``numeric`` admits ``NaN`` and orders it
+    ABOVE every non-NaN value, so ``NaN > 0`` is TRUE and passes the constraint."""
+    return value is not None and value.is_finite()
+
+
+def substitute_official_marks(
+    *,
+    official: Sequence[OfficialPositionMark],
+    local: Sequence[LocalPositionMark],
+    declared_long: int | None,
+    declared_short: int | None,
+) -> MarkSubstitution:
+    """Re-price the local book at the broker's own marks. Pure (#3068).
+
+    The local end-of-day value of a position is ``amount + s × units × (close_local −
+    open_rate)`` (``portfolio_eod.compute_eod_equity``, ``s = +1`` long / ``−1`` short).
+    Replacing our close with the broker's published one adds
+
+        ``s × units_local × (close_rate_official − close_local) × close_conversion_rate``
+
+    and nothing else: ``amount`` and ``open_rate`` are untouched, so no relationship
+    between them is assumed, and ``close_local`` cancels — it appears once with each sign
+    and the subtraction is exact in ``Decimal``. The comparand therefore does not depend
+    on our marks, which is the entire point of #3068 and why the two mark-effectiveness
+    caveats no longer gate this comparison.
+
+    ⚠ The cancellation is exact in the ARITHMETIC and not quite exact END TO END, because
+    the left-hand side is read back from ``portfolio_eod_snapshots.total_value``, which is
+    ``NUMERIC(20,4)``. The stored total therefore contributes up to half a unit in its
+    last decimal place, converted at the display→account rate. Measured on the 2026-09-14
+    shape that residual is 2.9e-5 USD against a 31.55 tolerance; it is stated rather than
+    claimed away, because "cancels exactly" is the kind of sentence a later reader builds
+    a tighter bound on.
+
+    ⚠⚠ ``(amount + unrealized_pnl) / units`` is NOT an acceptable substitute for
+    ``close_rate`` and this function must never be rewritten to use it. That quotient is
+    equity per unit; ``amount`` is documented to include "additional margin allocated to
+    the position as collateral", so it equals ``units × openRate`` only at leverage 1 with
+    no added collateral. At leverage 2 it invents a difference on a healthy position, and
+    at leverage 1 the substitution it feeds reduces algebraically to
+    ``units × open_rate_local − amount_local`` — identically zero on an unleveraged book,
+    i.e. a comparison that cannot fail. Both measured; see the proposal's revision 4.
+
+    ⚠ The broker's own ``close_conversion_rate`` is used rather than our daily ECB rate,
+    so the correction and the rate applied to it come from ONE observation. Our rates keep
+    converting the stored local total, which is unchanged behaviour.
+
+    Evaluated in a fixed precedence — evidence presence, then operand validity, then
+    identity, then set membership, then arithmetic — so that a legacy row's ABSENCE can
+    never present as a fabricated missing-position finding, and nothing multiplies or
+    divides before its operands have been checked.
+    """
+    reasons: list[str] = []
+    declared = None if declared_long is None or declared_short is None else declared_long + declared_short
+
+    if not official:
+        # ⚠ Zero children is ambiguous on its own and the parent is the discriminator
+        # (sql/383). An empty official book would otherwise reconcile against an empty
+        # local side and manufacture a green out of a snapshot that recorded nothing.
+        if declared is None or declared > 0:
+            return MarkSubstitution(None, ("official_position_marks_not_recorded",))
+        if local:
+            return MarkSubstitution(None, ("local_position_missing_officially",))
+        return MarkSubstitution(Decimal("0"), ())
+
+    official_long = sum(1 for mark in official if mark.is_buy)
+    if declared is None or len(official) != declared or official_long != declared_long:
+        # Catches PARTIAL child loss, which zero-child checking cannot see: a child set
+        # that lost rows still pairs with matching local rows and would substitute
+        # cleanly for the survivors while the parent's value covers all of them.
+        reasons.append("official_position_marks_incomplete")
+
+    by_id: dict[int, LocalPositionMark] = {row.position_id: row for row in local}
+    correction = Decimal("0")
+    for mark in official:
+        if not _usable(mark.close_rate) or not _usable(mark.close_conversion_rate):
+            reasons.append("official_position_marks_unusable")
+            continue
+        asset_currency = (
+            None if mark.asset_currency_id is None else DOCUMENTED_ACCOUNT_CURRENCIES.get(mark.asset_currency_id)
+        )
+        if asset_currency is None:
+            # An id with no documented code cannot be compared against the local row's
+            # currency, and guessing one would make the guess indistinguishable from an
+            # observation — the posture sql/341 already takes on the parent.
+            reasons.append("official_position_marks_unusable")
+            continue
+        row = by_id.get(mark.position_id)
+        if row is None:
+            # In the official set, absent locally. The official comparand covers it and
+            # the local total does not, so the books disagree structurally.
+            reasons.append("official_position_missing_locally")
+            continue
+        if row.is_buy is None:
+            reasons.append("local_eod_position_direction_not_recorded")
+            continue
+        if (
+            row.instrument_id != mark.instrument_id
+            or row.is_buy != mark.is_buy
+            or row.native_currency != asset_currency
+        ):
+            # Same position id, different position. ⚠ The currency arm is not cosmetic:
+            # matching ids and directions do not establish that the two sides agree on
+            # what currency the price is quoted in, and the correction is a price
+            # difference.
+            reasons.append("position_identity_mismatch")
+            continue
+        if (
+            row.price_status != "priced"
+            or not _usable(row.close_price)
+            or not _usable(row.units)
+            or (row.units is not None and row.units <= 0)
+        ):
+            # Nothing of this position reached `positions_value`, so there is no value to
+            # correct. Its absence from the total is already under-stated against an
+            # official side that includes it.
+            reasons.append("local_position_mark_unusable")
+            continue
+        assert row.units is not None and row.close_price is not None  # narrowed by `_usable`
+        assert mark.close_rate is not None and mark.close_conversion_rate is not None
+        sign = Decimal("1") if mark.is_buy else Decimal("-1")
+        correction += sign * row.units * (mark.close_rate - row.close_price) * mark.close_conversion_rate
+
+    official_ids = {mark.position_id for mark in official}
+    if any(row.position_id not in official_ids for row in local):
+        # Locally held, no official mark: its value sits in the local total at OUR close
+        # with nothing to substitute, so the comparand as defined is not computable.
+        reasons.append("local_position_missing_officially")
+
+    if reasons:
+        return MarkSubstitution(None, tuple(dict.fromkeys(reasons)))
+    return MarkSubstitution(correction, ())
+
+
+def _reread_write_stamps(
+    conn: psycopg.Connection[Any], *, environment: str, snapshot_date: date
+) -> tuple[datetime | None, datetime | None]:
+    """``(broker recorded_at, local computed_at)`` as they stand right now.
+
+    ⚠⚠ THE PAIRING GUARD, and it is load-bearing rather than defensive. The totals come
+    from one statement and the per-position rows from two more, on a READ COMMITTED
+    connection — so a writer that commits in between hands this function one snapshot's
+    TOTAL beside a different snapshot's MARKS. The correction would then subtract closes
+    that never contributed to that total, and `run_reconciliation_check` would freeze the
+    resulting verdict permanently.
+
+    ⚠ It is not a theoretical race on the local side. `portfolio_eod._write_snapshot`
+    upserts the parent and replaces the children for whatever date it resolves, which can
+    be a PAST one — the 2026-09-12 recovery burst re-stamped a row 18 days old. (The
+    official side is narrower: `record_account_equity_snapshot` only ever accepts a write
+    for today. Guarded anyway, because "only today" is a property of another module's
+    `WHERE` clause.)
+
+    ⚠ `snapshot_read` is deliberately NOT used. It COMMITS the caller's pending
+    transaction before switching isolation, and this loader is called from inside
+    `run_reconciliation_check`'s transaction — so buying read consistency that way would
+    commit a job's in-flight work as a side effect. Both writers bump their stamp in the
+    same transaction as their rows, so an unchanged stamp across the whole read proves no
+    version boundary was crossed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT recorded_at FROM broker_account_equity_snapshots WHERE environment=%s AND snapshot_date=%s",
+            (environment, snapshot_date),
+        )
+        official = cur.fetchone()
+        cur.execute(
+            "SELECT computed_at FROM portfolio_eod_snapshots WHERE snapshot_date=%s",
+            (snapshot_date,),
+        )
+        local = cur.fetchone()
+    return (
+        None if official is None else official[0],
+        None if local is None else local[0],
+    )
+
+
+def _read_official_position_marks(
+    conn: psycopg.Connection[Any], *, environment: str, snapshot_date: date
+) -> tuple[OfficialPositionMark, ...]:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT position_id,instrument_id,is_buy,close_rate,close_conversion_rate,asset_currency_id
+            FROM broker_account_position_marks
+            WHERE environment=%s AND snapshot_date=%s
+            """,
+            (environment, snapshot_date),
+        )
+        return tuple(
+            OfficialPositionMark(
+                position_id=int(row["position_id"]),
+                instrument_id=int(row["instrument_id"]),
+                is_buy=bool(row["is_buy"]),
+                close_rate=_decimal(row["close_rate"]),
+                close_conversion_rate=_decimal(row["close_conversion_rate"]),
+                asset_currency_id=None if row["asset_currency_id"] is None else int(row["asset_currency_id"]),
+            )
+            for row in cur.fetchall()
+        )
+
+
+def _read_local_position_marks(conn: psycopg.Connection[Any], *, snapshot_date: date) -> tuple[LocalPositionMark, ...]:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT position_id,instrument_id,is_buy,units,close_price,native_currency,price_status
+            FROM portfolio_eod_position_snapshots
+            WHERE snapshot_date=%s
+            """,
+            (snapshot_date,),
+        )
+        return tuple(
+            LocalPositionMark(
+                position_id=int(row["position_id"]),
+                instrument_id=int(row["instrument_id"]),
+                is_buy=None if row["is_buy"] is None else bool(row["is_buy"]),
+                units=_decimal(row["units"]),
+                close_price=_decimal(row["close_price"]),
+                native_currency=None if row["native_currency"] is None else str(row["native_currency"]),
+                price_status=str(row["price_status"]),
+            )
+            for row in cur.fetchall()
+        )
 
 
 def _convert_local_total(
@@ -493,6 +740,7 @@ def load_account_equity_evidence(
                    coalesce(local.positions_no_price,0) > 0
                      OR coalesce(local.positions_no_fx,0) > 0
                      OR coalesce(local.cash_no_fx_currencies,0) > 0 AS local_valuation_incomplete,
+                   chosen.recorded_at,local.computed_at,
                    local.oldest_mark_date,local.positions_priced,local.stale_mark_positions,
                    local.positions_total,local.mark_rounding_tolerance
             FROM chosen
@@ -521,6 +769,7 @@ def load_account_equity_evidence(
             local_eod_currency=None,
             local_eod_value=None,
             local_eod_value_in_account_currency=None,
+            local_eod_value_at_official_marks=None,
             local_eod_positions_priced=None,
             local_eod_stale_mark_positions=None,
             difference=None,
@@ -567,19 +816,48 @@ def load_account_equity_evidence(
     )
 
     local_in_account_currency: Decimal | None = None
+    local_at_official_marks: Decimal | None = None
     tolerance: Decimal | None = None
     if local_value is None:
         reasons.append("same_day_local_eod_snapshot_missing")
     else:
         if bool(row["local_valuation_incomplete"]):
             reasons.append("local_eod_valuation_incomplete")
-        reasons.extend(
-            mark_effectiveness_reasons(
-                snapshot_date=observed_date,
-                oldest_mark_date=row["oldest_mark_date"],
-                positions_priced=int(row["positions_priced"]),
-            )
+        # ⚠⚠ `mark_effectiveness_reasons` USED TO BE CALLED HERE and has been DELETED
+        # (#3068). Its two slugs — `local_eod_marks_carried_forward` and
+        # `local_eod_effective_time_unknown` — both describe `close_price`, and since
+        # `f0-reconcile-v2` the comparand re-prices every position at the broker's own
+        # mark: `close_price` enters `positions_value` with one sign and the correction
+        # with the other, so a carried-forward or undated local mark cannot move
+        # `difference`. This was its only caller, so the function was dead, not merely
+        # unused here.
+        #
+        # This is a WIDENING and it is deliberate. Measured on the stored population, 4 of
+        # the 10 local snapshots carrying recorded mark dates have
+        # `stale_mark_positions > 0`, so retaining the caveat as a refusal would block
+        # roughly two days in five of a five-day countdown, over a quantity the verdict
+        # provably does not read. The magnitude counters
+        # (`local_eod_positions_priced`, `local_eod_stale_mark_positions`) are unchanged
+        # and still reported — the operator keeps the information, it just stops being a
+        # refusal. The FE labels for both slugs are kept so that verdicts STORED under
+        # `f0-reconcile-v1`, which still carry them, keep rendering.
+        marks = substitute_official_marks(
+            official=_read_official_position_marks(conn, environment=environment, snapshot_date=observed_date),
+            local=_read_local_position_marks(conn, snapshot_date=observed_date),
+            declared_long=direct_long_positions,
+            declared_short=direct_short_positions,
         )
+        if _reread_write_stamps(conn, environment=environment, snapshot_date=observed_date) != (
+            row["recorded_at"],
+            row["computed_at"],
+        ):
+            # A writer committed while this comparison was being assembled, so the totals
+            # and the marks may be from different versions. Refuse and re-decide on the
+            # next pass rather than freeze a verdict computed across a boundary — the
+            # ledger only writes an UNDECIDED day again, so a refusal is recoverable and a
+            # wrong `reconciled` is not.
+            reasons.append("reconciliation_inputs_changed_during_read")
+        reasons.extend(marks.reasons)
         if mark_rounding_tolerance is None:
             reasons.append("mark_rounding_tolerance_not_recorded")
         elif mark_rounding_tolerance < 0:
@@ -611,14 +889,22 @@ def load_account_equity_evidence(
                 reasons.append(fx_reason)
             elif converted_tolerance is not None:
                 tolerance = converted_tolerance + CASH_ROUNDING_TOLERANCE
+            if local_in_account_currency is not None and marks.correction is not None:
+                # ⚠ The correction is already in the ACCOUNT currency — the broker's own
+                # `close_conversion_rate` carried it there — so it is added AFTER the
+                # display→account conversion rather than being pushed through the display
+                # currency first. Routing it through display would convert it with our
+                # ECB rate and back again for no reason, and on the live configuration
+                # (display GBP, account USD, assets USD) that is a pure round trip.
+                local_at_official_marks = local_in_account_currency + marks.correction
 
     official_comparand = (
         None if direct_long_market_value is None else official_available_cash + direct_long_market_value
     )
     difference = (
         None
-        if official_comparand is None or local_in_account_currency is None
-        else official_comparand - local_in_account_currency
+        if official_comparand is None or local_at_official_marks is None
+        else official_comparand - local_at_official_marks
     )
     incomplete_reasons = tuple(dict.fromkeys(reasons))
     decided = not incomplete_reasons and difference is not None and tolerance is not None
@@ -648,6 +934,7 @@ def load_account_equity_evidence(
         local_eod_currency=local_currency,
         local_eod_value=local_value,
         local_eod_value_in_account_currency=local_in_account_currency,
+        local_eod_value_at_official_marks=local_at_official_marks,
         local_eod_positions_priced=None if row["positions_priced"] is None else int(row["positions_priced"]),
         local_eod_stale_mark_positions=(
             None if row["stale_mark_positions"] is None else int(row["stale_mark_positions"])
