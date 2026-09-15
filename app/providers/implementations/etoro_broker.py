@@ -1554,8 +1554,15 @@ def _parse_account_risk_snapshot(
         looks like an observation. ``_instrument_id`` already fails closed on the same
         "documented, required, must be positive" grounds.
         """
-        if "units" not in row or isinstance(row["units"], bool):
+        if "units" not in row:
             raise TradingPreflightParseError("account P&L position units is required")
+        # ⚠ Separate branch from absence on purpose: a present-but-bool `units` is
+        # response drift, not an omission, and `Decimal(str(True))` is `Decimal('True')`
+        # -- which raises anyway, but under a message that would send a reader looking
+        # for a missing field. `bool` is a subclass of `int`, so it must be excluded
+        # before any numeric coercion.
+        if isinstance(row["units"], bool):
+            raise TradingPreflightParseError("account P&L position units must be numeric")
         try:
             value = Decimal(str(row["units"]))
         except decimal.DecimalException as exc:
