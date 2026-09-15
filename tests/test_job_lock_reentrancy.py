@@ -6,17 +6,34 @@ Six tests covering the new same-source re-entrancy contract added to
 ``app/jobs/locks.py::JobLock`` plus the ``test_only_per_name`` escape
 hatch invariant.
 
-Tests that only exercise advisory locks use ``settings.database_url``
-directly — advisory locks are cluster-wide, not database-scoped, and no
-rows are written. Tests that go through ``_run_with_lock`` /
-``_latest_job_outcome`` (which write/read ``job_runs`` rows) monkeypatch
-``settings.database_url`` to ``test_database_url()`` and use
-``ebull_test_conn`` for per-test cleanup so the dev DB is never touched.
+⚠ **Postgres advisory locks are PER-DATABASE, not cluster-wide** (#2224
+residual 3). Until 2026-09-15 this module said the opposite and used
+``settings.database_url`` for every acquire that wrote no rows, on the
+premise that the database choice could not matter. It does. Measured on
+this cluster (PG 17.9): two sessions on the SAME database contend
+(``True``/``False``), two sessions on DIFFERENT databases in the same
+cluster both acquire (``True``/``True``) — which matches
+``app/jobs/locks.py::probe_jobs_process_running``, whose docstring has
+carried the correct statement since #1233, and ``pg_lock``'s own
+``SET_LOCKTAG_ADVISORY(tag, MyDatabaseId, ...)``.
 
-The same ``xdist_group`` marker as ``tests/test_joblock_per_source.py``
-serialises this module onto a single xdist worker — Postgres advisory
-locks are cluster-wide and parallel workers competing for the same
-``hashtext('job_source:db')`` would otherwise see cross-test contention.
+The consequence was bidirectional and both halves were live: the running
+jobs daemon holds ``job_source:etoro`` on ``ebull`` ~8.8% of wall clock,
+so it intermittently broke these tests (as a misleading ``TimeoutError``
+from the cross-thread helper, not ``JobAlreadyRunning``); and while a
+test held that key, a real ``execute_approved_orders`` fire on the
+operator's dev daemon could not acquire it.
+
+Every acquire therefore targets ``test_database_url()`` — the per-worker
+private DB on the SEPARATE ``postgres-test`` cluster. Tests that go
+through ``_run_with_lock`` / ``_latest_job_outcome`` (which write/read
+``job_runs`` rows) additionally monkeypatch ``settings.database_url``,
+because that production code reads the setting internally.
+
+The ``xdist_group`` marker shared with ``tests/test_joblock_per_source.py``
+is retained: per-worker DBs make cross-worker contention impossible for
+these modules today, but the marker is cheap insurance against a future
+test here acquiring on a shared DB, and removing it is not this fix.
 """
 
 from __future__ import annotations
@@ -57,7 +74,7 @@ def test_same_source_reentrant_bypasses_pg_lock() -> None:
     """
     real_connect = psycopg.connect
 
-    with JobLock(settings.database_url, "orchestrator_full_sync"):
+    with JobLock(test_database_url(), "orchestrator_full_sync"):
         # Count connect calls made FROM app.jobs.locks during the inner
         # acquire. Other modules may legitimately open connections;
         # patching the symbol on app.jobs.locks scopes the count.
@@ -68,7 +85,7 @@ def test_same_source_reentrant_bypasses_pg_lock() -> None:
             return real_connect(*args, **kwargs)  # type: ignore[arg-type]
 
         with patch("app.jobs.locks.psycopg.connect", side_effect=counting_connect):
-            with JobLock(settings.database_url, "fx_rates_refresh") as inner:
+            with JobLock(test_database_url(), "fx_rates_refresh") as inner:
                 assert inner._reentrant is True, "inner JobLock should have bypassed via re-entrancy"
 
         assert connect_calls == [], (
@@ -93,12 +110,15 @@ def test_different_source_still_acquires_real_pg_lock() -> None:
     targets still serialise across processes under the new outer-db
     re-entrancy.
     """
-    with JobLock(settings.database_url, "orchestrator_full_sync"):
-        with JobLock(settings.database_url, "daily_portfolio_sync") as inner:
+    with JobLock(test_database_url(), "orchestrator_full_sync"):
+        with JobLock(test_database_url(), "daily_portfolio_sync") as inner:
             assert inner._reentrant is False
             assert inner._conn is not None
             # Second connection mimics another process trying the same source.
-            with psycopg.connect(settings.database_url, autocommit=True) as side:
+            # MUST be the same database as the inner JobLock: advisory locks
+            # are per-database, so a side session on a different DB would
+            # acquire and the assertion below would fail for the wrong reason.
+            with psycopg.connect(test_database_url(), autocommit=True) as side:
                 row = side.execute(
                     "SELECT pg_try_advisory_lock(hashtext(%s)::int)",
                     ("job_source:etoro",),
@@ -108,7 +128,7 @@ def test_different_source_still_acquires_real_pg_lock() -> None:
             # Release the side lock if Postgres somehow gave it to us
             # (would be a real serialisation regression).
             if acquired_on_side:
-                with psycopg.connect(settings.database_url, autocommit=True) as side:
+                with psycopg.connect(test_database_url(), autocommit=True) as side:
                     side.execute(
                         "SELECT pg_advisory_unlock(hashtext(%s)::int)",
                         ("job_source:etoro",),
@@ -248,14 +268,14 @@ def test_reset_restores_prior_held_set_on_exception() -> None:
 
     assert _HELD_SOURCES.get() == frozenset()
 
-    with JobLock(settings.database_url, "orchestrator_full_sync"):
+    with JobLock(test_database_url(), "orchestrator_full_sync"):
         assert _HELD_SOURCES.get() == frozenset({"db"})
         # Patch only DURING the inner acquire attempt so the outer
         # __exit__'s release path still uses the real connect.
         with patch("app.jobs.locks.psycopg.connect", side_effect=maybe_raising_connect):
             raise_next["flag"] = True
             with pytest.raises(RuntimeError, match="simulated connect failure"):
-                with JobLock(settings.database_url, "daily_portfolio_sync"):
+                with JobLock(test_database_url(), "daily_portfolio_sync"):
                     pytest.fail("inner __enter__ should have raised before entering body")
         # Inner acquire raised before mutating _HELD_SOURCES, so the
         # held set should still be {"db"} (outer only).
@@ -282,18 +302,18 @@ def test_test_only_per_name_acquires_never_treated_as_reentrant() -> None:
     """
     raw_key = "fake_test_job_for_reentrancy_pin"
 
-    with JobLock(settings.database_url, "orchestrator_full_sync"):
+    with JobLock(test_database_url(), "orchestrator_full_sync"):
         # _HELD_SOURCES contains 'db' here. test_only_per_name acquires
         # MUST ignore that — _source is None for the escape hatch.
         assert _HELD_SOURCES.get() == frozenset({"db"})
 
-        with JobLock.test_only_per_name(settings.database_url, raw_key) as first:
+        with JobLock.test_only_per_name(test_database_url(), raw_key) as first:
             assert first._reentrant is False
             assert first._conn is not None, "test_only_per_name must always open a real connection"
             # Sibling acquire of the SAME raw key from a different
             # JobLock instance must collide at the Postgres layer.
             with pytest.raises(JobAlreadyRunning):
-                with JobLock.test_only_per_name(settings.database_url, raw_key):
+                with JobLock.test_only_per_name(test_database_url(), raw_key):
                     pytest.fail("second test_only_per_name acquire on same raw key must raise")
 
 
@@ -320,7 +340,7 @@ def test_threads_do_not_inherit_held_sources() -> None:
     def worker() -> None:
         observed.append(_HELD_SOURCES.get())
 
-    with JobLock(settings.database_url, "orchestrator_full_sync"):
+    with JobLock(test_database_url(), "orchestrator_full_sync"):
         assert _HELD_SOURCES.get() == frozenset({"db"})
         t = threading.Thread(target=worker, daemon=True)
         t.start()

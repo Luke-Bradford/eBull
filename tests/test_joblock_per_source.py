@@ -23,15 +23,23 @@ import threading
 
 import pytest
 
-from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.jobs.sources import source_for
+from tests.fixtures.ebull_test_db import test_database_url
 
-# Postgres advisory locks are cluster-wide, not database-scoped. With pytest-xdist
-# running tests in parallel workers against the same dev DB cluster, two tests
-# acquiring the same source lock would contend across workers. Group these tests
-# onto a single worker so the only contention is intra-test (which is what each
-# test asserts).
+# ⚠ Every acquire below targets ``test_database_url()`` — the per-worker private
+# DB on the SEPARATE ``postgres-test`` cluster — NOT ``settings.database_url``.
+#
+# Postgres advisory locks are PER-DATABASE, not cluster-wide (#2224 residual 3;
+# measured on PG 17.9, and stated correctly all along in
+# ``app/jobs/locks.py::probe_jobs_process_running``). This module previously
+# locked real production source keys on the operator's dev DB on the opposite
+# premise, which made it collide both ways with the running jobs daemon —
+# ``job_source:etoro`` alone is held ~8.8% of wall clock there.
+#
+# The ``xdist_group`` is retained so every module that locks a real source key
+# lands on one worker; with per-worker DBs it is now belt-and-braces rather than
+# load-bearing.
 pytestmark = pytest.mark.xdist_group(name="joblock_source_serial")
 
 
@@ -63,7 +71,7 @@ def _assert_cross_thread_serialises(outer_job: str, inner_job: str) -> None:
 
     def hold_outer() -> None:
         try:
-            with JobLock(settings.database_url, outer_job):
+            with JobLock(test_database_url(), outer_job):
                 outer_holding.set()
                 if not inner_done.wait(timeout=10.0):
                     raise TimeoutError("inner thread did not complete within 10s")
@@ -75,7 +83,7 @@ def _assert_cross_thread_serialises(outer_job: str, inner_job: str) -> None:
             if not outer_holding.wait(timeout=10.0):
                 raise TimeoutError("outer thread did not acquire within 10s")
             try:
-                with JobLock(settings.database_url, inner_job):
+                with JobLock(test_database_url(), inner_job):
                     inner_result.put("acquired unexpectedly")
             except JobAlreadyRunning as exc:
                 inner_result.put(exc)
@@ -103,8 +111,8 @@ class TestJobLockSourceLevel:
     def test_cross_source_runs_concurrently(self) -> None:
         """orchestrator_full_sync (db) + execute_approved_orders (etoro)
         are different sources and both must acquire successfully."""
-        with JobLock(settings.database_url, "orchestrator_full_sync"):
-            with JobLock(settings.database_url, "execute_approved_orders"):
+        with JobLock(test_database_url(), "orchestrator_full_sync"):
+            with JobLock(test_database_url(), "execute_approved_orders"):
                 # Both held simultaneously — no exception means success.
                 pass
 
@@ -118,14 +126,14 @@ class TestJobLockSourceLevel:
 
     def test_quote_observation_runs_concurrently_with_candle_lane(self) -> None:
         """#2934: immutable hourly quotes cannot wait behind candle refresh."""
-        with JobLock(settings.database_url, "daily_candle_refresh"):
-            with JobLock(settings.database_url, "quotes_refresh"):
+        with JobLock(test_database_url(), "daily_candle_refresh"):
+            with JobLock(test_database_url(), "quotes_refresh"):
                 pass
 
     def test_sec_rate_vs_sec_bulk_download_run_parallel(self) -> None:
         """sec_rate and sec_bulk_download are disjoint rate buckets — no contention."""
-        with JobLock(settings.database_url, "sec_form3_ingest"):  # sec_rate
-            with JobLock(settings.database_url, "sec_bulk_download"):  # sec_bulk_download
+        with JobLock(test_database_url(), "sec_form3_ingest"):  # sec_rate
+            with JobLock(test_database_url(), "sec_bulk_download"):  # sec_bulk_download
                 pass
 
     def test_sec_manifest_worker_runs_concurrently_with_producer(self) -> None:
@@ -138,8 +146,8 @@ class TestJobLockSourceLevel:
         HTTP-layer throttle (``sec_edgar.py`` ``_PROCESS_RATE_LIMIT_*``), which
         is lane-agnostic; see ``test_sec_rate_limit_clock`` for that floor.
         """
-        with JobLock(settings.database_url, "sec_manifest_worker"):  # lane sec_manifest
-            with JobLock(settings.database_url, "sec_atom_fast_lane"):  # lane sec_rate
+        with JobLock(test_database_url(), "sec_manifest_worker"):  # lane sec_manifest
+            with JobLock(test_database_url(), "sec_atom_fast_lane"):  # lane sec_rate
                 # Both held simultaneously — no exception means they no longer
                 # mutually exclude.
                 pass
@@ -162,21 +170,21 @@ class TestJobLockUnknownJobName:
 
     def test_unknown_raises_keyerror(self) -> None:
         with pytest.raises(KeyError, match="unknown job_name"):
-            JobLock(settings.database_url, "completely_made_up_job_name_xyz")
+            JobLock(test_database_url(), "completely_made_up_job_name_xyz")
 
 
 class TestJobLockTestOnlyEscape:
     """test_only_per_name preserves pre-PR1a per-name semantics for fixtures."""
 
     def test_per_name_serialises_same_name(self) -> None:
-        with JobLock.test_only_per_name(settings.database_url, "fake_test_job_a"):
+        with JobLock.test_only_per_name(test_database_url(), "fake_test_job_a"):
             with pytest.raises(JobAlreadyRunning):
-                with JobLock.test_only_per_name(settings.database_url, "fake_test_job_a"):
+                with JobLock.test_only_per_name(test_database_url(), "fake_test_job_a"):
                     pytest.fail("same-name test_only lock should have raised")
 
     def test_per_name_different_names_run_parallel(self) -> None:
-        with JobLock.test_only_per_name(settings.database_url, "fake_test_job_a"):
-            with JobLock.test_only_per_name(settings.database_url, "fake_test_job_b"):
+        with JobLock.test_only_per_name(test_database_url(), "fake_test_job_a"):
+            with JobLock.test_only_per_name(test_database_url(), "fake_test_job_b"):
                 pass
 
     def test_per_name_does_not_collide_with_real_source_lock(self) -> None:
@@ -186,8 +194,8 @@ class TestJobLockTestOnlyEscape:
         block a real production source lock during pytest.
         """
         # Hold a real source-level lock.
-        with JobLock(settings.database_url, "execute_approved_orders"):  # source=etoro → key 'job_source:etoro'
+        with JobLock(test_database_url(), "execute_approved_orders"):  # source=etoro → key 'job_source:etoro'
             # A test-only lock keyed on raw 'etoro' string would hash to
             # something different from 'job_source:etoro' — so this MUST succeed.
-            with JobLock.test_only_per_name(settings.database_url, "etoro"):
+            with JobLock.test_only_per_name(test_database_url(), "etoro"):
                 pass

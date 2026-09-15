@@ -18,19 +18,22 @@ from __future__ import annotations
 import pytest
 from psycopg import errors as psycopg_errors
 
-from app.config import settings
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.jobs.sources import get_job_name_to_source, source_for
+from tests.fixtures.ebull_test_db import test_database_url
 
-# Postgres advisory locks are cluster-wide, not database-scoped, and
-# the tests below lock real production source keys (notably
-# ``job_source:db`` via ``orchestrator_full_sync``). The existing
-# ``tests/test_joblock_per_source.py`` locks the same shared keys
-# under ``xdist_group="joblock_source_serial"``; reuse that group so
-# every test that touches a real source key lands on the SAME xdist
-# worker and the only contention is intra-test (which each test
-# asserts). A different group name would flake under parallel
-# workers as cross-worker advisory-lock collisions appear at random.
+# ⚠ Every acquire below targets ``test_database_url()`` — the per-worker private
+# DB on the SEPARATE ``postgres-test`` cluster — NOT ``settings.database_url``.
+#
+# Postgres advisory locks are PER-DATABASE, not cluster-wide (#2224 residual 3;
+# measured on PG 17.9). This module previously said the opposite and locked real
+# production source keys (notably ``job_source:db`` via
+# ``orchestrator_full_sync``) on the operator's dev DB, where the running jobs
+# daemon holds those same keys.
+#
+# The ``xdist_group`` shared with ``tests/test_joblock_per_source.py`` is
+# retained so every module that locks a real source key lands on the SAME xdist
+# worker; with per-worker DBs it is now belt-and-braces rather than load-bearing.
 pytestmark = pytest.mark.xdist_group(name="joblock_source_serial")
 
 
@@ -94,8 +97,8 @@ class TestCrossFamilyConcurrency:
         """``sec_submissions_ingest`` (``db_filings``) and
         ``sec_13f_ingest_from_dataset`` (``db_ownership_inst``) write
         disjoint table families. Both ``JobLock``s must succeed."""
-        with JobLock(settings.database_url, "sec_submissions_ingest"):
-            with JobLock(settings.database_url, "sec_13f_ingest_from_dataset"):
+        with JobLock(test_database_url(), "sec_submissions_ingest"):
+            with JobLock(test_database_url(), "sec_13f_ingest_from_dataset"):
                 # Both held simultaneously — no exception means success.
                 pass
 
@@ -107,7 +110,7 @@ class TestCrossFamilyConcurrency:
 
         with ExitStack() as stack:
             for job_name, _source in _FAMILY_ASSIGNMENTS:
-                stack.enter_context(JobLock(settings.database_url, job_name))
+                stack.enter_context(JobLock(test_database_url(), job_name))
             # Reached only if every JobLock acquired without raising.
 
     def test_family_source_disjoint_from_db_source(self) -> None:
@@ -116,8 +119,8 @@ class TestCrossFamilyConcurrency:
         serialisation" called out in the spec. Pinned so a future
         re-merge has to fight a red test.
         """
-        with JobLock(settings.database_url, "sec_submissions_ingest"):  # db_filings
-            with JobLock(settings.database_url, "orchestrator_full_sync"):  # db
+        with JobLock(test_database_url(), "sec_submissions_ingest"):  # db_filings
+            with JobLock(test_database_url(), "orchestrator_full_sync"):  # db
                 pass
 
 
@@ -154,7 +157,7 @@ class TestIntraFamilySerialisation:
 
         def hold_outer() -> None:
             try:
-                with JobLock(settings.database_url, "sec_submissions_ingest"):
+                with JobLock(test_database_url(), "sec_submissions_ingest"):
                     outer_holding.set()
                     if not inner_done.wait(timeout=10.0):
                         raise TimeoutError("inner thread did not complete within 10s")
@@ -166,7 +169,7 @@ class TestIntraFamilySerialisation:
                 if not outer_holding.wait(timeout=10.0):
                     raise TimeoutError("outer thread did not acquire within 10s")
                 try:
-                    with JobLock(settings.database_url, "sec_submissions_ingest"):
+                    with JobLock(test_database_url(), "sec_submissions_ingest"):
                         inner_result.put("acquired unexpectedly")
                 except JobAlreadyRunning as exc:
                     inner_result.put(exc)
