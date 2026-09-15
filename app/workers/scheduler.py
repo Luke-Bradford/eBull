@@ -2605,6 +2605,16 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
     # invokers at top level, so the reverse import has to be lazy.
     from app.jobs.runtime import consume_params_snapshot, consume_prelude_run_id
 
+    # Function-local for the same reason as ``exception_classifier``
+    # below: ``job_heartbeat`` imports ``sync_orchestrator.progress``,
+    # and importing that package executes its ``__init__``, which pulls
+    # the adapters back into this module. #2274 — installs the
+    # ``job_runs`` heartbeat listener around the body so a job whose loop
+    # already calls ``report_progress`` produces ``last_progress_at``.
+    # A no-op when the run has no row or when no background pool is
+    # registered (i.e. outside the jobs daemon) — see its docstring.
+    from app.services.job_heartbeat import job_heartbeat
+
     pre_allocated_run_id = consume_prelude_run_id()
     # Always consume the snapshot context so a nested ``_tracked_job``
     # cannot reuse a stale value. Only used on the prelude-fallback path
@@ -2626,8 +2636,15 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             tracker.run_id = pre_allocated_run_id
             # Advance straight to the body — the prelude already wrote the
             # ``status='running'`` row in its own committed tx.
+            #
+            # ⚠ The heartbeat is installed HERE as well as on the fallback
+            # branch below. This branch RETURNS, so an install placed only
+            # after ``record_job_start`` would miss scheduled fires and
+            # queue-dispatched manual triggers entirely — i.e. the primary
+            # path (#2274 predecessor spec, finding 1).
             try:
-                yield tracker
+                with job_heartbeat(tracker.run_id):
+                    yield tracker
             except Exception as exc:
                 try:
                     from app.services.sync_orchestrator.exception_classifier import (
@@ -2676,7 +2693,8 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             return
 
         try:
-            yield tracker
+            with job_heartbeat(tracker.run_id):
+                yield tracker
         except Exception as exc:
             try:
                 # Function-local import: scheduler is above classify_exception in the orchestrator graph.

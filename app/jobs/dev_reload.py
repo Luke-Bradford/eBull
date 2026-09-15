@@ -58,6 +58,11 @@ forever. A job that stops heartbeating goes stale and stops blocking
 reloads on its own, which is why this needs no watchdog and cannot
 false-fire on a legitimately-long run (#2274's own constraint).
 
+Age does appear in the query, for a different job: ``RUNTIME_CEILING_S``
+bounds how long a still-ticking run may defer, so the deferral is finite.
+Liveness is still decided by the heartbeat alone. See the comment on
+``_LIVE_JOB_SQL``.
+
 This is a correctness fix as much as an availability one. Had a drain
 mid-run actually succeeded, the surviving rows would carry a
 ``strategy_version`` derived from code that changed underneath the run.
@@ -91,6 +96,7 @@ from pathlib import Path
 from typing import Final
 
 from app.config import DEV_LIKE_ENVS, settings
+from app.services.processes.stale_detection import RUNTIME_CEILING_S
 from app.services.processes.stale_thresholds import (
     DEFAULT_THRESHOLD_S,
     get_threshold,
@@ -202,6 +208,23 @@ _LIVE_JOB_CONNECT_TIMEOUT_S: Final[int] = 5
 # probe's own guard turns into "no live job".
 _LIVE_JOB_STATEMENT_TIMEOUT_MS: Final[int] = 3_000
 
+# ⚠⚠ The deferral must be FINITE (#2274). This query selected on
+# heartbeat freshness alone, so a run that ticks forever deferred every
+# automatic reload forever — latent while ``strategy_backtest_run`` was
+# the only producer, and widened the moment ``_tracked_job`` started
+# installing a heartbeat for every ticking job. ``started_at`` is
+# therefore also bounded by ``RUNTIME_CEILING_S``.
+#
+# ⚠ That does NOT reverse "deliberately NOT an age cut" above. That
+# sentence rejects age as a LIVENESS signal — inferring "still working"
+# from "started recently" would protect a wedged job forever, which is
+# the opposite of what the heartbeat is for. Here age is an UPPER BOUND
+# ON DEFERRAL: liveness is still decided by the heartbeat, and the
+# ceiling only caps how long a live-looking run may withhold code
+# activation. A run past it already reads ``attention`` /
+# ``runtime_ceiling`` on the admin surface (``stale_detection`` rule 5),
+# so the two rules describe the same runs.
+#
 # Every row this returns is already live by its OWN threshold, so LIMIT 1
 # is safe: it picks a blocker to name, it does not decide whether one
 # exists. Freshest heartbeat first — the row that ticked most recently is
@@ -218,6 +241,7 @@ _LIVE_JOB_SQL: Final[str] = """
        AND last_progress_at > now() - make_interval(
                secs => COALESCE((%(overrides)s::jsonb ->> job_name)::int, %(default_s)s)
            )
+       AND started_at > now() - make_interval(secs => %(ceiling_s)s)
      ORDER BY last_progress_at DESC
      LIMIT 1
 """
@@ -250,7 +274,11 @@ def live_job() -> str | None:
         ) as conn:
             row = conn.execute(
                 _LIVE_JOB_SQL,
-                {"overrides": _THRESHOLD_OVERRIDES_JSON, "default_s": DEFAULT_THRESHOLD_S},
+                {
+                    "overrides": _THRESHOLD_OVERRIDES_JSON,
+                    "default_s": DEFAULT_THRESHOLD_S,
+                    "ceiling_s": RUNTIME_CEILING_S,
+                },
             ).fetchone()
     except Exception:
         # Intentionally broad: a probe is not worth an exception class.
