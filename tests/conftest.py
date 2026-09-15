@@ -194,15 +194,25 @@ def _restore_dependency_overrides() -> Iterator[None]:
 # reads. Restoring the pre-test snapshot contains the leak at its source, which
 # is enough: a test that needs the registry populated on a cold worker imports
 # the package itself, as ``test_manifest_parser_sec_424b.py`` already does.
+# ⚠ Bound through the MODULE, not by importing the dict (review bot WARNING on
+# PR #3065). ``from ... import _PARSERS`` captures the object, so a test that
+# REBINDS ``sec_manifest_worker._PARSERS = {...}`` instead of mutating it would
+# leave this fixture restoring a dict nobody reads any more — the restore would
+# appear to run and the leak would survive, which is the failure mode this
+# fixture exists to make impossible. No test does that today; the point is that
+# the fixture must not depend on none ever doing it.
 @pytest.fixture(autouse=True)
 def _restore_manifest_parser_registry() -> Iterator[None]:
-    from app.jobs.sec_manifest_worker import _PARSERS
+    from app.jobs import sec_manifest_worker
 
-    saved = dict(_PARSERS)
+    original = sec_manifest_worker._PARSERS  # noqa: SLF001 — the registry under restore
+    saved = dict(original)
     yield
-    if _PARSERS != saved:
-        _PARSERS.clear()
-        _PARSERS.update(saved)
+    if sec_manifest_worker._PARSERS is not original:  # noqa: SLF001
+        sec_manifest_worker._PARSERS = original  # noqa: SLF001
+    if original != saved:
+        original.clear()
+        original.update(saved)
 
 
 @pytest.fixture(autouse=True)

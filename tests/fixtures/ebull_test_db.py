@@ -594,6 +594,19 @@ def _snapshot_name(table: str) -> str:
     return f"{_SEED_SNAPSHOT_PREFIX}{table}"
 
 
+def is_snapshot_relation(table: str) -> bool:
+    """True for the seed-snapshot machinery rather than a schema table.
+
+    Single definition for the three places that must skip it: the wipe-set
+    derivation, the snapshot builder (which would otherwise ask for
+    ``_pristine__pristine_*``), and the partition assertion in
+    ``tests/test_db_fixture_cleanup.py`` — where having its own copy was a
+    review NITPICK on PR #3065, and would have been a real divergence the day
+    the prefix changed.
+    """
+    return table == _SEED_SNAPSHOT_MANIFEST or table.startswith(_SEED_SNAPSHOT_PREFIX)
+
+
 # #1401 — worker-DB relation-count tripwire ceiling.
 #
 # The per-worker private DB is cloned from ``ebull_test_template``
@@ -1580,7 +1593,7 @@ def _snapshot_seed_tables(conn: psycopg.Connection[tuple]) -> tuple[str, ...]:
     seeded: list[str] = []
     with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
         for table in candidates:
-            if table.startswith(_SEED_SNAPSHOT_PREFIX) or table == _SEED_SNAPSHOT_MANIFEST:
+            if is_snapshot_relation(table):
                 continue
             cur.execute(sql.SQL("SELECT EXISTS (SELECT 1 FROM {})").format(sql.Identifier(table)))
             row = cur.fetchone()
@@ -1697,10 +1710,7 @@ def _derive_wipe_set(roots: set[str], seed_tables: tuple[str, ...]) -> set[str]:
     return {
         table
         for table in roots
-        if table not in seed_tables
-        and table not in _WIPE_EXCLUDED
-        and table != _SEED_SNAPSHOT_MANIFEST
-        and not table.startswith(_SEED_SNAPSHOT_PREFIX)
+        if table not in seed_tables and table not in _WIPE_EXCLUDED and not is_snapshot_relation(table)
     }
 
 

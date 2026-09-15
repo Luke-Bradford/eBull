@@ -25,15 +25,10 @@ from tests.fixtures.ebull_test_db import (
     _reset_planner_tables,
     _snapshot_name,
     _truncate_planner_tables,
+    is_snapshot_relation,
     test_database_url,
     test_db_available,
     test_db_name,
-)
-from tests.fixtures.ebull_test_db import (
-    _SEED_SNAPSHOT_MANIFEST as _SNAPSHOT_MANIFEST,
-)
-from tests.fixtures.ebull_test_db import (
-    _SEED_SNAPSHOT_PREFIX as _SNAPSHOT_PREFIX,
 )
 
 
@@ -321,7 +316,7 @@ def test_every_table_is_wiped_restored_or_deliberately_excluded(
     ).fetchall()
     every_table = {r[0] for r in rows}
 
-    machinery = {t for t in every_table if t.startswith(_SNAPSHOT_PREFIX)} | {_SNAPSHOT_MANIFEST}
+    machinery = {t for t in every_table if is_snapshot_relation(t)}
     wiped = set(plan.delete_order)
     restored = set(plan.seed_tables)
 
