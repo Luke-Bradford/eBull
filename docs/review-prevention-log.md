@@ -6801,3 +6801,59 @@ side-session connects). The correction never travelled the ten lines to the next
   (`QuarantineCensus` docstring + the corroboration-census comment, both now figure-free);
   `scripts/verify_3046_t3_corroboration_ceiling.py` (six arms, every figure computed at run
   time, `--probe` for the source-side observation).
+
+### An AGGREGATE counter carries no per-entity identity, so its sample size for any per-entity claim is ZERO, not `n`
+
+- First seen in: #2414 (2026-09-15), at Codex checkpoint 1, on a spec that read a
+  conclusion out of `job_runs.progress_json -> 'context'`.
+- The data looked like a sample of four. One `daily_candle_refresh` run reported
+  `bars_revised = 2` and `bars_revised_max_age_days = 275`, and the spec concluded that
+  the run could not have been an adjustment heal — "a heal re-fetches the full history, so
+  it cannot revise exactly two bars" — and therefore that the revision-age axis was
+  confounded.
+- **Every step of that is unsupported by the row it was read from.** Both counters are
+  summed over every instrument in the run, so the 2 and the 275 need not belong to the
+  same instrument, the same branch, or the same fetch. The maximum does not say that
+  either revision was deep. The conclusion happened to be right — age really does not
+  identify the branch — but it was right for reasons the aggregate cannot carry, and the
+  supporting argument was independently false too (a heal counts only rows that actually
+  differ, so it CAN revise two).
+- The tell: the sentence names a single entity ("the run could not have been a heal",
+  "that instrument", "the bar that was revised") while the query named a population.
+  ⚠ Distinct from the existing full-population rule, which fires on *"most / usually /
+  every"*. This is its mirror — **a claim about ONE entity read off a number that has
+  already been summed over many.** A COUNT can support an existence claim ("a revision
+  reached 275 days" is true from this row); it cannot support a conjunction ("this
+  revision, from that branch, at that depth").
+- Prevention: before writing a sentence about an entity, ask **"is the grain of this
+  number the grain of my claim?"** If the number is a SUM, MAX or COUNT over a
+  population, the only claims it licenses are existence and totals. If you need the
+  conjunction, the producer has to emit it — which on #2414 is exactly what the fix was:
+  the branch is recorded at the write site rather than inferred from the aggregate later.
+- Enforced in: this prevention log;
+  `docs/proposals/ta/2026-09-15-2414-revision-cause-attribution.md` (the ⚠ under "What the
+  age axis settles"); `tests/test_market_data_bar_revision_counter_db.py`
+  (`test_two_instruments_on_different_branches_report_both_causes`, which constructs the
+  ambiguity deliberately so the shape is on the record).
+
+### A pure test pins the FUNCTION; it does not stop the caller re-deriving what the function returned
+
+- First seen in: #2414 (2026-09-15), during revert-probing, not review.
+- `_candles_fetch_count` was changed to return its decision REASON alongside the count,
+  because the caller's old inference (`count == _INCREMENTAL_FETCH_BARS` ⟹ incremental)
+  collapses whenever `lookback_days` is itself 3. A parametrised pure test pinned all
+  three reasons, including that case.
+- **The revert-probe then restored the caller's inference and every test stayed green.**
+  The pure test called the function directly, so it could never see a caller that took
+  the reason and threw it away. The guard existed one layer above everything that tested
+  it.
+- Prevention: **revert-probe at the layer the defect lives at, not the layer the helper
+  lives at.** If a change's whole value is that a caller stops inferring something,
+  at least one test has to drive the caller. A probe that leaves the suite green is not
+  a clean bill of health — it is a coverage finding, and the next commit is the test it
+  demanded.
+- ⚠ Generalises to every "return the reason instead of inferring it" refactor, which this
+  repo does often: the helper is easy to test and is not where the bug was.
+- Enforced in: this prevention log;
+  `tests/test_market_data_bar_revision_counter_db.py::test_a_stale_reobservation_is_not_labelled_incremental_when_the_lookback_is_three`
+  (added because the probe passed, and confirmed red under the same probe afterwards).

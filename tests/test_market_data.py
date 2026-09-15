@@ -34,6 +34,9 @@ from app.services import market_data
 from app.services.market_data import (
     _INCREMENTAL_FETCH_BARS,
     DEFAULT_MAX_SPREAD_PCT,
+    FETCH_REASON_INCREMENTAL,
+    FETCH_REASON_INITIAL_BACKFILL,
+    FETCH_REASON_STALE_REOBSERVATION,
     _candles_are_fresh,
     _candles_fetch_count,
     _compute_and_store_features,
@@ -1136,18 +1139,27 @@ class TestCandlesFetchCount:
     def test_returns_default_when_no_prior_candles(self) -> None:
         """Initial backfill — fetchone returns None (no rows)."""
         conn = self._mock_conn(fetchone_return=None)
-        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == (
+            400,
+            FETCH_REASON_INITIAL_BACKFILL,
+        )
 
     def test_returns_default_when_max_price_date_is_null(self) -> None:
         """Defensive — SELECT MAX(...) always returns a row; NULL when
         there are no matching rows. Treat as initial backfill."""
         conn = self._mock_conn(fetchone_return=(None,))
-        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == (
+            400,
+            FETCH_REASON_INITIAL_BACKFILL,
+        )
 
     def test_returns_incremental_when_latest_is_within_window(self) -> None:
         """Normal daily maintenance — last candle is yesterday."""
         conn = self._mock_conn(fetchone_return=(date(2026, 4, 16),))
-        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == _INCREMENTAL_FETCH_BARS
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == (
+            _INCREMENTAL_FETCH_BARS,
+            FETCH_REASON_INCREMENTAL,
+        )
         assert _INCREMENTAL_FETCH_BARS == 3  # pinning documented value
 
     def test_returns_default_when_gap_exceeds_incremental_window(self) -> None:
@@ -1156,7 +1168,10 @@ class TestCandlesFetchCount:
         incremental fetch would leave a 7-day hole; fall back to
         full backfill instead."""
         conn = self._mock_conn(fetchone_return=(date(2026, 4, 7),))
-        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == (
+            400,
+            FETCH_REASON_STALE_REOBSERVATION,
+        )
 
     def test_returns_incremental_at_exact_window_boundary(self) -> None:
         """Boundary — gap of exactly _INCREMENTAL_FETCH_BARS days is
@@ -1165,7 +1180,26 @@ class TestCandlesFetchCount:
         latest = date(2026, 4, 14)  # 3 days ago
         assert (today - latest).days == _INCREMENTAL_FETCH_BARS
         conn = self._mock_conn(fetchone_return=(latest,))
-        assert _candles_fetch_count(conn, 42, default=400, today=today) == _INCREMENTAL_FETCH_BARS
+        assert _candles_fetch_count(conn, 42, default=400, today=today) == (
+            _INCREMENTAL_FETCH_BARS,
+            FETCH_REASON_INCREMENTAL,
+        )
+
+    def test_a_stale_gap_is_named_stale_even_when_the_default_is_the_incremental_size(self) -> None:
+        """⚠⚠ #2414 — the case that made the CALLER's old inference wrong.
+
+        The caller used to derive "was this incremental?" by comparing the
+        returned count against ``_INCREMENTAL_FETCH_BARS``. When ``default`` is
+        itself 3 the stale-gap fallback returns 3 too, so that comparison
+        reports a full re-observation as a 3-bar correction — the two branches
+        with opposite meanings for #2414's supersession question. The reason is
+        returned by the function that made the decision so the counts colliding
+        no longer matters.
+        """
+        conn = self._mock_conn(fetchone_return=(date(2025, 1, 1),))
+        count, reason = _candles_fetch_count(conn, 42, default=_INCREMENTAL_FETCH_BARS, today=date(2026, 4, 17))
+        assert count == _INCREMENTAL_FETCH_BARS
+        assert reason == FETCH_REASON_STALE_REOBSERVATION
 
 
 class TestRevisionAgeBucket:
@@ -1300,7 +1334,10 @@ class TestRefreshMarketDataForceBackfill:
 
         with (
             patch("app.services.market_data._candles_are_fresh", return_value=False),
-            patch("app.services.market_data._candles_fetch_count", return_value=3),
+            patch(
+                "app.services.market_data._candles_fetch_count",
+                return_value=(3, FETCH_REASON_INCREMENTAL),
+            ),
             patch("app.services.market_data._last_bar", return_value=None),
             # A `CandleUpsertOutcome` since #2414 — a bare int, and latterly a
             # bare tuple, unpacks to nothing.
