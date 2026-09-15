@@ -56,9 +56,11 @@ logger = logging.getLogger(__name__)
 #
 # ⚠ ``report_progress``'s own throttle (5 items or 10s) does NOT bound
 # this: ``force=True`` bypasses it entirely, and four of our covered tick
-# sites use it (``market_data.py:751,767``,
-# ``fundamentals/__init__.py:648,3261``). A writer that inherited the
-# caller's cadence would therefore inherit an unbounded one.
+# sites use it — in ``market_data.refresh_market_data`` and in
+# ``fundamentals.refresh_financial_facts`` / ``fundamentals.execute_refresh``.
+# A writer that inherited the caller's cadence would inherit an unbounded
+# one. Re-derive the set with ``rg -n 'force=True' app/`` rather than
+# trusting a line number here.
 #
 # 5s is the cadence ``docs/proposals/ui/admin-control-hub-rewrite.md``
 # §A3 already documents for job telemetry, so this reconciles with the
