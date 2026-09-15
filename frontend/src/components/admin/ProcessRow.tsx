@@ -61,26 +61,35 @@ export interface ProcessRowProps {
  * 25-hour run that ticked 10 minutes ago would read "running past its
  * runtime ceiling 10m". Caught by Codex ckpt-2, not by any test.
  *
- * ⚠⚠ `queue_stuck` suppresses it for exactly the same reason, and this was
- * missed the first time because the pair was unreachable: `mid_flight_stuck`
- * could not fire while the kill switch was on (#2274 — `stale_detection` rule 4
- * was gated on `status === "running"`, which `_status_for` never returns for a
- * halted system). `queue_stuck` has no such gate, so once rule 4 was fixed the
- * combination became reachable and the row read "queue stuck 7m" where `7m` was
- * the HEARTBEAT age, not the queue age. The suffix belongs to the headline
- * reason, and the headline is whichever wedge wins
- * `health_verdict._WEDGE_HEADLINE_ORDER` — so any wedge ranked above
- * `mid_flight_stuck` must suppress it.
+ * ⚠⚠ `queue_stuck` suppresses it too, but ONLY on a halted row, and the
+ * asymmetry is the backend's, not a hedge (#2274). `compute_verdict` ranks the
+ * wedges differently per status: the `disabled` branch uses
+ * `_WEDGE_HEADLINE_ORDER` (`queue_stuck` > `runtime_ceiling` >
+ * `mid_flight_stuck`), while the `running` branch headlines
+ * "running but no progress" even when `queue_stuck` is also present. So on a
+ * halted row `queue_stuck` owns the line and `7m` would be the HEARTBEAT age
+ * rather than the queue age; on a running row no-progress owns the line and the
+ * suffix is exactly right. An unconditional `queue_stuck` exclusion strips a
+ * valid, clock-advancing duration from running rows — caught by Codex ckpt-2.
+ *
+ * This combination was unreachable before #2274: `mid_flight_stuck` could not
+ * fire while the kill switch was on (rule 4 was gated on `status ===
+ * "running"`, which `_status_for` never returns for a halted system) whereas
+ * `queue_stuck` has no such gate.
+ *
+ * ⚠ This predicate TRACKS `health_verdict`'s headline precedence rather than
+ * being told it. A durable fix is for the backend to send "the headline is
+ * heartbeat-based" as a field, since it is the side that decides; noted on
+ * #2274. Until then, both directions are pinned by tests so drift is visible.
  *
  * Kept as one predicate so the memo signature and the rendered line can
  * never disagree about whether the row has a ticking suffix.
  */
 function hasHeartbeatSuffix(row: ProcessRowResponse): boolean {
-  return (
-    row.stale_reasons.includes("mid_flight_stuck") &&
-    !row.stale_reasons.includes("runtime_ceiling") &&
-    !row.stale_reasons.includes("queue_stuck")
-  );
+  if (!row.stale_reasons.includes("mid_flight_stuck")) return false;
+  if (row.stale_reasons.includes("runtime_ceiling")) return false;
+  // Only a halted row lets queue_stuck take the headline.
+  return !(row.status === "disabled" && row.stale_reasons.includes("queue_stuck"));
 }
 
 /**

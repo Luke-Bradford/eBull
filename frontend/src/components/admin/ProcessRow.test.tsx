@@ -341,7 +341,35 @@ describe("ProcessRow", () => {
     expect(reason.textContent).not.toMatch(/\d+m/);
   });
 
-  it("queue_stuck headline carries NO elapsed-since-heartbeat suffix (#2274)", () => {
+  it("RUNNING queue_stuck + no-progress KEEPS the suffix — no-progress owns the line (#2274)", () => {
+    // Codex ckpt-2. The exclusion below must not be unconditional: on a
+    // running row `compute_verdict` headlines "running but no progress" even
+    // when queue_stuck is present (only the `disabled` branch ranks
+    // queue_stuck first), so the heartbeat age IS the duration the line is
+    // about, and suppressing it would strip a valid clock-advancing signal.
+    const sevenMinutesAgo = new Date(Date.now() - 7 * 60 * 1000).toISOString();
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "running",
+        stale_reasons: ["queue_stuck", "mid_flight_stuck"],
+        active_run: {
+          run_id: 99,
+          started_at: sevenMinutesAgo,
+          rows_processed_so_far: 42,
+          progress_units_done: null,
+          progress_units_total: null,
+          last_progress_at: sevenMinutesAgo,
+          is_cancelling: false,
+        },
+      }),
+    });
+    const reason = container.querySelector(
+      "[data-testid='verdict-reason']",
+    ) as HTMLElement;
+    expect(reason.textContent).toMatch(/\d+m/);
+  });
+
+  it("HALTED queue_stuck headline carries NO elapsed-since-heartbeat suffix (#2274)", () => {
     // Same defect as the ceiling case above, missed the first time because the
     // pair was UNREACHABLE: mid_flight_stuck could not fire while the kill
     // switch was on (stale_detection rule 4 was gated on status === "running",
