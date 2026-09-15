@@ -180,9 +180,7 @@ class TestBuilder:
         "make the comparison work", this goes red and sends them to the reason
         it is there.
         """
-        earlier = CorpusGenerationBuilder(
-            frontier_date=date(2026, 9, 10), quarantine_rule_set_version="q-v1"
-        )
+        earlier = CorpusGenerationBuilder(frontier_date=date(2026, 9, 10), quarantine_rule_set_version="q-v1")
         later = CorpusGenerationBuilder(frontier_date=date(2026, 9, 11), quarantine_rule_set_version="q-v1")
         for builder in (earlier, later):
             builder.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
