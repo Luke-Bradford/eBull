@@ -1292,6 +1292,47 @@ The countdown is read by `live_gate_refusals` (`account_reconciliation_streak_in
 AFTER the unconditional `live_strategy_broker_contract_not_validated` so `refusal_codes[0]` cannot
 move) and rendered on the `/strategies` account-evidence panel.
 
+## 2026-09-15 — The verdict-aware read contract is FOUR composing clauses, not one loader (#3046 residual 5)
+
+`price_daily` has three verdict surfaces and they assert three different damages, so there is
+no single "verdict-aware loader". A consumer satisfies **all** the clauses that apply to it;
+they are not alternatives.
+
+1. **Bar fields → `price_masked_bars`.** B1–B4 per field, plus the open masked by value
+   (#2354). Does NOT mask `volume`. Also covers **T1**, which is a restatement of a bar
+   verdict — measured 355/355 in both directions.
+2. **Joinability → `price_segments`.** Covers **T3** completely (412 T3 ↔ 412
+   `price_series_break`, both set differences 0) and already honours `sql/246`'s
+   adjusted reclassification.
+3. **Window crossing → `rule_w1` behind a loader that does not exist yet.** The only
+   missing machinery. It must (a) take `cardinality(rules) > 0`, (b) pass the LATER date
+   only, (c) exclude dates carrying a **resolved** break per `sql/246:4-10`, and (d) be
+   **fail-closed** against `price_quarantine_coverage` per `sql/247:23-33`. ⚠ (c) and (d)
+   are required by RULE; their populations measured **0** and **0** on 2026-09-15 and that
+   is not a reason to drop them.
+4. **Window horizon → `rule_w2`, no new machinery.** The consumer already holds the window
+   bounds and bar count. It is a genuinely separate damage kind (185 windows fire W2 with
+   no quarantined transition and no weekend explanation) and the smallest of the four.
+
+⚠⚠ **`calendar_days_per_bar` is an AVERAGE, so `rule_w2` is not meaningful at tiny bar
+counts.** At `bar_count = 2` on a 5-day class the gate is `2 × 1.4 = 2.8` days — below an
+ordinary Friday-to-Monday gap of 3 — so ~6,900 ordinary 2-bar `load_day_changes` windows
+fire it. Any adopter at a short window carries the weekend qualifier.
+
+⚠⚠ **The contract binds where the WINDOW is evaluated, not where the row is read.** Every
+stored derived column (`price_daily.sma_200`, `return_6m`, `rsi_14`, …) has its window
+evaluated by `market_data._compute_and_store_features`; a consumer reading one row cannot
+apply any clause to history it did not load.
+
+⚠ **Magnitude is never the damage test for a transition.** *"Magnitude is a trigger, not a
+verdict"*, and the class threshold is calibrated on ADJACENT bars — applying it to a T2 pair
+spanning a hole compares a daily constant to a multi-month return. Killed twice by Codex on
+this ticket.
+
+Evidence: `scripts/verify_3046_contract_decision.py` (five arms, full population).
+Spec: `docs/proposals/ta/2026-09-15-3046-transition-verdict-contract.md`. No consumer is
+retrofitted and the clause-3 loader is deliberately NOT shipped ahead of its first caller.
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
