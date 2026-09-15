@@ -304,21 +304,30 @@ uv run pytest -m "not db" --tb=short -q
 # trusting the exit code: reachability of the 5433 cluster (fail fast, with the
 # command to fix it), and the fixture's own "unavailable" warning, which covers
 # the case where the cluster is up but the role cannot CREATEDB.
+# ⚠ The probe's stderr is CAPTURED, not discarded (review NITPICK on PR #3066).
+# Throwing it away collapses every failure into "cluster unreachable" — a broken
+# `uv`, a missing interpreter and a stopped container would all print the same
+# sentence, and the two cures are nothing alike. The probe's own message is the
+# one piece of diagnostic text available at that moment.
 echo "==> Pre-push gate: db-backed integration tier (5433 cluster)"
+DB_PROBE_ERR="$(mktemp -t ebull-prepush-probe)"
 if ! uv run python -c "
 import socket, sys
 host, port = 'localhost', 5433
 try:
     socket.create_connection((host, port), timeout=3).close()
 except OSError as exc:
-    sys.exit(f'{exc}')
-" 2>/dev/null; then
-  echo "==> FAIL: the postgres-test cluster (5433) is not reachable."
+    sys.exit(f'{type(exc).__name__}: {exc}')
+" 2>"${DB_PROBE_ERR}"; then
+  echo "==> FAIL: could not reach the postgres-test cluster (5433)."
+  echo "==>       probe said: $(tr '\n' ' ' < "${DB_PROBE_ERR}")"
   echo "==>       The db tier would SKIP and exit 0, which is a green gate that"
-  echo "==>       tested nothing. Start it and re-push:"
+  echo "==>       tested nothing. If the container is simply down:"
   echo "==>         docker compose --profile test up -d postgres-test"
+  rm -f "${DB_PROBE_ERR}"
   exit 1
 fi
+rm -f "${DB_PROBE_ERR}"
 
 # Whole output to a file, never a pipe: `cmd | tail` returns tail's status and
 # would mask a failing pytest (prevention log, re-committed #2279).
