@@ -25,10 +25,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
+import time
 import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 import psycopg.sql
@@ -960,6 +962,97 @@ def _finalize_cancelled_sync_run(sync_run_id: int) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# Run heartbeat (#2274)
+# ---------------------------------------------------------------------------
+
+# Minimum wall-clock between two THROTTLED heartbeat writes for one run.
+# Mirrors the ``job_runs`` writer's own floor: a tick is advisory, and the
+# progress callback's item-count trigger (every 5 items) imposes no time bound
+# of its own, so a fast loop would otherwise open a transaction per item.
+# Layer-boundary stamps bypass this — there are at most ~14 per run and each is
+# a real lifecycle event.
+_RUN_HEARTBEAT_MIN_INTERVAL_S: Final[float] = 5.0
+
+# Bound on the heartbeat's own statement. The cancel path holds the
+# ``sync_runs`` row under ``SELECT FOR UPDATE`` (``app/api/processes.py``), and
+# ``background_write_connection`` sets no timeout of its own, so without this a
+# heartbeat could block the worker that is trying to report progress.
+_RUN_HEARTBEAT_STATEMENT_TIMEOUT_MS: Final[int] = 3_000
+
+# Composed once, mirroring ``job_heartbeat._SET_TIMEOUT_SQL``: a value cannot be
+# a query parameter in a SET, so it is a Literal in composed SQL rather than an
+# f-string.
+_RUN_HEARTBEAT_SET_TIMEOUT_SQL = psycopg.sql.SQL("SET LOCAL statement_timeout = {ms}").format(
+    ms=psycopg.sql.Literal(_RUN_HEARTBEAT_STATEMENT_TIMEOUT_MS)
+)
+
+_run_heartbeat_lock = threading.Lock()
+# {sync_run_id: monotonic seconds of the last throttled write}. The singleton
+# index allows one running sync at a time, so this holds at most one live entry;
+# a new run id clears the map rather than growing it.
+_run_heartbeat_last: dict[int, float] = {}
+
+
+def _run_heartbeat_due(sync_run_id: int) -> bool:
+    now = time.monotonic()
+    with _run_heartbeat_lock:
+        last = _run_heartbeat_last.get(sync_run_id)
+        if last is not None and now - last < _RUN_HEARTBEAT_MIN_INTERVAL_S:
+            return False
+        _run_heartbeat_last.clear()
+        _run_heartbeat_last[sync_run_id] = now
+    return True
+
+
+def _touch_run_heartbeat(sync_run_id: int, *, force: bool = True) -> None:
+    """Advance ``sync_runs.last_progress_at`` for an in-flight run (#2274).
+
+    ⚠ ALWAYS call this AFTER the caller's own layer write has committed and
+    OUTSIDE its ``background_write_connection`` block, for three reasons:
+
+    1. **Isolation.** Inside ``_record_layer_result``'s transaction a heartbeat
+       failure would roll the authoritative layer result back, and committed
+       layer work would be recorded as failed.
+    2. **Lock order.** ``reaper.reap_orphaned_syncs`` locks ``sync_runs`` then
+       ``sync_layer_progress`` in one transaction. A heartbeat appended to a
+       child transaction would take child→parent and invert that. A separate
+       transaction holds one row lock at a time.
+    3. **Pool slots.** Calling from inside the caller's checkout holds one slot
+       while asking for another, which a saturated pool turns into a stall.
+
+    Never raises: a heartbeat is advisory and must not change an execution
+    outcome. A write that fails logs — so "writer broken" stays distinguishable
+    from "no progress", which is the whole point of the signal.
+
+    ``force=False`` applies ``_RUN_HEARTBEAT_MIN_INTERVAL_S``; layer-boundary
+    callers leave it True.
+    """
+    if not force and not _run_heartbeat_due(sync_run_id):
+        return
+    try:
+        with background_write_connection() as conn:
+            with conn.transaction():
+                conn.execute(_RUN_HEARTBEAT_SET_TIMEOUT_SQL)
+                conn.execute(
+                    """
+                    UPDATE sync_runs
+                       SET last_progress_at = now()
+                     WHERE sync_run_id = %s
+                       AND status = 'running'
+                       AND (last_progress_at IS NULL OR last_progress_at < now())
+                    """,
+                    (sync_run_id,),
+                )
+    except Exception:
+        # Intentionally broad — see the never-raises contract above.
+        logger.warning(
+            "sync run %s: heartbeat write failed; liveness will read from started_at",
+            sync_run_id,
+            exc_info=True,
+        )
+
+
 def _record_layer_started(sync_run_id: int, layer_name: str) -> None:
     with background_write_connection() as conn:
         with conn.transaction():
@@ -972,6 +1065,7 @@ def _record_layer_started(sync_run_id: int, layer_name: str) -> None:
                 """,
                 (sync_run_id, layer_name),
             )
+    _touch_run_heartbeat(sync_run_id)
 
 
 def _record_layer_result(
@@ -1013,6 +1107,7 @@ def _record_layer_result(
                     layer_name,
                 ),
             )
+    _touch_run_heartbeat(sync_run_id)
 
 
 _FORENSICS_MESSAGE_LIMIT = 1000
@@ -1082,6 +1177,7 @@ def _record_layer_failed(
                     layer_name,
                 ),
             )
+    _touch_run_heartbeat(sync_run_id)
 
 
 def _record_layer_skipped(
@@ -1101,6 +1197,7 @@ def _record_layer_skipped(
                 """,
                 (reason, sync_run_id, layer_name),
             )
+    _touch_run_heartbeat(sync_run_id)
 
 
 def _fail_unfinished_layers(sync_run_id: int) -> dict[str, LayerOutcome]:
@@ -1155,6 +1252,7 @@ def _fail_unfinished_layers(sync_run_id: int) -> dict[str, LayerOutcome]:
             ).fetchall()
             for r in failed_rows:
                 failed[r[0]] = LayerOutcome.FAILED
+    _touch_run_heartbeat(sync_run_id)
     return {**cancelled, **failed}
 
 
@@ -1331,7 +1429,21 @@ def _drift_check(
 
 def _make_progress_callback(sync_run_id: int, emits: tuple[str, ...]):
     """Return a callback that updates items_done for each emit of this
-    layer plan. Opens a short-lived autocommit connection per call."""
+    layer plan. Opens a short-lived autocommit connection per call.
+
+    Also advances the run-level heartbeat (#2274), throttled — see
+    ``_touch_run_heartbeat``. The stamp happens AFTER this callback's own
+    transaction commits and OUTSIDE its connection checkout, which is what keeps
+    the two writes independent in both directions that matter: a heartbeat
+    failure cannot roll back reported progress, and the heartbeat never takes a
+    child row lock and a parent row lock at the same time.
+
+    ⚠ The converse is NOT true and is deliberate: if the ``items_done`` UPDATE
+    raises, the heartbeat below is skipped and ``report_progress`` swallows the
+    exception, so a healthy worker with a broken child write reads as
+    heartbeat-less. That degrades to the ``started_at`` fallback, which is the
+    honest reading — we genuinely do not know it is progressing.
+    """
 
     def _callback(items_done: int, items_total: int | None = None) -> None:
         with background_write_connection() as conn:
@@ -1346,5 +1458,6 @@ def _make_progress_callback(sync_run_id: int, emits: tuple[str, ...]):
                         """,
                         (items_done, items_total, sync_run_id, emit),
                     )
+        _touch_run_heartbeat(sync_run_id, force=False)
 
     return _callback

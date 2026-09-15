@@ -25,6 +25,7 @@ import { fetchJobsOverview, runJob } from "@/api/jobs";
 import { fetchRecommendations } from "@/api/recommendations";
 import { fetchSystemStatus } from "@/api/system";
 import { fetchSyncLayersV2, fetchSyncStatus } from "@/api/sync";
+import type { SyncStatusResponse } from "@/api/sync";
 import { ApiError } from "@/api/client";
 import type {
   CoverageSummaryResponse,
@@ -42,7 +43,7 @@ import {
 } from "@/components/dashboard/Section";
 import { Badge } from "@/components/ui/Badge";
 import { useAsync } from "@/lib/useAsync";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, formatRelativeTime } from "@/lib/format";
 import { useProcesses } from "@/lib/useProcesses";
 
 type RowState =
@@ -58,7 +59,11 @@ const ORCHESTRATOR_OWNED = new Set([
 
 export function AdminPage() {
   const v2 = useAsync(fetchSyncLayersV2, []);
-  const status = useAsync(fetchSyncStatus, []);
+  // `preserveOnRefetch` (#2274): without it `data` is cleared at the START of
+  // every refetch, so `isRunning` below flipped false on each 10s/60s poll and
+  // re-armed the interval at the idle cadence — the 10s cadence never actually
+  // held. The holder banner would have flickered the same way.
+  const status = useAsync(fetchSyncStatus, [], { preserveOnRefetch: true });
   const coverage = useAsync(fetchCoverageSummary, []);
   const capabilityOverrides = useAsync(fetchCapabilityOverrides, []);
   const jobs = useAsync(fetchJobsOverview, []);
@@ -202,6 +207,8 @@ export function AdminPage() {
       </div>
 
       <KillSwitchSection />
+
+      <SyncHolderBanner status={status.data} />
 
       <ProblemsPanel
         v2={v2.data}
@@ -585,5 +592,41 @@ function RunButton({
     >
       {buttonLabel}
     </button>
+  );
+}
+
+/**
+ * The in-flight sync run, named (#2274).
+ *
+ * The orchestrator's singleton index lets one sync run at a time, so a run that
+ * was stranded by a crashed worker blocks EVERY later sync until the jobs
+ * process next boots — and nothing rendered it, so the operator's only symptom
+ * was ingest quietly stopping.
+ *
+ * ⚠ `over_ceiling` is a wall-clock verdict, not proof the worker is dead, and
+ * `live` is not proof it is alive. The ages are the signal; the verdict only
+ * marks the case that cannot be a legitimately-long run.
+ *
+ * ⚠ Absent `liveness` (frontend deployed ahead of backend) reads as `live`.
+ */
+function SyncHolderBanner({ status }: { status: SyncStatusResponse | null }) {
+  const run = status?.current_run ?? null;
+  if (run === null) return null;
+  const overCeiling = run.liveness === "over_ceiling";
+  const tone = overCeiling
+    ? "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200"
+    : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300";
+  return (
+    <div className={`rounded border px-3 py-2 text-xs ${tone}`} data-testid="sync-holder-banner">
+      <span className="font-medium">
+        {overCeiling ? "Sync running past its runtime ceiling" : "Sync in flight"}
+      </span>{" "}
+      — run {run.sync_run_id} ({run.scope} / {run.trigger}), started{" "}
+      {formatRelativeTime(run.started_at)}, last progress{" "}
+      {formatRelativeTime(run.last_progress_at)}.
+      {overCeiling
+        ? " No further sync can start while this row holds the orchestrator singleton."
+        : null}
+    </div>
   );
 }

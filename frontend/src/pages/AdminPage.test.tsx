@@ -530,3 +530,64 @@ describe("AdminPage — PR9 decommission", () => {
     ).toBeNull();
   });
 });
+
+describe("AdminPage — sync holder banner (#2274)", () => {
+  /**
+   * The orchestrator's singleton index lets one sync run at a time, so a run
+   * stranded by a crashed worker blocks every later sync until the jobs process
+   * next boots. Nothing rendered that row before this banner — the operator's
+   * only symptom was ingest quietly stopping.
+   */
+  function runningStatus(liveness?: "live" | "over_ceiling") {
+    return {
+      is_running: true,
+      current_run: {
+        sync_run_id: 4242,
+        scope: "behind",
+        trigger: "boot_sweep",
+        started_at: "2026-04-19T00:00:00Z",
+        last_progress_at: null,
+        ...(liveness ? { liveness } : {}),
+        layers_planned: 3,
+        layers_done: 1,
+        layers_failed: 0,
+        layers_skipped: 0,
+      },
+      active_layer: null,
+    };
+  }
+
+  it("is absent when no sync is in flight", async () => {
+    renderPage();
+    await waitFor(() => screen.getByText("Admin"));
+    expect(screen.queryByTestId("sync-holder-banner")).toBeNull();
+  });
+
+  it("names the in-flight run so a held singleton has a subject", async () => {
+    mockedStatus.mockResolvedValue(runningStatus("live"));
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("Sync in flight");
+    expect(banner).toHaveTextContent("run 4242");
+    expect(banner).toHaveTextContent("behind");
+    expect(banner).toHaveTextContent("boot_sweep");
+  });
+
+  it("marks a run past its runtime ceiling and says what it blocks", async () => {
+    mockedStatus.mockResolvedValue(runningStatus("over_ceiling"));
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("past its runtime ceiling");
+    expect(banner).toHaveTextContent("No further sync can start");
+  });
+
+  it("treats an absent liveness field as live, not as a warning", async () => {
+    // Frontend deployed ahead of the backend: the field is optional on the
+    // wire, and a missing verdict must not invent an alarm.
+    mockedStatus.mockResolvedValue(runningStatus());
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("Sync in flight");
+    expect(banner).not.toHaveTextContent("past its runtime ceiling");
+  });
+});
