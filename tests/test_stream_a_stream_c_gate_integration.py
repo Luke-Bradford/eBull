@@ -340,7 +340,19 @@ def test_check_c4_fails_when_a_registered_source_has_no_manifest_drain(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     """With ZERO manifest rows post-completed_at, every registered
-    source is missing → C4 failed + details lists the missing sources."""
+    source is missing → C4 failed + details lists the missing sources.
+
+    ⚠ The import is the test's own setup, not a lint artefact (#2224 residual
+    4). ``registered_parser_sources()`` reads the module-global
+    ``sec_manifest_worker._PARSERS``, which is populated by importing this
+    package — ``app/main.py`` does it explicitly at startup for the same reason.
+    Without it here the test passed only when some EARLIER test on the same
+    xdist worker happened to import it, so it failed roughly once per three full
+    tier runs with ``registered_parser_sources() returned empty frozenset``.
+    Same shape as the established usage in ``tests/test_manifest_parser_sec_424b.py``.
+    """
+    import app.services.manifest_parsers  # noqa: F401, PLC0415 — side-effect: registers the parsers
+
     completed_at = datetime.now(UTC) - timedelta(hours=2)
     _seed_bootstrap_run(ebull_test_conn, completed_at=completed_at)
     status, _, detail = _check_c4_manifest_drained(ebull_test_conn, completed_at=completed_at)

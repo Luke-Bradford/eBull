@@ -164,23 +164,35 @@ _TEST_CLUSTER_PORT = os.environ.get("POSTGRES_TEST_PORT", "5433")
 _DEV_DATABASE_URL: str = settings.database_url
 
 
-# ROOTS of the per-test wipe set. The set actually emptied is this list plus
-# everything reachable from it through inbound FKs — 450 tables today. That
-# closure is DERIVED from ``pg_constraint`` at session start (see
-# ``_build_cleanup_plan``, #1568), so a migration that adds an FK CHILD of a
-# table already listed here needs no edit: it is picked up automatically, and
-# the delete order with it.
+# ⚠⚠ ADVISORY ONLY SINCE #2224 residual 4 (2026-09-15). This tuple no longer
+# decides what is emptied — see ``_derive_wipe_set``. The wipe set is now every
+# public base table MINUS the seed-restore set and ``_WIPE_EXCLUDED``, so a new
+# table is covered the moment a migration creates it, whatever its FK shape.
 #
-# What still MUST be appended here in the same PR is a table with NO inbound-FK
-# path from an existing entry — a standalone table, or one whose "link" to
-# instruments is a bare BIGINT rather than a real FK (``copy_mirror_positions``,
-# ``fx_rates_daily`` below). Nothing can derive those, so rows leak across tests
-# exactly as the review-prevention-log entry "Test-teardown list missing new
-# FK-child tables" describes.
+# It is kept only as the record of which entries were added by hand and why,
+# because four separate defects were caused by this list being incomplete and
+# the reasons are worth not losing. The list is now asserted to be a SUBSET of
+# the derived wipe set (``test_planner_tables_is_a_subset_of_the_derived_wipe_set``),
+# which is the only claim it can still make.
 #
-# Ordering within this tuple is now irrelevant — the delete order is computed
-# topologically. It is kept child-to-parent only because that also happens to
-# be a safe TRUNCATE order for the fallback path.
+# Why it stopped being the source of truth, in one paragraph. The old model was
+# "these roots, plus everything reachable through inbound FKs". That is blind to
+# any table nothing references, so each miss had to be found by a flaky test and
+# patched by name: ``strategy_results_store`` (#2224 cause 2),
+# ``strategy_signal_daily_counts`` + ``strategy_outcome_cursor`` (cause 2), and
+# ``runtime_config_audit`` (residual 4 — a leaked audit row made
+# ``test_update_writes_audit_rows_per_changed_field`` fail once in three full
+# tier runs). The guard added after cause 2 could not catch the fourth, twice
+# over: it is scoped to ``strategy_*``, and it matches only tables with NO
+# foreign key in EITHER direction, so an isolated PAIR slips through — measured,
+# ``strategy_decision_calendar`` and ``strategy_decision_calendar_publications``
+# reference each other and nothing else, and were leaking under the very guard
+# written to catch their class.
+#
+# The derivation is safe because of one measured property, not by assumption: of
+# the 25 tables that were unmanaged under the old model, exactly ONE
+# (``schema_migrations``) holds rows in a pristine template. Emptying the other
+# 24 therefore cannot destroy migration seed data — there is none to destroy.
 _PLANNER_TABLES: tuple[str, ...] = (
     "cik_upsert_timing",
     "financial_facts_raw",
@@ -528,7 +540,13 @@ _SEED_SNAPSHOT_MANIFEST = "_pristine_manifest"
 #: Bumped whenever the snapshot recipe or the exclusion set changes. Recorded in
 #: the template stamp, so a template built by an older checkout is rebuilt even
 #: though its migration hash still matches.
-_SEED_SNAPSHOT_VERSION = 1
+#: v2 (#2224 residual 4) — the restore set is now derived POSITIVELY ("non-empty
+#: in a pristine template, minus _SEED_SNAPSHOT_EXCLUDED") instead of by
+#: subtracting the wipe closure. The resulting manifest happens to name the same
+#: 11 tables today, so a stale template would not misbehave; the bump is here
+#: because the RECIPE changed and a recipe change moves no file under sql/, so
+#: the migration hash alone is blind to it (cause 3's own lesson).
+_SEED_SNAPSHOT_VERSION = 2
 
 #: ``schema_migrations`` is the schema LEDGER, not seed data.
 #: ``tests/test_migration_content_drift.py`` runs the real ``run_migrations()``
@@ -536,7 +554,40 @@ _SEED_SNAPSHOT_VERSION = 1
 #: that HAS been applied — leaving the ledger disagreeing with the schema, which
 #: is precisely the divergence #1333's content-drift guard exists to catch. That
 #: module cleans up its own probe row; it does not need this mechanism.
-_SEED_SNAPSHOT_EXCLUDED: frozenset[str] = frozenset({"schema_migrations"})
+#: Seeded, but NOT restored. Every entry needs a reason, because the default for
+#: a migration-seeded table is to be restored (#2224 cause 3).
+_SEED_SNAPSHOT_EXCLUDED: frozenset[str] = frozenset(
+    {
+        # The schema LEDGER. Restoring it would delete the row for a migration
+        # that HAS been applied, which is exactly the divergence #1333's drift
+        # guard exists to catch, and
+        # ``tests/test_migration_content_drift.py`` runs the real
+        # ``run_migrations()`` against the worker DB.
+        "schema_migrations",
+        # #2224 residual 1 — the ownership tests' FIXTURE SURFACE. These three
+        # are migration-seeded, so under the "non-empty in a pristine template"
+        # rule below they would land in the restore set; they must not. Tests
+        # populate them through the production ``seed_filer`` helper immediately
+        # before each walk, and ``ingest_all_active_filers`` walks every active
+        # seed against a stub fetcher built for the one CIK the test seeded —
+        # six restored CIKs would be fetched and are not in the fixture.
+        # Excluding them here is what puts them on the wipe side, which is where
+        # residual 1 settled them.
+        "institutional_filers",
+        "institutional_filer_seeds",
+        "etf_filer_cik_seeds",
+    }
+)
+
+#: Never emptied by the per-test wipe, whatever the catalog says (#2224
+#: residual 4). ``schema_migrations`` is the schema LEDGER: emptying it would
+#: tell ``run_migrations()`` that nothing has been applied, and
+#: ``tests/test_migration_content_drift.py`` runs the real migrator against the
+#: worker DB. It is excluded from the restore set for the same reason —
+#: restoring it would delete the row for a migration that HAS been applied
+#: (#1333's drift guard). So it is the one table that is neither wiped nor
+#: restored, and that is deliberate on both sides.
+_WIPE_EXCLUDED: frozenset[str] = frozenset({"schema_migrations"})
 
 
 def _snapshot_name(table: str) -> str:
@@ -1287,18 +1338,34 @@ def _truncate_planner_tables(conn: psycopg.Connection[tuple]) -> None:
     here — unconditionally, since the probe that decides "dirty" is exactly the
     thing that just failed. The manifest is read straight from the DB rather
     than from a cleanup plan, because this path runs when there is no usable plan.
+
+    ⚠⚠ The table list is likewise re-derived from the catalog here rather than
+    taken from ``_PLANNER_TABLES`` (#2224 residual 4). "Same end state as the
+    fast path" is the whole contract of this function, and the fast path stopped
+    using that list — truncating the old hand-list would leave exactly the 24
+    tables residual 4 is about still holding rows on the one path that runs when
+    something has already gone wrong.
     """
     assert_test_db(conn)
     with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
-        query = sql.SQL("TRUNCATE {tables} RESTART IDENTITY CASCADE").format(
-            tables=sql.SQL(", ").join(sql.Identifier(t) for t in _PLANNER_TABLES),
-        )
-        cur.execute(query)
         cur.execute("SELECT to_regclass(%s)", (f"public.{_SEED_SNAPSHOT_MANIFEST}",))
         row = cur.fetchone()
+        seed_tables: tuple[str, ...] = ()
         if row is not None and row[0] is not None:
             cur.execute(sql.SQL("SELECT table_name FROM {}").format(sql.Identifier(_SEED_SNAPSHOT_MANIFEST)))
-            _restore_seed_tables(cur, tuple(sorted(r[0] for r in cur.fetchall())))
+            seed_tables = tuple(sorted(r[0] for r in cur.fetchall()))
+
+        cur.execute(_ROOT_TABLES_SQL)
+        roots = {r[0] for r in cur.fetchall()}
+        targets = sorted(_derive_wipe_set(roots, seed_tables))
+
+        cur.execute(
+            sql.SQL("TRUNCATE {tables} RESTART IDENTITY CASCADE").format(
+                tables=sql.SQL(", ").join(sql.Identifier(t) for t in targets),
+            )
+        )
+        if seed_tables:
+            _restore_seed_tables(cur, seed_tables)
     conn.commit()
 
 
@@ -1492,13 +1559,23 @@ def _snapshot_seed_tables(conn: psycopg.Connection[tuple]) -> tuple[str, ...]:
     DB by page, so the baseline provably predates every test. Snapshotting
     per-worker instead would capture whatever state existed at the first cleanup.
 
-    Excludes the wipe closure (those tables are meant to be emptied), the schema
-    ledger, and the snapshot relations themselves — without the last one a
-    rebuild would ask for ``_pristine__pristine_*``.
+    The restore set is "NON-EMPTY here, minus ``_SEED_SNAPSHOT_EXCLUDED``",
+    which is the definition of "the migrations put rows here" stated directly.
+
+    ⚠ It deliberately does NOT subtract the wipe set any more (#2224 residual
+    4). Since the wipe set became the complement of this one, defining this one
+    by subtracting that one is circular — and the circularity is not academic:
+    under the old pair of definitions a table that nothing referenced fell out
+    of BOTH, which is how ``runtime_config_audit`` ended up cleaned by nothing
+    at all. Naming the restore set positively makes "neither" unreachable: every
+    table is now in exactly one of restore / wipe / ``_WIPE_EXCLUDED``, and
+    ``test_every_table_is_wiped_restored_or_deliberately_excluded`` asserts it.
+
+    Snapshot relations are skipped explicitly — without that a rebuild would ask
+    for ``_pristine__pristine_*``.
     """
-    roots, referencing = _read_topology(conn)
-    closure = _wipe_closure(referencing)
-    candidates = sorted(roots - closure - _SEED_SNAPSHOT_EXCLUDED)
+    roots, _referencing = _read_topology(conn)
+    candidates = sorted(roots - _SEED_SNAPSHOT_EXCLUDED)
 
     seeded: list[str] = []
     with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
@@ -1591,17 +1668,40 @@ def _read_topology(conn: psycopg.Connection[tuple]) -> tuple[set[str], dict[str,
     return roots, referencing
 
 
-def _wipe_closure(referencing: dict[str, set[str]]) -> set[str]:
-    """Everything ``TRUNCATE ... CASCADE`` would reach from ``_PLANNER_TABLES``."""
-    closure = set(_PLANNER_TABLES)
-    stack = list(closure)
-    while stack:
-        table = stack.pop()
-        for child in referencing.get(table, ()):
-            if child not in closure:
-                closure.add(child)
-                stack.append(child)
-    return closure
+def _derive_wipe_set(roots: set[str], seed_tables: tuple[str, ...]) -> set[str]:
+    """Every public base table that is not restored and not excluded.
+
+    #2224 residual 4. The old model took ``_PLANNER_TABLES`` as roots and walked
+    inbound FKs, which is blind to any table nothing references — four tables
+    leaked that way and each was found by a flaky test, not by the model. The
+    complement is the honest default: a table is emptied unless something says
+    otherwise, so a migration creating a standalone table is covered the moment
+    it lands rather than the next time it makes a test fail.
+
+    The two "otherwise"s are both narrow and both derived, not judged here:
+
+    * ``seed_tables`` — the restore set, read from the cloned manifest. Those
+      are emptied and refilled by ``_restore_seed_tables`` instead, because
+      their rows come from the migrations (#2224 cause 3).
+    * ``_WIPE_EXCLUDED`` plus the snapshot relations, which are fixture
+      machinery rather than schema.
+
+    ⚠ The safety of inverting the default rests on a measurement, not on
+    reasoning: of the 25 tables unmanaged under the old model, only
+    ``schema_migrations`` holds rows in a pristine template, and it is excluded.
+    Emptying the other 24 cannot destroy seed data because they have none. If a
+    future migration seeds a previously-empty standalone table, the template
+    rebuild puts it in the manifest and it moves to the restore side on its own
+    — which is the behaviour the old model could not express at all.
+    """
+    return {
+        table
+        for table in roots
+        if table not in seed_tables
+        and table not in _WIPE_EXCLUDED
+        and table != _SEED_SNAPSHOT_MANIFEST
+        and not table.startswith(_SEED_SNAPSHOT_PREFIX)
+    }
 
 
 def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
@@ -1613,16 +1713,16 @@ def _build_cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
         seed_tables = _read_seed_manifest(cur, roots)
     conn.rollback()
 
-    missing = sorted(t for t in _PLANNER_TABLES if t not in roots)
-    if missing:
-        raise RuntimeError(
-            f"_PLANNER_TABLES names tables absent from the worker DB: {missing}. "
-            f"A migration renamed or dropped them without updating the list."
-        )
-
-    closure = _wipe_closure(referencing)
+    closure = _derive_wipe_set(roots, seed_tables)
     delete_order = _topological_delete_order(closure, referencing)
     assert set(delete_order) == closure, "delete order must cover the whole wipe set"
+
+    # ⚠ The old "_PLANNER_TABLES names a table absent from the worker DB" check
+    # is gone with the list's authority: under derivation the wipe set comes
+    # FROM the catalog, so a renamed or dropped table simply stops appearing and
+    # there is nothing to be stale against. What replaces it is the subset
+    # assertion in tests/test_db_fixture_cleanup.py, which still catches a
+    # hand-listed name that no longer exists.
 
     overlap = sorted(set(seed_tables) & closure)
     if overlap:
