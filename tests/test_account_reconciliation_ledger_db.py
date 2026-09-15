@@ -58,6 +58,7 @@ def _evidence(
         local_eod_currency="USD",
         local_eod_value=Decimal("99"),
         local_eod_value_in_account_currency=Decimal("99"),
+        local_eod_value_at_official_marks=Decimal("99"),
         local_eod_positions_priced=1,
         local_eod_stale_mark_positions=0,
         difference=None if difference is None else Decimal(difference),
@@ -130,7 +131,14 @@ def test_a_rule_version_bump_starts_a_parallel_series_it_does_not_overwrite(
 ) -> None:
     """So "bump the version, re-verdict only the red days" cannot work: greens go too."""
     record_reconciliation_day(ebull_test_conn, environment="demo", evidence=_evidence())
-    bumped = replace(_evidence(state="diverged", difference="999.00"), reconciliation_rule_version="f0-reconcile-v2")
+    # ⚠ DERIVED from the current constant, never a literal. This read "f0-reconcile-v2",
+    # which stopped being a bump and became the CURRENT version on 2026-09-15 (#3068) —
+    # so both writes collided on one primary key and the test failed for a reason that had
+    # nothing to do with what it asserts. A hardcoded "next version" has a shelf life.
+    bumped = replace(
+        _evidence(state="diverged", difference="999.00"),
+        reconciliation_rule_version=f"{RECONCILIATION_RULE_VERSION}-next",
+    )
     assert record_reconciliation_day(ebull_test_conn, environment="demo", evidence=bumped) is True
 
     # The counter reads only the CURRENT tolerance rule, so the old series is invisible

@@ -37,8 +37,15 @@ from app.providers.implementations.etoro_broker import (
     _normalise_close_order_response,
     _normalise_open_order_response,
     _normalise_order_info_response,
+    _parse_account_risk_snapshot,
+    _parse_direct_position,
     _parse_order_detail,
 )
+
+#: Sentinel meaning "delete this key" in the payload builders below. A literal `None`
+#: cannot express it: `None` is itself a value the parsers must reject, and conflating
+#: "absent" with "present and null" would make half the fail-closed cases untested.
+_ABSENT = object()
 
 # ---------------------------------------------------------------------------
 # Fixtures — documented eToro API response shapes
@@ -171,7 +178,7 @@ FIXTURE_ACCOUNT_PNL_RESPONSE = {
                 "units": 10,
                 "isBuy": True,
                 "isPartiallyAltered": False,
-                "unrealizedPnL": {"pnL": 20},
+                "unrealizedPnL": {"pnL": 20, "closeRate": 22, "closeConversionRate": 1, "assetCurrencyId": 1},
             },
             {
                 "positionID": 9002,
@@ -180,7 +187,7 @@ FIXTURE_ACCOUNT_PNL_RESPONSE = {
                 "units": 10,
                 "isBuy": True,
                 "isPartiallyAltered": False,
-                "unrealizedPnL": {"pnL": -5},
+                "unrealizedPnL": {"pnL": -5, "closeRate": 9.5, "closeConversionRate": 1, "assetCurrencyId": 1},
             },
         ],
         "mirrors": [
@@ -544,7 +551,7 @@ class TestStrategyAccountRisk:
                         "units": 10,
                         "isBuy": True,
                         "isPartiallyAltered": False,
-                        "unrealizedPnL": {"pnL": 20},
+                        "unrealizedPnL": {"pnL": 20, "closeRate": 22, "closeConversionRate": 1, "assetCurrencyId": 1},
                     },
                     {
                         "positionID": 9002,
@@ -553,7 +560,7 @@ class TestStrategyAccountRisk:
                         "units": 10,
                         "isBuy": True,
                         "isPartiallyAltered": False,
-                        "unrealizedPnL": {"pnL": -30},
+                        "unrealizedPnL": {"pnL": -30, "closeRate": 7, "closeConversionRate": 1, "assetCurrencyId": 1},
                     },
                     # Sums to exactly zero -- invisible to any money-valued short field.
                     {
@@ -563,7 +570,7 @@ class TestStrategyAccountRisk:
                         "units": 10,
                         "isBuy": False,
                         "isPartiallyAltered": False,
-                        "unrealizedPnL": {"pnL": -50},
+                        "unrealizedPnL": {"pnL": -50, "closeRate": 5, "closeConversionRate": 1, "assetCurrencyId": 1},
                     },
                 ],
                 "mirrors": [],
@@ -604,7 +611,7 @@ class TestStrategyAccountRisk:
                         "units": 10,
                         "isBuy": True,
                         "isPartiallyAltered": False,
-                        "unrealizedPnL": {"pnL": -250},
+                        "unrealizedPnL": {"pnL": -250, "closeRate": 3, "closeConversionRate": 1, "assetCurrencyId": 1},
                     },
                 ],
                 "mirrors": [],
@@ -632,7 +639,7 @@ class TestStrategyAccountRisk:
                 "instrumentID": 1001,
                 "amount": 200,
                 "isPartiallyAltered": False,
-                "unrealizedPnL": {"pnL": 20},
+                "unrealizedPnL": {"pnL": 20, "closeRate": 22, "closeConversionRate": 1, "assetCurrencyId": 1},
             },
             {
                 "positionID": 9001,
@@ -641,7 +648,7 @@ class TestStrategyAccountRisk:
                 "units": 10,
                 "isBuy": "true",
                 "isPartiallyAltered": False,
-                "unrealizedPnL": {"pnL": 20},
+                "unrealizedPnL": {"pnL": 20, "closeRate": 22, "closeConversionRate": 1, "assetCurrencyId": 1},
             },
             {
                 "positionID": 9001,
@@ -650,7 +657,7 @@ class TestStrategyAccountRisk:
                 "units": 10,
                 "isBuy": 1,
                 "isPartiallyAltered": False,
-                "unrealizedPnL": {"pnL": 20},
+                "unrealizedPnL": {"pnL": 20, "closeRate": 22, "closeConversionRate": 1, "assetCurrencyId": 1},
             },
         ):
             payload = {
@@ -707,7 +714,7 @@ class TestStrategyAccountRisk:
             "amount": 200,
             "isBuy": True,
             "isPartiallyAltered": False,
-            "unrealizedPnL": {"pnL": 20},
+            "unrealizedPnL": {"pnL": 20, "closeRate": 22, "closeConversionRate": 1, "assetCurrencyId": 1},
         }
         for units in (None, "abc", float("nan"), 0, -5, True):
             position = dict(base)
@@ -1951,3 +1958,153 @@ def test_broker_portfolio_mirrors_defaults_to_empty_tuple() -> None:
         raw_payload={},
     )
     assert portfolio.mirrors == ()
+
+
+class TestAccountPnlMarkOperands:
+    """#3068 — the broker's own close rate, parsed as a comparand operand.
+
+    ⚠ These are read from ``unrealizedPnL`` and not derived. ``(amount + pnL) / units``
+    is equity per unit, not a price: the portal documents ``amount`` as including
+    "additional margin allocated to the position as collateral", so the two coincide only
+    at leverage 1 with no added collateral — and where they do coincide, the substitution
+    built on the quotient is identically zero, i.e. a comparison that cannot fail.
+    """
+
+    @staticmethod
+    def _payload(**pnl_overrides: object) -> dict[str, object]:
+        pnl: dict[str, object] = {
+            "pnL": 20,
+            "closeRate": 22,
+            "closeConversionRate": 1,
+            "assetCurrencyId": 1,
+        }
+        pnl.update(pnl_overrides)
+        for key in [k for k, v in pnl.items() if v is _ABSENT]:
+            del pnl[key]
+        return {
+            "clientPortfolio": {
+                "accountCurrencyId": 1,
+                "credit": 1000,
+                "positions": [
+                    {
+                        "positionID": 9001,
+                        "instrumentID": 1001,
+                        "amount": 200,
+                        "units": 10,
+                        "isBuy": True,
+                        "isPartiallyAltered": False,
+                        "unrealizedPnL": pnl,
+                    }
+                ],
+                "mirrors": [],
+                "ordersForOpen": [],
+                "orders": [],
+            }
+        }
+
+    def test_the_published_mark_is_read_not_derived(self) -> None:
+        """The stored close rate must be the broker's 22, NOT (200 + 20) / 10 = 22.
+
+        Those agree here by construction, which is why the test asserts the mark against a
+        payload where they do NOT: below.
+        """
+        snapshot = _parse_account_risk_snapshot(self._payload(), observed_at=datetime.now(UTC))
+        position = snapshot.direct_positions[0]
+        assert position.close_rate == Decimal("22")
+        assert position.close_conversion_rate == Decimal("1")
+        assert position.asset_currency_id == 1
+
+    def test_a_leveraged_row_keeps_the_published_mark_not_the_quotient(self) -> None:
+        """amount 50 of margin on 1 unit entered at 100, broker mark 110, P&L 10.
+
+        The quotient is (50 + 10) / 1 = 60. The mark is 110. A parser that derived it
+        would be out by 50 on a healthy position.
+        """
+        payload = self._payload(pnL=10, closeRate=110)
+        positions = payload["clientPortfolio"]["positions"]  # type: ignore[index]
+        positions[0].update({"amount": 50, "units": 1, "leverage": 2})
+        snapshot = _parse_account_risk_snapshot(payload, observed_at=datetime.now(UTC))
+        position = snapshot.direct_positions[0]
+        assert position.close_rate == Decimal("110")
+        assert (position.amount + position.unrealized_pnl) / position.units == Decimal("60")
+
+    def test_the_pnl_timestamp_is_carried_when_present(self) -> None:
+        """⚠ Seven fractional digits, which is what eToro actually sends."""
+        snapshot = _parse_account_risk_snapshot(
+            self._payload(timestamp="2026-09-15T04:02:27.3169794Z"), observed_at=datetime.now(UTC)
+        )
+        stamped = snapshot.direct_positions[0].pnl_timestamp
+        assert stamped is not None
+        assert stamped.tzinfo is not None
+        assert stamped.isoformat().startswith("2026-09-15T04:02:27")
+
+    @pytest.mark.parametrize("overrides", [{"timestamp": _ABSENT}, {"timestamp": "not-a-date"}, {"timestamp": 7}])
+    def test_an_unusable_timestamp_is_dropped_rather_than_failing_the_snapshot(
+        self, overrides: dict[str, object]
+    ) -> None:
+        """Evidence, not an operand. No verdict reads it, so losing the whole comparand
+        over it would protect a diagnostic at the expense of the thing being diagnosed."""
+        snapshot = _parse_account_risk_snapshot(self._payload(**overrides), observed_at=datetime.now(UTC))
+        assert snapshot.direct_positions[0].pnl_timestamp is None
+        assert snapshot.direct_positions[0].close_rate == Decimal("22")
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"closeRate": _ABSENT},
+            {"closeRate": 0},
+            {"closeRate": -1},
+            {"closeRate": "NaN"},
+            {"closeRate": True},
+            {"closeRate": "abc"},
+            {"closeConversionRate": _ABSENT},
+            {"closeConversionRate": 0},
+            {"closeConversionRate": "Infinity"},
+            {"assetCurrencyId": _ABSENT},
+            {"assetCurrencyId": 0},
+            {"assetCurrencyId": True},
+            {"assetCurrencyId": "1"},
+        ],
+    )
+    def test_an_unusable_comparand_operand_fails_closed(self, overrides: dict[str, object]) -> None:
+        """A defaulted or coerced operand produces a number that LOOKS like an observation.
+
+        ⚠ `True` is tested explicitly on both the numeric and the integer field: `bool` is
+        an `int` subclass in Python, so an unguarded read would store 1 — a plausible
+        conversion rate and a plausible currency id.
+        """
+        with pytest.raises(TradingPreflightParseError):
+            _parse_account_risk_snapshot(self._payload(**overrides), observed_at=datetime.now(UTC))
+
+
+class TestDirectPositionDirection:
+    """#3068 — `/portfolio` direction is read, not defaulted."""
+
+    @staticmethod
+    def _position_payload(**overrides: object) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "positionID": 9001,
+            "instrumentID": 1001,
+            "openRate": 20,
+            "units": 10,
+            "amount": 200,
+            "isBuy": True,
+        }
+        payload.update(overrides)
+        for key in [k for k, v in payload.items() if v is _ABSENT]:
+            del payload[key]
+        return payload
+
+    def test_direction_is_read(self) -> None:
+        assert _parse_direct_position(self._position_payload()).is_buy is True
+        assert _parse_direct_position(self._position_payload(isBuy=False)).is_buy is False
+
+    @pytest.mark.parametrize("overrides", [{"isBuy": _ABSENT}, {"isBuy": 1}, {"isBuy": "true"}, {"isBuy": None}])
+    def test_an_absent_or_coerced_direction_fails_closed(self, overrides: dict[str, object]) -> None:
+        """⚠⚠ This used to read `bool(payload.get("isBuy", True))`, so an ABSENT direction
+        became LONG and any truthy value became LONG. `broker_positions.is_buy` signs the
+        end-of-day mark-to-market and is compared against the broker's own `isBuy` as a
+        two-endpoint check — which a default makes vacuous.
+        """
+        with pytest.raises(ValueError):
+            _parse_direct_position(self._position_payload(**overrides))

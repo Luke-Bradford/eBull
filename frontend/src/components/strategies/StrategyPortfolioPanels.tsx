@@ -52,6 +52,10 @@ const ACCOUNT_EVIDENCE_REASON_LABELS: Record<string, string> = {
   // the slug renders rather than falling back to the raw text.
   local_eod_currency_mismatch: "The broker account and local valuation currencies do not match.",
   local_eod_valuation_incomplete: "The local valuation is missing at least one price or currency conversion.",
+  // Retired as refusals in #3068 — since f0-reconcile-v2 the comparison re-prices every
+  // position at the broker's own mark, so our closing mark cancels out of it entirely and
+  // its age cannot move the result. The labels stay so any row still carrying the slug
+  // renders rather than falling back to raw text.
   local_eod_effective_time_unknown: "The effective dates of the local valuation marks were not recorded.",
   account_currency_fx_rate_missing: "No exchange rate converts the local valuation into the broker account currency.",
   official_direct_position_value_not_recorded:
@@ -66,6 +70,25 @@ const ACCOUNT_EVIDENCE_REASON_LABELS: Record<string, string> = {
     "This local valuation predates the recorded rounding allowance, so no tolerance can be applied to it.",
   reconciliation_inputs_out_of_bounds:
     "A stored reconciliation input is outside its safe range; the comparison is refused rather than reported.",
+  // #3068 — the per-position marks the v2 comparand is built from.
+  official_position_marks_not_recorded:
+    "This broker snapshot predates the per-position marks, so our holdings cannot be re-priced at the broker's own prices.",
+  official_position_marks_incomplete:
+    "The broker's per-position marks do not account for every position the same snapshot reports.",
+  official_position_marks_unusable:
+    "A broker per-position mark is missing, out of range, or quoted in an undocumented currency.",
+  official_position_missing_locally:
+    "The broker reports a position the local end-of-day book does not hold.",
+  local_position_missing_officially:
+    "The local end-of-day book holds a position the broker's snapshot does not price.",
+  local_position_mark_unusable:
+    "A local position carries no usable closing value, so there is nothing to re-price at the broker's mark.",
+  local_eod_position_direction_not_recorded:
+    "This local valuation predates recorded position direction, so long and short cannot be told apart.",
+  position_identity_mismatch:
+    "The broker and the local book disagree about the instrument, direction, or currency of the same position.",
+  reconciliation_inputs_changed_during_read:
+    "A snapshot was rewritten while this comparison was being assembled; it will be decided on the next pass.",
 };
 
 function accountEvidenceReasonLabel(
@@ -219,6 +242,17 @@ export function AccountEvidence({ overview }: { overview: StrategyOverviewRespon
             <div>
               <span className="block text-slate-500">Local valuation</span>
               <strong>{formatMoney(Number(evidence.local_eod_value), evidence.local_eod_currency)}</strong>
+            </div>
+          ) : null}
+          {/* Shown as its own figure because it, and NOT "Local valuation", is what
+              `difference` is measured against since f0-reconcile-v2: the same holdings
+              re-priced at the broker's own marks so both sides are struck at one instant
+              (#3068). Without it the panel shows a difference the two visible numbers do
+              not produce. */}
+          {evidence.local_eod_value_at_official_marks !== null && currency !== null ? (
+            <div>
+              <span className="block text-slate-500">At broker marks</span>
+              <strong>{formatMoney(Number(evidence.local_eod_value_at_official_marks), currency)}</strong>
             </div>
           ) : null}
           {/* The residual is dominated by copy-trader mirrors and pending orders, but it

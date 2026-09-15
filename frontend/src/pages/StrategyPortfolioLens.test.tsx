@@ -65,6 +65,7 @@ const BLOCKED = {
   "local_eod_currency": null,
   "local_eod_value": null,
   "local_eod_value_in_account_currency": null,
+  "local_eod_value_at_official_marks": null,
   "local_eod_positions_priced": null,
   "local_eod_stale_mark_positions": null,
   "difference": null,

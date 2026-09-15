@@ -250,6 +250,9 @@ class FileBackedFakeBroker:
                         unrealized_pnl=Decimal("0"),
                         market_value=amount,
                         is_partially_altered=False,
+                        close_rate=amount,
+                        close_conversion_rate=Decimal("1"),
+                        asset_currency_id=1,
                     )
                 )
             else:

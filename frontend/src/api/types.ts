@@ -2880,6 +2880,10 @@ export interface StrategyOverviewResponse {
     local_eod_currency: string | null;
     local_eod_value: string | null;
     local_eod_value_in_account_currency: string | null;
+    // The local book re-priced at the broker's own per-position marks — the left operand
+    // of `difference` since `f0-reconcile-v2` (#3068). The field above stays the stored
+    // end-of-day total merely converted, so both are needed for the subtraction to check.
+    local_eod_value_at_official_marks: string | null;
     local_eod_positions_priced: number | null;
     local_eod_stale_mark_positions: number | null;
     difference: string | null;

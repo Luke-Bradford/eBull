@@ -59,6 +59,9 @@ def position(
         unrealized_pnl=Decimal(market_value) - Decimal(amount),
         market_value=Decimal(market_value),
         is_partially_altered=partial,
+        close_rate=Decimal(market_value) / Decimal(units),
+        close_conversion_rate=Decimal("1"),
+        asset_currency_id=1,
     )
 
 

@@ -155,6 +155,8 @@ class TestParser:
             "openRate": "512.34",
             "amount": "8672.15",
             "settlementTypeID": 0,
+            # Required since #3068 — an absent direction is no longer defaulted to long.
+            "isBuy": True,
         }
         assert _parse_direct_position(payload).settlement_type_id == 0
 
@@ -165,5 +167,6 @@ class TestParser:
             "units": "1",
             "openRate": "10",
             "amount": "10",
+            "isBuy": True,
         }
         assert _parse_direct_position(payload).settlement_type_id is None
