@@ -3478,6 +3478,26 @@ def daily_candle_refresh() -> None:
                     # this function returns, nothing can establish it.
                     "bars_revised_age_days": summary.candle_revision_age_days,
                     "bars_revised_max_age_days": summary.candle_revision_max_age_days,
+                    # #2414 — the same revisions attributed to the WRITE BRANCH
+                    # that produced them. Age could not do it: an incremental
+                    # fetch is bounded in BARS not days, a heal can revise a
+                    # handful of rows, and a stale re-observation can rewrite
+                    # four years — so depth does not invert to a branch, and a
+                    # run aggregate cannot say which instrument a maximum
+                    # belongs to either. ⚠ The branch is an UPPER BOUND on
+                    # attribution, not the economic cause: one fetch can rewrite
+                    # bars for more than one reason at once. It narrows the
+                    # population #2414's supersession question must examine; it
+                    # does not classify it.
+                    "bars_revised_by_cause": summary.candle_revisions_by_cause,
+                    "bars_revised_max_age_days_by_cause": summary.candle_revision_max_age_by_cause,
+                    # #2414 — on the summary since #2066 and persisted nowhere
+                    # until now; a grep returned its definition, its increment
+                    # and one log line. ⚠ Narrower than its name: heals whose
+                    # re-fetch returned at least one in-window bar AND whose
+                    # per-instrument transaction then committed. A detected
+                    # adjustment whose re-fetch came back empty counts zero.
+                    "adjustment_refetches": summary.adjustment_refetches,
                 },
             )
         tracker.row_count = summary.candle_rows_upserted

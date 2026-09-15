@@ -72,16 +72,53 @@ def _seed(conn: psycopg.Connection[tuple], days: list[date], close: str) -> None
         )
 
 
-def _run(conn: psycopg.Connection[tuple], bars: list[OHLCVBar]) -> MarketRefreshSummary:
+def _run(
+    conn: psycopg.Connection[tuple],
+    bars: list[OHLCVBar],
+    *,
+    extra_responses: list[list[OHLCVBar]] | None = None,
+    instruments: list[tuple[int, str]] | None = None,
+) -> MarketRefreshSummary:
     provider = MagicMock()
-    provider.get_daily_candles.side_effect = [bars]
-    return refresh_market_data(
+    provider.get_daily_candles.side_effect = [bars, *(extra_responses or [])]
+    summary = refresh_market_data(
         provider,
         conn,
-        instruments=[(_IID, "REVN")],
+        instruments=instruments or [(_IID, "REVN")],
         lookback_days=1000,
         skip_quotes=True,
     )
+    _assert_cause_invariants(summary)
+    return summary
+
+
+def _ensure_instrument(conn: psycopg.Connection[tuple], instrument_id: int, symbol: str) -> None:
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+        "VALUES (%s, %s, 'Revision Test Co', TRUE) ON CONFLICT (instrument_id) DO NOTHING",
+        (instrument_id, symbol),
+    )
+
+
+def _assert_cause_invariants(summary: MarketRefreshSummary) -> None:
+    """#2414's three by-cause invariants, checked on EVERY run in this file.
+
+    ⚠ Conservation alone cannot validate attribution — labelling every revision
+    ``stale_reobservation`` satisfies the sum. That is why the per-branch tests
+    below assert the KEY against a path the loop actually executed, and why this
+    helper is a floor rather than the evidence.
+    """
+    by_cause = summary.candle_revisions_by_cause
+    max_by_cause = summary.candle_revision_max_age_by_cause
+    assert sum(by_cause.values()) == summary.candle_rows_revised
+    # Same keys in both maps, in both directions: a cause with a count and no
+    # depth is as broken as a depth with no count.
+    assert set(max_by_cause) == {cause for cause, count in by_cause.items() if count > 0}
+    assert all(count > 0 for count in by_cause.values())
+    if max_by_cause:
+        assert max(max_by_cause.values()) == summary.candle_revision_max_age_days
+    else:
+        assert summary.candle_revision_max_age_days is None
 
 
 def test_new_revised_and_identical_bars_are_counted_separately(
@@ -123,6 +160,13 @@ def test_new_revised_and_identical_bars_are_counted_separately(
     assert summary.candle_revision_age_days == {"1_3": 1}
     assert summary.candle_revision_max_age_days is not None
     assert 1 <= summary.candle_revision_max_age_days <= 3
+
+    # #2414 cause half. The instrument is one trading day behind, so
+    # `_candles_fetch_count` chose the 3-bar window and said so — attributed to
+    # the branch that ran, not inferred from the depth.
+    assert summary.candle_revisions_by_cause == {"incremental": 1}
+    assert summary.candle_revision_max_age_by_cause["incremental"] == summary.candle_revision_max_age_days
+    assert summary.adjustment_refetches == 0
 
     # The revision really did land, so the counter is describing a real
     # overwrite and not merely a code path.
@@ -185,6 +229,13 @@ def test_a_revision_far_past_the_correction_buffer_is_recorded_as_such(
     assert summary.candle_rows_revised == 1
     assert summary.candle_revision_age_days == {"31_365": 1}
     assert summary.candle_revision_max_age_days == age_days
+
+    # #2414 cause half, and this is the pair that shows why depth is NOT the
+    # branch: this run and the incremental one above both revised exactly one
+    # bar, and only the reason recorded by `_candles_fetch_count` separates a
+    # correction-window overwrite from a four-year re-observation.
+    assert summary.candle_revisions_by_cause == {"stale_reobservation": 1}
+    assert summary.candle_revision_max_age_by_cause == {"stale_reobservation": age_days}
     # The overwrite is real, not merely a counted code path.
     stored = dict(
         conn.execute(
@@ -244,3 +295,87 @@ def test_re_running_identical_bars_reports_neither(
 
     assert summary.candle_rows_revised == 0
     assert summary.candle_rows_upserted == 0
+
+
+def test_an_adjustment_heal_is_attributed_to_the_heal_not_to_the_incremental_branch(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ The ordering trap, driven through the real loop rather than the helper.
+
+    A heal is reachable ONLY from the incremental branch — ``:733`` requires
+    ``fetch_count == _INCREMENTAL_FETCH_BARS`` — so its fetch reason is always
+    ``incremental``. If ``revision_cause`` consulted the fetch reason first,
+    every split re-basing in the corpus would be filed under the 3-bar
+    correction window, which is the branch with the opposite meaning for
+    #2414's supersession question.
+    """
+    conn = ebull_test_conn
+    _ensure_instrument(conn, _IID, "REVN")
+    days = _weekdays_back(most_recent_trading_day(date.today()), 40)
+    # Three stored bars ending one trading day back: fresh enough for the
+    # incremental window, not fresh enough for the freshness skip.
+    _seed(conn, days[-4:-1], "100")
+
+    summary = _run(
+        conn,
+        # The 3-bar incremental response, re-based 2x against what is stored —
+        # past `_ADJUSTMENT_RATIO_THRESHOLD`, so the heal fires.
+        [_bar(d, "200") for d in days[-3:]],
+        # The heal's full-history re-fetch.
+        extra_responses=[[_bar(d, "200") for d in days]],
+    )
+
+    assert summary.candles_failed == 0
+    assert summary.adjustment_refetches == 1
+    # The three seeded bars were overwritten 100 -> 200; the other 37 are new.
+    assert summary.candle_rows_revised == 3
+    assert summary.candle_revisions_by_cause == {"adjustment_heal": 3}
+    assert "incremental" not in summary.candle_revisions_by_cause
+
+
+def test_two_instruments_on_different_branches_report_both_causes(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A run aggregate is a SUM OVER INSTRUMENTS, which is the thing that makes
+    a single global maximum uninterpretable (#2414).
+
+    One instrument takes the incremental window and one takes the stale
+    re-observation, in the same run. The by-cause split is what lets a reader
+    tell that the run's deepest revision belongs to the second and not to the
+    first — the inference an earlier draft of the spec got wrong.
+    """
+    conn = ebull_test_conn
+    other = _IID + 1
+    _ensure_instrument(conn, _IID, "REVN")
+    _ensure_instrument(conn, other, "REVO")
+
+    days = _weekdays_back(most_recent_trading_day(date.today()), 40)
+    # Instrument A: one trading day behind -> incremental.
+    _seed(conn, days[-4:-1], "100")
+    # Instrument B: ten trading days behind -> stale re-observation.
+    for d in days[:-10]:
+        conn.execute(
+            "INSERT INTO price_daily (instrument_id, price_date, open, high, low, close, volume) "
+            "VALUES (%s, %s, %s, %s, %s, %s, 1000) ON CONFLICT DO NOTHING",
+            (other, d, Decimal("100"), Decimal("100"), Decimal("100"), Decimal("100")),
+        )
+
+    oldest = days[0]
+    deep_age = (days[-1] - oldest).days
+    summary = _run(
+        conn,
+        # A's incremental window: one revision, one insert. Held under the 1.2
+        # ratio so this stays an ordinary correction and does not trip the heal.
+        [_bar(days[-3], "100"), _bar(days[-2], "101"), _bar(days[-1], "102")],
+        extra_responses=[[_bar(d, "101" if d == oldest else "100") for d in days]],
+        instruments=[(_IID, "REVN"), (other, "REVO")],
+    )
+
+    assert summary.candles_failed == 0
+    assert summary.adjustment_refetches == 0
+    assert summary.candle_revisions_by_cause == {"incremental": 1, "stale_reobservation": 1}
+    # The run's single global maximum belongs to ONE of the two causes, and
+    # without the split nothing says which.
+    assert summary.candle_revision_max_age_days == deep_age
+    assert summary.candle_revision_max_age_by_cause["stale_reobservation"] == deep_age
+    assert summary.candle_revision_max_age_by_cause["incremental"] < deep_age

@@ -380,6 +380,22 @@ class MarketRefreshSummary:
     # histogram because one deep revision IS the finding and a bucket count of 1
     # does not say how deep. `None` when nothing was revised.
     candle_revision_max_age_days: int | None = None
+    # #2414 — the same revisions again, split by WHICH WRITE BRANCH produced
+    # them. Age turned out not to identify the branch: an incremental fetch is
+    # bounded in BARS not in days (a sparse name's third-newest bar can be
+    # months old), a heal can revise a handful of rows, and a stale
+    # re-observation can rewrite four years. So depth cannot be inverted to a
+    # cause, and the run aggregate cannot even say which instrument a maximum
+    # belongs to.
+    #
+    # ⚠⚠ THE BRANCH IS NOT THE ECONOMIC CAUSE. One fetch can rewrite bars for
+    # more than one underlying reason at once, including inside a heal, so this
+    # is an upper bound on attribution. It narrows the population #2414's
+    # supersession question has to examine; it does not classify it.
+    candle_revisions_by_cause: dict[str, int] = field(default_factory=dict)
+    # The deepest revision within each cause, in calendar days. Present for
+    # exactly the causes with a positive count.
+    candle_revision_max_age_by_cause: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -658,6 +674,8 @@ def refresh_market_data(
     candle_rows_revised = 0
     candle_revision_age_days: dict[str, int] = {}
     candle_revision_max_age_days: int | None = None
+    candle_revisions_by_cause: dict[str, int] = {}
+    candle_revision_max_age_by_cause: dict[str, int] = {}
     features_computed = 0
     quotes_updated = 0
     quotes_skipped = 0
@@ -695,9 +713,14 @@ def refresh_market_data(
             report_progress(idx, total)
             continue
         if force_backfill:
-            fetch_count = lookback_days
+            # ⚠ No fetch reason: this path never consults `_candles_fetch_count`,
+            # and `revision_cause` reports `force_backfill` for it rather than
+            # inferring one from the size.
+            fetch_count, fetch_reason = lookback_days, ""
         else:
-            fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=freshness_target)
+            fetch_count, fetch_reason = _candles_fetch_count(
+                conn, instrument_id, default=lookback_days, today=freshness_target
+            )
         upserted = 0
         revised = 0
         revision_ages: dict[str, int] = {}
@@ -773,6 +796,29 @@ def refresh_market_data(
                     if candle_revision_max_age_days is None
                     else max(candle_revision_max_age_days, revision_max_age)
                 )
+            # #2414 — the same revisions, attributed to the branch that wrote
+            # them. Gated on `revised` so a cause never appears with a zero
+            # count: the by-cause map and its max-age map must have exactly the
+            # same keys, which is the invariant the tests pin.
+            if revised:
+                cause = revision_cause(
+                    adjustment_detected=adjustment_detected,
+                    force_backfill=force_backfill,
+                    fetch_reason=fetch_reason,
+                )
+                candle_revisions_by_cause[cause] = candle_revisions_by_cause.get(cause, 0) + revised
+                # ⚠ `revised` and `revision_max_age` are set in the SAME branch of
+                # `_upsert_candles`, so this is never skipped for a positive count —
+                # which is what makes "same keys in both maps" an invariant rather
+                # than a hope. The narrowing is for the type checker, and it keeps a
+                # producer change from silently inventing a cause with no depth.
+                if revision_max_age is not None:
+                    prior = candle_revision_max_age_by_cause.get(cause)
+                    # `max` over the RAW age, so a future-dated bar's negative age
+                    # survives here exactly as it does in the global maximum.
+                    candle_revision_max_age_by_cause[cause] = (
+                        revision_max_age if prior is None else max(prior, revision_max_age)
+                    )
             features_computed += computed
             # Counted only after a clean commit (same #1293 rule as the row
             # totals) — a heal whose re-fetch or write failed did NOT happen.
@@ -852,12 +898,28 @@ def refresh_market_data(
         quotes_skipped = quote_result.quotes_skipped
         spread_flags_set = quote_result.spread_flags_set
 
+    # #2414 — logged HERE and not only in the scheduler, because the scheduler is
+    # the only caller that persists `progress_json`. `scripts/rebackfill_candles_5y.py`
+    # is the sole `force_backfill=True` caller and it reports neither revisions nor
+    # causes, so without this line the `force_backfill` cause could never be observed
+    # anywhere. Gated on a non-zero count: a quiet run must stay quiet.
+    if candle_rows_revised:
+        logger.info(
+            "Candle revisions: %d bars, by cause %s, deepest by cause %s (max %s days)",
+            candle_rows_revised,
+            dict(sorted(candle_revisions_by_cause.items())),
+            dict(sorted(candle_revision_max_age_by_cause.items())),
+            candle_revision_max_age_days,
+        )
+
     return MarketRefreshSummary(
         instruments_refreshed=len(instruments),
         candle_rows_upserted=candle_rows_upserted,
         candle_rows_revised=candle_rows_revised,
         candle_revision_age_days=candle_revision_age_days,
         candle_revision_max_age_days=candle_revision_max_age_days,
+        candle_revisions_by_cause=candle_revisions_by_cause,
+        candle_revision_max_age_by_cause=candle_revision_max_age_by_cause,
         features_computed=features_computed,
         quotes_updated=quotes_updated,
         quotes_skipped=quotes_skipped,
@@ -939,27 +1001,45 @@ def _candles_are_fresh(
 _INCREMENTAL_FETCH_BARS = 3
 
 
+#: Why ``_candles_fetch_count`` chose the size it chose (#2414). Returned rather
+#: than left for the caller to infer from the count, because the inference is
+#: wrong twice: it collapses whenever ``lookback_days == _INCREMENTAL_FETCH_BARS``
+#: (a stale-gap fallback also returns 3, and would read as incremental), and
+#: re-deriving "did this instrument have prior bars" from a SECOND read can
+#: disagree with the read this function already did.
+FETCH_REASON_INITIAL_BACKFILL = "initial_backfill"
+FETCH_REASON_STALE_REOBSERVATION = "stale_reobservation"
+FETCH_REASON_INCREMENTAL = "incremental"
+
+
 def _candles_fetch_count(
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instrument_id: int,
     *,
     default: int,
     today: date | None = None,
-) -> int:
-    """Decide the candlesCount for an instrument's fetch (#271).
+) -> tuple[int, str]:
+    """Decide the candlesCount for an instrument's fetch, and say why (#271, #2414).
 
-    Returns ``default`` (typically 1000 per #603) in two cases:
-      * No prior candles at all — initial backfill mode.
-      * Prior candles exist but the most recent is older than the
-        incremental window (e.g. instrument was halted, re-added to
-        the universe after a gap, or a multi-day market closure). A
-        3-bar incremental fetch here would silently leave a history
-        gap; falling back to ``default`` closes the gap.
+    Returns ``default`` (typically 1000 per #603) in two cases, which the second
+    element separates:
+      * ``initial_backfill`` — no prior candles at all.
+      * ``stale_reobservation`` — prior candles exist but the most recent is
+        older than the incremental window (e.g. instrument was halted, re-added
+        to the universe after a gap, or a multi-day market closure). A 3-bar
+        incremental fetch here would silently leave a history gap; falling back
+        to ``default`` closes the gap.
 
-    Returns ``_INCREMENTAL_FETCH_BARS`` when the most recent candle is
-    within the incremental window — normal daily maintenance mode.
-    The upsert dedupes on (instrument_id, price_date) so overlap is
-    safe.
+    Returns ``_INCREMENTAL_FETCH_BARS`` / ``incremental`` when the most recent
+    candle is within the incremental window — normal daily maintenance mode.
+    The upsert dedupes on (instrument_id, price_date) so overlap is safe.
+
+    ⚠ The incremental window is a CALENDAR-gap test on the NEWEST stored bar
+    only. The three bars the provider then returns are spaced by the
+    instrument's own trading cadence, so an incremental fetch is bounded in
+    BARS and not in days — a sparse name two days behind can have a
+    third-newest bar hundreds of days old. This is why #2414's revision-age
+    axis cannot be inverted to a fetch reason, and why the reason is returned.
 
     Note: this function does NOT extend an instrument's lookback when
     ``default`` is bumped. An instrument that has 400 bars stays at
@@ -974,14 +1054,49 @@ def _candles_fetch_count(
         {"instrument_id": instrument_id},
     ).fetchone()
     if row is None or row[0] is None:
-        return default  # no prior data — backfill
+        return default, FETCH_REASON_INITIAL_BACKFILL
     latest: date = row[0]
     reference = today if today is not None else date.today()
     gap_days = (reference - latest).days
     if gap_days > _INCREMENTAL_FETCH_BARS:
         # Gap wider than the incremental window — backfill to close it.
-        return default
-    return _INCREMENTAL_FETCH_BARS
+        return default, FETCH_REASON_STALE_REOBSERVATION
+    return _INCREMENTAL_FETCH_BARS, FETCH_REASON_INCREMENTAL
+
+
+#: The two causes that do not come from ``_candles_fetch_count``.
+REVISION_CAUSE_ADJUSTMENT_HEAL = "adjustment_heal"
+REVISION_CAUSE_FORCE_BACKFILL = "force_backfill"
+
+
+def revision_cause(*, adjustment_detected: bool, force_backfill: bool, fetch_reason: str) -> str:
+    """Which write branch produced this instrument's revisions (#2414).
+
+    ⚠⚠ A BRANCH, NOT AN ECONOMIC CAUSE. One fetch can rewrite bars for more than
+    one underlying reason at once — a provider correction landing in the same
+    response as a re-basing, including inside a heal — so this is an UPPER BOUND
+    on attribution. It narrows the population #2414's supersession question has
+    to examine; it does not classify it. Do not read ``adjustment_heal`` as
+    "this revision was a split" or ``incremental`` as "this revision was a bad
+    print".
+
+    ⚠ The order is load-bearing and is neither alphabetical nor historical:
+
+    * A heal is reachable ONLY from the incremental branch — its precondition is
+      ``not force_backfill and fetch_count == _INCREMENTAL_FETCH_BARS`` — so
+      returning ``fetch_reason`` first would claim every heal as incremental.
+    * ``force_backfill`` bypasses ``_candles_fetch_count`` entirely, so there is
+      no reason to report for it.
+    * ``adjustment_detected and force_backfill`` is unreachable today by that
+      same precondition. It resolves to the heal rather than raising: a
+      telemetry helper that can abort a refresh is a worse failure than a
+      mislabelled counter.
+    """
+    if adjustment_detected:
+        return REVISION_CAUSE_ADJUSTMENT_HEAL
+    if force_backfill:
+        return REVISION_CAUSE_FORCE_BACKFILL
+    return fetch_reason
 
 
 # #2066 — smallest overlap close ratio that reads as an adjustment event
@@ -990,6 +1105,10 @@ def _candles_fetch_count(
 # to a finalized close are single-digit percent. 1.2 sits between the two
 # with margin, and a false positive only costs one idempotent full-history
 # re-fetch, so the threshold errs low.
+#
+# ⚠ It is a TRIGGER for the heal, never a verdict on whether a stored
+# strategy decision survives the revision. #3046 killed that reading twice:
+# "magnitude is a trigger, not a verdict".
 _ADJUSTMENT_RATIO_THRESHOLD = Decimal("1.2")
 
 
