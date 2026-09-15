@@ -304,6 +304,13 @@ def arm_verdict_reach(conn: psycopg.Connection[Any], classes: list[str]) -> None
     print("\nWHAT THE EXISTING RULE SET ALREADY REACHES")
     print("-" * 100)
     print(f"  weekend bars                                  {total:>6}")
+    # ⚠ An empty population is a REAL state, not an impossible one: re-parameterise
+    # every class 7-day and `five_day_classes` returns nothing. A share of zero bars
+    # is undefined, so it prints as `n/a` rather than dividing — a crash here would
+    # replace the answer "there are none" with a traceback.
+    if total == 0:
+        print("  ⚠ no weekend bars on any 5-day class — nothing to report, and that IS the answer")
+        return
     print(f"  carrying a price_bar_quarantine row           {bar_rows:>6}  ({100 * bar_rows / total:.1f}%)")
     print(f"  an endpoint of a quarantined transition       {trans:>6}  ({100 * trans / total:.1f}%)")
     # ⚠ Computed as a real set complement, NOT `total - max(bar_rows, trans)`. The two
