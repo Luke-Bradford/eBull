@@ -146,6 +146,8 @@ function MirrorRow({
 }) {
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
+  // Its OWN sign — see the twin in PortfolioPage.tsx::MirrorRow (#3084).
+  const closedPositive = m.closed_pnl >= 0;
   const unconverted = currency !== displayCurrency;
   return (
     <tr className="border-t border-slate-100">
@@ -178,6 +180,13 @@ function MirrorRow({
         <span className={positive ? "text-emerald-600" : "text-red-600"}>
           {formatMoney(m.unrealized_pnl, currency)}
           {pct === null ? "" : ` (${formatPct(pct)})`}
+        </span>
+        <span className="block text-[10px] text-slate-400">unrealised</span>
+        <span
+          className={`block text-[10px] ${closedPositive ? "text-emerald-600" : "text-red-600"}`}
+          data-testid={`dashboard-mirror-closed-pnl-${m.mirror_id}`}
+        >
+          {formatMoney(m.closed_pnl, currency)} closed P&amp;L
         </span>
       </Td>
     </tr>
