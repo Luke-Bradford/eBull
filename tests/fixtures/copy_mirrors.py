@@ -627,7 +627,11 @@ def mtm_delta_mirror_fixture(
     conn: psycopg.Connection[Any],
     *,
     is_buy: bool = True,
-    quote_last: Decimal = Decimal("1400.0"),
+    quote_last: Decimal | None = Decimal("1400.0"),
+    quote_bid: Decimal | None = None,
+    quote_ask: Decimal | None = None,
+    daily_close: Decimal | None = None,
+    expected_mark: Decimal | None = None,
 ) -> Decimal:
     """Seed one long (or short) position with a non-zero MTM
     delta and a matching quote, so §8.4 can assert FX-aware
@@ -642,8 +646,30 @@ def mtm_delta_mirror_fixture(
                           = 2800.33  + 101.08 + 16.1122
                           ≈ 2917.5222
 
+    #3086 knobs, all defaulting to the original behaviour:
+
+    - ``quote_bid`` / ``quote_ask`` default to ``quote_last`` on both sides.
+      Pass them explicitly — with ``quote_last=None`` — to seed the shape
+      `sql/181_quotes_last_positive.sql` produces for an un-freshly-traded
+      instrument: NULL trade price over a live two-sided book.
+    - ``daily_close`` seeds a ``price_daily`` row so the close tier is
+      reachable and *distinguishable* from the mid.
+    - ``expected_mark`` is the mark the caller asserts the hierarchy resolves
+      to, and is what the returned equity is computed from. It is stated by
+      the caller rather than derived here on purpose: deriving it would make
+      this fixture a third copy of the rule under test, which is the exact
+      defect #3086 fixed.
+
     Caller owns commit / rollback. ebull_test only.
     """
+    if quote_bid is None:
+        quote_bid = quote_last
+    if quote_ask is None:
+        quote_ask = quote_last
+    if expected_mark is None:
+        if quote_last is None:
+            raise ValueError("mtm_delta_mirror_fixture: expected_mark is required when quote_last is None")
+        expected_mark = quote_last
     open_rate = Decimal("1207.4994")
     units = Decimal("6.28927")
     conv_rate = Decimal("0.01331")
@@ -716,16 +742,26 @@ def mtm_delta_mirror_fixture(
             """
             INSERT INTO quotes (instrument_id, last, bid, ask,
                                 quoted_at)
-            VALUES (4201, %(last)s, %(last)s, %(last)s, %(now)s)
+            VALUES (4201, %(last)s, %(bid)s, %(ask)s, %(now)s)
             ON CONFLICT (instrument_id) DO UPDATE
               SET last = EXCLUDED.last,
                   bid  = EXCLUDED.bid,
                   ask  = EXCLUDED.ask,
                   quoted_at = EXCLUDED.quoted_at
             """,
-            {"last": quote_last, "now": _NOW},
+            {"last": quote_last, "bid": quote_bid, "ask": quote_ask, "now": _NOW},
         )
+        if daily_close is not None:
+            cur.execute(
+                """
+                INSERT INTO price_daily (instrument_id, price_date, close)
+                VALUES (4201, %(d)s, %(close)s)
+                ON CONFLICT (instrument_id, price_date) DO UPDATE
+                  SET close = EXCLUDED.close
+                """,
+                {"d": _NOW.date(), "close": daily_close},
+            )
 
     sign = Decimal("1") if is_buy else Decimal("-1")
-    usd_delta = sign * units * (quote_last - open_rate) * conv_rate
+    usd_delta = sign * units * (expected_mark - open_rate) * conv_rate
     return available + amount + usd_delta

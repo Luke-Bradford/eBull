@@ -13,7 +13,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.services.portfolio import _load_mirror_equity
+from app.services.portfolio import _load_mirror_equity, load_mirror_breakdowns
 from tests.fixtures.copy_mirrors import (
     mirror_aum_fixture,
     mtm_delta_mirror_fixture,
@@ -45,7 +45,7 @@ def conn() -> Iterator[psycopg.Connection[Any]]:
         with c.cursor() as cur:
             cur.execute(
                 "TRUNCATE copy_mirror_positions, copy_mirrors, "
-                "copy_traders, quotes, scores, positions, "
+                "copy_traders, quotes, price_daily, scores, positions, "
                 "cash_ledger, instruments RESTART IDENTITY CASCADE"
             )
         c.commit()
@@ -139,3 +139,86 @@ def test_all_mirrors_closed_returns_zero(
 
     result = _load_mirror_equity(conn)
     assert result == 0.0
+
+
+# ---------------------------------------------------------------------------
+# #3086 — the bid/ask-mid tier, on both mirror SQL paths
+# ---------------------------------------------------------------------------
+#
+# `quotes.last` is NULL (not 0) for an un-freshly-traded instrument —
+# `sql/181_quotes_last_positive.sql` CHECKs `last IS NULL OR last > 0` and its
+# constraint COMMENT states the read-side contract: *"Read-side derives a mark
+# from bid/ask when NULL."*  Both cases below seed a `price_daily.close` that
+# DIFFERS from the mid, so passing requires the mid specifically — a test where
+# the two agree would pass against the pre-#3086 SQL as well.
+
+_MID = Decimal("1400.0")  # (1399.0 + 1401.0) / 2
+_STALE_CLOSE = Decimal("1300.0")
+
+
+def test_mid_is_used_when_last_is_null_load_mirror_equity(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """#3086: live two-sided book beats the previous session's close."""
+    expected = mtm_delta_mirror_fixture(
+        conn,
+        quote_last=None,
+        quote_bid=Decimal("1399.0"),
+        quote_ask=Decimal("1401.0"),
+        daily_close=_STALE_CLOSE,
+        expected_mark=_MID,
+    )
+    conn.commit()
+
+    assert _load_mirror_equity(conn) == pytest.approx(float(expected), abs=1e-6)
+
+
+def test_mid_is_used_when_last_is_null_load_mirror_breakdowns(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """#3086: the per-mirror path marks identically to the aggregate one.
+
+    The two restate the rule in separate SQL statements, which is how they
+    could have diverged; both now embed ``_MIRROR_MARK_SQL``.
+    """
+    expected = mtm_delta_mirror_fixture(
+        conn,
+        quote_last=None,
+        quote_bid=Decimal("1399.0"),
+        quote_ask=Decimal("1401.0"),
+        daily_close=_STALE_CLOSE,
+        expected_mark=_MID,
+    )
+    conn.commit()
+
+    breakdowns = load_mirror_breakdowns(conn)
+    assert len(breakdowns) == 1
+    assert breakdowns[0].mirror_equity_usd == pytest.approx(float(expected), abs=1e-6)
+    assert breakdowns[0].mirror_equity_usd == pytest.approx(_load_mirror_equity(conn), abs=1e-6)
+
+
+def test_one_sided_book_falls_through_to_the_close(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """#3086, the other direction: a mid needs BOTH sides positive.
+
+    Without this, a fix that used `bid` alone — or averaged a zero side —
+    would pass the two tests above.
+
+    The absent side is `0`, not NULL: `quotes.bid` / `quotes.ask` are both
+    NOT NULL (`information_schema`, dev + test DB), so a one-sided book can
+    only ever reach us as a zero side. That is why the guard is `> 0` and
+    not `IS NOT NULL` — the latter would accept a 0 side and average it
+    into a fabricated mark of 699.5 here.
+    """
+    expected = mtm_delta_mirror_fixture(
+        conn,
+        quote_last=None,
+        quote_bid=Decimal("1399.0"),
+        quote_ask=Decimal("0"),
+        daily_close=_STALE_CLOSE,
+        expected_mark=_STALE_CLOSE,
+    )
+    conn.commit()
+
+    assert _load_mirror_equity(conn) == pytest.approx(float(expected), abs=1e-6)

@@ -136,7 +136,12 @@ def _compute_position_mtm(
 ) -> MirrorPositionItem:
     """Build a MirrorPositionItem with mark-to-market from a joined row.
 
-    Price hierarchy: quote.last → price_daily.close → open_rate (fallback).
+    Price hierarchy: positive ``quote.last`` → bid/ask mid → positive
+    ``price_daily.close`` → ``open_rate`` (fallback).  The first two tiers
+    are ``resolve_quote_price``; the docstring said three tiers and omitted
+    the mid until #3086, which is the drift that let the aggregate SQL in
+    ``portfolio.py`` restate this rule with the mid missing.  That SQL twin
+    is ``portfolio._MIRROR_MARK_SQL`` — change the two together.
     All monetary values are in USD natively (eToro copy-trading positions).
     Convert to display_currency at the end.
     """
