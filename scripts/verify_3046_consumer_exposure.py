@@ -954,9 +954,21 @@ def measure(
     for iid, a in anchors[spec.slice_].items():
         # The producer writes the TA columns only when the newest complete-OHLCV
         # bar is also the newest close row; otherwise it stores NULL.
+        #
+        # ⚠ FAIL CLOSED ON EITHER SIDE BEING ABSENT, rather than letting `None ==
+        # None` satisfy the gate. Review nitpick on PR #3071. The both-absent case
+        # is unreachable today — the `ohlcv` predicate requires a non-null close, so
+        # every instrument in that slice has a `close` anchor and a `ta_last`, and
+        # the corpus agrees (0 instruments with a complete-OHLCV bar and no non-null
+        # close). But it is unreachable by an invariant of the slice PREDICATES, not
+        # by anything stated here, and a comparison that reads "both missing, so the
+        # producer must have written TA" is the wrong default if a slice ever changes.
         if spec.ta_gate:
-            close_end = close_anchors[iid].win_end if iid in close_anchors else None
-            if ta_last.get(iid) != close_end:
+            close_anchor = close_anchors.get(iid)
+            instrument_ta_last = ta_last.get(iid)
+            if close_anchor is None or instrument_ta_last is None:
+                continue
+            if instrument_ta_last != close_anchor.win_end:
                 continue
         start = window_start(spec, a)
         if start is None:
