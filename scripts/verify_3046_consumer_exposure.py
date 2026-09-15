@@ -164,7 +164,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     # --- the producer of every DERIVED_COLUMN below -----------------------
     Occurrence(
         "app/services/market_data.py",
-        1164,
+        1583,
         "_compute_and_store_features closes",
         "WINDOWED",
         (*_RETURN_COLS, "volatility_30d"),
@@ -172,7 +172,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/market_data.py",
-        1192,
+        1611,
         "_compute_and_store_features OHLCV",
         "WINDOWED",
         _TA_COLS,
@@ -180,7 +180,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/market_data.py",
-        222,
+        254,
         "load_day_changes",
         "WINDOWED",
         ("day_change",),
@@ -188,7 +188,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/market_data.py",
-        962,
+        1235,
         "_stored_overlap_closes",
         "SINGLE_BAR",
         (),
@@ -196,14 +196,19 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/market_data.py",
-        272,
+        273,
         "load_day_changes bar_count",
         "METADATA",
         (),
         "#3046: count(*) of STORED bars between the two operands — rule_w2's interval "
         "count, never a rank and never a calendar estimate. No price is read.",
     ),
-    Occurrence("app/services/market_data.py", 146, "_last_bar", "METADATA"),
+    Occurrence("app/services/market_data.py", 148, "_last_bar", "METADATA"),
+    # #2414 item 2 — the backdated-insert classification frontier. Deliberately a
+    # SECOND read of the same aggregate `_last_bar` returns: that one runs before
+    # `BEGIN`, this one inside the bar write's transaction. Same kind, different
+    # snapshot, and the difference is the whole point.
+    Occurrence("app/services/market_data.py", 1520, "_observed_frontier", "METADATA"),
     # --- #3046 build item 1: the verdict-aware window loader ---------------
     # ⚠ All three read ``price_date`` ONLY — no close, no OHLC, no arithmetic on a
     # price. This module's job is to say whether somebody ELSE's window is sound;
@@ -234,8 +239,8 @@ INVENTORY: tuple[Occurrence, ...] = (
         "max(price_date), the instrument's own last bar, so the habit lookback ends "
         "at its own history rather than at current_date",
     ),
-    Occurrence("app/services/market_data.py", 851, "_candles_are_fresh", "METADATA"),
-    Occurrence("app/services/market_data.py", 898, "_candles_fetch_count", "METADATA"),
+    Occurrence("app/services/market_data.py", 1042, "_candles_are_fresh", "METADATA"),
+    Occurrence("app/services/market_data.py", 1114, "_candles_fetch_count", "METADATA"),
     # --- own multi-bar arithmetic -----------------------------------------
     Occurrence(
         "app/services/risk_metrics.py",
