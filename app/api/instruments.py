@@ -290,6 +290,14 @@ class InstrumentListItem(BaseModel):
     # closes exist.
     day_change_pct: Decimal | None = None
     day_change_as_of: date | None = None
+    # #3046 — the window's quarantine verdict: "ok" | "unverified" | "quarantined".
+    # ``day_change_pct`` is NULL on "quarantined" because the ratio between the two
+    # closes is not a return (a level break or a series hole sits inside the window).
+    # "unverified" means the window is outside the evaluated interval — NOT that it
+    # is bad — and its value is rendered. NULL on both fields = fewer than two
+    # positive closes, which is absent data and not a verdict.
+    day_change_verdict: str | None = None
+    day_change_reasons: list[str] | None = None
 
 
 class InstrumentListResponse(BaseModel):
@@ -362,6 +370,11 @@ class InstrumentPrice(BaseModel):
     # from — stamped so a stale close reads honestly rather than as "today"
     # (settled-decisions.md:767). NULL when no day-change is available.
     day_change_as_of: date | None = None
+    # #3046 — same contract as ``InstrumentListItem.day_change_verdict``; this is the
+    # detail-page carrier (``SummaryStrip`` consumes it), which is why it lives here
+    # and not on ``InstrumentDetail``.
+    day_change_verdict: str | None = None
+    day_change_reasons: list[str] | None = None
     week_52_high: Decimal | None
     week_52_low: Decimal | None
     currency: str | None
@@ -815,6 +828,8 @@ def list_instruments(
                 latest_quote=_parse_quote(r),
                 day_change_pct=dc.change_pct if dc is not None else None,
                 day_change_as_of=dc.as_of if dc is not None else None,
+                day_change_verdict=dc.verdict if dc is not None else None,
+                day_change_reasons=list(dc.reasons) if dc is not None else None,
             )
         )
 
@@ -3918,6 +3933,8 @@ def get_instrument_summary(
             day_change=dc.change_abs if dc is not None else None,
             day_change_pct=dc.change_pct if dc is not None else None,
             day_change_as_of=dc.as_of if dc is not None else None,
+            day_change_verdict=dc.verdict if dc is not None else None,
+            day_change_reasons=list(dc.reasons) if dc is not None else None,
             week_52_high=None,
             week_52_low=None,
             currency=native_ccy,  # type: ignore[arg-type]

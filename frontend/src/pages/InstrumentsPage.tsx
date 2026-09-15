@@ -24,6 +24,7 @@ import {
 } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Pagination } from "@/components/ui/Pagination";
+import { dayChangeVerdictTitle } from "@/lib/dayChangeVerdict";
 import { formatCloseDate, formatMoney, formatPct } from "@/lib/format";
 import { SECTOR_OPTIONS } from "@/lib/sectors";
 import { useAsync } from "@/lib/useAsync";
@@ -158,9 +159,18 @@ function TierBadge({ tier }: { tier: number | null }) {
  */
 function DayChangeCell({ item }: { item: InstrumentListItem }) {
   const pct = item.day_change_pct != null ? Number(item.day_change_pct) : null;
+  // #3046: a suppressed day change renders the same "—" as an absent one, so the
+  // verdict title is what tells the two apart. Absent data carries no verdict.
+  const verdictTitle = dayChangeVerdictTitle(
+    item.day_change_verdict,
+    item.day_change_reasons,
+  );
   if (pct == null || Number.isNaN(pct)) {
     return (
-      <td className="py-2 pr-0 text-right text-xs tabular-nums text-slate-400">
+      <td
+        className="py-2 pr-0 text-right text-xs tabular-nums text-slate-400"
+        title={verdictTitle}
+      >
         —
       </td>
     );
@@ -173,7 +183,7 @@ function DayChangeCell({ item }: { item: InstrumentListItem }) {
       {asOf ? (
         <div
           className="text-[10px] text-slate-400"
-          title="Close-to-close change, as of this close"
+          title={verdictTitle ?? "Close-to-close change, as of this close"}
         >
           as of {asOf}
         </div>

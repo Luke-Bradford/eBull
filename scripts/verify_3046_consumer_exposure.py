@@ -194,7 +194,46 @@ INVENTORY: tuple[Occurrence, ...] = (
         (),
         "#2066 overlap read: stored closes compared to freshly fetched ones on the SAME dates",
     ),
+    Occurrence(
+        "app/services/market_data.py",
+        272,
+        "load_day_changes bar_count",
+        "METADATA",
+        (),
+        "#3046: count(*) of STORED bars between the two operands — rule_w2's interval "
+        "count, never a rank and never a calendar estimate. No price is read.",
+    ),
     Occurrence("app/services/market_data.py", 146, "_last_bar", "METADATA"),
+    # --- #3046 build item 1: the verdict-aware window loader ---------------
+    # ⚠ All three read ``price_date`` ONLY — no close, no OHLC, no arithmetic on a
+    # price. This module's job is to say whether somebody ELSE's window is sound;
+    # it computes no quantity of its own, so it is not itself exposed.
+    Occurrence(
+        "app/services/price_window_verdict.py",
+        251,
+        "load_window_inputs weekend bar dates",
+        "METADATA",
+        (),
+        "weekend days this instrument PRINTED on — a printed day is not deducted from an observed span",
+    ),
+    Occurrence(
+        "app/services/price_window_verdict.py",
+        266,
+        "load_window_inputs weekend habit",
+        "METADATA",
+        (),
+        "weekend share of bars over the instrument's own last WEEKEND_HABIT_DAYS — "
+        "decides whether an ABSENT weekend day is a closure or a hole",
+    ),
+    Occurrence(
+        "app/services/price_window_verdict.py",
+        269,
+        "load_window_inputs habit anchor",
+        "METADATA",
+        (),
+        "max(price_date), the instrument's own last bar, so the habit lookback ends "
+        "at its own history rather than at current_date",
+    ),
     Occurrence("app/services/market_data.py", 851, "_candles_are_fresh", "METADATA"),
     Occurrence("app/services/market_data.py", 898, "_candles_fetch_count", "METADATA"),
     # --- own multi-bar arithmetic -----------------------------------------

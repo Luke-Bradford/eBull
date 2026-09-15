@@ -22,6 +22,7 @@ import type {
   ThesisDetail,
 } from "@/api/types";
 import { Term } from "@/components/Term";
+import { dayChangeVerdictTitle } from "@/lib/dayChangeVerdict";
 import { formatCloseDate } from "@/lib/format";
 import { isThesisQuarantined, thesisRefusalTooltip } from "@/lib/thesisQuarantine";
 import {
@@ -173,6 +174,12 @@ export function SummaryStrip({
   const changeNum =
     price?.day_change_pct != null ? Number(price.day_change_pct) : null;
   const dayChangeAsOf = formatCloseDate(price?.day_change_as_of ?? null);
+  // #3046: "— (—)" here means either "no day change exists" or "the window is
+  // quarantined". The title is the only thing that distinguishes them.
+  const dayChangeTitle = dayChangeVerdictTitle(
+    price?.day_change_verdict,
+    price?.day_change_reasons,
+  );
   const changeColor =
     changeNum === null
       ? "text-slate-500"
@@ -254,7 +261,10 @@ export function SummaryStrip({
                 ≈ {formatPrice(companion!.value, companion!.currency)}
               </span>
             ) : null}
-            <span className={`text-sm tabular-nums ${changeColor}`}>
+            <span
+              className={`text-sm tabular-nums ${changeColor}`}
+              title={dayChangeTitle}
+            >
               {formatChange(price?.day_change)} (
               {formatPct(price?.day_change_pct, true)})
             </span>
