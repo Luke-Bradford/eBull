@@ -657,11 +657,12 @@ def test_halted_wedge_still_headlines_queue_stuck_over_the_run_reasons() -> None
     """Precedence preserved: a dispatch that never reached a worker outranks
     anything about the run's own progress or age.
     """
-    for reasons in (
+    cases: tuple[tuple[StaleReason, ...], ...] = (
         ("queue_stuck", "mid_flight_stuck"),
         ("queue_stuck", "runtime_ceiling"),
         ("queue_stuck", "mid_flight_stuck", "runtime_ceiling"),
-    ):
+    )
+    for reasons in cases:
         _, _, reason = compute_verdict(status="disabled", stale_reasons=reasons)
         assert reason == _REASON_LABEL["queue_stuck"], reasons
 
