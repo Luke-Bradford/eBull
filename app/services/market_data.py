@@ -775,7 +775,18 @@ def refresh_market_data(
                         # only a heal if the series was actually rewritten.
                         adjustment_detected = bool(bars)
                 if bars:
-                    outcome = _upsert_candles(conn, instrument_id, bars, reference_date=freshness_target)
+                    # #2414 item 2 — the frontier for backdated-insert
+                    # classification, read INSIDE this transaction rather than
+                    # reusing `last_bar_before` above (which is read before
+                    # `BEGIN` on purpose, for #2262). See `_observed_frontier`.
+                    frontier_before = _observed_frontier(conn, instrument_id)
+                    outcome = _upsert_candles(
+                        conn,
+                        instrument_id,
+                        bars,
+                        reference_date=freshness_target,
+                        frontier_before=frontier_before,
+                    )
                     revised = outcome.revised
                     upserted = outcome.inserted + revised
                     revision_ages = outcome.revision_age_days
@@ -790,19 +801,38 @@ def refresh_market_data(
                     #
                     # ⚠ `revision_cause` is a pure function of three values that
                     # do not change between here and the post-commit block
-                    # below, and is deliberately called in both places rather
-                    # than hoisted — the counter block's "same keys in both
-                    # maps" invariant is pinned by tests and is left untouched.
+                    # below, and is STILL called separately there rather than
+                    # hoisted out of the transaction — the counter block's "same
+                    # keys in both maps" invariant is pinned by tests and is left
+                    # untouched. The local below is shared only by the two AUDIT
+                    # writers in this block, which must agree with each other by
+                    # construction: one fetch has one write branch, and two rows
+                    # describing the same fetch disagreeing about it would be a
+                    # defect no consumer could detect.
+                    write_branch = revision_cause(
+                        adjustment_detected=adjustment_detected,
+                        force_backfill=force_backfill,
+                        fetch_reason=fetch_reason,
+                    )
                     _record_bar_revisions(
                         conn,
                         instrument_id,
                         outcome.revised_bar_dates,
-                        cause=revision_cause(
-                            adjustment_detected=adjustment_detected,
-                            force_backfill=force_backfill,
-                            fetch_reason=fetch_reason,
-                        ),
+                        cause=write_branch,
                     )
+                    # #2414 item 2 — the other mutation class, same transaction,
+                    # same rollback property. `frontier_before` is not None
+                    # whenever this list is non-empty: `_upsert_candles` can only
+                    # classify a bar as backdated by comparing against it.
+                    if outcome.backdated_insert_dates:
+                        assert frontier_before is not None
+                        _record_backdated_inserts(
+                            conn,
+                            instrument_id,
+                            outcome.backdated_insert_dates,
+                            frontier_before=frontier_before,
+                            cause=write_branch,
+                        )
                     computed = _compute_and_store_features(conn, instrument_id)
             # Accumulate the running totals ONLY after the transaction has
             # committed cleanly (#1293 / Codex): incrementing inside the
@@ -1264,6 +1294,15 @@ class CandleUpsertOutcome:
     #: revised. Kept beside the histogram because a single deep revision is the
     #: finding, and a bucket count of 1 does not say how deep.
     revision_max_age_days: int | None
+    #: The ``price_date`` of every bar this call INSERTED strictly below the
+    #: frontier the caller observed (#2414 item 2). Empty when none, and always a
+    #: subset of the ``inserted`` count — a bar above the frontier extends the
+    #: series and is not here.
+    #:
+    #: ⚠ Cannot repeat a date within one call, unlike ``revised_bar_dates``: the
+    #: second occurrence of a duplicated date conflicts, so it is a revision or an
+    #: ``IS DISTINCT FROM`` no-op, never a second insert.
+    backdated_insert_dates: tuple[date, ...]
 
 
 def _revision_age_bucket(age_days: int) -> str:
@@ -1292,6 +1331,7 @@ def _upsert_candles(
     bars: list[OHLCVBar],
     *,
     reference_date: date,
+    frontier_before: date | None,
 ) -> CandleUpsertOutcome:
     """
     Upsert OHLCV bars into price_daily. Idempotent — re-running with the same
@@ -1339,12 +1379,24 @@ def _upsert_candles(
     ``xmax = 0``; update → non-zero). A row blocked by the ``IS DISTINCT FROM``
     guard returns NO row at all, so a genuine no-op counts as neither — which
     is the same thing the previous ``rowcount`` accounting did.
+
+    ⚠⚠ ``frontier_before`` splits the INSERTS in two (#2414 item 2), and it must be
+    the caller's OBSERVED ``MAX(price_date)`` — read in-transaction, immediately
+    before this call. It is held FIXED for the whole call and deliberately not
+    advanced as bars land: within one transaction nothing is visible to anyone
+    else, so a bar that arrives after a higher-dated bar in the same payload was
+    never behind committed history. Advancing it would classify provider payload
+    ORDER, which is not a property of the corpus.
+
+    ``None`` means the instrument had no prior bars, so **no** bar can be
+    backdated — the initial-backfill case, where nothing had been decided against.
     """
     inserted = 0
     revised = 0
     age_days: dict[str, int] = {}
     max_age: int | None = None
     revised_dates: list[date] = []
+    backdated_dates: list[date] = []
     for bar in bars:
         row = conn.execute(
             """
@@ -1384,6 +1436,8 @@ def _upsert_candles(
             continue
         if row[0]:
             inserted += 1
+            if frontier_before is not None and bar.price_date < frontier_before:
+                backdated_dates.append(bar.price_date)
         else:
             revised += 1
             revised_dates.append(bar.price_date)
@@ -1400,6 +1454,7 @@ def _upsert_candles(
         revision_age_days=age_days,
         revision_max_age_days=max_age,
         revised_bar_dates=tuple(revised_dates),
+        backdated_insert_dates=tuple(backdated_dates),
     )
 
 
@@ -1438,6 +1493,72 @@ def _record_bar_revisions(
             [
                 {"instrument_id": instrument_id, "price_date": price_date, "cause": cause}
                 for price_date in revised_bar_dates
+            ],
+        )
+
+
+def _observed_frontier(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+) -> date | None:
+    """``MAX(price_date)`` for one instrument, for backdated-insert classification.
+
+    ⚠⚠ Deliberately NOT ``last_bar_before`` from the caller's #2262 supply-marker
+    read, even though that value is already in hand and this costs a second
+    indexed aggregate. That one is read BEFORE ``BEGIN``; this one is read inside
+    the bar write's transaction, immediately before the upsert, which is the
+    tightest window available. Codex checkpoint 1: writer A reads frontier 10,
+    writer B commits 15, a decision consumes B's history, A then inserts 12 — with
+    the pre-transaction value A calls 12 an extension, and it is not.
+
+    ⚠ Read Committed does not make this exact, it makes it TIGHT. A concurrent
+    commit inside the remaining window still misclassifies, which is why the
+    observed frontier is STORED on the row rather than implied: two honest writers
+    can disagree about the same date, and the row says which frontier it used.
+    """
+    row = conn.execute(
+        "SELECT MAX(price_date) FROM price_daily WHERE instrument_id = %(iid)s",
+        {"iid": instrument_id},
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def _record_backdated_inserts(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    backdated_insert_dates: Sequence[date],
+    *,
+    frontier_before: date,
+    cause: RevisionCause,
+) -> None:
+    """Append one ``price_daily_backdated_insert`` row per bar inserted behind the frontier.
+
+    ⚠⚠ CALL THIS INSIDE THE SAME TRANSACTION AS THE BAR WRITE, for the same reason
+    as ``_record_bar_revisions``: an audit row that outlived a rolled-back write
+    would assert a mutation ``price_daily`` has no record of.
+
+    ⚠ ``cause`` is shared with the revision log deliberately — it is the WRITE
+    BRANCH (``revision_cause``), which is identical for both classes. The
+    function's name says "revision" only because that is where the branch
+    resolution was first needed; it makes no claim about the row's kind.
+    """
+    if not backdated_insert_dates:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO price_daily_backdated_insert
+                (instrument_id, price_date, frontier_before, cause)
+            VALUES (%(instrument_id)s, %(price_date)s, %(frontier_before)s, %(cause)s)
+            """,
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "price_date": price_date,
+                    "frontier_before": frontier_before,
+                    "cause": cause,
+                }
+                for price_date in backdated_insert_dates
             ],
         )
 

@@ -1349,6 +1349,7 @@ class TestRefreshMarketDataForceBackfill:
                     revision_age_days={},
                     revision_max_age_days=None,
                     revised_bar_dates=(),
+                    backdated_insert_dates=(),
                 ),
             ) as upsert,
             patch("app.services.market_data._compute_and_store_features", return_value=0),
@@ -1430,6 +1431,14 @@ class TestRefreshMarketDataForceBackfill:
                     # `_record_bar_revisions` is reached and then rolled back with
                     # everything else, which is the property #2414 relies on.
                     revised_bar_dates=(date(2025, 6, 2), date(2025, 6, 3)),
+                    # Non-empty for the same reason: it drives
+                    # `_record_backdated_inserts`, so the rolled-back assertion
+                    # covers BOTH audit writers rather than only the revision one.
+                    # ⚠ Before the mocked frontier (`fetchone` → 2020-01-01), so the
+                    # fixture stays consistent with the predicate that would have
+                    # produced it — `_upsert_candles` is patched out here, so
+                    # nothing else enforces that.
+                    backdated_insert_dates=(date(2019, 12, 31),),
                 ),
             ),
             _patch.object(market_data, "_compute_and_store_features", side_effect=RuntimeError("feature boom")),
