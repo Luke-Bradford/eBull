@@ -68,6 +68,15 @@ from scripts.verify_3046_consumer_exposure import (
     load_anchors,
 )
 
+#: The only two ways ``git rev-parse`` can fail: the binary is missing (``OSError``,
+#: via ``FileNotFoundError``) or it exits non-zero (``subprocess.CalledProcessError``,
+#: via ``SubprocessError``). Bound to a NAME rather than written inline because
+#: ``ruff format`` strips the parentheses from ``except (A, B):`` on this repo's
+#: Python target, leaving ``except A, B:`` — valid PEP 758 on 3.14 and identical in
+#: meaning, but visually indistinguishable from the Python 2 ``except E, name:`` form.
+#: A named tuple has one reading on every interpreter.
+_GIT_SHA_FAILURES = (OSError, subprocess.SubprocessError)
+
 #: Bumped whenever an arm's definition changes, so two runs of this script are
 #: comparable only when it matches. Not a rule constant — the rules all live in
 #: ``price_quarantine`` and this script only calls them.
@@ -79,10 +88,9 @@ def _git_sha() -> str:
         return subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True
         ).stdout.strip()
-    # Narrowed rather than bare: `git` missing is OSError, a non-zero exit is
-    # CalledProcessError, and there is no third way this can fail. Run identity is
-    # best-effort — the measurement is not — so it degrades rather than aborting.
-    except OSError, subprocess.SubprocessError:
+    # Narrowed rather than bare. Run identity is best-effort — the measurement is
+    # not — so it degrades to "unknown" rather than aborting the run.
+    except _GIT_SHA_FAILURES:
         return "unknown"
 
 
