@@ -1344,7 +1344,11 @@ class TestRefreshMarketDataForceBackfill:
             patch(
                 "app.services.market_data._upsert_candles",
                 return_value=market_data.CandleUpsertOutcome(
-                    inserted=1, revised=0, revision_age_days={}, revision_max_age_days=None
+                    inserted=1,
+                    revised=0,
+                    revision_age_days={},
+                    revision_max_age_days=None,
+                    revised_bar_dates=(),
                 ),
             ) as upsert,
             patch("app.services.market_data._compute_and_store_features", return_value=0),
@@ -1417,7 +1421,15 @@ class TestRefreshMarketDataForceBackfill:
                 market_data,
                 "_upsert_candles",
                 return_value=market_data.CandleUpsertOutcome(
-                    inserted=3, revised=2, revision_age_days={"31_365": 2}, revision_max_age_days=200
+                    inserted=3,
+                    revised=2,
+                    revision_age_days={"31_365": 2},
+                    revision_max_age_days=200,
+                    # Non-empty for the same reason, and it keeps
+                    # `len(revised_bar_dates) == revised` true in the fixture:
+                    # `_record_bar_revisions` is reached and then rolled back with
+                    # everything else, which is the property #2414 relies on.
+                    revised_bar_dates=(date(2025, 6, 2), date(2025, 6, 3)),
                 ),
             ),
             _patch.object(market_data, "_compute_and_store_features", side_effect=RuntimeError("feature boom")),
@@ -1656,3 +1668,30 @@ class TestDetectAdjustmentEvent:
         stored = {self._D1: Decimal("100"), self._D2: Decimal("300")}
         bars = [self._bar(self._D1, "50"), self._bar(self._D2, "100")]
         assert detect_adjustment_event(stored, bars) == Decimal("3")
+
+
+class TestRevisionCauseVocabularyParity:
+    """`RevisionCause` and `sql/387`'s CHECK must name exactly the same causes (#2414).
+
+    ⚠ The failure this prevents is silent in the direction that matters. Adding a
+    member in Python without the migration does not break a test that mocks the
+    DB; it breaks the first PRODUCTION insert that hits the new branch, inside
+    the per-instrument transaction, which is exactly where a revision is being
+    recorded. Asserting the two vocabularies against each other makes the push
+    gate the detector instead.
+    """
+
+    def test_python_literal_and_migration_check_name_the_same_causes(self) -> None:
+        import re
+        from pathlib import Path
+        from typing import get_args
+
+        from app.services.market_data import RevisionCause
+
+        sql = Path("sql/387_price_daily_revision.sql").read_text()
+        # The CHECK body, not the whole file: the header prose names causes too.
+        match = re.search(r"cause\s+TEXT\s+NOT NULL CHECK \(cause IN \(([^)]*)\)\)", sql)
+        assert match is not None, "sql/387's cause CHECK is not in the shape this test reads"
+        in_sql = set(re.findall(r"'([a-z_]+)'", match.group(1)))
+
+        assert in_sql == set(get_args(RevisionCause))

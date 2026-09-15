@@ -780,6 +780,29 @@ def refresh_market_data(
                     upserted = outcome.inserted + revised
                     revision_ages = outcome.revision_age_days
                     revision_max_age = outcome.revision_max_age_days
+                    # #2414 — the IDENTITY of each overwritten bar, written
+                    # INSIDE this transaction so it rolls back with the bar
+                    # write it describes. The counters below are merged AFTER
+                    # commit for the opposite reason (#1293): a counter cannot
+                    # roll back, a row can, and a revision row that outlived a
+                    # rolled-back write would assert a change `price_daily` has
+                    # no record of and nothing left to contradict.
+                    #
+                    # ⚠ `revision_cause` is a pure function of three values that
+                    # do not change between here and the post-commit block
+                    # below, and is deliberately called in both places rather
+                    # than hoisted — the counter block's "same keys in both
+                    # maps" invariant is pinned by tests and is left untouched.
+                    _record_bar_revisions(
+                        conn,
+                        instrument_id,
+                        outcome.revised_bar_dates,
+                        cause=revision_cause(
+                            adjustment_detected=adjustment_detected,
+                            force_backfill=force_backfill,
+                            fetch_reason=fetch_reason,
+                        ),
+                    )
                     computed = _compute_and_store_features(conn, instrument_id)
             # Accumulate the running totals ONLY after the transaction has
             # committed cleanly (#1293 / Codex): incrementing inside the
@@ -1224,6 +1247,19 @@ class CandleUpsertOutcome:
     revised: int
     #: bucket name -> count, over the REVISED bars only. Empty when none.
     revision_age_days: dict[str, int]
+    #: The ``price_date`` of every bar this call OVERWROTE, in the order seen
+    #: (#2414). Empty when none, and ``len(...) == revised`` always.
+    #:
+    #: ⚠ MAY CONTAIN THE SAME DATE TWICE. ``_normalise_candles``
+    #: (``app/providers/implementations/etoro.py``) flattens every group's inner
+    #: array with no date dedup, so one payload can carry a date twice and the
+    #: second occurrence is a genuine second overwrite. The caller's table is
+    #: append-only for exactly this reason.
+    #:
+    #: Carried here rather than written here because ``_upsert_candles`` does not
+    #: know the write BRANCH — ``revision_cause`` needs ``adjustment_detected``,
+    #: which only the caller has.
+    revised_bar_dates: tuple[date, ...]
     #: The oldest revised bar's age in calendar days, or ``None`` if none were
     #: revised. Kept beside the histogram because a single deep revision is the
     #: finding, and a bucket count of 1 does not say how deep.
@@ -1308,6 +1344,7 @@ def _upsert_candles(
     revised = 0
     age_days: dict[str, int] = {}
     max_age: int | None = None
+    revised_dates: list[date] = []
     for bar in bars:
         row = conn.execute(
             """
@@ -1349,6 +1386,7 @@ def _upsert_candles(
             inserted += 1
         else:
             revised += 1
+            revised_dates.append(bar.price_date)
             age = (reference_date - bar.price_date).days
             bucket = _revision_age_bucket(age)
             age_days[bucket] = age_days.get(bucket, 0) + 1
@@ -1361,7 +1399,47 @@ def _upsert_candles(
         revised=revised,
         revision_age_days=age_days,
         revision_max_age_days=max_age,
+        revised_bar_dates=tuple(revised_dates),
     )
+
+
+def _record_bar_revisions(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    revised_bar_dates: Sequence[date],
+    *,
+    cause: RevisionCause,
+) -> None:
+    """Append one ``price_daily_revision`` row per overwritten bar (#2414).
+
+    ⚠⚠ CALL THIS INSIDE THE SAME TRANSACTION AS THE BAR WRITE. That is the whole
+    point of the table and the one property it rests on: `price_daily` keeps no
+    prior value, so a revision row that survived a rolled-back bar write would
+    assert a change that never happened, with nothing left to contradict it.
+    The running counters in ``refresh_market_data`` are merged AFTER commit for
+    the opposite reason (#1293) — a counter cannot roll back and a row can.
+
+    ⚠ ``revised_bar_dates`` may repeat a date; see ``CandleUpsertOutcome``. Every
+    element becomes a row, because each one IS a separate overwrite.
+
+    The insert is ``executemany`` for the ROUND TRIPS, not for statement count —
+    psycopg runs the command once per row either way. A heal re-fetches
+    ``lookback_days`` (1000) bars and can revise all of them inside a
+    per-instrument transaction on a sweep that already runs 17-34 minutes.
+    """
+    if not revised_bar_dates:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO price_daily_revision (instrument_id, price_date, cause)
+            VALUES (%(instrument_id)s, %(price_date)s, %(cause)s)
+            """,
+            [
+                {"instrument_id": instrument_id, "price_date": price_date, "cause": cause}
+                for price_date in revised_bar_dates
+            ],
+        )
 
 
 def _compute_and_store_features(
