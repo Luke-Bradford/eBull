@@ -164,6 +164,10 @@ export const STALE_REASON_LABEL: Record<StaleReason, string> = {
   watermark_gap: "ingest failing",
   queue_stuck: "queue stuck",
   mid_flight_stuck: "no progress",
+  // #2274 — run age past the wall-clock ceiling. No elapsed suffix: the
+  // mid_flight_stuck suffix is computed from `last_progress_at`, and this
+  // reason deliberately does not consult the heartbeat at all.
+  runtime_ceiling: "past runtime ceiling",
 };
 
 /**

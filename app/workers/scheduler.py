@@ -7701,6 +7701,7 @@ def jobs_liveness_watchdog() -> None:
 
     from app.services.job_liveness import evaluate_liveness
     from app.services.job_liveness_act import act_on_stalled_jobs
+    from app.services.processes.stale_detection import RUNTIME_CEILING_S
 
     # Self-tracked jobs write ``sync_runs`` not ``job_runs`` — excluding
     # them avoids a permanent false-stall (Codex ckpt-1).
@@ -7727,15 +7728,27 @@ def jobs_liveness_watchdog() -> None:
             )
         # Aged-running visibility: log runs older than 2h (the same
         # threshold check_job_health treats as "likely crashed").
+        #
+        # ⚠ This used to claim "the #1474 reaper will terminalise it past its
+        # threshold". That was FALSE (#2274): ``reap_orphaned_job_runs`` has
+        # exactly one production caller — ``app/jobs/__main__.py`` at boot,
+        # with ``reap_all=True`` — and its steady-state ``timeout`` predicate
+        # is documented as existing "for a future periodic watchdog" that was
+        # never written. Nothing terminalises a wedged row short of a restart.
+        # The signal that does exist is the ``runtime_ceiling`` stale reason
+        # (``stale_detection`` rule 5), which is a VERDICT and deliberately
+        # does not rewrite the row — see that rule's comment for why.
         for run in active:
             if run.age_seconds > 2 * 3600:
                 logger.warning(
                     "liveness: job %r has a run still 'running' for %.0fs "
-                    "(since %s) — possible wedge; the #1474 reaper will "
-                    "terminalise it past its threshold",
+                    "(since %s) — possible wedge; nothing terminalises it short "
+                    "of a restart. Past %ds it also reads 'runtime_ceiling' on "
+                    "the admin Processes page.",
                     run.job_name,
                     run.age_seconds,
                     run.started_at,
+                    RUNTIME_CEILING_S,
                 )
         logger.info(
             "jobs_liveness_watchdog: %d stalled, %d active run(s)",

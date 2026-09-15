@@ -1,11 +1,11 @@
-"""Pure-logic four-case stale model.
+"""Pure-logic five-case stale model.
 
 Issue #1083 (umbrella #1064) — admin control hub PR8.
 Spec: ``docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md``
       §A1 (operator-amendment round 1, line 11-22) — supersedes the
       legacy §"Stale-detection rule" (line 597-606) v0 sketch.
 
-Four reasons can fire on one row simultaneously:
+Five reasons can fire on one row simultaneously:
 
 1. ``schedule_missed`` — ``mechanism="scheduled_job"`` only. Cron
    should have fired by now and didn't. Negative when the job is
@@ -26,6 +26,15 @@ Four reasons can fire on one row simultaneously:
    "stuck before first tick" case (Codex pre-impl review BLOCKING) —
    without it, a worker that crashes before its first
    ``record_processed`` would never surface as stale.
+5. ``runtime_ceiling`` (#2274) — ``mechanism="scheduled_job"`` only.
+   An ACTIVE RUN exists AND ``active_run.started_at < now() -
+   RUNTIME_CEILING_S``. Rule 4's sibling, and the difference is the
+   whole point: **this one never consults the heartbeat**. Rule 4 is
+   muted the moment a producer ticks, so once #2274's heartbeat lands a
+   job that ticks forever would read *Working* forever; rule 5 measures
+   the run's AGE and nothing else, so it cannot be muted. That is what
+   makes the heartbeat safe to have — see
+   ``docs/proposals/ops/2026-09-15-2274-job-runtime-ceiling.md``.
 
 Adapters do the per-rule DB probes (one query each); this module
 composes the boolean results into the ordered ``stale_reasons`` tuple.
@@ -62,6 +71,36 @@ WATERMARK_GAP_TOLERANCE_S: Final[int] = 60
 # Queue-stuck threshold — 30 min in the operator-amendment §A1.3.
 # Boot-recovery sweep handles >6h.
 QUEUE_STUCK_THRESHOLD_S: Final[int] = 30 * 60
+
+# #2274 — whole-run wall-clock ceiling for rule 5. No published or vendor
+# formulation exists for a background-job runtime ceiling, so this is fixed
+# BY CONSTRUCTION and frozen: a ceiling is a safety BACKSTOP, not a health
+# alarm, so it sits an order of magnitude above the measured population
+# rather than fitted to it.
+#
+# ⚠ Do not read a derived figure out of this comment — run the query. Over
+# EVERY status, not successes only (a success-only query cannot establish the
+# counterfactual, because the population a ceiling fires on is exactly the runs
+# that never succeeded):
+#
+#   SELECT job_name, status, count(*),
+#          round(max(extract(epoch FROM coalesce(finished_at, now()) - started_at)))
+#     FROM job_runs
+#    WHERE started_at > now() - interval '180 days'
+#      AND extract(epoch FROM coalesce(finished_at, now()) - started_at) > 86400
+#    GROUP BY 1, 2 ORDER BY 4 DESC;
+#
+# Measured 2026-09-15 on dev: every row it returns is a `failure` — an
+# `orphaned: reaped at boot` run that sat `running` until a restart cleared it,
+# up to 4.4 days. No SUCCESSFUL run of any registered job exceeds this ceiling;
+# the longest is `sec_filing_documents_ingest` at ~2.7h. So the measured
+# false-positive count is zero, which is what #2274's constraint demands ("a
+# watchdog that fires on legitimately-long corpus jobs is worse than none").
+#
+# ⚠ The evidence is right-censored: a reaped row records when a restart
+# happened, not when the work would have finished. That understates long runs,
+# which argues for the large margin rather than for fitting the number tighter.
+RUNTIME_CEILING_S: Final[int] = 86_400  # 24h
 
 
 def compute(
@@ -126,8 +165,8 @@ def compute(
     Returns:
         Ordered tuple of ``StaleReason`` literals. Order is fixed
         (schedule_missed → watermark_gap → queue_stuck →
-        mid_flight_stuck) so the FE renders chips in a stable
-        sequence.
+        mid_flight_stuck → runtime_ceiling) so the FE renders chips in
+        a stable sequence.
     """
     reasons: list[StaleReason] = []
 
@@ -173,6 +212,43 @@ def compute(
         if heartbeat is not None and heartbeat < now - _seconds(threshold_s):
             reasons.append("mid_flight_stuck")
 
+    # Rule 5: runtime_ceiling (#2274) — the run's AGE, and nothing else.
+    #
+    # ⚠⚠ Deliberately does NOT consult ``last_progress_at``. Rule 4 above is
+    # muted the moment a producer ticks, so once #2274's heartbeat writer
+    # lands, a job that ticks forever reads *Working* forever and rule 4's
+    # current stand-in coverage INVERTS. Rule 5 cannot be muted by a
+    # heartbeat, which is the property that makes the heartbeat safe to
+    # switch on (predecessor doc §3).
+    #
+    # ⚠ Scheduled jobs only. ``ingest_sweep`` passes
+    # ``active_run_started_at=None`` by construction (sweeps own no active
+    # run). ``bootstrap`` is excluded on purpose: a one-time install drives
+    # 17 stages including multi-GB archive seeds, has no cadence to bound a
+    # ceiling against and no measured duration distribution, and already
+    # carries a mid_flight_stuck signal via its 1,800s threshold override.
+    #
+    # ⚠ This does NOT terminalise the run. ``job_runs.status='running'`` is a
+    # mutual-exclusion signal, not a display state — ``_has_active_job_run``
+    # (app/api/processes.py) refuses a manual trigger while it is set, so a
+    # full wash cannot "reset watermarks under the running worker's feet". A
+    # ceiling that rewrote the status would unlock that guard while the
+    # worker thread is still alive, and Python cannot kill that thread.
+    # ⚠⚠ Gated on the ACTIVE RUN, not on ``status``, and that is deliberate.
+    # ``scheduled_adapter._status_for`` returns ``disabled`` FIRST when the
+    # kill switch is on — before it looks at ``has_running_row`` — so a
+    # ``status == "running"`` gate would silently never fire for a halted
+    # system, and the ``_WEDGE_STALE`` membership that exists to keep this
+    # reason red under the kill switch would be dead code (Codex ckpt-2).
+    # Halting the SCHEDULE does not end a run that started before the halt,
+    # which is exactly when a ceiling breach matters most. ``active_run_
+    # started_at is not None`` already means "a run is in flight": the
+    # adapter builds ``active_run`` from the running row regardless of
+    # status, and every non-running status reaches here with ``None``.
+    if mechanism == "scheduled_job" and active_run_started_at is not None:
+        if active_run_started_at < now - _seconds(RUNTIME_CEILING_S):
+            reasons.append("runtime_ceiling")
+
     return tuple(reasons)
 
 
@@ -185,6 +261,7 @@ def _seconds(n: int) -> timedelta:
 
 __all__ = [
     "QUEUE_STUCK_THRESHOLD_S",
+    "RUNTIME_CEILING_S",
     "SCHEDULE_MISS_FLOOR_S",
     "SCHEDULE_MISS_TOLERANCE_S",
     "WATERMARK_GAP_TOLERANCE_S",

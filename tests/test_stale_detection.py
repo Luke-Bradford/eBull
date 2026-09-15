@@ -1,4 +1,4 @@
-"""Pure-logic tests for the four-case stale model (PR8 / #1083).
+"""Pure-logic tests for the five-case stale model (PR8 / #1083; rule 5 #2274).
 
 Issue #1083 (umbrella #1064) — admin control hub PR8.
 Spec: ``docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md``
@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.services.processes.stale_detection import (
     QUEUE_STUCK_THRESHOLD_S,
+    RUNTIME_CEILING_S,
     SCHEDULE_MISS_FLOOR_S,
     SCHEDULE_MISS_TOLERANCE_S,
     WATERMARK_GAP_TOLERANCE_S,
@@ -486,3 +487,158 @@ def test_running_row_can_fire_queue_and_midflight_simultaneously() -> None:
         now=NOW,
     )
     assert reasons == ("queue_stuck", "mid_flight_stuck")
+
+
+# ---------------------------------------------------------------------------
+# Rule 5: runtime_ceiling (#2274)
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_ceiling_fires_when_run_age_exceeds_ceiling() -> None:
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="running",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(RUNTIME_CEILING_S + 60),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert "runtime_ceiling" in reasons
+
+
+def test_runtime_ceiling_does_not_fire_under_the_ceiling() -> None:
+    """Revert-probe: drop the age comparison in rule 5 and this fails."""
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="running",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(RUNTIME_CEILING_S - 60),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert "runtime_ceiling" not in reasons
+
+
+def test_runtime_ceiling_at_exact_ceiling_does_not_fire() -> None:
+    """Strictly-older-than, consistent with rules 1/2/4's boundaries."""
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="running",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(RUNTIME_CEILING_S),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert "runtime_ceiling" not in reasons
+
+
+def test_runtime_ceiling_is_not_muted_by_a_fresh_heartbeat() -> None:
+    """⚠⚠ The property the whole rule exists for (#2274).
+
+    ``mid_flight_stuck`` is muted the instant a producer ticks. Once
+    #2274's heartbeat writer lands, a job that ticks forever would read
+    *Working* forever and rule 4's stand-in coverage would INVERT. Rule 5
+    measures the run's AGE and nothing else, so a heartbeat one second old
+    cannot suppress it — that is what makes the heartbeat safe to switch on.
+    """
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="running",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=_seconds_ago(1),  # ticking healthily, right now
+        active_run_started_at=_seconds_ago(RUNTIME_CEILING_S + 60),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert reasons == ("runtime_ceiling",)
+    assert "mid_flight_stuck" not in reasons
+
+
+def test_runtime_ceiling_does_not_fire_without_an_active_run() -> None:
+    """The gate is the presence of an active run, not the display status:
+    every non-running status reaches ``compute`` with
+    ``active_run_started_at=None`` (the adapter builds ``active_run`` from the
+    running row, and there is none)."""
+    for status in ("ok", "idle", "failed", "disabled", "pending_retry"):
+        reasons = compute(
+            mechanism="scheduled_job",
+            status=status,  # type: ignore[arg-type]
+            expected_fire_at=None,
+            has_data_freshness_gap=False,
+            has_dispatched_queue_age=False,
+            last_progress_at=None,
+            active_run_started_at=None,
+            process_id="some_job",
+            now=NOW,
+        )
+        assert "runtime_ceiling" not in reasons, status
+
+
+def test_runtime_ceiling_still_fires_when_the_kill_switch_reads_disabled() -> None:
+    """⚠⚠ Codex ckpt-2. ``scheduled_adapter._status_for`` returns ``disabled``
+    FIRST when the kill switch is on — before it looks at ``has_running_row``
+    — so a ``status == 'running'`` gate would make this reason unreachable on
+    a halted system, and its ``_WEDGE_STALE`` membership dead code. Halting
+    the SCHEDULE does not end a run that started before the halt.
+    """
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="disabled",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(RUNTIME_CEILING_S + 60),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert "runtime_ceiling" in reasons
+
+
+def test_runtime_ceiling_is_scheduled_job_only() -> None:
+    """Bootstrap is excluded deliberately: a one-time install drives 17
+    stages including multi-GB archive seeds, has no cadence to bound a
+    ceiling against, and already carries a 1,800s mid_flight_stuck
+    override. ``ingest_sweep`` passes ``active_run_started_at=None`` in
+    production, but the mechanism gate is asserted directly so the
+    exclusion survives an adapter change."""
+    for mechanism in ("bootstrap", "ingest_sweep"):
+        reasons = compute(
+            mechanism=mechanism,  # type: ignore[arg-type]
+            status="running",
+            expected_fire_at=None,
+            has_data_freshness_gap=False,
+            has_dispatched_queue_age=False,
+            last_progress_at=None,
+            active_run_started_at=_seconds_ago(RUNTIME_CEILING_S + 60),
+            process_id="bootstrap",
+            now=NOW,
+        )
+        assert "runtime_ceiling" not in reasons, mechanism
+
+
+def test_runtime_ceiling_sorts_last_in_canonical_order() -> None:
+    """The FE renders chips in the order returned."""
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="running",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=True,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(RUNTIME_CEILING_S + 60),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert reasons == ("queue_stuck", "mid_flight_stuck", "runtime_ceiling")

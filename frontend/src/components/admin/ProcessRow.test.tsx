@@ -312,6 +312,35 @@ describe("ProcessRow", () => {
     expect(reason.textContent).toMatch(/running but no progress\s+\d+m/);
   });
 
+  it("runtime_ceiling headline carries NO elapsed-since-heartbeat suffix (#2274)", () => {
+    // ⚠ Codex ckpt-2. mid_flight_stuck almost always fires alongside the
+    // ceiling, and the old predicate keyed only on its presence — so a
+    // 25-hour run that ticked 10 minutes ago rendered "running past its
+    // runtime ceiling 10m", attaching an unrelated duration to an age claim.
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const yesterday = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "running",
+        stale_reasons: ["mid_flight_stuck", "runtime_ceiling"],
+        active_run: {
+          run_id: 99,
+          started_at: yesterday,
+          rows_processed_so_far: 42,
+          progress_units_done: null,
+          progress_units_total: null,
+          last_progress_at: tenMinutesAgo,
+          is_cancelling: false,
+        },
+      }),
+    });
+    const reason = container.querySelector(
+      "[data-testid='verdict-reason']",
+    ) as HTMLElement;
+    expect(reason.textContent).toBe("running past its runtime ceiling");
+    expect(reason.textContent).not.toMatch(/\d+m/);
+  });
+
   it("attention verdict paints a red left border", () => {
     const { container } = renderRow({
       row: makeProcessRow({ status: "ok", stale_reasons: ["watermark_gap"] }),

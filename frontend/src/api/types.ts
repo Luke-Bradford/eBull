@@ -2191,7 +2191,14 @@ export interface ActiveRunSummaryResponse {
  * means the row is not stale.
  */
 export type StaleReason =
-  "schedule_missed" | "watermark_gap" | "queue_stuck" | "mid_flight_stuck";
+  | "schedule_missed"
+  | "watermark_gap"
+  | "queue_stuck"
+  | "mid_flight_stuck"
+  // #2274 — the run has been `running` past its whole-run wall-clock ceiling.
+  // Unlike mid_flight_stuck it ignores the heartbeat, so a job that ticks
+  // forever cannot mute it.
+  | "runtime_ceiling";
 
 export interface ProcessWatermarkResponse {
   cursor_kind: CursorKind;

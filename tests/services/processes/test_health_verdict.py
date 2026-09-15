@@ -74,7 +74,7 @@ def test_total_and_single_valued(status: ProcessStatus, reasons: tuple[StaleReas
 
 
 _HALT_EXPECTED: tuple[StaleReason, ...] = ("schedule_missed", "watermark_gap")
-_WEDGES: tuple[StaleReason, ...] = ("queue_stuck", "mid_flight_stuck")
+_WEDGES: tuple[StaleReason, ...] = ("queue_stuck", "mid_flight_stuck", "runtime_ceiling")
 
 
 def test_disabled_reads_paused_when_only_halt_expected_stale() -> None:
@@ -292,7 +292,7 @@ def test_retry_suppresses_schedule_missed() -> None:
     assert (v, sh) == ("self_healing", True)
 
 
-@pytest.mark.parametrize("wedge", ["queue_stuck", "mid_flight_stuck", "watermark_gap"])
+@pytest.mark.parametrize("wedge", ["queue_stuck", "mid_flight_stuck", "runtime_ceiling", "watermark_gap"])
 def test_retry_never_masks_genuine_wedge(wedge: StaleReason) -> None:
     """Codex ckpt-1 invariant: a retry must NOT paint a genuinely-wedged row
     self-healing — queue_stuck / mid_flight_stuck / watermark_gap still win."""
@@ -346,7 +346,7 @@ def test_liveness_kick_suppresses_schedule_missed() -> None:
     assert v == "self_healing"
 
 
-@pytest.mark.parametrize("wedge", ["queue_stuck", "mid_flight_stuck", "watermark_gap"])
+@pytest.mark.parametrize("wedge", ["queue_stuck", "mid_flight_stuck", "runtime_ceiling", "watermark_gap"])
 def test_liveness_kick_never_masks_genuine_wedge(wedge: StaleReason) -> None:
     """Codex ckpt-1 invariant: a kick must NOT paint a genuinely-wedged row
     self-healing — a kick into a stuck queue does not un-stick it."""
@@ -667,3 +667,31 @@ def test_degraded_last_run_is_not_hidden_behind_the_kill_switch() -> None:
     masking the disabled branch exists to prevent."""
     v, _, reason = compute_verdict(status="disabled", stale_reasons=(), last_run_failed=True)
     assert (v, reason) == ("attention", "last run failed")
+
+
+# ---------------------------------------------------------------------------
+# runtime_ceiling (#2274)
+# ---------------------------------------------------------------------------
+
+
+def test_running_past_runtime_ceiling_headline() -> None:
+    v, _, reason = compute_verdict(status="running", stale_reasons=("runtime_ceiling",))
+    assert v == "attention"
+    assert reason == "running past its runtime ceiling"
+
+
+def test_runtime_ceiling_outranks_mid_flight_stuck_in_the_headline() -> None:
+    """Both fire on a wedged run. ``runtime_ceiling`` is the stronger claim —
+    age-based, and the one a heartbeat cannot mute — so it headlines."""
+    v, _, reason = compute_verdict(status="running", stale_reasons=("mid_flight_stuck", "runtime_ceiling"))
+    assert v == "attention"
+    assert reason == "running past its runtime ceiling"
+
+
+def test_runtime_ceiling_is_a_wedge_under_the_kill_switch() -> None:
+    """#1831 invariant extended: halting the SCHEDULE does not end a run that
+    started before the halt, so a ceiling breach must not demote to ``paused``
+    the way ``schedule_missed`` / ``watermark_gap`` do."""
+    v, sh, reason = compute_verdict(status="disabled", stale_reasons=("runtime_ceiling",))
+    assert (v, sh) == ("attention", False)
+    assert reason == "past runtime ceiling"

@@ -21,12 +21,14 @@ const REASON_LABEL: Record<StaleReason, string> = {
   watermark_gap: "ingest failing",
   queue_stuck: "queue stuck",
   mid_flight_stuck: "no progress",
+  runtime_ceiling: "past runtime ceiling",
 };
 const REASON_ORDER: StaleReason[] = [
   "schedule_missed",
   "watermark_gap",
   "queue_stuck",
   "mid_flight_stuck",
+  "runtime_ceiling",
 ];
 
 /**
@@ -47,7 +49,9 @@ export function deriveVerdict(
   // and a last terminal run that genuinely failed. Only the halt-expected
   // reasons (schedule_missed / watermark_gap) demote to paused.
   if (status === "disabled") {
-    const wedge = actionable.find((r) => r === "queue_stuck" || r === "mid_flight_stuck");
+    const wedge = actionable.find(
+      (r) => r === "queue_stuck" || r === "mid_flight_stuck" || r === "runtime_ceiling",
+    );
     if (wedge !== undefined)
       return { health_verdict: "attention", self_healing: false, verdict_reason: REASON_LABEL[wedge] };
     return lastRunFailed
@@ -59,9 +63,11 @@ export function deriveVerdict(
     const reason =
       status === "failed"
         ? "last run failed"
-        : status === "running" && actionable.includes("mid_flight_stuck")
-          ? "running but no progress"
-          : REASON_LABEL[headline];
+        : status === "running" && actionable.includes("runtime_ceiling")
+          ? "running past its runtime ceiling"
+          : status === "running" && actionable.includes("mid_flight_stuck")
+            ? "running but no progress"
+            : REASON_LABEL[headline];
     return { health_verdict: "attention", self_healing: false, verdict_reason: reason };
   }
   switch (status) {

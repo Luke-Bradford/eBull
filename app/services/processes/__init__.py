@@ -90,11 +90,13 @@ WatermarkCursorKind = Literal[
 # Operator-amendment §A1 (PR8 / #1083): four-case stale model. Supersedes
 # the original PR8 spec text ("rolling p95 + last log timestamp" — line
 # 953-958) which was a v0 sketch. Multiple reasons can fire on one row.
+# #2274 added a fifth, ``runtime_ceiling`` — see stale_detection rule 5.
 StaleReason = Literal[
     "schedule_missed",
     "watermark_gap",
     "queue_stuck",
     "mid_flight_stuck",
+    "runtime_ceiling",
 ]
 
 
