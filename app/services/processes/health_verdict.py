@@ -68,9 +68,9 @@ from app.services.processes import (
 # sees their triggered job failed.
 STALE_MANUAL_WINDOW: Final[timedelta] = timedelta(hours=24)
 
-# All four stale reasons are actionable in v1 (none auto-recovers yet).
+# All five stale reasons are actionable in v1 (none auto-recovers yet).
 ACTIONABLE_STALE: Final[frozenset[StaleReason]] = frozenset(
-    {"schedule_missed", "watermark_gap", "queue_stuck", "mid_flight_stuck"}
+    {"schedule_missed", "watermark_gap", "queue_stuck", "mid_flight_stuck", "runtime_ceiling"}
 )
 
 # #1831 — genuine WEDGES: a request/run that is actually stuck, not merely
@@ -80,7 +80,11 @@ ACTIONABLE_STALE: Final[frozenset[StaleReason]] = frozenset(
 # ``watermark_gap`` are EXPECTED while halted (nothing is firing / ingesting),
 # so they demote to neutral ``paused`` — that expected-drift flood was the #1831
 # bug (~42 halted jobs painted red).
-_WEDGE_STALE: Final[frozenset[StaleReason]] = frozenset({"queue_stuck", "mid_flight_stuck"})
+# ``runtime_ceiling`` (#2274) is a wedge for the same reason: the run is
+# already in flight, and halting the SCHEDULE does not end a run that started
+# before the halt. Demoting it to ``paused`` would mute the one alarm that a
+# ticking heartbeat cannot mute.
+_WEDGE_STALE: Final[frozenset[StaleReason]] = frozenset({"queue_stuck", "mid_flight_stuck", "runtime_ceiling"})
 
 # Stable order for picking the headline reason when several fire at once.
 _REASON_ORDER: Final[tuple[StaleReason, ...]] = (
@@ -88,6 +92,7 @@ _REASON_ORDER: Final[tuple[StaleReason, ...]] = (
     "watermark_gap",
     "queue_stuck",
     "mid_flight_stuck",
+    "runtime_ceiling",
 )
 
 _REASON_LABEL: Final[dict[StaleReason, str]] = {
@@ -95,6 +100,7 @@ _REASON_LABEL: Final[dict[StaleReason, str]] = {
     "watermark_gap": "ingest failing",
     "queue_stuck": "queue stuck",
     "mid_flight_stuck": "no progress",
+    "runtime_ceiling": "past runtime ceiling",
 }
 
 
@@ -190,6 +196,11 @@ def compute_verdict(
     if actionable:
         if status == "failed":
             reason = "last run failed"
+        elif status == "running" and "runtime_ceiling" in actionable:
+            # #2274 — ordered BEFORE mid_flight_stuck: both fire on a wedged
+            # run, but "past its 24h ceiling" is the stronger, age-based claim
+            # and the one a heartbeat cannot mute. Headline the stronger one.
+            reason = "running past its runtime ceiling"
         elif status == "running" and "mid_flight_stuck" in actionable:
             reason = "running but no progress"
         else:
