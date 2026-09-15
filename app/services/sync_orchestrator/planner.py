@@ -123,12 +123,52 @@ def _scope_to_candidate_jobs(
         if conn is None:
             raise ValueError("scope='behind' requires a live connection")
         states = compute_layer_states_from_db(conn)
-        target_layers = {n for n, s in states.items() if s in {LayerState.DEGRADED, LayerState.ACTION_NEEDED}}
+        # RETRYING is a DIRECT target alongside DEGRADED / ACTION_NEEDED (#2274).
+        #
+        # ⚠ It was excluded on the strength of a spec promise that was never
+        # implemented: freshness-unification.md:78 says "orchestrator will
+        # re-fire with backoff", but no production code re-fires a layer —
+        # ``RetryPolicy.backoff_seconds`` is read only by its own __post_init__
+        # validation and by tests, and ``layer_state`` reads ``max_attempts``
+        # alone. So RETRYING named a catch-up that never happened, and the
+        # exclusion made the gate NON-MONOTONE in failure count: 0 failures
+        # (DEGRADED) selected, 1..max_attempts-1 (RETRYING) NOT selected,
+        # >= max_attempts (ACTION_NEEDED) selected again. A layer that had
+        # failed LESS was treated as less recoverable.
+        #
+        # Measured cost on the dev corpus: ``candles`` sat RETRYING from
+        # 2026-09-15 03:00Z while two boot sweeps (13:22Z, 14:22Z) each planned
+        # ZERO layers, leaving 4,292 instruments without their 09-14 bar. All 5
+        # of the 64 ``behind`` sweeps in the preceding 14 days that planned
+        # nothing had ``candles`` failed with an as-of streak of 1 or 2.
+        #
+        # ⚠ This is not a new behaviour class: ``_transitive_upstreams_not_healthy``
+        # below already pulls RETRYING layers into a plan whenever some OTHER
+        # layer is unhealthy. What was broken is that recovery of a failed layer
+        # depended on an unrelated layer also being unhealthy. It IS a wider
+        # trigger, though — see the composite-job note on the closure line.
+        target_layers = {
+            n
+            for n, s in states.items()
+            if s in {LayerState.DEGRADED, LayerState.RETRYING, LayerState.ACTION_NEEDED}
+        }
         if not target_layers:
             return []
         # Include any non-HEALTHY upstreams transitively, so a waiting
-        # layer's prerequisites get refreshed first.
+        # layer's prerequisites get refreshed first. ⚠ The closure predicate is
+        # NOT the same as the target predicate above — it excludes only HEALTHY
+        # and DISABLED, so it can pull in RUNNING, SECRET_MISSING and
+        # CASCADE_WAITING upstreams, and it stops traversal at a healthy
+        # intermediate. Do not restate one as the other.
         target_layers |= _transitive_upstreams_not_healthy(target_layers, states)
+        # ⚠ PRE-EXISTING GAP, now reachable from one more trigger: a job that
+        # emits several layers runs ALL of them, and the executor does not
+        # recheck the operator's enabled flag. ``morning_candidate_review`` is
+        # the only multi-emit job in the registry (scoring + recommendations),
+        # so a DISABLED scoring can be written by a RETRYING recommendations —
+        # exactly as it already could by a DEGRADED one. Pinned by
+        # ``test_behind_composite_job_runs_disabled_sibling`` so the behaviour
+        # is explicit rather than silent; the fix belongs in the executor.
         return [job for job in in_dag if any(e in target_layers for e in JOB_TO_LAYERS[job])]
 
     raise ValueError(f"unknown scope kind: {scope.kind}")

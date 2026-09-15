@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.services.sync_orchestrator.layer_types import LayerState
 from app.services.sync_orchestrator.planner import (
     _build_layer_plan,
     build_execution_plan,
@@ -191,3 +192,106 @@ class TestBuildExecutionPlanJobForce:
         morning_plans = [lp for lp in plan.layers_to_refresh if lp.name == "morning_candidate_review"]
         assert len(morning_plans) == 1
         assert morning_plans[0].emits == ("scoring", "recommendations")
+
+
+class TestBehindScopeTargetStates:
+    """#2274 — which LayerStates are DIRECT targets of scope='behind'.
+
+    RETRYING was excluded on the strength of ``freshness-unification.md:78``
+    ("orchestrator will re-fire with backoff"), a mechanism that was never
+    built: ``RetryPolicy.backoff_seconds`` has no scheduling consumer. The
+    exclusion made the gate non-monotone in failure count — 0 failures
+    (DEGRADED) selected, 1..max_attempts-1 (RETRYING) not, >= max_attempts
+    (ACTION_NEEDED) selected again.
+    """
+
+    @staticmethod
+    def _plan_with_states(states: dict[str, LayerState]) -> set[str]:
+        """Return the set of job names planned for scope='behind' under the
+        given layer states. Every unnamed layer is HEALTHY."""
+        from app.services.sync_orchestrator import planner
+        from app.services.sync_orchestrator.registry import LAYERS
+
+        full = {name: LayerState.HEALTHY for name in LAYERS}
+        full.update(states)
+        with patch.object(planner, "compute_layer_states_from_db", return_value=full):
+            plan = build_execution_plan(MagicMock(), SyncScope.behind())
+        return {lp.name for lp in plan.layers_to_refresh}
+
+    @pytest.mark.parametrize(
+        ("state", "selected"),
+        [
+            (LayerState.DEGRADED, True),
+            (LayerState.RETRYING, True),  # #2274: was False
+            (LayerState.ACTION_NEEDED, True),
+            (LayerState.HEALTHY, False),
+            (LayerState.RUNNING, False),
+            (LayerState.DISABLED, False),
+            (LayerState.SECRET_MISSING, False),
+            (LayerState.CASCADE_WAITING, False),
+        ],
+    )
+    def test_every_state_as_an_isolated_direct_target(self, state: LayerState, selected: bool) -> None:
+        """All eight states, one at a time, on a layer with no unhealthy
+        neighbours — so selection is attributable to the direct-target
+        predicate and not to the closure arm."""
+        planned = self._plan_with_states({"candles": state})
+        assert ("daily_candle_refresh" in planned) is selected
+
+    def test_retrying_is_planned_even_when_is_fresh_says_otherwise(self) -> None:
+        """``behind`` bypasses the freshness re-filter (state selection is
+        authoritative), so a RETRYING layer fires even with every predicate
+        returning fresh. Pins the interaction the backoff design would have
+        broken."""
+        from app.services.sync_orchestrator.registry import LAYERS
+
+        _make_conn_with_freshness(set(LAYERS.keys()))
+        assert "daily_candle_refresh" in self._plan_with_states({"candles": LayerState.RETRYING})
+
+    def test_retrying_upstream_still_planned_via_closure(self) -> None:
+        """Regression pin for the pre-#2274 path: a RETRYING layer was already
+        reachable as a transitive upstream of a DEGRADED target. That must keep
+        working, and must not produce a duplicate plan entry now that the same
+        layer is also a direct target."""
+        from app.services.sync_orchestrator import planner
+        from app.services.sync_orchestrator.registry import LAYERS
+
+        full = {name: LayerState.HEALTHY for name in LAYERS}
+        full["candles"] = LayerState.RETRYING
+        full["scoring"] = LayerState.DEGRADED
+        with patch.object(planner, "compute_layer_states_from_db", return_value=full):
+            plan = build_execution_plan(MagicMock(), SyncScope.behind())
+        names = [lp.name for lp in plan.layers_to_refresh]
+        assert "daily_candle_refresh" in names
+        assert "morning_candidate_review" in names
+        assert len(names) == len(set(names)), f"duplicate plan entries: {names}"
+
+    def test_behind_composite_job_runs_disabled_sibling(self) -> None:
+        """⚠ PINS A PRE-EXISTING GAP, not desired behaviour.
+
+        ``morning_candidate_review`` is the registry's only multi-emit job. A
+        job is selected if ANY emit is a target, and the executor does not
+        recheck the operator's enabled flag — so a DISABLED ``scoring`` is
+        written anyway when ``recommendations`` is selected. That was already
+        true for a DEGRADED recommendations; #2274 makes it reachable from a
+        RETRYING one too. Asserted so the expansion is explicit and a future
+        executor-side fix has a test to update rather than a silent behaviour
+        to discover.
+        """
+        planned = self._plan_with_states(
+            {"recommendations": LayerState.RETRYING, "scoring": LayerState.DISABLED}
+        )
+        assert "morning_candidate_review" in planned
+
+    def test_non_behind_scopes_ignore_layer_state(self) -> None:
+        """The state machine gates ``behind`` only. ``high_frequency`` selects
+        by emit name and must be unaffected by a RETRYING candles layer."""
+        from app.services.sync_orchestrator import planner
+        from app.services.sync_orchestrator.registry import LAYERS
+
+        _make_conn_with_freshness(set())
+        full = {name: LayerState.HEALTHY for name in LAYERS}
+        full["candles"] = LayerState.RETRYING
+        with patch.object(planner, "compute_layer_states_from_db", return_value=full):
+            plan = build_execution_plan(MagicMock(), SyncScope.high_frequency())
+        assert {lp.name for lp in plan.layers_to_refresh} == {"daily_portfolio_sync", "fx_rates_refresh"}

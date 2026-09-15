@@ -63,13 +63,19 @@ REMEDIES: dict[FailureCategory, Remedy] = {
         operator_fix="Update the public key in Settings → Providers",
         self_heal=False,
     ),
+    # ⚠ These two said "retrying with backoff" until #2274. No production code
+    # applies a backoff to a layer retry — ``RetryPolicy.backoff_seconds`` has
+    # no scheduling consumer — so the message promised the operator a mechanism
+    # that does not exist. The truthful statement is what the planner now does:
+    # the next orchestrator sweep re-fires it (``SyncScope.behind()``, whose two
+    # callers are the boot sweep and the operator's own Sync button).
     FailureCategory.RATE_LIMITED: Remedy(
-        message="Rate limit hit — retrying with backoff",
+        message="Rate limit hit — will retry on the next sync",
         operator_fix=None,
         self_heal=True,
     ),
     FailureCategory.SOURCE_DOWN: Remedy(
-        message="Data source unreachable — retrying with backoff",
+        message="Data source unreachable — will retry on the next sync",
         operator_fix=None,
         self_heal=True,
     ),
@@ -106,8 +112,12 @@ REMEDIES: dict[FailureCategory, Remedy] = {
         # fresh root secret).
         self_heal=False,
     ),
+    # ⚠ Same correction as RATE_LIMITED / SOURCE_DOWN above, and this is the
+    # category that carries it in practice: ``ops_monitor`` stamps INTERNAL_ERROR
+    # on every run it reaps at boot, so a restart-killed sweep is exactly the row
+    # an operator reads this message on.
     FailureCategory.INTERNAL_ERROR: Remedy(
-        message="Unclassified error — retrying with backoff",
+        message="Unclassified error — will retry on the next sync",
         operator_fix=None,
         self_heal=True,
     ),
