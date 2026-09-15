@@ -379,3 +379,48 @@ def test_two_instruments_on_different_branches_report_both_causes(
     assert summary.candle_revision_max_age_days == deep_age
     assert summary.candle_revision_max_age_by_cause["stale_reobservation"] == deep_age
     assert summary.candle_revision_max_age_by_cause["incremental"] < deep_age
+
+
+def test_a_stale_reobservation_is_not_labelled_incremental_when_the_lookback_is_three(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ The CALLER-side half of the inference trap, found by revert-probe.
+
+    The pure test in ``tests/test_2414_revision_cause.py`` pins
+    ``_candles_fetch_count``'s reason. It does NOT stop the caller from throwing
+    that reason away and re-deriving one from the count — which is what the code
+    did before this change, and which a revert-probe re-introduced with every
+    pure test still green.
+
+    At ``lookback_days == _INCREMENTAL_FETCH_BARS`` the stale-gap fallback and
+    the incremental window return the SAME number, so the inference reports a
+    full re-observation as a 3-bar correction. Driven through the real loop
+    because that is the layer the defect lives at.
+
+    ⚠ The revised bar is held under ``_ADJUSTMENT_RATIO_THRESHOLD``: at this
+    lookback the stale fetch also satisfies the heal precondition
+    (``fetch_count == _INCREMENTAL_FETCH_BARS``), so a larger move would make
+    this a heal and test something else.
+    """
+    conn = ebull_test_conn
+    _ensure_instrument(conn, _IID, "REVN")
+    days = _weekdays_back(most_recent_trading_day(date.today()), 40)
+    # Ten trading days behind -> the gap fallback, whatever the lookback is.
+    _seed(conn, days[:-10], "100")
+
+    provider = MagicMock()
+    provider.get_daily_candles.side_effect = [[_bar(d, "101") for d in days[-13:-10]]]
+    summary = refresh_market_data(
+        provider,
+        conn,
+        instruments=[(_IID, "REVN")],
+        lookback_days=3,
+        skip_quotes=True,
+    )
+    _assert_cause_invariants(summary)
+
+    assert summary.candles_failed == 0
+    assert summary.adjustment_refetches == 0
+    assert summary.candle_rows_revised == 3
+    assert summary.candle_revisions_by_cause == {"stale_reobservation": 3}
+    assert "incremental" not in summary.candle_revisions_by_cause
