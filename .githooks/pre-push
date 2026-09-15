@@ -8,20 +8,18 @@
 # costing 13-20 min and stacking with bot-review iterations
 # (PR + follow-up = 30-60 min wall-clock).
 #
-# Pytest tiering (operator decision 2026-06-07): the gate runs only the
-# FAST tier — pure-logic tests that need no Postgres (`-m "not db"`,
-# ~25s under xdist). The DB-backed integration tier (~half the suite,
-# xdist-flaky, needs the 5433 test cluster) was the multi-minute cost
-# that was routinely bypassed with `--no-verify` — it paid no rent on
-# every push. It now runs on demand / pre-merge (`uv run pytest -m db`),
-# not here. The `db` marker is auto-applied at collection
-# (tests/conftest.py). Testmon scoping was removed with it — the fast
-# tier is cheap enough to always run in full. Plus the smoke test (app
-# boots against the dev DB), the one DB-touching test worth gating.
+# Pytest tiering (operator decision 2026-06-07; DB tier restored 2026-09-15).
+# The gate runs the FAST tier (`-m "not db"`, ~25s), the DB-backed
+# integration tier (`-m db`, ~114s — see its own block below), and the
+# smoke test. The `db` marker is auto-applied at collection
+# (tests/conftest.py).
 #
-# This keeps the push gate fast + deterministic (no DB ⇒ no xdist DB
-# flake ⇒ no reflexive --no-verify), shifting the heavy integration
-# cost to when DB/SQL code actually changes.
+# The DB tier was removed in 2026-06 because it was xdist-flaky and
+# therefore routinely bypassed with `--no-verify`, which is strictly
+# worse than no gate. It is back because both halves of that changed:
+# #1568 took it from 66 min to ~114s, and #2224 closed the leakage
+# causes behind the flake. The gate is still fast + deterministic; it
+# is no longer fast by being blind.
 #
 # Wire once per clone:
 #   git config core.hooksPath .githooks
@@ -269,25 +267,89 @@ bash scripts/check_probe_anchors.sh
 echo "==> Pre-push gate: pre-push <-> ci.yml lint parity"
 bash scripts/check_ci_mirrors_prepush.sh
 
-# Pytest — FAST TIER ONLY (operator decision 2026-06-07).
+# Pytest — FAST TIER (pure-logic, no Postgres). The DB tier follows it below.
 #
-# The gate runs the pure-logic tests that need no Postgres (`-m "not db"`,
-# ~3.1k tests, ~25s under xdist). The DB-backed integration tier (~half the
-# suite, xdist-flaky, needs the 5433 test cluster) is OFF the per-push critical
-# path — it was the multi-minute, routinely-`--no-verify`'d cost that paid no
-# rent on every push. Run it deliberately when you change DB/SQL/ingest code:
+# ~3.1k tests, ~25s under xdist. The `db` marker is auto-applied at collection
+# (tests/conftest.py: pytest_collection_modifyitems) to any test pulling a
+# real-DB fixture or whose module touches psycopg.connect / the test-DB URL /
+# run_migrations / TestClient. No testmon and no run-mode branching — this tier
+# is cheap enough to always run in full, and it never touches a DB so it cannot
+# flake on xdist DB isolation.
 #
-#   docker compose --profile test up -d postgres-test   # once
-#   uv run pytest -m db                                  # full integration tier
-#
-# The `db` marker is auto-applied at collection (tests/conftest.py:
-# pytest_collection_modifyitems) to any test pulling a real-DB fixture or whose
-# module touches psycopg.connect / the test-DB URL / run_migrations / TestClient.
-# No testmon, no run-mode branching, no cluster startup here — the fast tier is
-# cheap enough to always run in full, and never touches a DB so it can't flake
-# on xdist DB isolation.
+# It runs FIRST so a plain logic error fails in ~25s without waiting on the DB
+# tier's ~114s.
 echo "==> Pre-push gate: fast tests (pure-logic, no DB)"
 uv run pytest -m "not db" --tb=short -q
+
+# DB-BACKED INTEGRATION TIER — back on the gate as of #2224 (2026-09-15).
+#
+# CLAUDE.md set an objective trigger for this: "when #2224 is closed and the
+# full tier has run clean 3 consecutive times, add `-m db` to
+# .githooks/pre-push". Both conditions are met. The blocker was never cost —
+# #1568 took the tier from 66 min to ~114s — it was DETERMINISM, because a gate
+# that fails randomly trains you to --no-verify, which is strictly worse than no
+# gate. #2224 closed four leakage causes plus the run-shape question.
+#
+# ⚠ RUN SHAPE IS PART OF THE GATE, not an implementation detail. The documented
+# substitute while bare `-m db` was believed un-runnable split the tier into
+# alphabetical 40-file chunks, and that partition provably CANNOT see
+# cross-module leakage: it reported 24/24 green on two separate defects that
+# failed 100% of the time when the two modules ran together. Bare (the repo
+# default `-n 4 --dist=loadgroup`) is the shape the three clean runs used and
+# the shape this gate must keep. Do not "speed it up" by chunking.
+#
+# ⚠⚠ A db-tier run with NO Postgres SKIPS and exits 0 — the single most
+# dangerous outcome here, because a green gate that exercised no database looks
+# exactly like a green gate that exercised all of it. Hence two checks before
+# trusting the exit code: reachability of the 5433 cluster (fail fast, with the
+# command to fix it), and the fixture's own "unavailable" warning, which covers
+# the case where the cluster is up but the role cannot CREATEDB.
+# ⚠ The probe's stderr is CAPTURED, not discarded (review NITPICK on PR #3066).
+# Throwing it away collapses every failure into "cluster unreachable" — a broken
+# `uv`, a missing interpreter and a stopped container would all print the same
+# sentence, and the two cures are nothing alike. The probe's own message is the
+# one piece of diagnostic text available at that moment.
+echo "==> Pre-push gate: db-backed integration tier (5433 cluster)"
+DB_PROBE_ERR="$(mktemp -t ebull-prepush-probe)"
+if ! uv run python -c "
+import socket, sys
+host, port = 'localhost', 5433
+try:
+    socket.create_connection((host, port), timeout=3).close()
+except OSError as exc:
+    sys.exit(f'{type(exc).__name__}: {exc}')
+" 2>"${DB_PROBE_ERR}"; then
+  echo "==> FAIL: could not reach the postgres-test cluster (5433)."
+  echo "==>       probe said: $(tr '\n' ' ' < "${DB_PROBE_ERR}")"
+  echo "==>       The db tier would SKIP and exit 0, which is a green gate that"
+  echo "==>       tested nothing. If the container is simply down:"
+  echo "==>         docker compose --profile test up -d postgres-test"
+  rm -f "${DB_PROBE_ERR}"
+  exit 1
+fi
+rm -f "${DB_PROBE_ERR}"
+
+# Whole output to a file, never a pipe: `cmd | tail` returns tail's status and
+# would mask a failing pytest (prevention log, re-committed #2279).
+DB_TIER_LOG="$(mktemp -t ebull-prepush-db)"
+if ! uv run pytest -m db --tb=short -q > "${DB_TIER_LOG}" 2>&1; then
+  tail -40 "${DB_TIER_LOG}"
+  echo "==> FAIL: db-backed integration tier. Full output: ${DB_TIER_LOG}"
+  exit 1
+fi
+# Two distinct warnings, because there are two distinct ways to end up skipping:
+# the per-worker fixture's "ebull_test DB unavailable" (cluster up, but e.g. the
+# role lacks CREATEDB) and the controller's "Could not build ebull_test_template"
+# (template build failed). Only the first was obvious; the second was observed in
+# a sandboxed run during #2224 and would otherwise sail through as a green gate.
+if grep -qE "ebull_test DB unavailable|Could not build ebull_test_template" "${DB_TIER_LOG}"; then
+  tail -20 "${DB_TIER_LOG}"
+  echo "==> FAIL: the db tier could not reach or build the test DB, so it SKIPPED."
+  echo "==>       Exit code 0 here means nothing. Full output: ${DB_TIER_LOG}"
+  exit 1
+fi
+tail -1 "${DB_TIER_LOG}"
+rm -f "${DB_TIER_LOG}"
 
 # The smoke test is the ONE DB-touching test worth gating on every push: it
 # drives the FastAPI lifespan against the dev DB, catching lifespan-only
