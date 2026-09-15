@@ -201,7 +201,17 @@ class MirrorBreakdown:
     active: bool
     funded_usd: float  # initial_investment + deposits - withdrawals
     mirror_equity_usd: float  # available_amount + sum(position market values)
-    unrealized_pnl_usd: float  # mirror_equity - funded
+    # ⚠ `- closed_pnl` is #226 and is load-bearing: a closed mirror position returns its
+    # proceeds to `available_amount`, so `mirror_equity - funded` is the TOTAL return.
+    # Subtracting the realised term leaves the genuinely unrealised part.  The comment
+    # here read `mirror_equity - funded` until #3084 -- true before #226, wrong after.
+    unrealized_pnl_usd: float  # mirror_equity - funded - closed_pnl
+    # The realised half of that split, carried rather than discarded (#3084).  Without it
+    # a caller rendering `funded / mirror_equity / unrealized_pnl` shows three numbers
+    # that cannot be reconciled from each other.  Source: eToro
+    # `closedPositionsNetProfit`, "Realised P&L from closed positions (USD)"
+    # (`docs/etoro-api-reference.md:457`).
+    closed_pnl_usd: float
     position_count: int
     started_copy_date: datetime
 
@@ -278,6 +288,7 @@ def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdow
                 mirror_equity_usd=mirror_equity,
                 # Isolate unrealised: total_return - realised closed-position gains.
                 unrealized_pnl_usd=mirror_equity - funded - realised,
+                closed_pnl_usd=realised,
                 position_count=int(r["position_count"]),
                 started_copy_date=r["started_copy_date"],
             )

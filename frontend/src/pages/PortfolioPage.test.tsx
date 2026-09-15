@@ -136,6 +136,7 @@ function mirror(
     funded: 1000,
     mirror_equity: 1200,
     unrealized_pnl: 200,
+    closed_pnl: 0,
     position_count: 5,
     started_copy_date: "2026-01-01",
     ...overrides,
@@ -302,6 +303,30 @@ describe("PortfolioPage — unified drill-in", () => {
     await waitFor(() => {
       expect(screen.getByTestId("location").textContent).toBe("/copy-trading/42");
     });
+  });
+
+  // #3084 — a mirror row's INVESTED/VALUE/P&L cannot reconcile without the closed
+  // half, because `unrealized_pnl` deliberately excludes realised profit (#226).
+  it.each([
+    { label: "positive closed beside a negative unrealised", closed: 615.38, unrealised: -226.09 },
+    { label: "negative closed beside a positive unrealised", closed: -1514.74, unrealised: 350.68 },
+    { label: "both negative", closed: -50, unrealised: -25 },
+    { label: "zero closed still renders", closed: 0, unrealised: 200 },
+  ])("mirror row shows its closed P&L — $label", async ({ closed, unrealised }) => {
+    mockedFetchPortfolio.mockResolvedValue(
+      portfolioWith(
+        [],
+        [mirror(42, "@gurutrader", { closed_pnl: closed, unrealized_pnl: unrealised })],
+      ),
+    );
+    renderPage();
+
+    const cell = await screen.findByTestId("mirror-closed-pnl-42");
+    expect(cell.textContent).toMatch(/closed P&L/);
+    // Its OWN sign, not the unrealised figure's: every case above pairs opposite
+    // signs precisely so a cell that reused `positive` would pass on one and fail here.
+    expect(cell.className).toMatch(closed >= 0 ? /text-emerald-600/ : /text-red-600/);
+    expect(screen.getByTestId("mirror-row-42").textContent).toMatch(/unrealised/);
   });
 
   it("Add button on a row opens Add modal (does NOT drill)", async () => {

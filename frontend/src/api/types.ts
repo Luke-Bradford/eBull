@@ -817,7 +817,11 @@ export interface PortfolioMirrorItem {
   active: boolean;
   funded: number;
   mirror_equity: number;
+  /** Unrealised only — `mirror_equity - funded - closed_pnl` (#226). */
   unrealized_pnl: number;
+  /** Realised P&L from positions the mirror has closed, so a row reconciles:
+   *  `mirror_equity - funded === unrealized_pnl + closed_pnl` (#3084). */
+  closed_pnl: number;
   position_count: number;
   started_copy_date: string;
 }

@@ -44,6 +44,7 @@ function mirror(
     funded: 1000,
     mirror_equity: 1200,
     unrealized_pnl: 200,
+    closed_pnl: 0,
     position_count: 5,
     started_copy_date: "2026-01-01",
     ...overrides,

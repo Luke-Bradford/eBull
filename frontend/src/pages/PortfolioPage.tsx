@@ -663,6 +663,10 @@ function MirrorRow({
 }) {
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
+  // ⚠ Its OWN sign, not `positive`. The dev book holds one mirror of each sign, so a
+  // negative unrealised beside a positive closed result is the live case, and reusing
+  // `positive` would paint the closed figure the colour of a different number (#3084).
+  const closedPositive = m.closed_pnl >= 0;
   const unconverted = currency !== displayCurrency;
 
   const rowClass = [
@@ -702,6 +706,13 @@ function MirrorRow({
       <td className="px-2 py-2 text-right tabular-nums">
         <span className={positive ? "text-emerald-600" : "text-red-600"}>
           {formatMoney(m.unrealized_pnl, currency)}
+        </span>
+        <span className="block text-[10px] text-slate-400">unrealised</span>
+        <span
+          className={`block text-[10px] ${closedPositive ? "text-emerald-600" : "text-red-600"}`}
+          data-testid={`mirror-closed-pnl-${m.mirror_id}`}
+        >
+          {formatMoney(m.closed_pnl, currency)} closed P&amp;L
         </span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums">

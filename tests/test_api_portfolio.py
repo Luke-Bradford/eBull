@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -982,6 +982,177 @@ class TestPortfolioMirrors:
         assert m["funded"] == 10000.0
         # unrealized = total_return - realised = (10500 - 10000) - 500 = 0
         assert m["unrealized_pnl"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestMirrorClosedPnl — the realised half is carried, not discarded (#3084)
+# ---------------------------------------------------------------------------
+
+
+class TestMirrorClosedPnl:
+    """`closed_pnl` on a mirror row, so `equity - funded == unrealised + closed`.
+
+    Every case drives the real path (``GET /portfolio`` -> ``get_portfolio`` ->
+    ``load_mirror_breakdowns``) rather than constructing the model by hand: a
+    hand-built ``PortfolioMirrorItem`` cannot catch a wiring or conversion fault.
+
+    ⚠ ``closed_pnl`` is asserted against the SOURCE column
+    (``closed_positions_net_profit``), never against
+    ``mirror_equity - funded - unrealized_pnl`` — that is the definition rearranged
+    and would pass on any wrong input.
+    """
+
+    def setup_method(self) -> None:
+        self._patch_config = patch(
+            "app.services.valuation.get_runtime_config",
+            return_value=_DEFAULT_CONFIG,
+        )
+        self._patch_fx_meta = patch(
+            "app.services.valuation.load_live_fx_rates_with_metadata",
+            return_value={},
+        )
+        self._patch_config.start()
+        self._patch_fx_meta.start()
+
+    def teardown_method(self) -> None:
+        self._patch_config.stop()
+        self._patch_fx_meta.stop()
+        _cleanup()
+
+    @pytest.mark.parametrize("realised", [500.0, -500.0, 0.0])
+    def test_closed_pnl_carries_the_source_column_with_its_sign(self, realised: float) -> None:
+        """A realised LOSS stays negative, and zero still renders as a value.
+
+        The negative arm is the one that matters: a sign flip passes a
+        positive-only test, and the dev book's two mirrors carry opposite signs.
+        """
+        mirror = _make_mirror_row(
+            initial_investment=10000.0,
+            available_amount=3000.0 + realised,
+            closed_positions_net_profit=realised,
+            positions_mv=7000.0,
+        )
+        _with_conn([[], [_make_cash_row(None)], [], [mirror]])
+
+        m = client.get("/portfolio").json()["mirrors"][0]
+
+        assert m["closed_pnl"] == realised
+        # The identity the row exists to make visible, on raw values.
+        assert m["mirror_equity"] - m["funded"] == pytest.approx(m["unrealized_pnl"] + m["closed_pnl"], abs=1e-6)
+
+    def test_two_mirrors_keep_their_own_closed_pnl(self) -> None:
+        """Matched by mirror_id — a single-mirror case cannot detect cross-row reuse."""
+        m1 = _make_mirror_row(mirror_id=1001, closed_positions_net_profit=250.0)
+        m2 = _make_mirror_row(mirror_id=1002, parent_username="other", closed_positions_net_profit=-800.0)
+        _with_conn([[], [_make_cash_row(None)], [], [m1, m2]])
+
+        by_id = {m["mirror_id"]: m for m in client.get("/portfolio").json()["mirrors"]}
+
+        assert by_id[1001]["closed_pnl"] == 250.0
+        assert by_id[1002]["closed_pnl"] == -800.0
+
+    def test_no_existing_number_moves(self) -> None:
+        """Regression: adding the field must not shift funded/equity/unrealised/AUM.
+
+        Without this, accidental double-counting passes every new-field assertion.
+        """
+        mirror = _make_mirror_row(
+            initial_investment=10000.0,
+            available_amount=3500.0,
+            closed_positions_net_profit=500.0,
+            positions_mv=7000.0,
+        )
+        _with_conn([[], [_make_cash_row(None)], [], [mirror]])
+
+        body = client.get("/portfolio").json()
+        m = body["mirrors"][0]
+
+        assert m["funded"] == 10000.0
+        assert m["mirror_equity"] == 10500.0
+        assert m["unrealized_pnl"] == 0.0
+        assert body["mirror_equity"] == 10500.0
+        assert body["total_aum"] == 10500.0
+
+    def test_inactive_mirrors_are_excluded(self) -> None:
+        """`load_mirror_breakdowns` filters `WHERE m.active`; the new field changes nothing."""
+        _with_conn([[], [_make_cash_row(None)], [], []])
+
+        body = client.get("/portfolio").json()
+
+        assert body["mirrors"] == []
+
+    def test_cash_only_mirror_still_reports_closed_pnl(self) -> None:
+        """Every position closed, copying still active: equity is cash, closed is non-zero."""
+        mirror = _make_mirror_row(
+            initial_investment=10000.0,
+            available_amount=10400.0,
+            closed_positions_net_profit=400.0,
+            positions_mv=0.0,
+            position_count=0,
+        )
+        _with_conn([[], [_make_cash_row(None)], [], [mirror]])
+
+        m = client.get("/portfolio").json()["mirrors"][0]
+
+        assert m["closed_pnl"] == 400.0
+        assert m["unrealized_pnl"] == 0.0
+
+
+class TestMirrorClosedPnlFxConversion:
+    """`closed_pnl` converts through the SAME call as its three siblings."""
+
+    def setup_method(self) -> None:
+        gbp_config = RuntimeConfig(
+            enable_auto_trading=False,
+            enable_live_trading=False,
+            display_currency="GBP",
+            llm_provider="openai_compatible",
+            llm_base_url="http://localhost:11434/v1",
+            llm_model_writer="qwen3:14b",
+            llm_model_critic="qwen3:14b",
+            updated_at=_NOW,
+            updated_by="test",
+            reason="test",
+        )
+        self._patch_config = patch("app.services.valuation.get_runtime_config", return_value=gbp_config)
+        self._patch_config.start()
+
+    def teardown_method(self) -> None:
+        self._patch_config.stop()
+        _cleanup()
+
+    def _run(self, rates: dict[Any, Any]) -> dict[str, Any]:
+        mirror = _make_mirror_row(
+            initial_investment=10000.0,
+            available_amount=3500.0,
+            closed_positions_net_profit=500.0,
+            positions_mv=7000.0,
+        )
+        with patch("app.services.valuation.load_live_fx_rates_with_metadata", return_value=rates):
+            _with_conn([[], [_make_cash_row(None)], [], [mirror]])
+            return cast(dict[str, Any], client.get("/portfolio").json())
+
+    def test_converted_at_the_same_rate_as_its_siblings(self) -> None:
+        """Expected value computed independently, so a uniformly wrong rate still fails."""
+        body = self._run({("USD", "GBP"): {"rate": Decimal("0.78"), "quoted_at": _FX_QUOTED_AT}})
+        m = body["mirrors"][0]
+
+        assert m["closed_pnl"] == pytest.approx(500.0 * 0.78, abs=1e-6)
+        assert m["mirror_equity"] - m["funded"] == pytest.approx(m["unrealized_pnl"] + m["closed_pnl"], abs=1e-6)
+
+    def test_missing_rate_degrades_in_step_with_its_siblings(self) -> None:
+        """No USD->GBP rate: `_convert_value` returns USD unchanged for ALL four.
+
+        The row carries one currency label for all of them, so a field that
+        converted on its own path would be mislabelled.
+        """
+        body = self._run({})
+        m = body["mirrors"][0]
+
+        assert m["closed_pnl"] == 500.0
+        assert m["funded"] == 10000.0
+        assert m["mirror_equity"] == 10500.0
+        assert m["mirror_equity"] - m["funded"] == pytest.approx(m["unrealized_pnl"] + m["closed_pnl"], abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

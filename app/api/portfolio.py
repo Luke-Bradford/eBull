@@ -139,7 +139,13 @@ class PortfolioMirrorItem(BaseModel):
     active: bool
     funded: float  # initial_investment + deposits - withdrawals (display currency)
     mirror_equity: float  # available_amount + sum(position market values) (display currency)
-    unrealized_pnl: float  # mirror_equity - funded (display currency)
+    # ⚠ `- closed_pnl`, not `mirror_equity - funded` as this comment claimed until #3084.
+    # See `app/services/portfolio.py::MirrorBreakdown` for why (#226).
+    unrealized_pnl: float  # mirror_equity - funded - closed_pnl (display currency)
+    # Realised P&L from positions the mirror has closed (#3084).  Rendered beside
+    # `unrealized_pnl` so a mirror row reconciles:
+    # `mirror_equity - funded == unrealized_pnl + closed_pnl`.
+    closed_pnl: float
     position_count: int
     started_copy_date: datetime
 
@@ -489,6 +495,11 @@ def get_portfolio(
                 funded=_convert_value(mb.funded_usd, "USD", display_currency, rates),
                 mirror_equity=_convert_value(mb.mirror_equity_usd, "USD", display_currency, rates),
                 unrealized_pnl=_convert_value(mb.unrealized_pnl_usd, "USD", display_currency, rates),
+                # Same call as its three siblings, deliberately: `_convert_value` returns
+                # USD unchanged when the rate is missing, and the response's single
+                # `cash_currency` field labels all four together.  A second conversion
+                # path here could degrade differently and break the row's identity.
+                closed_pnl=_convert_value(mb.closed_pnl_usd, "USD", display_currency, rates),
                 position_count=mb.position_count,
                 started_copy_date=mb.started_copy_date,
             )
