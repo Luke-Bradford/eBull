@@ -23,6 +23,8 @@ from app.services.market_data import (
     FETCH_REASON_STALE_REOBSERVATION,
     REVISION_CAUSE_ADJUSTMENT_HEAL,
     REVISION_CAUSE_FORCE_BACKFILL,
+    REVISION_CAUSE_UNKNOWN,
+    FetchReason,
     revision_cause,
 )
 
@@ -53,17 +55,21 @@ def _conn_returning(latest: date | None) -> MagicMock:
         # ⚠ ORDERING TRAP 2. `force_backfill` never consults
         # `_candles_fetch_count`, so it has no reason to report and arrives as
         # the empty string. Falling through to it would emit a blank cause key.
-        (False, True, "", REVISION_CAUSE_FORCE_BACKFILL),
+        (False, True, None, REVISION_CAUSE_FORCE_BACKFILL),
         # Unreachable today (`:733` requires `not force_backfill`), and resolved
         # rather than raised: a telemetry helper that can abort a refresh is a
         # worse failure than a mislabelled counter.
-        (True, True, "", REVISION_CAUSE_ADJUSTMENT_HEAL),
+        (True, True, None, REVISION_CAUSE_ADJUSTMENT_HEAL),
+        # A non-forced fetch with no reason is unreachable from the one call
+        # site, and is NAMED rather than guessed: it must surface in the census
+        # as unattributed, never be folded into a real cause.
+        (False, False, None, REVISION_CAUSE_UNKNOWN),
     ],
 )
 def test_revision_cause_resolves_every_branch_in_priority_order(
     adjustment_detected: bool,
     force_backfill: bool,
-    fetch_reason: str,
+    fetch_reason: FetchReason | None,
     expected: str,
 ) -> None:
     assert (
@@ -76,10 +82,34 @@ def test_revision_cause_resolves_every_branch_in_priority_order(
     )
 
 
-def test_revision_cause_never_emits_an_empty_key_for_a_forced_run() -> None:
-    """The blank fetch reason must not escape into a counter key.
+def test_no_input_combination_produces_an_empty_or_unnamed_key() -> None:
+    """Every result must be a NAMED cause.
 
-    `bars_revised_by_cause` is read as a mapping of named causes; an empty key
-    is indistinguishable on the admin surface from a missing one.
+    `bars_revised_by_cause` is read as a mapping of named causes, so an empty or
+    unrecognised key is indistinguishable on the admin surface from a cause that
+    genuinely did not fire. The `Literal` return type makes a typo a pyright
+    error; this pins the runtime side over the whole input space.
     """
-    assert revision_cause(adjustment_detected=False, force_backfill=True, fetch_reason="") != ""
+    named = {
+        FETCH_REASON_INCREMENTAL,
+        FETCH_REASON_STALE_REOBSERVATION,
+        FETCH_REASON_INITIAL_BACKFILL,
+        REVISION_CAUSE_ADJUSTMENT_HEAL,
+        REVISION_CAUSE_FORCE_BACKFILL,
+        REVISION_CAUSE_UNKNOWN,
+    }
+    reasons: list[FetchReason | None] = [
+        FETCH_REASON_INCREMENTAL,
+        FETCH_REASON_STALE_REOBSERVATION,
+        FETCH_REASON_INITIAL_BACKFILL,
+        None,
+    ]
+    for adjustment in (True, False):
+        for forced in (True, False):
+            for reason in reasons:
+                cause = revision_cause(
+                    adjustment_detected=adjustment,
+                    force_backfill=forced,
+                    fetch_reason=reason,
+                )
+                assert cause in named, (adjustment, forced, reason, cause)

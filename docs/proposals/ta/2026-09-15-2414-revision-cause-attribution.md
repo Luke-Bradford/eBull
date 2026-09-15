@@ -138,12 +138,27 @@ New return: `(count, reason)` where `reason` is one of `initial_backfill`,
 ### 2. `revision_cause()` — pure, table-testable, no DB
 
 ```python
-def revision_cause(*, adjustment_detected: bool, force_backfill: bool, fetch_reason: str) -> str:
+def revision_cause(
+    *, adjustment_detected: bool, force_backfill: bool, fetch_reason: FetchReason | None
+) -> RevisionCause:
 ```
 
 1. `adjustment_detected` → `adjustment_heal`
 2. `force_backfill` → `force_backfill`
-3. otherwise → `fetch_reason`
+3. `fetch_reason is None` → `unknown`
+4. otherwise → `fetch_reason`
+
+⚠ **Both ends are `Literal`, not `str`** (review nitpick on PR #3080). These strings become
+KEYS in `bars_revised_by_cause`, and an unrecognised key is indistinguishable on the admin
+surface from a cause that genuinely did not fire — so a typo would be invisible rather than
+loud. Typing them makes pyright the detector; probed by mistyping one constant, which is an
+error at the assignment.
+
+⚠ The forced path passes `None`, not `""`. An empty string is a value that can reach a
+counter key; `None` is one the type checker forces every consumer to handle. `unknown` is
+then a NAMED refusal rather than a guess: it is unreachable from the one call site today,
+and a future caller that forgets the reason must surface in the census as an unattributed
+revision instead of being folded into a real cause.
 
 ⚠ Order is load-bearing. A heal is reachable only from the incremental branch — its
 precondition at `:733` is `not force_backfill and fetch_count == _INCREMENTAL_FETCH_BARS` —

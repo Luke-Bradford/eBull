@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 
 import psycopg
 from psycopg.rows import dict_row
@@ -715,8 +716,10 @@ def refresh_market_data(
         if force_backfill:
             # ⚠ No fetch reason: this path never consults `_candles_fetch_count`,
             # and `revision_cause` reports `force_backfill` for it rather than
-            # inferring one from the size.
-            fetch_count, fetch_reason = lookback_days, ""
+            # inferring one from the size. `None` and not `""` — an empty string
+            # is a value that can reach a counter key, `None` is one the type
+            # checker forces every consumer to handle.
+            fetch_count, fetch_reason = lookback_days, None
         else:
             fetch_count, fetch_reason = _candles_fetch_count(
                 conn, instrument_id, default=lookback_days, today=freshness_target
@@ -1007,9 +1010,16 @@ _INCREMENTAL_FETCH_BARS = 3
 #: (a stale-gap fallback also returns 3, and would read as incremental), and
 #: re-deriving "did this instrument have prior bars" from a SECOND read can
 #: disagree with the read this function already did.
-FETCH_REASON_INITIAL_BACKFILL = "initial_backfill"
-FETCH_REASON_STALE_REOBSERVATION = "stale_reobservation"
-FETCH_REASON_INCREMENTAL = "incremental"
+#:
+#: ⚠ A `Literal`, not a bare `str`. These strings become KEYS in
+#: `bars_revised_by_cause`, and an unrecognised key is indistinguishable on the
+#: admin surface from a cause that genuinely did not fire — so a typo would be
+#: invisible rather than loud. Typing them is what makes pyright the detector.
+FetchReason = Literal["initial_backfill", "stale_reobservation", "incremental"]
+
+FETCH_REASON_INITIAL_BACKFILL: FetchReason = "initial_backfill"
+FETCH_REASON_STALE_REOBSERVATION: FetchReason = "stale_reobservation"
+FETCH_REASON_INCREMENTAL: FetchReason = "incremental"
 
 
 def _candles_fetch_count(
@@ -1018,7 +1028,7 @@ def _candles_fetch_count(
     *,
     default: int,
     today: date | None = None,
-) -> tuple[int, str]:
+) -> tuple[int, FetchReason]:
     """Decide the candlesCount for an instrument's fetch, and say why (#271, #2414).
 
     Returns ``default`` (typically 1000 per #603) in two cases, which the second
@@ -1064,12 +1074,28 @@ def _candles_fetch_count(
     return _INCREMENTAL_FETCH_BARS, FETCH_REASON_INCREMENTAL
 
 
-#: The two causes that do not come from ``_candles_fetch_count``.
-REVISION_CAUSE_ADJUSTMENT_HEAL = "adjustment_heal"
-REVISION_CAUSE_FORCE_BACKFILL = "force_backfill"
+#: The three causes that do not come from ``_candles_fetch_count``.
+RevisionCause = Literal[
+    "initial_backfill",
+    "stale_reobservation",
+    "incremental",
+    "adjustment_heal",
+    "force_backfill",
+    "unknown",
+]
+
+REVISION_CAUSE_ADJUSTMENT_HEAL: RevisionCause = "adjustment_heal"
+REVISION_CAUSE_FORCE_BACKFILL: RevisionCause = "force_backfill"
+#: A non-forced fetch that arrived without the reason its sizing decision
+#: produced. Unreachable from the one call site today, and NAMED rather than
+#: guessed: a future caller that forgets the reason must show up in the census
+#: as an unattributed revision, not be silently folded into a real cause.
+REVISION_CAUSE_UNKNOWN: RevisionCause = "unknown"
 
 
-def revision_cause(*, adjustment_detected: bool, force_backfill: bool, fetch_reason: str) -> str:
+def revision_cause(
+    *, adjustment_detected: bool, force_backfill: bool, fetch_reason: FetchReason | None
+) -> RevisionCause:
     """Which write branch produced this instrument's revisions (#2414).
 
     ⚠⚠ A BRANCH, NOT AN ECONOMIC CAUSE. One fetch can rewrite bars for more than
@@ -1096,6 +1122,8 @@ def revision_cause(*, adjustment_detected: bool, force_backfill: bool, fetch_rea
         return REVISION_CAUSE_ADJUSTMENT_HEAL
     if force_backfill:
         return REVISION_CAUSE_FORCE_BACKFILL
+    if fetch_reason is None:
+        return REVISION_CAUSE_UNKNOWN
     return fetch_reason
 
 
