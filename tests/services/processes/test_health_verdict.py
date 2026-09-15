@@ -32,6 +32,8 @@ from app.services.processes import (
 )
 from app.services.processes.health_verdict import (
     _REASON_LABEL,
+    _WEDGE_HEADLINE_ORDER,
+    _WEDGE_STALE,
     ACTIONABLE_STALE,
     STALE_MANUAL_WINDOW,
     compute_verdict,
@@ -629,6 +631,21 @@ def test_verdict_for_row_wedged_running_reads_red() -> None:
     attention — a hung non-heartbeating job is never falsely calm."""
     row = _row(role="steady_state", status="running", stale_reasons=("mid_flight_stuck",))
     assert verdict_for_row(row, now=_NOW)[0] == "attention"
+
+
+def test_wedge_headline_order_covers_every_wedge() -> None:
+    """``_WEDGE_HEADLINE_ORDER`` must be a total ordering OF ``_WEDGE_STALE``.
+
+    Review-bot NITPICK on PR #3083, and it is this PR's own bug class: the
+    tuple hand-restates the frozenset's membership, so a fourth wedge added to
+    ``_WEDGE_STALE`` and not to the tuple would be silently dropped from
+    headline consideration on the ``disabled`` branch — a reason that fires and
+    is never shown, which is exactly what ``mid_flight_stuck`` was doing.
+    Mirrors ``tests/test_stale_thresholds.py``, which pins the override keys
+    against the live registry for the same reason.
+    """
+    assert set(_WEDGE_HEADLINE_ORDER) == _WEDGE_STALE
+    assert len(_WEDGE_HEADLINE_ORDER) == len(_WEDGE_STALE), "no duplicates"
 
 
 def test_halted_wedge_headlines_the_ceiling_not_no_progress() -> None:

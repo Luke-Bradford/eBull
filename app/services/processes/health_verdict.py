@@ -102,6 +102,12 @@ _WEDGE_STALE: Final[frozenset[StaleReason]] = frozenset({"queue_stuck", "mid_fli
 #
 # ``queue_stuck`` stays first: it is about a DISPATCH that never reached a
 # worker, which outranks anything about the run's own progress.
+#
+# ⚠ MUST be a total ordering of ``_WEDGE_STALE`` — it restates that frozenset's
+# membership, so a fourth wedge added there and not here would be silently
+# dropped from headline consideration: a reason that fires and is never shown,
+# which is the exact defect this change exists to fix. Pinned by
+# ``test_wedge_headline_order_covers_every_wedge`` (review-bot NITPICK, PR #3083).
 _WEDGE_HEADLINE_ORDER: Final[tuple[StaleReason, ...]] = (
     "queue_stuck",
     "runtime_ceiling",
