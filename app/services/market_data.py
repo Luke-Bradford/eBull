@@ -309,6 +309,11 @@ def load_day_changes(
             window_start=r["prior_date"],  # type: ignore[arg-type]
             window_end=r["as_of"],  # type: ignore[arg-type]
             bar_count=int(r["bar_count"]),  # type: ignore[arg-type]
+            # Clause 5's operand. ⚠ These are the two STORED BARS this day change
+            # divides, which for this consumer happen to equal the window bounds —
+            # they are passed explicitly because that coincidence is this caller's
+            # property, not a general one (``assess_window``).
+            endpoint_bar_dates=(r["prior_date"], r["as_of"]),  # type: ignore[arg-type]
         )
         suppressed = assessment.is_quarantined
         out[instrument_id] = DayChange(

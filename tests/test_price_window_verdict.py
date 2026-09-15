@@ -1,4 +1,4 @@
-"""#3046 — the four composing clauses over one window.
+"""#3046 — the five composing clauses over one window.
 
 Pure-logic, no DB. ⚠ Most of these cases CANNOT be reached from the live corpus:
 clause 1 fires on 0 windows, no series break is resolved, no instrument lacks a
@@ -19,12 +19,14 @@ from app.services.price_window_verdict import (
     REASON_COVERAGE_BEFORE_FIRST_BAR,
     REASON_COVERAGE_MISSING,
     REASON_HORIZON_STRETCHED,
+    REASON_NON_SESSION_BAR,
     REASON_QUARANTINED_TRANSITION,
     REASON_UNRESOLVED_BREAK,
     REASON_VERDICT_DEFERRED,
     VERDICT_OK,
     VERDICT_QUARANTINED,
     VERDICT_UNVERIFIED,
+    WEEKEND_HABIT_MIN_BARS,
     WindowInputs,
     assess_window,
 )
@@ -43,6 +45,8 @@ def _inputs(
     bars: tuple[date, ...] = (),
     weekend_bars: frozenset[date] = frozenset(),
     trades_weekends: bool = False,
+    asset_class: str | None = "us_equity",
+    habit_bar_count: int = 250,
 ) -> WindowInputs:
     return WindowInputs(
         coverage=coverage,
@@ -51,6 +55,8 @@ def _inputs(
         unresolved_breaks=breaks,
         return_unusable_bars=bars,
         weekend_bar_dates=weekend_bars,
+        asset_class=asset_class,
+        habit_bar_count=habit_bar_count,
         trades_weekends=trades_weekends,
     )
 
@@ -275,6 +281,163 @@ class TestBoundaries:
         """⚠ The two most recent POSITIVE closes need not be adjacent stored bars.
         A third stored bar makes the same span two intervals, which is why
         ``bar_count`` is read from ``price_daily`` and never assumed to be 2."""
-        span = {"window_start": date(2026, 6, 12), "window_end": date(2026, 6, 24)}
-        assert REASON_HORIZON_STRETCHED in assess_window(_inputs(), **span, bar_count=2).reasons
-        assert REASON_HORIZON_STRETCHED not in assess_window(_inputs(), **span, bar_count=10).reasons
+        start, end = date(2026, 6, 12), date(2026, 6, 24)
+        two = assess_window(_inputs(), window_start=start, window_end=end, bar_count=2)
+        ten = assess_window(_inputs(), window_start=start, window_end=end, bar_count=10)
+        assert REASON_HORIZON_STRETCHED in two.reasons
+        assert REASON_HORIZON_STRETCHED not in ten.reasons
+
+
+class TestClause5NonSessionBar:
+    """#3046 build item 2 — an endpoint bar dated on a day the venue held no session.
+
+    ⚠ The operand is ``endpoint_bar_dates``, never the window BOUNDS. A bound is a
+    calendar instant the caller chose; a stored bar is an observation the vendor sent.
+    A caller that supplies nothing gets no clause-5 verdict rather than a guess.
+    """
+
+    THU = date(2026, 4, 2)  # ordinary session
+    GOOD_FRIDAY = date(2026, 4, 3)  # NYSE full closure, 534 stored us_equity bars
+    THANKS_FRI = date(2026, 11, 27)  # 13:00 ET EARLY CLOSE — a real session
+    MOURNING = date(2025, 1, 9)  # extraordinary closure (President Carter)
+    SATURDAY = date(2026, 9, 12)
+
+    def _assess(self, inputs: WindowInputs | None, *, ends: tuple[date, ...]) -> tuple[str, tuple[str, ...]]:
+        got = assess_window(
+            inputs,
+            window_start=self.THU,
+            window_end=self.GOOD_FRIDAY,
+            bar_count=2,
+            endpoint_bar_dates=ends,
+        )
+        return got.verdict, got.reasons
+
+    def test_a_us_holiday_endpoint_quarantines(self) -> None:
+        verdict, reasons = self._assess(_inputs(), ends=(self.THU, self.GOOD_FRIDAY))
+        assert verdict == VERDICT_QUARANTINED
+        assert REASON_NON_SESSION_BAR in reasons
+
+    def test_it_fires_on_the_EARLIER_endpoint_too(self) -> None:
+        # Both positions matter: the prior close is as much an operand as the latest.
+        verdict, reasons = self._assess(_inputs(), ends=(self.GOOD_FRIDAY, self.THU))
+        assert verdict == VERDICT_QUARANTINED
+        assert REASON_NON_SESSION_BAR in reasons
+
+    def test_a_weekend_endpoint_quarantines(self) -> None:
+        _, reasons = self._assess(_inputs(), ends=(self.SATURDAY,))
+        assert REASON_NON_SESSION_BAR in reasons
+
+    def test_an_extraordinary_closure_quarantines(self) -> None:
+        _, reasons = self._assess(_inputs(), ends=(self.MOURNING,))
+        assert REASON_NON_SESSION_BAR in reasons
+
+    def test_a_HALF_DAY_is_a_real_session_and_does_not_fire(self) -> None:
+        # A 13:00 ET early close still trades. Full closures only.
+        _, reasons = self._assess(_inputs(), ends=(self.THANKS_FRI,))
+        assert REASON_NON_SESSION_BAR not in reasons
+
+    def test_identical_endpoints_on_a_closure_fire_once(self) -> None:
+        _, reasons = self._assess(_inputs(), ends=(self.GOOD_FRIDAY, self.GOOD_FRIDAY))
+        assert reasons.count(REASON_NON_SESSION_BAR) == 1
+
+    def test_no_endpoints_supplied_means_no_clause_5_verdict(self) -> None:
+        got = assess_window(_inputs(), window_start=self.THU, window_end=self.GOOD_FRIDAY, bar_count=2)
+        assert REASON_NON_SESSION_BAR not in got.reasons
+
+    # -- the four ways it must DECLINE, none of which is "the venue was open" -------
+
+    def test_a_non_us_class_never_fires(self) -> None:
+        # No published calendar exists for it. Silence, not an assumption: the Saudi
+        # Exchange trades Sunday-Thursday inside the same five-day ``mena_equity``.
+        _, reasons = self._assess(_inputs(asset_class="mena_equity"), ends=(self.SATURDAY,))
+        assert REASON_NON_SESSION_BAR not in reasons
+
+    def test_an_absent_asset_class_never_fires(self) -> None:
+        _, reasons = self._assess(_inputs(asset_class=None), ends=(self.GOOD_FRIDAY,))
+        assert REASON_NON_SESSION_BAR not in reasons
+
+    def test_absent_inputs_never_fire(self) -> None:
+        verdict, reasons = self._assess(None, ends=(self.GOOD_FRIDAY,))
+        assert REASON_NON_SESSION_BAR not in reasons
+        assert verdict == VERDICT_UNVERIFIED  # coverage_missing, not a quarantine
+
+    def test_a_measured_weekend_TRADING_instrument_is_exempt(self) -> None:
+        # eToro's ``.24-7`` synthetics are typed ``us_equity`` and really do trade
+        # Saturdays and US holidays. This is constraint 4 of #3046 residual 2.
+        _, reasons = self._assess(
+            _inputs(trades_weekends=True, habit_bar_count=152), ends=(self.SATURDAY, self.GOOD_FRIDAY)
+        )
+        assert REASON_NON_SESSION_BAR not in reasons
+
+    def test_a_habit_below_the_BAR_FLOOR_is_unknown_and_grants_no_exemption_and_no_verdict(self) -> None:
+        # ⚠ Measured: ``PSTX.CVR`` scores a weekend ratio of 1.0000 off a SINGLE bar.
+        # Below ``WEEKEND_HABIT_MIN_BARS`` the habit is UNKNOWN, so clause 5 declines
+        # in BOTH directions — it neither exempts on it nor condemns on its absence.
+        _, exempt_side = self._assess(_inputs(trades_weekends=True, habit_bar_count=1), ends=(self.GOOD_FRIDAY,))
+        assert REASON_NON_SESSION_BAR not in exempt_side
+        _, condemn_side = self._assess(_inputs(trades_weekends=False, habit_bar_count=1), ends=(self.GOOD_FRIDAY,))
+        assert REASON_NON_SESSION_BAR not in condemn_side
+
+    def test_a_below_floor_habit_does_not_exempt_CLAUSE_4_either(self) -> None:
+        """⚠ The floor is applied in ``assess_window``, not only in the loader's SQL.
+
+        A hand-built ``WindowInputs`` can carry ``trades_weekends=True`` off one bar —
+        the loader's rows never can. Before this gate clause 5 declined on it while
+        clause 4 honoured it, which is a silent divergence from the loader's semantics
+        (review bot NITPICK on PR #3079). A below-floor habit must read as UNKNOWN to
+        every clause, which for clause 4 means the weekend days are deducted.
+        """
+        start, end = date(2026, 9, 9), date(2026, 9, 21)
+        measured = assess_window(
+            _inputs(trades_weekends=True, habit_bar_count=250), window_start=start, window_end=end, bar_count=2
+        )
+        asserted = assess_window(
+            _inputs(trades_weekends=True, habit_bar_count=1), window_start=start, window_end=end, bar_count=2
+        )
+        unknown = assess_window(
+            _inputs(trades_weekends=False, habit_bar_count=1), window_start=start, window_end=end, bar_count=2
+        )
+        # A MEASURED seven-day habit keeps the full span, so the gap is visible to W2.
+        assert REASON_HORIZON_STRETCHED in measured.reasons
+        # An ASSERTED one must behave exactly like the unknown case, not like the measured one.
+        assert asserted.reasons == unknown.reasons
+
+    def test_the_floor_boundary_is_inclusive(self) -> None:
+        _, at_floor = self._assess(
+            _inputs(trades_weekends=False, habit_bar_count=WEEKEND_HABIT_MIN_BARS), ends=(self.GOOD_FRIDAY,)
+        )
+        assert REASON_NON_SESSION_BAR in at_floor
+        _, below = self._assess(
+            _inputs(trades_weekends=False, habit_bar_count=WEEKEND_HABIT_MIN_BARS - 1),
+            ends=(self.GOOD_FRIDAY,),
+        )
+        assert REASON_NON_SESSION_BAR not in below
+
+    # -- composition: clause 5 ADDS, it never displaces ----------------------------
+
+    def test_it_composes_with_every_other_clause_without_removing_one(self) -> None:
+        got = assess_window(
+            _inputs(bars=(self.GOOD_FRIDAY,), transitions=(self.GOOD_FRIDAY,), breaks=(self.GOOD_FRIDAY,)),
+            window_start=self.THU,
+            window_end=self.GOOD_FRIDAY,
+            bar_count=2,
+            endpoint_bar_dates=(self.THU, self.GOOD_FRIDAY),
+        )
+        assert got.verdict == VERDICT_QUARANTINED
+        assert set(got.reasons) >= {
+            REASON_BAR_RETURN_UNUSABLE,
+            REASON_QUARANTINED_TRANSITION,
+            REASON_UNRESOLVED_BREAK,
+            REASON_NON_SESSION_BAR,
+        }
+
+    def test_it_outranks_a_coverage_reason_and_keeps_it(self) -> None:
+        got = assess_window(
+            _inputs(coverage=(date(2020, 1, 1), date(2026, 4, 1))),
+            window_start=self.THU,
+            window_end=self.GOOD_FRIDAY,
+            bar_count=2,
+            endpoint_bar_dates=(self.GOOD_FRIDAY,),
+        )
+        assert got.verdict == VERDICT_QUARANTINED
+        assert REASON_COVERAGE_AFTER_LAST_BAR in got.reasons

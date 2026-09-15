@@ -21,6 +21,8 @@ const REASON_TEXT: Record<string, string> = {
     "the move between these two closes is not a return (quarantined transition)",
   horizon_stretched:
     "these closes are too far apart to be a day change (the series has a gap)",
+  non_session_bar:
+    "one of these closes is dated on a day the market was shut (weekend or US market holiday)",
   coverage_missing: "this instrument has not been checked for price defects",
   coverage_before_first_bar: "the earlier close is before the checked range",
   coverage_after_last_bar: "the latest close has not been checked yet",
