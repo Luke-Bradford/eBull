@@ -75,6 +75,13 @@ CENSUS_VERSION = "t3-ceiling-v1"
 #: the figure is descriptive and no decision is gated on it.
 RUN_WINDOW_DAYS = 14
 
+#: eToro's instrument id for AAPL. The probe needs SOME liquid, long-history US
+#: equity to ask the source about; AAPL is the one the rest of this repo already
+#: probes (``app/api/_debug_ws.py``, the etoro-api skill's reach table), so results
+#: are comparable across tickets. Named rather than inlined because a bare 1001 in an
+#: argparse default is unreadable at the call site.
+PROBE_DEFAULT_INSTRUMENT_ID = 1001  # AAPL
+
 #: The only two ways ``git rev-parse`` can fail: the binary is missing (``OSError``)
 #: or it exits non-zero. Bound to a name because ``ruff format`` strips the
 #: parentheses from ``except (A, B):`` on this Python target, leaving a form the
@@ -585,7 +592,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", action="store_true", help="Also make ONE informational eToro daily-candle GET")
     parser.add_argument(
-        "--probe-instrument", type=int, default=1001, help="Instrument for --probe (default 1001 = AAPL)"
+        "--probe-instrument",
+        type=int,
+        default=PROBE_DEFAULT_INSTRUMENT_ID,
+        help=f"Instrument for --probe (default {PROBE_DEFAULT_INSTRUMENT_ID} = AAPL)",
     )
     parser.add_argument(
         "--probe-count", type=int, default=1000, help="Bars to request for --probe (eToro caps at 1000)"
