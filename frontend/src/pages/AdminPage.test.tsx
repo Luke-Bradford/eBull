@@ -587,6 +587,18 @@ describe("AdminPage — sync holder banner (#2274)", () => {
     expect(banner).toHaveTextContent("No further sync can start");
   });
 
+  it("distinguishes a not-yet heartbeat from an unrenderable one", async () => {
+    // `formatRelativeTime(null)` is "—", the same string it uses for a value it
+    // could not parse. Beside "last progress" that reads as missing data, when
+    // the truth is that the run has not reached a layer yet — the ordinary
+    // state for the whole prelude and for a plan with no layers.
+    mockedStatus.mockResolvedValue(runningStatus("live"));
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("no layer has started");
+    expect(banner).not.toHaveTextContent("last progress —");
+  });
+
   it("says so when the status read fails, rather than looking idle", async () => {
     // `useAsync` clears `data` on a failed refetch even under
     // `preserveOnRefetch`, so without an explicit error branch a single failed

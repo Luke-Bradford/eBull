@@ -649,7 +649,15 @@ function SyncHolderBanner({
       </span>{" "}
       — run {run.sync_run_id} ({run.scope} / {run.trigger}), started{" "}
       {formatRelativeTime(run.started_at)}, last progress{" "}
-      {formatRelativeTime(run.last_progress_at)}.
+      {/*
+       * ⚠ `formatRelativeTime` renders null as "—", which is the string it also
+       * uses for a value it could not parse. Beside "last progress" that reads
+       * as missing data when the truth is "this run has not reached a layer
+       * yet" — the ordinary state for the whole prelude, and for a plan with no
+       * layers. A distinct phrase keeps never-happened apart from not-known.
+       */}
+      {run.last_progress_at ? formatRelativeTime(run.last_progress_at) : "not yet — no layer has started"}
+      .
       {overCeiling
         ? " No further sync can start while this row holds the orchestrator singleton."
         : null}
