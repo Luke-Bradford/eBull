@@ -83,9 +83,10 @@ function hasHeartbeatSuffix(row: ProcessRowResponse): boolean {
 export function processRowSignature(row: ProcessRowResponse): string {
   const heartbeatBase =
     row.active_run?.last_progress_at ?? row.active_run?.started_at ?? null;
-  const elapsed = hasHeartbeatSuffix(row) && heartbeatBase !== null
-    ? formatElapsedSince(heartbeatBase)
-    : "";
+  const elapsed =
+    hasHeartbeatSuffix(row) && heartbeatBase !== null
+      ? formatElapsedSince(heartbeatBase)
+      : "";
   return `${JSON.stringify(row)}|${elapsed}`;
 }
 
@@ -297,9 +298,10 @@ function VerdictReason({ row }: { row: ProcessRowResponse }) {
   if (!row.verdict_reason) return null;
   const heartbeatBase =
     row.active_run?.last_progress_at ?? row.active_run?.started_at ?? null;
-  const elapsed = hasHeartbeatSuffix(row) && heartbeatBase !== null
-    ? ` ${formatElapsedSince(heartbeatBase)}`
-    : "";
+  const elapsed =
+    hasHeartbeatSuffix(row) && heartbeatBase !== null
+      ? ` ${formatElapsedSince(heartbeatBase)}`
+      : "";
   return (
     <div
       data-testid="verdict-reason"
