@@ -92,9 +92,12 @@ target_layers = {n for n, s in states.items()
                  if s in {LayerState.DEGRADED, LayerState.RETRYING, LayerState.ACTION_NEEDED}}
 ```
 
-That is the whole change. Equivalently: `behind` targets every non-HEALTHY, non-DISABLED,
-non-RUNNING, non-CASCADE_WAITING layer — the same predicate the closure arm already applies to
-upstreams, now applied to direct targets too.
+That is the whole change.
+
+⚠ It is **not** the same predicate as the closure arm, and an earlier draft of this spec said it
+was. `_transitive_upstreams_not_healthy` excludes only `HEALTHY` and `DISABLED` — it can pull in
+`RUNNING`, `SECRET_MISSING` and `CASCADE_WAITING` upstreams — and it stops traversal at a healthy
+intermediate. The direct-target set stays strictly narrower. Neither is a restatement of the other.
 
 ### Why not the backoff gate the spec describes
 
@@ -128,29 +131,82 @@ recover the layer, it does not add the scheduler line 78 describes.
 `behind` bypasses the freshness re-filter (`planner.py:38-45` — state selection is authoritative),
 so an included layer is planned unconditionally. It is **not** guaranteed to run: credentials,
 layer-initialization gates, failed dependencies, cancellation and the adapter's `JobLock` can all
-stop it at execution. Planning inclusion is necessary for recovery, not sufficient. In particular
-`JobLock` is what prevents a boot sweep from double-firing a sweep that is still running.
+stop it at execution. Planning inclusion is necessary for recovery, not sufficient.
 
-Nor is a new thrash risk introduced: `ACTION_NEEDED` already fires on every boot with no brake,
-and closure already fires `RETRYING` layers. This change makes that behaviour uniform instead of
-conditional on an unrelated layer's health.
+Two safety claims from the previous draft were too strong and are withdrawn:
 
-### Explicitly out of scope
+- **"`JobLock` prevents a boot sweep double-firing a running sweep."** `JobLock` guards *adapter
+  overlap*; whole-sync overlap is guarded by the `sync_runs` unique index. Different mechanisms.
+  And a newly-selected target can pull in a `RUNNING` upstream that finishes before the lock is
+  acquired, which then runs again without freshness revalidation.
+- **"No new thrash risk."** False for a previously-isolated `RETRYING` layer. Repeated
+  restart/reap cycles now retry it on every boot, and repeated operator `Sync now` requests queue
+  on a single-worker executor and run in sequence, so fast failures can re-fire back-to-back
+  without `SyncAlreadyRunning` ever tripping. `max_attempts` does not brake this — it only
+  relabels the layer `ACTION_NEEDED`, which is selected too. The honest statement is that the
+  retry is now *unbraked and intended*; braking it is what `backoff_seconds` is for, and that
+  remains unbuilt.
 
+Recovery also stays lossy in ways this change does not address: a boot sweep rejected for overlap
+is swallowed with no deferred wake-up, and an adapter skipped for lock contention is not
+rescheduled. So the ~24h outage bound rests on the daily `full` sync, not on this path.
+
+### Explicitly out of scope — pre-existing, now more reachable
+
+- **An operator-DISABLED layer can be written by an enabled sibling.** A job is selected if *any*
+  emit is a target and the executor does not recheck the enabled flag, so `scoring=DISABLED` +
+  `recommendations=RETRYING` runs `morning_candidate_review` and emits both. That was already true
+  for a `DEGRADED` recommendations; this change adds one more trigger. `morning_candidate_review`
+  is the registry's **only** multi-emit job and dev currently has **zero** disabled layers, so the
+  reachable surface is one pair. Pinned by `test_behind_composite_job_runs_disabled_sibling` so it
+  is explicit; the fix belongs in the executor.
+- **A skipped run can erase a failure signal without recovering.** Lock contention, dependency /
+  init / credential skips and cancellation replace the failed head row and reset the streak, so a
+  layer can go `RETRYING → HEALTHY` without ever succeeding. History semantics, not selection.
+- **Refreshing a layer alone does not invalidate healthy downstreams.** An isolated `candles`
+  refresh leaves scoring, risk metrics and quarantine verdicts describing pre-retry prices;
+  quarantine freshness is age-based, not keyed to candle revisions. Pre-existing architectural
+  gap, newly reachable through this path.
 - `ACTION_NEEDED` gets no backoff today and keeps none.
 - `jobs_retry_sweeper`'s stray-clearing stays. It is correct for a sync-tracked job — the
   orchestrator owns that recovery, which is what this change makes true.
-- Composite-job arbitration (one job emitting layers in different states) is unchanged.
 - #2274's no-progress watchdog. Untouched.
 
 ## Acceptance
 
-1. Pure selection test over `_scope_to_candidate_jobs` with mocked states: an isolated `RETRYING`
-   layer is now a direct target; `DEGRADED` / `ACTION_NEEDED` selection is unchanged; `HEALTHY`,
-   `DISABLED`, `RUNNING` and `CASCADE_WAITING` remain unselected.
-2. Regression pin for the closure arm: `RETRYING` upstream + `DEGRADED` downstream still plans
-   both, and plans each job exactly once (no duplicate from being both target and upstream).
-3. Dev-verify on the real stack: `build_execution_plan(conn, SyncScope.behind())` against the dev
-   DB returns 0 layers today and must include `candles` after the change. Record both readings
-   and the commit SHA in the PR.
-4. The five-sweep table above is recomputed at review time, not copied.
+All in `tests/test_sync_orchestrator_planner.py::TestBehindScopeTargetStates`.
+
+1. **All eight `LayerState`s as an isolated direct target**, parametrised, on a layer with no
+   unhealthy neighbours — so selection is attributable to the direct-target predicate rather than
+   to closure. `DEGRADED` / `RETRYING` / `ACTION_NEEDED` selected; `HEALTHY`, `RUNNING`,
+   `DISABLED`, `SECRET_MISSING`, `CASCADE_WAITING` not.
+2. **`RETRYING` fires with every freshness predicate returning fresh** — pins that `behind`
+   bypasses the re-filter, the interaction the backoff design would have broken.
+3. **Closure regression:** `RETRYING` upstream + `DEGRADED` downstream still plans both, exactly
+   once each (no duplicate now that a layer can be target *and* upstream).
+4. **Composite pin:** `recommendations=RETRYING` + `scoring=DISABLED` runs the shared job. Asserts
+   the pre-existing gap explicitly rather than widening it silently.
+5. **Non-`behind` scopes ignore layer state:** `high_frequency` selects by emit name and is
+   unaffected by a `RETRYING` candles.
+6. **Revert-probe, run:** with `LayerState.RETRYING` removed from the target set, exactly three
+   tests fail (`[retrying-True]`, the freshness-bypass test, the composite pin) and the other nine
+   pass in both arms — so they pin existing behaviour, not the change.
+7. **Dev-verify on the real stack, both arms at the same instant on the same DB state:**
+   `build_execution_plan(conn, SyncScope.behind())` returns
+   `['daily_portfolio_sync', 'fx_rates_refresh']` before and
+   `['daily_portfolio_sync', 'fx_rates_refresh', 'daily_candle_refresh']` after, with `candles`
+   = `retrying`. Note closure did **not** rescue `candles` despite two `DEGRADED` layers being
+   present, because neither is a descendant of it — Codex's point that closure only helps when the
+   unhealthy layer is downstream.
+
+The five-sweep table is reproduced by, over `now() - interval '14 days'`:
+
+```sql
+select sync_run_id, started_at from sync_runs
+ where scope='behind' and layers_planned=0 and started_at > now() - interval '14 days'
+ order by started_at;
+```
+
+then, per sweep, walking `sync_layer_progress` for `candles` backwards from that `started_at` and
+counting consecutive `failed` rows until the first `complete`/`skipped`. Re-run it rather than
+copying the table — the window is relative and the numbers move.

@@ -148,9 +148,7 @@ def _scope_to_candidate_jobs(
         # depended on an unrelated layer also being unhealthy. It IS a wider
         # trigger, though — see the composite-job note on the closure line.
         target_layers = {
-            n
-            for n, s in states.items()
-            if s in {LayerState.DEGRADED, LayerState.RETRYING, LayerState.ACTION_NEEDED}
+            n for n, s in states.items() if s in {LayerState.DEGRADED, LayerState.RETRYING, LayerState.ACTION_NEEDED}
         }
         if not target_layers:
             return []

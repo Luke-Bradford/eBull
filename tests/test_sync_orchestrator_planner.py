@@ -278,9 +278,7 @@ class TestBehindScopeTargetStates:
         executor-side fix has a test to update rather than a silent behaviour
         to discover.
         """
-        planned = self._plan_with_states(
-            {"recommendations": LayerState.RETRYING, "scoring": LayerState.DISABLED}
-        )
+        planned = self._plan_with_states({"recommendations": LayerState.RETRYING, "scoring": LayerState.DISABLED})
         assert "morning_candidate_review" in planned
 
     def test_non_behind_scopes_ignore_layer_state(self) -> None:
