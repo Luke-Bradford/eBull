@@ -155,6 +155,44 @@ class TestBuilder:
         second.add_series(1, _series(revised))
         assert first.finish() != second.finish()
 
+    def test_the_frontier_alone_rotates_the_stamp_so_the_watermark_comparison_is_constant(
+        self,
+    ) -> None:
+        """⚠⚠ The stamp CANNOT answer "has the corpus moved under this strategy?".
+
+        `finish()` puts `frontier_date` in the payload
+        (`corpus_generation.py:362`) — deliberately, because the stamp identifies
+        what a pass READ and the frontier is that read's boundary
+        (`docs/proposals/ta/2026-09-14-2414-corpus-generation-construction.md`
+        §2's payload table: *"the pass's frontier | the corpus boundary"*).
+
+        The consequence was asserted the other way round in two places until
+        #2414: `sql/382`'s column COMMENT and `advance_watermark`'s docstring
+        both claimed that comparing the stored stamp against the next pass's
+        *"answers 'has the corpus moved under this strategy?'"*. It cannot.
+        `_ADVANCE_WATERMARK` only updates on a **strictly greater**
+        `frontier_date`, so every stored advance carries a new frontier and
+        therefore a new stamp — the comparison is a constant TRUE, on a corpus
+        where nothing changed at all.
+
+        This test is the pin: identical corpus, frontier one day apart, digests
+        differ. If someone later removes `frontier_date` from the payload to
+        "make the comparison work", this goes red and sends them to the reason
+        it is there.
+        """
+        earlier = CorpusGenerationBuilder(
+            frontier_date=date(2026, 9, 10), quarantine_rule_set_version="q-v1"
+        )
+        later = CorpusGenerationBuilder(frontier_date=date(2026, 9, 11), quarantine_rule_set_version="q-v1")
+        for builder in (earlier, later):
+            builder.add_spans({1: _Span(date(2026, 9, 11), 10), 2: _Span(date(2026, 9, 10), 4)})
+            builder.add_panel_calendars({"s2": frozenset({date(2026, 9, 10), date(2026, 9, 11)})})
+            builder.add_unresolved_breaks({2: (date(2025, 1, 2),)})
+            builder.add_regime([(date(2026, 9, 10), Regime.BULL_QUIET), (date(2026, 9, 11), None)])
+            builder.add_series(1, _series(BARS_A))
+
+        assert earlier.finish() != later.finish()
+
     def test_a_newly_masked_field_rotates_the_stamp(self) -> None:
         """Masking is an input, not a presentation detail — ``None`` must differ
         from every value, including from a zero."""

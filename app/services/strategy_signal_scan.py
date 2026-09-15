@@ -425,12 +425,33 @@ def advance_watermark(
     ⚠ ``corpus_generation`` (#2414) is UPDATED here while it is write-once on the
     signal rows, and the difference is the point. A ledger row records the corpus
     that produced THAT decision and must never move; the watermark records where
-    this identity got to and against WHICH corpus it last got there. That second
-    fact is what makes "has the corpus moved under this strategy since it last
-    scanned?" answerable by comparing one stored value against the next pass's
-    stamp — without re-deciding anything, which spec §11 forbids. A run that
-    writes zero rows still advances both, so the comparison does not go stale on
-    quiet days.
+    this identity got to and against WHICH corpus it last got there.
+
+    ⚠⚠ This docstring used to continue: *"that second fact is what makes 'has the
+    corpus moved under this strategy since it last scanned?' answerable by
+    comparing one stored value against the next pass's stamp"*. **That was false
+    by construction and is corrected here and in ``sql/386``.**
+    ``CorpusGenerationBuilder.finish()`` hashes ``frontier_date``
+    (``corpus_generation.py:362``) — rightly, since the stamp identifies what a
+    pass READ and the frontier is that read's boundary — and
+    ``_ADVANCE_WATERMARK`` above only updates on a **strictly greater** frontier.
+    So every stored advance carries a new stamp and the comparison is a constant
+    TRUE on a corpus where nothing changed. Pinned by
+    ``tests/test_corpus_generation.py::test_the_frontier_alone_rotates_the_stamp_so_the_watermark_comparison_is_constant``.
+
+    ⚠ The general result, so the next attempt does not rebuild it: no
+    **pass-scoped** digest can answer "did data I already decided on change?" —
+    drop ``frontier_date`` and the pass still reads one more day of bars than the
+    last one, so the digest rotates on ordinary growth. That question is about
+    the OVERLAP (bars at or before the previous frontier) and needs a
+    prefix-scoped digest. ``sql/386`` carries the reasoning; #2414's supersession
+    half stays open and is not prejudged by it.
+
+    What the stored stamp DOES buy is unchanged: the corpus identity of this
+    identity's last pass, comparable to the write-once stamp on the rows that
+    pass wrote. Construction doc §3.5(4) gives the direction that holds — equal
+    stamps imply one corpus, different stamps do not imply different corpora.
+    A run that writes zero rows still advances both.
     """
     with conn.cursor() as cur:
         cur.execute(
