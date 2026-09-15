@@ -9,7 +9,11 @@ from decimal import Decimal
 import psycopg
 import pytest
 
-from app.providers.broker import BrokerAccountRiskSnapshot, BrokerInstrumentInvestment
+from app.providers.broker import (
+    BrokerAccountRiskSnapshot,
+    BrokerDirectPositionInvestment,
+    BrokerInstrumentInvestment,
+)
 from app.services.account_equity_evidence import (
     DOCUMENTED_ACCOUNT_CURRENCIES,
     RECONCILIATION_RULE_VERSION,
@@ -33,6 +37,7 @@ def _snapshot(
     direct_long_positions: int = 1,
     direct_short_positions: int = 0,
     pending_order_amount: str | None = "0",
+    direct_positions: tuple[BrokerDirectPositionInvestment, ...] = (),
 ) -> BrokerAccountRiskSnapshot:
     available_cash = Decimal(cash)
     total_invested = Decimal(invested)
@@ -59,6 +64,7 @@ def _snapshot(
         raw_payload={"not": "persisted"},
         account_currency_id=account_currency_id,
         pending_order_amount=None if pending_order_amount is None else Decimal(pending_order_amount),
+        direct_positions=direct_positions,
     )
 
 
@@ -687,3 +693,202 @@ def test_a_decided_verdict_always_carries_its_difference_and_tolerance(
     assert evidence.comparable
     assert evidence.difference is not None
     assert evidence.tolerance is not None
+
+
+def _position(
+    position_id: int,
+    *,
+    units: str,
+    amount: str,
+    pnl: str,
+    instrument_id: int = 1,
+    is_buy: bool = True,
+) -> BrokerDirectPositionInvestment:
+    return BrokerDirectPositionInvestment(
+        position_id=position_id,
+        instrument_id=instrument_id,
+        is_buy=is_buy,
+        units=Decimal(units),
+        amount=Decimal(amount),
+        unrealized_pnl=Decimal(pnl),
+        market_value=Decimal(amount) + Decimal(pnl),
+        is_partially_altered=False,
+    )
+
+
+class TestOfficialPositionMarks:
+    """#3068 — the official per-position terms, retained so a mark can be derived.
+
+    The mark this table exists to make computable is ``(amount + unrealized_pnl) / units``,
+    struck at the SAME instant as the snapshot's totals. Before it, pricing our book
+    against the broker's meant pairing an official total with a mark taken at some other
+    time, which red-flagged a healthy 2026-09-14 by 204.65 USD.
+    """
+
+    def test_marks_are_stored_with_their_snapshot_and_the_mark_is_derivable(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        # 1500 units whose market value implies a 21.50 mark — the GME shape from #3068,
+        # where our own session close said 21.63.
+        snapshot = _snapshot(
+            observed_at=now,
+            direct_positions=(_position(9001, units="1500", amount="33885", pnl="-1635"),),
+        )
+        assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot)
+
+        row = ebull_test_conn.execute(
+            """
+            SELECT units, amount, unrealized_pnl, market_value,
+                   (market_value / units) AS implied_mark
+              FROM broker_account_position_marks
+             WHERE environment='demo' AND position_id=9001
+            """
+        ).fetchone()
+        assert row is not None
+        assert row[0] == Decimal("1500.00000000")
+        assert row[4] == Decimal("21.50000000000000000000")
+
+    def test_a_rejected_parent_write_leaves_the_stored_marks_untouched(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """A stale observation must not pair its positions with the newer totals.
+
+        The parent refuses an older same-day observation; writing its children anyway
+        would leave one snapshot's totals beside a different snapshot's book, which is
+        worse than having no children at all.
+        """
+        now = datetime.now(UTC).replace(microsecond=0)
+        accepted = _snapshot(
+            observed_at=now,
+            direct_positions=(_position(9001, units="10", amount="100", pnl="5"),),
+        )
+        assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=accepted)
+        stale = _snapshot(
+            observed_at=now - timedelta(minutes=5),
+            direct_positions=(_position(9002, units="99", amount="990", pnl="0"),),
+        )
+        assert not record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=stale)
+
+        stored = ebull_test_conn.execute(
+            "SELECT position_id FROM broker_account_position_marks WHERE environment='demo' ORDER BY position_id"
+        ).fetchall()
+        assert stored == [(9001,)]
+
+    def test_an_accepted_rewrite_replaces_the_set_so_a_closed_position_disappears(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Wholesale replacement, not an upsert — an upsert has no arm that removes."""
+        now = datetime.now(UTC).replace(microsecond=0)
+        before = _snapshot(
+            observed_at=now - timedelta(minutes=2),
+            direct_positions=(
+                _position(9001, units="10", amount="100", pnl="5"),
+                _position(9002, units="20", amount="200", pnl="-7"),
+            ),
+        )
+        assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=before)
+        after = _snapshot(
+            observed_at=now,
+            direct_positions=(_position(9001, units="10", amount="100", pnl="6"),),
+        )
+        assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=after)
+
+        stored = ebull_test_conn.execute(
+            """
+            SELECT position_id, unrealized_pnl
+              FROM broker_account_position_marks
+             WHERE environment='demo' ORDER BY position_id
+            """
+        ).fetchall()
+        assert stored == [(9001, Decimal("6.000000"))]
+
+    def test_a_short_is_stored_even_though_the_parent_only_counts_it(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """The parent's short arm is a COUNT because no monetary sum can carry "a short
+        exists". That argument is about the AGGREGATE. Per position there is nothing to
+        protect against, and dropping shorts would make the child set not-the-book.
+        """
+        now = datetime.now(UTC).replace(microsecond=0)
+        snapshot = _snapshot(
+            observed_at=now,
+            direct_short_positions=1,
+            direct_positions=(
+                _position(9001, units="10", amount="100", pnl="5"),
+                _position(9002, units="4", amount="40", pnl="-2", is_buy=False),
+            ),
+        )
+        assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot)
+
+        stored = ebull_test_conn.execute(
+            """
+            SELECT position_id, is_buy
+              FROM broker_account_position_marks
+             WHERE environment='demo' ORDER BY position_id
+            """
+        ).fetchall()
+        assert stored == [(9001, True), (9002, False)]
+
+    def test_the_child_count_matches_the_parents_own_direct_position_counts(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """The discriminator that makes "zero children" readable (sql/383).
+
+        A legacy snapshot and a genuinely empty book both store zero child rows. Only
+        the parent's own long+short counts tell them apart, so the writer must keep the
+        two in agreement — otherwise a missing capture reads as an empty book and
+        reconciles against an empty local side to manufacture a green.
+        """
+        now = datetime.now(UTC).replace(microsecond=0)
+        snapshot = _snapshot(
+            observed_at=now,
+            direct_long_positions=2,
+            direct_short_positions=1,
+            direct_positions=(
+                _position(9001, units="10", amount="100", pnl="5"),
+                _position(9002, units="20", amount="200", pnl="-7"),
+                _position(9003, units="4", amount="40", pnl="-2", is_buy=False),
+            ),
+        )
+        assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot)
+
+        row = ebull_test_conn.execute(
+            """
+            SELECT s.official_direct_long_positions + s.official_direct_short_positions,
+                   (SELECT count(*) FROM broker_account_position_marks m
+                     WHERE m.environment=s.environment AND m.snapshot_date=s.snapshot_date)
+              FROM broker_account_equity_snapshots s
+             WHERE s.environment='demo'
+            """
+        ).fetchone()
+        assert row is not None
+        declared, stored = row
+        assert declared == 3
+        assert stored == declared
+
+    def test_an_empty_book_stores_no_marks_and_says_so_on_the_parent(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        snapshot = _snapshot(
+            observed_at=now,
+            direct_long_market_value="0",
+            direct_long_positions=0,
+            direct_short_positions=0,
+            direct_positions=(),
+        )
+        assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot)
+
+        row = ebull_test_conn.execute(
+            """
+            SELECT s.official_direct_long_positions + s.official_direct_short_positions,
+                   (SELECT count(*) FROM broker_account_position_marks m
+                     WHERE m.environment=s.environment AND m.snapshot_date=s.snapshot_date)
+              FROM broker_account_equity_snapshots s
+             WHERE s.environment='demo'
+            """
+        ).fetchone()
+        # Zero children AND zero declared — the one shape that is a real empty book
+        # rather than a snapshot whose capture is missing.
+        assert row == (0, 0)

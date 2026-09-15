@@ -81,6 +81,7 @@ def snapshot(
                 position_id=9001,
                 instrument_id=CORE_ID,
                 is_buy=shorts == 0,
+                units=Decimal("1"),
                 amount=Decimal(core_market_value),
                 unrealized_pnl=Decimal("0"),
                 market_value=Decimal(core_market_value),

@@ -1539,6 +1539,40 @@ def _parse_account_risk_snapshot(
         assert legacy is not None
         return legacy
 
+    def _position_units(row: dict[str, Any]) -> Decimal:
+        """Read the position's CURRENT quantity, failing closed on anything unusable.
+
+        The portal documents ``units`` on ``clientPortfolio.positions[]`` -- "Number of
+        units in the position" -- and the same ``TradingRealAdminApi_Position`` schema
+        backs both the portfolio and the P&L response, so it is present on this payload.
+
+        ⚠ This fails closed rather than carrying ``None`` like ``_account_currency_id``
+        does, and the difference is deliberate: an open position with no positive
+        quantity is not a state this endpoint can legitimately report, and the value is
+        a DIVISOR for the derived mark (#3068). A zero or absent one would either raise
+        deep inside a consumer or -- worse -- be quietly coerced and produce a mark that
+        looks like an observation. ``_instrument_id`` already fails closed on the same
+        "documented, required, must be positive" grounds.
+        """
+        if "units" not in row:
+            raise TradingPreflightParseError("account P&L position units is required")
+        # ⚠ Separate branch from absence on purpose: a present-but-bool `units` is
+        # response drift, not an omission, and `Decimal(str(True))` is `Decimal('True')`
+        # -- which raises anyway, but under a message that would send a reader looking
+        # for a missing field. `bool` is a subclass of `int`, so it must be excluded
+        # before any numeric coercion.
+        if isinstance(row["units"], bool):
+            raise TradingPreflightParseError("account P&L position units must be numeric")
+        try:
+            value = Decimal(str(row["units"]))
+        except decimal.DecimalException as exc:
+            raise TradingPreflightParseError("account P&L position units must be numeric") from exc
+        if not value.is_finite():
+            raise TradingPreflightParseError("account P&L position units must be finite")
+        if value <= 0:
+            raise TradingPreflightParseError("account P&L position units must be positive")
+        return value
+
     def _is_partially_altered(row: dict[str, Any]) -> bool:
         if "isPartiallyAltered" not in row:
             raise TradingPreflightParseError("account P&L position isPartiallyAltered is required")
@@ -1623,12 +1657,14 @@ def _parse_account_risk_snapshot(
             direct_position_ids.add(position_id)
             is_buy = _is_buy(row)
             is_partially_altered = _is_partially_altered(row)
+            units = _position_units(row)
             market_value = amount + pnl
             direct_positions.append(
                 BrokerDirectPositionInvestment(
                     position_id=position_id,
                     instrument_id=instrument_id,
                     is_buy=is_buy,
+                    units=units,
                     amount=amount,
                     unrealized_pnl=pnl,
                     market_value=market_value,
