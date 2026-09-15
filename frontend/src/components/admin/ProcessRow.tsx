@@ -61,13 +61,25 @@ export interface ProcessRowProps {
  * 25-hour run that ticked 10 minutes ago would read "running past its
  * runtime ceiling 10m". Caught by Codex ckpt-2, not by any test.
  *
+ * ⚠⚠ `queue_stuck` suppresses it for exactly the same reason, and this was
+ * missed the first time because the pair was unreachable: `mid_flight_stuck`
+ * could not fire while the kill switch was on (#2274 — `stale_detection` rule 4
+ * was gated on `status === "running"`, which `_status_for` never returns for a
+ * halted system). `queue_stuck` has no such gate, so once rule 4 was fixed the
+ * combination became reachable and the row read "queue stuck 7m" where `7m` was
+ * the HEARTBEAT age, not the queue age. The suffix belongs to the headline
+ * reason, and the headline is whichever wedge wins
+ * `health_verdict._WEDGE_HEADLINE_ORDER` — so any wedge ranked above
+ * `mid_flight_stuck` must suppress it.
+ *
  * Kept as one predicate so the memo signature and the rendered line can
  * never disagree about whether the row has a ticking suffix.
  */
 function hasHeartbeatSuffix(row: ProcessRowResponse): boolean {
   return (
     row.stale_reasons.includes("mid_flight_stuck") &&
-    !row.stale_reasons.includes("runtime_ceiling")
+    !row.stale_reasons.includes("runtime_ceiling") &&
+    !row.stale_reasons.includes("queue_stuck")
   );
 }
 
