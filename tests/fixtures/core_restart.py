@@ -245,6 +245,7 @@ class FileBackedFakeBroker:
                         position_id=int(record["position_id"]),
                         instrument_id=int(record["instrument_id"]),
                         is_buy=True,
+                        units=Decimal("1"),
                         amount=amount,
                         unrealized_pnl=Decimal("0"),
                         market_value=amount,

@@ -48,11 +48,13 @@ def position(
     market_value: str = "330",
     is_buy: bool = True,
     partial: bool = False,
+    units: str = "10",
 ) -> BrokerDirectPositionInvestment:
     return BrokerDirectPositionInvestment(
         position_id=position_id,
         instrument_id=instrument_id,
         is_buy=is_buy,
+        units=Decimal(units),
         amount=Decimal(amount),
         unrealized_pnl=Decimal(market_value) - Decimal(amount),
         market_value=Decimal(market_value),

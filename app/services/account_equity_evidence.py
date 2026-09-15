@@ -10,7 +10,11 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
-from app.providers.broker import BrokerAccountRiskSnapshot, BrokerInstrumentInvestment
+from app.providers.broker import (
+    BrokerAccountRiskSnapshot,
+    BrokerDirectPositionInvestment,
+    BrokerInstrumentInvestment,
+)
 from app.services.fx import FxRateNotFound, convert
 from app.services.fx_history import load_fx_rates_for_date
 
@@ -196,6 +200,15 @@ def record_account_equity_snapshot(
     than dropped: the money columns are still true, and losing the row would hide
     the one fact that matters most -- that this account is not the USD account
     every capital authority assumes.
+
+    ⚠⚠ The per-position child rows (#3068, sql/383) are replaced WHOLESALE exactly
+    when the parent accepts the write, and left untouched when it does not. The
+    parent is an ``ON CONFLICT DO UPDATE`` guarded by ``EXCLUDED.observed_at >``
+    the stored one AND "today", so a stale or historical observation is silently
+    rejected -- and writing its children anyway would pair one snapshot's totals
+    with a different snapshot's positions, which is a worse state than having no
+    children at all. ``RETURNING`` already reports which happened, so the decision
+    is read from the database rather than re-derived from the timestamps.
     """
     account_currency_id = _validate_snapshot(snapshot)
     direct = summarise_direct_positions(snapshot.instrument_investments)
@@ -243,7 +256,68 @@ def record_account_equity_snapshot(
             snapshot.pending_order_amount,
         ),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    _replace_position_marks(
+        conn,
+        environment=environment,
+        snapshot_date=observed_at.date(),
+        positions=snapshot.direct_positions,
+    )
+    return True
+
+
+def _replace_position_marks(
+    conn: psycopg.Connection[Any],
+    *,
+    environment: str,
+    snapshot_date: date,
+    positions: tuple[BrokerDirectPositionInvestment, ...],
+) -> None:
+    """Make the stored child set exactly this snapshot's positions (#3068).
+
+    DELETE-then-INSERT rather than an upsert: a position CLOSED since the previous
+    write of the same day must disappear, and an upsert has no arm that removes it.
+    The caller holds the same transaction as the parent write, so the set is never
+    observable half-replaced.
+
+    ⚠ SHORTS ARE STORED TOO, even though ``official_direct_long_market_value``
+    values longs only. The parent's short arm is deliberately a COUNT -- "no
+    monetary sum can carry 'a short exists'" -- and that argument is about the
+    AGGREGATE. Per position there is no ambiguity to protect against, and dropping
+    shorts here would make the child set silently not-the-book, which is the one
+    property a reconciliation reads it for.
+    """
+    conn.execute(
+        "DELETE FROM broker_account_position_marks WHERE environment=%s AND snapshot_date=%s",
+        (environment, snapshot_date),
+    )
+    if not positions:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO broker_account_position_marks (
+                environment,snapshot_date,position_id,instrument_id,is_buy,
+                units,amount,unrealized_pnl,market_value,is_partially_altered
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            [
+                (
+                    environment,
+                    snapshot_date,
+                    position.position_id,
+                    position.instrument_id,
+                    position.is_buy,
+                    position.units,
+                    position.amount,
+                    position.unrealized_pnl,
+                    position.market_value,
+                    position.is_partially_altered,
+                )
+                for position in positions
+            ],
+        )
 
 
 def mark_effectiveness_reasons(

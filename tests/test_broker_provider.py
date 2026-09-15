@@ -168,6 +168,7 @@ FIXTURE_ACCOUNT_PNL_RESPONSE = {
                 "positionID": 9001,
                 "instrumentID": 1001,
                 "amount": 200,
+                "units": 10,
                 "isBuy": True,
                 "isPartiallyAltered": False,
                 "unrealizedPnL": {"pnL": 20},
@@ -176,6 +177,7 @@ FIXTURE_ACCOUNT_PNL_RESPONSE = {
                 "positionID": 9002,
                 "instrumentID": 1002,
                 "amount": 100,
+                "units": 10,
                 "isBuy": True,
                 "isPartiallyAltered": False,
                 "unrealizedPnL": {"pnL": -5},
@@ -539,6 +541,7 @@ class TestStrategyAccountRisk:
                         "positionID": 9001,
                         "instrumentID": 1001,
                         "amount": 200,
+                        "units": 10,
                         "isBuy": True,
                         "isPartiallyAltered": False,
                         "unrealizedPnL": {"pnL": 20},
@@ -547,6 +550,7 @@ class TestStrategyAccountRisk:
                         "positionID": 9002,
                         "instrumentID": 1001,
                         "amount": 100,
+                        "units": 10,
                         "isBuy": True,
                         "isPartiallyAltered": False,
                         "unrealizedPnL": {"pnL": -30},
@@ -556,6 +560,7 @@ class TestStrategyAccountRisk:
                         "positionID": 9003,
                         "instrumentID": 1001,
                         "amount": 50,
+                        "units": 10,
                         "isBuy": False,
                         "isPartiallyAltered": False,
                         "unrealizedPnL": {"pnL": -50},
@@ -596,6 +601,7 @@ class TestStrategyAccountRisk:
                         "positionID": 9001,
                         "instrumentID": 1001,
                         "amount": 200,
+                        "units": 10,
                         "isBuy": True,
                         "isPartiallyAltered": False,
                         "unrealizedPnL": {"pnL": -250},
@@ -632,6 +638,7 @@ class TestStrategyAccountRisk:
                 "positionID": 9001,
                 "instrumentID": 1001,
                 "amount": 200,
+                "units": 10,
                 "isBuy": "true",
                 "isPartiallyAltered": False,
                 "unrealizedPnL": {"pnL": 20},
@@ -640,6 +647,7 @@ class TestStrategyAccountRisk:
                 "positionID": 9001,
                 "instrumentID": 1001,
                 "amount": 200,
+                "units": 10,
                 "isBuy": 1,
                 "isPartiallyAltered": False,
                 "unrealizedPnL": {"pnL": 20},
@@ -667,6 +675,65 @@ class TestStrategyAccountRisk:
                     assert "isBuy" in str(exc)
                 else:  # pragma: no cover - assertion helper branch
                     raise AssertionError(f"missing/malformed isBuy must fail closed: {position}")
+
+    def test_position_units_are_read_so_the_official_mark_is_derivable(self) -> None:
+        """#3068 — `units` was published on this row and unread.
+
+        With it, `(amount + pnL) / units` is the position's mark AT the snapshot
+        instant. Without it the only comparand available was a total priced at some
+        other time, which is the whole defect.
+        """
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_ACCOUNT_PNL_RESPONSE
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            positions = {p.position_id: p for p in broker.get_account_risk_snapshot().direct_positions}
+        assert positions[9001].units == Decimal("10")
+        # amount 200 + pnL 20 over 10 units.
+        assert positions[9001].market_value / positions[9001].units == Decimal("22")
+
+    def test_unusable_position_units_fail_closed_rather_than_becoming_a_mark(self) -> None:
+        """A divisor is not a field that may be defaulted.
+
+        Absent, non-numeric, non-finite, zero or negative `units` all raise. A coerced
+        one would produce a mark that looks like an observation, and a zero one would
+        raise deep inside a consumer instead of at the parse boundary. `_instrument_id`
+        already fails closed on the same "documented, required, positive" grounds.
+        """
+        base = {
+            "positionID": 9001,
+            "instrumentID": 1001,
+            "amount": 200,
+            "isBuy": True,
+            "isPartiallyAltered": False,
+            "unrealizedPnL": {"pnL": 20},
+        }
+        for units in (None, "abc", float("nan"), 0, -5, True):
+            position = dict(base)
+            if units is not None:
+                position["units"] = units
+            payload = {
+                "clientPortfolio": {
+                    "accountCurrencyId": 1,
+                    "credit": 1000,
+                    "positions": [position],
+                    "mirrors": [],
+                    "ordersForOpen": [],
+                    "orders": [],
+                }
+            }
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = payload
+            with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+                broker._http_read = MagicMock()
+                broker._http_read.get.return_value = mock_resp
+                try:
+                    broker.get_account_risk_snapshot()
+                except TradingPreflightParseError as exc:
+                    assert "units" in str(exc)
+                else:  # pragma: no cover - assertion helper branch
+                    raise AssertionError(f"unusable units must fail closed: {units!r}")
 
     def test_account_currency_id_is_read_from_the_payload(self) -> None:
         mock_resp = MagicMock()

@@ -453,11 +453,26 @@ class BrokerDirectPositionInvestment:
 
     Identity is carried alongside the two source terms so ownership filtering can
     never fall back to instrument matching and the derived mark remains auditable.
+
+    ⚠⚠ ``units`` is what makes the mark auditable, and it was UNREAD until #3068.
+    The portal publishes it on this row -- ``TradingRealAdminApi_Position.units``,
+    "Number of units in the position", the item schema of ``ClientPortfolio.positions``
+    in BOTH ``PortfolioResponse`` and ``PortfolioResponseWithPnl`` (committed
+    ``tests/fixtures/etoro/openapi_v1.375.0.json``). With it,
+    ``(amount + unrealized_pnl) / units`` is this position's mark AT THE INSTANT the
+    snapshot was taken, derived from one observation. Without it, the only way to price
+    our book against the broker's was to pair an official total with a mark struck at
+    some other time -- which is #3068: the reconciliation compared a 23:55 UTC broker
+    mark against a regular-session close and red-flagged a healthy day by 204.65 USD.
+
+    ⚠ Distinct from ``initialUnits``, which the portal documents as not changing. This
+    is the CURRENT quantity, which is the one a mark applies to.
     """
 
     position_id: int
     instrument_id: int
     is_buy: bool
+    units: Decimal
     amount: Decimal
     unrealized_pnl: Decimal
     market_value: Decimal
