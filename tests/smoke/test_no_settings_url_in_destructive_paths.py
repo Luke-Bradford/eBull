@@ -90,6 +90,24 @@ _FORBIDDEN_PATTERNS: tuple[str, ...] = (
     # ``AsyncConnectionPool`` because it pinned the prefix
     # (PR #129 round 3 review).
     "Pool(settings.database_url",
+    # #2224 residual 3. ``JobLock`` opens its OWN psycopg connection
+    # inside ``__enter__`` and holds a session-scoped advisory lock on
+    # it, so it is precisely the "driver or helper that opens a single
+    # connection directly" the broad ``connect(`` pattern above was
+    # written for — but the call site reads ``JobLock(...)``, so the
+    # substring never matched and three modules
+    # (``test_joblock_per_source``, ``test_job_lock_reentrancy``,
+    # ``test_db_lane_family_split``) locked real production source keys
+    # on the operator's dev DB for months.
+    #
+    # The harm is NOT a destructive write — it is bidirectional lock
+    # contention with the live jobs daemon, which holds those same keys
+    # on ``ebull`` (``job_source:etoro`` ~8.8% of wall clock). That
+    # broke the tests intermittently AND could refuse a real job fire.
+    # Advisory locks are PER-DATABASE (measured, PG 17.9), so routing
+    # the acquire at ``test_database_url()`` removes both directions.
+    "JobLock(settings.database_url",
+    "test_only_per_name(settings.database_url",
 )
 
 # Files allowed to contain a forbidden pattern. Read-only paths
@@ -156,16 +174,19 @@ _ALLOWED: dict[str, str] = {
     # not reflect operator-tunable postgres.conf state. Read-only:
     # ``SHOW max_locks_per_transaction`` only.
     "test_pg_settings_call_sites.py": "read-only pg_settings introspection of the live dev DB GUC (#1187)",
-    # Read-only singleton-fence tests. ``test_jobs_process_probe_fence.py``
-    # (#1233 Stream A PR-D) exercises the JOBS_PROCESS_LOCK_KEY
-    # session-scoped advisory lock that the jobs daemon holds against
-    # the dev DB. The fence's correctness depends on testing against
-    # the same DB the daemon connects to. Read-only:
-    # ``pg_try_advisory_lock`` / ``pg_advisory_unlock`` /
-    # ``pg_stat_activity`` introspection — no DML.
-    "test_jobs_process_probe_fence.py": (
-        "read-only singleton-fence advisory-lock tests against the live dev DB (#1233 Stream A PR-D)"
-    ),
+    # ⚠ ``test_jobs_process_probe_fence.py`` was allowlisted here on the
+    # justification "read-only singleton-fence advisory-lock tests against
+    # the live dev DB (#1233 Stream A PR-D)". That file has used
+    # ``test_database_url()`` for every acquire since PR-D's own bench
+    # forced the PER-DATABASE correction, and it says so in its module
+    # docstring. Entry REMOVED 2026-09-15 — surfaced by
+    # ``test_every_allowlist_entry_is_still_load_bearing`` on that check's
+    # first run, i.e. exactly the rot it was added to catch.
+    #
+    # ⚠⚠ That file is also where the correct fact has lived all along. The
+    # #1233 correction landed in ONE module and never propagated to the
+    # three joblock modules next door, which kept locking real source keys
+    # on the dev DB under a "cluster-wide" comment until #2224 residual 3.
     # Per-worker test DB via monkeypatched ``settings.database_url``.
     # ``test_orchestrator_cancel.py`` (#1064 PR6) connects via
     # ``psycopg.connect(settings.database_url)`` INSIDE production
@@ -179,16 +200,18 @@ _ALLOWED: dict[str, str] = {
     "test_orchestrator_cancel.py": (
         "monkeypatches settings.database_url to per-worker test DB before any destructive write (#1064 PR6)"
     ),
-    # Same monkeypatch pattern. ``test_job_lock_reentrancy.py``
-    # (#1184) repoints ``settings.database_url`` to
-    # ``test_database_url()`` via ``monkeypatch.setattr`` at fixture
-    # setup, then exercises JobLock re-entrancy semantics that
-    # production code reaches via ``connect(settings.database_url)``.
-    # Module docstring explicitly documents this routing. No
-    # destructive write hits the dev DB.
-    "test_job_lock_reentrancy.py": (
-        "monkeypatches settings.database_url to per-worker test DB before any destructive write (#1184)"
-    ),
+    # ⚠ ``test_job_lock_reentrancy.py`` was allowlisted here until
+    # 2026-09-15 on the justification "monkeypatches
+    # settings.database_url to per-worker test DB before any
+    # destructive write (#1184)". That was true of 2 of its 8 tests.
+    # The other six acquired real advisory locks on the operator's dev
+    # DB directly, on the module's own (false) premise that advisory
+    # locks are cluster-wide. Entry REMOVED rather than re-justified:
+    # the file now routes every acquire at ``test_database_url()`` and
+    # matches no forbidden pattern, so it needs no exception.
+    # See ``test_every_allowlist_entry_is_still_load_bearing`` below —
+    # a stale entry is how the wrong justification survived.
+    #
     # Same monkeypatch pattern (#1273 PR2 — bootstrap stage-progress
     # instrumentation tests). Lives under tests/services/, so the key carries
     # the subdirectory prefix per the posix-relative-path contract below.
@@ -257,6 +280,39 @@ def test_no_test_writes_to_dev_database_url() -> None:
         + "\n\nDestructive tests must connect to the isolated ebull_test "
         "database, not the dev DB. See tests/test_operator_setup_race.py "
         "for the pattern, and the docstring of this file for guidance."
+    )
+
+
+def test_every_allowlist_entry_is_still_load_bearing() -> None:
+    """Fail if an ``_ALLOWED`` entry no longer matches any forbidden pattern.
+
+    #2224 residual 3. An exception outlives the thing it excuses: the
+    ``test_job_lock_reentrancy.py`` entry claimed the file monkeypatched
+    ``settings.database_url`` before any destructive write, which was true
+    of 2 of its 8 tests — the rest took real advisory locks on the dev DB.
+    Nobody re-read the justification because nothing forced them to.
+
+    An entry that matches nothing is either (a) a file that has since been
+    fixed, in which case delete the entry, or (b) a file that no longer
+    exists, in which case the key is a lie about the tree. Both are caught
+    here rather than discovered the next time someone trusts the comment.
+    """
+    stale: list[str] = []
+    for rel in sorted(_ALLOWED):
+        path = _TESTS_DIR / rel
+        if not path.exists():
+            stale.append(f"{rel} (file does not exist)")
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not any(pattern in text for pattern in _FORBIDDEN_PATTERNS):
+            stale.append(f"{rel} (matches no forbidden pattern)")
+
+    assert not stale, (
+        "These _ALLOWED entries no longer excuse anything:\n"
+        + "\n".join(f"  {s}" for s in stale)
+        + "\n\nDelete the entry. An allowlist exception that excuses nothing "
+        "is a justification nobody is forced to re-read, which is how a "
+        "factually wrong one survived from #1184 to #2224."
     )
 
 

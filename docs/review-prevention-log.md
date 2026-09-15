@@ -6669,3 +6669,60 @@ SELECT count(*), count(DISTINCT instrument_id), count(DISTINCT price_date)
   (five `#2224 cause 3` tests, including the immutability-trigger control);
   `tests/test_template_staleness_stamp.py`
   (`test_a_stale_seed_snapshot_version_refuses_even_when_the_migrations_match`).
+
+## 2026-09-15 — #2224 residual 3: a correction that lands in ONE module does not propagate to its siblings
+
+**Shape.** `app/jobs/locks.py::probe_jobs_process_running` has said since #1233 that
+*"PG advisory locks are PER-DATABASE (NOT cluster-wide) — verified empirically against PG 17"*,
+and `tests/test_jobs_process_probe_fence.py` was rewritten onto `test_database_url()` in the
+same PR. Three sibling modules kept the opposite claim in their own comments —
+*"Postgres advisory locks are cluster-wide, not database-scoped"* — and used that claim to
+justify locking **real production source keys on the operator's dev DB**:
+`tests/test_joblock_per_source.py`, `tests/test_job_lock_reentrancy.py`,
+`tests/test_db_lane_family_split.py` (27 `JobLock(settings.database_url` sites + 2 raw
+side-session connects). The correction never travelled the ten lines to the next file.
+
+- ⚠⚠ **A comment that justifies a decision is a CLAIM, and it goes stale exactly like a
+  hardcoded statistic.** Re-measured on this cluster (PG 17.9): same database → `True`/`False`
+  (contention); different databases, same cluster → `True`/`True`. The engine-level reason is
+  `SET_LOCKTAG_ADVISORY(tag, MyDatabaseId, …)`. Two of the repo's own files asserted opposite
+  facts and both had been reviewed. **When two places in the tree disagree about runtime
+  behaviour, measure — do not pick the one nearer your change.**
+- ⚠⚠ **The harm of a test touching the dev DB is not only a destructive write.** It was
+  bidirectional lock contention with the live jobs daemon: the daemon holds `job_source:etoro`
+  on `ebull` **8.80% of wall clock** (30-day full population off `job_runs`), which
+  intermittently broke these tests, *and* a test holding that key could refuse a real
+  `execute_approved_orders` fire. The existing guard's whole framing was "destructive write",
+  so a contention-only hazard was outside what anyone was looking for.
+- ⚠⚠ **The symptom was a misleading `TimeoutError`, not `JobAlreadyRunning`.** With a foreign
+  holder on the dev key, the outer thread in `_assert_cross_thread_serialises` never acquires,
+  so the inner thread times out waiting on the event — the helper's own docstring warns about
+  exactly this substitution (it cost a WARNING on PR #1186). That is why the class read as
+  "intermittent flake" for months rather than as lock contention. **Deterministic
+  reproduction:** hold `hashtext('job_source:etoro')::int` on `ebull` from a side session →
+  3 failures; after the fix, the same arm passes and a holder on the TEST db still produces
+  5 failures, so the contention assertions kept their teeth.
+- ⚠⚠ **A static guard is scoped by the PATTERN, not by its docstring's intent.**
+  `tests/smoke/test_no_settings_url_in_destructive_paths.py` says its broad `connect(` pattern
+  targets "any driver or helper that opens a single connection directly". `JobLock` is exactly
+  that — it opens its own psycopg session inside `__enter__` — but the call site reads
+  `JobLock(settings.database_url`, so the substring never matched and three modules passed the
+  guard silently. **When a guard's stated intent is broader than its patterns, the patterns
+  are the guard.** Added `JobLock(settings.database_url` and
+  `test_only_per_name(settings.database_url`.
+- ⚠⚠ **An allowlist entry outlives the thing it excuses, and nothing forces a re-read.** The
+  `test_job_lock_reentrancy.py` entry claimed the file "monkeypatches settings.database_url to
+  per-worker test DB before any destructive write". True of 2 of its 8 tests. The
+  `test_jobs_process_probe_fence.py` entry claimed dev-DB testing "by design" for a file that
+  had used `test_database_url()` since #1233. **Fix is structural, not editorial:**
+  `test_every_allowlist_entry_is_still_load_bearing` fails when an `_ALLOWED` key matches no
+  forbidden pattern (or names a missing file). It caught the probe-fence entry on its first
+  run — i.e. the rot it was written for was already there.
+- ⚠ **Scope came from the full population, not from the handoff.** The inherited residual named
+  two modules; `rg -c "JobLock\(settings\.database_url" tests/` named three. The one module
+  already doing it correctly (`tests/test_bootstrap_orchestrator_source_registry.py:81`) is
+  also where the reusable pattern was sitting.
+- Enforced in: `tests/smoke/test_no_settings_url_in_destructive_paths.py`
+  (`_FORBIDDEN_PATTERNS` + `test_every_allowlist_entry_is_still_load_bearing`);
+  `tests/test_joblock_per_source.py`, `tests/test_job_lock_reentrancy.py`,
+  `tests/test_db_lane_family_split.py` (module headers now carry the measured fact).
