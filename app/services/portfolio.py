@@ -188,6 +188,38 @@ def _load_positions(conn: psycopg.Connection[Any]) -> dict[int, PositionState]:
 # ---------------------------------------------------------------------------
 
 
+# The SQL twin of the Python mirror mark: ``valuation.resolve_quote_price``
+# (last>0 → bid/ask mid → None) followed by the ``daily_close > 0`` guard in
+# ``app.api.copy_trading._compute_position_mtm``, then the entry rate.
+#
+# #3086: the two mirror SQL paths below restated that rule inline and dropped
+# the **mid** tier, so a lot whose latest quote has a live two-sided book but
+# no trade price was marked at the previous session's close in the list figure
+# and at the mid in its own drill-down.  `quotes.last` carries no 0 sentinel —
+# `sql/181_quotes_last_positive.sql` nulls it and CHECKs `last IS NULL OR
+# last > 0` — and that constraint's own COMMENT states the contract this
+# expression implements: *"Read-side derives a mark from bid/ask when NULL."*
+#
+# ⚠ `<> 'NaN'::numeric` is not redundant.  PostgreSQL orders numeric NaN
+# ABOVE every non-NaN value, so `NaN > 0` is TRUE and NaN would pass as a
+# mark; Python's `nan > 0` is False and rejects it.  `bid`/`ask` carry no
+# positivity CHECK at all, and NaN satisfies `last`'s.  Without this the two
+# implementations disagree on the one input neither should accept.
+#
+# Aliases are fixed (`q`, `pd`, `cmp`) because both call sites already use
+# them.  A module constant, not a format string: nothing is interpolated.
+_MIRROR_MARK_SQL = """COALESCE(
+                          CASE WHEN q.last > 0 AND q.last <> 'NaN'::numeric
+                               THEN q.last END,
+                          CASE WHEN q.bid > 0 AND q.bid <> 'NaN'::numeric
+                                AND q.ask > 0 AND q.ask <> 'NaN'::numeric
+                               THEN (q.bid + q.ask) / 2.0 END,
+                          CASE WHEN pd.close > 0 AND pd.close <> 'NaN'::numeric
+                               THEN pd.close END,
+                          cmp.open_rate
+                      )"""
+
+
 @dataclass(frozen=True)
 class MirrorBreakdown:
     """Per-mirror aggregate for the portfolio endpoint.
@@ -219,13 +251,14 @@ class MirrorBreakdown:
 def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdown]:
     """Return per-mirror equity breakdowns for active mirrors.
 
-    Uses the same three-tier MTM pricing hierarchy as
-    ``_compute_position_mtm``: quote.last → price_daily.close →
-    open_rate fallback.  Returns one row per active mirror.
+    Marks each lot through ``_MIRROR_MARK_SQL`` — the same four-tier
+    hierarchy ``_compute_position_mtm`` applies in Python: positive
+    ``quote.last`` → bid/ask mid → positive ``price_daily.close`` →
+    ``open_rate`` fallback.  Returns one row per active mirror.
 
     Values are in USD — the caller converts to display currency.
     """
-    sql = """
+    sql = f"""
         SELECT ct.parent_username,
                m.mirror_id, m.active,
                m.initial_investment, m.deposit_summary,
@@ -241,13 +274,13 @@ def load_mirror_breakdowns(conn: psycopg.Connection[Any]) -> list[MirrorBreakdow
                       cmp.amount
                     + (CASE WHEN cmp.is_buy THEN 1 ELSE -1 END)
                       * cmp.units
-                      * (COALESCE(NULLIF(GREATEST(q.last, 0), 0), pd.close, cmp.open_rate) - cmp.open_rate)
+                      * ({_MIRROR_MARK_SQL} - cmp.open_rate)
                       * cmp.open_conversion_rate
                    ) AS mv,
                    COUNT(*) AS pos_count
             FROM copy_mirror_positions cmp
             LEFT JOIN LATERAL (
-                SELECT last
+                SELECT last, bid, ask
                 FROM quotes
                 WHERE instrument_id = cmp.instrument_id
                 ORDER BY quoted_at DESC
@@ -312,16 +345,17 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
     the aggregate could go negative too. Callers sum this
     directly into `total_aum` without assuming positivity.
 
-    Pricing uses the same 3-tier hierarchy as `load_mirror_breakdowns`:
-    live quote → most-recent daily close → position open rate.
-    This ensures budget state and dashboard AUM agree when quotes
-    are absent but `price_daily` has data.
+    Pricing uses `_MIRROR_MARK_SQL`, the same hierarchy as
+    `load_mirror_breakdowns`: positive live `last` → bid/ask mid →
+    most-recent positive daily close → position open rate. This
+    ensures budget state and dashboard AUM agree with each other and
+    with the per-position drill-down.
 
     This helper does NOT open its own transaction; it reads
     under the caller's scope, matching `_load_cash` /
     `_load_positions`.
     """
-    sql = """
+    sql = f"""
         WITH mirror_equity AS (
             SELECT COALESCE(SUM(
                 m.available_amount + COALESCE(p.mv, 0)
@@ -332,12 +366,12 @@ def _load_mirror_equity(conn: psycopg.Connection[Any]) -> float:
                       cmp.amount
                     + (CASE WHEN cmp.is_buy THEN 1 ELSE -1 END)
                       * cmp.units
-                      * (COALESCE(NULLIF(GREATEST(q.last, 0), 0), pd.close, cmp.open_rate) - cmp.open_rate)
+                      * ({_MIRROR_MARK_SQL} - cmp.open_rate)
                       * cmp.open_conversion_rate
                 ) AS mv
                 FROM copy_mirror_positions cmp
                 LEFT JOIN LATERAL (
-                    SELECT last
+                    SELECT last, bid, ask
                     FROM quotes
                     WHERE instrument_id = cmp.instrument_id
                     ORDER BY quoted_at DESC
