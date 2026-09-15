@@ -40,6 +40,8 @@ from typing import Any, Protocol
 
 import psycopg
 
+from app.services.sync_orchestrator.progress import report_progress
+
 logger = logging.getLogger(__name__)
 
 
@@ -333,58 +335,86 @@ def ingest_filing_documents(
     fetch_errors = 0
     parse_misses = 0
 
-    for filing_event_id, accession, cik, primary_url in candidates:
+    # #2274 heartbeat. ``total`` is the batch this run selected (<= ``limit``),
+    # not the backlog — the bounded case ``sql/140_per_run_progress_telemetry.sql``
+    # documents for ``target_count`` (NULL there means "unbounded").
+    total = len(candidates)
+    for idx, (filing_event_id, accession, cik, primary_url) in enumerate(candidates, start=1):
+        # ⚠ The tick lives in a ``finally`` and not before each ``continue``.
+        # This loop has FOUR early exits (fetch raise, empty body, empty parse,
+        # upsert raise) and a tick missed on any one of them is a heartbeat that
+        # stops exactly when the job is having trouble — a fetch error is still
+        # one SEC round trip, i.e. a live worker, not a wedged one. ``continue``
+        # runs ``finally``, so one call covers every path including a future
+        # fifth branch. ``report_progress`` swallows callback exceptions, so this
+        # cannot turn a heartbeat fault into a lost item.
         try:
-            # Pass the issuer CIK explicitly so the archive URL
-            # routes under the issuer-not-filer path (#736).
-            raw = fetcher.fetch_filing_index(accession, issuer_cik=cik)
-        except Exception:
-            logger.warning(
-                "ingest_filing_documents: fetch failed accession=%s",
-                accession,
-                exc_info=True,
-            )
-            fetch_errors += 1
-            continue
-        if raw is None:
-            fetch_errors += 1
-            continue
+            try:
+                # Pass the issuer CIK explicitly so the archive URL
+                # routes under the issuer-not-filer path (#736).
+                raw = fetcher.fetch_filing_index(accession, issuer_cik=cik)
+            except Exception:
+                logger.warning(
+                    "ingest_filing_documents: fetch failed accession=%s",
+                    accession,
+                    exc_info=True,
+                )
+                fetch_errors += 1
+                continue
+            if raw is None:
+                fetch_errors += 1
+                continue
 
-        # Derive the primary document filename from the stored URL —
-        # the archive listing has no flag for it.
-        primary_name: str | None = None
-        if primary_url:
-            primary_name = primary_url.rsplit("/", 1)[-1] or None
+            # Derive the primary document filename from the stored URL —
+            # the archive listing has no flag for it.
+            primary_name: str | None = None
+            if primary_url:
+                primary_name = primary_url.rsplit("/", 1)[-1] or None
 
-        docs = parse_filing_index(
-            raw,
-            accession_number=accession,
-            cik=cik,
-            primary_document_name=primary_name,
-        )
-        if not docs:
-            parse_misses += 1
-            continue
-
-        try:
-            upsert_filing_documents(
-                conn,
-                filing_event_id=filing_event_id,
+            docs = parse_filing_index(
+                raw,
                 accession_number=accession,
-                documents=docs,
+                cik=cik,
+                primary_document_name=primary_name,
             )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.warning(
-                "ingest_filing_documents: upsert failed accession=%s",
-                accession,
-                exc_info=True,
-            )
-            continue
+            if not docs:
+                parse_misses += 1
+                continue
 
-        filings_parsed += 1
-        documents_inserted += len(docs)
+            try:
+                upsert_filing_documents(
+                    conn,
+                    filing_event_id=filing_event_id,
+                    accession_number=accession,
+                    documents=docs,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.warning(
+                    "ingest_filing_documents: upsert failed accession=%s",
+                    accession,
+                    exc_info=True,
+                )
+                continue
+
+            filings_parsed += 1
+            documents_inserted += len(docs)
+        finally:
+            # ``idx`` counts items ATTEMPTED, matching processed_count's
+            # documented meaning and the other report_progress call sites
+            # (market_data ticks a skipped instrument, fundamentals ticks a
+            # failed fetch). Counting successes only would stall the heartbeat
+            # on a bad batch — reintroducing the reap for the runs most likely
+            # to be long.
+            report_progress(idx, total)
+
+    if candidates:
+        # Final count, as both shipped producers do. Guarded on a non-empty
+        # batch: a ``(0, 0)`` tick would stamp ``last_progress_at`` for a run
+        # that attempted nothing, which is the fabricated-progress claim
+        # ``set_active_progress``'s ``initial_tick=False`` exists to forbid.
+        report_progress(total, total, force=True)
 
     logger.info(
         "ingest_filing_documents: parser_version=%d scanned=%d parsed=%d docs=%d fetch_errors=%d parse_misses=%d",
