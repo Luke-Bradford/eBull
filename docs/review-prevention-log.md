@@ -6956,3 +6956,71 @@ side-session connects). The correction never travelled the ten lines to the next
   elapsed-since-heartbeat suffix (#2274)"`;
   `docs/wiki/runbooks/runbook-stuck-process-triage.md` (the chip table records the dark
   window, so a triage note reasoning from the chip's absence in it is not trusted).
+
+## `codex exec "<prompt>"` with an open stdin BLOCKS FOREVER, and its only output is a sentence that looks like progress (2026-09-16, #2414)
+
+- Symptom: a checkpoint-1 pass was launched as
+  `codex exec "Review this spec…" > /tmp/out.txt 2>&1` from a non-interactive tool
+  call. It ran for **30 minutes**, three processes alive the whole time, and wrote
+  **39 bytes**: `Reading additional input from stdin...`. Nothing failed, nothing timed
+  out on codex's side, and the tool call itself was moved to the background after its
+  own 10-minute limit — so the visible state was "a long review in progress", which is
+  indistinguishable from a real one. Re-run with `< /dev/null` appended: **complete in
+  minutes, 30 findings, several decisive.**
+- Root cause: with a prompt supplied as an argument AND an inherited open stdin, `codex
+  exec` waits to concatenate stdin onto the prompt. In an interactive terminal stdin is
+  a TTY and this never bites. Earlier sessions in this repo happened to avoid it because
+  their commands were chained after a heredoc, which had already consumed stdin — i.e.
+  the invocation was only ever accidentally correct.
+- ⚠ This is a THIRD codex-invocation trap on top of the two already logged (never pipe
+  it through `tail`/`head`; always `exec`, never bare `codex`). All three share one
+  shape: **the failure is silent in the direction that looks like work happening.**
+- Prevention: **always append `< /dev/null` to `codex exec`.** Redirect output whole to
+  a file, never a pipe. If a codex call passes ~3 minutes with a near-empty output file,
+  `cat` the file before waiting any longer — `Reading additional input from stdin` is
+  the tell, and no amount of further waiting changes it.
+- Enforced in: this prevention log. ⚠ **NOT yet in `.claude/CLAUDE.md`'s Codex
+  invocation rule, which is where it belongs** — that path is write-refused from a loop
+  worktree (#2403), so the replacement text is posted on #2403 and on this PR for the
+  operator to apply. Recorded as owed rather than claimed as done.
+
+## `(expected total − actual total)` IS NOT A GAP COUNT, and an invented calendar is a source-rule miss even inside a "full-population" query (2026-09-16, #2414)
+
+- Symptom: sizing the backdated-insert population, I measured interior price-history
+  gaps as `(count of calendar dates in the instrument's span) − (count of its bars)`
+  against a calendar derived as *"dates on which ≥ 500 instruments have a bar"*. It
+  reported **449,533 gaps over 12,284 instruments** and I published that on #2414 as an
+  **upper bound**. Codex ckpt-1 falsified both halves. Re-measured with an ANTI-JOIN,
+  the repo's real NYSE calendar and an `asset_class = 'us_equity'` scope: **186,318
+  gaps over 7,151 instruments (81.8% affected, median 28)**.
+- Root cause 1 — **the subtraction is only a gap count if the actual set is a SUBSET of
+  the expected set, and here it is not.** `price_daily` holds bars on dates that are not
+  sessions at all (3,669 weekend bars across 389 instruments — already in this log), and
+  every such bar silently CANCELS a genuinely missing session date. So the result is
+  neither an upper nor a lower bound; its error has no sign.
+- Root cause 2 — **the calendar was invented while the repo already owned the documented
+  one.** `app/services/market_calendar.py` carries the NYSE holiday calendar plus
+  observed extraordinary closures, sourced to nyse.com; the instrument side resolves
+  through `exchanges.asset_class` via `exchanges.exchange_id = instruments.exchange`,
+  a join `scripts/verify_3046_weekend_bar_census.py` already uses. I also wrote on the
+  ticket that the exchange code map "needs to be found first". It did not.
+- ⚠ **Running a query over every row does not make its POPULATION DEFINITION correct.**
+  "Full-population verification" was satisfied in the letter — 7M rows, no sampling —
+  and the population was wrong. The full-population rule constrains the *scan*; the
+  source-rule rule constrains the *definition*, and only the second one was skipped.
+- ⚠ A third defect rode along, of a different kind: the same comment set the 449,533
+  against *"4,080 revisions over 23 days"* as a ~100× ratio. **Hypothetical capacity and
+  observed events are unlike quantities**, and the 4,080 figure predates the revision
+  table existing (it is empty), so it had no reproducible provenance either.
+- Prevention: before writing a census, (1) ask whether the observed set can contain
+  members outside the reference set — if it can, use `NOT EXISTS` / anti-join, never
+  arithmetic on two totals; (2) grep for an existing calendar / classification / code
+  map before deriving one from the data, and cite the module you found; (3) put the
+  census in a SCRIPT that computes its figures at run time, so a corrected definition
+  cannot leave a stale number in prose (repo rule: never hardcode a derived statistic);
+  (4) never place a capacity figure beside an event count without saying which is which.
+- Enforced in: this prevention log;
+  `scripts/verify_2414_backdated_insert_census.py` (the header records both defects and
+  the named exclusions, and the anti-join is the fix in situ);
+  `docs/proposals/ta/2026-09-15-2414-backdated-insert-record.md` (§Full-population
+  verification carries the superseded figure and why it was wrong).
