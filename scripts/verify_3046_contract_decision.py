@@ -79,7 +79,10 @@ def _git_sha() -> str:
         return subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True
         ).stdout.strip()
-    except Exception:  # noqa: BLE001 — run identity is best-effort, the measurement is not
+    # Narrowed rather than bare: `git` missing is OSError, a non-zero exit is
+    # CalledProcessError, and there is no third way this can fail. Run identity is
+    # best-effort — the measurement is not — so it degrades rather than aborting.
+    except OSError, subprocess.SubprocessError:
         return "unknown"
 
 
@@ -371,6 +374,11 @@ def _weekend_explains(start: date, end: date, bar_count: int, days_per_bar: Deci
     weekend = sum(
         1 for offset in range(1, (end - start).days + 1) if (start + timedelta(days=offset)).isoweekday() >= 6
     )
+    # ⚠ `magnitude_threshold` and `hole_days` are UNREAD by `rule_w2` — it takes
+    # `calendar_days_per_bar` alone — so the zeros are unused fields, not tuned values.
+    # They are deliberately IMPOSSIBLE rather than plausible: if `rule_w2` ever grows a
+    # dependency on either, a 0x magnitude gate and a 0-day hole tolerance fail loudly
+    # instead of quietly re-classifying every window this arm counts.
     trading_day_params = ClassParams(magnitude_threshold=Decimal(0), hole_days=0, calendar_days_per_bar=Decimal(1))
     return not rule_w2(start, end - timedelta(days=weekend), bar_count, trading_day_params)
 
