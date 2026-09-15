@@ -1429,16 +1429,17 @@ def _record_bar_revisions(
     """
     if not revised_bar_dates:
         return
-    conn.cursor().executemany(
-        """
-        INSERT INTO price_daily_revision (instrument_id, price_date, cause)
-        VALUES (%(instrument_id)s, %(price_date)s, %(cause)s)
-        """,
-        [
-            {"instrument_id": instrument_id, "price_date": price_date, "cause": cause}
-            for price_date in revised_bar_dates
-        ],
-    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO price_daily_revision (instrument_id, price_date, cause)
+            VALUES (%(instrument_id)s, %(price_date)s, %(cause)s)
+            """,
+            [
+                {"instrument_id": instrument_id, "price_date": price_date, "cause": cause}
+                for price_date in revised_bar_dates
+            ],
+        )
 
 
 def _compute_and_store_features(

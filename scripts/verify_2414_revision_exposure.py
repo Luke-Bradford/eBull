@@ -27,6 +27,7 @@ than as evidence of non-occurrence.
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -61,6 +62,18 @@ SELECT count(*) AS bars, coalesce(max(n), 0) AS worst, coalesce(sum(n), 0) AS ro
 """
 
 
+def _utc(stamp: datetime) -> str:
+    """Format a ``timestamptz`` as UTC, CONVERTING rather than relabelling.
+
+    ⚠ A trailing ``Z`` in a format string is YOUR OWN LITERAL — ``strftime`` does
+    not check the value's offset, so ``f"{stamp:...Z}"`` prints whatever tz the
+    connection happens to be in and asserts UTC regardless. This box's server
+    ``TimeZone`` is ``Etc/UTC`` today, which is exactly why the mislabel would be
+    invisible here and wrong on any box that is not.
+    """
+    return f"{stamp.astimezone(UTC):%Y-%m-%d %H:%M:%SZ}"
+
+
 def census(conn: psycopg.Connection[Any]) -> int:
     row = conn.execute(_TOTALS).fetchone()
     assert row is not None
@@ -79,7 +92,7 @@ def census(conn: psycopg.Connection[Any]) -> int:
     print(f"  rows (overwrite events)      : {rows}")
     print(f"  distinct instruments         : {instruments}")
     print(f"  distinct (instrument, bar)   : {bars}")
-    print(f"  observed window (revised_at) : {first_at:%Y-%m-%d %H:%M:%SZ} -> {last_at:%Y-%m-%d %H:%M:%SZ}")
+    print(f"  observed window (revised_at) : {_utc(first_at)} -> {_utc(last_at)}")
     print(f"  window span (days)           : {span_days:.3f}")
     # Computed from the two endpoints above, never quoted: a rate written by hand goes
     # stale silently the moment the corpus moves.
