@@ -192,10 +192,12 @@ ignores it, so no job-health signal moves.
 ⚠ **`job_runs` is not the whole population and the census says so.** The scheduler is the
 only caller that persists these counters; `scripts/rebackfill_candles_5y.py` calls
 `refresh_market_data(force_backfill=True)` and persists nothing, so a `force_backfill`
-count can never appear in `job_runs`. The by-cause totals are therefore also added to the
-existing end-of-refresh `logger.info` line, which every caller reaches. Runs that die
-before the final progress assignment lose their counters entirely — a pre-existing
-property of the transport, recorded as a census limitation rather than fixed here.
+count can never appear in `job_runs`. The by-cause totals are therefore also logged from
+**inside `refresh_market_data`**, which every caller reaches — the existing
+"Market refresh complete" line lives in the scheduler and does not. Gated on a non-zero
+revision count so a quiet run stays quiet. Runs that die before the final progress
+assignment lose their counters entirely — a pre-existing property of the transport,
+recorded as a census limitation rather than fixed here.
 
 ### Invariants, asserted in tests rather than documented
 
@@ -239,6 +241,11 @@ so that such a count is visible rather than absorbed into `stale_reobservation`.
    `fetch_reason == "incremental"`, and a `force_backfill` whose reason is absent.
 2. `_candles_fetch_count`'s three reasons tested directly, including `lookback_days == 3`
    (the case that made the old inference wrong) and a `gap_days` exactly at the boundary.
+   ⚠ **And the same case driven through `refresh_market_data`.** The direct test pins the
+   FUNCTION; it does not stop the caller throwing the reason away and re-deriving one
+   from the count, which is what the code did before this change. A revert-probe
+   re-introduced exactly that with every pure test still green — so the caller-side test
+   is not redundant coverage, it is the only test of the layer the defect lived at.
 3. Per-branch attribution driven through `refresh_market_data` with a fake provider, one
    test per cause, asserting the emitted key — not the sum.
 4. The three invariants asserted, and revert-probed.

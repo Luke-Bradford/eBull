@@ -1,8 +1,9 @@
 """#2414 — the pure half of revision-cause attribution.
 
-No DB: ``revision_cause`` is a pure function and ``_candles_fetch_count``'s only
-DB interaction is one ``MAX(price_date)`` read, which a double supplies. The
-branch-attribution end of this lives in
+No DB: ``revision_cause`` is a pure function. Its input ``fetch_reason`` comes
+from ``_candles_fetch_count``, whose own tests stay with the rest of that
+function's suite in ``tests/test_market_data.py::TestCandlesFetchCount`` rather
+than being restated here. The branch-attribution end of this lives in
 ``tests/test_market_data_bar_revision_counter_db.py``, which drives the real
 loop — conservation cannot validate attribution (labelling everything
 ``stale_reobservation`` satisfies the sum), so the labels are pinned there
@@ -17,13 +18,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.market_data import (
-    _INCREMENTAL_FETCH_BARS,
     FETCH_REASON_INCREMENTAL,
     FETCH_REASON_INITIAL_BACKFILL,
     FETCH_REASON_STALE_REOBSERVATION,
     REVISION_CAUSE_ADJUSTMENT_HEAL,
     REVISION_CAUSE_FORCE_BACKFILL,
-    _candles_fetch_count,
     revision_cause,
 )
 
@@ -84,55 +83,3 @@ def test_revision_cause_never_emits_an_empty_key_for_a_forced_run() -> None:
     is indistinguishable on the admin surface from a missing one.
     """
     assert revision_cause(adjustment_detected=False, force_backfill=True, fetch_reason="") != ""
-
-
-# ---------------------------------------------------------------------------
-# _candles_fetch_count
-# ---------------------------------------------------------------------------
-
-
-def test_no_prior_bars_is_initial_backfill_not_stale() -> None:
-    count, reason = _candles_fetch_count(_conn_returning(None), 1, default=1000, today=date(2026, 9, 15))
-    assert (count, reason) == (1000, FETCH_REASON_INITIAL_BACKFILL)
-
-
-def test_a_gap_inside_the_window_is_incremental() -> None:
-    count, reason = _candles_fetch_count(_conn_returning(date(2026, 9, 12)), 1, default=1000, today=date(2026, 9, 15))
-    assert (count, reason) == (_INCREMENTAL_FETCH_BARS, FETCH_REASON_INCREMENTAL)
-
-
-def test_the_window_boundary_is_inclusive() -> None:
-    """``gap_days > _INCREMENTAL_FETCH_BARS`` — exactly 3 stays incremental.
-
-    Pinned because the reason now travels with the count: an off-by-one here
-    would mislabel every boundary instrument as well as mis-sizing its fetch.
-    """
-    at_edge = _candles_fetch_count(_conn_returning(date(2026, 9, 12)), 1, default=1000, today=date(2026, 9, 15))
-    past_edge = _candles_fetch_count(_conn_returning(date(2026, 9, 11)), 1, default=1000, today=date(2026, 9, 15))
-    assert at_edge[1] == FETCH_REASON_INCREMENTAL
-    assert past_edge[1] == FETCH_REASON_STALE_REOBSERVATION
-
-
-def test_a_stale_gap_is_stale_reobservation_even_when_the_default_is_three() -> None:
-    """⚠⚠ THE CASE THAT MADE THE OLD INFERENCE WRONG.
-
-    The caller used to derive the reason by comparing the returned count against
-    ``_INCREMENTAL_FETCH_BARS``. When ``lookback_days`` is itself 3, the
-    stale-gap fallback returns 3 too — so the comparison reports a four-year
-    re-observation as a 3-bar correction, which is the one confusion the whole
-    attribution exists to prevent. The reason now comes from the function that
-    made the decision, so the counts colliding no longer matters.
-    """
-    count, reason = _candles_fetch_count(
-        _conn_returning(date(2025, 1, 1)),
-        1,
-        default=_INCREMENTAL_FETCH_BARS,
-        today=date(2026, 9, 15),
-    )
-    assert count == _INCREMENTAL_FETCH_BARS
-    assert reason == FETCH_REASON_STALE_REOBSERVATION
-    # And the cause built from it is the deep one, not the shallow one.
-    assert (
-        revision_cause(adjustment_detected=False, force_backfill=False, fetch_reason=reason)
-        == FETCH_REASON_STALE_REOBSERVATION
-    )
