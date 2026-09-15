@@ -116,6 +116,30 @@ already reasons about for `runtime_ceiling` —
 — so the predicate must exclude `queue_stuck` for the same reason. Both
 reasons are reachable together under the halt only after this fix.
 
+⚠⚠ **Corrected by Codex checkpoint 2 (P2): the exclusion must NOT be
+unconditional.** `compute_verdict` ranks the wedges differently per status —
+the `disabled` branch uses `_WEDGE_HEADLINE_ORDER`, but the `running` branch
+headlines *"running but no progress"* even when `queue_stuck` is also present
+(its `elif` chain tests `runtime_ceiling` and then `mid_flight_stuck`, and never
+`queue_stuck`). So on a running row no-progress DOES own the line and the
+heartbeat age is the right duration; suppressing it there strips a valid,
+clock-advancing signal. The predicate suppresses on `queue_stuck` only when
+`status === "disabled"`. Both directions are pinned by tests (§5 item 9) so the
+coupling is visible.
+
+⚠ The FE predicate therefore TRACKS the backend's headline precedence rather
+than being told it — the shape `docs/review-prevention-log.md` warns about. The
+durable fix is for the backend to send "the headline is heartbeat-based" as a
+field, since it is the side that decides. Not folded in here (it is a contract
+addition, not a defect fix); recorded on #2274.
+
+⚠ Deliberately NOT done: unifying the two branches on one precedence so the FE
+needs no status condition. That would flip the headline for a running
+`queue_stuck + mid_flight_stuck` row from "running but no progress" to "queue
+stuck" — defensible, and no test pins it — but it is a behaviour change on rows
+that are not part of this defect, and the `running` branch's bespoke labels
+would have to be carried through a shared order. Out of scope.
+
 ## 4. Why the exposed false positives do not block the fix
 
 Rule 4's fallback fires on any run longer than its threshold when the job has
@@ -180,8 +204,11 @@ Pure-logic against `compute` / `compute_verdict` (no DB):
    headline is the ceiling, not "no progress". Red before the fix.
 8. **Verdict, precedence preserved:** `disabled` + `queue_stuck` +
    `mid_flight_stuck` → headline `queue_stuck` (unchanged).
-9. **FE, 3b:** `queue_stuck` + `mid_flight_stuck` → no heartbeat suffix;
-   `mid_flight_stuck` alone → suffix present. Red before the fix.
+9. **FE, 3b, both directions.** `status="disabled"` + `queue_stuck` +
+   `mid_flight_stuck` → NO suffix (red before the fix). `status="running"` +
+   the same pair → suffix PRESENT (red under an unconditional exclusion, which
+   is what ckpt-2 caught). Bracketing the predicate on both sides is the point:
+   one test alone would license the opposite error.
 
 Revert-probe items 1, 2, 7 and 9 at the layer each defect lives at (the
 `compute` predicate, the verdict branch, the FE predicate) — not at the layer
