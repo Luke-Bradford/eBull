@@ -22,6 +22,7 @@ import pytest
 
 from app.db.background_write import set_background_pool
 from app.services.sync_orchestrator import executor
+from app.services.sync_orchestrator.types import LayerOutcome, RefreshResult
 from tests.fixtures.ebull_test_db import test_database_url, test_db_available
 
 pytestmark = pytest.mark.skipif(not test_db_available(), reason="ebull_test Postgres not reachable")
@@ -116,6 +117,16 @@ def _insert_run(conn: psycopg.Connection[Any], *, status: str = "running") -> in
     return run_id
 
 
+def _success_result() -> RefreshResult:
+    return RefreshResult(
+        outcome=LayerOutcome.SUCCESS,
+        row_count=1,
+        items_processed=1,
+        items_total=1,
+        detail="fixture",
+    )
+
+
 def _heartbeat(conn: psycopg.Connection[Any], run_id: int) -> datetime | None:
     row = conn.execute(
         "SELECT last_progress_at FROM sync_runs WHERE sync_run_id = %s",
@@ -139,6 +150,14 @@ def test_heartbeat_is_null_before_any_hook(reader: psycopg.Connection[Any]) -> N
     "hook",
     [
         pytest.param(lambda run_id: executor._record_layer_started(run_id, _FIXTURE_LAYER), id="layer_started"),
+        # ⚠ The SUCCESS path, and it was missing from the first draft of this
+        # list (Codex checkpoint 3). It is the hook that fires on every ordinary
+        # layer, so omitting it left the widest path unpinned while the file
+        # claimed per-hook coverage.
+        pytest.param(
+            lambda run_id: executor._record_layer_result(run_id, _FIXTURE_LAYER, _success_result()),
+            id="layer_result",
+        ),
         pytest.param(
             lambda run_id: executor._record_layer_skipped(run_id, _FIXTURE_LAYER, "prereq missing"),
             id="layer_skipped",
@@ -157,8 +176,9 @@ def test_each_layer_hook_advances_the_run_heartbeat(
     """Per-hook, not "some hook".
 
     A single "the timestamp is non-null after a sync" assertion passes when only
-    one of the four hooks is wired, and the one most likely to be missed is the
-    one that only fires on a crash.
+    one of the five hooks is wired, and the two most likely to be missed are the
+    one that only fires on a crash and — as this file itself demonstrated — the
+    ordinary success path.
     """
     run_id = _insert_run(reader)
     with _registered_pool(test_database_url()):
@@ -221,7 +241,9 @@ def test_heartbeat_failure_does_not_change_the_layer_result(
 
     If the heartbeat shared ``_record_layer_result``'s transaction, a heartbeat
     failure would roll the layer row back and committed work would be recorded
-    as failed. Here the helper raises and the layer row must still be terminal.
+    as failed. Exercised on ``_record_layer_result`` specifically — that is the
+    writer carrying the authoritative outcome, so it is the one where a rollback
+    costs real information (Codex checkpoint 3).
     """
     run_id = _insert_run(reader)
 
@@ -231,13 +253,13 @@ def test_heartbeat_failure_does_not_change_the_layer_result(
     monkeypatch.setattr(executor, "_touch_run_heartbeat", _boom)
     with _registered_pool(test_database_url()):
         with pytest.raises(RuntimeError):
-            executor._record_layer_skipped(run_id, _FIXTURE_LAYER, "prereq missing")
+            executor._record_layer_result(run_id, _FIXTURE_LAYER, _success_result())
 
     status = reader.execute(
-        "SELECT status, skip_reason FROM sync_layer_progress WHERE sync_run_id = %s",
+        "SELECT status, row_count FROM sync_layer_progress WHERE sync_run_id = %s",
         (run_id,),
     ).fetchone()
-    assert status == ("skipped", "prereq missing")
+    assert status == ("complete", 1)
 
 
 def test_touch_never_raises_on_a_broken_connection(

@@ -114,8 +114,10 @@ def _touch_run_heartbeat(sync_run_id: int) -> None
 - `SET LOCAL statement_timeout` — the cancel path holds the `sync_runs` row under
   `SELECT FOR UPDATE` (`app/api/processes.py:1624`) and
   `background_write_connection` sets no timeout of its own (#5).
-- Never raises; failures log at debug and are counted, so "writer broken" is
-  distinguishable from "no progress" (#12).
+- Never raises; a failed write logs at WARNING naming the run, so "writer
+  broken" stays distinguishable from "no progress" (#12). ⚠ No counter — an
+  earlier draft of this line promised one and the implementation has never had
+  one. The log is the whole signal.
 - Monotonic and status-guarded:
 
 ```sql
@@ -205,10 +207,17 @@ rather than by module falsified the input:
   only the synthetic install tick.
 
 So the longest legitimate inter-heartbeat gap is at least **4,721s**, while the
-observed strandings run p50 35s to max 14,287s. **The two populations overlap over
-their whole range**: no threshold separates a stranded sync from a legitimately-long
-one on today's evidence. A rule fitted anyway would fire on real work, which is the
-one thing #2274's constraint forbids.
+observed strandings run p50 35s to max 14,287s — and those stranding durations are
+right-censored by the boot that reaped them, so they are not the true distribution
+either.
+
+Stated precisely rather than as a slogan: **a threshold low enough to catch the
+median stranding (35s) sits two orders of magnitude below a legitimate
+`fundamentals` layer, and one placed above that layer (≥4,721s) is already inside
+the top of the observed stranding range.** That does not prove no threshold could
+work — it does mean none is DERIVABLE from what is stored, and #2274's own
+constraint ("a watchdog that fires on legitimately-long corpus jobs is worse than
+none") makes guessing the wrong error to make.
 
 The prerequisite is not this heartbeat — it is tick coverage across more than one
 layer. Recorded on the issue as the next piece.
@@ -233,9 +242,16 @@ interval in which a row can be `running`:
 - after the last layer, if the post-loop cancel check or `_finalize_sync_run` blocks
   or raises.
 
-In all three the heartbeat is NULL and `assess_run` falls back to `started_at`, which
-is the correct and intended degradation — but the claim is "layer coverage", not
-"whole-lifecycle coverage".
+⚠ The three are not the same shape, and an earlier draft of this paragraph
+flattened them. In the first two the heartbeat is NULL for the whole interval. In
+the third it is NOT — the last layer stamped it — so the run carries a heartbeat
+that has simply stopped advancing.
+
+Neither case changes the verdict, because `assess_run` reads `started_at` and
+**only** `started_at`: there is no fallback, the heartbeat is accepted and
+ignored. So the claim here is "layer coverage", not "whole-lifecycle coverage",
+and what the heartbeat buys today is the operator-visible age on the banner
+rather than an input to the verdict.
 
 ⚠ `started_at` defaults to `now()` inside the insertion transaction, which begins
 before `build_execution_plan` runs, so a long prelude publishes a run whose age

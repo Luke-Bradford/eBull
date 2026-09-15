@@ -538,6 +538,13 @@ describe("AdminPage — sync holder banner (#2274)", () => {
    * next boots. Nothing rendered that row before this banner — the operator's
    * only symptom was ingest quietly stopping.
    */
+  /**
+   * `liveness: undefined` models an OLDER BACKEND, so it must omit
+   * `last_progress_at` too — both fields ship in the same commit, which is
+   * exactly why both are optional on the wire. A fixture that always sent
+   * `last_progress_at: null` would test a response shape no deployment
+   * produces (Codex checkpoint 3).
+   */
   function runningStatus(liveness?: "live" | "over_ceiling") {
     return {
       is_running: true,
@@ -546,8 +553,7 @@ describe("AdminPage — sync holder banner (#2274)", () => {
         scope: "behind",
         trigger: "boot_sweep",
         started_at: "2026-04-19T00:00:00Z",
-        last_progress_at: null,
-        ...(liveness ? { liveness } : {}),
+        ...(liveness ? { liveness, last_progress_at: null } : {}),
         layers_planned: 3,
         layers_done: 1,
         layers_failed: 0,
@@ -581,9 +587,9 @@ describe("AdminPage — sync holder banner (#2274)", () => {
     expect(banner).toHaveTextContent("No further sync can start");
   });
 
-  it("treats an absent liveness field as live, not as a warning", async () => {
-    // Frontend deployed ahead of the backend: the field is optional on the
-    // wire, and a missing verdict must not invent an alarm.
+  it("treats an older backend's response as live, not as a warning", async () => {
+    // Frontend deployed ahead of the backend: BOTH new fields are absent, and
+    // a missing verdict must not invent an alarm.
     mockedStatus.mockResolvedValue(runningStatus());
     renderPage();
     const banner = await screen.findByTestId("sync-holder-banner");

@@ -60,9 +60,12 @@ const ORCHESTRATOR_OWNED = new Set([
 export function AdminPage() {
   const v2 = useAsync(fetchSyncLayersV2, []);
   // `preserveOnRefetch` (#2274): without it `data` is cleared at the START of
-  // every refetch, so `isRunning` below flipped false on each 10s/60s poll and
-  // re-armed the interval at the idle cadence — the 10s cadence never actually
-  // held. The holder banner would have flickered the same way.
+  // every refetch, so during a running sync `isRunning` flipped false for the
+  // duration of each request and true again on resolution. ⚠ The cadence was
+  // not pinned at idle — it churned: every poll re-armed the interval twice,
+  // and because `useEffect` restarts the timer on each flip the effective
+  // period drifted with request latency rather than holding at 10s. The holder
+  // banner below would have blinked out on the same cycle.
   const status = useAsync(fetchSyncStatus, [], { preserveOnRefetch: true });
   const coverage = useAsync(fetchCoverageSummary, []);
   const capabilityOverrides = useAsync(fetchCapabilityOverrides, []);

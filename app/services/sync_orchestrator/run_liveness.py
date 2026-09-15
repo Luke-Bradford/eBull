@@ -25,11 +25,13 @@ separates a stranded sync from a legitimately-long one, and today nothing does:
   the synthetic install tick.
 - So the longest legitimate gap between two run heartbeats is at least the
   longest non-ticking layer, which on the stored corpus is ``fundamentals``.
-- The observed stranded runs (``error_category='orchestrator_crash'``) span a
-  range that sits entirely inside that. The two populations overlap over their
-  whole width, so any threshold fires on real work — which is exactly what
-  #2274's own constraint forbids ("a watchdog that fires on legitimately-long
-  corpus jobs is worse than none").
+- A threshold low enough to catch the median stranded run sits two orders of
+  magnitude below that layer; one placed above it is already inside the top of
+  the observed stranding range. So no threshold is DERIVABLE from what is
+  stored — which is not the same as proving none could work, and is why this is
+  a deferral rather than a verdict that the rule is impossible.
+- Guessing is the wrong error to make here: #2274's own constraint is that "a
+  watchdog that fires on legitimately-long corpus jobs is worse than none".
 
 The prerequisite for a ``stalled`` rule is tick coverage across more than one
 layer, not this module. Re-run the queries in the spec before assuming otherwise;
