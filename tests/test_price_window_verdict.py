@@ -378,6 +378,30 @@ class TestClause5NonSessionBar:
         _, condemn_side = self._assess(_inputs(trades_weekends=False, habit_bar_count=1), ends=(self.GOOD_FRIDAY,))
         assert REASON_NON_SESSION_BAR not in condemn_side
 
+    def test_a_below_floor_habit_does_not_exempt_CLAUSE_4_either(self) -> None:
+        """⚠ The floor is applied in ``assess_window``, not only in the loader's SQL.
+
+        A hand-built ``WindowInputs`` can carry ``trades_weekends=True`` off one bar —
+        the loader's rows never can. Before this gate clause 5 declined on it while
+        clause 4 honoured it, which is a silent divergence from the loader's semantics
+        (review bot NITPICK on PR #3079). A below-floor habit must read as UNKNOWN to
+        every clause, which for clause 4 means the weekend days are deducted.
+        """
+        start, end = date(2026, 9, 9), date(2026, 9, 21)
+        measured = assess_window(
+            _inputs(trades_weekends=True, habit_bar_count=250), window_start=start, window_end=end, bar_count=2
+        )
+        asserted = assess_window(
+            _inputs(trades_weekends=True, habit_bar_count=1), window_start=start, window_end=end, bar_count=2
+        )
+        unknown = assess_window(
+            _inputs(trades_weekends=False, habit_bar_count=1), window_start=start, window_end=end, bar_count=2
+        )
+        # A MEASURED seven-day habit keeps the full span, so the gap is visible to W2.
+        assert REASON_HORIZON_STRETCHED in measured.reasons
+        # An ASSERTED one must behave exactly like the unknown case, not like the measured one.
+        assert asserted.reasons == unknown.reasons
+
     def test_the_floor_boundary_is_inclusive(self) -> None:
         _, at_floor = self._assess(
             _inputs(trades_weekends=False, habit_bar_count=WEEKEND_HABIT_MIN_BARS), ends=(self.GOOD_FRIDAY,)

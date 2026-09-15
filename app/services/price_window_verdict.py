@@ -568,7 +568,16 @@ def assess_window(
     # ⚠ Absent inputs means the habit is unknown. Defaulting to False (weekends are
     # non-sessions) keeps the span SHORTER, so an unknown instrument is not quarantined
     # on an assumption — the UNKNOWN reasons above already carry that state honestly.
-    trades_weekends = inputs.trades_weekends if inputs is not None else False
+    #
+    # ⚠⚠ A HABIT BELOW THE BAR FLOOR IS THE SAME KIND OF UNKNOWN, AND IS APPLIED HERE
+    # RATHER THAN LEFT TO THE LOADER'S SQL. ``load_window_inputs`` already folds
+    # ``WEEKEND_HABIT_MIN_BARS`` into ``trades_weekends``, so its rows can never carry
+    # the contradictory state — but a hand-built ``WindowInputs`` can, and then clause
+    # 5 would decline (it applies the floor) while clause 4 would not, which is a
+    # silent divergence from the loader's semantics (review bot NITPICK, upheld). One
+    # gate here makes the two paths identical for any caller.
+    habit_known = inputs is not None and inputs.habit_bar_count >= WEEKEND_HABIT_MIN_BARS
+    trades_weekends = inputs.trades_weekends if (inputs is not None and habit_known) else False
     weekend_bars = inputs.weekend_bar_dates if inputs is not None else frozenset()
     if rule_w2(
         window_start,

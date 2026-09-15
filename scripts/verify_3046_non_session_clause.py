@@ -354,8 +354,12 @@ def clause_ab(conn: psycopg.Connection[Any], closures: list[date]) -> int:
         m = meta_all.get(iid)
         if src is None or m is None:
             continue
+        # ⚠ BOTH fields move, or the arm is a no-op. ``assess_window`` now gates the
+        # habit on ``habit_bar_count`` too (review bot NITPICK), so restoring only the
+        # boolean would be overridden by the floor it is trying to undo. The pre-floor
+        # world had no such field, which is what lifting the count to the floor models.
         got = assess_window(
-            replace(src, trades_weekends=m.habit_unfloored),
+            replace(src, trades_weekends=m.habit_unfloored, habit_bar_count=WEEKEND_HABIT_MIN_BARS),
             window_start=prior,
             window_end=as_of,
             bar_count=bars,
