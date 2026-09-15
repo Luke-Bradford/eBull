@@ -306,6 +306,14 @@ export interface InstrumentListItem {
    *  when <2 positive closes exist. */
   day_change_pct: string | null;
   day_change_as_of: string | null;
+  /** #3046: the window's quarantine verdict — "ok" | "unverified" |
+   *  "quarantined". `day_change_pct` is null on "quarantined" because the ratio
+   *  between the two closes is not a return. "unverified" means the window is
+   *  outside the evaluated interval, NOT that it is bad, and its value renders.
+   *  Both null = fewer than two positive closes, which is absent data, not a
+   *  verdict. */
+  day_change_verdict?: string | null;
+  day_change_reasons?: string[] | null;
 }
 
 export interface InstrumentListResponse {
@@ -388,6 +396,9 @@ export interface InstrumentPrice {
    *  computed from — stamped so a stale close reads honestly, not as "today".
    *  Null when no day-change is available. */
   day_change_as_of: string | null;
+  /** #3046 — same contract as `InstrumentListItem.day_change_verdict`. */
+  day_change_verdict?: string | null;
+  day_change_reasons?: string[] | null;
   week_52_high: string | null;
   week_52_low: string | null;
   currency: string | null;

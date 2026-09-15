@@ -18,6 +18,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.providers.market_data import MarketDataProvider, OHLCVBar, Quote
+from app.services.price_window_verdict import assess_window, load_window_inputs
 from app.services.strategy_core_quote_observation import (
     CoreQuoteObservation,
     record_core_quote_observations,
@@ -175,13 +176,27 @@ class DayChange:
     it (settled-decisions.md:767 "latest closed session" as-of convention) so a
     stale close reads honestly rather than as "today". ``change_pct`` is a
     FRACTION (``-0.015`` = −1.5%), matching the ``formatPct`` frontend contract.
+
+    ⚠ ``change_abs``/``change_pct`` are ``None`` when ``verdict`` is
+    ``quarantined`` (#3046): the ratio between the two closes is not a return, so
+    there is no day change to render. ``as_of``, ``last_close`` and ``prior_close``
+    are retained in EVERY state — the closes are prices, and what the quarantine
+    rules condemn is the ratio, never the level (``sql/247:83-88``). ⚠ That
+    level-validity statement is scoped to a level break and is NOT asserted when
+    ``bar_return_unusable`` is among ``reasons``; there the API carries the reason
+    and this module makes no claim about the close.
     """
 
     as_of: date
+    prior_date: date
+    """The earlier operand's ``price_date``. Carried so the window is explicit:
+    "as of" alone reads as a one-day change, and 208 of these windows are not one."""
     last_close: Decimal
     prior_close: Decimal
-    change_abs: Decimal
-    change_pct: Decimal
+    change_abs: Decimal | None
+    change_pct: Decimal | None
+    verdict: str
+    reasons: tuple[str, ...]
 
 
 def compute_day_change(last_close: Decimal, prior_close: Decimal) -> Decimal | None:
@@ -207,6 +222,22 @@ def load_day_changes(
     Instruments with fewer than two positive closes are omitted (caller renders
     "—"). Fan-out-safe: PK ``(instrument_id, price_date)`` guarantees one row
     per date.
+
+    ⚠⚠ #3046 — THE WINDOW IS ASSESSED, NOT ASSUMED. The two closes are raw vendor
+    prices and their ratio is not automatically a return. Measured on the full live
+    corpus before this landed: 208 of 12,262 instruments rendered a "day change" that
+    is not one — ALNEV.PA at **+999,900%** across a 12-day hole, MOND at −99.18%
+    across an unresolved level break. ``price_window_verdict`` composes the four
+    contract clauses over ``(prior_date, as_of]``; a ``quarantined`` verdict nulls
+    the change and keeps the closes.
+
+    ⚠ Omitting an instrument for <2 positive closes is NOT a verdict. Absent data
+    and an unverified window are different states and are not conflated: a missing
+    key carries no ``reasons`` at all.
+
+    ⚠ The original operand pair is preserved. Nothing substitutes an older bar for a
+    condemned one — a day change computed from a replaced operand would be a
+    different quantity wearing the same label.
     """
     ids = list({int(i) for i in instrument_ids})
     if not ids:
@@ -221,22 +252,49 @@ def load_day_changes(
                        ) AS rn
                 FROM price_daily
                 WHERE instrument_id = ANY(%(ids)s) AND close > 0
+            ), pair AS (
+                SELECT instrument_id,
+                       max(close)      FILTER (WHERE rn = 1) AS last_close,
+                       max(price_date) FILTER (WHERE rn = 1) AS as_of,
+                       max(close)      FILTER (WHERE rn = 2) AS prior_close,
+                       max(price_date) FILTER (WHERE rn = 2) AS prior_date
+                FROM ranked
+                WHERE rn <= 2
+                GROUP BY instrument_id
+                HAVING count(*) = 2
             )
-            SELECT instrument_id,
-                   max(close)      FILTER (WHERE rn = 1) AS last_close,
-                   max(price_date) FILTER (WHERE rn = 1) AS as_of,
-                   max(close)      FILTER (WHERE rn = 2) AS prior_close
-            FROM ranked
-            WHERE rn <= 2
-            GROUP BY instrument_id
-            HAVING count(*) = 2
+            SELECT pair.*,
+                   -- ⚠ ``rule_w2`` needs the STORED bar count, never a rank and
+                   -- never a calendar estimate. The two most recent POSITIVE closes
+                   -- need not be adjacent stored bars: a zero-close sentinel row
+                   -- between them is a third bar, and counting it is the difference
+                   -- between a stretched horizon and an ordinary one.
+                   (SELECT count(*) FROM price_daily d
+                     WHERE d.instrument_id = pair.instrument_id
+                       AND d.price_date BETWEEN pair.prior_date AND pair.as_of
+                   ) AS bar_count
+            FROM pair
             """,
             {"ids": ids},
         )
         rows = cur.fetchall()
 
+    # ⚠ Guard on what was actually CONSUMED, not on ``rows``'s truthiness. A cursor
+    # double that is truthy while iterating empty — which is what ``MagicMock`` is,
+    # and what 11 of the summary-endpoint tests hand this function — passes
+    # ``if not rows`` and then empties ``min()``. Materialising the operands once
+    # settles it for any container, and is one pass instead of two.
+    windows = {int(r["instrument_id"]): r["prior_date"] for r in rows}  # type: ignore[arg-type,misc]
+    if not windows:
+        return {}
+    # ⚠ Each instrument is bounded at ITS OWN window start, not at the batch minimum:
+    # one instrument with a 2020 window must not drag every other instrument's scan
+    # back with it (measured 4x on the worst page — see ``load_window_inputs``).
+    inputs = load_window_inputs(conn, windows)
+
     out: dict[int, DayChange] = {}
     for r in rows:
+        instrument_id = int(r["instrument_id"])  # type: ignore[arg-type]
         last_close = r["last_close"]  # type: ignore[assignment]
         prior_close = r["prior_close"]  # type: ignore[assignment]
         # ``prior_close > 0`` is guaranteed by the ``WHERE close > 0`` filter, so
@@ -246,12 +304,22 @@ def load_day_changes(
         pct = compute_day_change(last_close, prior_close)
         if pct is None:  # pragma: no cover — defensive; filter guarantees prior_close > 0
             continue
-        out[int(r["instrument_id"])] = DayChange(  # type: ignore[arg-type]
+        assessment = assess_window(
+            inputs.get(instrument_id),
+            window_start=r["prior_date"],  # type: ignore[arg-type]
+            window_end=r["as_of"],  # type: ignore[arg-type]
+            bar_count=int(r["bar_count"]),  # type: ignore[arg-type]
+        )
+        suppressed = assessment.is_quarantined
+        out[instrument_id] = DayChange(
             as_of=r["as_of"],  # type: ignore[arg-type]
+            prior_date=r["prior_date"],  # type: ignore[arg-type]
             last_close=last_close,
             prior_close=prior_close,
-            change_abs=last_close - prior_close,
-            change_pct=pct,
+            change_abs=None if suppressed else last_close - prior_close,
+            change_pct=None if suppressed else pct,
+            verdict=assessment.verdict,
+            reasons=assessment.reasons,
         )
     return out
 
