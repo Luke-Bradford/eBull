@@ -511,11 +511,22 @@ touched. Its properties, each of which D lacked:
 
 ## 4. Storage and parsing
 
-`sql/385` adds to `broker_account_position_marks`: `close_rate NUMERIC(20,8) NOT NULL
-CHECK (close_rate > 0)`, `close_conversion_rate NUMERIC(20,10) NOT NULL CHECK (> 0)`,
-`asset_currency_id INTEGER NOT NULL`, `pnl_timestamp TIMESTAMPTZ` (nullable — it is
-evidence, not an operand). All four fail closed at the parser on absent / non-numeric /
-non-finite / non-positive, on the same grounds as `units`: they are comparand operands.
+`sql/385` adds to `broker_account_position_marks`: `close_rate NUMERIC(20,8)`,
+`close_conversion_rate NUMERIC(20,10)`, `asset_currency_id INTEGER` and
+`pnl_timestamp TIMESTAMPTZ`, with `CHECK (col IS NULL OR col > 0)` on the first three.
+
+⚠ **All four are NULLABLE, and an earlier draft of this section said `NOT NULL`.** They
+cannot be `NOT NULL`: seven child rows already exist from the sql/383 writer and there is
+nothing to backfill them with — a close rate is instantaneous and the payload is not
+retained, so any value written now would be a reconstruction wearing an observation's
+clothes. The constraints are therefore written `IS NULL OR ...`: they constrain what may
+be WRITTEN without asserting that every stored row has been. The READER supplies the
+requirement instead, refusing a row with a NULL operand
+(`official_position_marks_unusable`) rather than falling back to the withdrawn derivation.
+
+The first three fail closed AT THE PARSER on absent / non-numeric / non-finite /
+non-positive, on the same grounds as `units`: they are comparand operands, so nothing
+unusable is ever written in the first place.
 
 ⚠ `pnl_timestamp` is stored because it is the ONLY record of the instant the mark was
 struck, and the unsolved capture-pairing problem (§7) is unmeasurable without it. It is
