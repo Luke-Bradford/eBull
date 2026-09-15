@@ -211,7 +211,7 @@ export function AdminPage() {
 
       <KillSwitchSection />
 
-      <SyncHolderBanner status={status.data} />
+      <SyncHolderBanner status={status.data} unavailable={status.error !== null} />
 
       <ProblemsPanel
         v2={v2.data}
@@ -611,8 +611,31 @@ function RunButton({
  * marks the case that cannot be a legitimately-long run.
  *
  * ⚠ Absent `liveness` (frontend deployed ahead of backend) reads as `live`.
+ *
+ * ⚠⚠ `unavailable` is not cosmetic. `useAsync` clears `data` on a failed
+ * refetch even under `preserveOnRefetch` ("stale-while-erroring is
+ * misleading"), so without this branch a single failed poll would silently
+ * remove an over-ceiling warning and leave the page looking exactly like "no
+ * sync is running" — the absence of a signal rendered as the absence of a
+ * problem, which is the shape #2274 is about (Codex checkpoint 3).
  */
-function SyncHolderBanner({ status }: { status: SyncStatusResponse | null }) {
+function SyncHolderBanner({
+  status,
+  unavailable,
+}: {
+  status: SyncStatusResponse | null;
+  unavailable: boolean;
+}) {
+  if (unavailable) {
+    return (
+      <div
+        className="rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
+        data-testid="sync-holder-banner"
+      >
+        Sync status unavailable — this panel cannot tell you whether a run is in flight.
+      </div>
+    );
+  }
   const run = status?.current_run ?? null;
   if (run === null) return null;
   const overCeiling = run.liveness === "over_ceiling";

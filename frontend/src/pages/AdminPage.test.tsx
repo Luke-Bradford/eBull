@@ -587,6 +587,17 @@ describe("AdminPage — sync holder banner (#2274)", () => {
     expect(banner).toHaveTextContent("No further sync can start");
   });
 
+  it("says so when the status read fails, rather than looking idle", async () => {
+    // `useAsync` clears `data` on a failed refetch even under
+    // `preserveOnRefetch`, so without an explicit error branch a single failed
+    // poll would erase an over-ceiling warning and render identically to "no
+    // sync is running" — absence of signal shown as absence of problem.
+    mockedStatus.mockRejectedValue(new Error("boom"));
+    renderPage();
+    const banner = await screen.findByTestId("sync-holder-banner");
+    expect(banner).toHaveTextContent("Sync status unavailable");
+  });
+
   it("treats an older backend's response as live, not as a warning", async () => {
     // Frontend deployed ahead of the backend: BOTH new fields are absent, and
     // a missing verdict must not invent an alarm.

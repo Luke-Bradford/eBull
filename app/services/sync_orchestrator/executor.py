@@ -1440,9 +1440,13 @@ def _make_progress_callback(sync_run_id: int, emits: tuple[str, ...]):
 
     ⚠ The converse is NOT true and is deliberate: if the ``items_done`` UPDATE
     raises, the heartbeat below is skipped and ``report_progress`` swallows the
-    exception, so a healthy worker with a broken child write reads as
-    heartbeat-less. That degrades to the ``started_at`` fallback, which is the
-    honest reading — we genuinely do not know it is progressing.
+    exception, so a healthy worker with a broken child write stops ADVANCING the
+    run heartbeat. Any stamp an earlier layer left is still there — it just goes
+    stale. That is the honest reading: we no longer know the run is progressing.
+
+    ⚠ It changes no verdict either way. ``run_liveness.assess_run`` reads
+    ``started_at`` and only ``started_at``; the heartbeat is an operator-visible
+    age on the admin banner, not an input to the judgement.
     """
 
     def _callback(items_done: int, items_total: int | None = None) -> None:
