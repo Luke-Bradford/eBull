@@ -86,6 +86,34 @@ ACTIONABLE_STALE: Final[frozenset[StaleReason]] = frozenset(
 # ticking heartbeat cannot mute.
 _WEDGE_STALE: Final[frozenset[StaleReason]] = frozenset({"queue_stuck", "mid_flight_stuck", "runtime_ceiling"})
 
+# #2274 — headline precedence among the wedges, for the ``disabled`` branch.
+#
+# ⚠⚠ NOT ``_REASON_ORDER`` filtered by ``_WEDGE_STALE``, which is what this
+# used to be. ``_REASON_ORDER`` is the CHIP-RENDER order (stable left-to-right
+# sequence for the FE) and puts ``mid_flight_stuck`` before ``runtime_ceiling``;
+# the non-disabled branch below deliberately headlines the CEILING first,
+# because "past its 24h ceiling" is the stronger, age-based claim and the one a
+# heartbeat cannot mute. Reusing the render order here made the two branches
+# disagree, and the disagreement was unobservable while rule 4 was masked by
+# the halt (it could not fire, so the pair could never occur). Combined with
+# the FE's ``hasHeartbeatSuffix`` — which suppresses the elapsed suffix when
+# ``runtime_ceiling`` is present — a halted over-ceiling row would have read a
+# bare "no progress", hiding both the ceiling and the elapsed silence.
+#
+# ``queue_stuck`` stays first: it is about a DISPATCH that never reached a
+# worker, which outranks anything about the run's own progress.
+#
+# ⚠ MUST be a total ordering of ``_WEDGE_STALE`` — it restates that frozenset's
+# membership, so a fourth wedge added there and not here would be silently
+# dropped from headline consideration: a reason that fires and is never shown,
+# which is the exact defect this change exists to fix. Pinned by
+# ``test_wedge_headline_order_covers_every_wedge`` (review-bot NITPICK, PR #3083).
+_WEDGE_HEADLINE_ORDER: Final[tuple[StaleReason, ...]] = (
+    "queue_stuck",
+    "runtime_ceiling",
+    "mid_flight_stuck",
+)
+
 # Stable order for picking the headline reason when several fire at once.
 _REASON_ORDER: Final[tuple[StaleReason, ...]] = (
     "schedule_missed",
@@ -179,7 +207,7 @@ def compute_verdict(
     if status == "disabled":
         # A genuine wedge is never masked by the halt (ckpt-1 invariant): a
         # stuck/no-progress request needs the operator regardless of the switch.
-        wedges: list[StaleReason] = [r for r in _REASON_ORDER if r in stale_reasons and r in _WEDGE_STALE]
+        wedges: list[StaleReason] = [r for r in _WEDGE_HEADLINE_ORDER if r in stale_reasons]
         if wedges:
             return ("attention", False, _REASON_LABEL[wedges[0]])
         # A last terminal run that genuinely failed predates the halt and still

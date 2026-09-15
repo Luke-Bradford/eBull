@@ -32,6 +32,8 @@ from app.services.processes import (
 )
 from app.services.processes.health_verdict import (
     _REASON_LABEL,
+    _WEDGE_HEADLINE_ORDER,
+    _WEDGE_STALE,
     ACTIONABLE_STALE,
     STALE_MANUAL_WINDOW,
     compute_verdict,
@@ -629,6 +631,57 @@ def test_verdict_for_row_wedged_running_reads_red() -> None:
     attention — a hung non-heartbeating job is never falsely calm."""
     row = _row(role="steady_state", status="running", stale_reasons=("mid_flight_stuck",))
     assert verdict_for_row(row, now=_NOW)[0] == "attention"
+
+
+def test_wedge_headline_order_covers_every_wedge() -> None:
+    """``_WEDGE_HEADLINE_ORDER`` must be a total ordering OF ``_WEDGE_STALE``.
+
+    Review-bot NITPICK on PR #3083, and it is this PR's own bug class: the
+    tuple hand-restates the frozenset's membership, so a fourth wedge added to
+    ``_WEDGE_STALE`` and not to the tuple would be silently dropped from
+    headline consideration on the ``disabled`` branch — a reason that fires and
+    is never shown, which is exactly what ``mid_flight_stuck`` was doing.
+    Mirrors ``tests/test_stale_thresholds.py``, which pins the override keys
+    against the live registry for the same reason.
+    """
+    assert set(_WEDGE_HEADLINE_ORDER) == _WEDGE_STALE
+    assert len(_WEDGE_HEADLINE_ORDER) == len(_WEDGE_STALE), "no duplicates"
+
+
+def test_halted_wedge_headlines_the_ceiling_not_no_progress() -> None:
+    """#2274 — the ``disabled`` branch must rank the wedges like the
+    non-disabled one does.
+
+    It used to filter ``_REASON_ORDER`` (the CHIP-RENDER order, in which
+    ``mid_flight_stuck`` precedes ``runtime_ceiling``) while the non-disabled
+    branch deliberately headlines the ceiling first — "past its 24h ceiling" is
+    the stronger, age-based claim and the one a heartbeat cannot mute. The
+    disagreement was unobservable because rule 4 could not fire while halted,
+    so the pair never occurred. With the FE suppressing the elapsed suffix
+    whenever ``runtime_ceiling`` is present, a halted over-ceiling row would
+    have read a bare "no progress" — hiding the ceiling AND the elapsed
+    silence.
+    """
+    verdict, _, reason = compute_verdict(
+        status="disabled",
+        stale_reasons=("mid_flight_stuck", "runtime_ceiling"),
+    )
+    assert verdict == "attention"
+    assert reason == _REASON_LABEL["runtime_ceiling"]
+
+
+def test_halted_wedge_still_headlines_queue_stuck_over_the_run_reasons() -> None:
+    """Precedence preserved: a dispatch that never reached a worker outranks
+    anything about the run's own progress or age.
+    """
+    cases: tuple[tuple[StaleReason, ...], ...] = (
+        ("queue_stuck", "mid_flight_stuck"),
+        ("queue_stuck", "runtime_ceiling"),
+        ("queue_stuck", "mid_flight_stuck", "runtime_ceiling"),
+    )
+    for reasons in cases:
+        _, _, reason = compute_verdict(status="disabled", stale_reasons=reasons)
+        assert reason == _REASON_LABEL["queue_stuck"], reasons
 
 
 # ---------------------------------------------------------------------------

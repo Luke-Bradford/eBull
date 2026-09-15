@@ -20,12 +20,18 @@ Five reasons can fire on one row simultaneously:
    observed terminal status from the worker; the worker may have
    crashed. Boot-recovery sweep (sql/137 §R2-W2) handles >6h; this is
    the in-window display.
-4. ``mid_flight_stuck`` — ``status="running"`` AND
+4. ``mid_flight_stuck`` — an ACTIVE RUN exists AND
    ``COALESCE(active_run.last_progress_at, active_run.started_at) <
    now() - threshold``. Falling back to ``started_at`` covers the
    "stuck before first tick" case (Codex pre-impl review BLOCKING) —
    without it, a worker that crashes before its first
-   ``record_processed`` would never surface as stale.
+   ``record_processed`` would never surface as stale, and bootstrap
+   would have no hung-run signal at all (rule 5 excludes it).
+   ⚠⚠ Gated on the active run, NOT on ``status``: a ``status ==
+   "running"`` gate is unsatisfiable while the kill switch is on,
+   because ``_status_for`` returns ``disabled`` first. See the inline
+   comment on the rule — that masked #1689's whole hung-job answer for
+   79 days.
 5. ``runtime_ceiling`` (#2274) — ``mechanism="scheduled_job"`` only.
    An ACTIVE RUN exists AND ``active_run.started_at < now() -
    RUNTIME_CEILING_S``. Rule 4's sibling, and the difference is the
@@ -201,15 +207,35 @@ def compute(
     if has_dispatched_queue_age:
         reasons.append("queue_stuck")
 
-    # Rule 4: mid_flight_stuck — only when running. Heartbeat is
+    # Rule 4: mid_flight_stuck. Heartbeat is
     # ``COALESCE(last_progress_at, started_at)``: producers that have
     # not yet emitted their first tick fall back to the run start.
     # Without the fallback, a worker that crashes before its first
-    # record_processed would silently never surface as stale.
-    if status == "running":
+    # record_processed would silently never surface as stale — and for
+    # ``mechanism="bootstrap"`` that fallback is the ONLY hung-run signal
+    # there is, because rule 5 excludes bootstrap by design.
+    #
+    # ⚠⚠ Gated on the ACTIVE RUN, not on ``status`` — the same predicate
+    # rule 5 uses, for the same reason, and it took a second occurrence to
+    # propagate. ``scheduled_adapter._status_for`` returns ``disabled``
+    # FIRST when the kill switch is on, BEFORE it looks at
+    # ``has_running_row``, so a ``status == "running"`` gate is
+    # unsatisfiable for a halted system. That is not a dark display chip:
+    # #1689 §Decision 4 chose THIS rule as its entire hung-job answer
+    # ("running_too_long: no new code") over a periodic reaper, so between
+    # 2026-06-28 (kill switch on, unattended loop) and the fix there was no
+    # hung-job coverage at all, and ``_WEDGE_STALE``'s ``mid_flight_stuck``
+    # membership — which exists precisely to keep this reason red under the
+    # switch — was dead code. The regression test #1689 asked for was
+    # written with ``status="running"`` and so passed throughout.
+    # ⚠ ``active_run_started_at is not None`` already means "a run is in
+    # flight": the adapters build ``active_run`` from the running row
+    # regardless of status, and every row without one reaches here with
+    # ``None``.
+    if active_run_started_at is not None:
         threshold_s = get_threshold(process_id)
         heartbeat = last_progress_at or active_run_started_at
-        if heartbeat is not None and heartbeat < now - _seconds(threshold_s):
+        if heartbeat < now - _seconds(threshold_s):
             reasons.append("mid_flight_stuck")
 
     # Rule 5: runtime_ceiling (#2274) — the run's AGE, and nothing else.

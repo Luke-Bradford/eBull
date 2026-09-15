@@ -6886,3 +6886,54 @@ side-session connects). The correction never travelled the ten lines to the next
   (`SyncHolderBanner`, with the reasoning inline at the call site);
   `frontend/src/pages/AdminPage.test.tsx::"distinguishes a not-yet heartbeat from an
   unrenderable one"`, which asserts the absence of the literal `last progress —`.
+
+### A guard whose gate is computed one layer above it can be structurally unsatisfiable, and its test will not notice
+
+- First seen in: #2274 (2026-09-15), `stale_detection` rule 4 `mid_flight_stuck`.
+- The rule read `if status == "running":` and was, by its own terms, correct.
+  `scheduled_adapter._status_for` returns `"disabled"` **first** when the kill switch is
+  on — before it looks at `has_running_row` — so on a halted system no row ever carries
+  `status="running"`. The kill switch has been continuously active since 2026-06-28
+  (`activated_by='monitor'`, *"autonomy loop unattended"*). **The gate was unsatisfiable
+  for 79 days.**
+- What it cost was not a display chip. `docs/specs/ops/2026-06-20-jobs-admin-display-honesty.md`
+  §Decision 4 **rejected a periodic reaper** and chose this rule as its entire hung-job
+  answer — *"running_too_long: no new code. A wedged non-heartbeating `running` row is
+  already caught"*. So the repo believed it had hung-job coverage and had none. The same
+  masking made `health_verdict._WEDGE_STALE`'s `mid_flight_stuck` membership — which
+  exists **specifically** to keep the reason red under the switch — dead code, and
+  falsified that module's documented ckpt-1 invariant (*"nothing genuine is hidden behind
+  the switch"*) for one of the two reasons it names.
+- ⚠⚠ **The regression test #1689 asked for was written with `status="running"`, so it
+  passed throughout.** A test that supplies the gate value itself can never discover that
+  production cannot produce it. This is the sibling of the revert-probe lesson: there, the
+  guard existed one layer above everything that tested it; here, the *input* is
+  manufactured one layer above and the test manufactures it too.
+- ⚠ The correction already existed in the same file. Rule 5 (`runtime_ceiling`) is gated
+  on `active_run_started_at is not None` and its comment spells out this exact reasoning,
+  crediting Codex ckpt-2 — and it was never propagated to its sibling twelve lines above.
+  A fix written as "this rule now does X" and not as "rules of this shape do X" does not
+  travel. (Same shape as `feedback-a-correction-in-one-module-does-not-propagate`.)
+- ⚠ A second-order trap rode along: because rule 4 could not fire under a halt, the
+  PAIRS it forms with reasons that *can* fire under a halt were unreachable, so two
+  consumers were wrong in ways no test could reach — `health_verdict`'s `disabled` branch
+  ranked the wedges by the CHIP-RENDER order (`_REASON_ORDER`) instead of the headline
+  order the non-disabled branch uses, and the FE appended the elapsed-since-heartbeat to
+  whichever reason owned the line, rendering `"queue stuck 7m"` with the heartbeat's age.
+  **Un-masking a dead signal makes its combinations live; enumerate them before shipping.**
+- Prevention: when a predicate tests a DERIVED enum (a status, a verdict, a mode), grep
+  the producer and enumerate which values it can actually return in the current
+  deployment posture — kill switch on, loop unattended, flags at their real settings.
+  If the tested value is unreachable, the guard is decoration. Self-review prompt:
+  *"can the thing that computes this value ever hand me the value I am testing for,
+  today?"* Prefer gating on the underlying FACT (`active_run is not None`) over the
+  derived label that summarises it.
+- Enforced in: this prevention log; `app/services/processes/stale_detection.py` (rule 4,
+  reasoning inline); `app/services/processes/health_verdict.py::_WEDGE_HEADLINE_ORDER`;
+  `tests/test_stale_detection.py::test_mid_flight_stuck_fires_while_halted_with_a_heartbeat`
+  + `..._on_the_started_at_fallback` + `..._for_halted_bootstrap_without_a_heartbeat`;
+  `tests/services/processes/test_health_verdict.py::test_halted_wedge_headlines_the_ceiling_not_no_progress`;
+  `frontend/src/components/admin/ProcessRow.test.tsx::"queue_stuck headline carries NO
+  elapsed-since-heartbeat suffix (#2274)"`;
+  `docs/wiki/runbooks/runbook-stuck-process-triage.md` (the chip table records the dark
+  window, so a triage note reasoning from the chip's absence in it is not trusted).

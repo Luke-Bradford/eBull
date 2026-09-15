@@ -412,9 +412,19 @@ def test_mid_flight_stuck_uses_per_process_threshold_override() -> None:
     assert "mid_flight_stuck" in reasons_over
 
 
-def test_mid_flight_stuck_does_not_fire_on_terminal_status() -> None:
-    """A failed/cancelled row with an old heartbeat is not stale —
-    the run terminated. mid_flight_stuck is gated on status='running'."""
+def test_mid_flight_stuck_does_not_fire_without_an_active_run() -> None:
+    """A terminated row is not stale — but the thing that makes it
+    terminated is the ABSENCE OF AN ACTIVE RUN, not its ``status``.
+
+    ⚠ #2274: this test used to assert the same intent via
+    ``status in ("failed", "cancelled", "ok")`` while passing a non-None
+    ``active_run_started_at``. That is a combination ``_status_for`` cannot
+    construct (with ``active_row`` present it returns only ``running`` or
+    ``disabled``), so the test froze a defensive contract on an unreachable
+    input — and it was the same ``status``-coupling that let the kill switch
+    mask rule 4 entirely. Rule 5 has always fired on that input. The
+    reachable contract is the one asserted here.
+    """
     for status in ("failed", "cancelled", "ok"):
         reasons = compute(
             mechanism="scheduled_job",
@@ -422,12 +432,117 @@ def test_mid_flight_stuck_does_not_fire_on_terminal_status() -> None:
             expected_fire_at=None,
             has_data_freshness_gap=False,
             has_dispatched_queue_age=False,
-            last_progress_at=_seconds_ago(DEFAULT_THRESHOLD_S * 10),
-            active_run_started_at=_seconds_ago(DEFAULT_THRESHOLD_S * 11),
+            last_progress_at=None,
+            active_run_started_at=None,
             process_id="some_job",
             now=NOW,
         )
         assert "mid_flight_stuck" not in reasons
+
+
+def test_mid_flight_stuck_fires_while_halted_with_a_heartbeat() -> None:
+    """#2274 REGRESSION — the kill switch must not mask a wedged run.
+
+    ``scheduled_adapter._status_for`` returns ``disabled`` BEFORE it looks at
+    ``has_running_row``, so every row on a halted system carries
+    ``status="disabled"`` even with a run in flight. Rule 4 was gated on
+    ``status == "running"`` and therefore could not fire from 2026-06-28
+    (kill switch on) onward — which silently removed #1689 §Decision 4's
+    entire hung-job answer, and made ``health_verdict._WEDGE_STALE``'s
+    ``mid_flight_stuck`` membership dead code.
+    """
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="disabled",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=_seconds_ago(DEFAULT_THRESHOLD_S + 60),
+        active_run_started_at=_seconds_ago(DEFAULT_THRESHOLD_S * 3),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert "mid_flight_stuck" in reasons
+
+
+def test_mid_flight_stuck_fires_while_halted_on_the_started_at_fallback() -> None:
+    """#1689's own case (no heartbeat at all), under the halt.
+
+    Of the 63 jobs rule 4 evaluates exactly one (``thesis_refresh``) reaches
+    ``report_progress``, so the fallback — not the heartbeat — is the path
+    almost every real wedge would take.
+    """
+    reasons = compute(
+        mechanism="scheduled_job",
+        status="disabled",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(DEFAULT_THRESHOLD_S + 30),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert "mid_flight_stuck" in reasons
+
+
+def test_mid_flight_stuck_fires_for_halted_bootstrap_without_a_heartbeat() -> None:
+    """Bootstrap has NO other hung-run signal — rule 5 excludes it by design
+    ("no cadence to bound a ceiling against"), and ``bootstrap_adapter``'s own
+    comment says only ``queue_stuck`` + ``mid_flight_stuck`` are reachable.
+    So the halt mask left a wedged install with nothing at all.
+    """
+    reasons = compute(
+        mechanism="bootstrap",
+        status="disabled",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(get_threshold("bootstrap") + 60),
+        process_id="bootstrap",
+        now=NOW,
+    )
+    assert reasons == ("mid_flight_stuck",)
+
+
+def test_mid_flight_stuck_fresh_heartbeat_still_mutes_while_halted() -> None:
+    """The fix must not repaint a HEALTHY halted board — a ticking producer
+    mutes rule 4 exactly as it does when running.
+    """
+    fresh = compute(
+        mechanism="scheduled_job",
+        status="disabled",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=_seconds_ago(10),
+        active_run_started_at=_seconds_ago(DEFAULT_THRESHOLD_S * 20),
+        process_id="some_job",
+        now=NOW,
+    )
+    assert "mid_flight_stuck" not in fresh
+
+
+def test_mid_flight_stuck_honours_per_process_override_while_halted() -> None:
+    """The 1800s override is consulted on the halted path too — a slow-tick
+    ingester quiet for 1000s is fine, 2000s is not.
+    """
+    pid = "sec_filing_documents_ingest"
+    assert get_threshold(pid) == 1800, "fixture assumes the shipped override"
+    for quiet_s, expected in ((1000, False), (2000, True)):
+        reasons = compute(
+            mechanism="scheduled_job",
+            status="disabled",
+            expected_fire_at=None,
+            has_data_freshness_gap=False,
+            has_dispatched_queue_age=False,
+            last_progress_at=_seconds_ago(quiet_s),
+            active_run_started_at=_seconds_ago(quiet_s + 60),
+            process_id=pid,
+            now=NOW,
+        )
+        assert ("mid_flight_stuck" in reasons) is expected, f"quiet_s={quiet_s}"
 
 
 def test_mid_flight_stuck_at_exact_threshold_does_not_fire() -> None:

@@ -341,6 +341,66 @@ describe("ProcessRow", () => {
     expect(reason.textContent).not.toMatch(/\d+m/);
   });
 
+  it("RUNNING queue_stuck + no-progress KEEPS the suffix — no-progress owns the line (#2274)", () => {
+    // Codex ckpt-2. The exclusion below must not be unconditional: on a
+    // running row `compute_verdict` headlines "running but no progress" even
+    // when queue_stuck is present (only the `disabled` branch ranks
+    // queue_stuck first), so the heartbeat age IS the duration the line is
+    // about, and suppressing it would strip a valid clock-advancing signal.
+    const sevenMinutesAgo = new Date(Date.now() - 7 * 60 * 1000).toISOString();
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "running",
+        stale_reasons: ["queue_stuck", "mid_flight_stuck"],
+        active_run: {
+          run_id: 99,
+          started_at: sevenMinutesAgo,
+          rows_processed_so_far: 42,
+          progress_units_done: null,
+          progress_units_total: null,
+          last_progress_at: sevenMinutesAgo,
+          is_cancelling: false,
+        },
+      }),
+    });
+    const reason = container.querySelector(
+      "[data-testid='verdict-reason']",
+    ) as HTMLElement;
+    expect(reason.textContent).toMatch(/\d+m/);
+  });
+
+  it("HALTED queue_stuck headline carries NO elapsed-since-heartbeat suffix (#2274)", () => {
+    // Same defect as the ceiling case above, missed the first time because the
+    // pair was UNREACHABLE: mid_flight_stuck could not fire while the kill
+    // switch was on (stale_detection rule 4 was gated on status === "running",
+    // which _status_for never returns for a halted system), whereas queue_stuck
+    // has no such gate. Once rule 4 was fixed the combination became reachable
+    // and the row read "queue stuck 7m" — where 7m is the HEARTBEAT age, not
+    // the age of the stuck dispatch. queue_stuck outranks mid_flight_stuck in
+    // health_verdict._WEDGE_HEADLINE_ORDER, so it owns the line.
+    const sevenMinutesAgo = new Date(Date.now() - 7 * 60 * 1000).toISOString();
+    const fortyMinutesAgo = new Date(Date.now() - 40 * 60 * 1000).toISOString();
+    const { container } = renderRow({
+      row: makeProcessRow({
+        status: "disabled",
+        stale_reasons: ["queue_stuck", "mid_flight_stuck"],
+        active_run: {
+          run_id: 99,
+          started_at: fortyMinutesAgo,
+          rows_processed_so_far: 42,
+          progress_units_done: null,
+          progress_units_total: null,
+          last_progress_at: sevenMinutesAgo,
+          is_cancelling: false,
+        },
+      }),
+    });
+    const reason = container.querySelector(
+      "[data-testid='verdict-reason']",
+    ) as HTMLElement;
+    expect(reason.textContent).not.toMatch(/\d+m/);
+  });
+
   it("attention verdict paints a red left border", () => {
     const { container } = renderRow({
       row: makeProcessRow({ status: "ok", stale_reasons: ["watermark_gap"] }),
