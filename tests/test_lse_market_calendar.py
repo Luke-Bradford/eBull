@@ -196,6 +196,31 @@ def test_a_closed_day_is_closed_at_every_hour() -> None:
     assert lse_session_is_open(boxing_substitute) is False
 
 
+def test_a_suppression_that_matches_nothing_is_rejected() -> None:
+    """The import-time integrity check, exercised -- otherwise it is a guard nobody
+    has ever seen fire.
+
+    ⚠ A typo'd suppression fails SILENTLY without it: the date it names is not
+    produced by the rules, so removing it does nothing, and the holiday it was
+    meant to reopen stays closed with no signal at all.
+
+    ⚠ It only recomputes the years the suppressions fall in, which is equivalent
+    because ``_scheduled_closure_names(Y)`` keeps only year-``Y`` dates. This
+    asserts the narrowing still catches a bad entry, including one in a year no
+    other suppression touches.
+    """
+    from app.services import lse_market_calendar as module
+
+    for bad in (date(2020, 5, 5), date(2024, 7, 4)):  # neither is an E&W bank holiday
+        original = module._RULE_SUPPRESSIONS
+        module._RULE_SUPPRESSIONS = {**original, bad: "typo"}  # type: ignore[misc]
+        try:
+            with pytest.raises(AssertionError, match="suppression matches no rule-derived date"):
+                module._assert_override_integrity()
+        finally:
+            module._RULE_SUPPRESSIONS = original  # type: ignore[misc]
+
+
 def test_the_reasons_map_is_total_over_the_special_dates() -> None:
     """A special date with no reason renders as an unexplained refusal, and a reason
     for a date that is not special is the residue of a suppression applied too late.
