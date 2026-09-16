@@ -1,7 +1,10 @@
 """The venue-support allow-list is shared by the core submission and selection
 paths (#2312 / #2603); these pin the direction it fails in."""
 
+import ast
+import inspect
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -104,3 +107,32 @@ def test_a_naive_instant_raises_rather_than_being_read_as_host_local_time() -> N
     for call in (venue_session_is_open, venue_local_now):
         with pytest.raises(ValueError, match="timezone-aware"):
             call("us_equity", datetime(2026, 9, 16, 12, 0))
+
+
+def test_admission_cannot_be_widened_on_the_eligibility_proof() -> None:
+    """⚠⚠ The specific wrong turn #2312's own research comment recommended.
+
+    Admitting a calendar-only venue on a tighter freshness bound over
+    ``strategy_core_eligibility_proofs.allow_open_position`` has no evidence behind
+    it: **26 of 26** ``uk_equity`` proofs taken while this module's own calendar
+    says the LSE was CLOSED read ``True``, and market-closed is one of the four
+    causes eToro documents that bit as conflating. Tightening a bound on a value
+    that does not respond to the one observable cause widens admission while
+    refusing nothing new. ⚠ The claim is "no demonstrated halt sensitivity", not
+    "cannot detect halts" -- no halt exists in our corpus to measure against.
+
+    No unit test can observe a measurement, so what is pinned here is the STRUCTURE
+    that implementing it would have to break: the admission decision is a pure
+    function of venue capability and reaches no account-specific evidence at all.
+    An ``import`` of the eligibility module into this one is the first line of that
+    change, and it fails here.
+    """
+    tree = ast.parse(Path(inspect.getfile(session_support_reason)).read_text(encoding="utf-8"))
+    imported = {
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
+    } | {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+    assert not any("eligibility" in module for module in imported), (
+        f"market_session_support must not reach account-specific eligibility evidence; imports: {sorted(imported)}"
+    )
+    # …and the set it produces is unmoved, which is the operator-visible half.
+    assert SESSION_SUPPORTED_ASSET_CLASSES == frozenset({"us_equity"})
