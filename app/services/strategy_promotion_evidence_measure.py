@@ -36,6 +36,7 @@ from typing import Final, TypedDict
 import numpy as np
 
 from app.services.block_bootstrap import BootstrapResult, block_bootstrap_expectancy, cluster_by_date
+from app.services.strategy_entry_liquidity import EntryLiquidityMeasurement
 
 #: Frozen because the estimators below are choices, and a stored record must be
 #: attributable to the rule that produced it. ⚠ Bump on a RULE change, never on
@@ -265,6 +266,12 @@ class LedgerMeasurements:
     #: legs all predate the horizon) or SHORTER than the horizon; the contract's
     #: floor of two is a gate, not a measurement, and is not enforced here.
     recent_years: tuple[RecentYearMeasurement, ...]
+    #: #3104 slice 7a — the per-leg entry-liquidity observation, summarised.
+    #: ⚠ ``None`` only where the caller measured none at all (a hand-built
+    #: harness ledger); a production book always carries one, because
+    #: withholding is expressed INSIDE the measurement so that
+    #: ``measured + excluded == realised`` survives it.
+    entry_liquidity: EntryLiquidityMeasurement | None = None
 
     def __post_init__(self) -> None:
         years = [item.year for item in self.recent_years]
@@ -430,7 +437,13 @@ def _recent_years(
     return tuple(measured)
 
 
-def measure_ledger(ledger: RealisedLedger, *, root_seed: int, anchor_year: int) -> LedgerMeasurements:
+def measure_ledger(
+    ledger: RealisedLedger,
+    *,
+    root_seed: int,
+    anchor_year: int,
+    entry_liquidity: EntryLiquidityMeasurement | None = None,
+) -> LedgerMeasurements:
     """Measure one realised ledger. Pure; reads no database.
 
     ``anchor_year`` is the year of the RESULT'S OWN ``window_end`` — the
@@ -440,6 +453,14 @@ def measure_ledger(ledger: RealisedLedger, *, root_seed: int, anchor_year: int) 
 
     ``root_seed`` is the run's ``BACKTEST_BOOTSTRAP_SEED``, the same root
     ``build_regime_cohorts`` already takes.
+
+    ⚠ ``entry_liquidity`` (#3104 slice 7a) is built by the CALLER, from the
+    book's liquidity columns, and passed through rather than derived here: it is
+    NOT positionally parallel to the realised columns — a leg whose causal
+    window fails is counted rather than measured — and forcing it into
+    ``RealisedLedger`` would break that object's parallel-column invariant. ⚠ It
+    is a diagnostic and produces no ``capacity_usd``; see
+    ``strategy_entry_liquidity``'s header for the four blockers on that field.
     """
     returns = np.asarray(ledger.net_return_pct, dtype=float)
     count = int(returns.size)
@@ -455,6 +476,7 @@ def measure_ledger(ledger: RealisedLedger, *, root_seed: int, anchor_year: int) 
     name_counts = Counter(ledger.name_key)
 
     return LedgerMeasurements(
+        entry_liquidity=entry_liquidity,
         rule_version=LEDGER_MEASUREMENT_RULE_VERSION,
         outcome_count=count,
         profitable_outcome_count=int(np.count_nonzero(returns > 0.0)),
