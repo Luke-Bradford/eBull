@@ -8,6 +8,7 @@ to account/instrument risk but can never acquire strategy ownership here.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -101,6 +102,9 @@ COST_BASIS_BROKER_PREFLIGHT_VALUE = "broker_preflight_value"
 #: ``tests/test_2598_preflight_cost_basis.py`` fails when either side moves alone.
 COST_BASES: frozenset[str] = frozenset({COST_BASIS_BROKER_PREFLIGHT_AMOUNT, COST_BASIS_BROKER_PREFLIGHT_VALUE})
 _ALLOCATOR_ADVISORY_LOCK = PAPER_ALLOCATOR_ADVISORY_LOCK
+
+
+logger = logging.getLogger(__name__)
 
 
 class StrategyPaperExecutionError(StrategyControlError):
@@ -905,7 +909,32 @@ def _risk_and_amount(
                 core_instrument_id=None if core_mandate is None else core_mandate.core_instrument_id,
             )
     except EngineCapitalObservationError as exc:
-        raise StrategyPaperExecutionError("shared assigned-capital observation is incomplete") from exc
+        # ⚠ REFUSED, not raised (#2979 half b).  `StrategyPaperExecutionError` has no
+        # handler anywhere in `app/` and `execute_fired_paper_signal` runs in a bare
+        # loop (`strategy_paper_runtime.py`), so raising here aborted the ENTIRE paper
+        # cycle -- reconciliation, position management and every other signal -- for a
+        # fact about the shared pot.  One wedged core ownership row (#2979) therefore
+        # took the alpha arm out too, on that tick and every later one.
+        #
+        # This is not a weakening.  The refused condition is a property of the shared
+        # population, identical for every signal in the cycle, so the remaining signals
+        # reach the same refusal and are rejected as well; nothing can be funded while
+        # the reader refuses.  What changes is that the refusal is now DURABLE -- the
+        # `str` return routes to `_persist_rejection`, which writes
+        # `strategy_funding_decisions` and `strategy_entry_preflights` -- instead of
+        # being lost in a job traceback.
+        # ⚠ Only the CODE reaches `_persist_rejection` -- the `str` return channel it
+        # shares with `account_risk_stale` and `sandbox_exceeded` carries no detail --
+        # and the message is the half that names the position or trade id.  Logged so
+        # the identifying half is not dropped.  Widening that channel to carry a detail
+        # is a change to every refusal in this function and is not bundled here.
+        logger.warning(
+            "paper signal %s: shared assigned-capital observation refused as %s (%s)",
+            intent.signal_id,
+            exc.reason_code,
+            exc,
+        )
+        return exc.reason_code
     if not usage.headroom.within_bound:
         return SANDBOX_EXCEEDED
     # A just-accepted strategy order may not yet be visible in the provider's

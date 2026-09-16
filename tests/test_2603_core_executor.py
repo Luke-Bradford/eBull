@@ -23,11 +23,14 @@ from app.services.broker_credentials import CredentialInUse, revoke_credential
 from app.services.strategy_core_executor import (
     CoreExecutionResult,
     CoreResumeAuthority,
+    StrategyCoreExecutionError,
     _observe_core_portfolio_drawdown,
     core_order_shape_for,
     execute_core_rebalance,
     resume_core_submission,
 )
+from app.services.strategy_core_sleeve import CoreSleeveObservationError
+from app.services.strategy_engine_capital import EngineCapitalObservationError
 
 OPERATOR = UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7")
 API_CREDENTIAL = UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8")
@@ -132,6 +135,8 @@ def _run(
     clock: Callable[[], datetime] | None = None,
     binding_proof_id: int = 7,
     drawdown_refusal: str | None = None,
+    authority_error: Exception | None = None,
+    usage_error: Exception | None = None,
 ) -> tuple[CoreExecutionResult, list[str]]:
     events: list[str] = []
     conn = FakeConn(events)
@@ -173,9 +178,19 @@ def _run(
 
     with (
         patch("app.services.strategy_core_executor.load_core_mandate", return_value=mandate),
-        patch("app.services.strategy_core_executor.load_engine_capital_authority", return_value=capital_authority),
+        # `side_effect=None` is the default, so one patch covers both the healthy and
+        # the refusing case without a conditional kwargs dict.
+        patch(
+            "app.services.strategy_core_executor.load_engine_capital_authority",
+            return_value=capital_authority,
+            side_effect=authority_error,
+        ),
         patch("app.services.strategy_core_executor.load_paper_pool", return_value=paper_pool),
-        patch("app.services.strategy_core_executor.resolve_engine_capital_usage", return_value=capital_usage),
+        patch(
+            "app.services.strategy_core_executor.resolve_engine_capital_usage",
+            return_value=capital_usage,
+            side_effect=usage_error,
+        ),
         patch("app.services.strategy_core_executor.require_selected_core_instrument"),
         patch("app.services.strategy_core_executor.require_core_eligibility", side_effect=[proof, binding_proof]),
         patch("app.services.strategy_core_executor.observe_core_sleeve", return_value=object()),
@@ -555,3 +570,56 @@ def test_resume_lookup_miss_never_reaches_fresh_safety_or_resubmission() -> None
     assert result.state == "submission_uncertain"
     assert result.reason_code == "core_order_reconciliation_not_found"
     broker.place_demo_core_order.assert_not_called()
+
+
+# --- #2979 half b: the capital reader's refusal is a verdict, not an exception ---
+
+
+def _capital_refusal(code: str = "engine_capital_ownership_unwitnessed") -> EngineCapitalObservationError:
+    return EngineCapitalObservationError("active core position 4242 is absent from broker snapshot", code)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("stage", ["authority", "usage"])
+def test_a_capital_observation_refusal_returns_a_verdict_rather_than_raising(stage: str) -> None:
+    """#2979 half b, at both steady-state sites.
+
+    An inconsistent shared population is true on this cycle and every later one, so the
+    caller gets a code it can act on instead of a 409 whose only text is the outer
+    sentence.  Still fail-closed: no intent, no order, no broker call.
+    """
+    error = _capital_refusal()
+    kwargs = {"authority_error": error} if stage == "authority" else {"usage_error": error}
+    result, events = _run(AssertionError("must not submit"), **kwargs)  # type: ignore[arg-type]
+
+    assert result.state == "refused"
+    assert result.reason_code == "engine_capital_ownership_unwitnessed"
+    assert result.intent_id is None
+    assert result.trade_id is None
+    assert result.order_id is None
+    # Nothing durable was created and nothing reached the broker.
+    assert "broker_submit" not in events
+    assert "persist_order" not in events
+    assert "persist_reconciliation" not in events
+    # The lock is entered and released either way.
+    assert events[0] == "lock_enter"
+    assert events[-1] == "lock_exit"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("the account read failed"),
+        CoreSleeveObservationError("snapshot observed_at must be timezone-aware"),
+    ],
+    ids=["broker_read", "sleeve_drift"],
+)
+def test_the_snapshot_block_still_raises_for_everything_else(error: Exception) -> None:
+    """The new arm must PRECEDE the blanket one without absorbing it.
+
+    A failed broker read is an execution fault, and ``CoreSleeveObservationError`` is
+    input drift in one payload -- its own docstring puts that on the raising side.  If
+    the new arm were written as a bare ``except Exception`` both would silently become
+    refusals, which is the failure this test exists to catch.
+    """
+    with pytest.raises(StrategyCoreExecutionError, match="could not describe the core sleeve"):
+        _run(AssertionError("must not submit"), usage_error=error)

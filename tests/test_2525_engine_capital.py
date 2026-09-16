@@ -97,20 +97,57 @@ def test_only_exact_owned_positions_enter_the_shared_boundary() -> None:
 
 
 @pytest.mark.parametrize(
-    ("rows", "instrument_id", "message"),
+    ("rows", "instrument_id", "message", "code"),
     [
-        ((), 42, "absent"),
-        ((position(11, instrument_id=43),), 42, "another instrument"),
-        ((position(11, is_buy=False),), 42, "short"),
-        ((position(11, partial=True),), 42, "partially altered"),
-        ((position(11),), None, "no configured instrument"),
+        ((), 42, "absent", "engine_capital_ownership_unwitnessed"),
+        ((position(11, instrument_id=43),), 42, "another instrument", "engine_capital_ownership_mismatched"),
+        ((position(11, is_buy=False),), 42, "short", "engine_capital_ownership_mismatched"),
+        ((position(11, partial=True),), 42, "partially altered", "engine_capital_ownership_mismatched"),
+        (
+            (position(11, market_value="-1"),),
+            42,
+            "market value is invalid",
+            "engine_capital_ownership_mismatched",
+        ),
+        (
+            (position(11, amount="-5"),),
+            42,
+            "outside safe bounds",
+            "engine_capital_ownership_mismatched",
+        ),
+        ((position(11), position(11)), 42, "repeats a direct position id", "engine_capital_snapshot_unusable"),
+        ((position(11),), None, "no configured instrument", "engine_capital_snapshot_unusable"),
     ],
 )
 def test_an_inexact_active_core_population_refuses(
-    rows: tuple[BrokerDirectPositionInvestment, ...], instrument_id: int | None, message: str
+    rows: tuple[BrokerDirectPositionInvestment, ...], instrument_id: int | None, message: str, code: str
 ) -> None:
-    with pytest.raises(EngineCapitalObservationError, match=message):
+    """Each refusal keeps its identifying message AND carries a machine-readable code.
+
+    The message is asserted as well as the code because the code is deliberately a
+    bucket: only the message names the position id, and a caller that reports the code
+    alone (``strategy_paper_executor``) logs the message for exactly that reason.
+
+    ⚠ A malformed BROKER amount buckets as ``ownership_mismatched``, not as a population
+    problem.  ``_money`` validates our stored amounts too, so the bucket is a parameter
+    at the call site rather than a property of the helper.
+    """
+    with pytest.raises(EngineCapitalObservationError, match=message) as raised:
         resolve_engine_capital_usage(authority(), snapshot(*rows), core_instrument_id=instrument_id)
+    assert raised.value.reason_code == code
+
+
+def test_the_refusal_code_does_not_displace_the_message() -> None:
+    """``str(exc)`` is unchanged by the added argument.
+
+    Four callers surface or log it (``read_core_sleeve``'s blocker detail among them),
+    so folding the code into ``RuntimeError.args`` would change operator-visible text
+    everywhere at once.
+    """
+    error = EngineCapitalObservationError("a message", "engine_capital_population_incomplete")
+    assert str(error) == "a message"
+    assert error.args == ("a message",)
+    assert error.reason_code == "engine_capital_population_incomplete"
 
 
 def test_no_core_positions_need_no_core_mandate() -> None:
@@ -121,12 +158,13 @@ def test_no_core_positions_need_no_core_mandate() -> None:
 
 @pytest.mark.parametrize("account_currency_id", [None, 2])
 def test_shared_boundary_refuses_a_snapshot_not_observed_as_usd(account_currency_id: int | None) -> None:
-    with pytest.raises(EngineCapitalObservationError, match="not observed as USD"):
+    with pytest.raises(EngineCapitalObservationError, match="not observed as USD") as raised:
         resolve_engine_capital_usage(
             authority(ids=()),
             snapshot(account_currency_id=account_currency_id),
             core_instrument_id=None,
         )
+    assert raised.value.reason_code == "engine_capital_snapshot_unusable"
 
 
 def test_database_authority_begins_at_the_first_assigned_pool_event(
@@ -202,8 +240,9 @@ def test_a_pending_allocation_before_the_assigned_pot_refuses_instead_of_disappe
         reason="assign the engine pot",
     )
 
-    with pytest.raises(EngineCapitalObservationError, match="predates the assigned pot"):
+    with pytest.raises(EngineCapitalObservationError, match="predates the assigned pot") as raised:
         load_engine_capital_authority(conn)
+    assert raised.value.reason_code == "engine_capital_population_incomplete"
 
 
 def test_a_trade_backed_by_a_non_actionable_core_intent_refuses_instead_of_disappearing(
@@ -247,5 +286,6 @@ def test_a_trade_backed_by_a_non_actionable_core_intent_refuses_instead_of_disap
         (intent.core_rebalance_intent_id,),
     )
 
-    with pytest.raises(EngineCapitalObservationError, match="entry authority is incomplete"):
+    with pytest.raises(EngineCapitalObservationError, match="entry authority is incomplete") as raised:
         load_engine_capital_authority(conn)
+    assert raised.value.reason_code == "engine_capital_population_incomplete"
