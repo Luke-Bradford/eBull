@@ -9,6 +9,8 @@ same reason -- it exercises the old import surface unchanged.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -297,22 +299,16 @@ def test_verdict_mode_defaults_only_by_schema_identity() -> None:
 
 
 def test_a_declaration_stating_a_rule_the_code_does_not_implement_is_refused(tmp_path) -> None:
-    import json
-
     payload = _declaration()
     payload["fx_rule"] = "ignore the conversion rate"
     path = tmp_path / "tampered.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    import hashlib
-
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     with pytest.raises(RuntimeError, match="does not implement"):
         load_declaration(path, digest)
 
 
 def test_an_empty_candidate_set_is_refused_rather_than_passing_vacuously(tmp_path) -> None:
-    import hashlib
-    import json
 
     payload = _declaration()
     payload["candidate_ids"] = []
