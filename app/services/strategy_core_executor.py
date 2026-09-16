@@ -585,13 +585,13 @@ def execute_core_rebalance(
             # docstring puts on the raising side).  Only the capital join's refusal --
             # steady state, unchanged by a retry -- becomes a verdict.
             #
-            # ⚠⚠ Reachability, so nobody reads more into this than it does: in the
-            # #2979 wedge `core_active_position_ids` is non-empty, so `read_core_sleeve`
-            # leaves `capital_ready=False` and the operator's Rebalance button is
-            # DISABLED (`app/api/strategies.py`, `StrategyPortfolioLens.tsx`).  This
-            # verdict is reachable today only by calling the endpoint directly.  The
-            # caller that reaches the same refusal on every unattended tick is the paper
-            # cycle, which is fixed in `strategy_paper_executor._risk_and_amount`.
+            # ⚠ Reachability.  When this arm was written the operator's Rebalance button
+            # was DISABLED whenever `core_active_position_ids` was non-empty, so this
+            # verdict was reachable only by calling the endpoint directly.  #3123 fixed
+            # that (`read_core_sleeve.capital_permits_rebalance`), so the attended path
+            # now reaches it.  The caller that reaches the same refusal on every
+            # UNATTENDED tick is still the paper cycle
+            # (`strategy_paper_executor._risk_and_amount`).
             return _capital_refusal_result(exc)
         except Exception as exc:
             raise StrategyCoreExecutionError("the broker account snapshot could not describe the core sleeve") from exc

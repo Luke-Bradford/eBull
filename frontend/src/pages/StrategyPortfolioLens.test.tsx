@@ -590,6 +590,62 @@ describe("StrategyPortfolioLens", () => {
     expect(status).not.toHaveTextContent("remains inside its band");
   });
 
+  it("does not claim the sleeve is inside its band when the floor is what stopped the trade", async () => {
+    // #3123. `below_min_rebalance_amount` is `held` and means the OPPOSITE of the band
+    // sentence: the sleeve is OUTSIDE the band and the gap is under the mandate's
+    // minimum, so the floor wins and the breach is reported rather than traded through.
+    // Reachable because #3123 re-enabled the affordance while the sleeve holds a
+    // position, which is the state a small drift lives in.
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    vi.spyOn(strategiesApi, "rebalanceCoreSleeve").mockResolvedValue({
+      state: "held",
+      reason_code: "below_min_rebalance_amount",
+      intent_id: 11,
+      trade_id: null,
+      order_id: null,
+      amount: "0",
+      submission_policy_version: "core-submission-v1",
+      preflight_policy_version: "core-preflight-v2",
+      broker_preflight_policy_version: "core-broker-preflight-v2",
+    });
+    renderLens();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Rebalance demo now" }));
+    await userEvent.click(screen.getByRole("button", { name: "Confirm demo rebalance" }));
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent("below the mandate's minimum rebalance amount");
+    expect(status).not.toHaveTextContent("remains inside its band");
+  });
+
+  it("does not blame the operator's mandate when it was the BROKER minimum that bound", async () => {
+    // Codex checkpoint 2 on #3123. `assess_core_broker_preflight` emits the SAME
+    // `below_min_rebalance_amount` code as a `refused`, where the broker's floor is what
+    // bound. Lowering `min_rebalance_amount` cannot resolve that, so the mandate wording
+    // must not be reachable from a refusal. The response carries no `floor_source`, so
+    // the honest fallback is the generic refusal line.
+    vi.mocked(strategiesApi.fetchCoreSleeve).mockResolvedValue(CORE_READY as never);
+    vi.spyOn(strategiesApi, "rebalanceCoreSleeve").mockResolvedValue({
+      state: "refused",
+      reason_code: "below_min_rebalance_amount",
+      intent_id: 11,
+      trade_id: null,
+      order_id: null,
+      amount: "0",
+      submission_policy_version: "core-submission-v1",
+      preflight_policy_version: "core-preflight-v2",
+      broker_preflight_policy_version: "core-broker-preflight-v2",
+    });
+    renderLens();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Rebalance demo now" }));
+    await userEvent.click(screen.getByRole("button", { name: "Confirm demo rebalance" }));
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent("Rebalance refused: below_min_rebalance_amount");
+    expect(status).not.toHaveTextContent("mandate's minimum");
+  });
+
   it("states what is blocking as facts, and offers the control for the one that has one", async () => {
     renderLens();
     const blocking = await screen.findByLabelText("Blocking conditions");
