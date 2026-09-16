@@ -15,6 +15,7 @@ from app.services.data_freshness import (
     record_poll_outcome,
 )
 from app.services.sec_manifest import get_manifest_row
+from app.services.watermarks import get_watermark, set_watermark
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 
 pytestmark = pytest.mark.integration
@@ -630,3 +631,103 @@ class TestCikSelectorInvariants:
         assert [len({r.cik for r in b}) for b in batches] == [1] * len(batches)
         assert sum(len(b) for b in batches) == 3
         assert len(batches) == 2
+
+
+def _fake_get_with_meta(status: int, payload: dict | bytes, last_modified: str | None, seen: list[dict]):
+    body = json.dumps(payload).encode("utf-8") if isinstance(payload, dict) else payload
+
+    def _impl(url: str, headers: dict[str, str]) -> tuple[int, bytes, str | None]:
+        seen.append(dict(headers))
+        return status, body, last_modified
+
+    return _impl
+
+
+class TestConditionalGetGuards:
+    """#3109 — the two ways a response could certify a subject nobody read.
+
+    ⚠ This whole path is inert in production: #3110 measured that
+    ``data.sec.gov`` returns no ``Last-Modified`` on these responses, and no
+    validator has ever been stored. It is kept correct because correctness
+    does not depend on whether it fires.
+    """
+
+    def test_unsolicited_304_is_an_error_not_a_success(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """No ``If-Modified-Since`` was sent, so a 304 cannot mean "unchanged
+        since your watermark" — there was no watermark. Treating it as success
+        would mark every batched subject ``current`` off a payload nobody read.
+        """
+        _seed_aapl(ebull_test_conn)
+        _make_due(ebull_test_conn, "sec_8k", cik="0000320193", instrument_id=1701, subject_id="1701")
+
+        seen: list[dict] = []
+        stats = run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_fake_get_with_meta(304, b"", None, seen),
+        )
+        ebull_test_conn.commit()
+
+        assert seen and "If-Modified-Since" not in seen[0], "test setup sent a conditional request"
+        assert stats.poll_errors == 1
+        row = get_freshness_row(ebull_test_conn, subject_type="issuer", subject_id="1701", source="sec_8k")
+        assert row is not None
+        assert row.state == "error", "an unsolicited 304 certified the subject as current"
+
+    def test_a_404_does_not_persist_a_validator(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The validator write is gated on "every discovered filing was
+        recorded", which on a 404 is trivially true at ``0 == 0``. Carrying the
+        header off a "no such CIK" response let it install a validator that the
+        next tick would send as ``If-Modified-Since``.
+        """
+        _seed_aapl(ebull_test_conn)
+        _make_due(ebull_test_conn, "sec_8k", cik="0000320193", instrument_id=1701, subject_id="1701")
+
+        seen: list[dict] = []
+        run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_fake_get_with_meta(404, b"", "Wed, 01 Apr 2026 00:00:00 GMT", seen),
+        )
+        ebull_test_conn.commit()
+
+        stored = get_watermark(ebull_test_conn, "sec.last_modified.per_cik_poll", "0000320193:sec_8k")
+        assert stored is None or stored.watermark is None, f"a 404 stored a validator: {stored}"
+
+    def test_a_multi_subject_batch_never_sends_if_modified_since(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """⚠⚠ The ``<cik>:<source>`` watermark key is SHARED by sibling
+        subjects (963 duplicate ``(cik, source)`` pairs measured 2026-09-16),
+        so no batch-level agreement check can establish that each batched
+        subject was processed at that validator. Only a single-subject batch —
+        which is byte-identical to the pre-batching probe — may send one.
+        """
+        _seed_aapl(ebull_test_conn)
+        _make_due(ebull_test_conn, "sec_8k", cik="0000320193", instrument_id=1701, subject_id="1701")
+        _make_due(ebull_test_conn, "sec_form4", cik="0000320193", instrument_id=1701, subject_id="1701")
+        # Plant a validator that a single-subject batch WOULD have sent.
+        with ebull_test_conn.transaction():
+            set_watermark(
+                ebull_test_conn,
+                source="sec.last_modified.per_cik_poll",
+                key="0000320193:sec_8k",
+                watermark="Wed, 01 Apr 2026 00:00:00 GMT",
+                watermark_at=None,
+            )
+        ebull_test_conn.commit()
+
+        seen: list[dict] = []
+        run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_fake_get_with_meta(200, _aapl_mixed_source_recent(), None, seen),
+        )
+        ebull_test_conn.commit()
+
+        assert len(seen) == 1, "batching collapsed or split unexpectedly"
+        assert "If-Modified-Since" not in seen[0], "a multi-subject batch sent a shared-key validator"
