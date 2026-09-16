@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -86,6 +87,7 @@ from app.services.operators import (
 from app.services.quote_stream import QuoteBus
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import LayerState
+from app.system import served_build
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
@@ -107,6 +109,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # #3119 — FIRST, before migrations or any other startup work. The 2026-09-16
+    # wedge had no detector for either half (stale code, then no responses), and
+    # a startup that hangs is one of the shapes it could have been. Registering
+    # after the expensive work would leave exactly that shape uncovered.
+    # Skipped under pytest: every TestClient drives this lifespan, and the
+    # sidecar names a single serving worker — a test process must not overwrite
+    # the real one's pid. The unit tests call ``activate`` directly instead.
+    if "pytest" not in sys.modules:
+        await asyncio.to_thread(served_build.activate)
+
     logger.info("Running pending migrations...")
     applied = await asyncio.to_thread(run_migrations)
     if applied:
@@ -643,6 +655,45 @@ def health(request: Request) -> JSONResponse:
         },
         status_code=503 if needs_attention else 200,
     )
+
+
+@app.get("/health/live")
+async def health_live() -> dict:
+    """Event-loop liveness, with no dependency of any kind (#3119).
+
+    ``async def`` with no ``Depends``, no DB and no threadpool hop, so it
+    answers iff the event loop is still scheduling. Every other probe on this
+    app — ``/health`` and ``/auth/login`` included — is ``def``, and therefore
+    dispatched through the AnyIO worker threadpool. On 2026-09-16 both of those
+    hung and there was no way to tell a blocked loop from a starved sync path.
+
+    Pairs with ``/health`` as a two-bit discriminator:
+
+    ======================  ==========  ==================================
+    ``/health/live``        ``/health``  reading
+    ======================  ==========  ==================================
+    answers                 answers      both paths live (``/health`` may
+                                         legitimately answer 503)
+    answers                 hangs        loop alive, sync path not completing
+    hangs                   hangs        loop blocked, OR no live worker — the
+                                         reload parent owns the listening
+                                         socket, so the kernel backlog accepts
+                                         connections either way
+    hangs                   answers      the probes straddled a restart;
+                                         re-probe
+    ======================  ==========  ==================================
+
+    ⚠ This narrows the candidate set; it does not name a cause. Row 2 also fits
+    ``/health``'s own DB work being slow, and row 3 also fits startup, drain or
+    process suspension. The ``SIGUSR1`` thread dump discriminates within a row
+    (``app/system/served_build.py``); this endpoint only says which one.
+
+    Returns liveness and uptime ONLY. Build identity (commit, pid, start time)
+    goes to the on-disk sidecar instead — a wedged worker cannot answer HTTP
+    about its own wedge anyway, and publishing that here would widen the same
+    fingerprint surface ``health_db`` below was narrowed to close (#240).
+    """
+    return {"alive": True, "uptime_s": round(served_build.uptime_s(), 3)}
 
 
 @app.get("/health/db")
