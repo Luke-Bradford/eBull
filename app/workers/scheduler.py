@@ -36,8 +36,6 @@ import psycopg.sql
 from psycopg.types.json import Jsonb
 
 if TYPE_CHECKING:
-    import psycopg
-
     from app.services.job_telemetry import JobTelemetryAggregator
     from app.services.reference_data import ReferenceRefreshReport
     from app.services.strategy_halts import HaltSnapshot
@@ -8023,18 +8021,23 @@ def _flush_manifest_worker_telemetry(
     inherits the job's bound (``job_statement_timeout_ms``, 30 minutes for this
     job), so a row-lock wait on the telemetry write could park an otherwise
     FINISHED tick for half an hour — the tick's work is already committed at
-    this point. Same reasoning, and the same 3s, as ``JobRunHeartbeat``'s writer
-    (``app/services/job_heartbeat.py``): a reporting write must never outlast
-    the thing it reports on. ``SET LOCAL`` reverts with the surrounding
-    transaction, which is exactly what we want here.
+    this point. The bound is ``job_heartbeat.REPORTING_WRITE_TIMEOUT_MS``, the
+    same constant ``JobRunHeartbeat``'s writer uses, because it encodes the same
+    rule: a write that REPORTS on a job body must never outlast it. ``SET
+    LOCAL`` reverts with the surrounding transaction, which is what we want.
     """
+    from app.services.job_heartbeat import REPORTING_WRITE_TIMEOUT_MS
     from app.services.job_telemetry import flush_to_job_run
 
     if not run_id:
         return
     try:
         conn.rollback()
-        conn.execute("SET LOCAL statement_timeout = 3000")
+        conn.execute(
+            psycopg.sql.SQL("SET LOCAL statement_timeout = {ms}").format(
+                ms=psycopg.sql.Literal(REPORTING_WRITE_TIMEOUT_MS)
+            )
+        )
         flush_to_job_run(conn, run_id=run_id, agg=agg)
         conn.commit()
     except Exception:
