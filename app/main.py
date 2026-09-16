@@ -425,6 +425,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
+    # #3119 — settle the background sidecar write. It is normally finished long
+    # before shutdown, but a slow git leaves a pending task at exit, which
+    # asyncio reports as "Task was destroyed but it is pending" — a scary line
+    # in the logs of the one process whose logs are being read precisely
+    # because something is wrong with it (review WARNING round 2 on PR #3133).
+    #
+    # Bounded and then CANCELLED rather than awaited to completion: the sidecar
+    # is a diagnostic, and nothing downstream waits on it, so it must never be
+    # able to hold a shutdown open. Doing so would also make this the second
+    # unbounded wait in a teardown path, which is close to the shape the ticket
+    # is about.
+    served_build_task = getattr(app.state, "served_build_task", None)
+    if served_build_task is not None:
+        try:
+            await asyncio.wait_for(asyncio.shield(served_build_task), timeout=5.0)
+        except TimeoutError, asyncio.CancelledError:
+            served_build_task.cancel()
+            logger.info("served_build: sidecar write did not settle within 5s — cancelled at teardown")
+        except Exception:
+            logger.warning("served_build: sidecar write failed", exc_info=True)
+
     if ws_subscriber is not None:
         try:
             # Bound the WS stop. ``EtoroWebSocketSubscriber.stop()``

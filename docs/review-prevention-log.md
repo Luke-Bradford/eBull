@@ -7315,3 +7315,41 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - Verification step: `rg -n "download_bulk_archives\(" app/ scripts/` — every hit that passes
   `archives=` must NOT pass `prune_strays=True`; the only `prune_strays=True` is the caller
   that passes no inventory at all.
+
+---
+
+### An `asyncio.create_task` in a lifespan needs a shutdown side, or it reports itself as a bug in the logs you are reading to find a bug
+
+- First seen in: #3119 (2026-09-16), review round 2 on PR #3133.
+- Symptom: the served-build sidecar write was moved off the startup critical path into
+  `asyncio.create_task(...)` — correctly, because its three git subprocesses are bounded at
+  5s each and a slow filesystem would otherwise delay every boot. Nothing awaited or
+  cancelled it after the `yield`. A task still pending when the loop closes makes asyncio
+  emit **`Task was destroyed but it is pending`**, which is an alarming line arriving in
+  the logs of the one process whose logs are being read *precisely because* something is
+  already suspected wrong with it. For instrumentation that exists to make a wedge
+  legible, manufacturing a spurious scary log line is the specific harm to avoid.
+- ⚠ The naive fix is worse than the bug. `await`ing the task to completion on the
+  shutdown path makes a diagnostic able to hold a shutdown open — which on this codebase
+  is the shape of the incident #3119 is about (`uvicorn/supervisors/basereload.py:97-98`
+  is `terminate()` then an untimed `join()`, so anything that delays a worker's exit
+  wedges the reload PARENT and stops all further restarts). The correct move is
+  **bounded, then cancelled**: `asyncio.wait_for(asyncio.shield(task), timeout=…)` and
+  `task.cancel()` on timeout. `shield` matters — without it the `wait_for` timeout
+  cancels the task as a side effect and the explicit `cancel()` reads as dead code.
+- ⚠ Hold the handle somewhere with an owner (`app.state`, a module global). A bare
+  `create_task(...)` whose reference is dropped can be garbage-collected mid-flight and
+  **cancelled silently**, which presents as the artefact intermittently not existing —
+  a far harder bug than the one the background dispatch was avoiding.
+- Prevention: any `asyncio.create_task` created in a lifespan (or any long-lived
+  context manager) must have a matching settle-or-cancel on the far side of the `yield`,
+  bounded by a timeout, with the handle owned. The bound should reflect that the task is
+  a diagnostic: it may be abandoned, it may not delay teardown.
+- Enforced in: `app/main.py::lifespan` (bounded `wait_for` + `shield` + `cancel` on the
+  shutdown side, handle on `app.state.served_build_task`);
+  `tests/test_3119_api_wedge_instrumentation.py::test_every_background_task_in_lifespan_has_a_shutdown_side`,
+  which parses the lifespan, splits it at the `yield`, and fails if the startup half
+  creates a task the shutdown half never settles — written to catch the NEXT one, not
+  just this one.
+- Verification step: `rg -n "create_task" app/main.py` — every hit inside `lifespan` must
+  have a `cancel` or `wait_for` naming the same handle after the `yield`.

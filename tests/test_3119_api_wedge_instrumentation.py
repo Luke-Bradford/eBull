@@ -360,6 +360,36 @@ def test_dump_handler_is_registered_before_any_other_startup_work() -> None:
     assert "register_dump_handler" not in rest
 
 
+def test_every_background_task_in_lifespan_has_a_shutdown_side() -> None:
+    """A ``create_task`` in lifespan needs a matching settle/cancel after the
+    ``yield``, or a slow task logs "Task was destroyed but it is pending" at
+    exit — in the one process whose logs are read precisely because something
+    is already wrong with it.
+
+    Generalised past this PR's own task on purpose: the review raised it as a
+    PREVENTION, and a rule that only pins the instance it was written for
+    catches nothing the next time.
+    """
+    body = _lifespan_body()
+    yield_index = next(
+        index
+        for index, statement in enumerate(body)
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Yield)
+    )
+    startup, shutdown = body[:yield_index], body[yield_index + 1 :]
+
+    def _attrs(statements: list[ast.stmt]) -> set[str]:
+        module = ast.Module(body=statements, type_ignores=[])
+        return {node.attr for node in ast.walk(module) if isinstance(node, ast.Attribute)}
+
+    started = _attrs(startup)
+    if "create_task" not in started:  # pragma: no cover - guards the guard
+        pytest.skip("no background task in lifespan startup")
+
+    settled = _attrs(shutdown)
+    assert {"cancel", "wait_for"} & settled, "lifespan creates a background task with no shutdown side"
+
+
 def test_identity_publication_is_not_awaited_on_the_startup_path() -> None:
     """Three git subprocesses bound at 5s each must not gate every boot.
 
