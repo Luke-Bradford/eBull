@@ -8110,6 +8110,12 @@ def sec_manifest_worker_tick() -> None:
         # processed work. Making dispatch errors operator-visible is #3111
         # slice 2, on `JobTelemetryAggregator`, which has its own `rows_errored`.
         tracker.row_count = stats.parsed + stats.tombstoned + stats.failed
+        # #3111 slice 4 — the verdict. Until now a tick in which EVERY row
+        # failed wrote `status='success', error_msg=NULL`, because
+        # `_finish_tracked` reports success whenever `progress` is absent. The
+        # mapping itself is a pure projection of the counters and lives on
+        # `WorkerStats.to_job_progress`, where it is table-tested.
+        tracker.progress = stats.to_job_progress()
         logger.info(
             "sec_manifest_worker tick: processed=%d parsed=%d tombstoned=%d "
             "failed=%d skipped_no_parser=%d dispatch_errors=%d processed_by_source=%s",

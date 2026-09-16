@@ -420,3 +420,103 @@ def test_a_failed_outcome_with_an_EMPTY_error_string_also_gets_the_fallback(
 
     sample = agg.to_error_classes_jsonb()["ParserReportedFailure:sec_form4"]["sample_message"]
     assert sample == "parser reported failure with no error text"
+
+
+# --- #3111 slice 4: the verdict the tick writes ---------------------------
+
+
+def _stats(**kw: Any) -> worker.WorkerStats:
+    """A WorkerStats with every counter zeroed unless the case overrides it."""
+    base: dict[str, Any] = {
+        "rows_processed": 0,
+        "parsed": 0,
+        "tombstoned": 0,
+        "failed": 0,
+        "skipped_no_parser": 0,
+    }
+    return worker.WorkerStats(**{**base, **kw})
+
+
+@pytest.mark.parametrize(
+    ("case", "stats", "expected"),
+    [
+        (
+            "the ticket's headline: every row failed",
+            _stats(rows_processed=5, failed=5),
+            "errors reported: failed=5",
+        ),
+        (
+            "partial failure still degrades — partial progress hides the same stall",
+            _stats(rows_processed=5, parsed=4, failed=1),
+            "errors reported: failed=1",
+        ),
+        (
+            "a row that never transitioned is an error too",
+            _stats(rows_processed=1, dispatch_errors=1),
+            "errors reported: dispatch_errors=1",
+        ),
+        (
+            "legitimate zero-work stays healthy — the COMMON case on a drained backlog",
+            _stats(rows_processed=0),
+            None,
+        ),
+        (
+            "policy tombstones stay healthy: a tombstone is a terminal OUTCOME",
+            _stats(rows_processed=74, tombstoned=74),
+            None,
+        ),
+        (
+            "an ordinary mixed tick stays healthy",
+            _stats(rows_processed=10, parsed=7, tombstoned=3),
+            None,
+        ),
+        (
+            "saw work, produced nothing, errored on nothing — the silent stall",
+            _stats(rows_processed=3, skipped_no_parser=3),
+            "saw 3 candidates and produced no terminal outcome (buckets: parsed, tombstoned)",
+        ),
+    ],
+)
+def test_to_job_progress_verdicts(case: str, stats: worker.WorkerStats, expected: str | None) -> None:
+    """Each of #3111's four acceptance clauses, read off ``degradation_reason``.
+
+    The mapping is a pure projection of the counters, so the acceptance is a
+    table rather than a DB fixture. ``case`` is carried only to name the row in
+    pytest output."""
+    from app.services.job_progress import degradation_reason
+
+    assert degradation_reason(stats.to_job_progress()) == expected, case
+
+
+def test_raw_payload_violations_are_context_not_an_error_bucket() -> None:
+    """A SUBSET of ``failed`` must not also appear on the ``errors`` axis.
+
+    ``JobProgress``'s contract forbids one bucket on two axes. The verdict is
+    unaffected (``errors`` is tested for "any non-zero", never summed) — this
+    pins the shape so a later reader who DOES sum it cannot double-count."""
+    progress = _stats(rows_processed=2, failed=2, raw_payload_violations=2).to_job_progress()
+
+    assert set(progress.errors) == {"failed", "dispatch_errors"}
+    assert progress.context["raw_payload_violations"] == 2
+
+
+def test_progress_context_is_json_serialisable() -> None:
+    """``as_json`` feeds ``Jsonb``. A non-serialisable value in ``context``
+    would raise at the TERMINAL write — i.e. at the end of the job, on the very
+    path that exists to report that the job went wrong.
+
+    ⚠ ``defaultdict`` and the ``ManifestSource`` keys both have to survive the
+    round-trip, which is why this asserts through ``json.dumps`` rather than
+    eyeballing the dict."""
+    import json
+
+    stats = _stats(
+        rows_processed=1,
+        failed=1,
+        processed_by_source={"sec_form4": 1},  # type: ignore[arg-type]
+    )
+
+    payload = json.loads(json.dumps(stats.to_job_progress().as_json()))
+
+    assert payload["errors"] == {"failed": 1, "dispatch_errors": 0}
+    assert payload["context"]["processed_by_source"] == {"sec_form4": 1}
