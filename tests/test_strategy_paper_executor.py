@@ -40,6 +40,7 @@ from app.services.strategy_control_plane import (
     decide_funding,
     link_strategy_order,
 )
+from app.services.strategy_engine_capital import EngineCapitalObservationError
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
 from app.services.strategy_halt_identity import HALT_IDENTITY_RULE_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
@@ -1782,3 +1783,52 @@ def test_a_capped_pot_does_not_let_realised_profit_reopen_the_boundary(
 
     assert result.reason_code == "sandbox_exceeded"
     broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_a_shared_capital_refusal_rejects_the_signal_instead_of_aborting_the_cycle(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2979 half b — the blast radius of the core arm's wedge was the ALPHA arm.
+
+    ``StrategyPaperExecutionError`` has no handler anywhere in ``app/`` and
+    ``execute_fired_paper_signal`` runs in a bare loop in ``strategy_paper_runtime``, so
+    raising here took out the whole paper cycle — reconciliation, position management
+    and every other signal — for a fact about the shared pot. One wedged core ownership
+    row (#2979) therefore stopped the alpha arm too, on that tick and every later one.
+
+    ⚠ This is not a weakening. The refused condition is a property of the shared
+    population, identical for every signal in the cycle, so no signal can be funded
+    while the reader refuses — asserted below on the funding verdict, not inferred.
+    What changes is that the refusal is DURABLE rather than lost in a job traceback.
+    """
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.commit()
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise EngineCapitalObservationError(
+            "active core position 4242 is absent from broker snapshot",
+            "engine_capital_ownership_unwitnessed",
+        )
+
+    monkeypatch.setattr("app.services.strategy_paper_executor.resolve_engine_capital_usage", refuse)
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "engine_capital_ownership_unwitnessed"
+    broker.place_demo_strategy_order.assert_not_called()
+
+    # Durable, and queryable — the `str` return channel routes to `_persist_rejection`.
+    funding = conn.execute(
+        "SELECT verdict,reason_code FROM strategy_funding_decisions WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone()
+    assert funding == ("rejected", "engine_capital_ownership_unwitnessed")
+    preflight = conn.execute(
+        "SELECT verdict,reason_code FROM strategy_entry_preflights WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone()
+    assert preflight == ("rejected", "engine_capital_ownership_unwitnessed")

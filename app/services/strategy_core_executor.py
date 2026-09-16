@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -84,6 +85,9 @@ def core_order_shape_for(action: str) -> tuple[str, CoreOrderLinkPurpose] | None
     return _CORE_ORDER_SHAPE.get(action)
 
 
+logger = logging.getLogger(__name__)
+
+
 class StrategyCoreExecutionError(RuntimeError):
     """The attended executor was called without a usable selected mandate."""
 
@@ -126,6 +130,16 @@ def _result(
     amount: Decimal = Decimal("0"),
 ) -> CoreExecutionResult:
     return CoreExecutionResult(state, reason_code, intent_id, trade_id, order_id, amount)
+
+
+def _capital_refusal_result(exc: EngineCapitalObservationError) -> CoreExecutionResult:
+    """One shape for both steady-state capital refusals, logged then returned.
+
+    The log is not decoration: only ``str(exc)`` names the trade or position id, and
+    ``CoreExecutionResult`` carries the bucket alone.
+    """
+    logger.warning("core rebalance refused as %s (%s)", exc.reason_code, exc)
+    return _result("refused", exc.reason_code)
 
 
 def _observe_core_portfolio_drawdown(
@@ -534,7 +548,11 @@ def execute_core_rebalance(
         try:
             capital_authority = load_engine_capital_authority(conn)
         except EngineCapitalObservationError as exc:
-            raise StrategyCoreExecutionError("the assigned-capital sandbox is incomplete") from exc
+            # ⚠ REFUSED, not raised (#2979 half b).  An inconsistent shared population is
+            # a steady state -- true on this cycle and every later one -- so a caller
+            # gets a reason code it can act on rather than a 409 whose only text is the
+            # OUTER sentence.  Still fail-closed: nothing is submitted either way.
+            return _capital_refusal_result(exc)
         if capital_authority is None:
             raise StrategyCoreExecutionError("an assigned paper pot is required")
         if not capital_authority.enabled:
@@ -560,6 +578,21 @@ def execute_core_rebalance(
                 exact_owned_market_value=usage.core_market_value,
                 assigned_cash_available=min(snapshot.available_cash, usage.headroom.remaining),
             )
+        except EngineCapitalObservationError as exc:
+            # ⚠ This arm MUST precede the blanket one below and must not absorb it.  The
+            # blanket arm still covers a failed broker read (an execution fault) and
+            # `CoreSleeveObservationError` (input drift in one payload, which its own
+            # docstring puts on the raising side).  Only the capital join's refusal --
+            # steady state, unchanged by a retry -- becomes a verdict.
+            #
+            # ⚠⚠ Reachability, so nobody reads more into this than it does: in the
+            # #2979 wedge `core_active_position_ids` is non-empty, so `read_core_sleeve`
+            # leaves `capital_ready=False` and the operator's Rebalance button is
+            # DISABLED (`app/api/strategies.py`, `StrategyPortfolioLens.tsx`).  This
+            # verdict is reachable today only by calling the endpoint directly.  The
+            # caller that reaches the same refusal on every unattended tick is the paper
+            # cycle, which is fixed in `strategy_paper_executor._risk_and_amount`.
+            return _capital_refusal_result(exc)
         except Exception as exc:
             raise StrategyCoreExecutionError("the broker account snapshot could not describe the core sleeve") from exc
         decision = evaluate_core_rebalance(mandate, state)
@@ -585,6 +618,11 @@ def execute_core_rebalance(
             try:
                 current_capital = load_engine_capital_authority(conn)
             except EngineCapitalObservationError as exc:
+                # ⚠ Deliberately still a RAISE, unlike the two sites above (#2979 half
+                # b).  Reaching here means the first load and the broker observation
+                # both succeeded and the population moved underneath them -- a
+                # concurrency fault, and the message is the only place that WHEN is
+                # recorded.  Returning the same code as the first load would discard it.
                 raise StrategyCoreExecutionError("the assigned-capital sandbox changed during preflight") from exc
             if current_capital is None or current_capital != capital_authority:
                 raise StrategyCoreExecutionError("the assigned-capital sandbox changed during broker preflight")

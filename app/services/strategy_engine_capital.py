@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import psycopg
 import psycopg.rows
@@ -28,8 +28,44 @@ _TERMINAL_TRADES = frozenset({"closed", "failed"})
 _TERMINAL_RECONCILIATION = frozenset({"resolved", "rejected"})
 
 
+EngineCapitalRefusal = Literal[
+    "engine_capital_ownership_unwitnessed",
+    "engine_capital_ownership_mismatched",
+    "engine_capital_snapshot_unusable",
+    "engine_capital_population_incomplete",
+]
+"""What a caller may report when this module refuses to observe the shared pot.
+
+A ``Literal`` rather than ``str`` so pyright checks every raise site and a code cannot
+be introduced without appearing here -- the device ``CoreBrokerPreflightRefusal`` uses.
+
+⚠ Unlike that vocabulary, DECLARATION ORDER IS NOT PRECEDENCE and must not be read as
+such.  That one is decided by a single function in a single pass; this module raises
+from twenty-one sites across three functions in execution order, and
+``resolve_engine_capital_usage`` iterates positions -- so a mismatched position 11 is
+reported before an absent position 12.  The recorded code is "the first defect reached
+in execution order" and nothing stronger.
+
+⚠ ``engine_capital_ownership_unwitnessed`` asserts an OBSERVATION, not a cause: an
+active ownership row is not in this snapshot.  A landed-but-unacknowledged close (#2979)
+produces it, and so does a transient omission or a snapshot of the wrong account.  The
+reader inspects no close evidence and cannot tell them apart.
+"""
+
+
 class EngineCapitalObservationError(RuntimeError):
-    """The shared capital population or its exact broker join is incomplete."""
+    """The shared capital population or its exact broker join is incomplete.
+
+    ``reason_code`` is required so a caller can report the refusal without parsing the
+    message.  The message itself is unchanged and is still the operator-facing detail --
+    it carries the trade or position id, which no code does.
+    """
+
+    def __init__(self, message: str, reason_code: EngineCapitalRefusal) -> None:
+        # Only the message reaches ``RuntimeError.args``: passing both would change
+        # ``str(exc)`` for every existing caller that logs or surfaces it.
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True)
@@ -57,13 +93,19 @@ class EngineCapitalUsage:
     core_active_committed: Decimal
 
 
-def _money(value: object, *, label: str, positive: bool = False) -> Decimal:
+def _money(value: object, *, label: str, reason: EngineCapitalRefusal, positive: bool = False) -> Decimal:
+    """Parse one monetary field.
+
+    ``reason`` is a parameter and not inferred, because this helper validates BOTH our
+    own stored amounts and the broker's ``row.amount``.  Bucketing every failure by the
+    helper would send a malformed broker payload to database triage.
+    """
     try:
         money = Decimal(str(value))
     except Exception as exc:
-        raise EngineCapitalObservationError(f"{label} is not numeric") from exc
+        raise EngineCapitalObservationError(f"{label} is not numeric", reason) from exc
     if not money.is_finite() or money < _ZERO or (positive and money <= _ZERO):
-        raise EngineCapitalObservationError(f"{label} is outside safe bounds")
+        raise EngineCapitalObservationError(f"{label} is outside safe bounds", reason)
     return money
 
 
@@ -107,10 +149,14 @@ def _load_realised_delta(conn: psycopg.Connection[Any], *, epoch: datetime) -> D
     ).fetchone()
     assert row is not None
     if int(row[1]) or int(row[2]):
-        raise EngineCapitalObservationError("exact-owned realised P&L is incomplete")
+        raise EngineCapitalObservationError(
+            "exact-owned realised P&L is incomplete", "engine_capital_population_incomplete"
+        )
     value = Decimal(str(row[0]))
     if not value.is_finite():
-        raise EngineCapitalObservationError("exact-owned realised P&L is not finite")
+        raise EngineCapitalObservationError(
+            "exact-owned realised P&L is not finite", "engine_capital_population_incomplete"
+        )
     return value
 
 
@@ -137,10 +183,12 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
     if pool is None:
         return None
     pool_event_id = int(pool[0])
-    capital_limit = _money(pool[2], label="paper pool capital limit")
+    capital_limit = _money(pool[2], label="paper pool capital limit", reason="engine_capital_population_incomplete")
     mode = str(pool[3])
     if mode not in {"fixed", "compound"}:
-        raise EngineCapitalObservationError("paper pool capital mode is unsupported")
+        raise EngineCapitalObservationError(
+            "paper pool capital mode is unsupported", "engine_capital_population_incomplete"
+        )
     capital_mode = cast(CapitalMode, mode)
     epoch = cast(datetime, pool[4])
 
@@ -164,7 +212,9 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
     ).fetchone()
     assert pre_epoch_funding is not None
     if int(pre_epoch_funding[0]):
-        raise EngineCapitalObservationError("a non-terminal strategy lifecycle predates the assigned pot")
+        raise EngineCapitalObservationError(
+            "a non-terminal strategy lifecycle predates the assigned pot", "engine_capital_population_incomplete"
+        )
 
     # Core trades have no funding decision, so their epoch guard remains rooted
     # at the trade. Signal-arm lifecycles are guarded above from the allocation
@@ -186,7 +236,9 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
     ).fetchone()
     assert pre_epoch_core is not None
     if int(pre_epoch_core[0]):
-        raise EngineCapitalObservationError("a non-terminal strategy lifecycle predates the assigned pot")
+        raise EngineCapitalObservationError(
+            "a non-terminal strategy lifecycle predates the assigned pot", "engine_capital_population_incomplete"
+        )
 
     alpha_rows = conn.execute(
         """
@@ -208,7 +260,12 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
     alpha_committed = _ZERO
     alpha_working = _ZERO
     for row in alpha_rows:
-        amount = _money(row[1], label=f"funding decision {row[0]} amount", positive=True)
+        amount = _money(
+            row[1],
+            label=f"funding decision {row[0]} amount",
+            reason="engine_capital_population_incomplete",
+            positive=True,
+        )
         trade_id = row[2]
         if trade_id is None:
             alpha_committed += amount
@@ -217,7 +274,9 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
         active_owned = int(row[4])
         terminal = status in _TERMINAL_TRADES
         if terminal and active_owned:
-            raise EngineCapitalObservationError(f"paper trade {trade_id} terminal state is inconsistent")
+            raise EngineCapitalObservationError(
+                f"paper trade {trade_id} terminal state is inconsistent", "engine_capital_population_incomplete"
+            )
         if not terminal:
             alpha_committed += amount
             if active_owned:
@@ -269,23 +328,44 @@ def load_engine_capital_authority(conn: psycopg.Connection[Any]) -> EngineCapita
             or row[7] != "strategy"
             or recon_state is None
         ):
-            raise EngineCapitalObservationError(f"core trade {trade_id} entry authority is incomplete")
+            raise EngineCapitalObservationError(
+                f"core trade {trade_id} entry authority is incomplete", "engine_capital_population_incomplete"
+            )
         terminal = status in _TERMINAL_TRADES
         if terminal:
             if recon_state not in _TERMINAL_RECONCILIATION or owned_ids:
-                raise EngineCapitalObservationError(f"core trade {trade_id} terminal state is inconsistent")
+                raise EngineCapitalObservationError(
+                    f"core trade {trade_id} terminal state is inconsistent", "engine_capital_population_incomplete"
+                )
             continue
         if recon_state != "resolved":
             if owned_ids:
-                raise EngineCapitalObservationError(f"core trade {trade_id} owns positions before entry resolution")
-            core_pending += _money(row[8], label=f"core trade {trade_id} requested amount", positive=True)
+                raise EngineCapitalObservationError(
+                    f"core trade {trade_id} owns positions before entry resolution",
+                    "engine_capital_population_incomplete",
+                )
+            core_pending += _money(
+                row[8],
+                label=f"core trade {trade_id} requested amount",
+                reason="engine_capital_population_incomplete",
+                positive=True,
+            )
             continue
         if not owned_ids:
-            raise EngineCapitalObservationError(f"resolved core trade {trade_id} has no active exact ownership")
-        core_active_recorded += _money(row[8], label=f"core trade {trade_id} requested amount", positive=True)
+            raise EngineCapitalObservationError(
+                f"resolved core trade {trade_id} has no active exact ownership", "engine_capital_population_incomplete"
+            )
+        core_active_recorded += _money(
+            row[8],
+            label=f"core trade {trade_id} requested amount",
+            reason="engine_capital_population_incomplete",
+            positive=True,
+        )
         active_ids.extend(owned_ids)
     if len(active_ids) != len(set(active_ids)):
-        raise EngineCapitalObservationError("active core ownership ids are duplicated")
+        raise EngineCapitalObservationError(
+            "active core ownership ids are duplicated", "engine_capital_population_incomplete"
+        )
 
     return EngineCapitalAuthority(
         pool_event_id=pool_event_id,
@@ -315,27 +395,47 @@ def resolve_engine_capital_usage(
         else DOCUMENTED_ACCOUNT_CURRENCIES.get(snapshot.account_currency_id)
     )
     if snapshot_currency != "USD":
-        raise EngineCapitalObservationError("broker account currency is not observed as USD")
+        raise EngineCapitalObservationError(
+            "broker account currency is not observed as USD", "engine_capital_snapshot_unusable"
+        )
     positions = {row.position_id: row for row in snapshot.direct_positions}
     if len(positions) != len(snapshot.direct_positions):
-        raise EngineCapitalObservationError("broker snapshot repeats a direct position id")
+        raise EngineCapitalObservationError(
+            "broker snapshot repeats a direct position id", "engine_capital_snapshot_unusable"
+        )
     core_committed = _ZERO
     core_market_value = _ZERO
     if authority.core_active_position_ids and core_instrument_id is None:
-        raise EngineCapitalObservationError("active core ownership has no configured instrument")
+        raise EngineCapitalObservationError(
+            "active core ownership has no configured instrument", "engine_capital_snapshot_unusable"
+        )
     for position_id in authority.core_active_position_ids:
         row = positions.get(position_id)
         if row is None:
-            raise EngineCapitalObservationError(f"active core position {position_id} is absent from broker snapshot")
+            raise EngineCapitalObservationError(
+                f"active core position {position_id} is absent from broker snapshot",
+                "engine_capital_ownership_unwitnessed",
+            )
         if row.instrument_id != core_instrument_id:
-            raise EngineCapitalObservationError(f"active core position {position_id} belongs to another instrument")
+            raise EngineCapitalObservationError(
+                f"active core position {position_id} belongs to another instrument",
+                "engine_capital_ownership_mismatched",
+            )
         if not row.is_buy:
-            raise EngineCapitalObservationError(f"active core position {position_id} is short")
+            raise EngineCapitalObservationError(
+                f"active core position {position_id} is short", "engine_capital_ownership_mismatched"
+            )
         if row.is_partially_altered:
-            raise EngineCapitalObservationError(f"active core position {position_id} is partially altered")
-        core_committed += _money(row.amount, label=f"active core position {position_id} amount")
+            raise EngineCapitalObservationError(
+                f"active core position {position_id} is partially altered", "engine_capital_ownership_mismatched"
+            )
+        core_committed += _money(
+            row.amount, label=f"active core position {position_id} amount", reason="engine_capital_ownership_mismatched"
+        )
         if not row.market_value.is_finite() or row.market_value < _ZERO:
-            raise EngineCapitalObservationError(f"active core position {position_id} market value is invalid")
+            raise EngineCapitalObservationError(
+                f"active core position {position_id} market value is invalid", "engine_capital_ownership_mismatched"
+            )
         core_market_value += row.market_value
 
     committed = authority.alpha_committed + authority.core_pending_committed + core_committed
@@ -352,6 +452,7 @@ def resolve_engine_capital_usage(
 __all__ = [
     "EngineCapitalAuthority",
     "EngineCapitalObservationError",
+    "EngineCapitalRefusal",
     "EngineCapitalUsage",
     "load_engine_capital_authority",
     "resolve_engine_capital_usage",

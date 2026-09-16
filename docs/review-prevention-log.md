@@ -7174,3 +7174,49 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   `tests/test_market_session_support.py::test_admission_cannot_be_widened_on_the_eligibility_proof`,
   which pins the structure the change would have to break rather than the measurement,
   since no unit test can observe one.
+
+## A refusal is only a fix if its path is reachable — check the affordance, not just the caller (#2979, 2026-09-16)
+
+- Symptom: #2979's named unblock half was *"turn `resolve_engine_capital_usage`'s raise
+  into a refusal verdict so the core arm degrades instead of disappearing"*. I traced the
+  raise to `execute_core_rebalance`, confirmed it became an HTTP 409 with only the outer
+  sentence, and specced the conversion there. Codex checkpoint 1 pointed one layer
+  further OUT: in the wedge state `load_engine_capital_authority` returns non-empty
+  `core_active_position_ids`, so `read_core_sleeve` takes its `core_live_snapshot_required`
+  branch, leaves `capital_ready=False`, and `can_rebalance` is therefore `False` — the
+  operator's Rebalance button is DISABLED in exactly the state the new verdict describes.
+  The whole change would have landed on a path no operator could reach.
+- Root cause: I traced the refusal from the RAISE outward to its caller and stopped at the
+  caller, because that is where the exception becomes a response. Reachability is decided
+  one layer further out again — by whatever enables the affordance that calls it. Those are
+  different functions, usually in different files, and the gating one mentions neither the
+  refusal nor the exception, so no grep for either finds it.
+- ⚠ This is the sibling of the "#2605 — the hook already exists" entry, inverted. There a
+  correct refusal was computed and its verdict discarded before the authorising step. Here
+  a correct refusal is computed and returned intact, and no caller can get to it. Both end
+  at "the change does not bind", and both are invisible to a grep for the refusal name.
+- ⚠⚠ The same pass found the fix that DOES bind, and it was in the other caller — the
+  #3049 lesson restated. `strategy_paper_executor._risk_and_amount` raised
+  `StrategyPaperExecutionError` on the same class; that exception has **no handler
+  anywhere in `app/`** and `execute_fired_paper_signal` runs in a bare loop
+  (`strategy_paper_runtime`), so one wedged core ownership row aborted every
+  `strategy_paper_cycle` tick — reconciliation, position management and every alpha
+  signal — on that tick and every later one. That caller runs unattended every five
+  minutes, already had a `str`-returning refusal channel, and its refusal lands in
+  `strategy_funding_decisions` + `strategy_entry_preflights`, i.e. durably.
+- Prevention: **before converting a raise into a verdict, ask who can actually invoke the
+  path, and enumerate the callers by frequency rather than by prominence.** Concretely:
+  (1) `rg` the entry point's name for every caller, and for a UI-facing one also grep the
+  read endpoint that computes its `can_*` / enabled flag for the state the new verdict
+  describes; (2) rank the callers by how often they run unattended — the attended path is
+  the one you were told about, the scheduled one is the one that is failing now; (3) prefer
+  the caller whose refusal channel already persists, because a verdict no table stores is a
+  report. Self-review prompt: *"in the exact state this verdict describes, what does the
+  operator's affordance do — and which caller reaches it without an operator at all?"*
+- Enforced in: this log; `docs/proposals/ta/2026-09-16-core-capital-refusal-verdict.md`
+  (the reachability section, stated as a limit of the change rather than omitted);
+  `app/services/strategy_core_executor.py` (the ⚠⚠ reachability comment on the new
+  `except EngineCapitalObservationError` arm, so the next reader does not over-read it);
+  `app/services/strategy_paper_executor.py` (the caller that actually binds);
+  `tests/test_strategy_paper_executor.py::test_a_shared_capital_refusal_rejects_the_signal_instead_of_aborting_the_cycle`
+  (asserts the DURABLE rows, not just the returned code).

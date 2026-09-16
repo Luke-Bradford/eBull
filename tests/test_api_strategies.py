@@ -574,7 +574,7 @@ def test_incomplete_shared_capital_keeps_overview_readable_but_withholds_headroo
     seed_universe_anchor(ebull_test_conn)
 
     def incomplete(_conn: object) -> None:
-        raise EngineCapitalObservationError("test incomplete ownership")
+        raise EngineCapitalObservationError("test incomplete ownership", "engine_capital_population_incomplete")
 
     monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", incomplete)
     overview = get_strategy_overview(ebull_test_conn)

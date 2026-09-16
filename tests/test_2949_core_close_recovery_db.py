@@ -60,13 +60,18 @@ import psycopg
 import pytest
 
 from app.providers.broker import BrokerProvider
-from app.services.strategy_core_executor import StrategyCoreExecutionError, execute_core_rebalance
-from app.services.strategy_engine_capital import EngineCapitalObservationError
+from app.services.strategy_core_executor import execute_core_rebalance
+from app.services.strategy_engine_capital import (
+    EngineCapitalObservationError,
+    load_engine_capital_authority,
+    resolve_engine_capital_usage,
+)
 from app.services.strategy_order_reconciliation import reconcile_backlog
 from app.services.strategy_position_manager import manage_owned_position
 from tests.fixtures.core_restart import (
     API_CREDENTIAL_ID,
     CLOCK,
+    CORE_INSTRUMENT_ID,
     OPERATOR_ID,
     SIGKILL_RETURNCODE,
     USER_CREDENTIAL_ID,
@@ -397,10 +402,16 @@ def test_scenario_7b_lost_close_acceptance_wedges_the_core_capital_reader(
       ``manage_owned_position`` pass returns ``owned_position_missing`` without
       releasing anything;
     * ``resolve_engine_capital_usage`` refuses that join by design
-      (``strategy_engine_capital.py:329``), and ``execute_core_rebalance`` wraps
-      the refusal into ``StrategyCoreExecutionError``
-      (``strategy_core_executor.py:527``).  So the core allocator does not refuse
-      politely, it RAISES, on this and every subsequent cycle.
+      (``strategy_engine_capital.py``), on this and every subsequent cycle.
+
+    ⚠ **What #2979 half b changed, and what it did not.**  The allocator no longer
+    RAISES on that refusal: it returns ``refused`` /
+    ``engine_capital_ownership_unwitnessed``, so the core arm degrades legibly instead
+    of surfacing a 409 whose only text is the outer sentence.  The wedge itself is
+    untouched — ownership is still ``active``, the join still refuses, and nothing
+    terminalises the row — which is why #2979 stays open on its other half.  The caller
+    that reached this refusal on every UNATTENDED tick was the paper cycle, which used
+    to abort entirely; it now rejects the signal (``strategy_paper_executor``).
 
     ⚠ The fail-closed behaviour is correct in isolation: an ownership row the
     account cannot witness must not be silently marked good, and #2602 owns the
@@ -447,19 +458,35 @@ def test_scenario_7b_lost_close_acceptance_wedges_the_core_capital_reader(
     # Fact 1: the one scheduled reconciler that exists cannot see this order.
     _assert_exit_order_is_invisible_to_the_backlog(ebull_test_conn, broker)
 
-    # The wedge. Not a refusal verdict -- an exception out of the allocator.
+    # The allocator now REFUSES rather than raising (#2979 half b). The wedge itself
+    # is unchanged -- ownership is still `active` and the join still refuses -- but the
+    # arm degrades with a reason code instead of disappearing behind a 409 whose only
+    # text is the outer sentence.
     #
-    # ⚠ The CAUSE is asserted, not just the type. `strategy_core_executor.py:528`
-    # raises the same `StrategyCoreExecutionError` for every failure of the
-    # snapshot block, so a broken account read would satisfy a type-only
-    # assertion and this test would be claiming something it had not shown. The
-    # chained `EngineCapitalObservationError` names the exact position id, which
-    # is what ties the raise to the ownership row this scenario stranded.
-    with pytest.raises(StrategyCoreExecutionError) as raised:
-        _execute_core(ebull_test_conn, broker)
-    cause = raised.value.__cause__
-    assert isinstance(cause, EngineCapitalObservationError)
-    assert str(cause) == f"active core position {coordinates[1]} is absent from broker snapshot"
+    # ⚠ The IDENTITY evidence is kept, and deliberately not left to the code alone:
+    # `engine_capital_ownership_unwitnessed` is a bucket, and a broken account read or
+    # a snapshot of the wrong account would produce the same bucket. The reader is
+    # therefore called directly below, so the position id this scenario stranded is
+    # still what ties the refusal to the ownership row.
+    refusal = _execute_core(ebull_test_conn, broker)
+    assert refusal.state == "refused"
+    assert refusal.reason_code == "engine_capital_ownership_unwitnessed"
+    assert refusal.intent_id is None
+    assert refusal.trade_id is None
+    assert refusal.order_id is None
+    ebull_test_conn.rollback()
+
+    authority = load_engine_capital_authority(ebull_test_conn)
+    assert authority is not None
+    assert coordinates[1] in authority.core_active_position_ids
+    with pytest.raises(EngineCapitalObservationError) as raised:
+        resolve_engine_capital_usage(
+            authority,
+            _provider(broker).get_account_risk_snapshot(),
+            core_instrument_id=CORE_INSTRUMENT_ID,
+        )
+    assert str(raised.value) == f"active core position {coordinates[1]} is absent from broker snapshot"
+    assert raised.value.reason_code == "engine_capital_ownership_unwitnessed"
     ebull_test_conn.rollback()
 
     # A later scheduled pass reaches it, reports the truth, and still cannot
