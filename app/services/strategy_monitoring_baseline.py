@@ -79,6 +79,7 @@ NO_PROMOTION_FOR_VERSION: Final = "no_promotion_for_version"
 NO_EVIDENCE_STAGE_PROMOTION: Final = "no_evidence_stage_promotion"
 NO_PINNED_RESULTS: Final = "no_pinned_results"
 PROMOTION_EVIDENCE_MISSING: Final = "promotion_evidence_missing"
+DUPLICATE_EVIDENCE_STAGE_PROMOTION: Final = "duplicate_evidence_stage_promotion"
 
 
 @dataclass(frozen=True)
@@ -123,14 +124,24 @@ def select_baseline_promotion(candidates: Sequence[BaselinePromotionCandidate]) 
     one (*"forward_observation requires at least one pinned result_id"*), so reaching
     this clause means the row is not what the transition rule says it is -- and falling
     back would monitor against the statement the empty one was allowed to supersede.
+
+    ⚠ TWO ROWS AT ONE EVIDENCE STAGE REFUSE TOO, rather than one of them being picked.
+    Settled decision #2612 makes stage arrival single-entry and
+    ``idx_strategy_promotions_one_successor`` enforces it, so this cannot happen today --
+    but a ``dict`` keyed on ``to_stage`` would have SILENTLY kept whichever row iterated
+    last, which is to say the oldest under the caller's ``promotion_id DESC``.  The
+    module's whole job is naming which evidence was approved; resolving a contradiction
+    about that by iteration order is the one answer it must not give.
     """
     if not candidates:
         return BaselineChoice(None, (NO_PROMOTION_FOR_VERSION,))
-    by_stage = {candidate.to_stage: candidate for candidate in candidates}
     for stage in _BASELINE_STAGE_PREFERENCE:
-        candidate = by_stage.get(stage)
-        if candidate is None:
+        at_stage = [candidate for candidate in candidates if candidate.to_stage == stage]
+        if not at_stage:
             continue
+        if len(at_stage) > 1:
+            return BaselineChoice(None, (DUPLICATE_EVIDENCE_STAGE_PROMOTION,))
+        candidate = at_stage[0]
         if not candidate.result_ids:
             return BaselineChoice(None, (NO_PINNED_RESULTS,))
         return BaselineChoice(candidate, ())
@@ -232,6 +243,7 @@ def baseline_unavailable_reasons(
 
 __all__ = [
     "BASELINE_RULE_VERSION",
+    "DUPLICATE_EVIDENCE_STAGE_PROMOTION",
     "MISSING_ENVELOPE_COMPONENTS",
     "NO_EVIDENCE_STAGE_PROMOTION",
     "NO_PINNED_RESULTS",

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.services.strategy_monitoring_baseline import (
+    DUPLICATE_EVIDENCE_STAGE_PROMOTION,
     MISSING_ENVELOPE_COMPONENTS,
     NO_EVIDENCE_STAGE_PROMOTION,
     NO_PINNED_RESULTS,
@@ -76,6 +77,31 @@ def test_an_evidence_stage_with_no_pinned_results_refuses_rather_than_falling_ba
     )
     assert choice.candidate is None
     assert choice.refusals == (NO_PINNED_RESULTS,)
+
+
+def test_two_rows_at_one_evidence_stage_refuse_rather_than_one_being_picked() -> None:
+    """#2612 makes this impossible today; a dict keyed on stage would have resolved it
+    silently by iteration order, which is the one answer this module must not give."""
+    choice = select_baseline_promotion(
+        (
+            _candidate("forward_observation", 3, result_ids=(30,)),
+            _candidate("forward_observation", 2, result_ids=(20,)),
+        )
+    )
+    assert choice.candidate is None
+    assert choice.refusals == (DUPLICATE_EVIDENCE_STAGE_PROMOTION,)
+
+
+def test_a_duplicate_at_a_lower_preference_stage_does_not_block_a_clean_forward_row() -> None:
+    choice = select_baseline_promotion(
+        (
+            _candidate("forward_observation", 5, result_ids=(50,)),
+            _candidate("historical_validated", 2, result_ids=(20,)),
+            _candidate("historical_validated", 1, result_ids=(10,)),
+        )
+    )
+    assert choice.candidate is not None
+    assert choice.candidate.promotion_id == 5
 
 
 def test_missing_envelope_components_names_what_2505_does_not_carry() -> None:
