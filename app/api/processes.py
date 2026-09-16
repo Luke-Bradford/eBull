@@ -1344,7 +1344,8 @@ def _apply_scheduled_full_wash_reset(
 
     * Freshness source — full epoch reset of ``data_freshness_index``
       (clears ``last_known_filed_at``, ``last_known_filing_id``,
-      ``expected_next_at``, ``next_recheck_at``, ``state_reason``,
+      ``expected_next_at``, ``next_recheck_at``, ``next_poll_at``,
+      ``state_reason``,
       ``new_filings_since`` and flips ``state`` to ``unknown``).
       Codex pre-push BLOCKING: clearing only ``last_known_filed_at``
       leaves the prior filing_id pointer + future poll cadence, so
@@ -1375,6 +1376,11 @@ def _apply_scheduled_full_wash_reset(
                        last_known_filing_id = NULL,
                        expected_next_at     = NULL,
                        next_recheck_at      = NULL,
+                       -- #3109: the poll queue is keyed on next_poll_at, so a
+                       -- full-wash that left it in the future would not re-poll
+                       -- for up to POLL_REPOLL_INTERVAL. NOT NULL column, so
+                       -- NOW() rather than NULL (unlike its two neighbours).
+                       next_poll_at         = NOW(),
                        state                = 'unknown',
                        state_reason         = NULL,
                        new_filings_since    = 0

@@ -12,9 +12,19 @@ The scheduler is subject-polymorphic — 13F-HR is filer-centric (one
 filer's 13F covers many issuers), so the row carries ``subject_type``
 + ``subject_id`` rather than always (instrument_id, source).
 
-Per-source cadence (the ``_CADENCE`` map below) drives
-``expected_next_at`` predictions from ``last_known_filed_at``. Calls
-from the worker layer:
+TWO clocks, deliberately (#3109):
+
+  - ``expected_next_at`` — the reconciliation deadline, ``last_known_filed_at``
+    + ``_CADENCE[source]``. A statement about the FILER.
+  - ``next_poll_at`` — poll eligibility, advanced by ``POLL_REPOLL_INTERVAL``
+    on every poll. A statement about OUR request budget.
+
+The queue reads the second. It used to read the first, and a filer last seen
+in 1994 therefore had a permanently-elapsed "deadline", won ``ORDER BY ... ASC``
+on every hourly tick, and starved the other 55,000 rows — 95 of them had ever
+been polled in 3.5 months. Keep the two apart.
+
+Calls from the worker layer:
 
   - ``seed_scheduler_from_manifest``: bootstrap rows from manifest history
   - ``record_poll_outcome``: record after a poll completes
@@ -55,6 +65,50 @@ FreshnessState = Literal[
 ]
 
 PollOutcome = Literal["current", "new_data", "error", "never"]
+
+
+# ---------------------------------------------------------------------------
+# Poll-eligibility clock (#3109)
+# ---------------------------------------------------------------------------
+#
+# ⚠ This is NOT ``_CADENCE``. ``_CADENCE`` answers "when is this subject's
+# reconciliation deadline, given its last filing" — a per-source figure
+# anchored to ``last_known_filed_at``. These two answer "when may we spend
+# another request on this row", which is a property of OUR budget and has
+# nothing to do with the filer. Conflating them is the #3109 defect: a
+# filer last seen in 1994 has a permanently-elapsed reconciliation deadline,
+# so it won the queue's ``ORDER BY`` on every tick forever and 95 of 55,775
+# rows had ever been polled.
+#
+# Source rule: ``.claude/skills/data-sources/sec-edgar.md`` §"Strategies"
+# item 4 ("Three-tier polling") — *"Cold: per-CIK submissions JSON re-pull
+# weekly or per-event."* ``sec_per_cik_poll`` IS the cold tier. The
+# "per-event" arm is the hot (Atom) and warm (daily-index) tiers, which
+# already exist; this layer is the weekly safety net behind them.
+#
+# ⚠ That is an in-repo settled convention, NOT an SEC requirement — SEC
+# publishes a rate ceiling (10 req/s) and no re-poll cadence at all. Stated
+# rather than dressed up as a regulation, per ``.claude/CLAUDE.md``.
+#
+# ONE constant, not per-source: ``submissions.json`` is entity-wide, one
+# fetch answers every source of that CIK, and since #3109's batching the
+# budget is denominated in CIKs. A per-source interval would be incoherent
+# with the unit the request is actually spent in.
+POLL_REPOLL_INTERVAL: Final = timedelta(days=7)
+
+# Backoff for a FAILED poll, so an errored row rotates instead of pinning.
+#
+# Before #3109 ``_record_subject_error`` supplied no ``next_recheck_at``, so
+# the UPSERT wrote NULL — and the recheck selector treats NULL as immediately
+# due. An errored row therefore sat at the head of the recheck lane forever:
+# the identical starvation defect in the other lane.
+#
+# One hour is BY CONSTRUCTION, not chosen: it is ``sec_per_cik_poll``'s own
+# tick, the smallest interval at which a retry can actually happen. The value
+# matters less than its finiteness — any advance converts starvation into
+# rotation, because N errored CIKs then rotate by oldest-deadline instead of
+# the lowest CIK monopolising every slot.
+ERROR_RECHECK_INTERVAL: Final = timedelta(hours=1)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +481,18 @@ def record_poll_outcome(
     else:
         expected_next_at = None
 
+    # #3109 — a FAILED poll must still get a finite deadline. Before this,
+    # ``_record_subject_error`` supplied no ``next_recheck_at`` and the UPSERT
+    # wrote NULL; ``ciks_due_for_recheck`` treats NULL as immediately due, so
+    # an errored row pinned the head of the recheck lane forever — the same
+    # starvation defect this ticket fixes in the poll lane. Applied here rather
+    # than at the call site so every caller inherits the invariant.
+    #
+    # An explicit deadline from the caller always wins (the 304 path supplies
+    # ``cadence_for(source)`` for a ``never_filed`` subject).
+    if outcome == "error" and next_recheck_at is None:
+        next_recheck_at = poll_now + ERROR_RECHECK_INTERVAL
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -436,7 +502,7 @@ def record_poll_outcome(
                 last_known_filing_id, last_known_filed_at,
                 last_polled_at, last_polled_outcome,
                 new_filings_since,
-                expected_next_at, next_recheck_at,
+                expected_next_at, next_recheck_at, next_poll_at,
                 state, state_reason
             ) VALUES (
                 %(stype)s, %(sid)s, %(source)s,
@@ -444,7 +510,7 @@ def record_poll_outcome(
                 %(acc)s, %(filed_at)s,
                 NOW(), %(outcome)s,
                 %(new_count)s,
-                %(next_at)s, %(recheck_at)s,
+                %(next_at)s, %(recheck_at)s, NOW() + %(repoll)s::interval,
                 %(state)s, %(reason)s
             )
             ON CONFLICT (subject_type, subject_id, source) DO UPDATE SET
@@ -495,6 +561,15 @@ def record_poll_outcome(
                     ELSE data_freshness_index.expected_next_at
                 END,
                 next_recheck_at = EXCLUDED.next_recheck_at,
+                -- #3109 — the poll-eligibility clock, advanced UNCONDITIONALLY.
+                -- Deliberately NOT guarded like ``expected_next_at`` above: that
+                -- guard is about watermark regression under concurrent discovery
+                -- producers (#1534), whereas this records that WE JUST SPENT A
+                -- REQUEST. A losing or stale poll consumed the fetch just as a
+                -- winning one did, so the clock must move either way — otherwise
+                -- the row returns to the head of the queue and starves the rest,
+                -- which is the whole defect.
+                next_poll_at = EXCLUDED.next_poll_at,
                 state = EXCLUDED.state,
                 state_reason = EXCLUDED.state_reason
             """,
@@ -510,6 +585,7 @@ def record_poll_outcome(
                 "new_count": new_filings_since,
                 "next_at": expected_next_at,
                 "recheck_at": next_recheck_at,
+                "repoll": POLL_REPOLL_INTERVAL,
                 "state": state,
                 "reason": error,
             },
@@ -535,6 +611,9 @@ class FreshnessRow:
     new_filings_since: int
     expected_next_at: datetime | None
     next_recheck_at: datetime | None
+    # #3109 — the poll-eligibility clock. NOT NULL in the schema, so unlike
+    # its two neighbours above this is never None on a row read from the DB.
+    next_poll_at: datetime
     state: FreshnessState
 
 
@@ -553,15 +632,23 @@ def subjects_due_for_poll(
     limit: int = 100,
     now: datetime | None = None,
 ) -> Iterator[FreshnessRow]:
-    """Yield scheduler rows whose ``expected_next_at`` has elapsed.
+    """Yield scheduler rows whose ``next_poll_at`` has elapsed.
 
     Codex review v3 finding 4: includes ``state='unknown'`` so rows
     reset by a rebuild (or freshly seeded) drain immediately rather
     than sitting in the future-poll queue.
 
-    Ordering: ``expected_next_at ASC NULLS FIRST`` — never-filed-but-
-    unknown rows (NULL expected) come first; otherwise oldest due row
-    first.
+    ⚠ **#3109 — this lane is keyed on ``next_poll_at``, NOT on
+    ``expected_next_at``.** The latter is the reconciliation deadline derived
+    from ``last_known_filed_at``; for a filer last seen in 1994 it is
+    permanently elapsed, so keying eligibility on it pinned the same rows to
+    the head of the queue on every tick and 95 of 55,775 rows had ever been
+    polled. ``next_poll_at`` is OUR budget's clock and advances on every poll,
+    which turns the queue from a fixed head into a rotation.
+
+    Ordering: ``next_poll_at ASC``. No ``NULLS FIRST`` — the column is
+    ``NOT NULL``, which is what stops a stream of newly seeded rows from
+    preempting the tail forever.
 
     ⚠ **No production caller since #3109** — ``sec_per_cik_poll`` moved to
     ``ciks_due_for_poll``, whose budget is denominated in CIKs. Kept because
@@ -572,7 +659,7 @@ def subjects_due_for_poll(
     if now is None:
         now = datetime.now(tz=UTC)
 
-    where = "state = ANY(%s) AND (expected_next_at IS NULL OR expected_next_at <= %s)"
+    where = "state = ANY(%s) AND next_poll_at <= %s"
     params: list[Any] = [list(_POLL_LANE_STATES), now]
     if source is not None:
         where += " AND source = %s"
@@ -585,10 +672,10 @@ def subjects_due_for_poll(
             SELECT subject_type, subject_id, source, cik, instrument_id,
                    last_known_filing_id, last_known_filed_at,
                    last_polled_at, last_polled_outcome, new_filings_since,
-                   expected_next_at, next_recheck_at, state
+                   expected_next_at, next_recheck_at, next_poll_at, state
             FROM data_freshness_index
             WHERE {where}
-            ORDER BY expected_next_at ASC NULLS FIRST
+            ORDER BY next_poll_at ASC, cik ASC
             LIMIT %s
             """,
             params,
@@ -628,7 +715,7 @@ def subjects_due_for_recheck(
             SELECT subject_type, subject_id, source, cik, instrument_id,
                    last_known_filing_id, last_known_filed_at,
                    last_polled_at, last_polled_outcome, new_filings_since,
-                   expected_next_at, next_recheck_at, state
+                   expected_next_at, next_recheck_at, next_poll_at, state
             FROM data_freshness_index
             WHERE {where}
             ORDER BY next_recheck_at ASC NULLS FIRST
@@ -665,14 +752,14 @@ _FRESHNESS_COLUMNS = """
     subject_type, subject_id, source, cik, instrument_id,
     last_known_filing_id, last_known_filed_at,
     last_polled_at, last_polled_outcome, new_filings_since,
-    expected_next_at, next_recheck_at, state
+    expected_next_at, next_recheck_at, next_poll_at, state
 """
 
 
 def _ciks_due(
     conn: psycopg.Connection[Any],
     *,
-    deadline_column: Literal["expected_next_at", "next_recheck_at"],
+    deadline_column: Literal["next_poll_at", "next_recheck_at"],
     states: tuple[str, ...],
     source: ManifestSource | None,
     limit: int,
@@ -696,8 +783,10 @@ def _ciks_due(
        on ``yesterday`` and fall behind an all-NULL CIK — inverting the
        NULL-is-most-urgent semantics the row-level readers get from
        ``ORDER BY ... NULLS FIRST``. Folding the NULL into the key makes the
-       group rank agree with the row rank. (0 NULL deadlines exist today; this
-       is correctness by construction.)
+       group rank agree with the row rank. ⚠ Since #3109 this is UNREACHABLE
+       for the poll lane — ``next_poll_at`` is ``NOT NULL`` — but the recheck
+       lane's ``next_recheck_at`` is still nullable, and this is one shared
+       body. Do not remove it when reading the poll lane's schema.
     2. ``cik_padded`` is INSIDE the ``DENSE_RANK`` ordering, so the rank is one
        per CIK and the tie-break is deterministic — the ticket's explicit
        requirement. Ranking on the deadline alone collapses every CIK sharing a
@@ -784,6 +873,13 @@ def ciks_due_for_poll(
     the whole batch — where the row-denominated reader spent one identical
     fetch per row.
 
+    ⚠ Eligibility is an EXCLUSION on ``next_poll_at``, not merely an ordering:
+    a polled row is gone from this lane for ``POLL_REPOLL_INTERVAL``. That is
+    what makes the queue rotate. It is **per row**, not per CIK — a sibling row
+    of the same CIK that becomes due later re-fetches that CIK, and a CIK with
+    rows in both lanes costs two fetches (see ``ciks_due_for_recheck``). Both
+    are bounded duplicate fetches, not starvation.
+
     Measured on the dev corpus 2026-09-16
     (``scripts/measure_3109_batching.py``): the row reader's 66-row prefix
     covers 48 distinct CIKs (in-prefix fan-out 1.375x); a 66-CIK budget covers
@@ -793,7 +889,7 @@ def ciks_due_for_poll(
     """
     return _ciks_due(
         conn,
-        deadline_column="expected_next_at",
+        deadline_column="next_poll_at",
         states=_POLL_LANE_STATES,
         source=source,
         limit=limit,
@@ -839,7 +935,7 @@ def get_freshness_row(
             SELECT subject_type, subject_id, source, cik, instrument_id,
                    last_known_filing_id, last_known_filed_at,
                    last_polled_at, last_polled_outcome, new_filings_since,
-                   expected_next_at, next_recheck_at, state
+                   expected_next_at, next_recheck_at, next_poll_at, state
             FROM data_freshness_index
             WHERE subject_type = %s AND subject_id = %s AND source = %s
             """,
