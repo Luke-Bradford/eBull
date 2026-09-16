@@ -90,7 +90,36 @@ ExclusionReason = Literal[
 #: FIRST.  A leg whose second boundary is ``off_axis`` and whose fifth is
 #: ``open_unusable`` reports ``off_axis``; chronological order would report the
 #: other and is not reproducible under a re-ordered corpus sweep.
-EXCLUSION_PRECEDENCE: Final[tuple[ExclusionReason, ...]] = get_args(ExclusionReason)
+#:
+#: ⚠⚠ WRITTEN OUT, NOT ``get_args(ExclusionReason)`` -- and that is the whole
+#: point of the line below.  Deriving a load-bearing RANK from the textual order
+#: of a ``Literal`` makes re-ordering the annotation for readability a silent
+#: behaviour change with no type-level signal (review NITPICK).  Here the order
+#: lives in one place and the annotation only has to agree about MEMBERSHIP.
+EXCLUSION_PRECEDENCE: Final[tuple[ExclusionReason, ...]] = (
+    "not_instrumented",
+    "no_session_boundary",
+    "provenance_unknown",
+    "off_axis",
+    "session_hole_spanned",
+    "scale_break_spanned",
+    "provisional_bar",
+    "open_unusable",
+    "close_unusable",
+    "non_finite",
+)
+
+# ⚠ IMPORT-TIME, and a SET comparison deliberately: adding a reason to the
+# ``Literal`` without ranking it here (or vice versa) fails the module import
+# rather than the run that first meets the unranked reason.  Re-ordering either
+# one now changes nothing, which is the property the NITPICK asked for.
+if set(EXCLUSION_PRECEDENCE) != set(get_args(ExclusionReason)) or len(EXCLUSION_PRECEDENCE) != len(
+    get_args(ExclusionReason)
+):  # pragma: no cover - a module-import guard, not a runtime branch
+    raise RuntimeError(
+        f"exclusion precedence {EXCLUSION_PRECEDENCE} does not rank exactly the reasons "
+        f"{get_args(ExclusionReason)} — every reason is ranked exactly once"
+    )
 
 _RANK: Final[Mapping[str, int]] = {reason: index for index, reason in enumerate(EXCLUSION_PRECEDENCE)}
 
