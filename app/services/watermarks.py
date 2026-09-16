@@ -70,7 +70,20 @@ Current namespaces:
   server returned (sent verbatim back as If-Modified-Since next tick).
   Item 7 of ``docs/proposals/etl/run-8-readiness-fixes.md``:
     * ``sec.last_modified.per_cik_poll`` — per-CIK submissions.json
-      poll at ``app/jobs/sec_per_cik_poll.py``. Key = 10-digit CIK.
+      poll at ``app/jobs/sec_per_cik_poll.py``. Key =
+      ``<10-digit cik>:<manifest source>`` (#3110). ⚠ It was the bare CIK,
+      which was wrong for the same reason ``sec.submissions`` must not be
+      reused here: ``submissions.json`` is an ENTITY-wide response but the
+      poll parses only ONE source out of it, so a CIK-wide validator let
+      source A's fetch certify source B as current without B's filings ever
+      being examined. **The key must describe what was PROCESSED, not what
+      was fetched.**
+      ⚠⚠ Nothing was migrated because there was nothing to migrate: this
+      namespace held **zero rows** across 1,949 poll runs since 2026-06-03.
+      ``data.sec.gov`` JSON APIs send NO ``Last-Modified`` and NO ``ETag``
+      (measured 2026-09-16 on submissions + companyfacts), so the watermark
+      can never be written and the conditional-GET path is INERT in
+      production. See ``.claude/skills/data-sources/sec-edgar.md`` §1.
     * ``sec.last_modified.submissions_files`` — secondary submissions
       page walker at ``app/services/sec_submissions_files_walk.py``.
       Key = ``<cik>:<page_name>``.
