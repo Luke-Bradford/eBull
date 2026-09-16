@@ -95,10 +95,18 @@ def _sanitise_sample(message: str) -> str:
     ⚠ The NUL strip is not defensive decoration. A producer's ``message`` is
     routinely an exception's ``str()``, and an exception raised over raw
     upstream bytes (a truncated XML body, a mis-decoded filing) can carry
-    ``\\x00``. psycopg rejects that at the driver boundary with *"A string
-    literal cannot contain NUL (0x00) characters"*, which would fail the
-    WHOLE flush — every class, every skip reason — over one bad sample. The
-    aggregate is worth more than the byte.
+    ``\\x00``.
+
+    ⚠ **POSTGRES rejects it, not the driver** — measured, because the
+    driver-side message for plain text ("A string literal cannot contain NUL")
+    is not what this path hits. The JSON encoder escapes the byte happily and
+    the SERVER refuses the cast::
+
+        psycopg.errors.UntranslatableCharacter: unsupported Unicode escape sequence
+        DETAIL:  \\u0000 cannot be converted to text.
+
+    That fails the WHOLE flush — every class, every skip reason — over one bad
+    sample. The aggregate is worth more than the byte.
     """
     return message[:_MAX_SAMPLE_MESSAGE_LEN].replace("\x00", "")
 

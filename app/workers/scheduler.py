@@ -8018,6 +8018,15 @@ def _flush_manifest_worker_telemetry(
     ``run_id == 0`` means ``_tracked_job`` never got a row (start-recording
     failed and the body ran anyway, by design). Skipped rather than issuing an
     UPDATE that matches nothing.
+
+    ⚠ The UPDATE carries its OWN short ``statement_timeout``. This connection
+    inherits the job's bound (``job_statement_timeout_ms``, 30 minutes for this
+    job), so a row-lock wait on the telemetry write could park an otherwise
+    FINISHED tick for half an hour — the tick's work is already committed at
+    this point. Same reasoning, and the same 3s, as ``JobRunHeartbeat``'s writer
+    (``app/services/job_heartbeat.py``): a reporting write must never outlast
+    the thing it reports on. ``SET LOCAL`` reverts with the surrounding
+    transaction, which is exactly what we want here.
     """
     from app.services.job_telemetry import flush_to_job_run
 
@@ -8025,6 +8034,7 @@ def _flush_manifest_worker_telemetry(
         return
     try:
         conn.rollback()
+        conn.execute("SET LOCAL statement_timeout = 3000")
         flush_to_job_run(conn, run_id=run_id, agg=agg)
         conn.commit()
     except Exception:

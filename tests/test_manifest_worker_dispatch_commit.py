@@ -395,3 +395,28 @@ def test_telemetry_is_optional_and_absent_by_default(
     stats = _dispatch_rows(conn, [_row("0000000001-26-000001")], now=_NOW)  # type: ignore[arg-type]
 
     assert stats.failed == 1
+
+
+def test_a_failed_outcome_with_an_EMPTY_error_string_also_gets_the_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The review bot's NITPICK, pinned as behaviour rather than argued once.
+
+    ``or`` catches ``""`` as well as ``None``, and that is deliberate: an empty
+    string is not a message. Rendering an empty ``sample_message`` in the
+    Processes Errors tab is strictly worse for an operator than the fallback
+    sentence, and the class + subject still identify the row either way. The
+    parser's original value reaches the manifest untouched — only the telemetry
+    SAMPLE is substituted.
+    """
+    from app.services.job_telemetry import JobTelemetryAggregator
+
+    register_parser("sec_form4", lambda _c, _r: ParseOutcome(status="failed", error=""))
+    _stub_transition(monkeypatch, lambda *_a, **_k: None)
+    conn = _CountingConn()
+    agg = JobTelemetryAggregator()
+
+    _dispatch_rows(conn, [_row("0000000001-26-000001")], now=_NOW, telemetry=agg)  # type: ignore[arg-type]
+
+    sample = agg.to_error_classes_jsonb()["ParserReportedFailure:sec_form4"]["sample_message"]
+    assert sample == "parser reported failure with no error text"

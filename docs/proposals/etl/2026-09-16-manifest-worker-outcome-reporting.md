@@ -1,9 +1,11 @@
 # #3111 — the manifest worker's outcome reporting: what is wrong, what the repo already has, and why it is four slices
 
-Status: **research + slice plan, no implementation.** Revised after Codex checkpoint 1 (24
-findings), which falsified three claims in the first draft and surfaced a parser-contract
-blocker that decides the ticket's shape. Target of the eventual slices:
-`app/jobs/sec_manifest_worker.py`, `app/workers/scheduler.py`.
+Status: **slices 1 and 2 SHIPPED; slices 3 and 4 outstanding.** Revised after Codex
+checkpoint 1 (24 findings), which falsified three claims in the first draft and surfaced a
+parser-contract blocker that decides the ticket's shape; §5a revised again after a second
+checkpoint-1 pass (38 findings) before slice 2 was written. Touches
+`app/jobs/sec_manifest_worker.py`, `app/workers/scheduler.py`,
+`app/services/job_telemetry.py`, `app/services/processes/scheduled_adapter.py`.
 
 ## 1. The premise holds — re-run on the full population
 
@@ -207,8 +209,11 @@ It is not "is the outcome good" — that question needs slice 3. It is:
 - **parsed** — handling completed. (⚠ `parsed` does not mean "successfully extracted" — §6.2.)
 - **`failed` / raised / dispatch-failed** — handling did NOT complete; the row is coming back.
 
-⚠ **Stated cost, not hidden:** the ~30.5% genuinely-defective tombstones stay invisible under
-this rule. That is the signal slice 3 buys, and it is why slice 3 is not optional.
+⚠ **Stated cost, not hidden:** the ~30.5% remainder stays invisible under this rule, and that
+remainder is MIXED (it contains genuine defects AND further intentional tombstones such as
+N-CSR's `INSTRUMENT_NOT_IN_UNIVERSE` — the paragraph above says so and this one must not
+quietly relabel it). Some unknown share of real defects is therefore unreported. That is the
+signal slice 3 buys, and it is why slice 3 is not optional.
 
 ### What slice 2 records
 
