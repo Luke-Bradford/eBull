@@ -3141,8 +3141,16 @@ def _expected_refusals(
         # ⚠ Through ``Decimal(repr(...))``, which is EXACTLY what ``build_result``
         # stamps the row with, so the prediction and the stored value cannot
         # disagree by a binary-float tail at the boundary.
+        #
+        # ⚠⚠ ``math.isfinite`` FIRST, and not as a tidiness. ``Decimal`` ordering
+        # comparisons RAISE on a NaN operand (``InvalidOperation``) where float
+        # comparisons quietly return False — so ``Decimal(repr(nan)) <= 1``
+        # would take down the write path that calls this, instead of predicting
+        # the refusal the gate produces. The gate's own ``finite_decimal``
+        # guards the same case; this side must guard it independently, because
+        # sharing the helper is exactly what criterion 8 forbids.
         probability = Decimal(repr(deflated_sharpe))
-        if not (Decimal(0) <= probability <= Decimal(1)):
+        if not probability.is_finite() or not (Decimal(0) <= probability <= Decimal(1)):
             expected.add("deflated_sharpe_invalid")
         elif probability <= DSR_PROMOTION_THRESHOLD:
             expected.add("deflated_sharpe_below_threshold")

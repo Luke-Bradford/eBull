@@ -507,6 +507,12 @@ class TestExpectedRefusals:
             (0.9505, 400.0, set()),
             (0.95, 400.0, {"deflated_sharpe_below_threshold"}),
             (1.01, 400.0, {"deflated_sharpe_invalid"}),
+            # ⚠ Decimal ORDERING RAISES on NaN where float comparison returns
+            # False, so an unguarded `Decimal(repr(nan)) <= 1` would crash the
+            # write path rather than predict a refusal. Review round 1, BLOCKING.
+            (float("nan"), 400.0, {"deflated_sharpe_invalid"}),
+            (float("inf"), 400.0, {"deflated_sharpe_invalid"}),
+            (float("-inf"), 400.0, {"deflated_sharpe_invalid"}),
             (0.99, 30.0, {"effective_sample_size_below_minimum"}),
             (0.99, None, {"effective_sample_size_not_computed"}),
             (0.998, 4.0, {"effective_sample_size_below_minimum"}),
