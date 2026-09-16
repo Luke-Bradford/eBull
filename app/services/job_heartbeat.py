@@ -88,9 +88,20 @@ _MIN_WRITE_INTERVAL_S: float = 5.0
 # its transaction ever rolled back the UPDATE would be gone too — so the
 # timeout reverting with it costs nothing. ``options=`` is not available
 # on a pooled connection in any case.
-_STATEMENT_TIMEOUT_MS: int = 3_000
+#
+# ⚠ PUBLIC, and shared on purpose (#3111 slice 2). The rule generalises past
+# this writer: any write that REPORTS on a job body, rather than doing its
+# work, must not outlast it. ``sec_manifest_worker``'s telemetry flush is the
+# second such writer and imports this rather than restating 3_000 — one bound,
+# one place to change it.
+#
+# ⚠ A third copy already exists at ``sync_orchestrator/executor.py``
+# (``_RUN_HEARTBEAT_STATEMENT_TIMEOUT_MS``), whose own comment says it mirrors
+# this one. Pre-dates this constant going public and is left alone rather than
+# folded in on an unrelated ticket.
+REPORTING_WRITE_TIMEOUT_MS: int = 3_000
 
-_SET_TIMEOUT_SQL = sql.SQL("SET LOCAL statement_timeout = {ms}").format(ms=sql.Literal(_STATEMENT_TIMEOUT_MS))
+_SET_TIMEOUT_SQL = sql.SQL("SET LOCAL statement_timeout = {ms}").format(ms=sql.Literal(REPORTING_WRITE_TIMEOUT_MS))
 
 _UPDATE_SQL = """
     UPDATE job_runs
@@ -236,4 +247,4 @@ def job_heartbeat(run_id: int) -> Iterator[None]:
         clear_active_progress(token)
 
 
-__all__ = ["JobRunHeartbeat", "job_heartbeat"]
+__all__ = ["REPORTING_WRITE_TIMEOUT_MS", "JobRunHeartbeat", "job_heartbeat"]

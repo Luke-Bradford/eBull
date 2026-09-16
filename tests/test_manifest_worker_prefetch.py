@@ -548,11 +548,11 @@ def test_per_source_rebuild_routes_through_prefetch(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(w, "iter_retryable", lambda conn, *, source, limit: [])
     routed = {"prefetch": False, "serial": False}
 
-    def _spy_prefetch(conn: Any, rows: Any, *, now: Any) -> Any:
+    def _spy_prefetch(conn: Any, rows: Any, *, now: Any, telemetry: Any = None) -> Any:
         routed["prefetch"] = True
         return w.WorkerStats(rows_processed=0, parsed=0, tombstoned=0, failed=0, skipped_no_parser=0)
 
-    def _spy_serial(conn: Any, rows: Any, *, now: Any) -> Any:
+    def _spy_serial(conn: Any, rows: Any, *, now: Any, telemetry: Any = None) -> Any:
         routed["serial"] = True
         return w.WorkerStats(rows_processed=0, parsed=0, tombstoned=0, failed=0, skipped_no_parser=0)
 

@@ -184,6 +184,14 @@ _RUN_STATUS_TO_SUMMARY: dict[str, RunStatus] = {
     "degraded": "degraded",
 }
 
+# Process states in which the latest terminal run's grouped errors are
+# deliberately hidden: a retry is already in flight (``running``) or the next
+# fire is known to cover the failed scope (``pending_retry``). Outside those
+# two, whatever the terminal run recorded is shown — see the auto-hide comment
+# at the ``last_n_errors`` assignment for why this is a state list and not a
+# ``== "failed"`` test (#3111 slice 2).
+_ERROR_SUMMARY_SUPPRESSED_STATUSES: Final[frozenset[ProcessStatus]] = frozenset({"running", "pending_retry"})
+
 
 def _status_for(
     *,
@@ -890,10 +898,25 @@ def _build_row(
     active_run = _build_active_run(active_row) if active_row is not None else None
 
     # Auto-hide-on-retry: hide error chips when status is running (retry
-    # in flight) or pending_retry (next fire covers failed scope). Only
-    # surface grouped errors in the actionable ``failed`` state.
+    # in flight) or pending_retry (next fire covers failed scope).
+    #
+    # ⚠ #3111 slice 2 — this used to read ``process_status == "failed"``, which
+    # tied VISIBILITY to the run's terminal status rather than to whether it
+    # recorded anything. A job whose rows all failed while the tick itself
+    # completed cleanly writes ``status='success'`` (that is #3111's whole
+    # premise), so its ``error_classes`` could never be rendered — a second
+    # write-with-no-reader, which is the exact defect that reshaped this ticket
+    # (``progress_json`` has no operator reader either). Suppression is now
+    # scoped to the two states the rule above actually names.
+    #
+    # Strictly a widening, and inert on every pre-#3111 row: with no producer
+    # wired, ``error_classes`` is NULL everywhere and ``_build_error_summaries``
+    # already returns ``()``. ⚠ The inline row chip
+    # (``frontend/src/components/admin/ProcessRow.tsx``) keeps its own
+    # ``status === "failed"`` gate — that one is row-level noise control, and
+    # the drill-in Errors tab is the surface #3111's acceptance names.
     last_n_errors: tuple[ErrorClassSummary, ...] = ()
-    if process_status == "failed" and terminal_row is not None:
+    if terminal_row is not None and process_status not in _ERROR_SUMMARY_SUPPRESSED_STATUSES:
         last_n_errors = _build_error_summaries(terminal_row.get("error_classes"))
 
     # Stale-reason probes — operator-amendment §A1 four-case model

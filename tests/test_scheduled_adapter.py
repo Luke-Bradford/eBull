@@ -1073,3 +1073,43 @@ def test_prereq_skip_still_resets_schedule_missed_anchor(
     row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
     assert row is not None
     assert "schedule_missed" not in row.stale_reasons
+
+
+def test_a_successful_run_that_recorded_errors_still_surfaces_them(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3111 slice 2 — visibility follows what the run RECORDED, not its status.
+
+    The manifest worker's whole defect is that a tick whose rows all failed
+    still writes ``status='success'``: nothing raised, so ``_tracked_job`` has
+    nothing to record. Gating the grouped errors on ``process_status ==
+    "failed"`` therefore made the aggregate unreachable for exactly the runs it
+    was built for — a second write-with-no-reader, which is the defect that
+    reshaped this ticket in the first place.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        status="success",
+        finished=True,
+        rows_errored=3,
+        error_classes={
+            "DispatchFailed:RuntimeError": {
+                "count": 3,
+                "sample_message": "RuntimeError: deadlock victim",
+                "last_subject": "sec_form4 0000320193-26-000001",
+                "last_seen_at": "2026-09-16T11:00:00+00:00",
+            }
+        },
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "ok"
+    assert len(row.last_n_errors) == 1
+    assert row.last_n_errors[0].error_class == "DispatchFailed:RuntimeError"
+    assert row.last_n_errors[0].count == 3
+    assert row.last_run is not None
+    assert row.last_run.rows_errored == 3

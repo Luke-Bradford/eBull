@@ -265,3 +265,158 @@ def test_the_tick_identity_holds_across_every_outcome_at_once(
     # happens AFTER the row reached the parser entry point, so it stays in
     # `processed_by_source`.
     assert sum(stats.processed_by_source.values()) == stats.rows_processed - stats.skipped_no_parser
+
+
+# --- #3111 slice 2: what the tick reports to the operator ---
+
+
+def test_telemetry_records_only_rows_whose_handling_did_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same all-buckets batch, now asserted on the operator-facing aggregate.
+
+    The axis is "did the worker FINISH with this row", not "is the outcome
+    good". A ``tombstoned`` row got a terminal decision and moved — and 69.5%
+    of worker-written tombstones are deliberate policy (retention floor, 424B2
+    volume cap, latest-N cap; census in the #3111 spec §5a), so counting them
+    as errors would report policy as failure. A ``failed`` row is coming back.
+    """
+    from app.services.job_telemetry import JobTelemetryAggregator
+
+    def _parse(_c: Any, row: ManifestRow) -> ParseOutcome:
+        if row.accession_number.endswith("2"):
+            return ParseOutcome(status="tombstoned", raw_status="stored")
+        if row.accession_number.endswith("3"):
+            raise RuntimeError("parser blew up")
+        if row.accession_number.endswith("5"):
+            return ParseOutcome(status="parsed", raw_status="absent")
+        if row.accession_number.endswith("7"):
+            return ParseOutcome(status="failed", error="iXBRL fetch timed out")
+        return ParseOutcome(status="parsed", raw_status="stored")
+
+    register_parser("sec_form4", _parse, requires_raw_payload=True)
+
+    def _transition(_c: Any, accession: str, **_k: Any) -> None:
+        if accession.endswith("6"):
+            raise RuntimeError("deadlock victim")
+
+    _stub_transition(monkeypatch, _transition)
+    conn = _CountingConn()
+    agg = JobTelemetryAggregator()
+    rows = [
+        _row("0000000001-26-000001"),  # parsed          -> not recorded
+        _row("0000000001-26-000002"),  # tombstoned      -> not recorded
+        _row("0000000001-26-000003"),  # parser raised   -> error
+        _row("0000000001-26-000004", source="finra_regsho_daily"),  # no parser -> skip
+        _row("0000000001-26-000005"),  # raw violation   -> error
+        _row("0000000001-26-000006"),  # transition raised -> error
+        _row("0000000001-26-000007"),  # parser returned failed -> error
+    ]
+
+    stats = _dispatch_rows(conn, rows, now=_NOW, telemetry=agg)  # type: ignore[arg-type]
+
+    # One error per row whose handling did not complete, and no others: the
+    # aggregate reconciles exactly with slice 1's counters.
+    assert agg.rows_errored == stats.failed + stats.dispatch_errors == 4
+    assert set(agg.to_error_classes_jsonb()) == {
+        "ParserRaised:RuntimeError",
+        "RawPayloadMissing",
+        "DispatchFailed:RuntimeError",
+        "ParserReportedFailure:sec_form4",
+    }
+    # The parser's own reason text is the sample an operator reads.
+    assert "timed out" in agg.to_error_classes_jsonb()["ParserReportedFailure:sec_form4"]["sample_message"]
+    # Subject carries source + accession so the failure is locatable.
+    assert (
+        agg.to_error_classes_jsonb()["DispatchFailed:RuntimeError"]["last_subject"] == "sec_form4 0000000001-26-000006"
+    )
+    assert agg.to_skips_jsonb() == {"no_parser_registered": 1}
+    # ⚠ Progress is NOT this producer's: ``report_progress`` owns that surface
+    # for this job, and a second writer would race the #2274 heartbeat.
+    assert agg.processed_count == 0
+    assert not agg.has_processed_state
+
+
+def test_a_parser_raise_whose_transition_also_raises_records_exactly_one_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recording at the counter site, not where the exception was caught.
+
+    The parser raise is handled by calling ``transition_status``; if THAT
+    raises, the row lands in ``dispatch_errors`` and never reaches ``failed``.
+    Recording the parser error where it was caught would emit two errors for
+    one row and break ``rows_errored == failed + dispatch_errors``.
+    """
+    from app.services.job_telemetry import JobTelemetryAggregator
+
+    def _boom_parser(_c: Any, _r: ManifestRow) -> ParseOutcome:
+        raise ValueError("parser blew up")
+
+    def _boom_transition(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("illegal state transition")
+
+    register_parser("sec_form4", _boom_parser)
+    _stub_transition(monkeypatch, _boom_transition)
+    conn = _CountingConn()
+    agg = JobTelemetryAggregator()
+
+    stats = _dispatch_rows(conn, [_row("0000000001-26-000001")], now=_NOW, telemetry=agg)  # type: ignore[arg-type]
+
+    assert (stats.failed, stats.dispatch_errors) == (0, 1)
+    assert agg.rows_errored == 1
+    assert list(agg.to_error_classes_jsonb()) == ["DispatchFailed:RuntimeError"]
+
+
+def test_a_failed_outcome_with_no_error_text_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ParseOutcome.error`` is legally ``None`` and ``record_error`` slices it."""
+    from app.services.job_telemetry import JobTelemetryAggregator
+
+    register_parser("sec_form4", lambda _c, _r: ParseOutcome(status="failed"))
+    _stub_transition(monkeypatch, lambda *_a, **_k: None)
+    conn = _CountingConn()
+    agg = JobTelemetryAggregator()
+
+    stats = _dispatch_rows(conn, [_row("0000000001-26-000001")], now=_NOW, telemetry=agg)  # type: ignore[arg-type]
+
+    assert stats.failed == 1
+    assert agg.to_error_classes_jsonb()["ParserReportedFailure:sec_form4"]["sample_message"]
+
+
+def test_telemetry_is_optional_and_absent_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every ``scripts/backfill_*.py`` caller passes no aggregator."""
+    register_parser("sec_form4", lambda _c, _r: ParseOutcome(status="failed", error="x"))
+    _stub_transition(monkeypatch, lambda *_a, **_k: None)
+    conn = _CountingConn()
+
+    stats = _dispatch_rows(conn, [_row("0000000001-26-000001")], now=_NOW)  # type: ignore[arg-type]
+
+    assert stats.failed == 1
+
+
+def test_a_failed_outcome_with_an_EMPTY_error_string_also_gets_the_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The review bot's NITPICK, pinned as behaviour rather than argued once.
+
+    ``or`` catches ``""`` as well as ``None``, and that is deliberate: an empty
+    string is not a message. Rendering an empty ``sample_message`` in the
+    Processes Errors tab is strictly worse for an operator than the fallback
+    sentence, and the class + subject still identify the row either way. The
+    parser's original value reaches the manifest untouched — only the telemetry
+    SAMPLE is substituted.
+    """
+    from app.services.job_telemetry import JobTelemetryAggregator
+
+    register_parser("sec_form4", lambda _c, _r: ParseOutcome(status="failed", error=""))
+    _stub_transition(monkeypatch, lambda *_a, **_k: None)
+    conn = _CountingConn()
+    agg = JobTelemetryAggregator()
+
+    _dispatch_rows(conn, [_row("0000000001-26-000001")], now=_NOW, telemetry=agg)  # type: ignore[arg-type]
+
+    sample = agg.to_error_classes_jsonb()["ParserReportedFailure:sec_form4"]["sample_message"]
+    assert sample == "parser reported failure with no error text"

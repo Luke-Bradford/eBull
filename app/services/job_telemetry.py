@@ -89,6 +89,28 @@ logger = logging.getLogger(__name__)
 _MAX_SAMPLE_MESSAGE_LEN = 500
 
 
+def _sanitise_sample(message: str) -> str:
+    """Truncate to the cap and strip NUL, which PostgreSQL text cannot hold.
+
+    ⚠ The NUL strip is not defensive decoration. A producer's ``message`` is
+    routinely an exception's ``str()``, and an exception raised over raw
+    upstream bytes (a truncated XML body, a mis-decoded filing) can carry
+    ``\\x00``.
+
+    ⚠ **POSTGRES rejects it, not the driver** — measured, because the
+    driver-side message for plain text ("A string literal cannot contain NUL")
+    is not what this path hits. The JSON encoder escapes the byte happily and
+    the SERVER refuses the cast::
+
+        psycopg.errors.UntranslatableCharacter: unsupported Unicode escape sequence
+        DETAIL:  \\u0000 cannot be converted to text.
+
+    That fails the WHOLE flush — every class, every skip reason — over one bad
+    sample. The aggregate is worth more than the byte.
+    """
+    return message[:_MAX_SAMPLE_MESSAGE_LEN].replace("\x00", "")
+
+
 @dataclass(slots=True)
 class _ErrorClassState:
     count: int = 0
@@ -156,7 +178,7 @@ class JobTelemetryAggregator:
         """
         state = self._errors.setdefault(error_class, _ErrorClassState())
         state.count += 1
-        state.sample_message = message[:_MAX_SAMPLE_MESSAGE_LEN]
+        state.sample_message = _sanitise_sample(message)
         state.last_subject = subject
         state.last_seen_at = datetime.now(UTC)
         self._errored += 1
@@ -219,7 +241,7 @@ class JobTelemetryAggregator:
         """
         state = self._warnings.setdefault(error_class, _ErrorClassState())
         state.count += 1
-        state.sample_message = message[:_MAX_SAMPLE_MESSAGE_LEN]
+        state.sample_message = _sanitise_sample(message)
         state.last_subject = subject
         state.last_seen_at = datetime.now(UTC)
         self._warned += 1
@@ -227,6 +249,25 @@ class JobTelemetryAggregator:
     # ------------------------------------------------------------------
     # Read-only views
     # ------------------------------------------------------------------
+
+    @property
+    def has_processed_state(self) -> bool:
+        """True once ``record_processed`` has actually bumped the ticker.
+
+        Read by :func:`flush_to_job_run` to decide whether this producer owns
+        ``processed_count`` / ``last_progress_at`` — see its docstring for why
+        the three progress columns are guarded INDEPENDENTLY rather than by one
+        combined flag."""
+        return self._processed > 0
+
+    @property
+    def has_target_state(self) -> bool:
+        """True once ``set_target`` has been called.
+
+        ⚠ Deliberately NOT ``bool(self._target)``: ``set_target(0)`` is a
+        meaningful denominator ("nothing to do", rendered ``0/0``), so the guard
+        has to be "was it set", not truthiness."""
+        return self._target is not None
 
     @property
     def rows_errored(self) -> int:
@@ -330,17 +371,34 @@ def flush_to_job_run(
     run_id: int,
     agg: JobTelemetryAggregator,
 ) -> None:
-    """Write the aggregator's full state into the ``job_runs`` row.
+    """Write the aggregator's state into the ``job_runs`` row.
 
     Caller is responsible for committing the surrounding transaction.
-    Uses ``COALESCE``-style override semantics: this UPDATE replaces
-    whatever was previously written (idempotent if called more than
-    once, last-writer-wins).
+    The sql/137 error/skip fields and the sql/140 warning fields are
+    replaced wholesale — last-writer-wins, idempotent on re-flush. One
+    producer per run is the contract; this is not a partial-writer API.
 
-    Writes BOTH the sql/137 error/skip fields AND the sql/140 progress
-    fields in one UPDATE so the snapshot the adapter renders is always
-    coherent (no two-phase intermediate state where progress moved but
-    error counts didn't).
+    ⚠⚠ THE THREE PROGRESS COLUMNS ARE NOT THIS WRITER'S UNLESS IT HAS THE
+    STATE (#3111 slice 2). ``processed_count``, ``target_count`` and
+    ``last_progress_at`` are also written by
+    :class:`app.services.job_heartbeat.JobRunHeartbeat`, which
+    ``_tracked_job`` installs for every tracked job that has a run id and a
+    background pool. Writing them unconditionally meant an ERROR-ONLY
+    producer — which is what the first real wiring of this aggregator is —
+    flushed ``processed_count=0, target_count=NULL, last_progress_at=NULL``
+    straight over a live liveness stamp that #2274 shipped and that
+    stale-detection reads.
+
+    No production producer existed when this module was written, so the trap
+    never fired; it would have fired on the FIRST wiring and on every later
+    one. Each progress column is therefore written only when this aggregator
+    carries THAT piece of state, via ``COALESCE(%s, <column>)`` with NULL
+    meaning "not mine, leave it".
+
+    ⚠ Guarded per column, not by one combined flag: a target-only producer
+    must not zero ``processed_count``, and a processed-only one must not NULL
+    the denominator another writer set. ``last_progress_at`` follows
+    ``processed_count`` because ``record_processed`` is what moves both.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -349,9 +407,9 @@ def flush_to_job_run(
                SET rows_errored           = %s,
                    error_classes          = %s,
                    rows_skipped_by_reason = %s,
-                   processed_count        = %s,
-                   target_count           = %s,
-                   last_progress_at       = %s,
+                   processed_count        = COALESCE(%s, processed_count),
+                   target_count           = COALESCE(%s, target_count),
+                   last_progress_at       = COALESCE(%s, last_progress_at),
                    warnings_count         = %s,
                    warning_classes        = %s
              WHERE run_id = %s
@@ -360,9 +418,9 @@ def flush_to_job_run(
                 agg.rows_errored,
                 Jsonb(agg.to_error_classes_jsonb()),
                 Jsonb(agg.to_skips_jsonb()),
-                agg.processed_count,
-                agg.target_count,
-                agg.last_progress_at,
+                agg.processed_count if agg.has_processed_state else None,
+                agg.target_count if agg.has_target_state else None,
+                agg.last_progress_at if agg.has_processed_state else None,
                 agg.warnings_count,
                 Jsonb(agg.to_warning_classes_jsonb()),
                 run_id,
