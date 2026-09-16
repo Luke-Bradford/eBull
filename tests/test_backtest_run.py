@@ -43,6 +43,7 @@ from app.services.backtest_run import (
     _dense_price_history,
     _expected_refusals,
     _fills,
+    _ledger_evidence,
     _measure_namespace,
     _NamespaceBook,
     _rank_cross_section,
@@ -207,6 +208,7 @@ def _measurement(
         ),
         position_count=200,
         axis_dates=axis_dates,
+        ledger_evidence=None,
     )
 
 
@@ -1904,6 +1906,7 @@ class TestCutSplits:
             ),
             position_count=len(starts),
             axis_dates=TestCutSplits.AXIS,
+            ledger_evidence=None,
             label_starts=array("i", starts),
             label_ends=array("i", ends),
         )
@@ -2198,3 +2201,71 @@ class TestCrossSectionOpportunityPopulation:
 
         assert loaded == [(10, corpus.window.end)]
         assert outcome.winners == {}
+
+
+class TestLedgerEvidence:
+    """#3104 — #2505's ledger arithmetic must leave the book, which does not survive."""
+
+    @staticmethod
+    def _book(*, returns: list[float], entries: list[date], exits: list[date], names: list[int]) -> _NamespaceBook:
+        book = _NamespaceBook()
+        book.returns.extend(returns)
+        book.entry_dates.extend(entries)
+        book.exit_dates.extend(exits)
+        book.regime_observations.extend(
+            RegimeTradeObservation(instrument_key=name, signal_date=entry, net_return_pct=value, regime=None)
+            for name, entry, value in zip(names, entries, returns, strict=True)
+        )
+        return book
+
+    def test_an_unrealised_book_measures_nothing(self) -> None:
+        """``None`` means "no realised legs" and is the only thing it means."""
+        book = _NamespaceBook()
+        book.open_entry_dates.append(date(2010, 1, 4))
+        assert _ledger_evidence(book, window_end=date(2010, 1, 6)) is None
+
+    def test_the_measurement_reads_the_book_s_own_columns(self) -> None:
+        book = self._book(
+            returns=[1.0, -2.0, 0.0],
+            entries=[date(2010, 1, 4), date(2010, 1, 4), date(2010, 1, 5)],
+            exits=[date(2010, 1, 6), date(2010, 1, 6), date(2010, 1, 6)],
+            names=[7, 7, 9],
+        )
+        measured = _ledger_evidence(book, window_end=date(2010, 1, 6))
+        assert measured is not None
+        assert measured.outcome_count == 3
+        assert (measured.profitable_outcome_count, measured.losing_outcome_count, measured.flat_outcome_count) == (
+            1,
+            1,
+            1,
+        )
+        # Two of three legs enter on one date and two carry one name key.
+        assert measured.max_date_contribution_pct == pytest.approx(Decimal(repr(200 / 3)))
+        assert measured.max_name_contribution_pct == pytest.approx(Decimal(repr(200 / 3)))
+        assert measured.max_concurrency == 3
+
+    def test_open_legs_reach_the_concurrency_measurement(self) -> None:
+        """They are on the curve and in exposure; omitting them understates the peak."""
+        book = self._book(
+            returns=[1.0],
+            entries=[date(2010, 1, 4)],
+            exits=[date(2010, 1, 6)],
+            names=[7],
+        )
+        assert (closed := _ledger_evidence(book, window_end=date(2010, 1, 6))) is not None
+        assert closed.max_concurrency == 1
+        book.open_entry_dates.append(date(2010, 1, 5))
+        assert (with_open := _ledger_evidence(book, window_end=date(2010, 1, 6))) is not None
+        assert with_open.max_concurrency == 2
+
+    def test_a_name_column_out_of_step_with_the_returns_is_refused(self) -> None:
+        """The two are appended by different statements, so the parallelism is checked."""
+        book = self._book(
+            returns=[1.0, 2.0],
+            entries=[date(2010, 1, 4), date(2010, 1, 5)],
+            exits=[date(2010, 1, 6), date(2010, 1, 6)],
+            names=[7, 9],
+        )
+        book.regime_observations.pop()
+        with pytest.raises(ValueError, match="positionally parallel"):
+            _ledger_evidence(book, window_end=date(2010, 1, 6))

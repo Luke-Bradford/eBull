@@ -138,6 +138,11 @@ from app.services.strategies.validated_universe import (
     load_validated_universe,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
+from app.services.strategy_promotion_evidence_measure import (
+    LedgerMeasurements,
+    RealisedLedger,
+    measure_ledger,
+)
 from app.services.strategy_recent_evidence import recent_evidence_window
 from app.services.strategy_regime_evidence import (
     RegimeCohort,
@@ -508,6 +513,18 @@ class NamespaceMeasurement:
     universe_record: ResultUniverseRecord
     position_count: int
     axis_dates: tuple[date, ...]
+    #: #3104 slice 1's #2505 ledger arithmetic, measured HERE because the book
+    #: does not survive this function — `_write_rows` sees only what this object
+    #: carries, exactly as with `regime_cohorts` and `termination_census`.
+    #: ⚠ ``None`` means the namespace realised NO legs, which is a real state
+    #: (`metrics.trade_count == 0`) and is the only thing it means. Required
+    #: rather than defaulted, per #2288: a field with a default is a field a
+    #: writer can forget.
+    #: ⚠ NOTHING READS IT YET. It reaches no result row and no gate; the
+    #: assembler that turns it into a `PromotionEvidence` is a later slice. Same
+    #: shape as `gross_returns` below, which is read by one script and nothing
+    #: else.
+    ledger_evidence: LedgerMeasurements | None
     #: Criterion 5's label windows, on the panel axis — populated for the
     #: ``in_sample`` namespace and EMPTY for ``hold_out``, which has no split.
     #: ⚠ These are the legs that reached the CURVE, so the census describes the
@@ -1138,6 +1155,13 @@ class _NamespaceBook:
     #: Positionally parallel to `entry_dates`; `TradeReturns` enforces that.
     exit_dates: list[date] = field(default_factory=list)
     regime_observations: list[RegimeTradeObservation] = field(default_factory=list)
+    #: #3104 — the entry fill of each leg still OPEN at the window end that
+    #: reached the curve. ⚠ Not derivable from `open_at_end`, which is a count,
+    #: and deliberately not parallel to `entry_dates`, which is realised-only:
+    #: #2505's concurrency describes EXPOSURE, and a leg the window ended on was
+    #: held. Counting realised legs alone understates the peak, which is the
+    #: direction that flatters a candidate.
+    open_entry_dates: list[date] = field(default_factory=list)
     instruments: set[int] = field(default_factory=set)
     positions: int = 0
     open_at_end: int = 0
@@ -1518,6 +1542,12 @@ def _absorb(
                     regime=market_regime_by_date.get(position.entry_signal_bar_date),
                 )
             )
+        else:
+            # #3104 — the open legs #2505's concurrency needs. ⚠ Recorded HERE
+            # and not beside the `open_at_end` increment above: a leg excluded
+            # between the two (`mark_bar_unlocatable`, `total_return_price_missing`)
+            # never reached `add_leg`, so it is on neither the curve nor this list.
+            book.open_entry_dates.append(position.entry_fill_bar_date)
 
 
 @dataclass(frozen=True)
@@ -1701,6 +1731,33 @@ def load_corpus(
     )
 
 
+def _ledger_evidence(book: _NamespaceBook, *, window_end: date) -> LedgerMeasurements | None:
+    """#2505's ledger arithmetic over one book. ``None`` on an empty population.
+
+    ⚠ ``regime_observations`` is positionally parallel to ``returns`` — both are
+    appended in the single realised branch of ``_absorb`` — which is what makes
+    its name key usable as a per-trade column. ``RealisedLedger`` re-checks the
+    lengths rather than trusting that, because the two are appended by different
+    statements and a future edit could separate them.
+
+    ⚠ The name key is NOT always an instrument id: the survivorship-free path
+    carries ``-series_id`` for a series admitted without a live link (#2721 step
+    3). Concentration needs identity only, so that is correct here — a later
+    slice joining this key to a sector is the one that must handle it.
+    """
+    if not book.returns:
+        return None
+    return measure_ledger(
+        RealisedLedger(
+            net_return_pct=tuple(book.returns),
+            entry_fill_date=tuple(book.entry_dates),
+            exit_bar_date=tuple(book.exit_dates),
+            name_key=tuple(observation.instrument_key for observation in book.regime_observations),
+            open_legs=tuple((entry, window_end) for entry in book.open_entry_dates),
+        )
+    )
+
+
 def _measure_namespace(
     namespace: ResultNamespace,
     book: _NamespaceBook,
@@ -1809,6 +1866,7 @@ def _measure_namespace(
         universe_record=opportunity,
         position_count=book.positions,
         axis_dates=dates,
+        ledger_evidence=_ledger_evidence(book, window_end=dates[-1]),
         label_starts=book.label_starts,
         label_ends=book.label_ends,
         rebalance_costs=curve.rebalance_costs,
