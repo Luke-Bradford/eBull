@@ -2222,7 +2222,7 @@ class TestLedgerEvidence:
         """``None`` means "no realised legs" and is the only thing it means."""
         book = _NamespaceBook()
         book.open_entry_dates.append(date(2010, 1, 4))
-        assert _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6)) is None
+        assert _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6), anchor_year=2010) is None
 
     def test_the_measurement_reads_the_book_s_own_columns(self) -> None:
         book = self._book(
@@ -2231,7 +2231,7 @@ class TestLedgerEvidence:
             exits=[date(2010, 1, 6), date(2010, 1, 6), date(2010, 1, 6)],
             names=[7, 7, 9],
         )
-        measured = _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6))
+        measured = _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6), anchor_year=2010)
         assert measured is not None
         assert measured.outcome_count == 3
         assert (measured.profitable_outcome_count, measured.losing_outcome_count, measured.flat_outcome_count) == (
@@ -2252,10 +2252,14 @@ class TestLedgerEvidence:
             exits=[date(2010, 1, 6)],
             names=[7],
         )
-        assert (closed := _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6))) is not None
+        assert (
+            closed := _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6), anchor_year=2010)
+        ) is not None
         assert closed.max_concurrency == 1
         book.open_entry_dates.append(date(2010, 1, 5))
-        assert (with_open := _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6))) is not None
+        assert (
+            with_open := _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6), anchor_year=2010)
+        ) is not None
         assert with_open.max_concurrency == 2
 
     def test_a_name_column_out_of_step_with_the_returns_is_refused(self) -> None:
@@ -2268,9 +2272,36 @@ class TestLedgerEvidence:
         )
         book.regime_observations.pop()
         with pytest.raises(RuntimeError, match="positionally parallel") as raised:
-            _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6))
+            _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6), anchor_year=2010)
         # ⚠ The message must name the namespace and both counts: #2820's lesson is
         # that a failure without a diagnosis costs the whole run a second time.
         assert "in_sample" in str(raised.value)
         assert "2 realised return(s)" in str(raised.value)
         assert "1 regime observation(s)" in str(raised.value)
+
+    def test_the_recency_anchor_is_not_the_metric_axis_end(self) -> None:
+        """#3104 slice 4 — the two dates diverge by years on an in-sample book.
+
+        ``window_end`` is the mark bar for an open leg; ``anchor_year`` is the
+        year of ``ResultIdentity.window_end``. An in-sample axis stops at
+        ``HOLDOUT_BOUNDARY`` while the identity window can end in 2026, so
+        collapsing the two would anchor the horizon years early.
+        """
+        book = self._book(
+            returns=[1.0, 2.0, -1.0],
+            entries=[date(2010, 1, 4), date(2010, 1, 5), date(2010, 1, 6)],
+            exits=[date(2010, 1, 6)] * 3,
+            names=[7, 8, 9],
+        )
+        axis_end = date(2010, 1, 6)
+
+        on_axis = _ledger_evidence(book, namespace="in_sample", window_end=axis_end, anchor_year=2010)
+        assert on_axis is not None
+        assert [item.year for item in on_axis.recent_years] == [2010]
+
+        # Same book, same mark bar, a result window ending in 2026: every leg
+        # now sits outside the five-year horizon.
+        off_horizon = _ledger_evidence(book, namespace="in_sample", window_end=axis_end, anchor_year=2026)
+        assert off_horizon is not None
+        assert off_horizon.recent_years == ()
+        assert off_horizon.outcome_count == 3
