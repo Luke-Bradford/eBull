@@ -175,11 +175,19 @@ the manual in-flight lock and its source advisory lock. This reservation only
 prevents unrelated general work from starving its connection-budget entry."""
 
 JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY: Final[int] = 1
-"""Reserved execution capacity for ``quotes_refresh`` only (#2934).
+"""Reserved execution capacity for the quote producers (#2934, #3118).
 
 The hourly immutable evidence writer must not queue behind the multi-hour full
 sync. APScheduler, this slot and its dedicated source lock each independently
-keep a second instance serialized."""
+keep a second instance serialized.
+
+⚠ STILL ONE PERMIT with two member jobs since #3118 — ``quotes_refresh`` and
+``core_candidate_quote_refresh`` serialise against each other here exactly as
+they already do on the ``etoro_quotes`` source lock, so the demand arithmetic
+below is unchanged. What the second member needs is a DISPATCH thread, and
+``build_scheduler_executors`` sizes the reserved pool ``max(permits, members)``
+for that reason. Raising this constant instead would cost a connection slot the
+dev profile does not have (measured 2026-09-16: usable 27, demand 27)."""
 
 JOBS_NON_SEC_MAX_CONCURRENCY: Final[int] = (
     JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY + JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY + JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY

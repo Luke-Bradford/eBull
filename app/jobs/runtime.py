@@ -99,6 +99,7 @@ from app.workers.scheduler import (
     JOB_AQR_REFERENCE_REFRESH,
     JOB_ATTRIBUTION_SUMMARY,
     JOB_CBOE_VIX_REFRESH,
+    JOB_CORE_CANDIDATE_QUOTE_REFRESH,
     JOB_CORE_ELIGIBILITY_REFRESH,
     JOB_CORE_REBALANCE_OBSERVATION,
     JOB_CUSIP_EXTID_SWEEP,
@@ -179,6 +180,7 @@ from app.workers.scheduler import (
     attribution_summary_job,
     cboe_vix_refresh,
     compute_next_run,
+    core_candidate_quote_refresh,
     core_eligibility_refresh,
     core_rebalance_observation,
     cusip_extid_sweep,
@@ -359,6 +361,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_EXCHANGES_METADATA_REFRESH: _adapt_zero_arg(exchanges_metadata_refresh),
     JOB_FX_RATES_REFRESH: _adapt_zero_arg(fx_rates_refresh),
     JOB_QUOTES_REFRESH: _adapt_zero_arg(quotes_refresh),
+    JOB_CORE_CANDIDATE_QUOTE_REFRESH: _adapt_zero_arg(core_candidate_quote_refresh),
     JOB_DAILY_RESEARCH_REFRESH: _adapt_zero_arg(daily_research_refresh),
     JOB_DAILY_NEWS_REFRESH: _adapt_zero_arg(daily_news_refresh),
     JOB_DAILY_PORTFOLIO_SYNC: _adapt_zero_arg(daily_portfolio_sync),
@@ -817,7 +820,18 @@ def execution_lane_for(job_name: str) -> str:
         return EXECUTION_LANE_SEC
     if job_name == JOB_STRATEGY_PAPER_CYCLE:
         return EXECUTION_LANE_PAPER
-    if job_name == JOB_QUOTES_REFRESH:
+    if job_name in (JOB_QUOTES_REFRESH, JOB_CORE_CANDIDATE_QUOTE_REFRESH):
+        # #3118 — the five-minute core producer joins the quote lane rather than
+        # taking one of its own.  Measured on dev 2026-09-16: the connection budget
+        # has ZERO headroom (usable 27, demand 27), so a new lane would add
+        # `1 permit x JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION = 2` and fail boot with
+        # `ConnectionBudgetExceeded` -- whose own message rejects raising
+        # `max_connections` as a remediation.  Sharing the lane leaves PERMITS at 1,
+        # so demand is unchanged and the two jobs serialise on the semaphore exactly
+        # as they already do on the `etoro_quotes` source lock.  What it buys is the
+        # DISPATCH thread: on the general lane a five-minute fire queues behind a
+        # multi-hour backfill holding the single general permit and is discarded as a
+        # misfire, which is the failure this job exists to prevent (Codex ckpt-2 P1).
         return EXECUTION_LANE_QUOTE
     return EXECUTION_LANE_GENERAL
 
@@ -827,9 +841,18 @@ def build_scheduler_executors() -> dict[str, APSchedulerThreadPoolExecutor]:
 
     A job parked on another lane's semaphore still OWNS its APScheduler worker
     thread, so a reserved lane needs a pool of its own or its fire queues behind
-    work its reservation was supposed to exclude.  Each reserved pool is sized FROM
-    that lane's permit count: a pool smaller than the semaphore would become the
-    tighter bound and re-create the starvation inside the lane.
+    work its reservation was supposed to exclude.  A pool smaller than the lane's
+    permit count would become the tighter bound and re-create the starvation inside
+    the lane.
+
+    ⚠ Sized ``max(permits, members)`` since #3118, not ``permits``.  The two are the
+    same number for a single-job lane, which every lane was until the quote lane
+    gained ``core_candidate_quote_refresh``.  Permits bound how many bodies may RUN
+    (and therefore the connection budget); members bound how many fires may be
+    waiting to DISPATCH.  Sizing on permits alone puts a second member's fire back
+    in the queue the reservation exists to keep it out of — while raising permits
+    instead would buy the same thread at the cost of a connection slot the dev
+    profile does not have (measured 2026-09-16: usable 27, demand 27).
 
     Exposed (not inlined) so the regression tests configure the SAME map production
     does rather than a copy of it.
@@ -838,8 +861,23 @@ def build_scheduler_executors() -> dict[str, APSchedulerThreadPoolExecutor]:
         "default": APSchedulerThreadPoolExecutor(_DEFAULT_EXECUTOR_MAX_WORKERS),
     }
     for lane in _RESERVED_EXECUTOR_LANES:
-        executors[lane] = APSchedulerThreadPoolExecutor(EXECUTION_LANE_PERMITS[lane])
+        executors[lane] = APSchedulerThreadPoolExecutor(
+            max(EXECUTION_LANE_PERMITS[lane], reserved_lane_member_count(lane))
+        )
     return executors
+
+
+def reserved_lane_member_count(lane: str) -> int:
+    """How many REGISTERED jobs dispatch on *lane*.
+
+    Read off ``SCHEDULED_JOBS`` rather than maintained by hand: a lane's pool has
+    to grow when a job joins it, and a hand-kept count is the thing that does not.
+    Imported locally to keep ``app.jobs.runtime`` free of an import-time cycle with
+    the scheduler module.
+    """
+    from app.workers.scheduler import SCHEDULED_JOBS
+
+    return sum(1 for job in SCHEDULED_JOBS if execution_lane_for(job.name) == lane)
 
 
 def _scheduler_executor_alias(job_name: str) -> str:

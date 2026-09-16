@@ -20,6 +20,7 @@ from __future__ import annotations
 import psycopg
 
 from app.workers.scheduler import (
+    JOB_CORE_CANDIDATE_QUOTE_REFRESH,
     JOB_CUSIP_EXTID_SWEEP,
     JOB_CUSIP_UNIVERSE_BACKFILL,
     JOB_DAILY_NEWS_REFRESH,
@@ -182,6 +183,12 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         # the non-exempt job is already stopped by the universal gate. A
         # second per-job gate would duplicate that authority.
         JOB_QUOTES_REFRESH,
+        # #3118 — same reasoning, and its scope is narrower still: the enabled
+        # core mandate's instrument plus the proved core candidates, both of
+        # which come from operator action rather than from bootstrap. On an
+        # unbootstrapped DB the scope query returns no rows and the job logs a
+        # no-op. Non-exempt, so the universal gate stops it anyway.
+        JOB_CORE_CANDIDATE_QUOTE_REFRESH,
         # #2629 audit (2026-08-13) — two strategy collection jobs that drifted
         # in carrying a COLLECTION-WINDOW prerequisite
         # (``_strategy_intraday_collection_due`` / ``_strategy_halt_collection_due``)
