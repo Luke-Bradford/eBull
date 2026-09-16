@@ -1736,6 +1736,7 @@ def _ledger_evidence(
     *,
     namespace: ResultNamespace,
     window_end: date,
+    anchor_year: int,
 ) -> LedgerMeasurements | None:
     """#2505's ledger arithmetic over one book. ``None`` on an empty population.
 
@@ -1759,6 +1760,16 @@ def _ledger_evidence(
     unreachable today: the entry price is positive-checked before the return is
     computed, and ``Position`` refuses a close before its own fill.
 
+    ⚠⚠ ``window_end`` AND ``anchor_year`` ARE TWO DIFFERENT DATES AND MUST STAY
+    SO. ``window_end`` is the namespace METRIC AXIS end and is the mark bar for
+    a leg still open — correct for that and wrong as a recency anchor.
+    ``anchor_year`` is the year of the RESULT IDENTITY's ``window_end``, which
+    is the ``as_of`` write-time ``check_promotable`` passes. On an in-sample
+    namespace the axis stops at ``HOLDOUT_BOUNDARY`` (2021-06-29) while the
+    identity window can end in 2026, so collapsing the two would anchor the
+    recent-year horizon years early. Caught at Codex checkpoint 1 on the slice-4
+    spec.
+
     ⚠ The refusal is re-raised NAMING THE NAMESPACE. ``RealisedLedger`` says
     which invariant failed and cannot say which of the run's books failed it,
     and #2820's lesson — recorded against ``_preflight_gate`` in this very file
@@ -1774,7 +1785,9 @@ def _ledger_evidence(
                 exit_bar_date=tuple(book.exit_dates),
                 name_key=tuple(observation.instrument_key for observation in book.regime_observations),
                 open_legs=tuple((entry, window_end) for entry in book.open_entry_dates),
-            )
+            ),
+            root_seed=BACKTEST_BOOTSTRAP_SEED,
+            anchor_year=anchor_year,
         )
     except ValueError as error:
         raise RuntimeError(
@@ -1892,7 +1905,16 @@ def _measure_namespace(
         universe_record=opportunity,
         position_count=book.positions,
         axis_dates=dates,
-        ledger_evidence=_ledger_evidence(book, namespace=namespace, window_end=dates[-1]),
+        ledger_evidence=_ledger_evidence(
+            book,
+            namespace=namespace,
+            window_end=dates[-1],
+            # ⚠ ``corpus.window.end`` IS ``ResultIdentity.window_end``: both
+            # result sites build the identity with ``evaluation_window=
+            # corpus.window`` and ``load_corpus`` sets ``evaluation_end=
+            # window.end``. NOT ``dates[-1]`` — see ``_ledger_evidence``.
+            anchor_year=corpus.window.end.year,
+        ),
         label_starts=book.label_starts,
         label_ends=book.label_ends,
         rebalance_costs=curve.rebalance_costs,
