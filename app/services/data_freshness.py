@@ -18,8 +18,13 @@ from the worker layer:
 
   - ``seed_scheduler_from_manifest``: bootstrap rows from manifest history
   - ``record_poll_outcome``: record after a poll completes
-  - ``subjects_due_for_poll``: worker pulls due rows
-  - ``subjects_due_for_recheck``: never_filed / error rechecks
+  - ``ciks_due_for_poll``: worker pulls due rows, GROUPED BY CIK (#3109)
+  - ``ciks_due_for_recheck``: never_filed / error rechecks, same grouping
+  - ``subjects_due_for_poll`` / ``subjects_due_for_recheck``: the
+    row-denominated originals. No production caller since #3109; they
+    remain the row-level statement of each lane's candidacy predicate,
+    which both forms share via ``_POLL_LANE_STATES`` /
+    ``_RECHECK_LANE_STATES``.
 
 The cadence map is hard-coded per the spec — adding a new source
 means one edit here, not a sweep across the worker / providers.
@@ -31,7 +36,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import psycopg
 import psycopg.rows
@@ -533,6 +538,14 @@ class FreshnessRow:
     state: FreshnessState
 
 
+# Each lane's candidacy predicate, named ONCE so the row-denominated readers
+# (``subjects_due_for_*``) and the CIK-denominated ones (``ciks_due_for_*``)
+# cannot drift about what "due" means. Two expressions of one rule is how the
+# two diverge later, silently.
+_POLL_LANE_STATES: Final[tuple[str, ...]] = ("unknown", "current", "expected_filing_overdue")
+_RECHECK_LANE_STATES: Final[tuple[str, ...]] = ("never_filed", "error")
+
+
 def subjects_due_for_poll(
     conn: psycopg.Connection[Any],
     *,
@@ -549,15 +562,18 @@ def subjects_due_for_poll(
     Ordering: ``expected_next_at ASC NULLS FIRST`` — never-filed-but-
     unknown rows (NULL expected) come first; otherwise oldest due row
     first.
+
+    ⚠ **No production caller since #3109** — ``sec_per_cik_poll`` moved to
+    ``ciks_due_for_poll``, whose budget is denominated in CIKs. Kept because
+    it is the row-level statement of this lane's candidacy predicate and its
+    tests pin it; the predicate itself is shared via ``_POLL_LANE_STATES``
+    so the two readers cannot disagree about what "due" means.
     """
     if now is None:
         now = datetime.now(tz=UTC)
 
-    where = (
-        "state IN ('unknown', 'current', 'expected_filing_overdue')"
-        " AND (expected_next_at IS NULL OR expected_next_at <= %s)"
-    )
-    params: list[Any] = [now]
+    where = "state = ANY(%s) AND (expected_next_at IS NULL OR expected_next_at <= %s)"
+    params: list[Any] = [list(_POLL_LANE_STATES), now]
     if source is not None:
         where += " AND source = %s"
         params.append(source)
@@ -599,8 +615,8 @@ def subjects_due_for_recheck(
     if now is None:
         now = datetime.now(tz=UTC)
 
-    where = "state IN ('never_filed', 'error') AND (next_recheck_at IS NULL OR next_recheck_at <= %s)"
-    params: list[Any] = [now]
+    where = "state = ANY(%s) AND (next_recheck_at IS NULL OR next_recheck_at <= %s)"
+    params: list[Any] = [list(_RECHECK_LANE_STATES), now]
     if source is not None:
         where += " AND source = %s"
         params.append(source)
@@ -766,7 +782,7 @@ def ciks_due_for_poll(
     return _ciks_due(
         conn,
         deadline_column="expected_next_at",
-        states=("unknown", "current", "expected_filing_overdue"),
+        states=_POLL_LANE_STATES,
         source=source,
         limit=limit,
         now=now if now is not None else datetime.now(tz=UTC),
@@ -790,7 +806,7 @@ def ciks_due_for_recheck(
     return _ciks_due(
         conn,
         deadline_column="next_recheck_at",
-        states=("never_filed", "error"),
+        states=_RECHECK_LANE_STATES,
         source=source,
         limit=limit,
         now=now if now is not None else datetime.now(tz=UTC),

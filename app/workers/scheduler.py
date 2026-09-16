@@ -2122,9 +2122,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "next_recheck_at (recheck path for never_filed/error rows "
             "— #1155 G13). For each due subject calls submissions.json "
             "and UPSERTs new manifest rows. Bounded total budget split "
-            "2/3 poll + ~1/3 recheck (default max_subjects=100 → "
-            "66+34) so error/never_filed backlog cannot starve "
-            "scheduled polls."
+            "2/3 poll + ~1/3 recheck (default max_ciks=100 → 66+34) "
+            "so error/never_filed backlog cannot starve scheduled "
+            "polls. #3109: the budget counts CIKs, not subjects — "
+            "submissions.json is entity-wide, so one fetch serves "
+            "every due source of that CIK."
         ),
         cadence=Cadence.hourly(minute=0),
         catch_up_on_boot=False,

@@ -135,7 +135,7 @@ class PerCikPollStats:
     new_filings_recorded: int
     poll_errors: int
     # #1155 G13 — separate counters for the recheck reader path
-    # (subjects_due_for_recheck) so operator can confirm both reader
+    # (ciks_due_for_recheck) so operator can confirm both reader
     # paths are draining. recheck_* counts subjects whose state was
     # 'never_filed' or 'error' at the start of the tick.
     recheck_subjects_polled: int = 0
