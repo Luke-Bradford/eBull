@@ -885,7 +885,12 @@ async def _preflight_etag_keyed_reuse(
                 reason=_MANIFEST_INVALIDATION_FAILED,
             )
             decisions[archive.name] = decision
-            logger.error("preflight: %s refused — %s", archive.name, _MANIFEST_INVALIDATION_FAILED)
+            # WARNING, not ERROR: this is a handled path and the refusal is
+            # already surfaced as a caller-visible ``ArchiveDownloadResult.error``
+            # (which the bootstrap job's fatal-failure filter escalates). The
+            # unwritable-manifest condition itself is logged at ERROR inside
+            # ``_invalidate_manifest_entries``, where it is the surprise.
+            logger.warning("preflight: %s refused — %s", archive.name, _MANIFEST_INVALIDATION_FAILED)
             continue
 
         decisions[archive.name] = decision
