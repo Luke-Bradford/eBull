@@ -236,15 +236,16 @@ def _probe_cik(
     # fetched, and ``python -O`` strips asserts. Under ``-O`` a mis-grouped
     # batch would silently fetch one CIK's submissions and write every other
     # subject's scheduler outcome from it. Review NITPICK on PR #3134; same
-    # shape as the #3104 bot WARNING about an ``assert`` that kept a
+    # shape as the #3104 bot WARNING about an ``assert`` that kept an
     # accounting equality summing under ``-O``.
     if cik_padded is None or any(s.cik != cik_padded for s in subjects):
-        # Not sorted: the offending set can contain None, which is unorderable
-        # against str — and a crash inside the error path would replace a
-        # diagnosable failure with an opaque one.
-        raise ValueError(
-            f"_probe_cik requires exactly one non-None CIK per batch, got { ({s.cik for s in subjects})!r}"
-        )
+        # Bound to a local rather than inlined: a set comprehension inside an
+        # f-string needs wrapping parens, which ``ruff format`` then pads to
+        # ``{ (...)!r}``. Not sorted — the offending set can contain None,
+        # which is unorderable against str, and a crash inside the error path
+        # would replace a diagnosable failure with an opaque one.
+        found_ciks = {s.cik for s in subjects}
+        raise ValueError(f"_probe_cik requires exactly one non-None CIK per batch, got {found_ciks!r}")
 
     # Read the watermark BEFORE the fetch so we know whether to inject
     # If-Modified-Since. Single-subject batches only — see the docstring.
