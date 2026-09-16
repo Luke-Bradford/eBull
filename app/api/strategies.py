@@ -139,7 +139,12 @@ from app.services.strategy_position_manager import (
 )
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_regime_evidence import RegimeCohortLabel
-from app.services.strategy_result import TOTAL_RETURN_BASIS
+from app.services.strategy_result import (
+    DSR_PROMOTION_THRESHOLD,
+    MIN_EFFECTIVE_SAMPLE_SIZE,
+    TOTAL_RETURN_BASIS,
+    finite_decimal,
+)
 from app.services.strategy_result_ambiguity import (
     AmbiguityRecord,
     ComparisonBasis,
@@ -1735,8 +1740,24 @@ def _promotion_refusals(
         or (row.get("trial_count") is not None and row.get("trial_count") != TRIAL_REGISTER.declared_count)
     ):
         refusals.append("trial_register_superseded")
+    # #2364 — criterion 6's verdict and criterion 3's floor. ⚠ Both are ALSO in
+    # `strategy_result.deflation_promotion_refusals`; this function is a second
+    # hand-written copy of the deflation block (it reconstructs from a compact
+    # row rather than a `StrategyResult`), so a rule added there and not here
+    # would make the operator surface disagree with the gate.
+    deflated_sharpe = row["deflated_sharpe"]
+    if deflated_sharpe is not None:
+        probability = finite_decimal(deflated_sharpe)
+        if probability is None or not (Decimal(0) <= probability <= Decimal(1)):
+            refusals.append("deflated_sharpe_invalid")
+        elif probability <= DSR_PROMOTION_THRESHOLD:
+            refusals.append("deflated_sharpe_below_threshold")
     if row["effective_sample_size"] is None:
         refusals.append("effective_sample_size_not_computed")
+    else:
+        sample_size = finite_decimal(row["effective_sample_size"])
+        if sample_size is None or sample_size <= MIN_EFFECTIVE_SAMPLE_SIZE:
+            refusals.append("effective_sample_size_below_minimum")
     is_holdout = row.get("namespace") == "hold_out"
     if not ambiguity_complete:
         refusals.append("ambiguity_arms_not_compared")

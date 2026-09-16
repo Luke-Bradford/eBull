@@ -51,7 +51,13 @@ RiskProfile = Literal["unconfigured", "cautious", "balanced", "growth"]
 ApprovalMode = Literal["manual", "autonomous"]
 TicketSizingMode = Literal["percent", "fixed"]
 
-GOVERNANCE_GATE_VERSION = "strategy-governance-v2+edge-evidence"
+#: ⚠ Stamped on every promotion row, so it must move whenever the gate's
+#: acceptance moves. #2364 added criterion 6's VERDICT (the gate previously
+#: refused only on the Deflated Sharpe being absent, never on its value) and
+#: criterion 3's sample-size floor, so a decision taken after it is not the same
+#: decision as one taken before. The bump is free today: 0 stored promotions and
+#: 0 deployments.
+GOVERNANCE_GATE_VERSION = "strategy-governance-v3+deflation-threshold"
 MANDATE_POLICY_VERSION = "portfolio-mandate-v1"
 UNCONFIGURED_MANDATE_POLICY_VERSION = "portfolio-mandate-unconfigured"
 

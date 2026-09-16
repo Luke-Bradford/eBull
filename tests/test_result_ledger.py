@@ -80,7 +80,12 @@ def build_deflated(**overrides: object) -> DeflatedSharpeResult:
     the easiest place for a positional read to drift unnoticed.
     """
     base: dict[str, object] = {
-        "deflated_sharpe": 0.71792143,
+        # ⚠ ABOVE #2364's 0.95 bar, and still an awkward float so the
+        # positional-drift property above is preserved. At 0.71792143 every
+        # fixture built on this block refused with
+        # `deflated_sharpe_below_threshold`, which would have made the
+        # promotion-path tests assert on a gate nobody intended to exercise.
+        "deflated_sharpe": 0.96792143,
         "expected_max_sharpe": 0.01520778,
         "trade_sharpe": 0.01703391,
         "skewness": -0.40218764,

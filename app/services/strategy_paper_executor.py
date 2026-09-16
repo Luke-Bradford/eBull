@@ -73,6 +73,7 @@ from app.services.strategy_order_reconciliation import (
     reconcile_strategy_order,
     reconciliation_order_lock,
 )
+from app.services.strategy_result import DSR_PROMOTION_THRESHOLD_SQL, MIN_EFFECTIVE_SAMPLE_SIZE_SQL
 
 _NY = ZoneInfo("America/New_York")
 _CENT = Decimal("0.01")
@@ -339,7 +340,9 @@ def _load_intent(
                            AND r.fx_unmodelled = false
                            AND r.trial_count IS NOT NULL
                            AND r.deflated_sharpe IS NOT NULL
+                           AND r.deflated_sharpe > {DSR_PROMOTION_THRESHOLD_SQL}
                            AND r.effective_sample_size IS NOT NULL
+                           AND r.effective_sample_size > {MIN_EFFECTIVE_SAMPLE_SIZE_SQL}
                            AND control_support.candidate_count = 1
                            AND control_result.synthetic_control_passed = true
                        ) AS qualified_result_count,
@@ -352,7 +355,9 @@ def _load_intent(
                            AND r.fx_unmodelled = false
                            AND r.trial_count IS NOT NULL
                            AND r.deflated_sharpe IS NOT NULL
+                           AND r.deflated_sharpe > {DSR_PROMOTION_THRESHOLD_SQL}
                            AND r.effective_sample_size IS NOT NULL
+                           AND r.effective_sample_size > {MIN_EFFECTIVE_SAMPLE_SIZE_SQL}
                            AND control_support.candidate_count = 1
                            AND control_result.synthetic_control_passed = true
                        ) AS expectancy_ci_low_pct

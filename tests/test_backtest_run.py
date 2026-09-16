@@ -484,27 +484,80 @@ class TestOptionalStr:
         assert _optional_str(raw) == expected
 
 
+#: A DSR and an effective sample size that clear #2364's two bars, so a test about
+#: some OTHER refusal is not silently also testing the deflation verdict.
+_PASSING_DSR = 0.99
+_PASSING_ESS = 400.0
+
+
 class TestExpectedRefusals:
     """§9's table, as the projection the run gates on."""
 
     def test_full_holdout_run_with_a_dsr_leaves_only_the_standing_refusals(self) -> None:
-        assert _expected_refusals(holdout_requested=True, deflated=True) == STANDING_REFUSALS | {
+        assert _expected_refusals(
+            holdout_requested=True, deflated_sharpe=_PASSING_DSR, effective_sample_size=_PASSING_ESS
+        ) == STANDING_REFUSALS | {
             "synthetic_control_not_run",
         }
+
+    @pytest.mark.parametrize(
+        ("probability", "sample_size", "expected"),
+        [
+            (0.9004, 400.0, {"deflated_sharpe_below_threshold"}),
+            (0.9505, 400.0, set()),
+            (0.95, 400.0, {"deflated_sharpe_below_threshold"}),
+            (1.01, 400.0, {"deflated_sharpe_invalid"}),
+            # ⚠ Decimal ORDERING RAISES on NaN where float comparison returns
+            # False, so an unguarded `Decimal(repr(nan)) <= 1` would crash the
+            # write path rather than predict a refusal. Review round 1, BLOCKING.
+            (float("nan"), 400.0, {"deflated_sharpe_invalid"}),
+            (float("inf"), 400.0, {"deflated_sharpe_invalid"}),
+            (float("-inf"), 400.0, {"deflated_sharpe_invalid"}),
+            (0.99, 30.0, {"effective_sample_size_below_minimum"}),
+            (0.99, None, {"effective_sample_size_not_computed"}),
+            (0.998, 4.0, {"effective_sample_size_below_minimum"}),
+        ],
+    )
+    def test_the_deflation_verdict_is_predicted_before_the_write(
+        self, probability: float, sample_size: float | None, expected: set[str]
+    ) -> None:
+        """#2364 — criterion 8 asserts the STORED refusal set equals this
+        prediction, so a gate rule that is not predicted here **aborts the run**
+        rather than failing quietly. ⚠ The duplication is deliberate (see
+        ``_expected_refusals``' docstring): a helper shared with the gate would
+        make the comparison agree with itself."""
+        baseline = _expected_refusals(
+            holdout_requested=True, deflated_sharpe=_PASSING_DSR, effective_sample_size=_PASSING_ESS
+        )
+        actual = _expected_refusals(
+            holdout_requested=True, deflated_sharpe=probability, effective_sample_size=sample_size
+        )
+        assert actual - baseline == expected
 
     def test_a_survivorship_free_run_drops_the_universe_refusal_and_nothing_else(self) -> None:
         """#2721 step 3 — the refusal became CONDITIONAL on the run's universe:
         a ``survivorship_free`` corpus has defined its termination treatment,
         which is exactly what the refusal existed to demand."""
-        survivor = _expected_refusals(holdout_requested=True, deflated=True, universe_basis="survivor_only")
-        free = _expected_refusals(holdout_requested=True, deflated=True, universe_basis="survivorship_free")
+        survivor = _expected_refusals(
+            holdout_requested=True,
+            deflated_sharpe=_PASSING_DSR,
+            effective_sample_size=_PASSING_ESS,
+            universe_basis="survivor_only",
+        )
+        free = _expected_refusals(
+            holdout_requested=True,
+            deflated_sharpe=_PASSING_DSR,
+            effective_sample_size=_PASSING_ESS,
+            universe_basis="survivorship_free",
+        )
         assert survivor - free == {"universe_basis_not_survivorship_free"}
         assert free - survivor == set()
 
     def test_harness_validation_purpose_is_predicted_before_the_write(self) -> None:
         assert _expected_refusals(
             holdout_requested=True,
-            deflated=True,
+            deflated_sharpe=_PASSING_DSR,
+            effective_sample_size=_PASSING_ESS,
             purpose="harness_validation",
         ) == STANDING_REFUSALS | {
             "harness_validation_only",
@@ -512,7 +565,9 @@ class TestExpectedRefusals:
         }
 
     def test_in_sample_run_adds_holdout_never_evaluated(self) -> None:
-        assert _expected_refusals(holdout_requested=False, deflated=True) == STANDING_REFUSALS | {
+        assert _expected_refusals(
+            holdout_requested=False, deflated_sharpe=_PASSING_DSR, effective_sample_size=_PASSING_ESS
+        ) == STANDING_REFUSALS | {
             "holdout_never_evaluated",
             "synthetic_control_not_run",
         }
@@ -538,13 +593,19 @@ class TestExpectedRefusals:
         a full corpus pass with the corrected buy-and-hold numbers unwritten.
         """
         refusals = _expected_refusals(
-            holdout_requested=holdout_requested, deflated=True, prior_holdout_evaluations=prior
+            holdout_requested=holdout_requested,
+            deflated_sharpe=_PASSING_DSR,
+            effective_sample_size=_PASSING_ESS,
+            prior_holdout_evaluations=prior,
         )
         assert ("holdout_never_evaluated" in refusals) is expects_never_evaluated
 
     def test_a_prior_evaluation_does_not_disturb_the_other_refusals(self) -> None:
         assert _expected_refusals(
-            holdout_requested=False, deflated=False, prior_holdout_evaluations=12
+            holdout_requested=False,
+            deflated_sharpe=None,
+            effective_sample_size=_PASSING_ESS,
+            prior_holdout_evaluations=12,
         ) == STANDING_REFUSALS | {
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
@@ -555,7 +616,9 @@ class TestExpectedRefusals:
         """⚠ TWO codes, not one. A DSR with no trial count is as refused as no
         DSR at all, and collapsing them would make "which of the two is missing"
         unanswerable."""
-        assert _expected_refusals(holdout_requested=True, deflated=False) == STANDING_REFUSALS | {
+        assert _expected_refusals(
+            holdout_requested=True, deflated_sharpe=None, effective_sample_size=_PASSING_ESS
+        ) == STANDING_REFUSALS | {
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "synthetic_control_not_run",
@@ -575,12 +638,16 @@ class TestExpectedRefusals:
         either refusal, and the prediction reads the SAME constants
         ``build_result`` stamps — a standing entry mis-predicted every
         post-#2720 run (caught by the #2721 smoke)."""
-        refusals = _expected_refusals(holdout_requested=True, deflated=True)
+        refusals = _expected_refusals(
+            holdout_requested=True, deflated_sharpe=_PASSING_DSR, effective_sample_size=_PASSING_ESS
+        )
         assert "carry_unmodelled" not in refusals
         assert "fx_unmodelled" not in refusals
 
     def test_a_run_without_the_control_still_declares_it_unrun(self) -> None:
-        assert "synthetic_control_not_run" in _expected_refusals(holdout_requested=True, deflated=True)
+        assert "synthetic_control_not_run" in _expected_refusals(
+            holdout_requested=True, deflated_sharpe=_PASSING_DSR, effective_sample_size=_PASSING_ESS
+        )
 
     @pytest.mark.parametrize(
         ("ci_low", "ci_high", "cohort_sharpe", "strategy_sharpe", "expected"),
@@ -606,7 +673,8 @@ class TestExpectedRefusals:
         would make it agree with itself."""
         refusals = _expected_refusals(
             holdout_requested=True,
-            deflated=True,
+            deflated_sharpe=_PASSING_DSR,
+            effective_sample_size=_PASSING_ESS,
             synthetic_control=_control(
                 ci_low=ci_low,
                 ci_high=ci_high,
@@ -1518,7 +1586,8 @@ class TestAmbiguityMateriality:
         assert _ambiguity_material_for(arms, self._result()) is None
         assert "ambiguity_arms_not_compared" in _expected_refusals(
             holdout_requested=True,
-            deflated=True,
+            deflated_sharpe=_PASSING_DSR,
+            effective_sample_size=_PASSING_ESS,
             ambiguity_material=None,
         )
 
