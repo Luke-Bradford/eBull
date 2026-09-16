@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from app.services.job_heartbeat import REPORTING_WRITE_TIMEOUT_MS
 from app.services.job_telemetry import JobTelemetryAggregator
 from app.workers.scheduler import _flush_manifest_worker_telemetry
 
@@ -17,6 +18,7 @@ from app.workers.scheduler import _flush_manifest_worker_telemetry
 class _FakeConn:
     def __init__(self, *, fail_on: str | None = None) -> None:
         self.calls: list[str] = []
+        self.executed: list[Any] = []
         self.fail_on = fail_on
 
     def _maybe_fail(self, what: str) -> None:
@@ -30,7 +32,8 @@ class _FakeConn:
     def commit(self) -> None:
         self._maybe_fail("commit")
 
-    def execute(self, *_a: Any, **_k: Any) -> Any:
+    def execute(self, query: Any = None, *_a: Any, **_k: Any) -> Any:
+        self.executed.append(query)
         self._maybe_fail("execute")
         return None
 
@@ -69,12 +72,23 @@ def test_a_run_with_no_job_runs_row_is_skipped_not_written() -> None:
 def test_the_flush_bounds_its_own_statement_timeout() -> None:
     """The worker connection carries the JOB's 30-minute bound. A reporting
     write must never outlast the work it reports on — the tick is already
-    committed by the time this runs."""
+    committed by the time this runs.
+
+    Asserts the VALUE, not just that some statement ran: a test that only
+    checked call order would pass with the timeout set to the job's own bound,
+    which is the defect.
+    """
     conn = _FakeConn()
 
     _flush_manifest_worker_telemetry(conn, run_id=7, agg=_agg())  # type: ignore[arg-type]
 
     assert conn.calls == ["rollback", "execute", "cursor", "commit"]
+    assert len(conn.executed) == 1
+    rendered = conn.executed[0].as_string(None) if hasattr(conn.executed[0], "as_string") else str(conn.executed[0])
+    assert "statement_timeout" in rendered
+    assert str(REPORTING_WRITE_TIMEOUT_MS) in rendered
+    # The bound is the shared one, not a literal that drifted from it.
+    assert REPORTING_WRITE_TIMEOUT_MS == 3_000
 
 
 @pytest.mark.parametrize("fail_on", ["rollback", "execute", "cursor", "commit"])

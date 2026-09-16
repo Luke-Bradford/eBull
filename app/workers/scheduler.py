@@ -36,7 +36,6 @@ import psycopg.sql
 from psycopg.types.json import Jsonb
 
 if TYPE_CHECKING:
-    from app.services.job_telemetry import JobTelemetryAggregator
     from app.services.reference_data import ReferenceRefreshReport
     from app.services.strategy_halts import HaltSnapshot
 
@@ -63,7 +62,9 @@ from app.services.exchange_directory import refresh_exchange_directory
 from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
+from app.services.job_heartbeat import REPORTING_WRITE_TIMEOUT_MS
 from app.services.job_progress import JobProgress, degradation_reason
+from app.services.job_telemetry import JobTelemetryAggregator, flush_to_job_run
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
 from app.services.market_calendar import latest_completed_us_session, us_market_status
 from app.services.market_data import refresh_market_data, refresh_quotes
@@ -8026,9 +8027,6 @@ def _flush_manifest_worker_telemetry(
     rule: a write that REPORTS on a job body must never outlast it. ``SET
     LOCAL`` reverts with the surrounding transaction, which is what we want.
     """
-    from app.services.job_heartbeat import REPORTING_WRITE_TIMEOUT_MS
-    from app.services.job_telemetry import flush_to_job_run
-
     if not run_id:
         return
     try:
@@ -8045,6 +8043,16 @@ def _flush_manifest_worker_telemetry(
             "sec_manifest_worker: telemetry flush failed for run_id=%s; the tick's own outcome is unaffected",
             run_id,
         )
+        # ⚠ Swallowing the exception is not on its own enough to keep the
+        # promise above. The caller's ``with connect_job() as conn`` COMMITS on
+        # a clean exit, so a connection left mid-failed-transaction by the
+        # attempt would raise there instead — outside this handler, and after
+        # the work is done. Put it back to idle so that exit commit is a no-op.
+        # Nested, because on a genuinely broken connection this can raise too.
+        try:
+            conn.rollback()
+        except Exception:
+            logger.exception("sec_manifest_worker: telemetry rollback also failed for run_id=%s", run_id)
 
 
 def sec_manifest_worker_tick() -> None:
@@ -8075,7 +8083,6 @@ def sec_manifest_worker_tick() -> None:
     re-check 13F's quota-share slice cost against the cadence.
     """
     from app.jobs.sec_manifest_worker import run_manifest_worker
-    from app.services.job_telemetry import JobTelemetryAggregator
 
     with _tracked_job(JOB_SEC_MANIFEST_WORKER) as tracker:
         # #3111 slice 2 — per-run error/skip aggregate. `row_count` says how

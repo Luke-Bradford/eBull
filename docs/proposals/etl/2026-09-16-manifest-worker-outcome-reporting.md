@@ -1,6 +1,6 @@
 # #3111 — the manifest worker's outcome reporting: what is wrong, what the repo already has, and why it is four slices
 
-Status: **slices 1 and 2 SHIPPED; slices 3 and 4 outstanding.** Revised after Codex
+Status: **slice 1 shipped (`5579eaf4`); slice 2 is this branch; slices 3 and 4 outstanding.** Revised after Codex
 checkpoint 1 (24 findings), which falsified three claims in the first draft and surfaced a
 parser-contract blocker that decides the ticket's shape; §5a revised again after a second
 checkpoint-1 pass (38 findings) before slice 2 was written. Touches
