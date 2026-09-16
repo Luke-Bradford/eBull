@@ -2221,6 +2221,42 @@ class TestReservedLaneSchedulerExecutors:
             assert members, f"{lane} has no registered job — a reserved lane with no member is dead capacity"
             assert executors[lane]._pool._max_workers >= len(members), f"{lane} has {members}"
 
+    def test_reserved_lane_membership_is_an_explicit_allow_list(self) -> None:
+        """⚠ The pool now GROWS to fit its members, so membership must be the reviewed act.
+
+        Review WARNING on #3118: with ``max(permits, members)`` sizing, a future job
+        assigned to a reserved lane would enlarge that lane's dispatch pool silently,
+        with no pass over the semaphore and connection-budget assumptions the
+        assignment rests on (dev profile, measured 2026-09-16: usable 27, demand 27 —
+        ZERO headroom, so raising a lane's PERMITS is not currently affordable).
+
+        This restores what #2985's ``len(members) == 1`` was really buying — the
+        decision surfacing in review — without pinning the count to a literal that
+        was only ever incidentally 1. Adding a name here is a deliberate act; the
+        same shape as ``NON_GATED_SCHEDULED`` and the misfire-grace allow list.
+        """
+        from app.workers.scheduler import (
+            JOB_CORE_CANDIDATE_QUOTE_REFRESH,
+            JOB_QUOTES_REFRESH,
+            JOB_STRATEGY_PAPER_CYCLE,
+            SCHEDULED_JOBS,
+        )
+
+        expected = {
+            runtime.EXECUTION_LANE_PAPER: {JOB_STRATEGY_PAPER_CYCLE},
+            runtime.EXECUTION_LANE_QUOTE: {JOB_QUOTES_REFRESH, JOB_CORE_CANDIDATE_QUOTE_REFRESH},
+        }
+        assert set(expected) == set(runtime._RESERVED_EXECUTOR_LANES), (
+            "a reserved lane was added or removed without updating this allow list"
+        )
+        for lane, names in expected.items():
+            actual = {j.name for j in SCHEDULED_JOBS if runtime.execution_lane_for(j.name) == lane}
+            assert actual == names, (
+                f"{lane} membership is {sorted(actual)}, expected {sorted(names)} — "
+                "a job joining a reserved lane grows its dispatch pool and must be reviewed "
+                "against EXECUTION_LANE_PERMITS and the connection budget first"
+            )
+
     def test_the_core_quote_producer_is_on_the_reserved_quote_lane(self) -> None:
         """#3118 Codex ckpt-2 P1 — on the general lane a five-minute fire queues
         behind whatever holds the single general permit, which includes multi-hour

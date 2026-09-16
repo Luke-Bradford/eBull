@@ -1018,6 +1018,16 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # runs ~40-90s (n=244: median 40.2s, p95 76.3s), so a fire landing during
         # the :23 sweep waits rather than being discarded by the 1-second
         # `job_defaults` grace.
+        #
+        # ⚠ The COMPOSED worst case, since the two halves are easy to read
+        # separately and get wrong (review NITPICK): what the grace has to cover is
+        # only the wait to ADMISSION, which is the lanemate's body (p95 76.3s, tail
+        # ~90s) plus this job's own dispatch. This job's provider latency is spent
+        # AFTER admission and does not consume the grace at all. 150s therefore
+        # leaves ~60s over the measured tail. If `quotes_refresh`'s body ever grows
+        # past ~150s the right response is a bigger PERMIT count or a lane split —
+        # not a wider grace, which would start admitting a fire while its successor
+        # is already due.
         misfire_grace_seconds=CORE_QUOTE_REFRESH_INTERVAL_MINUTES * 60 // 2,
         catch_up_on_boot=True,
     ),
