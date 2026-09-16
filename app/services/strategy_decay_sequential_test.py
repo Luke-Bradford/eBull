@@ -151,6 +151,11 @@ def uniform_boundary(intrinsic_time: float, *, rho: float, alpha: float) -> floa
     if not math.isfinite(intrinsic_time) or intrinsic_time < 0.0:
         raise SequentialTestError(f"intrinsic time must be finite and non-negative; got {intrinsic_time!r}")
     shifted = intrinsic_time + rho
+    # ⚠ The `l0` term is a DELIBERATE NO-OP at `l0 = 1` (`log(1) = 0`), kept so this line is
+    # eq (14) as PUBLISHED rather than eq (14) as specialised.  Dropping it would leave no
+    # trace that the general form carries `l0^2` inside the logarithm, and a future reader
+    # widening this to a matrix or self-normalised boundary -- where `l0 > 1` -- would have to
+    # rediscover the term from the paper.  Cost is one `log(1.0)`; the constant is `Final`.
     log_term = math.log(shifted) - math.log(rho) - 2.0 * math.log(alpha) + 2.0 * math.log(NORMAL_MIXTURE_L0)
     if log_term <= 0.0:  # pragma: no cover - unreachable for v >= 0 and alpha < 1
         raise SequentialTestError("boundary logarithm is non-positive")
