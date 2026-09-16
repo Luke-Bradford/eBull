@@ -559,6 +559,14 @@ const REFUSAL_LABELS: Record<string, string> = {
   carry_unmodelled: "Overnight financing cost is not modelled",
   fx_unmodelled: "Currency conversion cost is not modelled",
   trial_register_superseded: "Evidence does not match the current experiment register",
+  // #2364's four deflation codes. The first three landed with the gate's value
+  // checks and had no labels, so an operator saw the raw code; the fourth is the
+  // construction-identity refusal. Worded as what an operator can act on, not as
+  // the statistic's name.
+  deflated_sharpe_below_threshold: "Evidence does not survive the multiple-testing correction",
+  deflated_sharpe_invalid: "The multiple-testing correction did not produce a usable number",
+  effective_sample_size_below_minimum: "Too few independent trades for the correction to be valid",
+  deflated_sharpe_model_unrecognised: "Evidence was corrected by a superseded statistical model",
   synthetic_control_not_run: "Random-entry control has not passed",
   prospective_assessment_policy_missing: "Prospective forecast acceptance limits are missing",
   prospective_assessment_missing: "No current prospective forecast assessment exists",

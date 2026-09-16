@@ -1638,6 +1638,89 @@ class TestTheExtractedClauseHelpersAreTheGate:
         assert "effective_sample_size_below_minimum" in refusals
         assert "deflated_sharpe_below_threshold" not in refusals
 
+    def test_a_foreign_construction_is_refused_however_good_its_number(self) -> None:
+        """#2364's named residual — the gate compared a VALUE against a threshold
+        and never asked which construction produced it.
+
+        ⚠ The fixture clears every other deflation clause (current register,
+        declared count, ESS 41, DSR 0.9505 — the paper's own ALLOCATED value), so
+        the only code left is the construction one. A fixture that failed
+        something else would let this pass for the wrong reason."""
+        refusals = set(
+            deflation_promotion_refusals(
+                deflated_sharpe=Decimal("0.9505"),
+                trial_count=TRIAL_REGISTER.declared_count,
+                deflated=_deflated_result(model_id="c6-deflated-sharpe-v2"),
+                effective_sample_size=41.0,
+            )
+        )
+        assert refusals == {"deflated_sharpe_model_unrecognised"}
+
+    def test_the_current_construction_draws_nothing(self) -> None:
+        """The same fixture with the shipped stamp is fully promotable on these
+        four criteria — which is what makes the test above a measurement of the
+        model id and not of the fixture."""
+        assert (
+            deflation_promotion_refusals(
+                deflated_sharpe=Decimal("0.9505"),
+                trial_count=TRIAL_REGISTER.declared_count,
+                deflated=_deflated_result(),
+                effective_sample_size=41.0,
+            )
+            == ()
+        )
+
+    def test_the_construction_clause_is_guarded_on_the_object_not_the_probability(self) -> None:
+        """⚠ THE MIRROR IMAGE of ``trial_register_superseded``'s guard, and the
+        asymmetry is deliberate. A stored probability with no reconstructed
+        object has no model id to compare, so this clause must stay silent and
+        let the register clause own that state — otherwise a row would be refused
+        for a construction nobody read."""
+        refusals = set(
+            deflation_promotion_refusals(
+                deflated_sharpe=Decimal("0.9505"),
+                trial_count=TRIAL_REGISTER.declared_count,
+                deflated=None,
+                effective_sample_size=41.0,
+            )
+        )
+        assert refusals == {"trial_register_superseded"}
+        assert "deflated_sharpe_model_unrecognised" not in refusals
+
+    def test_a_foreign_construction_and_a_losing_value_both_fire(self) -> None:
+        """⚠ INDEPENDENT ``if``s. A row carrying a foreign 0.006 is both
+        unrecognised AND below the bar, and an operator reading "how far is this
+        from promotable" needs both."""
+        assert set(
+            deflation_promotion_refusals(
+                deflated_sharpe=Decimal("0.006"),
+                trial_count=TRIAL_REGISTER.declared_count,
+                deflated=_deflated_result(deflated_sharpe=0.006, model_id="some-other-construction"),
+                effective_sample_size=41.0,
+            )
+        ) == {"deflated_sharpe_below_threshold", "deflated_sharpe_model_unrecognised"}
+
+    def test_a_nameless_construction_cannot_be_built_at_all(self) -> None:
+        """⚠ The in-memory half of ``sql/266``'s non-empty CHECK. Without it a
+        blank stamp would reach the gate and be refused as "some other
+        construction", when what it means is that nobody recorded which one
+        ran.
+
+        ⚠ EXACTLY the SQL's emptiness test and no stricter: ``sql/266`` refuses
+        ``= ''`` and permits ``'   '``, so this does too. A whitespace stamp is
+        still refused — by the gate, as an unrecognised construction, which is
+        the correct verdict for an id that is not ours. Stripping here would make
+        the two halves disagree about which rows exist."""
+        for nameless in ("", None):
+            with pytest.raises(ValueError, match="model_id is blank"):
+                _deflated_result(model_id=nameless)
+        assert "deflated_sharpe_model_unrecognised" in deflation_promotion_refusals(
+            deflated_sharpe=Decimal("0.9505"),
+            trial_count=TRIAL_REGISTER.declared_count,
+            deflated=_deflated_result(model_id="   "),
+            effective_sample_size=41.0,
+        )
+
     def test_a_missing_probability_draws_only_the_absence_code(self) -> None:
         refusals = set(
             deflation_promotion_refusals(

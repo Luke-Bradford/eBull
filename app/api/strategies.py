@@ -39,6 +39,7 @@ from app.services.broker_credentials import (
     normalise_provider,
 )
 from app.services.cost_model import COST_MODEL_ID
+from app.services.deflated_sharpe import DSR_MODEL_ID
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
@@ -1752,6 +1753,16 @@ def _promotion_refusals(
             refusals.append("deflated_sharpe_invalid")
         elif probability <= DSR_PROMOTION_THRESHOLD:
             refusals.append("deflated_sharpe_below_threshold")
+    # #2364's named residual, mirrored for the same reason the block above is.
+    # ⚠ The row-shaped form of the gate's ``deflated is not None`` guard is
+    # ``dsr_model_id IS NOT NULL``: `result_ledger._result_from_row` decides
+    # whether the DSR block reconstructs at all on that ONE probe, and `sql/266`
+    # makes the block all-or-nothing (`CHECK (dsr_model_id IS NULL OR
+    # dsr_model_id <> '')` plus the companion clauses), so the two guards select
+    # the same rows. A NULL id is a row with no DSR object, which the register
+    # clause above has already refused.
+    if row.get("dsr_model_id") is not None and row["dsr_model_id"] != DSR_MODEL_ID:
+        refusals.append("deflated_sharpe_model_unrecognised")
     if row["effective_sample_size"] is None:
         refusals.append("effective_sample_size_not_computed")
     else:

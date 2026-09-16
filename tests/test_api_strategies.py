@@ -21,6 +21,7 @@ from app.api.strategies import (
 )
 from app.services.backtest_run import BACKTEST_UNIVERSE, corpus_version_for
 from app.services.cost_model import COST_MODEL_ID
+from app.services.deflated_sharpe import DSR_MODEL_ID, DeflatedSharpeResult
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
@@ -238,19 +239,30 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
 
 
 @pytest.mark.parametrize(
-    ("deflated_sharpe", "effective_sample_size"),
+    ("deflated_sharpe", "effective_sample_size", "dsr_model_id"),
     [
-        (Decimal("0.9505"), 200),
-        (Decimal("0.9004"), 200),
-        (Decimal("0.95"), 200),
-        (Decimal("1.5"), 200),
-        (Decimal("0.99"), 30),
-        (Decimal("0.99"), None),
-        (None, 200),
+        (Decimal("0.9505"), 200, DSR_MODEL_ID),
+        (Decimal("0.9004"), 200, DSR_MODEL_ID),
+        (Decimal("0.95"), 200, DSR_MODEL_ID),
+        (Decimal("1.5"), 200, None),
+        (Decimal("0.99"), 30, DSR_MODEL_ID),
+        (Decimal("0.99"), None, DSR_MODEL_ID),
+        (None, 200, None),
+        # #2364's construction identity. ⚠ A stored row's model id is the ONE
+        # probe that decides whether the DSR block reconstructs at all, so the
+        # gate side must be handed a real object for these — the old version of
+        # this test passed `deflated=None` unconditionally, which made the
+        # parity assertion vacuous for every clause that reads the object.
+        (Decimal("0.9505"), 200, "c6-deflated-sharpe-v2"),
+        (Decimal("0.006"), 200, "c6-deflated-sharpe-v2"),
+        # Present and reconstructible, but the probability is missing: the block
+        # is all-or-nothing in storage (`sql/266`), so this is the malformed
+        # shape, and both sides must still agree about it.
+        (None, 200, "c6-deflated-sharpe-v2"),
     ],
 )
 def test_the_operator_surface_reads_the_deflation_verdict_the_gate_does(
-    deflated_sharpe: Decimal | None, effective_sample_size: int | None
+    deflated_sharpe: Decimal | None, effective_sample_size: int | None, dsr_model_id: str | None
 ) -> None:
     """#2364 — ``_promotion_refusals`` hand-reimplements the deflation block, so
     a rule added to ``deflation_promotion_refusals`` and not here would let the
@@ -264,6 +276,7 @@ def test_the_operator_surface_reads_the_deflation_verdict_the_gate_does(
         "fx_unmodelled": False,
         "evaluated_instrument_count": 5266,
         "deflated_sharpe": deflated_sharpe,
+        "dsr_model_id": dsr_model_id,
         "trial_count": TRIAL_REGISTER.declared_count,
         "effective_sample_size": effective_sample_size,
         "trial_register_version": TRIAL_REGISTER_VERSION,
@@ -278,9 +291,34 @@ def test_the_operator_surface_reads_the_deflation_verdict_the_gate_does(
         "deflated_sharpe_not_computed",
         "deflated_sharpe_below_threshold",
         "deflated_sharpe_invalid",
+        "deflated_sharpe_model_unrecognised",
         "effective_sample_size_not_computed",
         "effective_sample_size_below_minimum",
     }
+    # The gate reads an OBJECT where the API reads columns, so the object has to
+    # be built from the same row — `result_ledger._result_from_row` reconstructs
+    # it exactly when `dsr_model_id` is non-NULL, and a probability outside [0, 1]
+    # cannot be constructed at all (it is the malformed-storage case the API's
+    # `deflated_sharpe_invalid` covers from the column).
+    deflated = (
+        DeflatedSharpeResult(
+            deflated_sharpe=float(deflated_sharpe) if deflated_sharpe is not None else 0.0,
+            expected_max_sharpe=0.015,
+            trade_sharpe=0.017,
+            skewness=-0.4,
+            kurtosis=8.0,
+            effective_sample_size=float(effective_sample_size or 200),
+            declared_trials=TRIAL_REGISTER.declared_count,
+            independent_trials=9.0,
+            average_trial_correlation=0.2,
+            trial_sharpe_variance=1e-4,
+            measured_trials=2,
+            trial_register_version=TRIAL_REGISTER_VERSION,
+            model_id=dsr_model_id,
+        )
+        if dsr_model_id is not None
+        else None
+    )
     api = (
         set(_promotion_refusals(row, ambiguity_complete=True, quarantine_complete=True, accesses_complete=True))
         & deflation_codes
@@ -290,7 +328,7 @@ def test_the_operator_surface_reads_the_deflation_verdict_the_gate_does(
             deflation_promotion_refusals(
                 deflated_sharpe=deflated_sharpe,
                 trial_count=TRIAL_REGISTER.declared_count,
-                deflated=None,
+                deflated=deflated,
                 effective_sample_size=effective_sample_size,  # type: ignore[arg-type]
             )
         )

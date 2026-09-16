@@ -231,6 +231,15 @@ class DeflatedSharpeResult:
             )
         if not self.trial_register_version:
             raise ValueError("trial_register_version is blank — a DSR that names no trial population states nothing")
+        # ⚠ The same rule for the same reason, added with #2364's
+        # `deflated_sharpe_model_unrecognised`: the gate compares this stamp
+        # against `DSR_MODEL_ID`, and a blank or missing one would be refused
+        # there as "some other construction" when what it actually means is that
+        # nobody recorded which construction ran. `sql/266`'s CHECK enforces
+        # non-empty on the STORED side; this is the in-memory half, so the two
+        # cannot disagree about what a nameless statistic is.
+        if not self.model_id:
+            raise ValueError("model_id is blank — a DSR that names no construction cannot be compared to a threshold")
 
 
 def trade_moments(net_return_pct: Sequence[float]) -> TradeMoments | None:
