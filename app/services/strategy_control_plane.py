@@ -57,7 +57,15 @@ TicketSizingMode = Literal["percent", "fixed"]
 #: criterion 3's sample-size floor, so a decision taken after it is not the same
 #: decision as one taken before. The bump is free today: 0 stored promotions and
 #: 0 deployments.
-GOVERNANCE_GATE_VERSION = "strategy-governance-v3+deflation-threshold"
+#:
+#: ⚠ Bumped again in the same ticket's follow-up: the gate gained criterion 6's
+#: CONSTRUCTION identity (`deflated_sharpe_model_unrecognised`), and the
+#: allocation path's own copy of the deflation predicate
+#: (`strategy_monitoring._CONTROL_SQL`, which feeds `pinned_evidence_ready`)
+#: gained the two value checks it was missed for. A decision taken after that is
+#: not the same decision as one taken before. Still free: 0 stored promotions and
+#: 0 deployments, re-measured rather than carried over.
+GOVERNANCE_GATE_VERSION = "strategy-governance-v4+deflation-construction"
 MANDATE_POLICY_VERSION = "portfolio-mandate-v1"
 UNCONFIGURED_MANDATE_POLICY_VERSION = "portfolio-mandate-unconfigured"
 

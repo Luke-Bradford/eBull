@@ -20,6 +20,7 @@ import psycopg
 import psycopg.rows
 
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_result import PINNED_EVIDENCE_FILTER_SQL
 from app.services.strategy_signal_scan import SCAN_UNIVERSE
 from app.services.valuation import resolve_quote_price
 
@@ -989,7 +990,22 @@ def load_paper_realised_pnl(conn: psycopg.Connection[Any]) -> dict[tuple[str, st
     return realised_pnl_for_keys(pnl_by_strategy, keys)
 
 
-_CONTROL_SQL = """
+#: ⚠⚠ THE DEFLATION PREDICATE'S FIFTH COPY, AND IT WAS MISSED BY #2364. The
+#: ticket taught the gate to read criterion 6's VERDICT and patched four sites;
+#: this one filtered on ``deflated_sharpe IS NOT NULL`` and
+#: ``effective_sample_size IS NOT NULL`` and on neither VALUE, so
+#: ``pinned_evidence_ready`` — and therefore the ALLOCATION refusal
+#: ``pinned_promotion_evidence_invalid`` — would have read a strategy whose
+#: pinned DSR was 0.006 as carrying valid evidence. The sibling copy in
+#: ``strategy_paper_executor`` got both thresholds in the same merge; this one
+#: did not, which is the whole failure mode of a hand-copied predicate.
+#:
+#: ⚠ The fix is the SHARED FRAGMENT, not the two missing lines.
+#: ``PINNED_EVIDENCE_FILTER_SQL`` is now the only place the predicate is written,
+#: so the next clause added to it reaches this query and the executor's two
+#: copies at once. Patching the two lines here would have left the same trap
+#: armed for whoever adds the clause after that.
+_CONTROL_SQL = f"""
     WITH current_stage AS (
         SELECT DISTINCT ON (strategy_id, strategy_version)
                strategy_id, strategy_version, to_stage
@@ -1006,17 +1022,7 @@ _CONTROL_SQL = """
         SELECT p.strategy_id, p.strategy_version,
                COUNT(*) AS result_count,
                COUNT(*) FILTER (WHERE
-                   r.expectancy_ci_low_pct IS NOT NULL
-                   AND r.namespace = 'hold_out'
-                   AND r.window_start >= DATE '2022-01-01'
-                   AND r.universe_basis = 'survivorship_free'
-                   AND r.carry_unmodelled = false
-                   AND r.fx_unmodelled = false
-                   AND r.trial_count IS NOT NULL
-                   AND r.deflated_sharpe IS NOT NULL
-                   AND r.effective_sample_size IS NOT NULL
-                   AND control_support.candidate_count = 1
-                   AND control_result.synthetic_control_passed = true
+                   {PINNED_EVIDENCE_FILTER_SQL}
                ) AS qualified_result_count
         FROM strategy_promotions p
         JOIN strategy_promotion_results pr ON pr.promotion_id = p.promotion_id

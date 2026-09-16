@@ -73,7 +73,7 @@ from app.services.strategy_order_reconciliation import (
     reconcile_strategy_order,
     reconciliation_order_lock,
 )
-from app.services.strategy_result import DSR_PROMOTION_THRESHOLD_SQL, MIN_EFFECTIVE_SAMPLE_SIZE_SQL
+from app.services.strategy_result import PINNED_EVIDENCE_FILTER_SQL
 
 _NY = ZoneInfo("America/New_York")
 _CENT = Decimal("0.01")
@@ -332,34 +332,10 @@ def _load_intent(
             LEFT JOIN LATERAL (
                 SELECT count(*) AS result_count,
                        count(*) FILTER (WHERE
-                           r.expectancy_ci_low_pct IS NOT NULL
-                           AND r.namespace = 'hold_out'
-                           AND r.window_start >= DATE '2022-01-01'
-                           AND r.universe_basis = 'survivorship_free'
-                           AND r.carry_unmodelled = false
-                           AND r.fx_unmodelled = false
-                           AND r.trial_count IS NOT NULL
-                           AND r.deflated_sharpe IS NOT NULL
-                           AND r.deflated_sharpe > {DSR_PROMOTION_THRESHOLD_SQL}
-                           AND r.effective_sample_size IS NOT NULL
-                           AND r.effective_sample_size > {MIN_EFFECTIVE_SAMPLE_SIZE_SQL}
-                           AND control_support.candidate_count = 1
-                           AND control_result.synthetic_control_passed = true
+                           {PINNED_EVIDENCE_FILTER_SQL}
                        ) AS qualified_result_count,
                        min(r.expectancy_ci_low_pct) FILTER (WHERE
-                           r.expectancy_ci_low_pct IS NOT NULL
-                           AND r.namespace = 'hold_out'
-                           AND r.window_start >= DATE '2022-01-01'
-                           AND r.universe_basis = 'survivorship_free'
-                           AND r.carry_unmodelled = false
-                           AND r.fx_unmodelled = false
-                           AND r.trial_count IS NOT NULL
-                           AND r.deflated_sharpe IS NOT NULL
-                           AND r.deflated_sharpe > {DSR_PROMOTION_THRESHOLD_SQL}
-                           AND r.effective_sample_size IS NOT NULL
-                           AND r.effective_sample_size > {MIN_EFFECTIVE_SAMPLE_SIZE_SQL}
-                           AND control_support.candidate_count = 1
-                           AND control_result.synthetic_control_passed = true
+                           {PINNED_EVIDENCE_FILTER_SQL}
                        ) AS expectancy_ci_low_pct
                 FROM strategy_promotion_results pr
                 JOIN strategy_promotions promotion ON promotion.promotion_id = pr.promotion_id

@@ -7053,3 +7053,41 @@ comparison it replaced quietly returns `False` and reaches the intended refusal.
   (the shared conversion, whose docstring names the three states it collapses);
   `tests/test_backtest_run.py::test_the_deflation_verdict_is_predicted_before_the_write`
   (`nan`, `+inf`, `-inf` parameters, revert-probed).
+
+## A hand-copied predicate has no compiler — count the copies or delete them (2026-09-16, #2364)
+
+`aec9d693` taught the promotion gate to read criterion 6's VERDICT rather than only that
+the Deflated Sharpe had been computed, and applied the change to four sites its own
+enumeration named. There was a fifth. `strategy_monitoring._CONTROL_SQL` held its own copy
+of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT NULL` and
+`effective_sample_size IS NOT NULL` — presence, never value.
+
+- **The missed copy was the one on the capital path.** `_CONTROL_SQL` computes
+  `qualified_result_count`, which becomes `StrategyControlState.pinned_evidence_ready`,
+  which is the sole input to the `pinned_promotion_evidence_invalid` **allocation**
+  refusal. So the surface that decides whether a strategy may receive capital would have
+  read a strategy whose pinned DSR was 0.006 as carrying valid evidence — the exact defect
+  the ticket existed to close, surviving one layer further out.
+- ⚠ **Its sibling four lines away in `strategy_paper_executor` DID get both thresholds in
+  the same merge.** Two hand-written copies of one predicate, updated by one author in one
+  change, and only one moved. This is not inattention that better review catches; it is
+  what copies do.
+- ⚠ **Nothing in the repo asserted the two agreed, and nothing could.** There was also no
+  test of `pinned_evidence_ready` at all — `rg pinned_evidence_ready tests/` returned
+  nothing — which is part of why the divergence was silent.
+- Prevention, in order of preference: (1) **extract the fragment** so there is one copy —
+  here `strategy_result.PINNED_EVIDENCE_FILTER_SQL`, interpolated by all three call sites,
+  which makes the next added clause reach every site by construction; (2) where a copy is
+  DELIBERATE (`backtest_run._expected_refusals` is an independent prediction, and sharing
+  a helper would make criterion 8's cross-check agree with itself), **enumerate the copies
+  in the shared function's docstring with the reason each exists** — an un-enumerated copy
+  is an un-updated one; (3) when changing a rule, grep for its DISTINCTIVE COLUMN
+  (`deflated_sharpe`, not the function name) across `app/` — the SQL copies contain no
+  Python identifier to find them by.
+- ⚠ The trigger to check is "I am changing a rule that is written in more than one
+  language". A Python gate and its SQL filter cannot share a type, a test, or an import,
+  so the only thing linking them is someone remembering.
+- Enforced in: `app/services/strategy_result.py::PINNED_EVIDENCE_FILTER_SQL` (the single
+  copy, whose comment records why it exists) and
+  `deflation_promotion_refusals`' docstring (the five-site enumeration with each site's
+  reason).

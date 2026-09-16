@@ -75,7 +75,7 @@ from decimal import Decimal
 from typing import Final, Literal, cast, get_args
 
 from app.services.cost_model import COST_MODEL_ID
-from app.services.deflated_sharpe import DeflatedSharpeResult
+from app.services.deflated_sharpe import DSR_MODEL_ID, DeflatedSharpeResult
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.random_entry_cohort import MATCH_QUALITY_POLICY_ID, SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
@@ -292,6 +292,28 @@ PromotionRefusal = Literal[
     "deflated_sharpe_below_threshold",
     "deflated_sharpe_invalid",
     "effective_sample_size_below_minimum",
+    #: Criterion 6's CONSTRUCTION, which no clause above reads. The three codes
+    #: above compare a value against a threshold; none of them asks whether the
+    #: value was produced by the construction that threshold was chosen for.
+    #: ``DSR_MODEL_ID``'s own docstring states the contract — the choices that
+    #: are ours rather than the paper's are frozen behind it *"so a stored
+    #: deflated_sharpe cannot silently change meaning. Bumping it is a new
+    #: evaluation."* — and comparing 0.97 from one construction against a bar set
+    #: for another is exactly that silent change of meaning.
+    #:
+    #: ⚠ "unrecognised", NOT "superseded", and the difference from
+    #: ``trial_register_superseded`` above is real: a register version carries an
+    #: ORDER (a newer declaration replaced an older one), and a model id carries
+    #: none. An id that is not ours may be older, newer, or a typo, and the gate
+    #: cannot tell which — so it refuses on non-recognition, exactly as
+    #: ``synthetic_control_match_policy_unrecognised`` does for the §9 cohort.
+    #:
+    #: ⚠ THE STAMP IS A DECLARATION, NOT A PROOF. This refuses a statistic that
+    #: SAYS it came from another construction; it cannot detect one computed
+    #: differently and then stamped with today's id. That is the same limit every
+    #: ``*_model_id`` in this file has, and it is the reason the stamp is written
+    #: by the computing function rather than by its caller.
+    "deflated_sharpe_model_unrecognised",
     "ambiguity_arms_not_compared",
     "ambiguity_material",
     #: Criterion 9's sensitivity arm (stage 5e-5a). ⚠ There is NO
@@ -374,10 +396,11 @@ PROMOTION_REFUSALS: frozenset[str] = frozenset(get_args(PromotionRefusal))
 #: demonstrate a 95% confidence level; they do not oblige every allocator to
 #: adopt it. ``DSR_PROMOTION_POLICY_VERSION`` exists so that changing this
 #: engine's tolerance is a versioned act rather than a constant edit.
-#: ⚠ ONE literal, two forms. ``strategy_paper_executor`` filters pinned evidence
-#: in SQL and psycopg's type checking requires a ``LiteralString`` there, which
-#: an interpolated ``Decimal`` is not — so the text form is the constant and the
-#: ``Decimal`` is derived from it. Writing "0.95" twice is how the two drift.
+#: ⚠ ONE literal, two forms. ``PINNED_EVIDENCE_FILTER_SQL`` below filters pinned
+#: evidence in SQL, and psycopg's type checking requires a ``LiteralString``
+#: there, which an interpolated ``Decimal`` is not — so the text form is the
+#: constant and the ``Decimal`` is derived from it. Writing "0.95" twice is how
+#: the two drift.
 DSR_PROMOTION_THRESHOLD_SQL: Final = "0.95"
 DSR_PROMOTION_THRESHOLD: Final = Decimal(DSR_PROMOTION_THRESHOLD_SQL)
 
@@ -399,6 +422,49 @@ DSR_PROMOTION_THRESHOLD: Final = Decimal(DSR_PROMOTION_THRESHOLD_SQL)
 #: Same two-form construction as ``DSR_PROMOTION_THRESHOLD_SQL`` above.
 MIN_EFFECTIVE_SAMPLE_SIZE_SQL: Final = "30"
 MIN_EFFECTIVE_SAMPLE_SIZE: Final = Decimal(MIN_EFFECTIVE_SAMPLE_SIZE_SQL)
+
+#: The pinned-evidence filter, ONCE. ⚠⚠ THIS CONSTANT EXISTS BECAUSE THE COPIES
+#: DRIFTED. ``strategy_paper_executor`` (twice, in a count and a min) and
+#: ``strategy_monitoring._CONTROL_SQL`` each held a hand-written copy of this
+#: predicate; #2364 added the two VALUE checks above to the executor's and missed
+#: the monitoring one, so ``pinned_evidence_ready`` — and therefore the
+#: ``pinned_promotion_evidence_invalid`` ALLOCATION refusal — would have read a
+#: strategy whose pinned Deflated Sharpe was 0.006 as carrying valid evidence.
+#: Nothing in the codebase asserted the copies agreed, and nothing could: a
+#: hand-copied predicate has no compiler.
+#:
+#: ⚠ The aliases are part of the contract. Every call site must bind ``r`` to
+#: ``strategy_results_store``, ``control_support`` to
+#: ``strategy_result_control_support`` and ``control_result`` to the control's own
+#: results row, because the fragment names them. All three sites already did.
+#:
+#: ⚠ A FILTER BODY, not a WHERE clause: it is interpolated inside
+#: ``FILTER (WHERE ...)`` and carries no leading ``AND``.
+#:
+#: ⚠⚠ IT CARRIES THE CONSTRUCTION IDENTITY TOO, and that clause was MISSING from
+#: the first draft of this very change — caught at Codex checkpoint 2. Closing
+#: the value divergence while leaving a construction divergence would have
+#: reintroduced the same defect one clause along: the gate would refuse a foreign
+#: ``dsr_model_id`` while ``pinned_evidence_ready`` and the executor's qualified
+#: count still accepted it. ⚠ ``= '<id>'`` is NULL-safe inside a FILTER (a NULL
+#: id is simply not counted), and a NULL id is a row with no DSR block, which the
+#: ``deflated_sharpe IS NOT NULL`` clause above has already excluded.
+PINNED_EVIDENCE_FILTER_SQL: Final = f"""
+                           r.expectancy_ci_low_pct IS NOT NULL
+                           AND r.namespace = 'hold_out'
+                           AND r.window_start >= DATE '2022-01-01'
+                           AND r.universe_basis = 'survivorship_free'
+                           AND r.carry_unmodelled = false
+                           AND r.fx_unmodelled = false
+                           AND r.trial_count IS NOT NULL
+                           AND r.deflated_sharpe IS NOT NULL
+                           AND r.deflated_sharpe > {DSR_PROMOTION_THRESHOLD_SQL}
+                           AND r.dsr_model_id = '{DSR_MODEL_ID}'
+                           AND r.effective_sample_size IS NOT NULL
+                           AND r.effective_sample_size > {MIN_EFFECTIVE_SAMPLE_SIZE_SQL}
+                           AND control_support.candidate_count = 1
+                           AND control_result.synthetic_control_passed = true
+"""
 
 #: The version of the two constants above, in the same role as
 #: ``STRUCTURAL_REFUSAL_POLICY_VERSION``: a promotion decision made under one
@@ -1375,19 +1441,37 @@ def deflation_promotion_refusals(
 ) -> tuple[PromotionRefusal, ...]:
     """Criteria 6 and 3, from the values a stored row also carries (#2639).
 
-    ⚠ THE ONE COPY, called by ``check_promotable`` and by the transition's
-    ``result_ledger.stored_result_promotion_refusals`` — the extraction argument
-    ``structural_promotion_refusals`` makes. A second hand-written copy would
-    drift the first time the deflation rule changed.
+    ⚠ THE ONE COPY *OF THE GATE*, called by ``check_promotable`` and by the
+    transition's ``result_ledger.stored_result_promotion_refusals`` — the
+    extraction argument ``structural_promotion_refusals`` makes.
 
-    ⚠ FOUR INDEPENDENT ``if``s, never an ``elif`` and never an early return. A
+    ⚠⚠ AND IT IS NOT THE ONLY PLACE THE DEFLATION PREDICATE IS WRITTEN. Five
+    other sites re-derive it, deliberately or otherwise, and the count is stated
+    here because #2364 proved that an un-enumerated copy is an un-updated one:
+
+      1. ``api/strategies.py`` — the operator surface, rebuilt from a compact row
+         rather than a ``StrategyResult``. Deliberate; kept in step by hand.
+      2. ``backtest_run._expected_refusals`` — criterion 8's INDEPENDENT
+         prediction. The duplication is the point; sharing a helper would make
+         the cross-check agree with itself.
+      3. ``strategy_paper_executor`` — SQL, over already-promoted rows.
+      4. ``strategy_monitoring._CONTROL_SQL`` — SQL, feeding
+         ``pinned_evidence_ready`` and so the ``pinned_promotion_evidence_invalid``
+         ALLOCATION refusal. ⚠ This one was MISSED when #2364 added the value
+         checks: it filtered on the DSR and the ESS being non-NULL and never on
+         either value, so the allocation path would have read a strategy whose
+         DSR was 0.006 as carrying valid pinned evidence.
+      5. ``scripts/audit_2745_in_sample_run.py`` — an audit script.
+
+    ⚠ FIVE INDEPENDENT ``if``s, never an ``elif`` and never an early return. A
     DSR with no trial count is as refused as no DSR at all, and both may fire at
     once; the gate's contract is that every reason is returned.
 
     ⚠ ``trial_register_superseded`` is guarded on ``deflated_sharpe is not
     None``, NOT on ``deflated``. A row with a probability but no reconstructed
     object is exactly the state the clause is for, and guarding on the object
-    would let it pass.
+    would let it pass. ``deflated_sharpe_model_unrecognised`` guards on the
+    OBJECT for the mirror-image reason — see its own comment below.
 
     ⚠ ``deflated_sharpe`` is typed ``object`` because in memory it is a float
     and off a stored row it is a psycopg ``Decimal``. #2364's value comparison
@@ -1409,6 +1493,18 @@ def deflation_promotion_refusals(
         or deflated.declared_trials != TRIAL_REGISTER.declared_count
     ):
         refusals.append("trial_register_superseded")
+
+    # Criterion 6's CONSTRUCTION identity (#2364's named residual). ⚠ Guarded on
+    # ``deflated``, NOT on ``deflated_sharpe``, and that is the opposite guard to
+    # the clause above for a reason: a probability with no reconstructed object
+    # carries no model id to compare, and the clause above has already refused
+    # it. Comparing against a missing object would invent a verdict.
+    #
+    # ⚠ An INDEPENDENT ``if``: an unrecognised construction and a losing value
+    # are both true of a row that carries a foreign 0.006, and the gate's
+    # contract is that every reason is returned.
+    if deflated is not None and deflated.model_id != DSR_MODEL_ID:
+        refusals.append("deflated_sharpe_model_unrecognised")
 
     # Criterion 6's VERDICT (#2364). ⚠ The `elif` here is NOT the `elif` the
     # contract above forbids: those are independent checks, these two are the
