@@ -16,6 +16,15 @@ Two non-negotiables apply throughout:
 1. SEC's User-Agent + 10 req/s budget is per-IP. The bulk-archive lane (`sec_bulk_download`) and the per-CIK lane (`sec_rate`) share the same physical IP — they DO NOT have independent budgets. Bulk-archive HEAD/GET requests count against the same 10 r/s bucket; eBull tunes the bulk lane to single-stream so it doesn't starve per-CIK polls. See `app/providers/implementations/sec_edgar.py:72` (`_PROCESS_RATE_LIMIT_CLOCK`).
 2. Bulk archives override `If-None-Match` / `If-Modified-Since` — they return `200 + full body` regardless of the request headers (empirical probe `sec-edgar.md` §4 "Bulk-archive reuse contract"). The right reuse contract is client-side HEAD → compare ETag against `<archive>.etag` sidecar (implemented at `app/services/sec_bulk_download.py::_preflight_etag_keyed_reuse`).
 
+⚠ **ETag availability is NOT uniform across these archives, and the reuse contract only works where SEC serves one** (measured 2026-09-16 on #3112, from `job_runs`):
+
+| archive family | HEAD `ETag` | consequence |
+| --- | --- | --- |
+| `submissions.zip`, `companyfacts.zip` | ✅ strong, S3 multipart (`"36cd63…-168"`) | reuse works: 86 runs of `sec_submissions_bulk_refresh` split **56 transfers / 30 zero-byte** |
+| every quarterly dataset (`form13f_*`, `insider_*`, `nport_*`, `fsds_*`, `fsnds_*`) | ❌ absent | `sec_quarterly_datasets_bulk_refresh` is **inert** — 5 runs 2026-06-05→2026-08-05, **0 bytes**, every archive recorded `head_missing_etag` (or `head_status_404` for a not-yet-published window) |
+
+The ETags that are served are **multipart** (`<md5-hex>-<partcount>`), i.e. an MD5 of the part MD5s — so an ETag is a comparison key against a previously recorded ETag, and NOT a content digest you can recompute locally from the file. Byte identity is proven by the `.sha256` sidecar, never by the ETag alone, and never by length + ZIP readability (#3112). This split matches the one #3110 found on the JSON APIs: validator support goes by hostname and resource kind, not by "per-CIK vs bulk".
+
 ---
 
 ## 1. Bulk archives eBull already consumes

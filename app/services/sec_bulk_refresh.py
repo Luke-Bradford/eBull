@@ -29,8 +29,12 @@ Contract
   =None``: SEC published an update; new file landed atomically,
   sidecars rewritten.
 * ``etag_changed=False`` + ``bytes_downloaded=0`` + ``skipped_reason
-  =<str>``: skipped without contacting SEC. Reasons: bootstrap in
-  flight, SEC 5xx, HEAD missing ETag, archive name unknown.
+  =<str>``: no new archive was published. Reasons: bootstrap in
+  flight, SEC 5xx, HEAD missing ETag, archive name unknown, or a
+  local-filesystem failure during publication
+  (``post_download_hash_failed`` / ``sidecar_invalidate_failed`` /
+  ``publish_rename_failed``) — in all of which the previous archive
+  and its sidecars are left exactly as they were.
 
 The job invokers (``sec_submissions_bulk_refresh_job`` /
 ``sec_companyfacts_bulk_refresh_job`` /
@@ -42,14 +46,23 @@ Sidecars
 --------
 Two sibling files per archive at ``<bulk>/``:
 
-* ``<archive>.etag``    — SEC's HEAD ETag (verbatim, including quotes).
+* ``<archive>.etag``    — the GET response's strong ETag (verbatim,
+  including quotes) for exactly the bytes on disk.
 * ``<archive>.sha256``  — SHA-256 hex digest of the local archive bytes.
 
-Both are written atomically (tmp + ``Path.replace``) AFTER the
-``.zip`` rename so a crash mid-write never leaves a sidecar
-referencing a partial download. On read, a missing or unreadable
-sidecar means "treat as stale" — the next refresh re-downloads
-and rebuilds the sidecar pair.
+Both are written atomically (tmp + ``Path.replace``). Skipping a
+transfer requires BOTH — ETag equality with SEC's live HEAD *and* a
+`.sha256` that still matches the local bytes — which is the reuse rule
+settled 2026-05-22. On read, a missing, unreadable or mismatched
+sidecar means "treat as stale": the next refresh re-downloads and
+rebuilds the pair. Length equality and ZIP readability are NOT
+evidence of identity and never certify an archive (#3112).
+
+Commit order (#3112): both sidecars are removed BEFORE the validated
+``.zip`` is renamed into place, then ``.sha256`` is written, then
+``.etag`` last. The ETag sidecar is the commit marker for both
+consumers, so any interruption leaves the archive uncertified rather
+than certified-wrong; the cost is a re-download, never a bad read.
 
 Bootstrap fence
 ---------------
@@ -172,6 +185,23 @@ def _sha256_sidecar_path(archive_path: Path) -> Path:
     return archive_path.with_name(archive_path.name + SIDECAR_SHA256_SUFFIX)
 
 
+def _read_sidecar_text(sidecar: Path) -> str | None:
+    """Return the stripped contents of ``sidecar``, or ``None``.
+
+    ``None`` for missing, unreadable, non-UTF-8 or empty — every one of
+    which means "we have no trustworthy provenance for these bytes", so
+    the caller must treat the archive as stale rather than guess.
+    """
+    if not sidecar.exists():
+        return None
+    try:
+        content = sidecar.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("sec_bulk_refresh: unreadable sidecar at %s: %s", sidecar, exc)
+        return None
+    return content or None
+
+
 def _read_local_etag(archive_path: Path) -> str | None:
     """Return the recorded ETag for ``archive_path`` or ``None``.
 
@@ -179,15 +209,54 @@ def _read_local_etag(archive_path: Path) -> str | None:
     A missing sidecar means "treat as stale" — the refresh will
     re-download and recreate it.
     """
-    sidecar = _etag_sidecar_path(archive_path)
-    if not sidecar.exists():
-        return None
+    return _read_sidecar_text(_etag_sidecar_path(archive_path))
+
+
+def _is_weak_etag(etag: str) -> bool:
+    """Return True for an RFC 9110 §8.8.1 weak validator (``W/"..."``).
+
+    A weak ETag only promises SEMANTIC equivalence, so two archives
+    sharing one may still differ byte-for-byte. Our whole reuse model
+    (settled 2026-05-22) is byte identity, so a weak validator is not
+    usable — neither for the skip-without-transfer decision nor as a
+    stored sidecar value, because storing one would let a later fire
+    compare weak-to-weak and skip a real update. SEC serves STRONG
+    multipart ETags today (``"36cd63…-168"``); this guard exists so a
+    server-side change degrades into extra transfers rather than into
+    silently certifying the wrong bytes.
+    """
+    return etag.lstrip().startswith(("W/", "w/"))
+
+
+def _local_sha256_matches(archive_path: Path) -> bool:
+    """Return True iff the ``.sha256`` sidecar matches the archive bytes.
+
+    This is condition (2) of the 2026-05-22 settled decision on bulk
+    archive reuse. A missing/unreadable sidecar, an unreadable archive,
+    or a digest mismatch all return False — "no proof, so re-download".
+    """
+    stored = _read_sidecar_text(_sha256_sidecar_path(archive_path))
+    if stored is None:
+        logger.info(
+            "sec_bulk_refresh: %s has no readable sha256 sidecar — cannot skip transfer",
+            archive_path.name,
+        )
+        return False
     try:
-        content = sidecar.read_text(encoding="utf-8").strip()
+        actual = _compute_sha256(archive_path)
     except OSError as exc:
-        logger.warning("sec_bulk_refresh: unreadable etag sidecar at %s: %s", sidecar, exc)
-        return None
-    return content or None
+        logger.warning("sec_bulk_refresh: could not hash %s: %s", archive_path, exc)
+        return False
+    if actual != stored:
+        logger.warning(
+            "sec_bulk_refresh: %s sha256 sidecar does not describe the local bytes "
+            "(sidecar=%s actual=%s) — re-downloading",
+            archive_path.name,
+            stored,
+            actual,
+        )
+        return False
+    return True
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -402,15 +471,25 @@ async def _refresh_one_async(
                 skipped_reason="head_bad_content_length",
             )
 
-        # Fast-path: ETag match AND we have a local file that
-        # round-trips. The round-trip is cheap (zipfile.ZipFile reads
-        # the central directory only) and catches the case where the
-        # ETag sidecar survived a crash that corrupted the archive.
+        # Fast-path: skip the transfer only when BOTH conditions of the
+        # 2026-05-22 settled decision hold — (1) the local ``.etag``
+        # sidecar equals SEC's strong HEAD ETag, and (2) the ``.sha256``
+        # sidecar matches a fresh digest of the local bytes. (1) alone
+        # only says "the value we last recorded still matches the
+        # server"; it says nothing about whether the bytes on disk are
+        # still the ones that value was recorded for. The ZIP round-trip
+        # stays as a cheap pre-filter (it reads the central directory
+        # only) and is ordered BEFORE the hash so a corrupt archive
+        # costs no full read. Measured: hashing the real 1.5 GB
+        # submissions.zip takes 0.62 s, against ~1 in 3 fires reaching
+        # this path.
         if (
             local_etag is not None
             and local_etag == remote_etag
+            and not _is_weak_etag(remote_etag)
             and archive_path.exists()
             and _zip_round_trip(archive_path)
+            and _local_sha256_matches(archive_path)
         ):
             logger.info(
                 "sec_bulk_refresh: %s fresh (etag=%s) — no transfer",
@@ -424,38 +503,19 @@ async def _refresh_one_async(
                 skipped_reason=None,
             )
 
-        # Seed-on-first-encounter: bootstrap downloader (sec_bulk_download)
-        # currently writes only the ``.zip`` itself — no ETag sidecar.
-        # PR-5b is in flight and will eventually do the sidecar write,
-        # but until then the FIRST refresh fire after install would see
-        # no sidecar and re-download the multi-GB archive even though
-        # the disk copy is fine. Detect this case and adopt the live
-        # HEAD ETag as the sidecar value, transferring zero bytes.
-        # Verified by: HEAD Content-Length must match local size AND the
-        # local ZIP must round-trip. If either fails we fall through to
-        # the slow path (a genuine re-download).
-        if (
-            local_etag is None
-            and archive_path.exists()
-            and archive_path.stat().st_size == expected_total
-            and _zip_round_trip(archive_path)
-        ):
-            sha256_hex = _compute_sha256(archive_path)
-            _atomic_write_text(_etag_sidecar_path(archive_path), remote_etag)
-            _atomic_write_text(_sha256_sidecar_path(archive_path), sha256_hex)
-            logger.info(
-                "sec_bulk_refresh: %s seeded sidecars from live HEAD (etag=%s sha256=%s size=%d) — no transfer",
-                archive.name,
-                remote_etag,
-                sha256_hex,
-                expected_total,
-            )
-            return RefreshResult(
-                archive_name=archive.name,
-                etag_changed=False,
-                bytes_downloaded=0,
-                skipped_reason=None,
-            )
+        # NOTE (#3112): there used to be a "seed-on-first-encounter"
+        # branch here. With no local ETag sidecar it accepted the local
+        # archive as identical to the remote one on HEAD Content-Length
+        # equality plus a ZIP round-trip, then wrote the REMOTE ETag
+        # beside a SHA-256 of the OLD LOCAL bytes — a fabricated
+        # provenance pair that both this module's fast-path and
+        # ``sec_bulk_download``'s reuse pre-flight would then trust.
+        # Equal length is not equal content. Its stated justification
+        # ("the bootstrap downloader writes no sidecar, PR-5b is in
+        # flight") is obsolete: ``sec_bulk_download`` writes both
+        # sidecars after every successful download. A missing ETag
+        # sidecar now means exactly what it says — no trustworthy
+        # provenance — and falls through to a validated re-download.
 
         # Slow-path: stream the new copy to a sibling tempfile,
         # validate ZIP integrity, then atomic-rename + write sidecars.
@@ -609,19 +669,106 @@ async def _refresh_one_async(
 
         # Compute SHA-256 BEFORE the rename so the sidecar describes
         # exactly the bytes that landed at archive_path.
-        sha256_hex = _compute_sha256(partial_path)
+        try:
+            sha256_hex = _compute_sha256(partial_path)
+        except OSError as exc:
+            logger.error("sec_bulk_refresh: could not hash downloaded %s: %s", archive.name, exc)
+            try:
+                partial_path.unlink()
+            except OSError:
+                pass
+            return RefreshResult(
+                archive_name=archive.name,
+                etag_changed=False,
+                bytes_downloaded=0,
+                skipped_reason="post_download_hash_failed",
+            )
 
-        # ETag to record: prefer the GET response ETag (describes
-        # exactly the bytes we kept); fall back to HEAD when GET
-        # didn't supply one. Both agree at this point (mismatch was
-        # already returned above).
-        recorded_etag = get_etag or remote_etag
+        # ETag to record: ONLY the GET response's own strong ETag, which
+        # describes exactly the bytes we kept. #3112: this used to fall
+        # back to the HEAD ETag (``get_etag or remote_etag``), which is
+        # the same defect as the deleted seed branch one layer down — a
+        # CDN serving HEAD=A then GET=B *without* an ETag would have had
+        # B's bytes stamped with A's validator, and the next fire's
+        # fast-path would then skip a real update forever. With no
+        # usable GET validator we keep the fresh bytes but record no
+        # ETag, so the next fire re-downloads (same posture as
+        # ``sec_bulk_download``'s "no ETag header on GET" path).
+        recorded_etag = get_etag if get_etag is not None and not _is_weak_etag(get_etag) else None
 
-        # Atomic rename — moves the validated copy into the canonical
-        # path, replacing any existing archive. Sidecars follow.
-        partial_path.replace(archive_path)
-        _atomic_write_text(_etag_sidecar_path(archive_path), recorded_etag)
-        _atomic_write_text(_sha256_sidecar_path(archive_path), sha256_hex)
+        etag_path = _etag_sidecar_path(archive_path)
+        sha_path = _sha256_sidecar_path(archive_path)
+
+        # Publish. The ETag sidecar is the commit marker for BOTH
+        # consumers (this fast-path and sec_bulk_download's pre-flight),
+        # so it is removed BEFORE the new bytes land and written LAST.
+        # Any interruption therefore leaves either no ETag sidecar or
+        # the pre-existing one — neither of which can certify the new
+        # bytes — and the next fire re-downloads.
+        try:
+            etag_path.unlink(missing_ok=True)
+            sha_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.error(
+                "sec_bulk_refresh: could not invalidate sidecars for %s: %s — keeping old archive",
+                archive.name,
+                exc,
+            )
+            try:
+                partial_path.unlink()
+            except OSError:
+                pass
+            return RefreshResult(
+                archive_name=archive.name,
+                etag_changed=False,
+                bytes_downloaded=0,
+                skipped_reason="sidecar_invalidate_failed",
+            )
+
+        try:
+            partial_path.replace(archive_path)
+        except OSError as exc:
+            logger.error("sec_bulk_refresh: could not publish %s: %s", archive.name, exc)
+            try:
+                partial_path.unlink()
+            except OSError:
+                pass
+            return RefreshResult(
+                archive_name=archive.name,
+                etag_changed=False,
+                bytes_downloaded=0,
+                skipped_reason="publish_rename_failed",
+            )
+
+        # From here the new bytes ARE the archive; a sidecar failure
+        # costs a re-download next fire but never a wrong certification,
+        # so it is logged rather than raised (raising would abort the
+        # remaining archives in refresh_archive_set).
+        try:
+            _atomic_write_text(sha_path, sha256_hex)
+        except OSError as exc:
+            logger.error(
+                "sec_bulk_refresh: sha256 sidecar write failed for %s: %s — "
+                "leaving the archive uncertified (next fire re-downloads)",
+                archive.name,
+                exc,
+            )
+        else:
+            if recorded_etag is None:
+                logger.warning(
+                    "sec_bulk_refresh: %s GET carried no usable strong ETag — "
+                    "archive updated but left uncertified; next fire re-downloads",
+                    archive.name,
+                )
+            else:
+                try:
+                    _atomic_write_text(etag_path, recorded_etag)
+                except OSError as exc:
+                    logger.error(
+                        "sec_bulk_refresh: etag sidecar write failed for %s: %s — next fire re-downloads",
+                        archive.name,
+                        exc,
+                    )
 
         logger.info(
             "sec_bulk_refresh: %s updated — old_etag=%s new_etag=%s bytes=%d sha256=%s",
