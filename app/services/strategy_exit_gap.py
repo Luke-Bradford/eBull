@@ -157,6 +157,10 @@ class GapObservation:
             return True
         if self.value != other.value:
             return self.value > other.value
+        # ⚠ ``<`` HERE TOO, AND IT IS NOT A TYPO.  Only the VALUE comparison is
+        # directional; the tie-break is a deterministic ordering, and mirroring
+        # it would make two equal extrema resolve to different legs depending on
+        # which tail asked -- which is the non-reproducibility it exists to stop.
         return self.order_key < other.order_key
 
 

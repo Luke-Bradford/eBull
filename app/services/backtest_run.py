@@ -1679,7 +1679,16 @@ def _record_exit_gap(
             highest = observation
     book.exit_gap_unmeasurable_boundaries += unmeasurable
     if lowest is None or highest is None:
-        assert reason is not None  # a leg with no measurable boundary refused at least one
+        if reason is None:  # pragma: no cover - a leg with no measurable boundary refused at least one
+            # ⚠ RAISED, NOT ASSERTED. `python -O` strips a bare `assert`, and the
+            # next line would then key the Counter on `None` — which is not an
+            # exclusion reason, so `measured + excluded == realised` would still
+            # sum correctly while naming a verdict that does not exist. A silent
+            # violation of the one invariant this recorder exists to provide.
+            raise RuntimeError(
+                f"leg {fill_date} -> {exit_date} measured no boundary and refused none either — "
+                f"{exit_index - fill_index} boundary/ies were walked and every verdict was consumed"
+            )
         book.exit_gap_excluded[reason] += 1
         return
     book.exit_gap_measured_boundaries += measured
