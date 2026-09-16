@@ -13,13 +13,16 @@ for exactly this shape.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 
+from app.jobs.sec_per_cik_poll import _probe_cik
 from app.providers.implementations.sec_submissions import (
     FilingIndexRow,
     select_new_filings,
 )
+from app.services.data_freshness import FreshnessRow
 from app.services.sec_manifest import ManifestSource
 
 
@@ -123,3 +126,54 @@ class TestBatchingEquivalence:
         unbatched, unbatched_ts = select_new_filings(pre_filtered, sources={source}, last_known_filing_id=watermark)
         assert [r.accession_number for r in batched] == [r.accession_number for r in unbatched]
         assert batched_ts == unbatched_ts
+
+
+class TestProbeCikBatchContract:
+    """``_probe_cik`` decides WHICH ENTITY'S URL is fetched from
+    ``subjects[0].cik`` and then writes every batched subject's scheduler
+    outcome from that one response. If the batch is mis-grouped, one CIK's
+    filings would be attributed to another's subjects.
+
+    ⚠⚠ That guard must NOT be an ``assert`` — ``python -O`` strips asserts,
+    and the failure mode under ``-O`` is silent mis-attribution rather than a
+    crash. Review NITPICK on PR #3134.
+
+    Pure: the check runs before the connection is touched, so no DB is needed.
+    """
+
+    @staticmethod
+    def _subject(cik: str | None) -> FreshnessRow:
+        return FreshnessRow(
+            subject_type="issuer",
+            subject_id="1701",
+            source="sec_8k",
+            cik=cik,
+            instrument_id=1701,
+            last_known_filing_id=None,
+            last_known_filed_at=None,
+            last_polled_at=None,
+            last_polled_outcome="current",
+            new_filings_since=0,
+            expected_next_at=None,
+            next_recheck_at=None,
+            state="current",
+        )
+
+    def _probe(self, subjects: list[FreshnessRow]) -> None:
+        def _never_called(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+            raise AssertionError(f"guard did not fire — fetched {url}")
+
+        _probe_cik(cast(Any, None), subjects, http_get=_never_called)
+
+    def test_a_mixed_cik_batch_raises_before_fetching(self) -> None:
+        with pytest.raises(ValueError, match="exactly one non-None CIK per batch"):
+            self._probe([self._subject("0000320193"), self._subject("0000789019")])
+
+    def test_a_none_cik_raises_before_fetching(self) -> None:
+        with pytest.raises(ValueError, match="exactly one non-None CIK per batch"):
+            self._probe([self._subject(None)])
+
+    def test_an_empty_batch_is_a_no_op_not_an_error(self) -> None:
+        """The readers never emit one, but a defensive path must not raise on
+        it — an empty batch has no CIK to disagree about."""
+        assert _probe_cik(cast(Any, None), [], http_get=lambda u, h: (200, b"{}")) == (0, 0)

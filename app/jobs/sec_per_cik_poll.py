@@ -101,11 +101,19 @@ def _watermark_key(cik_padded: str, sources: Collection[ManifestSource] | None) 
 
     **The key must describe WHAT WAS PROCESSED, not what was fetched.**
     ``submissions.json`` is an entity-wide response (SEC's own API docs; see
-    `.claude/skills/data-sources/sec-edgar.md` §1), but ``_probe_subject``
-    parses only ``sources={subject.source}`` out of it. Under the old CIK-only
+    `.claude/skills/data-sources/sec-edgar.md` §1), but each subject's filings
+    are taken out of it through its OWN source filter. Under the old CIK-only
     key, source A's poll stored the response validator and source B's next poll
     sent it as ``If-Modified-Since`` — so a 304 would certify B as current
     although B's filings had never been looked at by this path.
+
+    ⚠⚠ **The invariant this docstring states is weaker than it reads, and
+    #3109 measured why.** 963 duplicate ``(cik, source)`` row pairs exist, so
+    SIBLING subjects with different accession watermarks already share one key.
+    A validator stored under it therefore certifies "some subject with this
+    (cik, source) was processed", not "this one was". That is why the batching
+    path sends ``If-Modified-Since`` only for a single-subject batch, and why
+    closing the hole properly is recorded on #3110 rather than here.
 
     ``<cik>:<page_name>`` is the existing convention for the sibling namespace
     ``sec.last_modified.submissions_files``; this mirrors it.
@@ -168,7 +176,9 @@ def _probe_cik(
     Returns ``(new_filings_recorded, subjects_errored)`` summed over the
     batch. Every element of ``subjects`` must share a zero-padded CIK — the
     CIK-grouped readers (``ciks_due_for_poll`` / ``ciks_due_for_recheck``)
-    guarantee that, and it is asserted here.
+    guarantee that, and it is re-checked here with a ``raise`` rather than an
+    ``assert`` — this is the safeguard deciding which entity's URL is fetched,
+    and ``python -O`` strips asserts.
 
     The response is fetched **unfiltered and untruncated**
     (``sources=None, last_known_filing_id=None``) because it is entity-wide;
@@ -222,8 +232,19 @@ def _probe_cik(
     if not subjects:
         return (0, 0)
     cik_padded = subjects[0].cik
-    assert cik_padded is not None, "_probe_cik requires non-None cik"
-    assert all(s.cik == cik_padded for s in subjects), "_probe_cik requires one CIK per batch"
+    # ⚠ NOT ``assert`` — this is the safeguard deciding WHICH ENTITY'S URL gets
+    # fetched, and ``python -O`` strips asserts. Under ``-O`` a mis-grouped
+    # batch would silently fetch one CIK's submissions and write every other
+    # subject's scheduler outcome from it. Review NITPICK on PR #3134; same
+    # shape as the #3104 bot WARNING about an ``assert`` that kept a
+    # accounting equality summing under ``-O``.
+    if cik_padded is None or any(s.cik != cik_padded for s in subjects):
+        # Not sorted: the offending set can contain None, which is unorderable
+        # against str — and a crash inside the error path would replace a
+        # diagnosable failure with an opaque one.
+        raise ValueError(
+            f"_probe_cik requires exactly one non-None CIK per batch, got { ({s.cik for s in subjects})!r}"
+        )
 
     # Read the watermark BEFORE the fetch so we know whether to inject
     # If-Modified-Since. Single-subject batches only — see the docstring.
@@ -295,6 +316,10 @@ def _apply_delta_to_subject(
     the result is identical to what the unbatched probe produced for it given
     the same response bytes.
     """
+    # Pure type narrowing, not a safeguard: ``_probe_cik`` has already raised
+    # if any batch member's cik is None, and this function is only reachable
+    # from there. Left as an ``assert`` deliberately — under ``-O`` it narrows
+    # nothing and costs nothing, because the real check upstream is a raise.
     assert subject.cik is not None, "_apply_delta_to_subject requires non-None cik"
 
     # Item 7 (#1233): 304 short-circuit. Server says "nothing new since your
