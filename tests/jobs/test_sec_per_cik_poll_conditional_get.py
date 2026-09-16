@@ -56,6 +56,11 @@ _SOURCE_KEY_SUBMISSIONS_FILES = "sec.last_modified.submissions_files"
 
 
 _TEST_CIK = "0000320193"
+# #3110 — the per-cik-poll watermark is keyed ``<cik>:<source>``, not ``<cik>``.
+# Every test in this file polls ``source='sec_8k'``; the whole point of the
+# change is that a second source on the same CIK gets a DIFFERENT key, which
+# ``TestPerCikPollWatermarkIsSourceScoped`` below exercises directly.
+_TEST_WM_KEY = f"{_TEST_CIK}:sec_8k"
 _TEST_INSTRUMENT_ID = 1701
 _TEST_SYMBOL = "PERCIKLM"
 
@@ -164,7 +169,7 @@ class TestPerCikPollConditionalGet:
         # First fetch has NO If-Modified-Since header (watermark absent).
         assert "If-Modified-Since" not in captured[0]
 
-        wm = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_CIK)
+        wm = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_WM_KEY)
         assert wm is not None, "watermark must be persisted on 200 with Last-Modified"
         assert wm.watermark == "Wed, 30 Apr 2026 16:00:00 GMT"
 
@@ -182,7 +187,7 @@ class TestPerCikPollConditionalGet:
             set_watermark(
                 ebull_test_conn,
                 source=_SOURCE_KEY_PER_CIK_POLL,
-                key=_TEST_CIK,
+                key=_TEST_WM_KEY,
                 watermark="Tue, 29 Apr 2026 16:00:00 GMT",
                 watermark_at=None,
             )
@@ -208,7 +213,7 @@ class TestPerCikPollConditionalGet:
         assert captured[0].get("If-Modified-Since") == "Tue, 29 Apr 2026 16:00:00 GMT"
 
         # And the newer watermark replaced the prior value.
-        wm = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_CIK)
+        wm = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_WM_KEY)
         assert wm is not None
         assert wm.watermark == "Wed, 30 Apr 2026 16:00:00 GMT"
 
@@ -224,12 +229,12 @@ class TestPerCikPollConditionalGet:
             set_watermark(
                 ebull_test_conn,
                 source=_SOURCE_KEY_PER_CIK_POLL,
-                key=_TEST_CIK,
+                key=_TEST_WM_KEY,
                 watermark="Tue, 29 Apr 2026 16:00:00 GMT",
                 watermark_at=None,
             )
         ebull_test_conn.commit()
-        wm_before = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_CIK)
+        wm_before = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_WM_KEY)
         assert wm_before is not None
         fetched_before = wm_before.fetched_at
 
@@ -254,7 +259,7 @@ class TestPerCikPollConditionalGet:
         assert stats.new_filings_recorded == 0
         assert stats.poll_errors == 0
 
-        wm_after = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_CIK)
+        wm_after = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_WM_KEY)
         assert wm_after is not None
         # watermark VALUE unchanged on 304.
         assert wm_after.watermark == "Tue, 29 Apr 2026 16:00:00 GMT"
@@ -273,7 +278,7 @@ class TestPerCikPollConditionalGet:
             set_watermark(
                 ebull_test_conn,
                 source=_SOURCE_KEY_PER_CIK_POLL,
-                key=_TEST_CIK,
+                key=_TEST_WM_KEY,
                 watermark="Tue, 29 Apr 2026 16:00:00 GMT",
                 watermark_at=None,
             )
@@ -295,9 +300,195 @@ class TestPerCikPollConditionalGet:
         # Re-parsed → manifest got the new accession.
         assert stats.new_filings_recorded == 1
 
-        wm = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_CIK)
+        wm = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_WM_KEY)
         assert wm is not None
         assert wm.watermark == "Thu, 01 May 2026 16:00:00 GMT"
+
+
+class TestPerCikPollWatermarkIsSourceScoped:
+    """#3110 — one source's response validator must not certify another's.
+
+    ``submissions.json`` is an ENTITY-wide response (SEC's API docs), but
+    ``_probe_subject`` parses only ``sources={subject.source}`` out of it. Under
+    the old CIK-only watermark key, source A's 200 stored the validator and
+    source B's next poll sent it as ``If-Modified-Since`` — so B got a 304 and
+    was recorded ``current`` although its filings had never been examined by
+    this path.
+
+    ⚠ These tests describe a mechanism that is currently UNREACHABLE in
+    production: ``data.sec.gov`` sends no ``Last-Modified`` and no ``ETag``
+    (measured 2026-09-16), so no watermark is ever written and no conditional
+    request is ever sent. They pin the contract against the day that changes,
+    which is exactly when the defect would otherwise appear silently.
+    """
+
+    def _seed_second_source(self, conn: psycopg.Connection[tuple]) -> None:
+        """Give the same CIK a second source row, which is the shape 6,738
+        live CIKs already have."""
+        record_poll_outcome(
+            conn,
+            subject_type="issuer",
+            subject_id=str(_TEST_INSTRUMENT_ID),
+            source="sec_10q",
+            outcome="current",
+            last_known_filing_id="0000320193-25-000002",
+            last_known_filed_at=datetime(2025, 1, 1, tzinfo=UTC),
+            cik=_TEST_CIK,
+            instrument_id=_TEST_INSTRUMENT_ID,
+        )
+        with conn.cursor() as cur:
+            cur.execute("UPDATE data_freshness_index SET expected_next_at = '2024-01-01' WHERE source = 'sec_10q'")
+        conn.commit()
+
+    def test_one_sources_validator_does_not_certify_another(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The ticket's reproduction: poll 8-K, then poll 10-Q on the same CIK.
+
+        The 10-Q poll must send NO ``If-Modified-Since`` — it has never fetched
+        anything itself — so the server cannot 304 it into a false ``current``.
+        """
+        _seed_subject(ebull_test_conn)
+        self._seed_second_source(ebull_test_conn)
+
+        first: list[dict[str, str]] = []
+        run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_make_http_get_with_meta(
+                status=200,
+                payload=_aapl_submissions_recent(),
+                last_modified="Wed, 30 Apr 2026 16:00:00 GMT",
+                capture=first,
+            ),
+            source="sec_8k",
+        )
+        ebull_test_conn.commit()
+
+        second: list[dict[str, str]] = []
+        run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_make_http_get_with_meta(
+                status=200,
+                payload=_aapl_submissions_recent(),
+                last_modified="Wed, 30 Apr 2026 16:00:00 GMT",
+                capture=second,
+            ),
+            source="sec_10q",
+        )
+        ebull_test_conn.commit()
+
+        assert "If-Modified-Since" not in first[0], "first fetch of either source is unconditional"
+        assert "If-Modified-Since" not in second[0], (
+            "#3110: sec_10q had never fetched anything, so it must NOT inherit "
+            "sec_8k's validator — inheriting it is what lets a 304 certify an "
+            "unexamined source"
+        )
+
+        wm_8k = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, f"{_TEST_CIK}:sec_8k")
+        wm_10q = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, f"{_TEST_CIK}:sec_10q")
+        assert wm_8k is not None and wm_10q is not None, "each source keeps its own watermark"
+        assert get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_CIK) is None, (
+            "the CIK-wide key must no longer be written at all"
+        )
+
+    def test_source_order_does_not_change_the_result(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Acceptance clause: *source order and 304 do not change the result.*
+
+        Same as above with the order reversed, and with the SECOND poll's
+        server primed to answer 304 to any conditional request. Because the
+        second source sends no ``If-Modified-Since``, the 304 arm is never
+        reached and its watermark is still written from its own 200.
+        """
+        _seed_subject(ebull_test_conn)
+        self._seed_second_source(ebull_test_conn)
+
+        run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_make_http_get_with_meta(
+                status=200,
+                payload=_aapl_submissions_recent(),
+                last_modified="Wed, 30 Apr 2026 16:00:00 GMT",
+            ),
+            source="sec_10q",
+        )
+        ebull_test_conn.commit()
+
+        captured: list[dict[str, str]] = []
+        run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_make_http_get_with_meta(
+                status=200,
+                payload=_aapl_submissions_recent(),
+                last_modified="Thu, 01 May 2026 16:00:00 GMT",
+                capture=captured,
+            ),
+            source="sec_8k",
+        )
+        ebull_test_conn.commit()
+
+        assert "If-Modified-Since" not in captured[0]
+        wm_8k = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, f"{_TEST_CIK}:sec_8k")
+        wm_10q = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, f"{_TEST_CIK}:sec_10q")
+        assert wm_8k is not None and wm_8k.watermark == "Thu, 01 May 2026 16:00:00 GMT"
+        assert wm_10q is not None and wm_10q.watermark == "Wed, 30 Apr 2026 16:00:00 GMT"
+
+    def test_same_source_unchanged_poll_still_sends_the_conditional_header(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Acceptance clause: *same-source unchanged polls still use conditional
+        requests.* Scoping the key must not disable the mechanism it scopes."""
+        _seed_subject(ebull_test_conn)
+
+        run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_make_http_get_with_meta(
+                status=200,
+                payload=_aapl_submissions_recent(),
+                last_modified="Wed, 30 Apr 2026 16:00:00 GMT",
+            ),
+            source="sec_8k",
+        )
+        ebull_test_conn.commit()
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("UPDATE data_freshness_index SET expected_next_at = '2024-01-01' WHERE source = 'sec_8k'")
+        ebull_test_conn.commit()
+
+        captured: list[dict[str, str]] = []
+        run_per_cik_poll(
+            ebull_test_conn,
+            http_get_with_meta=_make_http_get_with_meta(
+                status=304,
+                payload=b"",
+                last_modified=None,
+                capture=captured,
+            ),
+            source="sec_8k",
+        )
+        ebull_test_conn.commit()
+
+        assert captured[0].get("If-Modified-Since") == "Wed, 30 Apr 2026 16:00:00 GMT"
+
+
+def test_watermark_key_describes_what_was_processed() -> None:
+    """Pure-logic companion to the DB tests above — no Postgres needed.
+
+    The ``source is None`` branch is not a fallback: a probe with no source
+    filter processes the WHOLE entity response, so the CIK-wide key is the
+    correct description of it.
+    """
+    from app.jobs.sec_per_cik_poll import _watermark_key
+
+    assert _watermark_key("0000320193", {"sec_8k"}) == "0000320193:sec_8k"
+    assert _watermark_key("0000320193", {"sec_10q"}) == "0000320193:sec_10q"
+    assert _watermark_key("0000320193", None) == "0000320193"
+    # Stable under set iteration order — the key is a cache key, so a value
+    # that varies run to run would silently disable the conditional request.
+    assert _watermark_key("0000320193", {"sec_10q", "sec_8k"}) == "0000320193:sec_10q,sec_8k"
 
 
 # -----------------------------------------------------------------
@@ -571,7 +762,7 @@ class TestSourceKeyNamespaceIsolation:
         )
         ebull_test_conn.commit()
 
-        wm_new = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_CIK)
+        wm_new = get_watermark(ebull_test_conn, _SOURCE_KEY_PER_CIK_POLL, _TEST_WM_KEY)
         wm_legacy = get_watermark(ebull_test_conn, "sec.submissions", _TEST_CIK)
 
         assert wm_new is not None, "namespaced watermark MUST be written"

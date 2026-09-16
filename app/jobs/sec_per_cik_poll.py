@@ -15,7 +15,8 @@ when the caller supplies the richer ``http_get_with_meta`` callable
 (see ``app/providers/implementations/sec_submissions.py:HttpGetWithMeta``),
 this job rounds the SEC ``Last-Modified`` header through
 ``external_data_watermarks`` under source-key
-``sec.last_modified.per_cik_poll`` and short-circuits on HTTP 304 —
+``sec.last_modified.per_cik_poll``, keyed ``<cik>:<source>`` (#3110 —
+see ``_watermark_key``), and short-circuits on HTTP 304 —
 skipping the manifest UPSERT + payload parse, but STILL writing a
 scheduler outcome (``current``/``never``) and re-stamping
 ``watermark_at`` so the recheck timing rolls forward and the
@@ -30,6 +31,7 @@ avoid corrupting two different fetch contracts.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -61,6 +63,39 @@ logger = logging.getLogger(__name__)
 # ``app/services/watermarks.py`` module docstring §Source-key
 # namespaces in use.
 _SOURCE_KEY_PER_CIK_POLL: str = "sec.last_modified.per_cik_poll"
+
+
+def _watermark_key(cik_padded: str, sources: Collection[ManifestSource] | None) -> str:
+    """Watermark key for one probe — ``<cik>:<source>``, not ``<cik>`` (#3110).
+
+    **The key must describe WHAT WAS PROCESSED, not what was fetched.**
+    ``submissions.json`` is an entity-wide response (SEC's own API docs; see
+    `.claude/skills/data-sources/sec-edgar.md` §1), but ``_probe_subject``
+    parses only ``sources={subject.source}`` out of it. Under the old CIK-only
+    key, source A's poll stored the response validator and source B's next poll
+    sent it as ``If-Modified-Since`` — so a 304 would certify B as current
+    although B's filings had never been looked at by this path.
+
+    ``<cik>:<page_name>`` is the existing convention for the sibling namespace
+    ``sec.last_modified.submissions_files``; this mirrors it.
+
+    ⚠⚠ Takes **the very object passed to the parser** (``sources_to_check``),
+    not ``subject.source``, so the key and the filter provably cannot diverge —
+    review NITPICK on PR #3130. The first cut derived the key separately and
+    re-tested ``subject.source`` for truthiness; that is a second expression of
+    one rule, which is how the two drift apart later.
+
+    ``sources is None`` is not a fallback, it is the same rule: a probe with no
+    filter processes the WHOLE response, so the CIK-wide key is the correct
+    description of it. Unreachable today — ``data_freshness_index.source`` is
+    ``NOT NULL`` with 0 null rows and ``FreshnessRow.source`` is non-optional.
+
+    Sorted so a multi-source filter (none exists yet) yields a stable key
+    rather than one that depends on set iteration order.
+    """
+    if sources is None:
+        return cik_padded
+    return f"{cik_padded}:{','.join(sorted(sources))}"
 
 
 @dataclass(frozen=True)
@@ -95,7 +130,9 @@ def _probe_subject(
 
     Item 7 (#1233): when ``http_get_with_meta`` is supplied, this
     function reads any prior ``sec.last_modified.per_cik_poll`` /
-    ``<cik>`` watermark, sends it as ``If-Modified-Since``, and on
+    ``<cik>:<source>`` watermark (#3110 — see ``_watermark_key``; it was
+    ``<cik>``, which let one source's validator certify another's),
+    sends it as ``If-Modified-Since``, and on
     HTTP 304 short-circuits the PAYLOAD work — skips manifest writes
     + parse — but STILL writes a scheduler outcome inside one
     transaction: ``current`` (rolls ``expected_next_at`` forward) for
@@ -126,8 +163,10 @@ def _probe_subject(
     # opens a per-CIK ``with conn.transaction():`` only around the
     # writes below).
     if_modified_since: str | None = None
+    # ⚠ Derived from ``sources_to_check`` itself (#3110) — see ``_watermark_key``.
+    watermark_key = _watermark_key(cik_padded, sources_to_check)
     if http_get_with_meta is not None:
-        wm = get_watermark(conn, _SOURCE_KEY_PER_CIK_POLL, cik_padded)
+        wm = get_watermark(conn, _SOURCE_KEY_PER_CIK_POLL, watermark_key)
         if_modified_since = wm.watermark if wm and wm.watermark else None
     try:
         if http_get_with_meta is not None:
@@ -183,7 +222,7 @@ def _probe_subject(
                 set_watermark(
                     conn,
                     source=_SOURCE_KEY_PER_CIK_POLL,
-                    key=cik_padded,
+                    key=watermark_key,
                     watermark=if_modified_since,
                     watermark_at=None,
                 )
@@ -292,7 +331,7 @@ def _probe_subject(
             set_watermark(
                 conn,
                 source=_SOURCE_KEY_PER_CIK_POLL,
-                key=cik_padded,
+                key=watermark_key,
                 watermark=delta.last_modified,
                 watermark_at=None,
             )
