@@ -1731,7 +1731,12 @@ def load_corpus(
     )
 
 
-def _ledger_evidence(book: _NamespaceBook, *, window_end: date) -> LedgerMeasurements | None:
+def _ledger_evidence(
+    book: _NamespaceBook,
+    *,
+    namespace: ResultNamespace,
+    window_end: date,
+) -> LedgerMeasurements | None:
     """#2505's ledger arithmetic over one book. ``None`` on an empty population.
 
     ⚠ ``regime_observations`` is positionally parallel to ``returns`` — both are
@@ -1744,18 +1749,39 @@ def _ledger_evidence(book: _NamespaceBook, *, window_end: date) -> LedgerMeasure
     carries ``-series_id`` for a series admitted without a live link (#2721 step
     3). Concentration needs identity only, so that is correct here — a later
     slice joining this key to a sector is the one that must handle it.
+
+    ⚠⚠ A REFUSED LEDGER ABORTS THE WHOLE RUN, deliberately and in company. This
+    function's neighbours already stop an invocation on a structural
+    inconsistency — an axis shorter than two dates, an in-sample book holding an
+    open leg, a block bootstrap that computed no effective sample size, regime
+    cohorts whose trade count disagrees with the parent metric — because a run
+    that measures an incoherent book produces numbers nobody can audit. It is
+    unreachable today: the entry price is positive-checked before the return is
+    computed, and ``Position`` refuses a close before its own fill.
+
+    ⚠ The refusal is re-raised NAMING THE NAMESPACE. ``RealisedLedger`` says
+    which invariant failed and cannot say which of the run's books failed it,
+    and #2820's lesson — recorded against ``_preflight_gate`` in this very file
+    — is that a failure without a diagnosis costs the whole run a second time.
     """
     if not book.returns:
         return None
-    return measure_ledger(
-        RealisedLedger(
-            net_return_pct=tuple(book.returns),
-            entry_fill_date=tuple(book.entry_dates),
-            exit_bar_date=tuple(book.exit_dates),
-            name_key=tuple(observation.instrument_key for observation in book.regime_observations),
-            open_legs=tuple((entry, window_end) for entry in book.open_entry_dates),
+    try:
+        return measure_ledger(
+            RealisedLedger(
+                net_return_pct=tuple(book.returns),
+                entry_fill_date=tuple(book.entry_dates),
+                exit_bar_date=tuple(book.exit_dates),
+                name_key=tuple(observation.instrument_key for observation in book.regime_observations),
+                open_legs=tuple((entry, window_end) for entry in book.open_entry_dates),
+            )
         )
-    )
+    except ValueError as error:
+        raise RuntimeError(
+            f"the {namespace} ledger carries {len(book.returns)} realised return(s), "
+            f"{len(book.entry_dates)} entry date(s), {len(book.exit_dates)} exit date(s) and "
+            f"{len(book.regime_observations)} regime observation(s), and cannot be measured: {error}"
+        ) from error
 
 
 def _measure_namespace(
@@ -1866,7 +1892,7 @@ def _measure_namespace(
         universe_record=opportunity,
         position_count=book.positions,
         axis_dates=dates,
-        ledger_evidence=_ledger_evidence(book, window_end=dates[-1]),
+        ledger_evidence=_ledger_evidence(book, namespace=namespace, window_end=dates[-1]),
         label_starts=book.label_starts,
         label_ends=book.label_ends,
         rebalance_costs=curve.rebalance_costs,

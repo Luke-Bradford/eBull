@@ -2222,7 +2222,7 @@ class TestLedgerEvidence:
         """``None`` means "no realised legs" and is the only thing it means."""
         book = _NamespaceBook()
         book.open_entry_dates.append(date(2010, 1, 4))
-        assert _ledger_evidence(book, window_end=date(2010, 1, 6)) is None
+        assert _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6)) is None
 
     def test_the_measurement_reads_the_book_s_own_columns(self) -> None:
         book = self._book(
@@ -2231,7 +2231,7 @@ class TestLedgerEvidence:
             exits=[date(2010, 1, 6), date(2010, 1, 6), date(2010, 1, 6)],
             names=[7, 7, 9],
         )
-        measured = _ledger_evidence(book, window_end=date(2010, 1, 6))
+        measured = _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6))
         assert measured is not None
         assert measured.outcome_count == 3
         assert (measured.profitable_outcome_count, measured.losing_outcome_count, measured.flat_outcome_count) == (
@@ -2252,10 +2252,10 @@ class TestLedgerEvidence:
             exits=[date(2010, 1, 6)],
             names=[7],
         )
-        assert (closed := _ledger_evidence(book, window_end=date(2010, 1, 6))) is not None
+        assert (closed := _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6))) is not None
         assert closed.max_concurrency == 1
         book.open_entry_dates.append(date(2010, 1, 5))
-        assert (with_open := _ledger_evidence(book, window_end=date(2010, 1, 6))) is not None
+        assert (with_open := _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6))) is not None
         assert with_open.max_concurrency == 2
 
     def test_a_name_column_out_of_step_with_the_returns_is_refused(self) -> None:
@@ -2267,5 +2267,10 @@ class TestLedgerEvidence:
             names=[7, 9],
         )
         book.regime_observations.pop()
-        with pytest.raises(ValueError, match="positionally parallel"):
-            _ledger_evidence(book, window_end=date(2010, 1, 6))
+        with pytest.raises(RuntimeError, match="positionally parallel") as raised:
+            _ledger_evidence(book, namespace="in_sample", window_end=date(2010, 1, 6))
+        # ⚠ The message must name the namespace and both counts: #2820's lesson is
+        # that a failure without a diagnosis costs the whole run a second time.
+        assert "in_sample" in str(raised.value)
+        assert "2 realised return(s)" in str(raised.value)
+        assert "1 regime observation(s)" in str(raised.value)
