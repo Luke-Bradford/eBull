@@ -54,6 +54,7 @@ from app.services.sec_manifest import (
     iter_retryable_topup,
     transition_status,
 )
+from app.services.sync_orchestrator.progress import report_progress
 
 logger = logging.getLogger(__name__)
 
@@ -666,7 +667,25 @@ def _dispatch_rows(
     # commit instead of releasing at the accession's row boundary.
     conn.commit()
 
-    for row in rows:
+    for index, row in enumerate(rows):
+        # #2274 tick coverage. ⚠ AT THE TOP OF THE BODY, not in a ``finally``
+        # like `ingest_filing_documents`' site, and the difference is mechanical
+        # rather than a change of contract: this body is ~126 lines with two
+        # nested `try`s and three `continue`s, so wrapping it would re-indent a
+        # hot path that four backfill scripts also drive. A tick placed first
+        # runs on EVERY path out of the iteration — including both `continue`s
+        # and any future branch — which is the property the `finally` was for.
+        #
+        # ⚠ It reports rows COMPLETED, so it is 0-based: at the top of row 1's
+        # iteration nothing has finished yet. The final forced tick below is
+        # what records the last row.
+        #
+        # ⚠ A no-op outside a job. `report_progress` returns immediately when no
+        # callback is installed, which is the case for every
+        # `scripts/backfill_*.py` caller of this function — so the shared helper
+        # stays usable from a script without stamping anything.
+        report_progress(index, len(rows))
+
         spec = _PARSERS.get(row.source)
         if spec is None:
             logger.debug(
@@ -791,6 +810,21 @@ def _dispatch_rows(
             )
             conn.rollback()
             continue
+
+    # #2274 — the last row's completion, which the top-of-body tick cannot
+    # record. ⚠ GUARDED ON ``rows``: a forced ``(0, 0)`` tick for a batch that
+    # attempted nothing would stamp ``last_progress_at`` for a run with no work,
+    # which is the fabricated-progress claim ``set_active_progress``'s
+    # ``initial_tick=False`` exists to forbid. An empty tick is the COMMON case
+    # here — this job fires every 5 minutes and most fires drain 0-2 rows.
+    #
+    # ⚠ ``force=True`` bypasses ``report_progress``'s throttle but NOT
+    # ``JobRunHeartbeat``'s own 5s write floor, so on a fast batch this final
+    # emission can be dropped and the stored count trail the true total. Measured
+    # at 12 items / ~2s on `sec_filing_documents_ingest` (#2274, PR #3090); both
+    # consumers read the TIMESTAMP, so the lag is immaterial to liveness.
+    if rows:
+        report_progress(len(rows), len(rows), force=True)
 
     # #940: surface no-parser drops at WARNING level with per-source
     # breakdown. Per-row debug logs above let operators dig in if

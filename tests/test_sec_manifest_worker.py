@@ -20,6 +20,7 @@ from typing import Any
 import psycopg
 import pytest
 
+from app.jobs import sec_manifest_worker
 from app.jobs.sec_manifest_worker import (
     ParseOutcome,
     clear_registered_parsers,
@@ -1222,3 +1223,139 @@ class TestRecentFirstSlice:
         assert set(got) == set(recent), "only this source's pending rows within the window"
         # Same filed_at across the recent rows → accession DESC tie-break.
         assert got == sorted(recent, reverse=True), "newest-first (filed_at DESC, accession DESC)"
+
+
+class _TickRecorder:
+    """Records ``report_progress`` CALL SITES, not callback emissions.
+
+    #2274, same split as ``tests/test_filing_documents_ingest.py``: three
+    layers throttle a tick and each owns its own tests — the call site here,
+    the 5-item/10s throttle in ``sync_orchestrator.progress.report_progress``,
+    and the 5s write floor in ``job_heartbeat.JobRunHeartbeat``. What can only
+    be pinned HERE is that the dispatch loop ticks once per attempted row on
+    every branch, including the two ``continue``s.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int | None, bool]] = []
+
+    def __call__(
+        self,
+        items_done: int,
+        items_total: int | None,
+        *,
+        force: bool = False,
+        **_: object,
+    ) -> None:
+        self.calls.append((items_done, items_total, force))
+
+
+#: Deliberately NOT a multiple of ``report_progress``'s 5-item throttle — a
+#: batch size aligned with it would let the last iteration emit the final count
+#: incidentally, so a missing ``force=True`` tail tick would still pass.
+_OFF_THROTTLE_BATCH = 7
+
+
+class TestDispatchLoopHeartbeat:
+    """#2274 — the job's ``job_runs`` heartbeat comes from this loop.
+
+    Before this, ``sec_manifest_worker`` had 0 ticks across all 24,588 stored
+    runs, so ``_LIVE_JOB_SQL``'s non-NULL ``last_progress_at`` requirement could
+    never hold and a deploy reaped it mid-drain (27 orphan reaps).
+    """
+
+    _NOW = datetime(2026, 2, 1, tzinfo=UTC)
+
+    def _run(
+        self,
+        conn: psycopg.Connection[tuple],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        n: int,
+        register: bool,
+    ) -> _TickRecorder:
+        _seed_pending_n(
+            conn,
+            source="sec_form4",
+            n=n,
+            base_filed_at=self._NOW - timedelta(days=5),
+            iid=910,
+            cik="0000000910",
+        )
+        conn.commit()
+        if register:
+            register_parser("sec_form4", lambda _c, _r: ParseOutcome(status="parsed", parser_version="t"))
+        recorder = _TickRecorder()
+        monkeypatch.setattr(sec_manifest_worker, "report_progress", recorder)
+        run_manifest_worker(conn, source="sec_form4", max_rows=n + 5, now=self._NOW)
+        return recorder
+
+    def test_ticks_once_per_row_plus_a_forced_final(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """⚠ 0-BASED, unlike the filing-documents site. The tick is at the TOP
+        of the body and reports rows COMPLETED, so row 1's iteration ticks 0."""
+        n = _OFF_THROTTLE_BATCH
+        recorder = self._run(ebull_test_conn, monkeypatch, n=n, register=True)
+        assert recorder.calls == [(i, n, False) for i in range(n)] + [(n, n, True)]
+
+    def test_ticks_on_every_row_when_no_parser_is_registered(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The ``spec is None`` ``continue`` is one of the two early exits the
+        top-of-body placement exists to cover. A tick after the parser call
+        would go silent on exactly the batch that is dropping every row."""
+        n = _OFF_THROTTLE_BATCH
+        recorder = self._run(ebull_test_conn, monkeypatch, n=n, register=False)
+        assert recorder.calls == [(i, n, False) for i in range(n)] + [(n, n, True)]
+
+    def test_ticks_on_every_row_when_every_parser_raises(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The second early exit. A raising parser is still a live worker doing
+        an SEC round trip per row — the heartbeat must not stop when the job is
+        having trouble, because that is when a reap is most expensive."""
+
+        def _boom(_c: psycopg.Connection[Any], _r: ManifestRow) -> ParseOutcome:
+            raise RuntimeError("parser exploded")
+
+        n = _OFF_THROTTLE_BATCH
+        _seed_pending_n(
+            ebull_test_conn,
+            source="sec_form4",
+            n=n,
+            base_filed_at=self._NOW - timedelta(days=5),
+            iid=911,
+            cik="0000000911",
+        )
+        ebull_test_conn.commit()
+        register_parser("sec_form4", _boom)
+        recorder = _TickRecorder()
+        monkeypatch.setattr(sec_manifest_worker, "report_progress", recorder)
+
+        run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=n + 5, now=self._NOW)
+
+        assert recorder.calls == [(i, n, False) for i in range(n)] + [(n, n, True)]
+
+    def test_an_empty_batch_ticks_nothing_at_all(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """⚠ THE COMMON CASE for this job — it fires every 5 minutes and most
+        fires drain 0 rows. A forced ``(0, 0)`` tick would stamp
+        ``last_progress_at`` for a run that attempted nothing, which is the
+        fabricated-progress claim ``set_active_progress``'s ``initial_tick=False``
+        exists to forbid."""
+        recorder = _TickRecorder()
+        monkeypatch.setattr(sec_manifest_worker, "report_progress", recorder)
+
+        run_manifest_worker(ebull_test_conn, source="sec_form4", max_rows=10, now=self._NOW)
+
+        assert recorder.calls == []

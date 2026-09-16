@@ -62,6 +62,7 @@ COVERED_JOBS = (
     "thesis_refresh",  # scheduler thesis batch loop
     "expected_filings_poller",  # -> run_force_refresh -> refresh_financial_facts
     "sec_filing_documents_ingest",  # filing_documents.ingest_filing_documents
+    "sec_manifest_worker",  # sec_manifest_worker._dispatch_rows
 )
 
 # The parent in the one confirmed nesting (fundamentals_sync ->
