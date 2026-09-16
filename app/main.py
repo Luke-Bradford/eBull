@@ -440,9 +440,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if served_build_task is not None:
         try:
             await asyncio.wait_for(asyncio.shield(served_build_task), timeout=5.0)
-        except TimeoutError, asyncio.CancelledError:
+        except TimeoutError:
             served_build_task.cancel()
             logger.info("served_build: sidecar write did not settle within 5s — cancelled at teardown")
+        except asyncio.CancelledError:
+            # ⚠⚠ The shield means a CancelledError arriving here is NOT the
+            # background task timing out — it is THIS lifespan task being
+            # cancelled from outside. Swallowing it would stop the cancellation
+            # propagating through the generator and could hang the very
+            # shutdown path #3119 exists to detect (review WARNING round 3 on
+            # PR #3133). Drop the diagnostic and re-raise: the caller's
+            # cancellation outranks a sidecar write.
+            served_build_task.cancel()
+            raise
         except Exception:
             logger.warning("served_build: sidecar write failed", exc_info=True)
 

@@ -7353,3 +7353,38 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   just this one.
 - Verification step: `rg -n "create_task" app/main.py` — every hit inside `lifespan` must
   have a `cancel` or `wait_for` naming the same handle after the `yield`.
+
+---
+
+### An `except CancelledError` that does not `raise` suppresses the CALLER's cancellation — and in a teardown path that is the hang it was added to prevent
+
+- First seen in: #3119 (2026-09-16), review round 3 on PR #3133. Found by the review bot,
+  one round after the entry above introduced the code it applies to — the fix for a
+  background-task lifecycle warning carried this defect in.
+- Symptom: a lifespan teardown settled a shielded background task with
+  `asyncio.wait_for(asyncio.shield(task), timeout=5.0)` and caught `TimeoutError` and
+  `asyncio.CancelledError` in ONE handler that logged and continued. Because of the
+  `shield`, those two exceptions do not mean the same thing at all: `TimeoutError` is the
+  background task overrunning, while `CancelledError` is **this lifespan task being
+  cancelled from outside**. Folding them together swallows the caller's cancellation, so
+  it never propagates through the async generator — which can hang the shutdown path.
+  On this codebase that is not an abstract risk: `uvicorn/supervisors/basereload.py:97-98`
+  is `terminate()` then an **untimed** `join()`, so a worker that will not finish shutting
+  down wedges the reload parent and stops every later restart. The defect was introduced
+  while fixing a log-noise warning on the very ticket about a shutdown hang.
+- ⚠ `CancelledError` derives from `BaseException`, not `Exception`, so a trailing
+  `except Exception:` does NOT catch it — which is why this only ever appears where
+  someone named it explicitly, usually while widening a handler to be "safe".
+- Prevention: **every `except asyncio.CancelledError` ends in `raise`**, unless the
+  function's own contract is to absorb cancellation and it says so. Never co-locate it
+  with `TimeoutError` in a single handler: after a `shield` they have opposite subjects
+  (the awaited task vs. the awaiting one), and a shared log line will also describe the
+  wrong one. Split the handlers, re-raise the cancellation, and let the timeout branch
+  own the diagnostic.
+- Enforced in: `app/main.py::lifespan` (separate `TimeoutError` / `CancelledError`
+  handlers; the cancellation branch cancels the diagnostic task and re-raises);
+  `tests/test_3119_api_wedge_instrumentation.py::test_cancelled_error_is_re_raised_on_the_teardown_path`,
+  which walks the parsed teardown half of `lifespan` and fails any `CancelledError`
+  handler containing no `ast.Raise`.
+- Verification step: `rg -n "CancelledError" app/` — every handler that names it must
+  contain a `raise`, or carry a comment stating why absorbing it is the contract.

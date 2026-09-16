@@ -390,6 +390,34 @@ def test_every_background_task_in_lifespan_has_a_shutdown_side() -> None:
     assert {"cancel", "wait_for"} & settled, "lifespan creates a background task with no shutdown side"
 
 
+def test_cancelled_error_is_re_raised_on_the_teardown_path() -> None:
+    """A swallowed ``CancelledError`` is the shutdown-hang class itself.
+
+    The background task is ``shield``ed, so a ``CancelledError`` reaching the
+    teardown handler is not the sidecar write timing out — it is the lifespan
+    task being cancelled from outside. Suppressing it stops the cancellation
+    propagating through the generator, which is the shape #3119 is about.
+    """
+    body = _lifespan_body()
+    yield_index = next(
+        index
+        for index, statement in enumerate(body)
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Yield)
+    )
+    shutdown = ast.Module(body=body[yield_index + 1 :], type_ignores=[])
+
+    handlers = [
+        handler
+        for handler in ast.walk(shutdown)
+        if isinstance(handler, ast.ExceptHandler) and "CancelledError" in ast.dump(handler)
+    ]
+    assert handlers, "teardown must handle CancelledError explicitly, not fold it into a broad except"
+    for handler in handlers:
+        assert any(isinstance(node, ast.Raise) for node in ast.walk(handler)), (
+            "a CancelledError handler on the teardown path must re-raise"
+        )
+
+
 def test_identity_publication_is_not_awaited_on_the_startup_path() -> None:
     """Three git subprocesses bound at 5s each must not gate every boot.
 
