@@ -4231,6 +4231,7 @@ Two things S-4 adds to the prevention above:
 - ⚠ The general form, worth carrying beyond this hook: **any rule implemented as a substring scan over source text is satisfied by a mention and cannot be satisfied by intent.** Whenever such a scan gates something, the honest verification is to run the selector and count, not to inspect the file and reason about what it should match.
 - Enforced in: this log; `tests/test_2612_forward_window_single_entry.py` (module docstring carries the rule and the incident, and deliberately describes the fixture without naming it); `tests/test_2612_forward_window_single_entry_db.py` (header records why the split is load-bearing rather than cosmetic).
 - ⚠⚠ **RECURRED THE SAME DAY, in #2611, with this entry already written.** A new pure-logic module named the settings database-URL attribute in a class docstring — in a sentence whose entire purpose was to say *that attribute is the wrong source for the audit DSN* — and all eight tests dropped out of the fast tier. **The recurrence is the point:** knowing the rule did not prevent it, because the mention was semantically a warning against the very thing it tripped, which is exactly the case intent-reading skips over. It was caught only by running `pytest <file> -m "not db"` and reading **exit 5**. So the prevention above is not "remember the rule" — it is **run the selector after writing any new pure-logic module, unconditionally**, the way `ruff` is run rather than recalled. Note the marker list is wider than the fixture name: the settings URL attribute, `TestClient`, `run_migrations(` and the test-DB helpers all mark a module, and any of them can appear in prose.
+- ⚠⚠ **THIRD instance, 2026-09-16 (#3119), and the same shape a third time.** A new pure-logic module opened with *"Pure-logic tier: no DB, no TestClient, no real API"* — a sentence asserting the module does not use the marker — and all 22 tests left the fast tier. Caught by `pytest <file> -m "not db"` → **exit 5, `0 items`**, run as a step rather than recalled as a rule. Three instances now share one shape: **the mention that trips the scan is a DISCLAIMER of the thing it names.** That is not a coincidence, it is selection — a pure-logic module is exactly the kind that wants to say which DB machinery it avoids, so the files most at risk are the ones whose authors are most aware of the rule. Practical consequence: when documenting what a test module does *not* touch, describe the mechanism without naming it (say "no starlette client harness", not "no `TestClient`"), the way `tests/test_2612_forward_window_single_entry.py` already does for its fixture.
 
 ---
 
@@ -7314,3 +7315,76 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - Verification step: `rg -n "download_bulk_archives\(" app/ scripts/` — every hit that passes
   `archives=` must NOT pass `prune_strays=True`; the only `prune_strays=True` is the caller
   that passes no inventory at all.
+
+---
+
+### An `asyncio.create_task` in a lifespan needs a shutdown side, or it reports itself as a bug in the logs you are reading to find a bug
+
+- First seen in: #3119 (2026-09-16), review round 2 on PR #3133.
+- Symptom: the served-build sidecar write was moved off the startup critical path into
+  `asyncio.create_task(...)` — correctly, because its three git subprocesses are bounded at
+  5s each and a slow filesystem would otherwise delay every boot. Nothing awaited or
+  cancelled it after the `yield`. A task still pending when the loop closes makes asyncio
+  emit **`Task was destroyed but it is pending`**, which is an alarming line arriving in
+  the logs of the one process whose logs are being read *precisely because* something is
+  already suspected wrong with it. For instrumentation that exists to make a wedge
+  legible, manufacturing a spurious scary log line is the specific harm to avoid.
+- ⚠ The naive fix is worse than the bug. `await`ing the task to completion on the
+  shutdown path makes a diagnostic able to hold a shutdown open — which on this codebase
+  is the shape of the incident #3119 is about (`uvicorn/supervisors/basereload.py:97-98`
+  is `terminate()` then an untimed `join()`, so anything that delays a worker's exit
+  wedges the reload PARENT and stops all further restarts). The correct move is
+  **bounded, then cancelled**: `asyncio.wait_for(asyncio.shield(task), timeout=…)` and
+  `task.cancel()` on timeout. `shield` matters — without it the `wait_for` timeout
+  cancels the task as a side effect and the explicit `cancel()` reads as dead code.
+- ⚠ Hold the handle somewhere with an owner (`app.state`, a module global). A bare
+  `create_task(...)` whose reference is dropped can be garbage-collected mid-flight and
+  **cancelled silently**, which presents as the artefact intermittently not existing —
+  a far harder bug than the one the background dispatch was avoiding.
+- Prevention: any `asyncio.create_task` created in a lifespan (or any long-lived
+  context manager) must have a matching settle-or-cancel on the far side of the `yield`,
+  bounded by a timeout, with the handle owned. The bound should reflect that the task is
+  a diagnostic: it may be abandoned, it may not delay teardown.
+- Enforced in: `app/main.py::lifespan` (bounded `wait_for` + `shield` + `cancel` on the
+  shutdown side, handle on `app.state.served_build_task`);
+  `tests/test_3119_api_wedge_instrumentation.py::test_every_background_task_in_lifespan_has_a_shutdown_side`,
+  which parses the lifespan, splits it at the `yield`, and fails if the startup half
+  creates a task the shutdown half never settles — written to catch the NEXT one, not
+  just this one.
+- Verification step: `rg -n "create_task" app/main.py` — every hit inside `lifespan` must
+  have a `cancel` or `wait_for` naming the same handle after the `yield`.
+
+---
+
+### An `except CancelledError` that does not `raise` suppresses the CALLER's cancellation — and in a teardown path that is the hang it was added to prevent
+
+- First seen in: #3119 (2026-09-16), review round 3 on PR #3133. Found by the review bot,
+  one round after the entry above introduced the code it applies to — the fix for a
+  background-task lifecycle warning carried this defect in.
+- Symptom: a lifespan teardown settled a shielded background task with
+  `asyncio.wait_for(asyncio.shield(task), timeout=5.0)` and caught `TimeoutError` and
+  `asyncio.CancelledError` in ONE handler that logged and continued. Because of the
+  `shield`, those two exceptions do not mean the same thing at all: `TimeoutError` is the
+  background task overrunning, while `CancelledError` is **this lifespan task being
+  cancelled from outside**. Folding them together swallows the caller's cancellation, so
+  it never propagates through the async generator — which can hang the shutdown path.
+  On this codebase that is not an abstract risk: `uvicorn/supervisors/basereload.py:97-98`
+  is `terminate()` then an **untimed** `join()`, so a worker that will not finish shutting
+  down wedges the reload parent and stops every later restart. The defect was introduced
+  while fixing a log-noise warning on the very ticket about a shutdown hang.
+- ⚠ `CancelledError` derives from `BaseException`, not `Exception`, so a trailing
+  `except Exception:` does NOT catch it — which is why this only ever appears where
+  someone named it explicitly, usually while widening a handler to be "safe".
+- Prevention: **every `except asyncio.CancelledError` ends in `raise`**, unless the
+  function's own contract is to absorb cancellation and it says so. Never co-locate it
+  with `TimeoutError` in a single handler: after a `shield` they have opposite subjects
+  (the awaited task vs. the awaiting one), and a shared log line will also describe the
+  wrong one. Split the handlers, re-raise the cancellation, and let the timeout branch
+  own the diagnostic.
+- Enforced in: `app/main.py::lifespan` (separate `TimeoutError` / `CancelledError`
+  handlers; the cancellation branch cancels the diagnostic task and re-raises);
+  `tests/test_3119_api_wedge_instrumentation.py::test_cancelled_error_is_re_raised_on_the_teardown_path`,
+  which walks the parsed teardown half of `lifespan` and fails any `CancelledError`
+  handler containing no `ast.Raise`.
+- Verification step: `rg -n "CancelledError" app/` — every handler that names it must
+  contain a `raise`, or carry a comment stating why absorbing it is the contract.

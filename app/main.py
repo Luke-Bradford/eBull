@@ -86,6 +86,7 @@ from app.services.operators import (
 from app.services.quote_stream import QuoteBus
 from app.services.sync_orchestrator.layer_state import compute_layer_states_from_db
 from app.services.sync_orchestrator.layer_types import LayerState
+from app.system import served_build
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
@@ -107,6 +108,29 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # #3119 — FIRST, before migrations or any other startup work. The 2026-09-16
+    # wedge had no detector for either half (stale code, then no responses), and
+    # a startup that hangs is one of the shapes it could have been. Registering
+    # after the expensive work would leave exactly that shape uncovered.
+    #
+    # The two halves are dispatched differently on purpose. Registering the
+    # SIGUSR1 handler opens one file and is what a startup wedge actually needs,
+    # so it is awaited. Publishing the sidecar runs three git subprocesses whose
+    # bounds sum to 15s, so it is fired into the background — a slow filesystem
+    # must not be able to delay every boot through the feature that exists to
+    # detect stalls (review WARNING on PR #3133).
+    #
+    # Skipped under test: every in-process client harness drives this lifespan,
+    # and the sidecar names a single serving worker, so a test process must not
+    # overwrite the real one's pid. See served_build.running_under_test.
+    if not served_build.running_under_test():
+        dump_handler_ready = served_build.register_dump_handler()
+        # Held on app.state because a bare create_task reference may be
+        # garbage-collected mid-flight, which cancels the task silently.
+        app.state.served_build_task = asyncio.create_task(
+            asyncio.to_thread(served_build.publish_identity, faulthandler_ready=dump_handler_ready)
+        )
+
     logger.info("Running pending migrations...")
     applied = await asyncio.to_thread(run_migrations)
     if applied:
@@ -401,6 +425,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
+    # #3119 — settle the background sidecar write. It is normally finished long
+    # before shutdown, but a slow git leaves a pending task at exit, which
+    # asyncio reports as "Task was destroyed but it is pending" — a scary line
+    # in the logs of the one process whose logs are being read precisely
+    # because something is wrong with it (review WARNING round 2 on PR #3133).
+    #
+    # Bounded and then CANCELLED rather than awaited to completion: the sidecar
+    # is a diagnostic, and nothing downstream waits on it, so it must never be
+    # able to hold a shutdown open. Doing so would also make this the second
+    # unbounded wait in a teardown path, which is close to the shape the ticket
+    # is about.
+    served_build_task = getattr(app.state, "served_build_task", None)
+    if served_build_task is not None:
+        try:
+            await asyncio.wait_for(asyncio.shield(served_build_task), timeout=5.0)
+        except TimeoutError:
+            served_build_task.cancel()
+            logger.info("served_build: sidecar write did not settle within 5s — cancelled at teardown")
+        except asyncio.CancelledError:
+            # ⚠⚠ The shield means a CancelledError arriving here is NOT the
+            # background task timing out — it is THIS lifespan task being
+            # cancelled from outside. Swallowing it would stop the cancellation
+            # propagating through the generator and could hang the very
+            # shutdown path #3119 exists to detect (review WARNING round 3 on
+            # PR #3133). Drop the diagnostic and re-raise: the caller's
+            # cancellation outranks a sidecar write.
+            served_build_task.cancel()
+            raise
+        except Exception:
+            logger.warning("served_build: sidecar write failed", exc_info=True)
+
     if ws_subscriber is not None:
         try:
             # Bound the WS stop. ``EtoroWebSocketSubscriber.stop()``
@@ -643,6 +698,45 @@ def health(request: Request) -> JSONResponse:
         },
         status_code=503 if needs_attention else 200,
     )
+
+
+@app.get("/health/live")
+async def health_live() -> dict:
+    """Event-loop liveness, with no dependency of any kind (#3119).
+
+    ``async def`` with no ``Depends``, no DB and no threadpool hop, so it
+    answers iff the event loop is still scheduling. Every other probe on this
+    app — ``/health`` and ``/auth/login`` included — is ``def``, and therefore
+    dispatched through the AnyIO worker threadpool. On 2026-09-16 both of those
+    hung and there was no way to tell a blocked loop from a starved sync path.
+
+    Pairs with ``/health`` as a two-bit discriminator:
+
+    ======================  ==========  ==================================
+    ``/health/live``        ``/health``  reading
+    ======================  ==========  ==================================
+    answers                 answers      both paths live (``/health`` may
+                                         legitimately answer 503)
+    answers                 hangs        loop alive, sync path not completing
+    hangs                   hangs        loop blocked, OR no live worker — the
+                                         reload parent owns the listening
+                                         socket, so the kernel backlog accepts
+                                         connections either way
+    hangs                   answers      the probes straddled a restart;
+                                         re-probe
+    ======================  ==========  ==================================
+
+    ⚠ This narrows the candidate set; it does not name a cause. Row 2 also fits
+    ``/health``'s own DB work being slow, and row 3 also fits startup, drain or
+    process suspension. The ``SIGUSR1`` thread dump discriminates within a row
+    (``app/system/served_build.py``); this endpoint only says which one.
+
+    Returns liveness and uptime ONLY. Build identity (commit, pid, start time)
+    goes to the on-disk sidecar instead — a wedged worker cannot answer HTTP
+    about its own wedge anyway, and publishing that here would widen the same
+    fingerprint surface ``health_db`` below was narrowed to close (#240).
+    """
+    return {"alive": True, "uptime_s": round(served_build.uptime_s(), 3)}
 
 
 @app.get("/health/db")
