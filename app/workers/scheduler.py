@@ -8030,15 +8030,23 @@ def sec_manifest_worker_tick() -> None:
             stats = run_manifest_worker(conn, source=None, max_rows=200, tick_id=None)
             conn.commit()
 
+        # ⚠ `dispatch_errors` is deliberately NOT added to `row_count`. That
+        # column means rows whose status actually TRANSITIONED, and a dispatch
+        # error is exactly the case where none did — the row keeps its prior
+        # status. `scheduled_adapter` maps `row_count` to the operator's
+        # `rows_processed`, so widening it here would report untouched rows as
+        # processed work. Making dispatch errors operator-visible is #3111
+        # slice 2, on `JobTelemetryAggregator`, which has its own `rows_errored`.
         tracker.row_count = stats.parsed + stats.tombstoned + stats.failed
         logger.info(
             "sec_manifest_worker tick: processed=%d parsed=%d tombstoned=%d "
-            "failed=%d skipped_no_parser=%d processed_by_source=%s",
+            "failed=%d skipped_no_parser=%d dispatch_errors=%d processed_by_source=%s",
             stats.rows_processed,
             stats.parsed,
             stats.tombstoned,
             stats.failed,
             stats.skipped_no_parser,
+            stats.dispatch_errors,
             dict(sorted(stats.processed_by_source.items())),
         )
 

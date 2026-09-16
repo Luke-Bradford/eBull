@@ -181,3 +181,87 @@ def test_transition_failure_rolls_back_and_continues(
     assert conn.commits == 1 + 2
     assert conn.rollbacks == 1
     assert stats.parsed == 2
+
+
+# --- #3111 slice 1: every row lands in exactly one outcome bucket ---
+
+
+def test_a_failed_transition_is_counted_rather_than_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer handler now increments a counter instead of only logging.
+
+    Before #3111 slice 1 this row was counted in ``rows_processed`` and in NO
+    outcome bucket, so a tick that lost every row still returned a summary that
+    read as healthy. The row itself is unchanged and re-drains next tick — that
+    is what makes the loss silent rather than loud.
+    """
+    register_parser("sec_form4", lambda _c, _r: ParseOutcome(status="parsed", raw_status="stored"))
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("illegal state transition")
+
+    _stub_transition(monkeypatch, _boom)
+    conn = _CountingConn()
+    rows = [_row("0000000001-26-000001")]
+
+    stats = _dispatch_rows(conn, rows, now=_NOW)  # type: ignore[arg-type]
+
+    assert stats.dispatch_errors == 1
+    assert conn.rollbacks == 1
+    # Not any other bucket: a transition failure is NOT a parser failure, which
+    # is caught one level in and stamps a retry.
+    assert (stats.parsed, stats.tombstoned, stats.failed, stats.skipped_no_parser) == (0, 0, 0, 0)
+    assert stats.outcome_total() == stats.rows_processed == 1
+
+
+def test_the_tick_identity_holds_across_every_outcome_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``rows_processed == parsed + tombstoned + failed + skipped + dispatch_errors``.
+
+    One batch reaching all five buckets plus a #938 raw-payload violation, so the
+    identity is exercised against the one term that is NOT part of it:
+    ``raw_payload_violations`` is a SUBSET of ``failed``, written alongside it,
+    and adding it would double-count. A per-bucket test cannot catch that; only
+    the sum can.
+    """
+
+    def _parse(_c: Any, row: ManifestRow) -> ParseOutcome:
+        if row.accession_number.endswith("2"):
+            return ParseOutcome(status="tombstoned", raw_status="stored")
+        if row.accession_number.endswith("3"):
+            raise RuntimeError("parser blew up")
+        if row.accession_number.endswith("5"):
+            # Payload-backed contract violated -> #938 failed + raw_violation.
+            return ParseOutcome(status="parsed", raw_status="absent")
+        return ParseOutcome(status="parsed", raw_status="stored")
+
+    register_parser("sec_form4", _parse, requires_raw_payload=True)
+
+    def _transition(_c: Any, accession: str, **_k: Any) -> None:
+        if accession.endswith("6"):
+            raise RuntimeError("deadlock victim")
+
+    _stub_transition(monkeypatch, _transition)
+    conn = _CountingConn()
+    rows = [
+        _row("0000000001-26-000001"),  # parsed
+        _row("0000000001-26-000002"),  # tombstoned
+        _row("0000000001-26-000003"),  # parser raised -> failed
+        _row("0000000001-26-000004", source="finra_regsho_daily"),  # no parser -> skipped
+        _row("0000000001-26-000005"),  # raw-payload violation -> failed (+ violation)
+        _row("0000000001-26-000006"),  # transition raised -> dispatch_errors
+    ]
+
+    stats = _dispatch_rows(conn, rows, now=_NOW)  # type: ignore[arg-type]
+
+    assert (stats.parsed, stats.tombstoned, stats.failed) == (1, 1, 2)
+    assert (stats.skipped_no_parser, stats.dispatch_errors) == (1, 1)
+    assert stats.raw_payload_violations == 1
+    assert stats.rows_processed == len(rows)
+    assert stats.outcome_total() == stats.rows_processed
+    # The #1179 invariant still holds alongside the new one: a dispatch error
+    # happens AFTER the row reached the parser entry point, so it stays in
+    # `processed_by_source`.
+    assert sum(stats.processed_by_source.values()) == stats.rows_processed - stats.skipped_no_parser
