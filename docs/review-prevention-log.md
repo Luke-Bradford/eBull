@@ -7091,3 +7091,35 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   copy, whose comment records why it exists) and
   `deflation_promotion_refusals`' docstring (the five-site enumeration with each site's
   reason).
+
+### Joining `instruments` on `symbol` collides with the Digital Currency venue (#2312 clause 4, 2026-09-16)
+
+- Symptom: measuring whether eToro's `Regular Trading Hours - RTH` venue (exchange `33`,
+  595 instruments, all `.RTH`-suffixed) is uniformly US-underlying, a join matching each
+  `X.RTH` to its non-33 twin **on `symbol` alone** reported **8 rows whose underlying is
+  `crypto`** — which would have made exchange 33 a mixed-calendar venue and reversed the
+  clause's answer.
+- Root cause: `AMP`, `A`, `DASH`, `IP`, `MET`, `STX`, `WELL` and `ZETA` exist BOTH as US
+  tickers and as tokens on eToro's `Digital Currency` venue. `AMP.RTH` is Ameriprise
+  Financial; it matched the crypto token `AMP`. Re-run matching on `symbol` **and**
+  `company_name`: 552 name-matched twins, **NYSE 348 / Nasdaq 203 / CBOE 1, zero
+  non-`us_equity`**, and the 43 unmatched rows are RTH-only or name-variant listings.
+- ⚠ **`symbol` is not a key across venues in this table, and the collision class is
+  specifically crypto** — short equity tickers are exactly the shape of a token ticker.
+  The same trap is latent for any cross-venue reconciliation (`.L` / `.DE` / `.RTH`
+  variants, universe diffing, corporate-action matching), not just for RTH.
+- ⚠ **The tell that saved it was printing `company_name` beside the match.** A count would
+  have read as a clean, surprising-but-plausible result — "8 of 595 are crypto" is exactly
+  the sort of number a venue-variant table might honestly produce. Same family as the
+  `.claude/CLAUDE.md` rule that a subtraction is not a gap count: **an aggregate over a
+  join you have not eyeballed is an aggregate over whatever the join actually matched.**
+- Scope, measured rather than assumed: `rg` over `app/` finds **no** production
+  symbol-keyed self-join on `instruments`, so this is an ANALYSIS trap, not a live defect.
+  That is why it is logged here rather than fixed in code — the next ad-hoc cross-venue
+  query is where it bites.
+- Prevention: when joining `instruments` to itself or to any external symbol list across
+  venues, join on `instrument_id` where one exists; where it does not, carry
+  `company_name` (or the exchange's `asset_class`) into the predicate AND print it in the
+  readout. Never report a cross-venue match count without having looked at rows.
+- Enforced in: this prevention log; the measurement and its correction are recorded on
+  #2312 (clause 4 answer, 2026-09-16).
