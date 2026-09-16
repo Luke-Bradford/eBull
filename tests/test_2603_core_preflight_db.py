@@ -39,7 +39,11 @@ from app.services.strategy_core_preflight import (
     StrategyCorePreflightError,
     preflight_core_submission,
 )
-from app.workers.scheduler import BENCHMARK_SYMBOLS, QUOTES_REFRESH_SCOPE_SQL
+from app.workers.scheduler import (
+    BENCHMARK_SYMBOLS,
+    CORE_QUOTE_REFRESH_SCOPE_SQL,
+    QUOTES_REFRESH_SCOPE_SQL,
+)
 
 # ⚠ Distinct from every other core-arc DB module's ids, and checked rather than
 # assumed: `test_2603_core_trade_arc_db.py` already uses 920605/920606 and
@@ -291,6 +295,12 @@ def _in_scope(conn: psycopg.Connection[Any]) -> bool:
     return INSTRUMENT_ID in {int(r[0]) for r in rows}
 
 
+def _in_core_scope(conn: psycopg.Connection[Any]) -> bool:
+    """#3118 — the narrow five-minute cohort: arms 4 and 5 and nothing else."""
+    rows = conn.execute(CORE_QUOTE_REFRESH_SCOPE_SQL, {"pass_verdict": CORE_ELIGIBILITY_PASS_VERDICT}).fetchall()
+    return INSTRUMENT_ID in {int(r[0]) for r in rows}
+
+
 def test_an_enabled_mandate_puts_its_core_instrument_in_the_quote_scope(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
@@ -447,4 +457,117 @@ def test_a_non_tradable_candidate_stays_out_of_the_quote_scope(
     account = _seed_account(ebull_test_conn)
     _record_proof(ebull_test_conn, account, verdict="underlying", observed_at=datetime.now(UTC))
     assert _in_scope(ebull_test_conn) is False
+    ebull_test_conn.rollback()
+
+
+# --------------------------------------------------------------------------
+# 4. The #3118 derived scope — arms 4 and 5, and NOTHING else
+# --------------------------------------------------------------------------
+#
+# `core_candidate_quote_refresh` runs every five minutes because `quotes_refresh`
+# fires at :23 and NYSE opens at 13:30 UTC — so the last scheduled fetch before a
+# US open is seven minutes early and still carries the previous session's price
+# stamp, and the next is 53 minutes after it.  Both queries are composed from the
+# SAME two predicate constants, so these tests pin the AGREEMENT rather than a
+# second transcription of the rules.
+
+
+def test_the_core_scope_is_built_from_the_same_predicates_as_the_full_scope() -> None:
+    """A hand-copy is the failure mode this extraction exists to remove.
+
+    `tests/test_2603_core_preflight_db.py` used to carry a copy of the whole scope
+    query plus a substring guard to catch it drifting; #3118 needed arms 4 and 5 in
+    a second statement and took the fragments out rather than copying them again.
+    """
+    from app.workers.scheduler import (
+        _CORE_CANDIDATE_PREDICATE_SQL,
+        _CORE_MANDATE_INSTRUMENT_PREDICATE_SQL,
+    )
+
+    for fragment in (_CORE_MANDATE_INSTRUMENT_PREDICATE_SQL, _CORE_CANDIDATE_PREDICATE_SQL):
+        assert fragment in QUOTES_REFRESH_SCOPE_SQL
+        assert fragment in CORE_QUOTE_REFRESH_SCOPE_SQL
+
+
+def test_an_enabled_mandate_alone_puts_the_instrument_in_the_core_scope(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """Arm 4 WITHOUT arm 5 — the bootstrap case the five-minute job must cover.
+
+    The mandate's instrument is exactly the one an attended evaluation is about,
+    and on the first rebalance it is unheld, off Tier 1/2 and not a benchmark.
+    """
+    _seed_instrument(ebull_test_conn)
+    assert _in_core_scope(ebull_test_conn) is False, "no mandate, no proof — must not be in the core scope"
+
+    ebull_test_conn.execute(_MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID})
+    assert _in_core_scope(ebull_test_conn) is True
+    ebull_test_conn.rollback()
+
+
+def test_a_passing_proof_alone_puts_the_candidate_in_the_core_scope(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """Arm 5 WITHOUT arm 4 — a candidate being MEASURED for a mandate it does not have."""
+    _seed_instrument(ebull_test_conn)
+    account = _seed_account(ebull_test_conn)
+    _record_proof(ebull_test_conn, account, verdict=CORE_ELIGIBILITY_PASS_VERDICT, observed_at=datetime.now(UTC))
+    assert _in_core_scope(ebull_test_conn) is True
+    ebull_test_conn.rollback()
+
+
+def test_the_core_scope_REJECTS_an_instrument_the_full_scope_admits(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """⚠ The narrowing, stated as what it REJECTS rather than what it keeps.
+
+    A held / Tier 1-2 / benchmark instrument is in the HOURLY scope and must stay
+    out of the five-minute one: quoting the scored set every five minutes would be
+    ~28 GETs per fire instead of one, for readers whose own cadence is hourly or
+    slower.
+    """
+    _seed_instrument(ebull_test_conn)
+    ebull_test_conn.execute(
+        "INSERT INTO coverage (instrument_id, coverage_tier) VALUES (%s, 1) "
+        "ON CONFLICT (instrument_id) DO UPDATE SET coverage_tier = 1",
+        (INSTRUMENT_ID,),
+    )
+    assert _in_scope(ebull_test_conn) is True, "Tier 1 must be in the hourly scope"
+    assert _in_core_scope(ebull_test_conn) is False, "Tier 1 alone must NOT be in the five-minute scope"
+    ebull_test_conn.rollback()
+
+
+def test_a_disabled_latest_revision_drops_the_instrument_from_the_core_scope(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """Same "THE mandate is the latest revision" rule as the hourly scope, because
+    it is the same constant, not a second copy of the reasoning."""
+    _seed_instrument(ebull_test_conn)
+    ebull_test_conn.execute(_MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID})
+    assert _in_core_scope(ebull_test_conn) is True
+
+    ebull_test_conn.execute(_MANDATE_INSERT, {"revision": 2, "enabled": False, "instrument_id": INSTRUMENT_ID})
+    assert _in_core_scope(ebull_test_conn) is False
+    ebull_test_conn.rollback()
+
+
+def test_the_core_scope_is_a_subset_of_the_hourly_scope(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """Both arms of the narrow query are arms of the wide one, so this must hold
+    for every seeding — here, one instrument that satisfies BOTH."""
+    _seed_instrument(ebull_test_conn)
+    account = _seed_account(ebull_test_conn)
+    _record_proof(ebull_test_conn, account, verdict=CORE_ELIGIBILITY_PASS_VERDICT, observed_at=datetime.now(UTC))
+    ebull_test_conn.execute(_MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID})
+
+    wide = {int(r[0]) for r in ebull_test_conn.execute(QUOTES_REFRESH_SCOPE_SQL, _SCOPE_PARAMS).fetchall()}
+    narrow = {
+        int(r[0])
+        for r in ebull_test_conn.execute(
+            CORE_QUOTE_REFRESH_SCOPE_SQL, {"pass_verdict": CORE_ELIGIBILITY_PASS_VERDICT}
+        ).fetchall()
+    }
+    assert narrow, "fixture seeded both arms — the narrow scope must not be empty"
+    assert narrow <= wide
     ebull_test_conn.rollback()

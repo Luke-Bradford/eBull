@@ -27,7 +27,7 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, LiteralString, cast
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -397,6 +397,15 @@ JOB_QUOTES_REFRESH = "quotes_refresh"
 #: Minute past each hour that ``quotes_refresh`` fires. Named because #2985's
 #: misfire ceiling is DERIVED from it — the two must not drift apart.
 QUOTES_REFRESH_MINUTE: Final[int] = 23
+#: #3118. The core cohort alone, at a cadence that can reach a session OPEN --
+#: ``quotes_refresh``'s :23 fire is seven minutes before the 13:30Z NYSE open and
+#: its next is 53 minutes after it. Named separately from the minute above
+#: because this one has no fire-minute to drift against.
+JOB_CORE_CANDIDATE_QUOTE_REFRESH = "core_candidate_quote_refresh"
+#: Minutes between ``core_candidate_quote_refresh`` fires. Named because the
+#: freshness bound it will eventually be DERIVED from lives in
+#: ``strategy_core_preflight``; today that bound still comes from the hourly job.
+CORE_QUOTE_REFRESH_INTERVAL_MINUTES: Final[int] = 5
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_PORTFOLIO_EOD_SNAPSHOT = "portfolio_eod_snapshot"
@@ -976,6 +985,40 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # Fire on boot when overdue — a process restart otherwise leaves every
         # headless reader on quotes up to an hour old for no reason, and the
         # fetch is bounded (28 GETs).
+        catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_CORE_CANDIDATE_QUOTE_REFRESH,
+        display_name="Core candidate quote refresh (#3118)",
+        source="etoro_quotes",
+        description=(
+            "Every five minutes — re-quote ONLY the enabled core mandate's instrument and the "
+            "proved core candidates, so a core evaluation inside a venue session is not reading "
+            "a price stamped before the open. Writes `quotes` and nothing else."
+        ),
+        cadence=Cadence.every_n_minutes(interval=CORE_QUOTE_REFRESH_INTERVAL_MINUTES),
+        # Same lane as `quotes_refresh` deliberately (#2934 gave that lane to the
+        # hourly job so the core-sleeve population could not wait behind the
+        # multi-hour candle sweep). This job is ~1 batched GET and ten upserts, so
+        # it cannot reintroduce that starvation; and the #1526/#1527 same-lane tick
+        # race needs an ALIGNED slot, which :23 against multiples of five is not.
+        #
+        # Cost: the cohort is ten instruments against `quote_batch_size` 100, so one
+        # upstream request per fire — 288/day against eToro's 120-per-60s shared
+        # market-data budget. The process-wide HTTP clock in
+        # `implementations/etoro.py` still bounds the combined rate.
+        #
+        # No `prerequisite`: a session predicate on the producer is precisely the
+        # coupling #3118 is about, and out-of-session fires are cheap.
+        #
+        # Grace DERIVED from the interval, never written down: half a period, so a
+        # fire can be admitted after a dispatch delay but can never outlive its own
+        # slot and run alongside its successor. The delay this absorbs is real and
+        # bounded — `quotes_refresh` shares this lane's single permit and its body
+        # runs ~40-90s (n=244: median 40.2s, p95 76.3s), so a fire landing during
+        # the :23 sweep waits rather than being discarded by the 1-second
+        # `job_defaults` grace.
+        misfire_grace_seconds=CORE_QUOTE_REFRESH_INTERVAL_MINUTES * 60 // 2,
         catch_up_on_boot=True,
     ),
     ScheduledJob(
@@ -3563,7 +3606,55 @@ def daily_candle_refresh() -> None:
 #:
 #: Params: ``benchmarks`` (``BENCHMARK_SYMBOLS``), ``pass_verdict``
 #: (``CORE_ELIGIBILITY_PASS_VERDICT``).
-QUOTES_REFRESH_SCOPE_SQL = """
+#: Arm 4 of :data:`QUOTES_REFRESH_SCOPE_SQL` — the ENABLED core mandate's own
+#: instrument — as a reusable predicate over an ``instruments i``.
+#:
+#: Extracted (#3118) because a SECOND job now needs exactly arms 4 and 5:
+#: ``core_candidate_quote_refresh``.  A hand-copy is the failure this repo has
+#: already paid for once — ``tests/test_2603_core_preflight_db.py`` used to carry
+#: one, plus a substring guard to catch it drifting.
+#:
+#: ``ORDER BY revision DESC LIMIT 1`` (no WHERE) matches ``load_core_mandate``:
+#: THE mandate is the latest revision, not the latest ENABLED one.  The CASE
+#: yields NULL when that revision is disabled, and ``instrument_id = NULL`` is
+#: never true — so a disabled mandate drops out of scope without a second
+#: subquery.
+_CORE_MANDATE_INSTRUMENT_PREDICATE_SQL: Final[LiteralString] = """(i.is_tradable = TRUE AND i.instrument_id = (
+    SELECT CASE WHEN m.enabled THEN m.core_instrument_id END
+    FROM strategy_core_mandate_events m
+    ORDER BY m.revision DESC
+    LIMIT 1
+))"""
+
+#: Arm 5 of :data:`QUOTES_REFRESH_SCOPE_SQL` — a core CANDIDATE, i.e. one whose
+#: LATEST eligibility proof per environment passes (#2833 step 1, #2603 item 2).
+#:
+#: Membership is the latest proof, so re-proving is also how a candidate LEAVES
+#: scope.  Bounded by deliberate action: only ``prove`` writes proofs (``census``
+#: records nothing), so this arm cannot widen to the universe on its own.
+#:
+#: ⚠ ``observed_at DESC, core_eligibility_proof_id DESC`` is NOT belt-and-braces
+#: and matches ``load_latest_core_eligibility_proof`` deliberately: ``observed_at``
+#: DEFAULTs to ``now()``, which is the TRANSACTION timestamp, so two proofs written
+#: in one transaction TIE and ``observed_at DESC`` alone picks either one.  Two
+#: readers of "the latest proof" that break the tie differently are two
+#: definitions, and the disagreement only shows up on the row that matters.
+#:
+#: ⚠ Unkeyed on operator/provider, unlike that reader: quoting is an app-wide side
+#: effect, not a per-account one, and ``provider`` is CHECK-pinned to 'etoro'.  Any
+#: account's passing proof is enough to quote.
+_CORE_CANDIDATE_PREDICATE_SQL: Final[LiteralString] = """(i.is_tradable = TRUE AND EXISTS (
+    SELECT 1
+    FROM (
+        SELECT DISTINCT ON (e.environment) e.verdict
+        FROM strategy_core_eligibility_proofs e
+        WHERE e.instrument_id = i.instrument_id
+        ORDER BY e.environment, e.observed_at DESC, e.core_eligibility_proof_id DESC
+    ) latest
+    WHERE latest.verdict = %(pass_verdict)s
+))"""
+
+QUOTES_REFRESH_SCOPE_SQL: Final[LiteralString] = f"""
 SELECT DISTINCT ON (i.instrument_id) i.instrument_id, i.symbol,
        -- #2833 step 2: does this instrument ALSO satisfy the core-candidate
        -- predicate (arm 5 below)?  Selected here rather than asked in a
@@ -3573,16 +3664,7 @@ SELECT DISTINCT ON (i.instrument_id) i.instrument_id, i.symbol,
        -- sample (Codex ckpt-3).  This is a plain boolean about ONE predicate,
        -- not a claim about which OR'd arm admitted the row, so it needs no
        -- arm precedence to stay honest.
-       (i.is_tradable = TRUE AND EXISTS (
-           SELECT 1
-           FROM (
-               SELECT DISTINCT ON (e.environment) e.verdict
-               FROM strategy_core_eligibility_proofs e
-               WHERE e.instrument_id = i.instrument_id
-               ORDER BY e.environment, e.observed_at DESC, e.core_eligibility_proof_id DESC
-           ) latest
-           WHERE latest.verdict = %(pass_verdict)s
-       )) AS is_core_candidate
+       {_CORE_CANDIDATE_PREDICATE_SQL} AS is_core_candidate
 FROM instruments i
 LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
 LEFT JOIN positions p ON p.instrument_id = i.instrument_id AND p.current_units > 0
@@ -3597,17 +3679,8 @@ WHERE p.instrument_id IS NOT NULL
    -- BENCHMARK_SYMBOLS, so a mandate naming one of them would
    -- never be quoted and `core_quote_missing` would be PERMANENT
    -- rather than transient (strategy_core_preflight.py).
-   -- `ORDER BY revision DESC LIMIT 1` (no WHERE) matches
-   -- load_core_mandate: THE mandate is the latest revision, not the
-   -- latest enabled one. The CASE yields NULL when that revision is
-   -- disabled, and `instrument_id = NULL` is never true -- so a
-   -- disabled mandate drops out of scope without a second subquery.
-   OR (i.is_tradable = TRUE AND i.instrument_id = (
-          SELECT CASE WHEN m.enabled THEN m.core_instrument_id END
-          FROM strategy_core_mandate_events m
-          ORDER BY m.revision DESC
-          LIMIT 1
-       ))
+   -- Mechanics (the revision rule, the NULL trick) are on the fragment.
+   OR {_CORE_MANDATE_INSTRUMENT_PREDICATE_SQL}
    -- #2833 step 1: a core CANDIDATE -- one with a recorded PASSING eligibility
    -- proof (#2603 item 2).  Arm 4 covers the instrument a mandate already
    -- NAMES; nothing covered the instrument being MEASURED for one, and the
@@ -3618,29 +3691,9 @@ WHERE p.instrument_id IS NOT NULL
    -- pass bar, which is the shortcut #2833 exists to avoid.  Measured on dev
    -- 2026-08-22: `select count(*) from quotes where instrument_id in
    -- (3417, 3434, 3075)` returned 0 for all three proved candidates.
-   -- Membership is the LATEST proof per (instrument, environment), so
-   -- re-proving is also how a candidate LEAVES scope.  Bounded by deliberate
-   -- action: only `prove` writes proofs (`census` records nothing), so this
-   -- arm cannot widen to the universe on its own.
-   -- ⚠ `observed_at DESC, core_eligibility_proof_id DESC` is NOT belt-and-braces
-   -- and matches load_latest_core_eligibility_proof deliberately: `observed_at`
-   -- DEFAULTs to `now()`, which is the TRANSACTION timestamp, so two proofs
-   -- written in one transaction TIE and `observed_at DESC` alone picks either
-   -- one.  Two readers of "the latest proof" that break the tie differently are
-   -- two definitions, and the disagreement only shows up on the row that matters.
-   -- ⚠ Unkeyed on operator/provider, unlike that reader: quoting is an
-   -- app-wide side effect, not a per-account one, and `provider` is CHECK-pinned
-   -- to 'etoro'.  Any account's passing proof is enough to quote.
-   OR (i.is_tradable = TRUE AND EXISTS (
-          SELECT 1
-          FROM (
-              SELECT DISTINCT ON (e.environment) e.verdict
-              FROM strategy_core_eligibility_proofs e
-              WHERE e.instrument_id = i.instrument_id
-              ORDER BY e.environment, e.observed_at DESC, e.core_eligibility_proof_id DESC
-          ) latest
-          WHERE latest.verdict = %(pass_verdict)s
-       ))
+   -- Membership, tie-breaking and the operator/provider scoping are on the
+   -- fragment.
+   OR {_CORE_CANDIDATE_PREDICATE_SQL}
 ORDER BY i.instrument_id, i.symbol
 """
 
@@ -3767,6 +3820,116 @@ def quotes_refresh() -> None:
             "sample is not accruing; #2833's pass bar cannot be measured until this is fixed",
             summary.core_observation_failures,
         )
+
+
+#: Arms 4 and 5 of :data:`QUOTES_REFRESH_SCOPE_SQL` and NOTHING else — the two
+#: instruments a core evaluation can actually be about.
+#:
+#: Built from the SAME predicate constants that query uses, so the two cannot
+#: drift into disagreeing about what a candidate is.
+#:
+#: Param: ``pass_verdict`` (``CORE_ELIGIBILITY_PASS_VERDICT``).  No
+#: ``benchmarks`` — neither arm reads it.
+CORE_QUOTE_REFRESH_SCOPE_SQL: Final[LiteralString] = f"""
+SELECT i.instrument_id, i.symbol
+FROM instruments i
+WHERE {_CORE_MANDATE_INSTRUMENT_PREDICATE_SQL}
+   OR {_CORE_CANDIDATE_PREDICATE_SQL}
+ORDER BY i.instrument_id
+"""
+
+
+def core_candidate_quote_refresh() -> None:
+    """Quote the core cohort every five minutes, so a session OPEN is covered.
+
+    #3118.  ``quotes.quoted_at`` stores eToro's ``date`` field — documented as
+    "the date-time of the price in the system" (live portal
+    ``market-data/get-instrument-market-rates``, re-read 2026-09-16), i.e. a
+    PRICE time and not a fetch time.  ``quotes_refresh`` fires hourly at :23 and
+    NYSE opens at 13:30 UTC, so the newest scheduled fetch before a US open is
+    SEVEN MINUTES EARLY and still carries the previous session's stamp.  For the
+    53 minutes from the open to the 14:23 fire, ``decide_core_preflight`` refuses
+    ``core_quote_stale`` on a quote that is genuinely ~17.5 h old — the bound
+    working, and the cadence failing to reach the moment an evaluation happens.
+
+    Measured over ``strategy_core_quote_observations`` (159 hourly ticks × 10
+    candidates since 2026-08-23; ``scripts/census_3118_core_quote_freshness.py``):
+    SPY.RTH's ``observed`` ticks are exactly the 14:00-20:00 UTC buckets, 7 of 7
+    on each of the four days the lane covered it, and the 13:00 bucket is
+    ``observed`` on zero of them.
+
+    ⚠⚠ THIS DOES NOT MOVE THE BOUND, AND THE ORDER IS DELIBERATE.
+    ``CORE_MAX_QUOTE_AGE_SECONDS`` stays 5400 s, derived from ``quotes_refresh``'s
+    hourly period by ``strategy_core_preflight._freshness_bound``.  Re-deriving it
+    from THIS job's 300 s period would tighten it 18-fold, which is safer in
+    steady state and strictly more dangerous on the first attended evaluation:
+    a bound tightened ahead of any run history for the producer it now depends on
+    can refuse for a reason nobody has observed.  Tightening is a separate step,
+    to be taken once this job has a measured run history, and it is a policy
+    VERSION bump rather than an edit to the constant.
+
+    Consequence, stated rather than left to be rediscovered: until then the bound
+    is LOOSE against this producer.  A stopped ``core_candidate_quote_refresh``
+    is not detected for up to 5400 s, exactly as today — the realised age
+    improves, the guarantee does not.
+
+    ⚠ No session prerequisite, on purpose.  A session predicate on the producer
+    is the coupling that caused #3118 in the first place, and the cost of running
+    it around the clock is one batched request per fire: the cohort is ten
+    instruments against ``quote_batch_size`` 100, i.e. 288 requests/day on eToro's
+    120-per-60 s shared market-data budget.
+
+    ⚠ It does NOT write ``strategy_core_quote_observations``.  That lane's primary
+    key is an hourly ``sample_bucket`` (sql/366) and ``quotes_refresh`` is its sole
+    writer; a five-minute producer would either collide with the scheduled sample
+    or displace it, and the #2833 pass bar reads it.
+    """
+    creds = _load_etoro_credentials(JOB_CORE_CANDIDATE_QUOTE_REFRESH)
+    if creds is None:
+        _record_prereq_skip(JOB_CORE_CANDIDATE_QUOTE_REFRESH, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_CORE_CANDIDATE_QUOTE_REFRESH) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            # autocommit for the same reason as quotes_refresh (#2269): the scope
+            # SELECT opens an implicit transaction otherwise, and refresh_quotes'
+            # per-instrument `with conn.transaction()` would degrade to a savepoint.
+            connect_job(autocommit=True) as conn,
+        ):
+            rows = conn.execute(
+                CORE_QUOTE_REFRESH_SCOPE_SQL,
+                {"pass_verdict": CORE_ELIGIBILITY_PASS_VERDICT},
+            ).fetchall()
+            instruments = [(int(r[0]), str(r[1])) for r in rows]
+            if not instruments:
+                # NOT anomalous, unlike quotes_refresh's empty scope: with no
+                # mandate and no passing proof there is genuinely no core cohort,
+                # which is the state this repo is in until #2833 concludes.
+                logger.info("core_candidate_quote_refresh: no core mandate and no proved candidate — nothing to quote")
+                tracker.row_count = 0
+                return
+
+            summary = refresh_quotes(provider, conn, instruments)
+            if summary.batch_error is not None:
+                # Same #2218 shape as quotes_refresh: a total upstream failure must
+                # not report as a clean run that simply found no quotes. Raised
+                # INSIDE the tracked block so the job records the failure.
+                logger.warning(
+                    "core_candidate_quote_refresh: eToro batch quote fetch FAILED for all %d instrument(s) — "
+                    "no quotes written; the core preflight continues on the previously stored values",
+                    summary.instruments_requested,
+                )
+                raise summary.batch_error
+            tracker.row_count = summary.quotes_updated
+
+    logger.info(
+        "core_candidate_quote_refresh complete: requested=%d updated=%d no_quote=%d",
+        summary.instruments_requested,
+        summary.quotes_updated,
+        summary.quotes_skipped,
+    )
 
 
 def _cik_destination_is_empty(conn: psycopg.Connection) -> bool:  # type: ignore[type-arg]

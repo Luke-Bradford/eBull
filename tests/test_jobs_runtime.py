@@ -2069,7 +2069,16 @@ class TestMisfireVisibilityAndGrace:
         # it lands in, so a discarded fire is a permanently missing #2833
         # observation. Its ceiling is derived in
         # ``test_quotes_refresh_grace_cannot_reach_the_next_bucket``.
-        assert opted_in == {"portfolio_eod_snapshot", "quotes_refresh"}
+        #
+        # #3118 added ``core_candidate_quote_refresh``, and the reason is the
+        # opposite shape: it is INDIFFERENT to its own fire time — any fire inside
+        # the slot refreshes the same ten quotes — while being the only producer
+        # that covers a venue session's opening window. It shares the quote lane's
+        # single permit with ``quotes_refresh``, whose body runs ~40-90s, so the
+        # 1-second default would discard a fire that landed during the :23 sweep for
+        # no reason at all. Ceiling derived in
+        # ``test_the_core_quote_grace_cannot_reach_the_next_fire``.
+        assert opted_in == {"portfolio_eod_snapshot", "quotes_refresh", "core_candidate_quote_refresh"}
 
     def test_grace_cannot_reach_the_next_frontier_advance(self) -> None:
         """The EOD grace must expire before the sweep that moves its anchor.
@@ -2189,18 +2198,60 @@ class TestReservedLaneSchedulerExecutors:
             permits = runtime.EXECUTION_LANE_PERMITS[lane]
             assert executors[lane]._pool._max_workers >= permits, lane
 
-    def test_exactly_one_registered_job_per_reserved_lane(self) -> None:
-        """One worker per reserved lane is sufficient ONLY while one job uses it.
+    def test_every_reserved_lane_has_a_dispatch_thread_per_member(self) -> None:
+        """A reserved lane needs a worker for every job that can queue on it.
 
-        Adding a second job to a reserved lane would let the two queue against each
-        other and misfire — the very failure this ticket fixes — so that must fail
-        here rather than in production.
+        ⚠ This replaces #2985's "exactly one job per reserved lane" (#3118).  That
+        assertion pinned the COUNT, but the property it was protecting is the one
+        its own docstring named: *"one worker per reserved lane is sufficient ONLY
+        while one job uses it"*.  Stated as ``workers >= members`` the condition is
+        explicit rather than implied by a literal, and a second member is admitted
+        only together with the thread that keeps it from queueing against the first
+        — which is what ``build_scheduler_executors`` now sizes for.
+
+        It does NOT relax the concurrency bound: PERMITS are unchanged, so the
+        members still serialise on the lane semaphore and the connection budget is
+        untouched.
         """
         from app.workers.scheduler import SCHEDULED_JOBS
 
+        executors = runtime.build_scheduler_executors()
         for lane in runtime._RESERVED_EXECUTOR_LANES:
             members = [j.name for j in SCHEDULED_JOBS if runtime.execution_lane_for(j.name) == lane]
-            assert len(members) == 1, f"{lane} has {members}"
+            assert members, f"{lane} has no registered job — a reserved lane with no member is dead capacity"
+            assert executors[lane]._pool._max_workers >= len(members), f"{lane} has {members}"
+
+    def test_the_core_quote_producer_is_on_the_reserved_quote_lane(self) -> None:
+        """#3118 Codex ckpt-2 P1 — on the general lane a five-minute fire queues
+        behind whatever holds the single general permit, which includes multi-hour
+        backfills. A producer that exists to cover a 53-minute session-open window
+        cannot be starved for hours by unrelated work.
+        """
+        from app.workers.scheduler import JOB_CORE_CANDIDATE_QUOTE_REFRESH, JOB_QUOTES_REFRESH
+
+        assert runtime.execution_lane_for(JOB_CORE_CANDIDATE_QUOTE_REFRESH) == runtime.EXECUTION_LANE_QUOTE
+        assert runtime._scheduler_executor_alias(JOB_CORE_CANDIDATE_QUOTE_REFRESH) == runtime.EXECUTION_LANE_QUOTE
+        # ⚠ And it did NOT buy that by taking the hourly job's reservation.
+        assert runtime.execution_lane_for(JOB_QUOTES_REFRESH) == runtime.EXECUTION_LANE_QUOTE
+        assert runtime.EXECUTION_LANE_PERMITS[runtime.EXECUTION_LANE_QUOTE] == 1
+
+    def test_the_core_quote_grace_cannot_reach_the_next_fire(self) -> None:
+        """DERIVED from the interval, so a re-cadence cannot leave it overlapping.
+
+        A grace at or above the period would admit a fire while its successor is
+        already due, putting two bodies on a lane whose semaphore holds one.
+        """
+        from app.workers.scheduler import (
+            CORE_QUOTE_REFRESH_INTERVAL_MINUTES,
+            JOB_CORE_CANDIDATE_QUOTE_REFRESH,
+            SCHEDULED_JOBS,
+        )
+
+        job = next(j for j in SCHEDULED_JOBS if j.name == JOB_CORE_CANDIDATE_QUOTE_REFRESH)
+        period_seconds = CORE_QUOTE_REFRESH_INTERVAL_MINUTES * 60
+        assert job.cadence.interval_minutes == CORE_QUOTE_REFRESH_INTERVAL_MINUTES
+        assert job.misfire_grace_seconds is not None
+        assert 0 < job.misfire_grace_seconds < period_seconds
 
     def test_default_pool_size_still_matches_apschedulers_own_default(self) -> None:
         """Before #2985 the default pool was IMPLICIT — registering the executor map
