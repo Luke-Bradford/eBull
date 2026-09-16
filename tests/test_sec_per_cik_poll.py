@@ -733,3 +733,47 @@ class TestConditionalGetGuards:
 
         assert len(seen) == 1, "batching collapsed or split unexpectedly"
         assert "If-Modified-Since" not in seen[0], "a multi-subject batch sent a shared-key validator"
+
+
+class TestMixedPaddingCik:
+    """#3109 — padding variants of one CIK must not abort the run.
+
+    ``data_freshness_index.cik`` has no format constraint, so ``320193`` and
+    ``0000320193`` can both exist. They address the SAME submissions URL, so
+    the selector groups them — but if each row kept its stored string the
+    batch would disagree with itself and ``_probe_cik``'s one-CIK assertion
+    would abort the whole poll before anything was fetched.
+
+    Measured 0 variants on the dev corpus 2026-09-16 — latent, not live.
+    Found by Codex checkpoint 2.
+    """
+
+    def test_padding_variants_form_one_batch_and_do_not_abort(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        _seed_aapl(ebull_test_conn)
+        _make_due(ebull_test_conn, "sec_8k", cik="0000320193", instrument_id=1701, subject_id="1701")
+        _make_due(ebull_test_conn, "sec_form4", cik="0000320193", instrument_id=1701, subject_id="1701")
+        # Strip the padding off ONE of them, behind the scheduler's back.
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE data_freshness_index SET cik = '320193' WHERE subject_id = '1701' AND source = 'sec_form4'"
+            )
+        ebull_test_conn.commit()
+
+        batches = ciks_due_for_poll(ebull_test_conn, limit=10)
+        assert len(batches) == 1, "padding variants split into separate batches"
+        assert {r.cik for r in batches[0]} == {"0000320193"}, "a row kept its unpadded cik"
+
+        urls: list[str] = []
+        stats = run_per_cik_poll(
+            ebull_test_conn,
+            http_get=_counting_get(200, _aapl_mixed_source_recent(), urls),
+        )
+        ebull_test_conn.commit()
+
+        assert len(urls) == 1
+        assert urls[0].endswith("CIK0000320193.json")
+        assert stats.subjects_polled == 2
+        assert stats.poll_errors == 0

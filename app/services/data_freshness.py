@@ -750,6 +750,18 @@ def _ciks_due(
     current_cik: str | None = None
     for row in rows:
         cik_padded = row.pop("cik_padded")
+        # ⚠⚠ Carry the PADDED cik onto the row, not the stored one. The SQL
+        # groups on ``lpad(cik, 10, '0')``, so ``320193`` and ``0000320193``
+        # correctly land in one batch — but returning each row's original
+        # string would then hand ``_probe_cik`` a batch whose members disagree
+        # about their own CIK, tripping its one-CIK assertion and aborting the
+        # WHOLE run before any subject is fetched or any outcome written.
+        # Padding is not constrained by the schema, and 10 digits is what both
+        # the submissions URL and ``_MANIFEST_CIK_RE`` require, so the padded
+        # form is the correct value to carry downstream in either case.
+        # Measured 0 padding variants on 2026-09-16; this is a latent crash,
+        # not a live one. Found by Codex checkpoint 2.
+        row["cik"] = cik_padded
         if cik_padded != current_cik:
             batches.append([])
             current_cik = cik_padded

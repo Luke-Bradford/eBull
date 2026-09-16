@@ -110,9 +110,7 @@ class TestLastFiledAt:
 class TestBatchingEquivalence:
     @pytest.mark.parametrize("source", ["sec_8k", "sec_form4", "sec_13f_hr"])
     @pytest.mark.parametrize("watermark", [None, "ACC-03", "ACC-05", "ACC-NOT-HERE"])
-    def test_one_shared_page_equals_a_per_subject_page(
-        self, source: ManifestSource, watermark: str | None
-    ) -> None:
+    def test_one_shared_page_equals_a_per_subject_page(self, source: ManifestSource, watermark: str | None) -> None:
         """The whole premise of #3109 in one assertion.
 
         Applying the filter to a CIK-wide page must equal what the old path
