@@ -1506,7 +1506,18 @@ def _record_entry_liquidity(
             f"entry signal bar {signal_date} is absent from the series it was produced on — "
             "the liquidity window cannot be located and the ledger is misaligned"
         )
-    reason = reasons[index] if index < len(reasons) else "window_short"
+    # ⚠ ASSERTED, not defended against. A first version read
+    # `reasons[index] if index < len(reasons) else "window_short"`, which was
+    # dead — `reasons` is built from `series.dates` in the same call — and
+    # misleading with it, because a short tuple would have been silently
+    # reported as a short WINDOW rather than as the plumbing bug it is
+    # (review NITPICK).
+    if len(reasons) != len(series.dates):  # pragma: no cover - built from these dates
+        raise RuntimeError(
+            f"{len(reasons)} liquidity verdicts against {len(series.dates)} bars — "
+            "the verdict array is built from this series and cannot disagree with it"
+        )
+    reason = reasons[index]
     if reason == "window_short":
         book.entry_liquidity_excluded["window_short"] += 1
         return

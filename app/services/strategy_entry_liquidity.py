@@ -22,8 +22,6 @@ CLOSING price for the whole session and would say nothing about spread or depth.
 
 from __future__ import annotations
 
-import hashlib
-import inspect
 from bisect import bisect_left, bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -59,17 +57,23 @@ ExclusionReason = Literal[
     "non_finite",
 ]
 
+#: ⚠ BUMPED ON A RULE CHANGE, NEVER ON A COMMENT — a literal rather than a hash
+#: of this module's source, matching ``LEDGER_MEASUREMENT_RULE_VERSION`` on
+#: ``strategy_promotion_evidence_measure``, which is the record this
+#: measurement rides on.
+#:
+#: ⚠ A first version hashed ``inspect.getsource(causal_close_volume_means)``.
+#: That moved the stamp on a comment-only edit (review NITPICK), which makes a
+#: version change stop meaning anything — the reader cannot tell a re-worded
+#: docstring from a changed estimator. Bump this deliberately when the
+#: lookback, the eligible bases, the precedence or the arithmetic move.
+ENTRY_LIQUIDITY_RULE_VERSION: Final[str] = "entry-liquidity-2026-09-16-v1"
+
 #: ⚠ FROZEN PRECEDENCE, and it is load-bearing. A window routinely fails several
 #: rules at once; counting every hit would break ``measured + excluded ==
 #: realised``, which is the one invariant that makes the exclusion counts
 #: auditable. Earliest match wins.
 EXCLUSION_PRECEDENCE: Final[tuple[ExclusionReason, ...]] = get_args(ExclusionReason)
-
-
-def _version() -> str:
-    payload = repr((LOOKBACK_SESSIONS, sorted(ELIGIBLE_ADJUSTMENT_BASES), EXCLUSION_PRECEDENCE))
-    payload += inspect.getsource(causal_close_volume_means)
-    return "entry-liquidity-v1:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -393,9 +397,6 @@ def _quantise(value: float) -> Decimal:
     false precision.
     """
     return Decimal(f"{value:.2f}")
-
-
-ENTRY_LIQUIDITY_RULE_VERSION: Final[str] = _version()
 
 
 __all__ = [
