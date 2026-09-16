@@ -281,6 +281,33 @@ class WorkerStats:
     # raw_payload_violations). Sum equals
     # ``rows_processed - skipped_no_parser``.
     processed_by_source: dict[ManifestSource, int] = field(default_factory=dict)
+    # Rows whose ``transition_status`` / ``commit`` itself raised, so the row
+    # exited the loop through the outer handler and landed in NO outcome
+    # bucket (#3111 slice 1). Before this counter existed such a row was
+    # counted in ``rows_processed`` and nowhere else, so the tick's own
+    # arithmetic did not add up and the loss was invisible to every reader.
+    #
+    # ⚠ NOT a parser failure. A parser that raises is caught one level in and
+    # counted as ``failed`` with a retry stamped. This is the transition or
+    # the commit failing — illegal state transition, deadlock victim, DB error
+    # — and the row keeps its prior status and re-drains next tick.
+    #
+    # ⚠ It does NOT prove nothing was committed: a parser may have committed
+    # its own typed-table work before the transition raised.
+    dispatch_errors: int = 0
+
+    def outcome_total(self) -> int:
+        """The five terminal buckets, which must sum to ``rows_processed``.
+
+        ⚠ ``raw_payload_violations`` is deliberately NOT a term: it is a SUBSET
+        of ``failed``, written alongside it on the #938 audit path, so adding it
+        would double-count.
+
+        ⚠ The identity holds for a normally-returned ``WorkerStats`` only. If
+        ``_dispatch_rows`` raises, no ``WorkerStats`` is produced at all and
+        there is nothing to check.
+        """
+        return self.parsed + self.tombstoned + self.failed + self.skipped_no_parser + self.dispatch_errors
 
 
 def run_manifest_worker(
@@ -649,6 +676,7 @@ def _dispatch_rows(
     failed = 0
     skipped = 0
     raw_violations = 0
+    dispatch_errors = 0
     skipped_by_source: dict[ManifestSource, int] = defaultdict(int)
     processed_by_source: dict[ManifestSource, int] = defaultdict(int)
 
@@ -809,6 +837,10 @@ def _dispatch_rows(
                 row.accession_number,
             )
             conn.rollback()
+            # #3111 slice 1. Without this the row was counted in
+            # ``rows_processed`` and in no outcome bucket, so a tick that lost
+            # every row still reported a self-consistent-looking summary.
+            dispatch_errors += 1
             continue
 
     # #2274 — the last row's completion, which the top-of-body tick cannot
@@ -837,6 +869,17 @@ def _dispatch_rows(
             dict(sorted(skipped_by_source.items())),
         )
 
+    # #3111 slice 1: loud once per tick, because a dispatch error is the one
+    # outcome that leaves the row exactly as it was. The per-row ``exception``
+    # log above carries the traceback and the accession; this is the count an
+    # operator sees without reading the log.
+    if dispatch_errors:
+        logger.warning(
+            "manifest worker: %d row(s) failed to transition and were rolled back; "
+            "they keep their prior status and re-drain next tick",
+            dispatch_errors,
+        )
+
     return WorkerStats(
         rows_processed=len(rows),
         parsed=parsed,
@@ -846,6 +889,7 @@ def _dispatch_rows(
         raw_payload_violations=raw_violations,
         skipped_no_parser_by_source=dict(skipped_by_source),
         processed_by_source=dict(processed_by_source),
+        dispatch_errors=dispatch_errors,
     )
 
 
