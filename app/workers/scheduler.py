@@ -9067,12 +9067,15 @@ def _cleanup_submissions_zip_after_drain(archive_path: Path) -> None:
     the last bootstrap consumer). Called on S16's SUCCESS path. The S23
     invoker still calls it too (line below) for the steady-state / manual
     ``sec_n_port_ingest`` path, where it remains idempotent + missing-ok.
+
+    #3113: "mirrors ``_delete_archive_after_success``" is now literal —
+    both delegate to ``sec_bulk_download._purge_archive_artifacts`` so
+    the sidecars go with the ``.zip``. One rule written twice is how two
+    expressions drift apart (#3110).
     """
-    try:
-        archive_path.unlink(missing_ok=True)
-        logger.info("disk hygiene: deleted post-drain submissions.zip at %s", archive_path)
-    except OSError as exc:
-        logger.warning("disk hygiene: failed to delete %s: %s", archive_path, exc)
+    from app.services.sec_bulk_download import _purge_archive_artifacts
+
+    _purge_archive_artifacts(archive_path.parent, archive_path.name)
 
 
 def mf_directory_sync(params: Mapping[str, Any]) -> None:

@@ -7260,3 +7260,57 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   `.etag` last); `tests/test_sec_bulk_refresh.py::TestNoAdoptionWithoutProvenance` (the
   same-length/different-content reproduction, the GET-without-ETag case, and old-archive
   preservation on a failed download).
+
+### One parameter carrying two contracts deletes things nobody asked it to, and the first fix was a docstring (#3113, 2026-09-16)
+
+- First seen in: #3113 stage 1, while specifying the bulk-cache fetch/consume/evict contract.
+  `download_bulk_archives(target_dir=…, archives=[…])` reads as "fetch these". It is also,
+  silently, "this is the complete inventory of the directory — delete anything else":
+  `_preflight_etag_keyed_reuse` ends with a sweep that purges every `.zip`/`.partial` in
+  `target_dir` absent from the list it was handed, and unlinks the run manifest up front.
+  Exactly one caller (the bootstrap stage) legitimately owns the directory; every other caller
+  passes a filtered list.
+- Symptom: a filtered call deletes unrelated retained inputs. **It already fired** — a filtered
+  insider list deleted `companyfacts.zip`, `submissions.zip` and 14 fsnds archives on
+  2026-08-14 (#2701). ⚠ The fix applied then was a **docstring warning on that one caller**
+  telling it to pass the FULL inventory instead. `scripts/backfill_fsds_class_shares_history.py`
+  still passed a filtered list of 20 FSDS archives with no such warning: one `--apply` would
+  have removed the other 90 ZIPs — the two nightly archives, the 74-archive #2701 insider
+  research corpus, 16 `fsnds_*`, 4 `nport_*`, 4 `form13f_*` — plus the bootstrap provenance
+  stamp, which that caller cannot rewrite because `write_run_manifest` is bootstrap-only.
+- ⚠ The workaround was itself expensive and reads as correct: "pass the full inventory" means
+  re-requesting every unrelated archive on every run to avoid losing it. A caller obeying the
+  docstring transfers gigabytes it does not want.
+- Prevention: **when a parameter's value changes what gets DELETED as well as what gets
+  fetched, split it.** The destructive half goes on its own flag, defaulting to the
+  non-destructive behaviour, so a caller that does not think about it destroys nothing; the
+  one caller that owns the resource opts in explicitly and says why at the call site. ⚠ And:
+  **a docstring on one caller is not a fix for a defect in the callee's contract** — it binds
+  the reader, not the next caller, and the next caller is who fires it. If the response to a
+  data-loss incident is a comment, the ticket is not closed.
+- ⚠ Second-order trap, caught by Codex checkpoint 2 on the fix itself: **making a destructive
+  operation narrower can convert a LOUD failure into a SILENT one.** The old behaviour unlinked
+  the whole run manifest, so a filtered backfill that replaced a paused bootstrap's archive left
+  phase C raising "manifest missing". Simply preserving the manifest kept an entry that says "run
+  99 downloaded these bytes" over bytes another caller had just replaced — and the precondition
+  checks run id, name and reuse_reason, never content, so the bootstrap would have ingested them
+  as its own. When you stop deleting a marker, check what that marker was accidentally protecting:
+  invalidate the entries you invalidate the bytes for, and keep the rest. Marker before bytes.
+- Corollary found in the same pass: **one rule expressed at N sites drifts at N-1 of them.**
+  Three eviction paths (`_delete_archive_after_success`, `_cleanup_submissions_zip_after_drain`,
+  the FSDS backfill) each unlinked the `.zip` alone while `_purge_archive_artifacts` already
+  existed and removed the whole artefact set — which is where the 10 orphan `.sha256` sidecars
+  on the dev cache came from. Two of the three even documented that they "mirror" the first.
+  Delegate; do not re-express.
+- Enforced in: `app/services/sec_bulk_download.py` (`prune_strays` on `download_bulk_archives`
+  + `_preflight_etag_keyed_reuse`, default False, gating both the stray sweep and the manifest
+  unlink; `_invalidate_manifest_entries` dropping the entry for any archive a filtered call
+  replaces; `_purge_archive_artifacts` extended to the PID-suffixed sidecar temporaries;
+  `_local_digest_certifies` required before `_download_one` may stamp `downloaded_in_run`);
+  the three eviction sites now delegate; `tests/test_sec_bulk_etag_reuse.py::TestFilteredCallerOwnsOnlyItsOwnArchives`;
+  `tests/test_sec_bulk_disk_hygiene.py` (artefact-set coverage at both helpers);
+  `docs/data-sources/sec-bulk-archives.md` non-negotiable 3; spec
+  `docs/specs/etl/2026-09-16-bulk-cache-lifecycle.md` §4.1.
+- Verification step: `rg -n "download_bulk_archives\(" app/ scripts/` — every hit that passes
+  `archives=` must NOT pass `prune_strays=True`; the only `prune_strays=True` is the caller
+  that passes no inventory at all.

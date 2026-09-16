@@ -11,10 +11,14 @@
 - §5 — per-form structured XML (single-filing HTTP only; no bulk path exists).
 - §6 — **Gap summary**: ranked by impact on first-install wall clock.
 
-Two non-negotiables apply throughout:
+Three non-negotiables apply throughout:
 
 1. SEC's User-Agent + 10 req/s budget is per-IP. The bulk-archive lane (`sec_bulk_download`) and the per-CIK lane (`sec_rate`) share the same physical IP — they DO NOT have independent budgets. Bulk-archive HEAD/GET requests count against the same 10 r/s bucket; eBull tunes the bulk lane to single-stream so it doesn't starve per-CIK polls. See `app/providers/implementations/sec_edgar.py:72` (`_PROCESS_RATE_LIMIT_CLOCK`).
 2. Bulk archives override `If-None-Match` / `If-Modified-Since` — they return `200 + full body` regardless of the request headers (empirical probe `sec-edgar.md` §4 "Bulk-archive reuse contract"). The right reuse contract is client-side HEAD → compare ETag against `<archive>.etag` sidecar (implemented at `app/services/sec_bulk_download.py::_preflight_etag_keyed_reuse`).
+3. ⚠⚠ **`download_bulk_archives(archives=…)` means "fetch these" and nothing more** (#3113). The directory-owning behaviour — purging archives outside the inventory, and unlinking the stale `.run_manifest.json` — lives on a separate `prune_strays` flag, default `False`, opted into only by the bootstrap stage `sec_bulk_download_job` (the sole caller of `write_run_manifest`). **Do not set it from a script.** Before the split, one parameter carried both contracts, and a filtered insider list deleted `companyfacts.zip`, `submissions.zip` and 14 fsnds archives on 2026-08-14 (#2701); `scripts/backfill_fsds_class_shares_history.py` still carried the same loaded gun until #3113.
+   Two corollaries that hold everywhere in this document:
+   - **Eviction removes the artefact set, not the `.zip`** — `.partial`, `.sha256`, `.etag` and the PID-suffixed sidecar temporaries go together, through `_purge_archive_artifacts`. The three eviction sites all delegate there.
+   - **A structural check may DECLINE to certify an archive, never certify it.** A ZIP central-directory round-trip is not identity evidence; the `.sha256` sidecar written by the code that fetched those bytes is (settled 2026-05-22, and the prevention-log entry for #3112).
 
 ⚠ **ETag availability is NOT uniform across these archives, and the reuse contract only works where SEC serves one** (measured 2026-09-16 on #3112, from `job_runs`):
 
