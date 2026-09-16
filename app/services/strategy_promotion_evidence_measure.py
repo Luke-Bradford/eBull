@@ -31,7 +31,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Final
+from typing import Final, TypedDict
 
 import numpy as np
 
@@ -318,7 +318,26 @@ def _year_seed(root_seed: int, year: int) -> int:
     return int.from_bytes(hashlib.sha256(f"{root_seed}:{year}".encode()).digest()[:4], "big")
 
 
-def _bootstrap_columns(result: BootstrapResult | None) -> dict[str, object]:
+class _BootstrapColumns(TypedDict):
+    """The seven all-or-none fields, typed so the spread below is CHECKED.
+
+    ⚠ A ``dict[str, object]`` return forced a blanket ``# type: ignore`` on the
+    ``**`` spread, which suppresses type-checking on EVERY keyword it carries —
+    including a future field whose type stops matching. Raised as a review
+    nitpick on PR #3107 and fixed rather than deferred: the ignore was the cheap
+    part, and what it hid was the expensive part.
+    """
+
+    expectancy_ci_low_pct: Decimal | None
+    expectancy_ci_high_pct: Decimal | None
+    effective_sample_size: float | None
+    bootstrap_seed: int | None
+    bootstrap_block_length: int | None
+    bootstrap_cluster_count: int | None
+    bootstrap_design_effect: float | None
+
+
+def _bootstrap_columns(result: BootstrapResult | None) -> _BootstrapColumns:
     if result is None:
         return {
             "expectancy_ci_low_pct": None,
@@ -405,7 +424,7 @@ def _recent_years(
                 max_name_contribution_pct=_share_pct(
                     max(Counter(ledger.name_key[index] for index in positions).values()), count
                 ),
-                **_bootstrap_columns(bootstrap),  # type: ignore[arg-type]
+                **_bootstrap_columns(bootstrap),
             )
         )
     return tuple(measured)
