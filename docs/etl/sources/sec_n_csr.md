@@ -12,9 +12,28 @@ Per-(subject, source) row in `data_freshness_index` keyed on `subject_type='fund
 ## 3. Retry posture
 - iXBRL fetch raise (transient) → `_failed_outcome` with `_FAILED_RETRY_DELAY = 1h` (`sec_n_csr.py:68, 128-137`).
 - Resolver miss `PENDING_CIK_REFRESH` → 24h backoff via `_PENDING_CIK_REFRESH_DELAY` (`sec_n_csr.py:70-71`) — gives daily `cik_refresh` time to write the ext_id.
-- Resolver miss `EXT_ID_NOT_YET_WRITTEN` → transient (1h).
+- Resolver miss `EXT_ID_NOT_YET_WRITTEN` → **24h, same branch as `PENDING_CIK_REFRESH`** — one
+  `has_pending` test covers both (`sec_n_csr.py:396-403`). ⚠ This line previously said "transient
+  (1h)"; the code was right and the line was stale. `docs/specs/fund-data/n-csr-metadata.md` §7.4
+  row 3 is the source rule: the ext-ID-missing case is *"Same as above — defer to cik_refresh to
+  write the canonical bridge row."*
 - Resolver miss `INSTRUMENT_NOT_IN_UNIVERSE` (unanimous across all classes) → tombstone with that reason.
 - Zero classes resolved + mixed miss-reasons OR any transient → `failed` (1h re-classify).
+- ⚠⚠ **The §7.4 retry BUDGET is not implemented.** The source rule bounds the wait at *"Up to 5
+  retries (5 days) … Beyond that → tombstone permanent with `class_id_unknown_persistent`"*.
+  Live code stamps a fresh 24h retry every time with no attempt counter, and
+  `sec_filing_manifest` has no column to hold one. `tombstone_stale_failed_upserts` does not
+  bound it either — that sweep is anchored to the `upsert error: ` / `upsert+tombstone error: ` /
+  `upsert+log error: ` prefixes and the wait's text is `resolver pending cik_refresh — no
+  in-universe classes yet`. Consequence: the wait is unbounded, which is why #3111 slice 4 lets
+  it degrade the tick rather than classifying it as benign. Found 2026-09-16 (#3111).
+- ⚠ **`EXT_ID_NOT_YET_WRITTEN` can be a PERMANENT wait.** `classify_resolver_miss`
+  (`_fund_class_resolver.py:98-110`) tests `EXISTS (SELECT 1 FROM instruments WHERE i.symbol =
+  mf.symbol)` with no tradability filter, while the writer that would satisfy the wait requires
+  `symbol = %s AND is_tradable = TRUE` (`mf_directory.py:124`, deliberate — #1233 §6.2 does not
+  seed class_ids for inactive instruments). A non-tradable symbol match therefore waits forever
+  for a bridge row that will never be written; §7.4 row 4 says it should tombstone as
+  `instrument_not_in_universe`. Found 2026-09-16 (#3111).
 - **Post-parse retention gate `n_csr_within_retention(filed_at)`** (`sec_n_csr.py:106-125`) → tombstone with `outside_retention`.
 
 ## 4. Bootstrap path

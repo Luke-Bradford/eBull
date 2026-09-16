@@ -43,6 +43,7 @@ from typing import Any, Literal
 
 import psycopg
 
+from app.services.job_progress import JobProgress
 from app.services.job_telemetry import JobTelemetryAggregator
 from app.services.sec_manifest import (
     IngestStatus,
@@ -309,6 +310,71 @@ class WorkerStats:
         there is nothing to check.
         """
         return self.parsed + self.tombstoned + self.failed + self.skipped_no_parser + self.dispatch_errors
+
+    def to_job_progress(self) -> JobProgress:
+        """Project the tick's counters onto the #2218 progress verdict.
+
+        #3111 slice 4. Before this the tick set only ``row_count``, so
+        ``_finish_tracked`` saw ``progress=None`` — documented as "judged
+        exactly as it was before" — and a tick in which every row failed wrote
+        ``status='success', error_msg=NULL``.
+
+        The three axes come straight out of ``degradation_reason``'s two rules:
+
+        * ``candidates_seen = rows_processed`` — a tick that selected nothing
+          reports 0 and can never trip the silent-stall rule, which needs
+          ``seen > 0``. "Legitimate zero-work stays healthy" therefore holds by
+          construction, not by a special case, and that is the COMMON case here
+          (the backlog is drained; most fires dispatch 0-2 rows).
+        * ``outcomes = {parsed, tombstoned}`` — the two terminal buckets where
+          the worker finished with the row. A policy tombstone is progress,
+          which is what keeps an all-tombstone tick healthy.
+        * ``errors = {failed, dispatch_errors}`` — the two where it did not.
+
+        ⚠ ``raw_payload_violations`` is in ``context``, NOT ``errors``: it is a
+        SUBSET of ``failed`` (``_dispatch_rows`` writes both on the #938 path)
+        and ``JobProgress`` forbids one bucket appearing on two axes. The
+        verdict is unaffected — ``errors`` is tested for "any non-zero", never
+        summed — but a later reader who DOES sum it would double-count.
+
+        ⚠ ``skipped_no_parser`` is in ``context`` too. It is structurally dead
+        on the scheduled path (the fairness phase picks sources from
+        ``registered_parser_sources()``), and ``errors`` is for work the job
+        could not do. Its real operator surface is
+        ``GET /coverage/manifest-parsers``.
+
+        ⚠ A ``sec_n_csr`` dependency wait (``PENDING_CIK_REFRESH``, 24h
+        backoff) DOES degrade the tick it re-drains on, and that is deliberate.
+        Slice 3 proposed reclassifying it as a benign skip and was WITHDRAWN on
+        the evidence: ``docs/specs/fund-data/n-csr-metadata.md`` §7.4 bounds the
+        wait at 5 retries / 5 days and then tombstones permanently, while live
+        code stamps a fresh 24h retry forever with no attempt counter — so the
+        wait violates its own source rule and a degraded verdict is the honest
+        reading, not a false alarm. The objective trigger to revisit is that
+        budget landing. Full reasoning:
+        ``docs/proposals/etl/2026-09-16-manifest-worker-outcome-reporting.md``
+        §5b.
+
+        ⚠ Every value here must be JSON-serialisable: ``as_json`` feeds
+        ``Jsonb``. The tick's "next eligible retry", which the acceptance also
+        asks for, is deliberately ABSENT — see §5c of the spec: it would land
+        only in ``progress_json``, which this ticket's own §3 established has no
+        operator-facing reader, and the one column that IS read
+        (``job_runs.next_retry_at``) is the retry sweeper's re-enqueue trigger
+        (``job_retry.py:108,219``), so writing a manifest-row stamp there would
+        re-fire the whole job.
+        """
+        return JobProgress(
+            candidates_seen=self.rows_processed,
+            outcomes={"parsed": self.parsed, "tombstoned": self.tombstoned},
+            errors={"failed": self.failed, "dispatch_errors": self.dispatch_errors},
+            context={
+                "raw_payload_violations": self.raw_payload_violations,
+                "skipped_no_parser": self.skipped_no_parser,
+                "skipped_no_parser_by_source": dict(sorted(self.skipped_no_parser_by_source.items())),
+                "processed_by_source": dict(sorted(self.processed_by_source.items())),
+            },
+        )
 
 
 def run_manifest_worker(

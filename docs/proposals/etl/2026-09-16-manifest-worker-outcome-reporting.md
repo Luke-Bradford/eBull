@@ -1,6 +1,7 @@
-# #3111 — the manifest worker's outcome reporting: what is wrong, what the repo already has, and why it is four slices
+# #3111 — the manifest worker's outcome reporting: what is wrong, what the repo already has, and how it was sliced
 
-Status: **slice 1 shipped (`5579eaf4`); slice 2 is this branch; slices 3 and 4 outstanding.** Revised after Codex
+Status: **slice 1 shipped (`5579eaf4`); slice 2 shipped (`548d6bdf`); slice 3 WITHDRAWN on
+evidence (§5b); slice 4 is this branch.** Revised after Codex
 checkpoint 1 (24 findings), which falsified three claims in the first draft and surfaced a
 parser-contract blocker that decides the ticket's shape; §5a revised again after a second
 checkpoint-1 pass (38 findings) before slice 2 was written. Touches
@@ -130,17 +131,17 @@ change. ⚠ Its original one-line rule — *"until slice 3, every non-success is
 the conservative direction"* — was **falsified before implementation**; §5a is the replacement
 and the evidence.
 
-**Slice 3 — give `ParseOutcome` a reason code**, then split error vs skip so documented
-dependency waits (`PENDING_CIK_REFRESH`) become `record_skip` and deterministic defects stay
-errors. The contract change is the cost; it is also what makes the signal trustworthy enough to
-alarm on. Source rules to cite: `docs/etl/sources/README.md` §"Retry posture" plus each
-per-source §3.
+**Slice 3 — ~~give `ParseOutcome` a reason code~~ WITHDRAWN.** The plan was to split error vs
+skip so documented dependency waits (`PENDING_CIK_REFRESH`) became `record_skip`. Specced, put
+through Codex checkpoint 1, and killed by it: the reclassification does not make the tick
+healthy (rule 2 of `degradation_reason` fires instead of rule 1), and the class it moves is not
+benign — its own source rule bounds the wait at 5 retries and live code has no budget. **§5b is
+the falsification and the evidence.** Slice 4 does not depend on it.
 
-**Slice 4 — `JobProgress` on the tracker**, once slice 3 makes the error set honest. Mapping,
-with slice 3's classification feeding `errors`:
-`candidates_seen=rows_processed`, `outcomes={parsed, tombstoned}`, `errors={…}`,
-`context={raw_payload_violations, processed_by_source, skipped_no_parser_by_source}`.
-⚠ `skipped_no_parser` goes in **context, not errors** — see §6.
+**Slice 4 — `JobProgress` on the tracker.** `candidates_seen=rows_processed`,
+`outcomes={parsed, tombstoned}`, `errors={failed, dispatch_errors}`, everything else in
+`context`. §5c is the shipped shape. ⚠ `skipped_no_parser` goes in **context, not errors** —
+see §6 — and so does `raw_payload_violations`, which is a subset of `failed`.
 
 ## 5a. Slice 2's classification, and the measurements that decided it
 
@@ -315,6 +316,148 @@ Stated, not engineered around:
 - Process death mid-tick loses the aggregate entirely. Mid-tick `maybe_flush` would bound that;
   deliberately not done in slice 2 (it adds a second in-loop DB writer on a hot path for a
   failure mode the orphan reaper already surfaces).
+
+## 5b. Slice 3 is FALSIFIED, and slice 4 does not need it
+
+Slice 3 ("give `ParseOutcome` a reason code, then split error vs skip") was specced, put
+through Codex checkpoint 1, and **withdrawn on the evidence**. Recorded rather than quietly
+dropped, because the reasoning is the deliverable.
+
+### What slice 3 was for, and why it cannot do it
+
+Its stated purpose was to stop slice 4 painting a healthy tick red: `sec_n_csr`'s documented 24 h
+`PENDING_CIK_REFRESH` wait is recorded as `failed`, so gating the verdict on the error set would
+degrade the job for a by-design wait. Moving that class to `record_skip` was supposed to fix it.
+
+**It does not.** `degradation_reason` (`app/services/job_progress.py:97-104`) has a SECOND
+condition: candidates seen, no terminal outcome. A tick whose only dispatched row is a
+dependency wait gives `candidates_seen=1`, `outcomes={parsed:0, tombstoned:0}` and — after the
+reclassification — `errors={}`. Rule 1 stops firing and rule 2 starts:
+`saw 1 candidates and produced no terminal outcome`. The run is degraded either way. Codex
+reproduced both branches.
+
+### And the class was not benign to begin with
+
+Citing the source rule is what killed it. `docs/specs/fund-data/n-csr-metadata.md:429` §7.4
+defines the wait as **bounded**:
+
+> `failed_outcome` with 24h backoff (reason: `class_id_pending_cik_refresh`). **Up to 5 retries
+> (5 days)** — gives daily cik_refresh time to populate. **Beyond that → tombstone permanent
+> with `class_id_unknown_persistent`**
+
+Live code has **no budget**: `sec_n_csr.py:396-403` stamps a fresh 24 h retry every time, with
+no attempt counter — and `sec_filing_manifest` has no column to hold one (`information_schema`
+read: `last_attempted_at` / `next_retry_at` and nothing else). Nor does the stale sweep bound
+it: `tombstone_stale_failed_upserts` (`sec_manifest.py:829`) is anchored to the `error` prefixes
+`upsert error: ` / `upsert+tombstone error: ` / `upsert+log error: `, and the wait's text is
+`resolver pending cik_refresh — no in-universe classes yet`, so it never matches.
+
+So the wait is unbounded in violation of its own source rule. **Classifying it as a benign skip
+would have hidden that**, and a degraded verdict on it is the honest reading, not a false alarm.
+⚠ It fires on the tick the row re-drains — once per 24 h — not on every tick; the first draft's
+"degraded every tick, indefinitely" was wrong (Codex 10).
+
+### Two N-CSR defects found while citing the rule — recorded here, fixed in neither slice
+
+1. **`EXT_ID_NOT_YET_WRITTEN` can be a permanent wait.** `classify_resolver_miss`
+   (`_fund_class_resolver.py:98-110`) tests `EXISTS (SELECT 1 FROM instruments WHERE i.symbol =
+   mf.symbol)` with no tradability filter, while the writer that would satisfy the wait requires
+   `symbol = %s AND is_tradable = TRUE` (`mf_directory.py:124`, deliberately — #1233 §6.2 does
+   not seed class_ids for inactive instruments). A non-tradable match therefore classifies as a
+   wait for a bridge row the writer will never create. The classifier should mirror the writer's
+   gate, which routes it to `INSTRUMENT_NOT_IN_UNIVERSE` → tombstone, per §7.4 row 4.
+2. **The §7.4 retry budget is absent**, per above. Landing it needs a durable attempt counter,
+   i.e. a migration — its own slice, at the corpus rung with clauses 8-12.
+
+Both are real and evidenced; neither is this ticket's subject, and neither is expanded into one
+here. ⚠ `docs/etl/sources/sec_n_csr.md:15` is also stale — it says `EXT_ID_NOT_YET_WRITTEN` →
+transient (1h) where the code puts it on the 24 h branch. §7.4 row 3 says "Same as above", so
+the CODE is right and the per-source doc line is the error. Corrected in this PR.
+
+### Corrections to my own withdrawn draft, so they are not re-made
+
+- The 79 tombstone constructors span **12** modules, not 16; 16 is the count of modules holding
+  any `ParseOutcome` call at all.
+- Calling the non-policy tombstone remainder a "~30.5% defect remainder" repeats a claim §5a had
+  already corrected: that remainder is **mixed**, containing further intentional tombstones
+  (N-CSR `INSTRUMENT_NOT_IN_UNIVERSE`) alongside real defects. Its defect share is unmeasured.
+- The draft's tombstone census ran over ALL tombstones, not §5a's worker-written population
+  (which excludes the 734,752 rows `manifest_pre_retention_sweep.py` writes in bulk SQL without
+  ever dispatching a parser), so it cannot support a worker-dispatch proportion.
+- "The dependency-wait class has never been observed" is not supportable from current state:
+  zero `failed` rows today is consistent with earlier failures that later retried successfully,
+  tombstoned, or were rebuilt. The honest claim is that **no such row is present now**.
+- One claim survived: an AST census (`ast.walk` filtering `Call.func.id == "ParseOutcome"`) over
+  `app/` returns `{'tombstoned': 79, 'parsed': 18, 'failed': 12}` across 109 calls, and all 12
+  `failed` constructors are per-module `_failed_outcome` bodies. The 25 hits `rg -n
+  'status="failed"'` returns include 13 `_record_ingest_attempt(..., status="failed")` calls — a
+  different function sharing a kwarg name.
+
+## 5c. Slice 4 — the verdict
+
+The tick's counters already exist and already add up (slices 1 and 2). Slice 4 spends them:
+
+```python
+tracker.progress = JobProgress(
+    candidates_seen=stats.rows_processed,
+    outcomes={"parsed": stats.parsed, "tombstoned": stats.tombstoned},
+    errors={"failed": stats.failed, "dispatch_errors": stats.dispatch_errors},
+    context={...},
+)
+```
+
+Each of the ticket's four acceptance clauses falls directly out of `degradation_reason`:
+
+| acceptance clause | mechanism | verdict |
+| --- | --- | --- |
+| all-failed batch is visibly degraded | rule 1, `errors.failed > 0` | `degraded`, reason in `error_msg` |
+| legitimate zero-work stays healthy | `candidates_seen=0`, so rule 2's `seen > 0` cannot hold | `success` |
+| policy tombstones stay healthy | `tombstoned` is an OUTCOME, so rule 2 is satisfied | `success` |
+| partial failure exposes counts | slice 2's `rows_errored` + `error_classes`, already rendered | `/processes` Errors tab |
+
+⚠ **`raw_payload_violations` goes in `context`, never `errors`.** It is a SUBSET of `failed`
+(`_dispatch_rows` writes both on the #938 path), and `JobProgress`'s docstring forbids a bucket
+appearing in two axes. Nothing about the verdict changes — `errors` is tested for "any non-zero",
+not summed — but the contract is explicit and the overlap would mislead a later reader who does
+sum it.
+
+⚠ **`skipped_no_parser` goes in `context` too** (§6 correction 1): it is dead in production, and
+`errors` is for work the job could not do.
+
+⚠ **Deliberate: a dependency-wait tick degrades.** Per §5b that is the honest reading while the
+§7.4 budget is missing. The objective trigger to revisit is that budget landing — at which point
+the wait becomes provably bounded and a reason-code split can be re-argued on evidence.
+
+⚠ **`dispatch_errors` is in `errors` but stays out of `row_count`**, which the tick's existing
+comment already pins: `row_count` means rows whose status TRANSITIONED, and a dispatch error is
+exactly the case where none did.
+
+### ⛔ "Next eligible retry" is DEFERRED, with the reason
+
+The acceptance also asks the drilldown to expose it, and slice 4 was built with it —
+`WorkerStats.earliest_next_retry_at`, the minimum stamp the tick committed — then **removed at
+Codex checkpoint 2**, which pointed out it had no reader. That is the defect this ticket exists
+to remove, so shipping it would have been self-contradictory. Both candidate homes fail:
+
+- **`progress_json`** — §3 of this very document establishes it has no operator-facing reader.
+- **`job_runs.next_retry_at`**, which `scheduled_adapter._read_latest_terminal_run` DOES select
+  (`:302`, `:1084`) — but that column is machinery, not a display field. `jobs_retry_sweeper`
+  scans it and **re-enqueues the job** (`job_retry.py:108` — *"only ever set on a
+  `status='failure'` row"* — `:219`, `scheduler.py:7976`). Writing a per-manifest-row stamp
+  there would re-fire `sec_manifest_worker` off a row-level backoff. Not a display change at
+  all; a scheduling one.
+
+So exposing it needs a new field carried through the adapter to the Processes drill-in, i.e. an
+API + FE change, which is its own slice. **The acceptance clause is partially unmet and that is
+stated rather than papered over.** What IS delivered is the other half of the same sentence —
+the failed SCOPE, via slice 2's `rows_errored` + `error_classes`, already rendered.
+
+⚠ The verdict itself does NOT depend on `progress_json` having a reader: it lands in
+`status='degraded'` plus the reason in `error_msg`, which the admin row and `/system/jobs`
+already render (§3). `progress_json` is the audit payload beside it.
+
+**What slice 4 does not change:** no retry behaviour, no backoff, no manifest state transition,
+no second health model, and no change to #2274's liveness axis.
 
 ## 6. Corrections to the first draft, recorded so they are not re-made
 
