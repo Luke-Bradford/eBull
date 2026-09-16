@@ -483,9 +483,12 @@ def test_watermark_key_describes_what_was_processed() -> None:
     """
     from app.jobs.sec_per_cik_poll import _watermark_key
 
-    assert _watermark_key("0000320193", "sec_8k") == "0000320193:sec_8k"
-    assert _watermark_key("0000320193", "sec_10q") == "0000320193:sec_10q"
+    assert _watermark_key("0000320193", {"sec_8k"}) == "0000320193:sec_8k"
+    assert _watermark_key("0000320193", {"sec_10q"}) == "0000320193:sec_10q"
     assert _watermark_key("0000320193", None) == "0000320193"
+    # Stable under set iteration order — the key is a cache key, so a value
+    # that varies run to run would silently disable the conditional request.
+    assert _watermark_key("0000320193", {"sec_10q", "sec_8k"}) == "0000320193:sec_10q,sec_8k"
 
 
 # -----------------------------------------------------------------

@@ -31,6 +31,7 @@ avoid corrupting two different fetch contracts.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -64,7 +65,7 @@ logger = logging.getLogger(__name__)
 _SOURCE_KEY_PER_CIK_POLL: str = "sec.last_modified.per_cik_poll"
 
 
-def _watermark_key(cik_padded: str, source: ManifestSource | None) -> str:
+def _watermark_key(cik_padded: str, sources: Collection[ManifestSource] | None) -> str:
     """Watermark key for one probe — ``<cik>:<source>``, not ``<cik>`` (#3110).
 
     **The key must describe WHAT WAS PROCESSED, not what was fetched.**
@@ -78,14 +79,23 @@ def _watermark_key(cik_padded: str, source: ManifestSource | None) -> str:
     ``<cik>:<page_name>`` is the existing convention for the sibling namespace
     ``sec.last_modified.submissions_files``; this mirrors it.
 
-    ⚠ The ``source is None`` branch is not a fallback, it is the same rule: a
-    probe with no source filter processes the WHOLE response, so the CIK-wide
-    key is the correct description of it. Unreachable today —
-    ``data_freshness_index.source`` is ``NOT NULL`` with 0 null rows and
-    ``FreshnessRow.source`` is non-optional — and kept so the two branches
-    cannot drift from the invariant.
+    ⚠⚠ Takes **the very object passed to the parser** (``sources_to_check``),
+    not ``subject.source``, so the key and the filter provably cannot diverge —
+    review NITPICK on PR #3130. The first cut derived the key separately and
+    re-tested ``subject.source`` for truthiness; that is a second expression of
+    one rule, which is how the two drift apart later.
+
+    ``sources is None`` is not a fallback, it is the same rule: a probe with no
+    filter processes the WHOLE response, so the CIK-wide key is the correct
+    description of it. Unreachable today — ``data_freshness_index.source`` is
+    ``NOT NULL`` with 0 null rows and ``FreshnessRow.source`` is non-optional.
+
+    Sorted so a multi-source filter (none exists yet) yields a stable key
+    rather than one that depends on set iteration order.
     """
-    return f"{cik_padded}:{source}" if source else cik_padded
+    if sources is None:
+        return cik_padded
+    return f"{cik_padded}:{','.join(sorted(sources))}"
 
 
 @dataclass(frozen=True)
@@ -153,7 +163,8 @@ def _probe_subject(
     # opens a per-CIK ``with conn.transaction():`` only around the
     # writes below).
     if_modified_since: str | None = None
-    watermark_key = _watermark_key(cik_padded, subject.source)
+    # ⚠ Derived from ``sources_to_check`` itself (#3110) — see ``_watermark_key``.
+    watermark_key = _watermark_key(cik_padded, sources_to_check)
     if http_get_with_meta is not None:
         wm = get_watermark(conn, _SOURCE_KEY_PER_CIK_POLL, watermark_key)
         if_modified_since = wm.watermark if wm and wm.watermark else None
