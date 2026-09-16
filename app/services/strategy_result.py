@@ -271,6 +271,27 @@ PromotionRefusal = Literal[
     #: missing is a DSR computed on a nominal n — which criterion 3 forbids
     #: outright. Collapsing them would make that state unreportable.
     "effective_sample_size_not_computed",
+    #: Criterion 6's VERDICT, which the gate did not read until #2364. The three
+    #: codes above are all about the statistic's PRESENCE and provenance; none
+    #: of them looks at its value, so a ``deflated_sharpe`` of 0.006 — a 0.6%
+    #: probability of surviving the selection-bias correction — was promotable
+    #: as far as criterion 6 was concerned. ⚠ THREE CODES, NOT ONE, and the
+    #: split is the argument the vocabulary already makes everywhere else: each
+    #: names a different broken thing and a different operator action.
+    #:
+    #:   - `deflated_sharpe_below_threshold` — measured, and it lost.
+    #:   - `effective_sample_size_below_minimum` — the DSR's asymptotic basis
+    #:     does not hold, so its value is not interpretable AT ALL. Separate
+    #:     from `effective_sample_size_not_computed` for the same reason the
+    #:     two DSR codes are separate: absent and too-small are different
+    #:     states. ⚠ A high DSR on a tiny sample is REACHABLE (0.998 on four
+    #:     trades), so this is not implied by the threshold.
+    #:   - `deflated_sharpe_invalid` — present, and not a probability. The
+    #:     `profit_factor_invalid` / `profit_factor_not_above_one` pair is the
+    #:     precedent: "measured and lost" must not read the same as "broken".
+    "deflated_sharpe_below_threshold",
+    "deflated_sharpe_invalid",
+    "effective_sample_size_below_minimum",
     "ambiguity_arms_not_compared",
     "ambiguity_material",
     #: Criterion 9's sensitivity arm (stage 5e-5a). ⚠ There is NO
@@ -335,6 +356,57 @@ PromotionRefusal = Literal[
     "metric_axis_unproven",
 ]
 PROMOTION_REFUSALS: frozenset[str] = frozenset(get_args(PromotionRefusal))
+
+#: Criterion 6's acceptance level. SOURCE RULE, both halves published and read
+#: at implementation time rather than recalled:
+#:
+#:   - Bailey & López de Prado (2014), *The Deflated Sharpe Ratio*, worked
+#:     example — *"DSR ~ ... = 0.9004 < 0.95"* (rejected) and *"the investor may
+#:     have allocated some funds, as DSR would have been 0.9505"* (accepted).
+#:     Both quotes are already pinned in ``tests/test_deflated_sharpe.py``.
+#:   - Bailey & López de Prado (2012), *The Sharpe Ratio Efficient Frontier*,
+#:     §6 — *"A PSR(0) > 0.95 indicates that a SR is greater than 0 with a
+#:     confidence level of 0.95."* That is where the STRICTNESS comes from: the
+#:     2014 example brackets 0.95 without saying which side owns it, and a gate
+#:     that fails closed must not read silence as permission.
+#:
+#: ⚠ What is OURS is the risk tolerance, not the statistic. The papers
+#: demonstrate a 95% confidence level; they do not oblige every allocator to
+#: adopt it. ``DSR_PROMOTION_POLICY_VERSION`` exists so that changing this
+#: engine's tolerance is a versioned act rather than a constant edit.
+#: ⚠ ONE literal, two forms. ``strategy_paper_executor`` filters pinned evidence
+#: in SQL and psycopg's type checking requires a ``LiteralString`` there, which
+#: an interpolated ``Decimal`` is not — so the text form is the constant and the
+#: ``Decimal`` is derived from it. Writing "0.95" twice is how the two drift.
+DSR_PROMOTION_THRESHOLD_SQL: Final = "0.95"
+DSR_PROMOTION_THRESHOLD: Final = Decimal(DSR_PROMOTION_THRESHOLD_SQL)
+
+#: The floor under criterion 3's overlap-corrected sample size. SOURCE RULE:
+#: Bailey & López de Prado (2012) §4, verbatim — *"Eq. (8) ... applies to an
+#: asymptotic distribution. CLT is typically assumed to hold for samples in
+#: excess of 30 observations (Hogg and Tanis (1996)) ... the moments inputted in
+#: Eq. (13) must be computed on longer series for CLT to hold."*
+#:
+#: "In excess of" is why the comparison is strict.
+#:
+#: ⚠ APPLIED TO THE EFFECTIVE SAMPLE SIZE, NOT THE NOMINAL TRADE COUNT, and that
+#: is the conservative direction: the ESS is the trade series after the block
+#: bootstrap's overlap correction, so ``ESS <= n`` always and this refuses a
+#: superset of what a floor on ``n`` would. Criterion 3's own rule — a nominal
+#: ``n`` is the number it forbids — points the same way. Measured on the full
+#: stored population (580 rows) the two are demonstrably not the same check: 4
+#: rows sit at or below an ESS of 30 while 0 rows have ``trade_count <= 30``.
+#: Same two-form construction as ``DSR_PROMOTION_THRESHOLD_SQL`` above.
+MIN_EFFECTIVE_SAMPLE_SIZE_SQL: Final = "30"
+MIN_EFFECTIVE_SAMPLE_SIZE: Final = Decimal(MIN_EFFECTIVE_SAMPLE_SIZE_SQL)
+
+#: The version of the two constants above, in the same role as
+#: ``STRUCTURAL_REFUSAL_POLICY_VERSION``: a promotion decision made under one
+#: risk tolerance must not be indistinguishable from one made under another.
+#: ⚠ Bumping it does NOT reset a preregistration — #2599 freezes
+#: ``structural_promotion_refusals`` only, and neither of these codes is in that
+#: set (see the function's "these four and no others").
+DSR_PROMOTION_POLICY_VERSION: Final = "c6-dsr-threshold-0.95-v1"
 
 
 # ---------------------------------------------------------------------------
@@ -1269,6 +1341,31 @@ def holdout_count_promotion_refusals(
     return ()
 
 
+_ZERO: Final = Decimal(0)
+_ONE: Final = Decimal(1)
+
+
+def finite_decimal(value: object) -> Decimal | None:
+    """``value`` as a finite ``Decimal``, or ``None`` if it is not one.
+
+    ⚠ ``Decimal(str(value))`` rather than ``Decimal(value)``: a psycopg column
+    arrives as a ``Decimal`` and an in-memory metric as a ``float``, and
+    ``Decimal(0.95)`` would carry the binary representation's tail while
+    ``Decimal("0.95")`` does not — so the two producers would disagree at the
+    boundary this gate compares against. Same construction as
+    ``evidence_refusals``' ``profit_factor`` handling.
+
+    ⚠ ``None`` covers three distinct upstream states — unconvertible, NaN and
+    infinity — deliberately: every caller here treats all three as "cannot be
+    read", and a gate must refuse what it cannot read.
+    """
+    try:
+        converted = value if isinstance(value, Decimal) else Decimal(str(value))
+    except ArithmeticError, TypeError, ValueError:
+        return None
+    return converted if converted.is_finite() else None
+
+
 def deflation_promotion_refusals(
     *,
     deflated_sharpe: object | None,
@@ -1292,10 +1389,10 @@ def deflation_promotion_refusals(
     object is exactly the state the clause is for, and guarding on the object
     would let it pass.
 
-    ⚠ ``deflated_sharpe`` is typed ``object`` because the only thing done with
-    it is a ``None`` test: in memory it is a float, off a stored row it is a
-    psycopg ``Decimal``, and narrowing the type here would force a conversion
-    that the clause does not need and that could raise where the gate refuses.
+    ⚠ ``deflated_sharpe`` is typed ``object`` because in memory it is a float
+    and off a stored row it is a psycopg ``Decimal``. #2364's value comparison
+    therefore converts rather than narrows, and a conversion that raises is a
+    REFUSAL (``deflated_sharpe_invalid``), never an exception out of a gate.
     """
     refusals: list[PromotionRefusal] = []
 
@@ -1313,13 +1410,35 @@ def deflation_promotion_refusals(
     ):
         refusals.append("trial_register_superseded")
 
+    # Criterion 6's VERDICT (#2364). ⚠ The `elif` here is NOT the `elif` the
+    # contract above forbids: those are independent checks, these two are the
+    # two outcomes of ONE check. A value that is not a probability has no
+    # position relative to the threshold, and reporting both would say it was
+    # measured and lost when it was never measurable.
+    if deflated_sharpe is not None:
+        probability = finite_decimal(deflated_sharpe)
+        if probability is None or not (_ZERO <= probability <= _ONE):
+            refusals.append("deflated_sharpe_invalid")
+        elif probability <= DSR_PROMOTION_THRESHOLD:
+            refusals.append("deflated_sharpe_below_threshold")
+
     # Criterion 3 — the effective sample size that criterion 6's deflation
     # consumes. ⚠ Checked SEPARATELY from the DSR: a DSR present with no
     # effective sample size is a DSR deflated on a nominal n, and criterion 3
-    # forbids reporting a nominal n anywhere. Stage 5e's block bootstrap fills
-    # it; until then this refusal fires on every result.
+    # forbids reporting a nominal n anywhere.
+    #
+    # ⚠ The floor (#2364) is a SECOND check on the same quantity, not a
+    # refinement of the first: `MIN_EFFECTIVE_SAMPLE_SIZE` carries the 2012
+    # paper's CLT caution, and without it a DSR of 0.998 computed on four
+    # trades clears criterion 6. An ESS that cannot be compared at all — NaN
+    # reaches here from an in-memory float, the stored column is constrained —
+    # refuses on the floor, because a gate may not pass what it cannot read.
     if effective_sample_size is None:
         refusals.append("effective_sample_size_not_computed")
+    else:
+        sample_size = finite_decimal(effective_sample_size)
+        if sample_size is None or sample_size <= MIN_EFFECTIVE_SAMPLE_SIZE:
+            refusals.append("effective_sample_size_below_minimum")
 
     return tuple(refusals)
 
@@ -1507,6 +1626,11 @@ __all__ = [
     "TOTAL_RETURN_BASIS",
     "TOTAL_RETURN_RESULT_SET_ID",
     "CURRENT_RESULT_PROVENANCE",
+    "DSR_PROMOTION_POLICY_VERSION",
+    "DSR_PROMOTION_THRESHOLD",
+    "DSR_PROMOTION_THRESHOLD_SQL",
+    "MIN_EFFECTIVE_SAMPLE_SIZE",
+    "MIN_EFFECTIVE_SAMPLE_SIZE_SQL",
     "EVALUATION_WINDOW_END",
     "EVALUATION_WINDOW_START",
     "HOLDOUT_BOUNDARY",
@@ -1530,6 +1654,7 @@ __all__ = [
     "UniverseBasis",
     "check_promotable",
     "deflation_promotion_refusals",
+    "finite_decimal",
     "holdout_count_promotion_refusals",
     "is_promotable",
     "metric_axis_invalid_reason",

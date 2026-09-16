@@ -34,7 +34,7 @@ from app.services.strategy_regime_evidence import (
     RegimeCohort,
     store_result_regime_cohorts,
 )
-from app.services.strategy_result import LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS
+from app.services.strategy_result import LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS, deflation_promotion_refusals
 from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION, AmbiguityRecord, record_sha256
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.fixtures.ebull_test_db import seed_universe_anchor
@@ -132,7 +132,7 @@ def test_harness_result_carries_a_permanent_refusal() -> None:
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 1,
         "trial_count": TRIAL_REGISTER.declared_count,
-        "effective_sample_size": 10,
+        "effective_sample_size": 200,
         "trial_register_version": TRIAL_REGISTER_VERSION,
         "synthetic_control_model_id": "control-v1",
         "synthetic_control_mean_return_ci_low_pct": -1,
@@ -162,7 +162,7 @@ def test_the_operator_view_recomputes_a_material_ambiguity_gap() -> None:
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 1,
         "trial_count": TRIAL_REGISTER.declared_count,
-        "effective_sample_size": 10,
+        "effective_sample_size": 200,
         "trial_register_version": TRIAL_REGISTER_VERSION,
         "synthetic_control_model_id": "control-v1",
         "synthetic_control_mean_return_ci_low_pct": -1,
@@ -189,7 +189,7 @@ def test_a_structurally_complete_pair_with_no_frozen_verdict_still_refuses() -> 
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 1,
         "trial_count": TRIAL_REGISTER.declared_count,
-        "effective_sample_size": 10,
+        "effective_sample_size": 200,
         "trial_register_version": TRIAL_REGISTER_VERSION,
         "synthetic_control_model_id": "control-v1",
         "synthetic_control_mean_return_ci_low_pct": -1,
@@ -213,7 +213,7 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
         "carry_unmodelled": True,
         "fx_unmodelled": True,
         "evaluated_instrument_count": 5266,
-        "deflated_sharpe": 0.8,
+        "deflated_sharpe": 0.99,
         "trial_count": TRIAL_REGISTER.declared_count,
         "effective_sample_size": 200,
         "trial_register_version": "trial-register-2026-08-10",
@@ -237,6 +237,68 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("deflated_sharpe", "effective_sample_size"),
+    [
+        (Decimal("0.9505"), 200),
+        (Decimal("0.9004"), 200),
+        (Decimal("0.95"), 200),
+        (Decimal("1.5"), 200),
+        (Decimal("0.99"), 30),
+        (Decimal("0.99"), None),
+        (None, 200),
+    ],
+)
+def test_the_operator_surface_reads_the_deflation_verdict_the_gate_does(
+    deflated_sharpe: Decimal | None, effective_sample_size: int | None
+) -> None:
+    """#2364 — ``_promotion_refusals`` hand-reimplements the deflation block, so
+    a rule added to ``deflation_promotion_refusals`` and not here would let the
+    operator surface report a result as closer to promotable than the gate does.
+    ⚠ This pins the AGREEMENT, not either side's answer."""
+    row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
+        "purpose": "capital_candidate",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "fx_unmodelled": False,
+        "evaluated_instrument_count": 5266,
+        "deflated_sharpe": deflated_sharpe,
+        "trial_count": TRIAL_REGISTER.declared_count,
+        "effective_sample_size": effective_sample_size,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+        "synthetic_control_model_id": "random-entry-v1",
+        "synthetic_control_passed": True,
+        "synthetic_control_mean_return_ci_low_pct": -1,
+        "synthetic_control_mean_return_ci_high_pct": 1,
+        "sharpe": 0.8,
+        "synthetic_control_sharpe_threshold": 0.5,
+    }
+    deflation_codes = {
+        "deflated_sharpe_not_computed",
+        "deflated_sharpe_below_threshold",
+        "deflated_sharpe_invalid",
+        "effective_sample_size_not_computed",
+        "effective_sample_size_below_minimum",
+    }
+    api = (
+        set(_promotion_refusals(row, ambiguity_complete=True, quarantine_complete=True, accesses_complete=True))
+        & deflation_codes
+    )
+    gate = (
+        set(
+            deflation_promotion_refusals(
+                deflated_sharpe=deflated_sharpe,
+                trial_count=TRIAL_REGISTER.declared_count,
+                deflated=None,
+                effective_sample_size=effective_sample_size,  # type: ignore[arg-type]
+            )
+        )
+        & deflation_codes
+    )
+    assert api == gate
+
+
 def test_holdout_display_uses_derived_control_and_not_its_empty_own_columns() -> None:
     row: dict[str, object] = {
         **_IMMATERIAL_AMBIGUITY,
@@ -246,7 +308,7 @@ def test_holdout_display_uses_derived_control_and_not_its_empty_own_columns() ->
         "carry_unmodelled": False,
         "fx_unmodelled": False,
         "evaluated_instrument_count": 3,
-        "deflated_sharpe": 0.8,
+        "deflated_sharpe": 0.99,
         "trial_count": TRIAL_REGISTER.declared_count,
         "effective_sample_size": 200,
         "trial_register_version": TRIAL_REGISTER_VERSION,
@@ -289,7 +351,7 @@ def test_holdout_display_composes_the_exact_in_sample_ambiguity_verdict() -> Non
         "carry_unmodelled": False,
         "fx_unmodelled": False,
         "evaluated_instrument_count": 3,
-        "deflated_sharpe": 0.8,
+        "deflated_sharpe": 0.99,
         "trial_count": TRIAL_REGISTER.declared_count,
         "effective_sample_size": 200,
         "trial_register_version": TRIAL_REGISTER_VERSION,
@@ -329,7 +391,7 @@ def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing()
         "carry_unmodelled": False,
         "fx_unmodelled": False,
         "evaluated_instrument_count": 1,
-        "deflated_sharpe": 0.8,
+        "deflated_sharpe": 0.99,
         "trial_count": TRIAL_REGISTER.declared_count,
         "effective_sample_size": 200,
         "trial_register_version": TRIAL_REGISTER_VERSION,
@@ -355,7 +417,7 @@ def test_a_current_register_label_cannot_hide_a_stale_trial_count() -> None:
         "carry_unmodelled": False,
         "fx_unmodelled": False,
         "evaluated_instrument_count": 1,
-        "deflated_sharpe": 0.8,
+        "deflated_sharpe": 0.99,
         "trial_count": 12,
         "effective_sample_size": 200,
         "trial_register_version": TRIAL_REGISTER_VERSION,
@@ -382,7 +444,7 @@ def test_a_missing_count_is_not_also_described_as_superseded_when_the_version_is
         "carry_unmodelled": False,
         "fx_unmodelled": False,
         "evaluated_instrument_count": 1,
-        "deflated_sharpe": 0.8,
+        "deflated_sharpe": 0.99,
         "trial_count": None,
         "effective_sample_size": 200,
         "trial_register_version": TRIAL_REGISTER_VERSION,

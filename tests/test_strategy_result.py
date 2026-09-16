@@ -290,7 +290,11 @@ class TestSyntheticControlMatchQuality:
 def _deflated_result(**overrides: object) -> DeflatedSharpeResult:
     """A complete DSR provenance block for promotion-gate tests."""
     base: dict[str, object] = {
-        "deflated_sharpe": 0.72,
+        # ⚠ The paper's own ALLOCATED value (2014 worked example, "DSR would have
+        # been 0.9505"). Was 0.72, which #2364's threshold refuses — a "clean"
+        # fixture must clear every gate, or the tests around it stop measuring
+        # what they claim to.
+        "deflated_sharpe": 0.9505,
         "expected_max_sharpe": 0.015,
         "trade_sharpe": 0.017,
         "skewness": -0.4,
@@ -314,7 +318,7 @@ _CLEAN_RESULT_FIELDS: dict[str, object] = {
     "carry_unmodelled": False,
     "fx_unmodelled": False,
     "trial_count": TRIAL_REGISTER.declared_count,
-    "deflated_sharpe": Decimal("0.72"),
+    "deflated_sharpe": Decimal("0.9505"),
     "deflated": _deflated_result(),
 }
 
@@ -1499,10 +1503,11 @@ class TestTheExtractedClauseHelpersAreTheGate:
             assert codes <= PROMOTION_REFUSALS
 
     def test_the_deflation_clauses_are_independent_and_all_fire_together(self) -> None:
-        """⚠ FOUR ``if``s, never an ``elif``. A DSR with no trial count is as
-        refused as no DSR at all, and an ``elif`` chain would report one reason
-        where four apply — which is the "how far is this from promotable"
-        number an operator actually reads."""
+        """⚠ INDEPENDENT ``if``s, never an ``elif`` chain. A DSR with no trial
+        count is as refused as no DSR at all, and an ``elif`` chain would report
+        one reason where several apply — which is the "how far is this from
+        promotable" number an operator actually reads. #2364's verdict clause
+        joins them: 0.9 is present, so it is judged, and it loses."""
         assert set(
             deflation_promotion_refusals(
                 deflated_sharpe=0.9,
@@ -1510,7 +1515,12 @@ class TestTheExtractedClauseHelpersAreTheGate:
                 deflated=None,
                 effective_sample_size=None,
             )
-        ) == {"trial_count_undeclared", "trial_register_superseded", "effective_sample_size_not_computed"}
+        ) == {
+            "trial_count_undeclared",
+            "trial_register_superseded",
+            "deflated_sharpe_below_threshold",
+            "effective_sample_size_not_computed",
+        }
 
     def test_trial_register_supersession_is_guarded_on_the_probability_not_the_object(self) -> None:
         """⚠ A row with a stored ``deflated_sharpe`` and no reconstructed object
@@ -1531,6 +1541,110 @@ class TestTheExtractedClauseHelpersAreTheGate:
         assert "deflated_sharpe_not_computed" not in deflation_promotion_refusals(
             deflated_sharpe=Decimal("0.9"), trial_count=11, deflated=None, effective_sample_size=1000.0
         )
+
+    @pytest.mark.parametrize(
+        ("probability", "expected"),
+        [
+            # The 2014 paper's own two data points, in its own words: 0.9004 is
+            # rejected, 0.9505 is the value at which "the investor may have
+            # allocated some funds".
+            (0.9004, "deflated_sharpe_below_threshold"),
+            (0.9505, None),
+            # ⚠ Exactly 0.95 REFUSES. The 2014 example brackets it without
+            # saying which side owns it; the 2012 companion's §6 states the
+            # acceptance as `PSR(0) > 0.95`, and a gate that fails closed does
+            # not read silence as permission.
+            (Decimal("0.95"), "deflated_sharpe_below_threshold"),
+            (Decimal("0.950000000000000001"), None),
+            (Decimal("0.949999999999999999"), "deflated_sharpe_below_threshold"),
+            (Decimal("0"), "deflated_sharpe_below_threshold"),
+            (Decimal("1"), None),
+            # Not a probability → broken, not "measured and lost".
+            (Decimal("1.01"), "deflated_sharpe_invalid"),
+            (Decimal("-0.01"), "deflated_sharpe_invalid"),
+            (float("nan"), "deflated_sharpe_invalid"),
+            (float("inf"), "deflated_sharpe_invalid"),
+            (Decimal("NaN"), "deflated_sharpe_invalid"),
+            ("not a number", "deflated_sharpe_invalid"),
+            (object(), "deflated_sharpe_invalid"),
+        ],
+    )
+    def test_criterion_sixs_verdict_is_read_not_only_its_presence(
+        self, probability: object, expected: str | None
+    ) -> None:
+        """#2364 — the gate used to check that the DSR EXISTED and never that it passed."""
+        refusals = set(
+            deflation_promotion_refusals(
+                deflated_sharpe=probability,
+                trial_count=11,
+                deflated=None,
+                effective_sample_size=1000.0,
+            )
+        )
+        verdict_codes = refusals & {"deflated_sharpe_below_threshold", "deflated_sharpe_invalid"}
+        assert verdict_codes == (set() if expected is None else {expected})
+        # Present, whatever its value — the absence code must not double-fire.
+        assert "deflated_sharpe_not_computed" not in refusals
+
+    def test_a_float_and_a_decimal_of_the_same_value_cannot_disagree(self) -> None:
+        """⚠ In memory the probability is a float and off a stored row a
+        ``Decimal``. Converting through ``Decimal(str(x))`` rather than
+        ``Decimal(x)`` is what stops the binary tail deciding a boundary case."""
+        for raw in (0.95, 0.9500001, 0.9499999):
+            assert deflation_promotion_refusals(
+                deflated_sharpe=raw, trial_count=11, deflated=None, effective_sample_size=1000.0
+            ) == deflation_promotion_refusals(
+                deflated_sharpe=Decimal(str(raw)), trial_count=11, deflated=None, effective_sample_size=1000.0
+            )
+
+    @pytest.mark.parametrize(
+        ("sample_size", "refused"),
+        [
+            (30.0, True),
+            (Decimal("30"), True),
+            (30.0000001, False),
+            (4.0833, True),
+            (float("nan"), True),
+            (1000.0, False),
+        ],
+    )
+    def test_the_effective_sample_size_floor_is_the_clts_and_is_strict(
+        self, sample_size: object, refused: bool
+    ) -> None:
+        """Bailey & López de Prado (2012) §4 — *"CLT is typically assumed to hold
+        for samples in excess of 30 observations"*. "In excess of" is why 30
+        itself refuses. ⚠ A NaN refuses too: a gate may not pass what it cannot
+        read."""
+        refusals = deflation_promotion_refusals(
+            deflated_sharpe=Decimal("0.99"),
+            trial_count=11,
+            deflated=None,
+            effective_sample_size=sample_size,  # type: ignore[arg-type]
+        )
+        assert ("effective_sample_size_below_minimum" in refusals) is refused
+        assert "effective_sample_size_not_computed" not in refusals
+
+    def test_a_high_dsr_on_a_tiny_sample_is_still_refused(self) -> None:
+        """⚠ THE FLOOR IS NOT IMPLIED BY THE THRESHOLD, which a draft of #2364's
+        spec asserted and Codex falsified: the current code returns
+        ``DSR = 0.998`` for four trades. Pinned so the argument cannot regress
+        into "the threshold covers small samples"."""
+        refusals = deflation_promotion_refusals(
+            deflated_sharpe=Decimal("0.998"),
+            trial_count=11,
+            deflated=None,
+            effective_sample_size=4.0,
+        )
+        assert "effective_sample_size_below_minimum" in refusals
+        assert "deflated_sharpe_below_threshold" not in refusals
+
+    def test_a_missing_probability_draws_only_the_absence_code(self) -> None:
+        refusals = set(
+            deflation_promotion_refusals(
+                deflated_sharpe=None, trial_count=11, deflated=None, effective_sample_size=1000.0
+            )
+        )
+        assert refusals == {"deflated_sharpe_not_computed"}
 
     def test_both_synthetic_control_thresholds_can_fail_at_once(self) -> None:
         """⚠ Derived from the control's own properties, never from the row's

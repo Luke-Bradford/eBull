@@ -154,11 +154,13 @@ from app.services.strategy_registry import (
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
     CORPUS_VERSION,
+    DSR_PROMOTION_THRESHOLD,
     EVALUATION_WINDOW_END,
     EVALUATION_WINDOW_START,
     HOLDOUT_BOUNDARY,
     LEGACY_RETURN_BASIS,
     METRIC_AXIS_RULE_VERSION,
+    MIN_EFFECTIVE_SAMPLE_SIZE,
     TOTAL_RETURN_BASIS,
     AmbiguityArm,
     PromotionCandidate,
@@ -3081,7 +3083,8 @@ def _ambiguity_material_for(
 def _expected_refusals(
     *,
     holdout_requested: bool,
-    deflated: bool,
+    deflated_sharpe: float | None,
+    effective_sample_size: float | None,
     purpose: StrategyPurpose = "capital_candidate",
     ambiguity_material: bool | None = False,
     prior_holdout_evaluations: int = 0,
@@ -3131,8 +3134,22 @@ def _expected_refusals(
         expected.add("harness_validation_only")
     if not holdout_requested and prior_holdout_evaluations <= 0:
         expected.add("holdout_never_evaluated")
-    if not deflated:
+    if deflated_sharpe is None:
         expected.update({"deflated_sharpe_not_computed", "trial_count_undeclared"})
+    else:
+        # #2364 — criterion 6's VERDICT, predicted independently of the gate.
+        # ⚠ Through ``Decimal(repr(...))``, which is EXACTLY what ``build_result``
+        # stamps the row with, so the prediction and the stored value cannot
+        # disagree by a binary-float tail at the boundary.
+        probability = Decimal(repr(deflated_sharpe))
+        if not (Decimal(0) <= probability <= Decimal(1)):
+            expected.add("deflated_sharpe_invalid")
+        elif probability <= DSR_PROMOTION_THRESHOLD:
+            expected.add("deflated_sharpe_below_threshold")
+    if effective_sample_size is None:
+        expected.add("effective_sample_size_not_computed")
+    elif not math.isfinite(effective_sample_size) or Decimal(repr(effective_sample_size)) <= MIN_EFFECTIVE_SAMPLE_SIZE:
+        expected.add("effective_sample_size_below_minimum")
     if ambiguity_material is None:
         expected.add("ambiguity_arms_not_compared")
     elif ambiguity_material:
@@ -3854,7 +3871,8 @@ def _write_rows(
         # mismatch #2433 was.
         expected = _expected_refusals(
             holdout_requested=holdout_requested,
-            deflated=result.deflated is not None,
+            deflated_sharpe=None if result.deflated is None else result.deflated.deflated_sharpe,
+            effective_sample_size=result.metrics.effective_sample_size,
             purpose=result.purpose,
             ambiguity_material=ambiguity_material,
             prior_holdout_evaluations=evaluations,
@@ -4146,7 +4164,8 @@ def _preflight_gate(
             )
             expected = _expected_refusals(
                 holdout_requested=holdout_requested,
-                deflated=result.deflated is not None,
+                deflated_sharpe=None if result.deflated is None else result.deflated.deflated_sharpe,
+                effective_sample_size=result.metrics.effective_sample_size,
                 purpose=result.purpose,
                 ambiguity_material=ambiguity_material,
                 prior_holdout_evaluations=prior_holdout.get(

@@ -207,6 +207,13 @@ def _row_refusals(row: dict[str, Any], attached: Attachments) -> list[str]:
         or any(row[field] is None for field in bootstrap_fields)
     ):
         refusals.append("bootstrap_provenance_incomplete")
+    # ⚠ #2364 added `deflated_sharpe_below_threshold` and
+    # `effective_sample_size_below_minimum` to the PROMOTION gate. They are
+    # deliberately NOT mirrored here: this audit has its own vocabulary
+    # (`deflated_sharpe_provenance_incomplete`, `trial_count_mismatch`) and
+    # freezes what the #2745 in-sample run recorded, so it reports the
+    # provenance of a stored row rather than today's acceptance level. Adding
+    # them would silently re-date a frozen audit.
     if row["deflated_sharpe"] is None:
         refusals.append("deflated_sharpe_not_computed")
     if row["dsr_model_id"] != EXPECTED_DSR_MODEL or row["dsr_measured_trials"] is None:

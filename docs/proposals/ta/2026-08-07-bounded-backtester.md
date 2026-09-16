@@ -714,7 +714,17 @@ Clauses 2–4 had no home until now, because they are about *results*:
      invariant 2 is a universe rule, not only a survivorship one;
    - hold-out never evaluated, or evaluated more than once without a recorded
      access (criterion 5);
-   - DSR not computed, or computed on an undeclared trial count (criterion 6).
+   - DSR not computed, or computed on an undeclared trial count (criterion 6);
+   - ⚠ **DSR computed and NOT ABOVE 0.95, or not a probability at all** (#2364).
+     The clause above enforced only that criterion 6 RAN — a `deflated_sharpe` of
+     0.006 was as promotable as one of 0.99. The level is the source's, not ours:
+     Bailey & López de Prado (2014)'s example rejects at 0.9004 and allocates at
+     0.9505, and (2012) §6 states the acceptance as `PSR(0) > 0.95`, which is
+     where the strict `>` comes from;
+   - ⚠ **effective sample size not above 30** (#2364, criterion 3). Bailey &
+     López de Prado (2012) §4: the statistic is asymptotic and *"CLT is typically
+     assumed to hold for samples in excess of 30 observations"*. Not implied by
+     the DSR level — the current code returns DSR 0.998 on four trades.
 
 ⚠ **The binary label is not sufficient and the result model must not pretend
 otherwise.** `survivor_only | survivorship_free` loses §4.0's measured nuance:
@@ -1256,7 +1266,12 @@ parent inputs: the trial count, the trials' **correlation**, and the returns'
 **skew and kurtosis**. The trial count is explicitly declared and includes
 abandoned branches, manual eyeballing and discarded parameter values. An
 undeclared trial count **fails**; it does not default to the number of shipped
-strategies.
+strategies. ⚠ **And the VALUE is gated, not only its presence** (#2364):
+promotion requires `deflated_sharpe > 0.95` — the level the source paper's own
+example allocates at, in the strict form its 2012 companion states — plus an
+effective sample size **above 30**, the CLT floor that companion names in §4.
+A high DSR on a tiny sample is reachable (0.998 on four trades), so the two are
+independent checks and neither implies the other.
 
 **C7 — a metric set that cannot flatter.** All **twelve** present on every
 sleeve-level and portfolio-level result: expectancy per trade, profit factor,
