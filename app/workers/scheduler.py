@@ -36,6 +36,9 @@ import psycopg.sql
 from psycopg.types.json import Jsonb
 
 if TYPE_CHECKING:
+    import psycopg
+
+    from app.services.job_telemetry import JobTelemetryAggregator
     from app.services.reference_data import ReferenceRefreshReport
     from app.services.strategy_halts import HaltSnapshot
 
@@ -7993,6 +7996,44 @@ def jobs_retry_sweeper() -> None:
         tracker.row_count = len(refired)
 
 
+def _flush_manifest_worker_telemetry(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+    agg: JobTelemetryAggregator,
+) -> None:
+    """Persist the manifest worker's per-run error/skip aggregate (#3111 slice 2).
+
+    ⚠⚠ THIS MUST NEVER RAISE INTO THE JOB. It runs in a ``finally``, so a raise
+    here would REPLACE the real exception on the failure path, and on the
+    success path it would turn completed business work — rows already committed
+    — into a recorded job failure, which the retry classifier would then act on.
+    Telemetry is a report about the work, never a gate on it.
+
+    ``conn`` is rolled back first: on the raising path it may be sitting in a
+    failed transaction, where every statement errors out. Rolling back costs
+    nothing (``_dispatch_rows`` commits per row, so there is no pending work to
+    lose) and is what makes the flush reachable at all on that path.
+
+    ``run_id == 0`` means ``_tracked_job`` never got a row (start-recording
+    failed and the body ran anyway, by design). Skipped rather than issuing an
+    UPDATE that matches nothing.
+    """
+    from app.services.job_telemetry import flush_to_job_run
+
+    if not run_id:
+        return
+    try:
+        conn.rollback()
+        flush_to_job_run(conn, run_id=run_id, agg=agg)
+        conn.commit()
+    except Exception:
+        logger.exception(
+            "sec_manifest_worker: telemetry flush failed for run_id=%s; the tick's own outcome is unaffected",
+            run_id,
+        )
+
+
 def sec_manifest_worker_tick() -> None:
     """#873 — One drain pass over ``sec_filing_manifest``.
 
@@ -8021,14 +8062,25 @@ def sec_manifest_worker_tick() -> None:
     re-check 13F's quota-share slice cost against the cadence.
     """
     from app.jobs.sec_manifest_worker import run_manifest_worker
+    from app.services.job_telemetry import JobTelemetryAggregator
 
     with _tracked_job(JOB_SEC_MANIFEST_WORKER) as tracker:
+        # #3111 slice 2 — per-run error/skip aggregate. `row_count` says how
+        # much work landed; this says what did NOT, on the surface that already
+        # renders it (`scheduled_adapter` → the Processes drill-in Errors tab).
+        telemetry = JobTelemetryAggregator()
         with connect_job() as conn:
-            # tick_id=None → run_manifest_worker pulls next value from
-            # the module-global _TICK_COUNTER (per-process +1-per-tick
-            # rotation). Tests inject explicitly via the helper signature.
-            stats = run_manifest_worker(conn, source=None, max_rows=200, tick_id=None)
-            conn.commit()
+            try:
+                # tick_id=None → run_manifest_worker pulls next value from
+                # the module-global _TICK_COUNTER (per-process +1-per-tick
+                # rotation). Tests inject explicitly via the helper signature.
+                stats = run_manifest_worker(conn, source=None, max_rows=200, tick_id=None, telemetry=telemetry)
+                conn.commit()
+            finally:
+                # ⚠ In a `finally`, because `_dispatch_rows` commits PER ROW: a
+                # raise escaping the selection/prefetch/commit path would
+                # otherwise discard the aggregate for rows that already landed.
+                _flush_manifest_worker_telemetry(conn, run_id=tracker.run_id, agg=telemetry)
 
         # ⚠ `dispatch_errors` is deliberately NOT added to `row_count`. That
         # column means rows whose status actually TRANSITIONED, and a dispatch

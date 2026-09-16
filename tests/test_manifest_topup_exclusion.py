@@ -73,7 +73,9 @@ def test_excluded_source_dropped_from_both_topup_calls(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         worker,
         "_prefetch_then_dispatch",
-        lambda conn, rows, *, now: WorkerStats(rows_processed=0, parsed=0, tombstoned=0, failed=0, skipped_no_parser=0),
+        lambda conn, rows, *, now, telemetry=None: WorkerStats(
+            rows_processed=0, parsed=0, tombstoned=0, failed=0, skipped_no_parser=0
+        ),
     )
 
     # Conn is never touched: every DB selector + the dispatch tail are stubbed.

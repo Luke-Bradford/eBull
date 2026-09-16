@@ -43,6 +43,7 @@ from typing import Any, Literal
 
 import psycopg
 
+from app.services.job_telemetry import JobTelemetryAggregator
 from app.services.sec_manifest import (
     IngestStatus,
     ManifestRow,
@@ -317,6 +318,7 @@ def run_manifest_worker(
     max_rows: int = 100,
     now: datetime | None = None,
     tick_id: int | None = None,
+    telemetry: JobTelemetryAggregator | None = None,
 ) -> WorkerStats:
     """One worker tick: drain pending + retryable manifest rows.
 
@@ -331,6 +333,12 @@ def run_manifest_worker(
       tests inject explicitly.
     - ``source is not None`` (per-source rebuild): unchanged shape;
       drains ``max_rows`` from one source (pending then retryable).
+
+    ``telemetry`` (#3111 slice 2) — optional per-run aggregator the dispatch
+    loop records per-row errors + skips into, for the caller to flush onto the
+    ``job_runs`` row. ``None`` (every ``scripts/backfill_*.py`` caller, and
+    every test that does not assert on it) leaves the loop's behaviour
+    byte-identical to before.
 
     Returns a :class:`WorkerStats` summary including a
     ``processed_by_source`` per-source breakdown.
@@ -352,7 +360,7 @@ def run_manifest_worker(
         # (~4.7s/row, ~1 req/s observed in the #554 backlog); overlapping the
         # fetches saturates the 10 req/s floor. No-op for sources without a
         # ``fetch_url`` hook (empty cache → identical to the old serial path).
-        return _prefetch_then_dispatch(conn, rows, now=now)
+        return _prefetch_then_dispatch(conn, rows, now=now, telemetry=telemetry)
 
     # Fairness path (#1179) — Phase R recent-first slice (#1685) +
     # Phase A per-source oldest slice + Phase B global oldest top-up.
@@ -444,7 +452,7 @@ def run_manifest_worker(
         rows.extend(topup_retryable)
 
     # Fairness path = steady-state backlog drain → prefetch bodies concurrently.
-    return _prefetch_then_dispatch(conn, rows, now=now)
+    return _prefetch_then_dispatch(conn, rows, now=now, telemetry=telemetry)
 
 
 def _prefetch_bodies(
@@ -587,6 +595,7 @@ def _prefetch_then_dispatch(
     rows: list[ManifestRow],
     *,
     now: datetime,
+    telemetry: JobTelemetryAggregator | None = None,
 ) -> WorkerStats:
     """#1686 Phase 2 — prefetch single-doc bodies concurrently, bind the
     tick-scoped cache, then run the serial per-row :func:`_dispatch_rows`.
@@ -637,7 +646,7 @@ def _prefetch_then_dispatch(
     cache = _prefetch_bodies(conn, rows)
     token = set_prefetch_body_cache(cache)
     try:
-        return _dispatch_rows(conn, rows, now=now)
+        return _dispatch_rows(conn, rows, now=now, telemetry=telemetry)
     finally:
         reset_prefetch_body_cache(token)
 
@@ -647,6 +656,7 @@ def _dispatch_rows(
     rows: list[ManifestRow],
     *,
     now: datetime,
+    telemetry: JobTelemetryAggregator | None = None,
 ) -> WorkerStats:
     """Per-row dispatch loop shared by both worker paths.
 
@@ -666,6 +676,23 @@ def _dispatch_rows(
     independent (no cross-row dependency), so per-row commit is safe and
     strictly more granular than the prior whole-tick commit at
     ``app/workers/scheduler.py``.
+
+    #3111 slice 2 — when ``telemetry`` is supplied, every branch that does NOT
+    complete its handling of a row records one error against it, and the
+    no-parser branch records a skip. The axis is "did the worker finish with
+    this row", not "is the outcome good": a ``tombstoned`` row got a terminal
+    decision and moved (69.5% of worker-written tombstones are deliberate
+    policy — retention floor, 424B2 volume cap, latest-N cap; full census in
+    ``docs/proposals/etl/2026-09-16-manifest-worker-outcome-reporting.md``
+    §5a), whereas a ``failed`` row is coming back. Calling a policy filter an
+    operator error is the same defect class this ticket exists to remove.
+
+    ⚠⚠ EVERY ``record_error`` SITS AT THE COUNTER INCREMENT, never before it.
+    A parser raise whose ``transition_status`` then ALSO raises increments
+    ``dispatch_errors`` and NOT ``failed`` — so recording the parser's error
+    at the point it was caught would emit TWO errors for one row and break
+    ``agg.rows_errored == failed + dispatch_errors``. Same-site recording
+    makes each row contribute at most one error by construction.
 
     Returns a :class:`WorkerStats` summary; the caller has already
     decided WHICH rows to dispatch (fairness allocation or per-source
@@ -723,6 +750,12 @@ def _dispatch_rows(
             )
             skipped += 1
             skipped_by_source[row.source] += 1
+            if telemetry is not None:
+                # A skip, not an error: no work was attempted. Structurally
+                # unreachable on the scheduled path (the fairness phase picks
+                # sources from ``registered_parser_sources()``), kept wired so a
+                # future per-source caller cannot drop rows silently.
+                telemetry.record_skip("no_parser_registered")
             continue
 
         # #1179: bump processed-by-source ONCE per dispatched row,
@@ -761,6 +794,12 @@ def _dispatch_rows(
                 )
                 conn.commit()  # #1735: release this accession's locks at its row boundary
                 failed += 1
+                if telemetry is not None:
+                    telemetry.record_error(
+                        error_class=f"ParserRaised:{type(exc).__name__}",
+                        message=f"{type(exc).__name__}: {exc}",
+                        subject=f"{row.source} {row.accession_number}",
+                    )
                 continue
 
             # #938 audit invariant: payload-backed parsers cannot transition
@@ -805,6 +844,15 @@ def _dispatch_rows(
                 conn.commit()  # #1735
                 failed += 1
                 raw_violations += 1
+                if telemetry is not None:
+                    telemetry.record_error(
+                        error_class="RawPayloadMissing",
+                        message=(
+                            "parser returned parsed without storing the upstream body "
+                            f"(effective raw_status={effective_raw_status!r})"
+                        ),
+                        subject=f"{row.source} {row.accession_number}",
+                    )
                 continue
 
             target_status: IngestStatus = outcome.status
@@ -824,7 +872,23 @@ def _dispatch_rows(
                 tombstoned += 1
             else:
                 failed += 1
-        except Exception:  # noqa: BLE001 — a per-row failure must not abort the tick
+                if telemetry is not None:
+                    # ⚠ Keyed by SOURCE, which is a structured field — not a
+                    # classifier over the free-text ``error``. It is the one
+                    # known-MIXED class: ``sec_n_csr``'s documented 24h
+                    # dependency wait (``PENDING_CIK_REFRESH``,
+                    # ``docs/etl/sources/sec_n_csr.md`` §3) is by design, not a
+                    # fault, and lands here until slice 3's reason code splits
+                    # it. The parser's own text rides along as the sample so an
+                    # operator can tell which they are looking at.
+                    telemetry.record_error(
+                        error_class=f"ParserReportedFailure:{row.source}",
+                        # ⚠ ``ParseOutcome.error`` is legally None; ``record_error``
+                        # slices ``message``, so None would raise here.
+                        message=outcome.error or "parser reported failure with no error text",
+                        subject=f"{row.source} {row.accession_number}",
+                    )
+        except Exception as exc:  # noqa: BLE001 — a per-row failure must not abort the tick
             # Reached only when ``transition_status`` / ``conn.commit()``
             # itself raised (illegal state transition, deadlock victim
             # aborted at the ``FOR UPDATE``, commit-time DB error). Roll
@@ -841,6 +905,16 @@ def _dispatch_rows(
             # ``rows_processed`` and in no outcome bucket, so a tick that lost
             # every row still reported a self-consistent-looking summary.
             dispatch_errors += 1
+            if telemetry is not None:
+                # Prefixed rather than bare: a ``RuntimeError`` from a parser and
+                # a ``RuntimeError`` from ``transition_status`` mean opposite
+                # things (one stamped a retry, one left the row untouched) and
+                # must not merge into one operator-facing class.
+                telemetry.record_error(
+                    error_class=f"DispatchFailed:{type(exc).__name__}",
+                    message=f"{type(exc).__name__}: {exc}",
+                    subject=f"{row.source} {row.accession_number}",
+                )
             continue
 
     # #2274 — the last row's completion, which the top-of-body tick cannot

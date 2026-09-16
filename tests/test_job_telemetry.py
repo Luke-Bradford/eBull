@@ -342,3 +342,127 @@ def test_default_flush_interval_constant_is_present() -> None:
     refactor that renames it surfaces here, not in production."""
     assert isinstance(DEFAULT_FLUSH_INTERVAL_SECONDS, float)
     assert DEFAULT_FLUSH_INTERVAL_SECONDS > 0
+
+
+# ---------------------------------------------------------------------------
+# #3111 slice 2 — the progress columns belong to whoever has the state
+# ---------------------------------------------------------------------------
+
+
+def test_error_only_flush_does_not_clobber_the_heartbeat_stamp(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ The defect the first real wiring of this aggregator would have shipped.
+
+    ``JobRunHeartbeat`` (``app/services/job_heartbeat.py``) writes
+    ``processed_count`` / ``target_count`` / ``last_progress_at`` for every
+    tracked job that reports progress. An ERROR-ONLY producer — which is what
+    ``sec_manifest_worker`` is — used to flush zeros and NULLs straight over
+    that live liveness stamp, which #2274 shipped and stale-detection reads.
+    """
+    run_id = _make_job_run(ebull_test_conn, "test_job_telemetry_no_clobber")
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE job_runs
+               SET processed_count = 42, target_count = 100, last_progress_at = now()
+             WHERE run_id = %s
+            """,
+            (run_id,),
+        )
+    ebull_test_conn.commit()
+
+    agg = JobTelemetryAggregator()
+    agg.record_error(error_class="DispatchFailed:RuntimeError", message="deadlock", subject="acc")
+    flush_to_job_run(ebull_test_conn, run_id=run_id, agg=agg)
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT processed_count, target_count, last_progress_at, rows_errored
+              FROM job_runs WHERE run_id = %s
+            """,
+            (run_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        processed, target, last_progress, rows_errored = row
+    assert (processed, target) == (42, 100)
+    assert last_progress is not None
+    # The columns this producer DOES own still landed.
+    assert rows_errored == 1
+
+
+def test_progress_columns_are_guarded_independently(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A target-only producer must not zero ``processed_count``, and vice versa.
+
+    One combined ``has_progress_state`` flag would fail this: it would let
+    ``set_target`` alone re-write ``processed_count=0`` and NULL the heartbeat's
+    timestamp. ⚠ ``set_target(0)`` is a meaningful denominator ("nothing to
+    do"), so the guard is "was it set", not truthiness.
+    """
+    run_id = _make_job_run(ebull_test_conn, "test_job_telemetry_partial_progress")
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE job_runs SET processed_count = 9, target_count = 50 WHERE run_id = %s",
+            (run_id,),
+        )
+    ebull_test_conn.commit()
+
+    target_only = JobTelemetryAggregator()
+    target_only.set_target(0)
+    flush_to_job_run(ebull_test_conn, run_id=run_id, agg=target_only)
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT processed_count, target_count FROM job_runs WHERE run_id = %s", (run_id,))
+        row = cur.fetchone()
+        assert row is not None
+    # target replaced (0 is a real value, not "unset"); processed untouched.
+    assert row == (9, 0)
+
+    processed_only = JobTelemetryAggregator()
+    processed_only.record_processed(3)
+    flush_to_job_run(ebull_test_conn, run_id=run_id, agg=processed_only)
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT processed_count, target_count FROM job_runs WHERE run_id = %s", (run_id,))
+        row = cur.fetchone()
+        assert row is not None
+    # processed replaced; the denominator another writer set is preserved.
+    assert row == (3, 0)
+
+
+def test_a_nul_byte_in_one_sample_does_not_fail_the_whole_flush(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A parser exception raised over raw upstream bytes can carry ``\\x00``.
+
+    PostgreSQL text cannot hold it, so an unsanitised sample would abort the
+    flush for EVERY class and skip reason in the aggregate — losing the whole
+    report over one byte.
+    """
+    run_id = _make_job_run(ebull_test_conn, "test_job_telemetry_nul")
+    ebull_test_conn.commit()
+
+    agg = JobTelemetryAggregator()
+    agg.record_error(error_class="ParserRaised:ValueError", message="bad body \x00 here", subject="acc")
+    agg.record_skip("no_parser_registered")
+
+    flush_to_job_run(ebull_test_conn, run_id=run_id, agg=agg)
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT error_classes, rows_skipped_by_reason FROM job_runs WHERE run_id = %s",
+            (run_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        error_classes, skips = row
+    assert "\x00" not in error_classes["ParserRaised:ValueError"]["sample_message"]
+    assert skips == {"no_parser_registered": 1}
