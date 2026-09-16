@@ -30,15 +30,17 @@ Spec: ``docs/proposals/ta/2026-08-14-core-submission-preflight.md``
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal, LiteralString
-from zoneinfo import ZoneInfo
 
 import psycopg
 
-from app.services.market_calendar import us_market_status
-from app.services.market_session_support import session_support_reason
+from app.services.market_session_support import (
+    session_support_reason,
+    venue_local_now,
+    venue_session_is_open,
+)
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 from app.services.strategy_core_mandate import CORE_MANDATE_ADVISORY_LOCK
 from app.services.strategy_core_submission_gate import (
@@ -54,19 +56,27 @@ from app.services.strategy_halt_identity import INSTRUMENT_HALT_SYMBOL_SQL
 #: versioned Nasdaq/eToro halt-symbol identity rule.
 CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v2"
 
-#: The one session calendar this repo has is US
-#: (``app/services/market_calendar.py::us_market_status``), so the only asset class
-#: whose session we can honestly evaluate is ``us_equity``.
+#: The venue allow-list and the session predicate both live in
+#: ``app/services/market_session_support.py``.
 #:
-#: ⚠ The allow-list and its rationale moved to ``app/services/market_session_support.py``
-#: (#2312, 2026-09-14) so the #2833 SELECTION path can refuse a sleeve this module
-#: would refuse at submission time.  It could not import the predicate from here:
-#: ``strategy_core_selection`` -> this module -> ``strategy_core_mandate`` ->
-#: ``strategy_core_selection`` is a real cycle.  A second copy of the allow-list
-#: would drift, and the drift direction is "selection says ready, submission
-#: refuses" -- discovered only in an operator-attended session.
-
-_NY: Final = ZoneInfo("America/New_York")
+#: ⚠ The allow-list moved there (#2312, 2026-09-14) so the #2833 SELECTION path
+#: could refuse a sleeve this module would refuse at submission time.  It could not
+#: import the predicate from here: ``strategy_core_selection`` -> this module ->
+#: ``strategy_core_mandate`` -> ``strategy_core_selection`` is a real cycle.  A
+#: second copy of the allow-list would drift, and the drift direction is "selection
+#: says ready, submission refuses" -- discovered only in an operator-attended session.
+#:
+#: ⚠ The session PREDICATE followed it (#2312, 2026-09-16): this module's
+#: ``_session_is_open`` hardcoded ``America/New_York`` and the NYSE hours, which was
+#: correct while ``us_equity`` was the only admitted class and is not a shape that
+#: generalises.  ``venue_session_is_open`` dispatches on ``asset_class``; for
+#: ``us_equity`` it is the same calendar, the same inclusive-open/exclusive-close
+#: boundaries and the same result.  ⚠⚠ ``SESSION_SUPPORTED_ASSET_CLASSES`` is
+#: unchanged at ``{"us_equity"}`` -- it is now DERIVED as "has a calendar AND has
+#: halt coverage", and the UK has only the first, because ``_PREFLIGHT_SQL`` below
+#: reads halts from ``nasdaq_trader_rss`` alone.  So
+#: ``CORE_PREFLIGHT_POLICY_VERSION`` does not move: the admission set it freezes is
+#: byte-identical.
 
 #: Tolerated clock skew on a producer timestamp, matching
 #: ``strategy_paper_executor._age_ok``.  A row stamped further into the future than
@@ -260,25 +270,6 @@ LEFT JOIN quotes q ON q.instrument_id = i.instrument_id
 """
 
 
-def _session_is_open(now: datetime) -> bool:
-    """Is the US regular session open at ``now``?
-
-    Shape copied from ``strategy_paper_executor._session_is_open`` rather than
-    imported: that name is module-private inside a 1,300-line ALPHA executor, and
-    #2603 scope item 5 is "explicitly NO alpha input".  Importing a private name to
-    save four lines would couple the core arm to the module it must not read.
-
-    Half-day closes at 13:00 ET, otherwise 16:00; open is inclusive at 09:30 and
-    close exclusive, so a submission at the closing bell refuses.
-    """
-    local = now.astimezone(_NY)
-    status = us_market_status(local.date())
-    if status == "closed":
-        return False
-    close_at = time(13, 0) if status == "half_day" else time(16, 0)
-    return time(9, 30) <= local.time().replace(tzinfo=None) < close_at
-
-
 def _age_ok(observed_at: datetime, *, now: datetime, max_seconds: int) -> bool:
     """Is ``observed_at`` neither implausibly future nor older than the bound?
 
@@ -460,8 +451,13 @@ def decide_core_preflight(
     unsupported_venue = session_support_reason(observation.asset_class)
     if unsupported_venue is not None:
         return refuse("core_unsupported_market_session", unsupported_venue)
-    if not _session_is_open(now):
-        return refuse("core_market_session_closed", now.astimezone(_NY).isoformat())
+    # ⚠ Reached only for an ADMITTED venue -- `session_support_reason` is checked
+    # immediately above -- so the dispatch below always finds a calendar.  The
+    # detail reports the VENUE's own civil time, not New York's: on a UK refusal
+    # a New York stamp is three hours of arithmetic the operator has to do to see
+    # why a 16:30 London cutoff had passed.
+    if not venue_session_is_open(observation.asset_class, now):
+        return refuse("core_market_session_closed", venue_local_now(observation.asset_class, now).isoformat())
 
     # Feed health BEFORE the halt itself: reporting "halted" on the strength of a
     # feed we have just failed to trust blames the instrument for an infrastructure

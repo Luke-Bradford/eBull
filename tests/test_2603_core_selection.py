@@ -119,7 +119,11 @@ def test_a_verdict_naming_a_venue_we_cannot_session_check_is_refused_at_declarat
     # #2833 completes" here would point the operator at a wait that will never clear it --
     # the study has answered; its answer is one this repo cannot execute.
     assert selection.declared_outcome == "pass"
-    with pytest.raises(CoreSelectionError, match="has no trading-session calendar"):
+    # ⚠ The REASON changed on 2026-09-16 (#2312) while the refusal did not: the LSE
+    # calendar now exists, so `uk_equity` is held out by the missing halt feed, not
+    # by a missing calendar. Matching the old phrase here would pass only until the
+    # message told the truth.
+    with pytest.raises(CoreSelectionError, match="no halt feed covers that venue"):
         require_selected_core_instrument(_candidate_connection(), instrument_id=unexecutable_id)
 
 
