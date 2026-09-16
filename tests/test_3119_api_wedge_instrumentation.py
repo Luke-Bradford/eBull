@@ -13,11 +13,12 @@ tier. The tell is pytest exit 5 with ``0 items`` under ``-m "not db"``.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import pathlib
 import signal
 import socket
-import sys
 import time
 
 import anyio
@@ -326,20 +327,47 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def test_main_module_registers_activation_before_migrations() -> None:
+def _lifespan_body() -> list[ast.stmt]:
+    """The statements of ``app.main.lifespan``, parsed rather than grepped."""
+    source = (pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan":
+            return node.body
+    raise AssertionError("app.main.lifespan not found")
+
+
+def test_dump_handler_is_registered_before_any_other_startup_work() -> None:
     """Placement is load-bearing: a startup that hangs is one of the shapes the
-    2026-09-16 wedge could have been, and registering after the expensive work
-    would leave exactly that shape uncovered."""
-    source = (
-        __import__("pathlib").Path(sys.modules["app.main"].__file__).read_text(encoding="utf-8")
-        if "app.main" in sys.modules
-        else None
-    )
-    if source is None:
-        import pathlib
+    2026-09-16 wedge could have been, so registering after the expensive work
+    would leave exactly that shape uncovered.
 
-        source = (pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    Checked structurally over the parsed lifespan rather than by searching the
+    source text, so renaming a log message cannot silently pass or fail it.
+    """
+    body = _lifespan_body()
+    first = body[0]
+    assert isinstance(first, ast.If), "the guarded registration must be the first statement in lifespan"
 
-    activate_at = source.index("served_build.activate")
-    migrations_at = source.index("Running pending migrations")
-    assert activate_at < migrations_at
+    # Attribute names, not call targets: ``publish_identity`` is handed to
+    # ``to_thread`` as a reference rather than invoked directly, which is the
+    # whole point of the split.
+    referenced = {node.attr for node in ast.walk(first) if isinstance(node, ast.Attribute)}
+    assert "register_dump_handler" in referenced
+    assert "publish_identity" in referenced
+
+    # Everything else in lifespan must come after it, migrations included.
+    rest = ast.dump(ast.Module(body=body[1:], type_ignores=[]))
+    assert "register_dump_handler" not in rest
+
+
+def test_identity_publication_is_not_awaited_on_the_startup_path() -> None:
+    """Three git subprocesses bound at 5s each must not gate every boot.
+
+    ``publish_identity`` may appear only inside a ``create_task``; an ``await``
+    on it would put up to 15s of subprocess time on the critical path — the
+    instrumentation becoming the stall it exists to detect (PR #3133 WARNING).
+    """
+    first = _lifespan_body()[0]
+    for node in ast.walk(first):
+        if isinstance(node, ast.Await):
+            assert "publish_identity" not in ast.dump(node)

@@ -135,17 +135,50 @@ def _write_sidecar(path: Path, record: dict[str, Any]) -> None:
         raise
 
 
-def activate(data_dir: Path | None = None) -> dict[str, Any] | None:
-    """Register the dump handler and publish the sidecar. Never raises.
+def running_under_test() -> bool:
+    """Whether this process is a test runner rather than a serving worker.
 
-    Returns the record written, or ``None`` if nothing could be published.
-    Idempotent: a reload re-registers and rewrites, which is what a new worker
-    should do.
+    The sidecar names ONE serving worker, and every in-process client harness
+    drives the real lifespan — so a test run would otherwise overwrite the
+    running worker's pid with its own and send a later probe at a dead process.
+
+    ⚠ Deliberately a ``sys.modules`` check and not a settings flag. A flag lives
+    in ``.env``, which is the one input that exists only on the operator's
+    machine and cannot be exercised by any fixture — #2286 is the precedent
+    where exactly that shape behaved differently against the real file than
+    against every test. A flag that is wrong fails silently in the direction
+    that matters here; an import check cannot be misconfigured at all.
+    """
+    return "pytest" in sys.modules
+
+
+def register_dump_handler(data_dir: Path | None = None) -> bool:
+    """Point ``SIGUSR1`` at a thread dump. Fast, and never raises.
+
+    ⚠ Split from :func:`publish_identity` deliberately, and called FIRST.
+    This half opens one file; the other half runs three git subprocesses whose
+    bounds sum to 15s. Putting the subprocesses on the startup critical path
+    would let a slow filesystem delay every boot — an instrumentation feature
+    becoming the stall it exists to detect. The handler is what a startup wedge
+    needs, so it is the half that goes early.
     """
     try:
         resolved = data_dir if data_dir is not None else resolve_data_dir()
-        ready = _register_faulthandler(resolved / DUMP_FILENAME)
-        record = build_record(data_dir=resolved, faulthandler_ready=ready)
+        return _register_faulthandler(resolved / DUMP_FILENAME)
+    except Exception:
+        logger.warning("served_build: could not register the thread-dump handler", exc_info=True)
+        return False
+
+
+def publish_identity(data_dir: Path | None = None, *, faulthandler_ready: bool = True) -> dict[str, Any] | None:
+    """Write the served-build sidecar. Runs git; never raises.
+
+    Returns the record written, or ``None`` if nothing could be published.
+    Idempotent: a reload rewrites it, which is what a new worker should do.
+    """
+    try:
+        resolved = data_dir if data_dir is not None else resolve_data_dir()
+        record = build_record(data_dir=resolved, faulthandler_ready=faulthandler_ready)
         _write_sidecar(resolved / SIDECAR_FILENAME, record)
     except Exception:
         logger.warning("served_build: could not publish served-build sidecar", exc_info=True)
@@ -158,3 +191,14 @@ def activate(data_dir: Path | None = None) -> dict[str, Any] | None:
         record["faulthandler"],
     )
     return record
+
+
+def activate(data_dir: Path | None = None) -> dict[str, Any] | None:
+    """Both halves, in order. Never raises.
+
+    The serving path calls the two halves separately so the git reads stay off
+    the startup critical path; this is the whole-thing entry point for tests
+    and for any caller that does not care about that ordering.
+    """
+    ready = register_dump_handler(data_dir)
+    return publish_identity(data_dir, faulthandler_ready=ready)

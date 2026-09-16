@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -113,11 +112,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # wedge had no detector for either half (stale code, then no responses), and
     # a startup that hangs is one of the shapes it could have been. Registering
     # after the expensive work would leave exactly that shape uncovered.
-    # Skipped under pytest: every TestClient drives this lifespan, and the
-    # sidecar names a single serving worker — a test process must not overwrite
-    # the real one's pid. The unit tests call ``activate`` directly instead.
-    if "pytest" not in sys.modules:
-        await asyncio.to_thread(served_build.activate)
+    #
+    # The two halves are dispatched differently on purpose. Registering the
+    # SIGUSR1 handler opens one file and is what a startup wedge actually needs,
+    # so it is awaited. Publishing the sidecar runs three git subprocesses whose
+    # bounds sum to 15s, so it is fired into the background — a slow filesystem
+    # must not be able to delay every boot through the feature that exists to
+    # detect stalls (review WARNING on PR #3133).
+    #
+    # Skipped under test: every in-process client harness drives this lifespan,
+    # and the sidecar names a single serving worker, so a test process must not
+    # overwrite the real one's pid. See served_build.running_under_test.
+    if not served_build.running_under_test():
+        dump_handler_ready = served_build.register_dump_handler()
+        # Held on app.state because a bare create_task reference may be
+        # garbage-collected mid-flight, which cancels the task silently.
+        app.state.served_build_task = asyncio.create_task(
+            asyncio.to_thread(served_build.publish_identity, faulthandler_ready=dump_handler_ready)
+        )
 
     logger.info("Running pending migrations...")
     applied = await asyncio.to_thread(run_migrations)
