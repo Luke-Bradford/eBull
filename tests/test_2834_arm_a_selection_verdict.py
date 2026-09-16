@@ -309,7 +309,6 @@ def test_a_declaration_stating_a_rule_the_code_does_not_implement_is_refused(tmp
 
 
 def test_an_empty_candidate_set_is_refused_rather_than_passing_vacuously(tmp_path) -> None:
-
     payload = _declaration()
     payload["candidate_ids"] = []
     path = tmp_path / "empty.json"
