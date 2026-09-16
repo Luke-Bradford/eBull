@@ -44,9 +44,9 @@ from app.services.fsds_class_shares import ingest_fsds_class_shares_archive
 from app.services.sec_bulk_download import (
     SEC_BASE_URL,
     BulkArchive,
-    _purge_archive_artifacts,
     download_bulk_archives,
     last_n_quarters,
+    purge_archive_artifacts,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.keep:
             # Sidecars go with the ZIP (#3113) — unlinking the .zip alone is
             # what left the 9 orphan fsds_*.sha256 files on the dev cache.
-            _purge_archive_artifacts(_bulk_dir(), path.name)
+            purge_archive_artifacts(_bulk_dir(), path.name)
 
     logger.info("FSDS history backfill: complete. quarters_ingested=%d rows_written=%d", ingested, total_written)
     return 0

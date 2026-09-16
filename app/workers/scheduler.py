@@ -9069,13 +9069,13 @@ def _cleanup_submissions_zip_after_drain(archive_path: Path) -> None:
     ``sec_n_port_ingest`` path, where it remains idempotent + missing-ok.
 
     #3113: "mirrors ``_delete_archive_after_success``" is now literal —
-    both delegate to ``sec_bulk_download._purge_archive_artifacts`` so
+    both delegate to ``sec_bulk_download.purge_archive_artifacts`` so
     the sidecars go with the ``.zip``. One rule written twice is how two
     expressions drift apart (#3110).
     """
-    from app.services.sec_bulk_download import _purge_archive_artifacts
+    from app.services.sec_bulk_download import purge_archive_artifacts
 
-    _purge_archive_artifacts(archive_path.parent, archive_path.name)
+    purge_archive_artifacts(archive_path.parent, archive_path.name)
 
 
 def mf_directory_sync(params: Mapping[str, Any]) -> None:

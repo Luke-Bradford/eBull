@@ -135,7 +135,7 @@ class TestS16CleanupSubmissionsZip:
 
     def test_removes_the_whole_artefact_set_not_just_the_zip(self, tmp_path: Path) -> None:
         # #3113 — "mirrors _delete_archive_after_success" is now literal: both
-        # delegate to _purge_archive_artifacts. One rule written twice is how
+        # delegate to purge_archive_artifacts. One rule written twice is how
         # two expressions drift apart (#3110).
         from app.workers.scheduler import _cleanup_submissions_zip_after_drain
 

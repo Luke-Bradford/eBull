@@ -18,7 +18,6 @@ from app.services.sec_bulk_download import (
     BulkDownloadResult,
     _download_one,
     _fatal_download_failures,
-    _purge_archive_artifacts,
     _zip_round_trip,
     build_bulk_archive_inventory,
     check_disk_space,
@@ -26,6 +25,7 @@ from app.services.sec_bulk_download import (
     last_n_13f_periods,
     last_n_quarters,
     measure_bandwidth_mbps,
+    purge_archive_artifacts,
 )
 
 # ---------------------------------------------------------------------------
@@ -259,19 +259,19 @@ class TestFatalDownloadFailures:
 
 class TestPreflightPurge:
     def test_purge_archive_artifacts_removes_zip_partial_and_sidecars(self, tmp_path: Path) -> None:
-        # _purge_archive_artifacts is the per-archive cleanup the
+        # purge_archive_artifacts is the per-archive cleanup the
         # ETag-keyed pre-flight calls when reuse is rejected. It must
         # delete the .zip, .partial, .sha256, and .etag in one call.
         (tmp_path / "submissions.zip").write_bytes(b"complete payload")
         (tmp_path / "submissions.zip.partial").write_bytes(b"resume tail")
         (tmp_path / "submissions.zip.sha256").write_text("deadbeef")
         (tmp_path / "submissions.zip.etag").write_text('"abc-123"')
-        _purge_archive_artifacts(tmp_path, "submissions.zip")
+        purge_archive_artifacts(tmp_path, "submissions.zip")
         for name in ("submissions.zip", "submissions.zip.partial", "submissions.zip.sha256", "submissions.zip.etag"):
             assert not (tmp_path / name).exists(), name
 
     def test_purge_archive_artifacts_no_op_when_missing(self, tmp_path: Path) -> None:
-        _purge_archive_artifacts(tmp_path, "absent.zip")
+        purge_archive_artifacts(tmp_path, "absent.zip")
 
 
 class TestDiskPreflight:

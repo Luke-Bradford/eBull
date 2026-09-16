@@ -460,6 +460,73 @@ class TestFilteredCallerOwnsOnlyItsOwnArchives:
         assert_archive_belongs_to_run(tmp_path, untouched, bootstrap_run_id=99)
 
     @pytest.mark.asyncio
+    async def test_archive_is_refused_when_its_manifest_entry_cannot_be_invalidated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bot review WARNING on PR #3132 — if neither the rewrite nor the
+        unlink fallback can remove the stale entry, the replacement must not
+        happen at all. Swallowing the failure restores the very hole
+        `_invalidate_manifest_entries` exists to close.
+        """
+        name = "insider_2026q1.zip"
+        manifest = tmp_path / RUN_MANIFEST_NAME
+        manifest.write_text(
+            json.dumps(
+                {
+                    "bootstrap_run_id": 99,
+                    "mode": "bulk",
+                    "archives": [
+                        {"name": name, "bytes_downloaded": 10, "error": None, "reuse_reason": "downloaded_in_run"}
+                    ],
+                }
+            )
+        )
+        zip_path = tmp_path / name
+        body = _build_zip_bytes()
+        zip_path.write_bytes(body)
+        _atomic_write_sidecar(Path(str(zip_path) + ".sha256"), _sha256_file(zip_path))
+        _atomic_write_sidecar(Path(str(zip_path) + ".etag"), '"stale"')
+
+        monkeypatch.setattr(mod, "_invalidate_manifest_entries", lambda *a, **k: False)
+
+        archive = BulkArchive(name=name, url="https://example.test/archive.zip")
+        transport = httpx.MockTransport(_make_handler_with_etag(archive.url, body, etag='"moved"'))
+        async with httpx.AsyncClient(transport=transport) as client:
+            decisions = await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+
+        assert decisions[name].reason == "manifest_invalidation_failed"
+        # Local bytes untouched, so the entry that describes them stays true.
+        assert zip_path.read_bytes() == body
+        assert_archive_belongs_to_run(tmp_path, name, bootstrap_run_id=99)
+
+    @pytest.mark.asyncio
+    async def test_refused_archive_is_reported_as_an_error_not_downloaded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        name = "insider_2026q1.zip"
+        body = _build_zip_bytes()
+        zip_path = tmp_path / name
+        zip_path.write_bytes(body)
+        _atomic_write_sidecar(Path(str(zip_path) + ".sha256"), _sha256_file(zip_path))
+        _atomic_write_sidecar(Path(str(zip_path) + ".etag"), '"stale"')
+        monkeypatch.setattr(mod, "_invalidate_manifest_entries", lambda *a, **k: False)
+
+        url = "https://example.test/archive.zip"
+        _patch_client(monkeypatch, httpx.MockTransport(_make_handler_with_etag(url, body, etag='"moved"')))
+        result = await download_bulk_archives(
+            target_dir=tmp_path,
+            user_agent="test",
+            archives=[BulkArchive(name=name, url=url)],
+            bandwidth_threshold_mbps=0,
+        )
+        refused = [r for r in result.archives if r.error is not None]
+        assert len(refused) == 1
+        assert "could not invalidate the run-manifest entry" in (refused[0].error or "")
+        assert refused[0].bytes_downloaded == 0
+        # The refusal must not have replaced the local bytes.
+        assert zip_path.read_bytes() == body
+
+    @pytest.mark.asyncio
     async def test_reused_archive_keeps_its_manifest_entry(self, tmp_path: Path) -> None:
         # Reuse means the bytes did not change, so the entry still describes
         # what is on disk. Invalidating here would break a legitimate resume.
@@ -903,7 +970,7 @@ class TestArchiveNameValidation:
             _validate_archive_name(name)
 
     def test_purge_rejects_traversal_name_without_touching_outside_dir(self, tmp_path: Path) -> None:
-        from app.services.sec_bulk_download import _purge_archive_artifacts
+        from app.services.sec_bulk_download import purge_archive_artifacts
 
         outside = tmp_path.parent / "must_survive.zip"
         outside.write_bytes(b"sentinel")
@@ -912,7 +979,7 @@ class TestArchiveNameValidation:
         target = tmp_path / "bulk"
         target.mkdir()
         with pytest.raises(ValueError):
-            _purge_archive_artifacts(target, "../must_survive.zip")
+            purge_archive_artifacts(target, "../must_survive.zip")
         assert outside.exists()
         outside.unlink()
 

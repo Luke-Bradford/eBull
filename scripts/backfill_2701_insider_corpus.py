@@ -34,7 +34,11 @@ archives = build_bulk_archive_inventory(n_quarters_insider=200)
 insider = [a for a in archives if a.name.startswith("insider_")]
 target = resolve_data_dir() / "sec" / "bulk"
 target.mkdir(parents=True, exist_ok=True)
-print(f"full inventory: {len(archives)} archives; insider span {insider[-1].name} .. {insider[0].name}", flush=True)
+print(
+    f"fetching {len(insider)} insider archives (of {len(archives)} in the full inventory); "
+    f"span {insider[-1].name} .. {insider[0].name}",
+    flush=True,
+)
 
 result = asyncio.run(download_bulk_archives(target_dir=target, user_agent=settings.sec_user_agent, archives=insider))
 ok = [r for r in result.archives if r.error is None]

@@ -480,7 +480,7 @@ def _read_sidecar(path: Path) -> str | None:
         return None
 
 
-def _invalidate_manifest_entries(target_dir: Path, archive_names: Sequence[str]) -> None:
+def _invalidate_manifest_entries(target_dir: Path, archive_names: Sequence[str]) -> bool:
     """Drop ``archive_names`` from the run manifest, keeping every other entry.
 
     Called by a FILTERED (non-pruning) preflight at the moment it decides to
@@ -496,22 +496,32 @@ def _invalidate_manifest_entries(target_dir: Path, archive_names: Sequence[str])
     BEFORE publishing new bytes, so an interruption leaves the archive
     uncertified rather than certified-wrong.
 
-    ⚠ On ANY failure to rewrite, the manifest is unlinked outright. A manifest
-    we could not correct is worse than none: "missing" fails closed and loudly
-    at the precondition, a stale entry fails open and silently.
+    ⚠ On failure to rewrite, the manifest is unlinked outright. A manifest we
+    could not correct is worse than none: "missing" fails closed and loudly at
+    the precondition, a stale entry fails open and silently.
+
+    ⚠⚠ Returns **False when the entry is still standing** — rewrite failed AND
+    the unlink fallback failed too. The caller MUST NOT replace the bytes in
+    that case; leaving the archive alone keeps the manifest's claim true, which
+    is the only safe state left. Swallowing this would restore the exact
+    "resumed bootstrap ingests foreign bytes as its own" hole the function
+    exists to close (bot review WARNING, PR #3132).
+
+    Returns True when nothing needed dropping, the entry was dropped, or the
+    manifest is gone — all states in which no stale claim survives.
     """
     import json
 
     manifest_path = target_dir / RUN_MANIFEST_NAME
     if not manifest_path.exists():
-        return
+        return True
     dropping = set(archive_names)
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         entries = manifest.get("archives", [])
         kept = [entry for entry in entries if entry.get("name") not in dropping]
         if len(kept) == len(entries):
-            return
+            return True
         manifest["archives"] = kept
         tmp_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
         tmp_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -521,6 +531,7 @@ def _invalidate_manifest_entries(target_dir: Path, archive_names: Sequence[str])
             len(entries) - len(kept),
             manifest_path,
         )
+        return True
     except (OSError, ValueError) as exc:
         logger.warning(
             "preflight: could not rewrite %s (%s) — unlinking it so provenance fails closed",
@@ -529,8 +540,16 @@ def _invalidate_manifest_entries(target_dir: Path, archive_names: Sequence[str])
         )
         try:
             manifest_path.unlink(missing_ok=True)
+            return True
         except OSError as unlink_exc:
-            logger.warning("preflight: failed to unlink %s: %s", manifest_path, unlink_exc)
+            logger.error(
+                "preflight: could not unlink %s either (%s) — refusing to replace %s; "
+                "the manifest entry would keep certifying bytes that are no longer there",
+                manifest_path,
+                unlink_exc,
+                sorted(dropping),
+            )
+            return False
 
 
 def _local_digest_certifies(zip_path: Path) -> bool:
@@ -555,7 +574,7 @@ def _local_digest_certifies(zip_path: Path) -> bool:
         return False
 
 
-def _purge_archive_artifacts(target_dir: Path, archive_name: str) -> None:
+def purge_archive_artifacts(target_dir: Path, archive_name: str) -> None:
     """Delete the .zip, .partial, .sha256 + .etag sidecars for ``archive_name``.
 
     Used by the ETag-keyed pre-flight when a re-download is required so
@@ -635,6 +654,9 @@ async def _head_etag(
         # No sidecar comparison possible → caller must re-download.
         return None
     return etag
+
+
+_MANIFEST_INVALIDATION_FAILED: Final[str] = "manifest_invalidation_failed"
 
 
 @dataclass(frozen=True)
@@ -844,16 +866,31 @@ async def _preflight_etag_keyed_reuse(
             )
         else:
             decision = await _preflight_archive_reuse_decision(client, archive, target_dir, rate_limiter=rate_limiter)
-        decisions[archive.name] = decision
-        if not decision.reused:
+        if not decision.reused and not prune_strays and not _invalidate_manifest_entries(target_dir, [archive.name]):
             # Marker first, bytes second (#3112): a filtered caller that is
             # about to replace an archive named in a paused bootstrap's
             # manifest must invalidate that entry, or the resumed bootstrap
             # accepts the replacement as its own run's input. A pruning caller
             # already unlinked the whole manifest above.
-            if not prune_strays:
-                _invalidate_manifest_entries(target_dir, [archive.name])
-            _purge_archive_artifacts(target_dir, archive.name)
+            #
+            # Invalidation could neither rewrite nor unlink the manifest, so a
+            # stale claim would survive the replacement. Refuse the archive
+            # instead: the local bytes stay, the entry stays true, and the
+            # caller reports a per-archive error rather than silently
+            # laundering foreign bytes into someone else's bootstrap run.
+            decision = _ArchiveReuseDecision(
+                name=archive.name,
+                reused=False,
+                sec_etag=decision.sec_etag,
+                reason=_MANIFEST_INVALIDATION_FAILED,
+            )
+            decisions[archive.name] = decision
+            logger.error("preflight: %s refused — %s", archive.name, _MANIFEST_INVALIDATION_FAILED)
+            continue
+
+        decisions[archive.name] = decision
+        if not decision.reused:
+            purge_archive_artifacts(target_dir, archive.name)
             logger.info(
                 "preflight: %s will re-download (reason=%s)",
                 archive.name,
@@ -888,7 +925,7 @@ async def _preflight_etag_keyed_reuse(
         if base_name in expected_names:
             continue
         # Also clean the matching sidecars if any.
-        _purge_archive_artifacts(target_dir, base_name)
+        purge_archive_artifacts(target_dir, base_name)
 
     return decisions
 
@@ -1184,7 +1221,7 @@ async def _download_one(
         # ``downloaded_in_run``, the provenance value
         # ``assert_archive_belongs_to_run`` accepts. The branch is
         # reachable whenever the preflight's purge failed
-        # (``_purge_archive_artifacts`` logs and swallows ``OSError``),
+        # (``purge_archive_artifacts`` logs and swallows ``OSError``),
         # i.e. exactly when the local bytes are the stale ones. Without
         # the sidecar match we would certify bytes we did not fetch.
         return ArchiveDownloadResult(
@@ -1641,6 +1678,20 @@ async def download_bulk_archives(
 
         async def _resolve(archive: BulkArchive) -> ArchiveDownloadResult:
             decision = reuse_decisions.get(archive.name)
+            if decision is not None and decision.reason == _MANIFEST_INVALIDATION_FAILED:
+                # The preflight could not invalidate this archive's manifest
+                # entry, so replacing its bytes would leave a stale claim
+                # certifying them. Report an error instead of downloading —
+                # the local file and the entry that describes it both stand.
+                return ArchiveDownloadResult(
+                    name=archive.name,
+                    path=None,
+                    bytes_downloaded=0,
+                    error=(
+                        f"refused: could not invalidate the run-manifest entry for {archive.name}; "
+                        f"replacing it would leave stale provenance"
+                    ),
+                )
             if decision is not None and decision.reused:
                 # 0-byte reuse: surface as a successful skip so the
                 # manifest writer records it with provenance

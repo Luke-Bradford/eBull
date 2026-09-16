@@ -160,15 +160,15 @@ def _delete_archive_after_success(archive: Path) -> None:
     swallowed inside the shared helper so a permission glitch does not
     unwind the commit.
 
-    Delegates to ``sec_bulk_download._purge_archive_artifacts``, which
+    Delegates to ``sec_bulk_download.purge_archive_artifacts``, which
     is the single expression of "what an archive's files are". Unlinking
     the ``.zip`` alone is what left 10 orphan ``.sha256`` sidecars on
     the dev cache (#3113) — and an orphan sidecar is precisely the
     fetched-versus-consumed signal this ticket wants to surface.
     """
-    from app.services.sec_bulk_download import _purge_archive_artifacts
+    from app.services.sec_bulk_download import purge_archive_artifacts
 
-    _purge_archive_artifacts(archive.parent, archive.name)
+    purge_archive_artifacts(archive.parent, archive.name)
 
 
 # ---------------------------------------------------------------------------
