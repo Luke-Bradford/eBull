@@ -325,12 +325,13 @@ class TestPreflightDecision:
     async def test_preflight_wipes_stale_run_manifest(self, tmp_path: Path) -> None:
         # Pre-existing run-manifest from a prior bootstrap must be
         # removed up front; write_run_manifest re-stamps later.
+        # ``prune_strays=True`` is the directory-owning caller (#3113).
         manifest = tmp_path / RUN_MANIFEST_NAME
         manifest.write_text('{"bootstrap_run_id": 99, "mode": "bulk", "archives": []}')
         archive = BulkArchive(name="archive.zip", url="https://example.test/archive.zip")
         transport = httpx.MockTransport(_make_handler_with_etag(archive.url, _build_zip_bytes(), etag='"e1"'))
         async with httpx.AsyncClient(transport=transport) as client:
-            await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+            await _preflight_etag_keyed_reuse(client, [archive], tmp_path, prune_strays=True)
         assert not manifest.exists()
 
     @pytest.mark.asyncio
@@ -345,10 +346,254 @@ class TestPreflightDecision:
         (Path(str(stray) + ".etag")).write_text('"old"')
         transport = httpx.MockTransport(_make_handler_with_etag(archive.url, _build_zip_bytes(), etag='"e1"'))
         async with httpx.AsyncClient(transport=transport) as client:
-            await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+            await _preflight_etag_keyed_reuse(client, [archive], tmp_path, prune_strays=True)
         assert not stray.exists()
         assert not Path(str(stray) + ".sha256").exists()
         assert not Path(str(stray) + ".etag").exists()
+
+
+# ---------------------------------------------------------------------------
+# #3113 — ``archives=`` means "fetch these", not "delete everything else".
+#
+# What the default REJECTS relative to the pre-#3113 behaviour: nothing that a
+# DIRECTORY-OWNING call used to remove (those pass prune_strays=True and are
+# covered above). What stops happening is collateral deletion by a FILTERED
+# caller — the class that deleted companyfacts.zip, submissions.zip and 14
+# fsnds archives on 2026-08-14 (#2701) and that
+# scripts/backfill_fsds_class_shares_history.py still carried.
+# ---------------------------------------------------------------------------
+
+
+class TestFilteredCallerOwnsOnlyItsOwnArchives:
+    @pytest.mark.asyncio
+    async def test_filtered_call_leaves_unrelated_archives_intact(self, tmp_path: Path) -> None:
+        archive = BulkArchive(name="fsds_2024q1.zip", url="https://example.test/fsds_2024q1.zip")
+        # Stand-ins for the real cache: the two nightly archives and one
+        # member of the #2701 insider research corpus.
+        bystanders = ("submissions.zip", "companyfacts.zip", "insider_2006q1.zip")
+        for name in bystanders:
+            (tmp_path / name).write_bytes(b"retained")
+            Path(str(tmp_path / name) + ".sha256").write_text("digest")
+        transport = httpx.MockTransport(_make_handler_with_etag(archive.url, _build_zip_bytes(), etag='"e1"'))
+        async with httpx.AsyncClient(transport=transport) as client:
+            await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+        for name in bystanders:
+            assert (tmp_path / name).exists(), name
+            assert Path(str(tmp_path / name) + ".sha256").exists(), name
+
+    @pytest.mark.asyncio
+    async def test_filtered_call_leaves_run_manifest_intact(self, tmp_path: Path) -> None:
+        # ``write_run_manifest`` is called only from the bootstrap stage, so a
+        # filtered caller that unlinked the manifest would strand a paused
+        # bootstrap with no provenance stamp and no way to rewrite one.
+        manifest = tmp_path / RUN_MANIFEST_NAME
+        manifest.write_text('{"bootstrap_run_id": 99, "mode": "bulk", "archives": []}')
+        archive = BulkArchive(name="fsds_2024q1.zip", url="https://example.test/fsds_2024q1.zip")
+        transport = httpx.MockTransport(_make_handler_with_etag(archive.url, _build_zip_bytes(), etag='"e1"'))
+        async with httpx.AsyncClient(transport=transport) as client:
+            await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+        assert manifest.exists()
+
+    @pytest.mark.asyncio
+    async def test_named_archive_failing_reuse_is_still_purged_when_filtered(self, tmp_path: Path) -> None:
+        # The per-archive purge is NOT gated — an archive the caller named is
+        # inside its declared scope, so a stale copy of it must still go.
+        archive = BulkArchive(name="fsds_2024q1.zip", url="https://example.test/fsds_2024q1.zip")
+        zip_path = tmp_path / archive.name
+        zip_path.write_bytes(b"stale-bytes")
+        _atomic_write_sidecar(Path(str(zip_path) + ".sha256"), "not-the-digest")
+        _atomic_write_sidecar(Path(str(zip_path) + ".etag"), '"stale"')
+        transport = httpx.MockTransport(_make_handler_with_etag(archive.url, _build_zip_bytes(), etag='"e1"'))
+        async with httpx.AsyncClient(transport=transport) as client:
+            decisions = await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+        assert decisions[archive.name].reused is False
+        assert not zip_path.exists()
+        assert not Path(str(zip_path) + ".sha256").exists()
+
+    @pytest.mark.asyncio
+    async def test_replacing_an_archive_drops_its_manifest_entry_and_keeps_the_rest(self, tmp_path: Path) -> None:
+        """#3113 Codex ckpt-2 — preserving the manifest is not enough.
+
+        Scenario: bootstrap run 99 downloaded `insider_2026q1.zip`, then paused.
+        The insider backfill runs with a filtered inventory that OVERLAPS it and
+        SEC's ETag has moved, so the preflight purges and re-downloads. The
+        manifest entry claims run 99 downloaded these bytes;
+        ``assert_archive_belongs_to_run`` checks run id, name and reuse_reason
+        and never the content, so the resumed bootstrap would ingest the
+        backfill's bytes as its own. The entry must go — and only that entry.
+        """
+        replaced = "insider_2026q1.zip"
+        untouched = "companyfacts.zip"
+        manifest = tmp_path / RUN_MANIFEST_NAME
+        manifest.write_text(
+            json.dumps(
+                {
+                    "bootstrap_run_id": 99,
+                    "mode": "bulk",
+                    "archives": [
+                        {"name": replaced, "bytes_downloaded": 10, "error": None, "reuse_reason": "downloaded_in_run"},
+                        {"name": untouched, "bytes_downloaded": 20, "error": None, "reuse_reason": "downloaded_in_run"},
+                    ],
+                }
+            )
+        )
+        # Local copy carries a matching digest but a STALE etag, so the
+        # decision is etag_mismatch → purge + re-download.
+        zip_path = tmp_path / replaced
+        body = _build_zip_bytes()
+        zip_path.write_bytes(body)
+        _atomic_write_sidecar(Path(str(zip_path) + ".sha256"), _sha256_file(zip_path))
+        _atomic_write_sidecar(Path(str(zip_path) + ".etag"), '"stale"')
+
+        archive = BulkArchive(name=replaced, url="https://example.test/archive.zip")
+        transport = httpx.MockTransport(_make_handler_with_etag(archive.url, body, etag='"moved"'))
+        async with httpx.AsyncClient(transport=transport) as client:
+            decisions = await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+
+        assert decisions[replaced].reason == "etag_mismatch"
+        names = {entry["name"] for entry in json.loads(manifest.read_text())["archives"]}
+        assert names == {untouched}
+        with pytest.raises(RuntimeError, match="not in current-run manifest"):
+            assert_archive_belongs_to_run(tmp_path, replaced, bootstrap_run_id=99)
+        # The bystander's provenance survives — that is the whole point of not
+        # unlinking the manifest wholesale.
+        assert_archive_belongs_to_run(tmp_path, untouched, bootstrap_run_id=99)
+
+    @pytest.mark.asyncio
+    async def test_archive_is_refused_when_its_manifest_entry_cannot_be_invalidated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bot review WARNING on PR #3132 — if neither the rewrite nor the
+        unlink fallback can remove the stale entry, the replacement must not
+        happen at all. Swallowing the failure restores the very hole
+        `_invalidate_manifest_entries` exists to close.
+        """
+        name = "insider_2026q1.zip"
+        manifest = tmp_path / RUN_MANIFEST_NAME
+        manifest.write_text(
+            json.dumps(
+                {
+                    "bootstrap_run_id": 99,
+                    "mode": "bulk",
+                    "archives": [
+                        {"name": name, "bytes_downloaded": 10, "error": None, "reuse_reason": "downloaded_in_run"}
+                    ],
+                }
+            )
+        )
+        zip_path = tmp_path / name
+        body = _build_zip_bytes()
+        zip_path.write_bytes(body)
+        _atomic_write_sidecar(Path(str(zip_path) + ".sha256"), _sha256_file(zip_path))
+        _atomic_write_sidecar(Path(str(zip_path) + ".etag"), '"stale"')
+
+        monkeypatch.setattr(mod, "_invalidate_manifest_entries", lambda *a, **k: False)
+
+        archive = BulkArchive(name=name, url="https://example.test/archive.zip")
+        transport = httpx.MockTransport(_make_handler_with_etag(archive.url, body, etag='"moved"'))
+        async with httpx.AsyncClient(transport=transport) as client:
+            decisions = await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+
+        assert decisions[name].reason == "manifest_invalidation_failed"
+        # Local bytes untouched, so the entry that describes them stays true.
+        assert zip_path.read_bytes() == body
+        assert_archive_belongs_to_run(tmp_path, name, bootstrap_run_id=99)
+
+    @pytest.mark.asyncio
+    async def test_refused_archive_is_reported_as_an_error_not_downloaded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        name = "insider_2026q1.zip"
+        body = _build_zip_bytes()
+        zip_path = tmp_path / name
+        zip_path.write_bytes(body)
+        _atomic_write_sidecar(Path(str(zip_path) + ".sha256"), _sha256_file(zip_path))
+        _atomic_write_sidecar(Path(str(zip_path) + ".etag"), '"stale"')
+        monkeypatch.setattr(mod, "_invalidate_manifest_entries", lambda *a, **k: False)
+
+        url = "https://example.test/archive.zip"
+        _patch_client(monkeypatch, httpx.MockTransport(_make_handler_with_etag(url, body, etag='"moved"')))
+        result = await download_bulk_archives(
+            target_dir=tmp_path,
+            user_agent="test",
+            archives=[BulkArchive(name=name, url=url)],
+            bandwidth_threshold_mbps=0,
+        )
+        refused = [r for r in result.archives if r.error is not None]
+        assert len(refused) == 1
+        assert "could not invalidate the run-manifest entry" in (refused[0].error or "")
+        assert refused[0].bytes_downloaded == 0
+        # The refusal must not have replaced the local bytes.
+        assert zip_path.read_bytes() == body
+
+    @pytest.mark.asyncio
+    async def test_reused_archive_keeps_its_manifest_entry(self, tmp_path: Path) -> None:
+        # Reuse means the bytes did not change, so the entry still describes
+        # what is on disk. Invalidating here would break a legitimate resume.
+        name = "insider_2026q1.zip"
+        manifest = tmp_path / RUN_MANIFEST_NAME
+        manifest.write_text(
+            json.dumps(
+                {
+                    "bootstrap_run_id": 99,
+                    "mode": "bulk",
+                    "archives": [
+                        {"name": name, "bytes_downloaded": 10, "error": None, "reuse_reason": "downloaded_in_run"}
+                    ],
+                }
+            )
+        )
+        zip_path = tmp_path / name
+        body = _build_zip_bytes()
+        zip_path.write_bytes(body)
+        _atomic_write_sidecar(Path(str(zip_path) + ".sha256"), _sha256_file(zip_path))
+        _atomic_write_sidecar(Path(str(zip_path) + ".etag"), '"same"')
+
+        archive = BulkArchive(name=name, url="https://example.test/archive.zip")
+        transport = httpx.MockTransport(_make_handler_with_etag(archive.url, body, etag='"same"'))
+        async with httpx.AsyncClient(transport=transport) as client:
+            decisions = await _preflight_etag_keyed_reuse(client, [archive], tmp_path)
+
+        assert decisions[name].reused is True
+        assert_archive_belongs_to_run(tmp_path, name, bootstrap_run_id=99)
+
+    def test_only_the_inventory_owning_call_site_prunes(self) -> None:
+        """Source invariant: ``prune_strays=True`` appears at exactly one call
+        site, and that site passes no ``archives=``.
+
+        A comment cannot hold this — the #2701 incident was "fixed" with a
+        docstring on one caller and the next caller inherited the hazard
+        anyway. Grepping the call sites is what actually binds the next one.
+        """
+        import ast
+
+        repo_root = Path(__file__).resolve().parents[1]
+        offenders: list[str] = []
+        pruning_sites: list[str] = []
+        for directory in ("app", "scripts"):
+            for py in sorted((repo_root / directory).rglob("*.py")):
+                text = py.read_text(encoding="utf-8")
+                if "download_bulk_archives(" not in text:
+                    continue
+                for node in ast.walk(ast.parse(text)):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    callee = node.func
+                    name = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", None)
+                    if name != "download_bulk_archives":
+                        continue
+                    kwargs = {kw.arg for kw in node.keywords}
+                    prunes = any(
+                        kw.arg == "prune_strays" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                        for kw in node.keywords
+                    )
+                    if not prunes:
+                        continue
+                    pruning_sites.append(f"{py.name}:{node.lineno}")
+                    if "archives" in kwargs:
+                        offenders.append(f"{py.name}:{node.lineno} — prune_strays=True with a filtered archives=")
+        assert offenders == [], offenders
+        assert [site.split(":")[0] for site in pruning_sites] == ["sec_bulk_download.py"], pruning_sites
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +970,7 @@ class TestArchiveNameValidation:
             _validate_archive_name(name)
 
     def test_purge_rejects_traversal_name_without_touching_outside_dir(self, tmp_path: Path) -> None:
-        from app.services.sec_bulk_download import _purge_archive_artifacts
+        from app.services.sec_bulk_download import purge_archive_artifacts
 
         outside = tmp_path.parent / "must_survive.zip"
         outside.write_bytes(b"sentinel")
@@ -734,7 +979,7 @@ class TestArchiveNameValidation:
         target = tmp_path / "bulk"
         target.mkdir()
         with pytest.raises(ValueError):
-            _purge_archive_artifacts(target, "../must_survive.zip")
+            purge_archive_artifacts(target, "../must_survive.zip")
         assert outside.exists()
         outside.unlink()
 

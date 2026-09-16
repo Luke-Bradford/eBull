@@ -18,6 +18,14 @@ Dry-run by default (lists the quarters + whether each ZIP is already cached).
 `--apply` downloads (each ~530 MB) + ingests. `--keep` retains the ZIPs
 (default: delete each after a successful ingest to bound disk). Resumable —
 a cached ZIP is re-used, and ingest is idempotent.
+
+⚠ This passes a FILTERED archive list, which is safe since #3113 gave
+`download_bulk_archives` an explicit `prune_strays` flag (default False).
+Before that, a filtered list also meant "delete every other .zip in the bulk
+dir": one `--apply` run here would have removed `submissions.zip`,
+`companyfacts.zip`, the 74-archive #2701 insider corpus and the fsnds
+monthlies — the same way a filtered insider list did on 2026-08-14 (#2701).
+Do NOT add `prune_strays=True` to the call below.
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ from app.services.sec_bulk_download import (
     BulkArchive,
     download_bulk_archives,
     last_n_quarters,
+    purge_archive_artifacts,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -116,7 +125,9 @@ def main(argv: list[str] | None = None) -> int:
         total_written += res.rows_written
         logger.info("  %s — written=%d no_row=%s", q, res.rows_written, res.curated_pairs_without_row)
         if not args.keep:
-            path.unlink(missing_ok=True)
+            # Sidecars go with the ZIP (#3113) — unlinking the .zip alone is
+            # what left the 9 orphan fsds_*.sha256 files on the dev cache.
+            purge_archive_artifacts(_bulk_dir(), path.name)
 
     logger.info("FSDS history backfill: complete. quarters_ingested=%d rows_written=%d", ingested, total_written)
     return 0

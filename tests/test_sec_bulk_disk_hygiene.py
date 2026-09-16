@@ -23,6 +23,49 @@ class TestDeleteArchiveAfterSuccess:
         # Must not raise — missing_ok=True.
         _delete_archive_after_success(archive)
 
+    def test_removes_the_whole_artefact_set_not_just_the_zip(self, tmp_path: Path) -> None:
+        # #3113 — unlinking the .zip alone is what left 10 orphan .sha256
+        # sidecars on the dev bulk cache. The orphan is not a correctness bug
+        # (the reuse preflight tests zip existence first) but it IS the
+        # fetched-versus-consumed signal this ticket wants to surface, so it
+        # must not be manufactured.
+        archive = tmp_path / "insider_2026q1.zip"
+        companions = _seed_archive_with_companions(archive)
+        _delete_archive_after_success(archive)
+        assert not archive.exists()
+        for path in companions:
+            assert not path.exists(), path.name
+
+    def test_leaves_a_different_archives_artefacts_alone(self, tmp_path: Path) -> None:
+        archive = tmp_path / "insider_2026q1.zip"
+        _seed_archive_with_companions(archive)
+        bystander = tmp_path / "submissions.zip"
+        bystander_companions = _seed_archive_with_companions(bystander)
+        _delete_archive_after_success(archive)
+        assert bystander.exists()
+        for path in bystander_companions:
+            assert path.exists(), path.name
+
+
+def _seed_archive_with_companions(archive: Path) -> tuple[Path, ...]:
+    """Write ``archive`` plus every file the purge helper must take with it.
+
+    The ``.tmp.<pid>`` entries are what ``_atomic_write_sidecar`` leaves when a
+    crash lands between the write and the rename — debris no fixed path covers
+    and that a bare ``*.tmp`` census does not see.
+    """
+    archive.write_bytes(b"x" * 100)
+    companions = (
+        archive.with_suffix(archive.suffix + ".partial"),
+        Path(str(archive) + ".sha256"),
+        Path(str(archive) + ".etag"),
+        Path(str(archive) + ".sha256.tmp.4242"),
+        Path(str(archive) + ".etag.tmp.4242"),
+    )
+    for path in companions:
+        path.write_text("x")
+    return companions
+
 
 def _build_minimal_archive(path: Path) -> None:
     buf = io.BytesIO()
@@ -89,6 +132,19 @@ class TestS16CleanupSubmissionsZip:
         # _delete_archive_after_success.
         _cleanup_submissions_zip_after_drain(archive)
         assert not archive.exists()
+
+    def test_removes_the_whole_artefact_set_not_just_the_zip(self, tmp_path: Path) -> None:
+        # #3113 — "mirrors _delete_archive_after_success" is now literal: both
+        # delegate to purge_archive_artifacts. One rule written twice is how
+        # two expressions drift apart (#3110).
+        from app.workers.scheduler import _cleanup_submissions_zip_after_drain
+
+        archive = tmp_path / "submissions.zip"
+        companions = _seed_archive_with_companions(archive)
+        _cleanup_submissions_zip_after_drain(archive)
+        assert not archive.exists()
+        for path in companions:
+            assert not path.exists(), path.name
 
 
 class TestListArchivesExcludesSidecars:

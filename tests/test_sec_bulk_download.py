@@ -18,7 +18,6 @@ from app.services.sec_bulk_download import (
     BulkDownloadResult,
     _download_one,
     _fatal_download_failures,
-    _purge_archive_artifacts,
     _zip_round_trip,
     build_bulk_archive_inventory,
     check_disk_space,
@@ -26,6 +25,7 @@ from app.services.sec_bulk_download import (
     last_n_13f_periods,
     last_n_quarters,
     measure_bandwidth_mbps,
+    purge_archive_artifacts,
 )
 
 # ---------------------------------------------------------------------------
@@ -259,19 +259,19 @@ class TestFatalDownloadFailures:
 
 class TestPreflightPurge:
     def test_purge_archive_artifacts_removes_zip_partial_and_sidecars(self, tmp_path: Path) -> None:
-        # _purge_archive_artifacts is the per-archive cleanup the
+        # purge_archive_artifacts is the per-archive cleanup the
         # ETag-keyed pre-flight calls when reuse is rejected. It must
         # delete the .zip, .partial, .sha256, and .etag in one call.
         (tmp_path / "submissions.zip").write_bytes(b"complete payload")
         (tmp_path / "submissions.zip.partial").write_bytes(b"resume tail")
         (tmp_path / "submissions.zip.sha256").write_text("deadbeef")
         (tmp_path / "submissions.zip.etag").write_text('"abc-123"')
-        _purge_archive_artifacts(tmp_path, "submissions.zip")
+        purge_archive_artifacts(tmp_path, "submissions.zip")
         for name in ("submissions.zip", "submissions.zip.partial", "submissions.zip.sha256", "submissions.zip.etag"):
             assert not (tmp_path / name).exists(), name
 
     def test_purge_archive_artifacts_no_op_when_missing(self, tmp_path: Path) -> None:
-        _purge_archive_artifacts(tmp_path, "absent.zip")
+        purge_archive_artifacts(tmp_path, "absent.zip")
 
 
 class TestDiskPreflight:
@@ -419,19 +419,58 @@ class TestDownloadOne:
         assert result.bytes_downloaded == len(body) - len(body) // 2
 
     @pytest.mark.asyncio
-    async def test_skip_when_final_file_already_present_and_valid(self, tmp_path: Path) -> None:
+    async def test_skip_when_final_file_already_present_and_digest_certified(self, tmp_path: Path) -> None:
+        import hashlib
+
         body = _build_zip_bytes()
         url = "https://example.test/archive.zip"
         archive = BulkArchive(name="archive.zip", url=url)
-        # Final file exists already and is a valid ZIP.
+        # Final file exists already, is a valid ZIP, AND its .sha256
+        # sidecar matches — the only evidence that may certify it
+        # ``downloaded_in_run`` (#3113 / settled 2026-05-22).
         final = tmp_path / "archive.zip"
         final.write_bytes(body)
+        Path(str(final) + ".sha256").write_text(hashlib.sha256(body).hexdigest())
 
         transport = httpx.MockTransport(_make_handler(url, body))
         async with httpx.AsyncClient(transport=transport) as client:
             result = await _download_one(client, archive, tmp_path)
         assert result.skipped is True
         assert result.bytes_downloaded == 0
+        assert result.reuse_reason == "downloaded_in_run"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sidecar", "case"),
+        [
+            (None, "no sidecar at all"),
+            ("0" * 64, "sidecar describes different bytes"),
+        ],
+    )
+    async def test_valid_zip_without_matching_digest_is_downloaded_not_certified(
+        self, tmp_path: Path, sidecar: str | None, case: str
+    ) -> None:
+        """#3113 — a ZIP round-trip may DECLINE, never certify.
+
+        This branch stamps ``reuse_reason='downloaded_in_run'``, the value
+        ``assert_archive_belongs_to_run`` accepts as current-run provenance. It
+        is reachable whenever the preflight's purge failed (``OSError`` is
+        logged and swallowed), i.e. exactly when the bytes on disk are the
+        STALE ones. Same class as #3112: equal structure is not equal content.
+        """
+        body = _build_zip_bytes()
+        url = "https://example.test/archive.zip"
+        archive = BulkArchive(name="archive.zip", url=url)
+        final = tmp_path / "archive.zip"
+        final.write_bytes(body)
+        if sidecar is not None:
+            Path(str(final) + ".sha256").write_text(sidecar)
+
+        transport = httpx.MockTransport(_make_handler(url, body))
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_one(client, archive, tmp_path)
+        assert result.skipped is False, case
+        assert result.bytes_downloaded == len(body), case
 
     @pytest.mark.asyncio
     async def test_rejects_non_zip_content_type(self, tmp_path: Path) -> None:
