@@ -1,0 +1,28 @@
+{
+  "all_in_cost_rule": "p75_full_round_trip_spread_bps; documented entry-sizing conversion markup is 0 bps; carry is structural zero only for a real long at x1",
+  "binding_percentile": "0.75",
+  "candidate_ids": [
+    14465,
+    15445,
+    15446
+  ],
+  "completion_rule": "evaluate only at or after 00:00Z following the fifth common UTC observation date",
+  "declaration_basis": "POST-HOC. ARM A observations began 2026-08-24, so this is not a #2829 preregistration and is not labelled as one. No ARM A spread statistic has been read. Every threshold and method field is copied from an artefact predating the first ARM A observation: candidate_ids and pass_bar_bps from issue 2834 (2026-08-22), every method field from the issue 2833 declaration sha256 5f3929e035c35d25254747512a3327adcec1863b9a5a5eb028706fcb95a66804 (2026-08-24). evidence_not_before is the stricter of the two available boundaries and is the one that does NOT permit a readout on the declaration date. See docs/proposals/ta/2026-09-16-arm-a-tilt-selection.md section 3.",
+  "descriptive_percentile": "0.50",
+  "evidence_not_before": "2026-08-25T00:00:00Z",
+  "eligibility_account_rule": "sole operator, provider etoro, environment demo, and the current non-revoked api_key and user_key credential ids",
+  "eligibility_environment": "demo",
+  "eligibility_provider": "etoro",
+  "fx_rule": "every included observed row must have conversion_rate exactly 1; otherwise the candidate fails fx_unmodelled",
+  "issue": 2834,
+  "missingness_rule": "within each candidate/date interval from its first through last observed hourly bucket, every hourly bucket must exist and be observed; otherwise the candidate fails incomplete_population",
+  "no_pass_action": "tilt sleeve not executable at the declared bar; ARM A closes",
+  "pass_bar_bps": "50",
+  "percentile_method": "continuous linear interpolation at (n - 1) * p, matching PostgreSQL percentile_cont",
+  "population_rule": "all immutable hourly rows in each candidate/date interval on the first five common UTC dates at or after evidence_not_before",
+  "required_common_utc_dates": 5,
+  "schema_version": "core-selection-2834-arm-a-v1",
+  "selection_rule": "each candidate passes or fails on its own refusals; no winner is chosen because a tilt sleeve holds every factor it can hold",
+  "spread_metric": "strategy_core_quote_observations.spread_bps, the full bid-ask spread divided by midpoint in basis points",
+  "verdict_mode": "per_candidate"
+}
