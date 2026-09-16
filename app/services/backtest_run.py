@@ -137,6 +137,18 @@ from app.services.strategies.validated_universe import (
     VALIDATED_UNIVERSE_RULE_VERSION,
     load_validated_universe,
 )
+from app.services.strategy_entry_liquidity import (
+    ArchivePolicy,
+    EntryLiquidityMeasurement,
+    ExclusionReason,
+    archive_policy_for,
+    bar_index_for,
+    causal_close_volume_means,
+    window_spans_break,
+)
+from app.services.strategy_entry_liquidity import (
+    summarise as summarise_entry_liquidity,
+)
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
 from app.services.strategy_promotion_evidence_measure import (
     LedgerMeasurements,
@@ -213,6 +225,7 @@ from app.services.universe_selection import (
     AdmittedSeries,
     UniverseSelection,
     load_universe_selection,
+    vendor_for,
 )
 from app.services.walk_forward import (
     FOLD_COUNT,
@@ -1162,6 +1175,24 @@ class _NamespaceBook:
     #: held. Counting realised legs alone understates the peak, which is the
     #: direction that flatters a candidate.
     open_entry_dates: list[date] = field(default_factory=list)
+    #: #3104 slice 7a — the causal mean of `close × volume` over the 20 sessions
+    #: ending at each REALISED leg's entry SIGNAL bar, with the leg's identity
+    #: beside it. ⚠ NOT parallel to `returns`: a leg whose window fails is
+    #: counted in `entry_liquidity_excluded` instead, so these four lists are
+    #: parallel to each other and shorter than the realised population.
+    #:
+    #: ⚠⚠ Measured HERE and not later because the book dies inside
+    #: `_measure_namespace`, exactly as the name key does. Nothing stores a
+    #: per-run book, so a job over stored results could never recover it.
+    entry_close_volume: list[float] = field(default_factory=list)
+    entry_liquidity_name_keys: list[int] = field(default_factory=list)
+    entry_liquidity_signal_dates: list[date] = field(default_factory=list)
+    entry_liquidity_exit_dates: list[date] = field(default_factory=list)
+    #: Why each unmeasured realised leg has no observation, under
+    #: `strategy_entry_liquidity.EXCLUSION_PRECEDENCE`. ⚠ Exactly one reason per
+    #: leg — `measured + excluded == realised` is the invariant that makes the
+    #: counts auditable, and `EntryLiquidityMeasurement` enforces it.
+    entry_liquidity_excluded: Counter[str] = field(default_factory=Counter)
     instruments: set[int] = field(default_factory=set)
     positions: int = 0
     open_at_end: int = 0
@@ -1404,6 +1435,110 @@ def _dense_price_history(
     return series, first_axis_index, array("d", raw_closes), array("d", wealth_closes)
 
 
+def _resolve_liquidity_policy(
+    conn: psycopg.Connection[Any],
+    *,
+    universe: Universe,
+    series_ids: Sequence[int],
+) -> ArchivePolicy | None:
+    """The run's pinned archive provenance, ASSERTED against the admitted set.
+
+    ``load_universe_selection`` pins one vendor per universe
+    (``universe_selection.vendor_for``) and a vendor fixes an adjustment basis,
+    so a run is single-basis BY CONSTRUCTION. That is exactly the kind of
+    construction worth checking: the stored rows are what the measurement reads,
+    and an assumption that costs one query is a check.
+
+    Returns ``None`` — withholding, never eligibility — when the vendor carries
+    no declared provenance, when the admitted set spans more than one basis, or
+    when the stored basis disagrees with the archive literal. Picking one basis
+    out of several would put a number the corpus does not support into an
+    immutable record.
+    """
+    policy = archive_policy_for(vendor_for(universe))
+    if policy is None or not series_ids:
+        return None
+    stored = {
+        row[0]
+        for row in conn.execute(
+            "SELECT DISTINCT adjustment_basis FROM research_price_series WHERE series_id = ANY(%(ids)s)",
+            {"ids": list(series_ids)},
+        ).fetchall()
+    }
+    if stored != {policy.adjustment_basis}:
+        logger.warning(
+            "entry-liquidity diagnostic withheld: admitted series carry adjustment bases %s "
+            "against the %s archive's pinned %r",
+            sorted(stored),
+            universe,
+            policy.adjustment_basis,
+        )
+        return None
+    return policy
+
+
+def _record_entry_liquidity(
+    book: _NamespaceBook,
+    *,
+    series: BarSeries,
+    signal_date: date,
+    exit_date: date,
+    name_key: int,
+    eligible: bool,
+    means: Sequence[float],
+    reasons: Sequence[str | None],
+    unresolved_breaks: Sequence[date],
+) -> None:
+    """Give one realised leg exactly one entry-liquidity verdict (#3104 7a).
+
+    ⚠ The ORDER below is ``strategy_entry_liquidity.EXCLUSION_PRECEDENCE``
+    applied literally, and it is load-bearing rather than stylistic: a window
+    routinely fails several rules at once, and counting each hit would break
+    ``measured + excluded == realised`` — the one invariant that makes these
+    counts auditable.
+    """
+    if not eligible:
+        book.entry_liquidity_excluded["basis_ineligible"] += 1
+        return
+    index = bar_index_for(series.dates, signal_date)
+    if index is None:  # pragma: no cover - the signal came from this series
+        raise RuntimeError(
+            f"entry signal bar {signal_date} is absent from the series it was produced on — "
+            "the liquidity window cannot be located and the ledger is misaligned"
+        )
+    reason = reasons[index] if index < len(reasons) else "window_short"
+    if reason == "window_short":
+        book.entry_liquidity_excluded["window_short"] += 1
+        return
+    # ⚠⚠ A NEGATIVE name key is `-series_id` for a survivorship-free series
+    # admitted without a live link (#2721 step 3, `:1540`), and
+    # `price_series_break.instrument_id REFERENCES instruments` (`sql/246:103`)
+    # — so that table describes the LIVE corpus and can hold no row for it.
+    # `unresolved_breaks` arrives as `()` for exactly those series, which is
+    # ALSO how every other consumer in this run treats them, and therefore how
+    # these legs came to be opened at all.
+    #
+    # Measured rather than excluded, and the reasoning is consistency, not
+    # convenience: a diagnostic applying a STRICTER scale-break standard than
+    # the position construction it describes would characterise a population
+    # the run did not trade. On `survivorship_free` that is 17,707 of 22,879
+    # series — it would gut the measurement on the one universe it is eligible
+    # for. The gap is instead CARRIED as
+    # `EntryLiquidityMeasurement.unlinked_series_leg_count`, because "no break
+    # record" and "no break" are different statements and the reader is owed
+    # which one applies.
+    if window_spans_break(dates=series.dates, index=index, unresolved_breaks=unresolved_breaks):
+        book.entry_liquidity_excluded["scale_break_spanned"] += 1
+        return
+    if reason is not None:
+        book.entry_liquidity_excluded[reason] += 1
+        return
+    book.entry_close_volume.append(means[index])
+    book.entry_liquidity_name_keys.append(name_key)
+    book.entry_liquidity_signal_dates.append(signal_date)
+    book.entry_liquidity_exit_dates.append(exit_date)
+
+
 def _absorb(
     costed: Sequence[CostedPosition],
     *,
@@ -1418,6 +1553,8 @@ def _absorb(
     close_sources: Counter[str],
     discarded: Counter[str],
     market_regime_by_date: Mapping[date, Regime | None],
+    liquidity_policy: ArchivePolicy | None = None,
+    unresolved_breaks: Sequence[date] = (),
     termination_class: str | None = None,
 ) -> None:
     """Route one instrument's costed positions into their namespace books.
@@ -1427,7 +1564,27 @@ def _absorb(
     evaluation. A namespace absent from ``books`` is COUNTED and discarded —
     which is §4's rule that an in-sample invocation must not so much as compute
     the withheld side's metrics.
+
+    ⚠ #3104 slice 7a: ``liquidity_policy`` is the run's PINNED archive
+    provenance, or ``None`` where the basis could not be resolved. It is
+    withholding and never eligibility — ``sql/305`` refuses an undeclared basis
+    exactly as it refuses a split-adjusted one.
     """
+    # Rolled once per (series, arm) rather than per leg. ⚠ Per ARM: `series` is
+    # already the arm's own masked view (`_apply_arm`), so the diagnostic
+    # follows the arm it is measured on and cannot borrow the other arm's
+    # prices. Skipped entirely when nothing will read it.
+    liquidity_means: tuple[float, ...] = ()
+    liquidity_reasons: tuple[str | None, ...] = ()
+    liquidity_eligible = liquidity_policy is not None and liquidity_policy.eligible
+    if liquidity_eligible and costed:
+        assert liquidity_policy is not None  # narrowed by liquidity_eligible
+        liquidity_means, liquidity_reasons = causal_close_volume_means(
+            dates=series.dates,
+            closes=[row["close"] for row in series.rows],
+            volumes=[row["volume"] for row in series.rows],
+            provisional_from=liquidity_policy.provisional_from,
+        )
     for row in costed:
         position = row.position
         side = namespace_for_position(position.entry_fill_bar_date, position.close_bar_date)
@@ -1542,6 +1699,22 @@ def _absorb(
                     regime=market_regime_by_date.get(position.entry_signal_bar_date),
                 )
             )
+            # #3104 slice 7a. ⚠ This block records a DIAGNOSTIC and nothing
+            # else: every append above has already happened unconditionally, so
+            # an excluded window removes the leg's LIQUIDITY OBSERVATION and
+            # never the leg. `returns`, `gross_returns`, `entry_dates`,
+            # `exit_dates` and `regime_observations` are untouched by it.
+            _record_entry_liquidity(
+                book,
+                series=series,
+                signal_date=position.entry_signal_bar_date,
+                exit_date=close_bar_date,
+                name_key=instrument_id,
+                eligible=liquidity_eligible,
+                means=liquidity_means,
+                reasons=liquidity_reasons,
+                unresolved_breaks=unresolved_breaks,
+            )
         else:
             # #3104 — the open legs #2505's concurrency needs. ⚠ Recorded HERE
             # and not beside the `open_at_end` increment above: a leg excluded
@@ -1596,6 +1769,11 @@ class _Corpus:
     #: termination census (criterion 9 — the exclusions are counted, not
     #: narrated). ``None`` only on a hand-built harness corpus.
     selection: UniverseSelection | None = None
+    #: #3104 slice 7a — the PINNED archive provenance the entry-liquidity
+    #: diagnostic needs, or ``None`` where it could not be resolved. ⚠ ``None``
+    #: is WITHHOLDING and never eligibility: ``sql/305`` refuses an undeclared
+    #: adjustment basis exactly as it refuses a split-adjusted one.
+    liquidity_policy: ArchivePolicy | None = None
     opportunity_records: Mapping[ResultNamespace, ResultUniverseRecord] = field(default_factory=dict)
 
     @property
@@ -1670,6 +1848,7 @@ def load_corpus(
     axis = tuple(row[0] for row in conn.execute(_AXIS_SQL, bounds).fetchall())
     included_ids = sorted({series.instrument_id for series in admitted if series.instrument_id is not None})
     unresolved_breaks = load_unresolved_breaks(conn, included_ids)
+    liquidity_policy = _resolve_liquidity_policy(conn, universe=universe_basis, series_ids=series_ids)
 
     in_sample = conn.execute(
         _INSAMPLE_AXIS_SQL,
@@ -1727,7 +1906,55 @@ def load_corpus(
         universe_basis=universe_basis,
         termination=termination,
         selection=selection,
+        liquidity_policy=liquidity_policy,
         opportunity_records=opportunity_records,
+    )
+
+
+def _entry_liquidity_summary(
+    book: _NamespaceBook,
+    *,
+    liquidity_policy: ArchivePolicy | None,
+) -> EntryLiquidityMeasurement | None:
+    """Summarise the book's liquidity verdicts, or ``None`` if it has none at all.
+
+    ⚠⚠ THE DISTINCTION BELOW IS THE POINT, and it was surfaced by the accounting
+    invariant firing on the existing harness suites rather than by review.
+
+    - **No verdicts at all** — a hand-built book that appended to ``returns``
+      without ever going through ``_absorb``. Every ``_NamespaceBook`` in the
+      test harnesses is one. There is nothing to report and ``None`` says so.
+    - **Some verdicts but not one per realised leg** — a REAL BUG: a path now
+      appends a realised return without recording its verdict, and the
+      exclusion counts no longer describe the population they claim to. That
+      still raises, via ``EntryLiquidityMeasurement``, because a partial
+      accounting read as a complete one is exactly the failure the invariant
+      exists to catch.
+
+    ⚠ So the escape is narrow by construction: it needs the recorder to have run
+    ZERO times against a non-empty ledger, which no production path can do —
+    ``_absorb`` calls it in the same branch that appends the return.
+    """
+    recorded = len(book.entry_close_volume) + sum(book.entry_liquidity_excluded.values())
+    if recorded == 0:
+        return None
+    return summarise_entry_liquidity(
+        values=book.entry_close_volume,
+        name_keys=book.entry_liquidity_name_keys,
+        signal_dates=book.entry_liquidity_signal_dates,
+        exit_dates=book.entry_liquidity_exit_dates,
+        realised_leg_count=len(book.returns),
+        excluded=cast("Mapping[ExclusionReason, int]", book.entry_liquidity_excluded),
+        # ⚠ REPORTED WHENEVER IT RESOLVED, eligible or not (Codex ckpt-2, P2).
+        # Gating this on `.eligible` collapsed two different states into one:
+        # a `survivor_only` run resolves and verifies `split_adjusted`, and
+        # reporting `None` for it made that indistinguishable from a run whose
+        # provenance could not be resolved AT ALL — both also carry
+        # `basis_ineligible`. Eligibility decides whether observations are
+        # MEASURED; it does not decide whether known provenance is REPORTED,
+        # and erasing it is the same "cannot check" / "checked and failed"
+        # conflation this module exists to keep apart.
+        adjustment_basis=liquidity_policy.adjustment_basis if liquidity_policy is not None else None,
     )
 
 
@@ -1737,6 +1964,7 @@ def _ledger_evidence(
     namespace: ResultNamespace,
     window_end: date,
     anchor_year: int,
+    liquidity_policy: ArchivePolicy | None = None,
 ) -> LedgerMeasurements | None:
     """#2505's ledger arithmetic over one book. ``None`` on an empty population.
 
@@ -1788,6 +2016,7 @@ def _ledger_evidence(
             ),
             root_seed=BACKTEST_BOOTSTRAP_SEED,
             anchor_year=anchor_year,
+            entry_liquidity=_entry_liquidity_summary(book, liquidity_policy=liquidity_policy),
         )
     except ValueError as error:
         raise RuntimeError(
@@ -1914,6 +2143,7 @@ def _measure_namespace(
             # corpus.window`` and ``load_corpus`` sets ``evaluation_end=
             # window.end``. NOT ``dates[-1]`` — see ``_ledger_evidence``.
             anchor_year=corpus.window.end.year,
+            liquidity_policy=corpus.liquidity_policy,
         ),
         label_starts=book.label_starts,
         label_ends=book.label_ends,
@@ -2127,6 +2357,8 @@ def evaluate_arm(
             close_sources=close_sources,
             discarded=discarded,
             market_regime_by_date=market_regime_by_date,
+            liquidity_policy=corpus.liquidity_policy,
+            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
         )
         if collector is not None:
             collector.collect(
@@ -2516,6 +2748,8 @@ def evaluate_level_arms(
                 close_sources=close_sources[ambiguity],
                 discarded=discarded[ambiguity],
                 market_regime_by_date=market_regime_by_date,
+                liquidity_policy=corpus.liquidity_policy,
+                unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
                 termination_class=termination_label,
             )
             arm_collector = collectors[ambiguity]
