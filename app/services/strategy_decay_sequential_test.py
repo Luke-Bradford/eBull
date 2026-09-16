@@ -185,6 +185,21 @@ def hoeffding_variance_proxy(*, lower_bound: float, upper_bound: float) -> float
     boundary before the ``+99`` that would trigger the refusal ever arrives, with probability
     ``0.99^17 ~ 84%``.  The caller must therefore widen the strategy's TP/SL contract by the
     pinned ``worst_gap_pct`` rather than pass the naive barriers.
+
+    ⛔⛔ THAT LAST SENTENCE DOES NOT HAVE A PRODUCER, AND THE PARAGRAPH ABOVE IS WHY (#3104
+    slice 9).  Every ``worst_gap_pct`` this repo can produce is a HISTORICAL EXTREMUM over a
+    realised book -- ``strategy_exit_gap`` is the producer and says so in its own header --
+    so widening by it is exactly the "policing afterwards" ruled out two paragraphs up.  It
+    also only ever widens ONE side: a long can gap THROUGH its target (entry 100, target 120,
+    prior close 119, an open at 150 is a 26.1% gap and a 30-point overshoot), and Hoeffding
+    needs both bounds.  ⚠ No finite sample can establish bounded support either, so a larger
+    measurement does not fix this.
+
+    A caller needing ``[a, b]`` therefore owes a bound that holds BY CONSTRUCTION, and the
+    honest constructions change the estimand rather than supplying the missing number -- e.g.
+    monitoring ``Y = clip(X, a, b)`` against ITS OWN declared baseline, which is a different
+    claim from #2500's expectancy one and must be declared as such.  Recorded on #3104 and
+    #2500; do not wire the widened bound in the meantime.
     """
     if not math.isfinite(lower_bound) or not math.isfinite(upper_bound):
         raise SequentialTestError("declared bounds must both be finite")

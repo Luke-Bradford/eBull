@@ -99,7 +99,12 @@ ADJUSTMENT_BASIS = "split_adjusted"
 #: Asset class handed to the quarantine rule set. Every symbol in this archive
 #: is a US listing; ``params_for`` reads this to pick the 5-day-week
 #: continuity parameters.
-_ASSET_CLASS = "us_equity"
+#:
+#: ⚠ PUBLIC since #3104 slice 9, which needs the same class to read T2's
+#: ``hole_days`` for this corpus. Exported rather than restated so the two
+#: cannot drift — a second literal is how a threshold comes to mean two
+#: things.
+ASSET_CLASS = "us_equity"
 
 #: eToro publishes venue variants of the same company as separate instrument
 #: rows — ``AAPL``, ``AAPL.RTH`` (regular trading hours) and ``AAPL.24-7``.
@@ -186,7 +191,7 @@ INTRADER_ARCHIVE = ArchiveProvenance(
 #: declared ``quarantine_as_of`` — which is the point. Deliberately excludes
 #: ``cboe`` and ``etoro/etoro-comparators-*``: those 19 series have never had a
 #: coverage row, and covering them is a data-treatment decision rather than a
-#: registration one, because ``_ASSET_CLASS`` below is hardcoded ``us_equity``
+#: registration one, because ``ASSET_CLASS`` below is hardcoded ``us_equity``
 #: and a VIX index series is not an equity (#3040 non-goal).
 RESEARCH_ARCHIVES: tuple[ArchiveProvenance, ...] = (HF_ARCHIVE, INTRADER_ARCHIVE)
 
@@ -1006,7 +1011,7 @@ def run_quarantine(
             )
             for r in rows
         ]
-        verdicts = evaluate_series(bars, _ASSET_CLASS, as_of=as_of)
+        verdicts = evaluate_series(bars, ASSET_CLASS, as_of=as_of)
 
         bar_rows = [
             (

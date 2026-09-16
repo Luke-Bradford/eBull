@@ -37,6 +37,7 @@ import numpy as np
 
 from app.services.block_bootstrap import BootstrapResult, block_bootstrap_expectancy, cluster_by_date
 from app.services.strategy_entry_liquidity import EntryLiquidityMeasurement
+from app.services.strategy_exit_gap import ExitGapMeasurement
 
 #: Frozen because the estimators below are choices, and a stored record must be
 #: attributable to the rule that produced it. ⚠ Bump on a RULE change, never on
@@ -272,6 +273,14 @@ class LedgerMeasurements:
     #: withholding is expressed INSIDE the measurement so that
     #: ``measured + excluded == realised`` survives it.
     entry_liquidity: EntryLiquidityMeasurement | None = None
+    #: #3104 slice 9 — the per-leg session-gap observation, summarised.
+    #: ⚠⚠ DESCRIPTIVE, NOT A BOUND. ``strategy_exit_gap``'s header records why
+    #: `worst_gap_pct` cannot supply Hoeffding's ``[a, b]`` and why #2500's
+    #: ``-(stop_barrier + worst_gap)`` therefore has no producer here.
+    #: ⚠ ``None`` only where the caller built no measurement at all; the
+    #: producer path always supplies one, because withholding is expressed
+    #: INSIDE it (including the never-instrumented case).
+    exit_gap: ExitGapMeasurement | None = None
 
     def __post_init__(self) -> None:
         years = [item.year for item in self.recent_years]
@@ -443,6 +452,7 @@ def measure_ledger(
     root_seed: int,
     anchor_year: int,
     entry_liquidity: EntryLiquidityMeasurement | None = None,
+    exit_gap: ExitGapMeasurement | None = None,
 ) -> LedgerMeasurements:
     """Measure one realised ledger. Pure; reads no database.
 
@@ -477,6 +487,7 @@ def measure_ledger(
 
     return LedgerMeasurements(
         entry_liquidity=entry_liquidity,
+        exit_gap=exit_gap,
         rule_version=LEDGER_MEASUREMENT_RULE_VERSION,
         outcome_count=count,
         profitable_outcome_count=int(np.count_nonzero(returns > 0.0)),
