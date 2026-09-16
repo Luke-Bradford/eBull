@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -235,6 +235,60 @@ def parse_submissions_page(
     return rows, has_more
 
 
+def select_new_filings(
+    rows: Sequence[FilingIndexRow],
+    *,
+    sources: Iterable[ManifestSource] | None,
+    last_known_filing_id: str | None,
+) -> tuple[list[FilingIndexRow], datetime | None]:
+    """Source-filter + watermark-truncate one parsed page. Returns
+    ``(new_filings, last_filed_at)``.
+
+    **The per-TRIPLE half of a freshness check, extracted so it has exactly
+    one expression (#3109).** ``submissions.json`` is an entity-wide response
+    — one CIK, every form — so fetch and parse are per-CIK while the source
+    filter and the accession watermark are per ``(subject, source)`` triple.
+    Splitting there lets ``sec_per_cik_poll`` fetch once per CIK and apply
+    this tail per due subject, instead of re-fetching the same response for
+    each of them.
+
+    ⚠⚠ Both ``check_freshness`` and ``check_freshness_conditional`` call this
+    rather than carrying their own copy, and so does the batching job. A
+    second copy in the job is the drift hazard the #3110 review nitpick
+    named: one rule written twice is how two expressions diverge later,
+    silently and in the direction that hides filings.
+
+    ``last_filed_at`` is ``max(filed_at)`` over the SOURCE-FILTERED rows
+    **before** truncation — it describes the newest filing this subject can
+    see, not the newest one that is new to it.
+
+    Truncation semantics (carried over unchanged, limits included): SEC's
+    ``recent`` array is newest-first, so we walk until the watermark
+    accession appears and stop. A watermark absent from the response means
+    it has rolled into the secondary pages, or the caller's watermark is
+    wrong — return everything and let the idempotent accession-PK upsert
+    sort it out. Metadata corrections to an already-known accession and
+    SEC-side deletions are invisible to prefix truncation; that is
+    pre-existing and is not addressed here (#3109 §4).
+    """
+    if sources is not None:
+        wanted = set(sources)
+        rows = [r for r in rows if r.source is not None and r.source in wanted]
+
+    new_filings: list[FilingIndexRow] = []
+    if last_known_filing_id is None:
+        new_filings = list(rows)
+    else:
+        for row in rows:
+            if row.accession_number == last_known_filing_id:
+                break
+            new_filings.append(row)
+        else:
+            new_filings = list(rows)
+
+    return new_filings, max((r.filed_at for r in rows), default=None)
+
+
 def check_freshness(
     http_get: HttpGet,
     *,
@@ -270,9 +324,6 @@ def check_freshness(
         raise RuntimeError(f"submissions.json fetch failed: status={status} cik={cik_padded}")
 
     rows, has_more = parse_submissions_page(body, cik=cik_padded)
-    if sources is not None:
-        wanted = set(sources)
-        rows = [r for r in rows if r.source is not None and r.source in wanted]
 
     # Extract ``filings.files[*].name`` from the same primary body so
     # ``_walk_secondary_pages`` (#936) does not re-fetch the primary
@@ -312,28 +363,9 @@ def check_freshness(
             cik_padded,
         )
 
-    # Filter to strictly newer than the watermark. SEC's recent array
-    # is ordered newest-first; we walk until we hit the watermark and
-    # stop — preserves chronological order in the result and avoids
-    # double-recording on amendments that share an accession family.
-    new_filings: list[FilingIndexRow] = []
-    if last_known_filing_id is None:
-        new_filings = rows
-    else:
-        for row in rows:
-            if row.accession_number == last_known_filing_id:
-                break
-            new_filings.append(row)
-        else:
-            # Watermark not in response: either it's old enough to
-            # have rolled into the secondary pages, or the caller's
-            # watermark is wrong. Return everything; the scheduler
-            # will UPSERT the manifest (idempotent on accession PK)
-            # and the next poll will see the new newest as the
-            # watermark.
-            new_filings = rows
-
-    last_filed_at = max((r.filed_at for r in rows), default=None)
+    # Source filter + watermark truncation — ``select_new_filings`` owns both
+    # so this function and the batching job cannot drift (#3109).
+    new_filings, last_filed_at = select_new_filings(rows, sources=sources, last_known_filing_id=last_known_filing_id)
     return FreshnessDelta(
         cik=cik_padded,
         new_filings=new_filings,
@@ -397,20 +429,23 @@ def check_freshness_conditional(
             last_modified=if_modified_since,
         )
     if status == 404:
+        # ⚠⚠ ``last_modified`` is deliberately NOT carried off a 404 (#3109).
+        # The caller stores the returned validator whenever every discovered
+        # filing was recorded — and on a 404 that gate is trivially true at
+        # ``0 == 0``, so passing the header through let a "no such CIK"
+        # response install a validator that the next tick would send as
+        # ``If-Modified-Since``. A 404 has nothing to certify.
         return FreshnessDelta(
             cik=cik_padded,
             new_filings=[],
             last_filed_at=None,
             has_more_in_files=False,
-            last_modified=last_modified,
+            last_modified=None,
         )
     if status != 200:
         raise RuntimeError(f"submissions.json fetch failed: status={status} cik={cik_padded}")
 
     rows, has_more = parse_submissions_page(body, cik=cik_padded)
-    if sources is not None:
-        wanted = set(sources)
-        rows = [r for r in rows if r.source is not None and r.source in wanted]
 
     # Mirror the files_pages extraction in ``check_freshness`` — same
     # warning path on disagreement between row parse + files extraction.
@@ -438,20 +473,9 @@ def check_freshness_conditional(
             cik_padded,
         )
 
-    # Watermark-aware truncation — identical semantics to
-    # ``check_freshness``.
-    new_filings: list[FilingIndexRow] = []
-    if last_known_filing_id is None:
-        new_filings = rows
-    else:
-        for row in rows:
-            if row.accession_number == last_known_filing_id:
-                break
-            new_filings.append(row)
-        else:
-            new_filings = rows
-
-    last_filed_at = max((r.filed_at for r in rows), default=None)
+    # Source filter + watermark truncation — the SAME call ``check_freshness``
+    # makes, not a mirrored copy of it (#3109).
+    new_filings, last_filed_at = select_new_filings(rows, sources=sources, last_known_filing_id=last_known_filing_id)
     return FreshnessDelta(
         cik=cik_padded,
         new_filings=new_filings,

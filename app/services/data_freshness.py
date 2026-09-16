@@ -18,8 +18,13 @@ from the worker layer:
 
   - ``seed_scheduler_from_manifest``: bootstrap rows from manifest history
   - ``record_poll_outcome``: record after a poll completes
-  - ``subjects_due_for_poll``: worker pulls due rows
-  - ``subjects_due_for_recheck``: never_filed / error rechecks
+  - ``ciks_due_for_poll``: worker pulls due rows, GROUPED BY CIK (#3109)
+  - ``ciks_due_for_recheck``: never_filed / error rechecks, same grouping
+  - ``subjects_due_for_poll`` / ``subjects_due_for_recheck``: the
+    row-denominated originals. No production caller since #3109; they
+    remain the row-level statement of each lane's candidacy predicate,
+    which both forms share via ``_POLL_LANE_STATES`` /
+    ``_RECHECK_LANE_STATES``.
 
 The cadence map is hard-coded per the spec — adding a new source
 means one edit here, not a sweep across the worker / providers.
@@ -31,7 +36,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import psycopg
 import psycopg.rows
@@ -533,6 +538,14 @@ class FreshnessRow:
     state: FreshnessState
 
 
+# Each lane's candidacy predicate, named ONCE so the row-denominated readers
+# (``subjects_due_for_*``) and the CIK-denominated ones (``ciks_due_for_*``)
+# cannot drift about what "due" means. Two expressions of one rule is how the
+# two diverge later, silently.
+_POLL_LANE_STATES: Final[tuple[str, ...]] = ("unknown", "current", "expected_filing_overdue")
+_RECHECK_LANE_STATES: Final[tuple[str, ...]] = ("never_filed", "error")
+
+
 def subjects_due_for_poll(
     conn: psycopg.Connection[Any],
     *,
@@ -549,15 +562,18 @@ def subjects_due_for_poll(
     Ordering: ``expected_next_at ASC NULLS FIRST`` — never-filed-but-
     unknown rows (NULL expected) come first; otherwise oldest due row
     first.
+
+    ⚠ **No production caller since #3109** — ``sec_per_cik_poll`` moved to
+    ``ciks_due_for_poll``, whose budget is denominated in CIKs. Kept because
+    it is the row-level statement of this lane's candidacy predicate and its
+    tests pin it; the predicate itself is shared via ``_POLL_LANE_STATES``
+    so the two readers cannot disagree about what "due" means.
     """
     if now is None:
         now = datetime.now(tz=UTC)
 
-    where = (
-        "state IN ('unknown', 'current', 'expected_filing_overdue')"
-        " AND (expected_next_at IS NULL OR expected_next_at <= %s)"
-    )
-    params: list[Any] = [now]
+    where = "state = ANY(%s) AND (expected_next_at IS NULL OR expected_next_at <= %s)"
+    params: list[Any] = [list(_POLL_LANE_STATES), now]
     if source is not None:
         where += " AND source = %s"
         params.append(source)
@@ -599,8 +615,8 @@ def subjects_due_for_recheck(
     if now is None:
         now = datetime.now(tz=UTC)
 
-    where = "state IN ('never_filed', 'error') AND (next_recheck_at IS NULL OR next_recheck_at <= %s)"
-    params: list[Any] = [now]
+    where = "state = ANY(%s) AND (next_recheck_at IS NULL OR next_recheck_at <= %s)"
+    params: list[Any] = [list(_RECHECK_LANE_STATES), now]
     if source is not None:
         where += " AND source = %s"
         params.append(source)
@@ -622,6 +638,191 @@ def subjects_due_for_recheck(
         )
         for row in cur.fetchall():
             yield FreshnessRow(**row)
+
+
+# The CIK shape a SEC submissions poll can actually address: the URL is built
+# from ``_zero_pad_cik`` (``sec_submissions.py``) and the manifest writer
+# enforces the same 10-digit form (``_MANIFEST_CIK_RE``).
+#
+# ⚠⚠ This REPLACES the ``subject.cik is None`` guard the per-CIK poll used to
+# carry, which was dead code for the wrong reason (#3109). That guard was
+# written for the FINRA universe singletons — and those rows do not have a NULL
+# cik, they have the literal strings ``FINRA_REGSHO`` / ``FINRA_SI``. Full
+# population 2026-09-16: 0 NULL ciks, 2 non-numeric ones, both of them those
+# singletons, both ``state='current'`` and therefore eligible. A poll of one
+# fetches ``.../submissions/CIKFINRA_SI.json`` (``str.zfill`` leaves a
+# 12-character string alone), takes the 404 branch, and writes
+# ``outcome='current'`` — certifying a FINRA subject off a 404 from an endpoint
+# that never served it.
+#
+# Narrowing gate, so state what it REJECTS rather than what it keeps. Exactly
+# two rows today, enumerated by ``scripts/measure_3109_batching.py`` M0:
+#   ('FINRA_REGSHO', 'finra_universe', 'finra_regsho_daily', 'current')
+#   ('FINRA_SI',     'finra_universe', 'finra_short_interest', 'current')
+_SEC_POLLABLE_CIK_RE = r"^[0-9]{1,10}$"
+
+_FRESHNESS_COLUMNS = """
+    subject_type, subject_id, source, cik, instrument_id,
+    last_known_filing_id, last_known_filed_at,
+    last_polled_at, last_polled_outcome, new_filings_since,
+    expected_next_at, next_recheck_at, state
+"""
+
+
+def _ciks_due(
+    conn: psycopg.Connection[Any],
+    *,
+    deadline_column: Literal["expected_next_at", "next_recheck_at"],
+    states: tuple[str, ...],
+    source: ManifestSource | None,
+    limit: int,
+    now: datetime,
+) -> list[list[FreshnessRow]]:
+    """Shared body of ``ciks_due_for_poll`` / ``ciks_due_for_recheck``.
+
+    Returns the due rows of the ``limit`` most urgent CIKs, **grouped by CIK**
+    and ordered most-urgent-CIK first. One inner list is one batch: every row
+    in it shares a zero-padded CIK, so one ``submissions.json`` fetch serves
+    all of them (#3109).
+
+    ``deadline_column`` is interpolated, not bound — it is one of two literals
+    chosen by the caller, never user input.
+
+    Three things in the SQL are load-bearing and each was a defect in the first
+    draft of this query:
+
+    1. ``COALESCE(<deadline>, '-infinity')`` sits INSIDE the ``MIN``. ``MIN``
+       ignores NULLs, so a CIK with deadlines ``{NULL, yesterday}`` would rank
+       on ``yesterday`` and fall behind an all-NULL CIK — inverting the
+       NULL-is-most-urgent semantics the row-level readers get from
+       ``ORDER BY ... NULLS FIRST``. Folding the NULL into the key makes the
+       group rank agree with the row rank. (0 NULL deadlines exist today; this
+       is correctness by construction.)
+    2. ``cik_padded`` is INSIDE the ``DENSE_RANK`` ordering, so the rank is one
+       per CIK and the tie-break is deterministic — the ticket's explicit
+       requirement. Ranking on the deadline alone collapses every CIK sharing a
+       timestamp into a single rank and blows the budget.
+    3. Grouping is on ``lpad(cik, 10, '0')``, the expression the fetch URL is
+       built from, so padding variants of one entity cannot become two batches.
+       The ``{1,10}`` bound in ``_SEC_POLLABLE_CIK_RE`` is what makes ``lpad``
+       safe here — it cannot truncate a string it never sees longer than 10.
+    """
+    params: dict[str, Any] = {
+        "now": now,
+        "limit": limit,
+        "states": list(states),
+        "cik_shape": _SEC_POLLABLE_CIK_RE,
+    }
+    source_clause = ""
+    if source is not None:
+        # Applied BEFORE ranking: filtering after would let a scoped call spend
+        # its CIK budget on CIKs whose only due rows are other sources.
+        source_clause = " AND source = %(source)s"
+        params["source"] = source
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            WITH due AS (
+                SELECT {_FRESHNESS_COLUMNS},
+                       lpad(cik, 10, '0') AS cik_padded,
+                       MIN(COALESCE({deadline_column}, '-infinity'::timestamptz))
+                           OVER (PARTITION BY lpad(cik, 10, '0')) AS cik_rank_key
+                FROM data_freshness_index
+                WHERE state = ANY(%(states)s)
+                  AND ({deadline_column} IS NULL OR {deadline_column} <= %(now)s)
+                  AND cik ~ %(cik_shape)s
+                  {source_clause}
+            ), ranked AS (
+                SELECT *, DENSE_RANK() OVER (ORDER BY cik_rank_key, cik_padded) AS cik_rank
+                FROM due
+            )
+            SELECT {_FRESHNESS_COLUMNS}, cik_padded
+            FROM ranked
+            WHERE cik_rank <= %(limit)s
+            ORDER BY cik_rank, source, subject_type, subject_id
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    batches: list[list[FreshnessRow]] = []
+    current_cik: str | None = None
+    for row in rows:
+        cik_padded = row.pop("cik_padded")
+        # ⚠⚠ Carry the PADDED cik onto the row, not the stored one. The SQL
+        # groups on ``lpad(cik, 10, '0')``, so ``320193`` and ``0000320193``
+        # correctly land in one batch — but returning each row's original
+        # string would then hand ``_probe_cik`` a batch whose members disagree
+        # about their own CIK, tripping its one-CIK assertion and aborting the
+        # WHOLE run before any subject is fetched or any outcome written.
+        # Padding is not constrained by the schema, and 10 digits is what both
+        # the submissions URL and ``_MANIFEST_CIK_RE`` require, so the padded
+        # form is the correct value to carry downstream in either case.
+        # Measured 0 padding variants on 2026-09-16; this is a latent crash,
+        # not a live one. Found by Codex checkpoint 2.
+        row["cik"] = cik_padded
+        if cik_padded != current_cik:
+            batches.append([])
+            current_cik = cik_padded
+        batches[-1].append(FreshnessRow(**row))
+    return batches
+
+
+def ciks_due_for_poll(
+    conn: psycopg.Connection[Any],
+    *,
+    source: ManifestSource | None = None,
+    limit: int = 100,
+    now: datetime | None = None,
+) -> list[list[FreshnessRow]]:
+    """CIK-grouped counterpart of ``subjects_due_for_poll`` (#3109).
+
+    Same candidate states and same due predicate; the budget is denominated in
+    **CIKs** instead of rows, and every due row of a selected CIK comes back in
+    that CIK's batch. ``submissions.json`` is entity-wide, so one fetch answers
+    the whole batch — where the row-denominated reader spent one identical
+    fetch per row.
+
+    Measured on the dev corpus 2026-09-16
+    (``scripts/measure_3109_batching.py``): the row reader's 66-row prefix
+    covers 48 distinct CIKs (in-prefix fan-out 1.375x); a 66-CIK budget covers
+    127 rows across 66 CIKs (1.924x). ⚠ Those are a snapshot, not an invariant
+    — and note the population fan-out is 3.60x, which does NOT describe an
+    ordered prefix.
+    """
+    return _ciks_due(
+        conn,
+        deadline_column="expected_next_at",
+        states=_POLL_LANE_STATES,
+        source=source,
+        limit=limit,
+        now=now if now is not None else datetime.now(tz=UTC),
+    )
+
+
+def ciks_due_for_recheck(
+    conn: psycopg.Connection[Any],
+    *,
+    source: ManifestSource | None = None,
+    limit: int = 100,
+    now: datetime | None = None,
+) -> list[list[FreshnessRow]]:
+    """CIK-grouped counterpart of ``subjects_due_for_recheck`` (#3109).
+
+    ⚠ The two lanes are selected INDEPENDENTLY and are not merged, so a CIK
+    with both poll-lane and recheck-lane rows costs two fetches — exactly as it
+    does today, where they are two separate probes. Merging them would change
+    the budget contract #1155 G13's 2/3-1/3 split exists to enforce.
+    """
+    return _ciks_due(
+        conn,
+        deadline_column="next_recheck_at",
+        states=_RECHECK_LANE_STATES,
+        source=source,
+        limit=limit,
+        now=now if now is not None else datetime.now(tz=UTC),
+    )
 
 
 def get_freshness_row(
