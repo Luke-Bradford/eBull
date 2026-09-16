@@ -132,6 +132,16 @@ def _result(
     return CoreExecutionResult(state, reason_code, intent_id, trade_id, order_id, amount)
 
 
+def _capital_refusal_result(exc: EngineCapitalObservationError) -> CoreExecutionResult:
+    """One shape for both steady-state capital refusals, logged then returned.
+
+    The log is not decoration: only ``str(exc)`` names the trade or position id, and
+    ``CoreExecutionResult`` carries the bucket alone.
+    """
+    logger.warning("core rebalance refused as %s (%s)", exc.reason_code, exc)
+    return _result("refused", exc.reason_code)
+
+
 def _observe_core_portfolio_drawdown(
     conn: psycopg.Connection[Any],
     *,
@@ -542,8 +552,7 @@ def execute_core_rebalance(
             # a steady state -- true on this cycle and every later one -- so a caller
             # gets a reason code it can act on rather than a 409 whose only text is the
             # OUTER sentence.  Still fail-closed: nothing is submitted either way.
-            logger.warning("core rebalance refused as %s (%s)", exc.reason_code, exc)
-            return _result("refused", exc.reason_code)
+            return _capital_refusal_result(exc)
         if capital_authority is None:
             raise StrategyCoreExecutionError("an assigned paper pot is required")
         if not capital_authority.enabled:
@@ -583,8 +592,7 @@ def execute_core_rebalance(
             # verdict is reachable today only by calling the endpoint directly.  The
             # caller that reaches the same refusal on every unattended tick is the paper
             # cycle, which is fixed in `strategy_paper_executor._risk_and_amount`.
-            logger.warning("core rebalance refused as %s (%s)", exc.reason_code, exc)
-            return _result("refused", exc.reason_code)
+            return _capital_refusal_result(exc)
         except Exception as exc:
             raise StrategyCoreExecutionError("the broker account snapshot could not describe the core sleeve") from exc
         decision = evaluate_core_rebalance(mandate, state)

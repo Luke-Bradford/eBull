@@ -30,7 +30,7 @@ from app.services.strategy_core_executor import (
     resume_core_submission,
 )
 from app.services.strategy_core_sleeve import CoreSleeveObservationError
-from app.services.strategy_engine_capital import EngineCapitalObservationError
+from app.services.strategy_engine_capital import EngineCapitalObservationError, EngineCapitalRefusal
 
 OPERATOR = UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7")
 API_CREDENTIAL = UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8")
@@ -575,8 +575,10 @@ def test_resume_lookup_miss_never_reaches_fresh_safety_or_resubmission() -> None
 # --- #2979 half b: the capital reader's refusal is a verdict, not an exception ---
 
 
-def _capital_refusal(code: str = "engine_capital_ownership_unwitnessed") -> EngineCapitalObservationError:
-    return EngineCapitalObservationError("active core position 4242 is absent from broker snapshot", code)  # type: ignore[arg-type]
+def _capital_refusal(
+    code: EngineCapitalRefusal = "engine_capital_ownership_unwitnessed",
+) -> EngineCapitalObservationError:
+    return EngineCapitalObservationError("active core position 4242 is absent from broker snapshot", code)
 
 
 @pytest.mark.parametrize("stage", ["authority", "usage"])
