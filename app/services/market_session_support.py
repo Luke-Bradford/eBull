@@ -125,6 +125,66 @@ _ASSET_CLASS_CALENDARS: Final = MappingProxyType({"us_equity": _NYSE, "uk_equity
 #: ``strategy_core_preflight._PREFLIGHT_SQL``, which reads
 #: ``source = 'nasdaq_trader_rss'`` for both the halt flag and the feed freshness.
 #: ⚠ This is the SECOND of the two conditions, and #2312 owns closing it for the UK.
+#:
+#: ⚠⚠ **DO NOT SUBSTITUTE THE ELIGIBILITY PROOF FOR THIS.** #2312's own research
+#: comment (2026-09-16) recommended admitting a calendar-only venue on a TIGHTER
+#: FRESHNESS BOUND over ``strategy_core_eligibility_proofs.allow_open_position``,
+#: reasoning that eToro refusing to open a name is sufficient to refuse it, so
+#: re-proving nearer the submission closes the halt window. What is measured, and
+#: what it does and does not settle:
+#:
+#: * ⚠ **The bit does not move for a state we KNOW obtains.** Labelling every
+#:   ``uk_equity`` proof with this module's own :func:`venue_session_is_open` puts
+#:   **26 of 26** observations taken while the LSE was CLOSED at ``True``,
+#:   including 22:20Z on a Sunday. This is the load-bearing measurement because it
+#:   is PAIRED -- the same instruments, the same bit, spanning open and closed
+#:   sessions -- so selection cannot explain it. eToro's own documentation says
+#:   this bit conflates market-closed with three other causes; it does not reflect
+#:   the one of those four we can observe.
+#: * ⚠ The whole-table ``(True, 148, 25)`` is WEAKER than it looks and must not be
+#:   cited as "the bit is constant". It is a SELECTED population -- instruments are
+#:   proved because they are core candidates -- and ``docs/etoro-api-reference.md``
+#:   records a demo census where **1 of 8** instruments returned
+#:   ``allowOpenPosition=false``. The bit does vary; it does not vary with session.
+#: * ⚠⚠ What is NOT established: halt INSENSITIVITY. No halt exists anywhere in our
+#:   corpus, so nothing here measures halt sensitivity in either direction. The
+#:   defensible claim is *"eligibility has no demonstrated halt sensitivity"*, not
+#:   *"eligibility cannot detect halts"*. It is enough to refuse the substitution --
+#:   an unevidenced gate must not widen admission -- and not enough to call it inert.
+#: * ⚠ Separately fatal to the recommendation as written: *false suffices to refuse*
+#:   does not imply *true suffices to admit*, and freshness cannot supply the missing
+#:   implication. An OPEN-permission bit also says nothing about a rebalance SELL.
+#:
+#: See ``docs/review-prevention-log.md``, "A substitute gate must be shown to vary
+#: with the state it stands in for".
+#:
+#: ⚠ What DOES track the venue, and is the design the next session should cost:
+#: ``quotes.quoted_at`` is eToro's own ``date`` field (``etoro.py`` ~line 708), not
+#: our fetch time. Measured 2026-09-16 04:43Z with the LSE shut 13.2h, every ``.L``
+#: quote was stamped ``15:29Z`` = 16:29 London, one minute before the 16:30 close,
+#: and ``SPY.RTH`` ``19:59Z`` = 15:59 ET, one minute before the 16:00 NYSE close.
+#: Both gaps are far longer than any producer cadence, so neither is the collector's
+#: own period -- unlike the ~21-minute US extended-hours reading taken the same
+#: instant, which matches the 04:23 write and is confounded.
+#:
+#: ⚠⚠ Three limits, before anyone builds on it. (1) It is BROKER-supplied, not
+#: exchange-origin: a scheduled broker freeze, a cached snapshot or a delayed feed
+#: all fit the same observation. (2) ``etoro.py`` falls back to ``now()`` when
+#: ``date`` is absent or unparseable, which MANUFACTURES freshness on exactly the
+#: responses a liveness gate must not trust. (3) Session-associated staleness is not
+#: halt detection -- illiquidity, a delayed opening or a dropped subscription stop
+#: the clock without a halt, and an auction or an indicative quote may keep it
+#: moving through one.
+#:
+#: ⚠ And it is not reachable at today's cadence. The only SCHEDULED producer is
+#: ``quotes_refresh`` (hourly @ :23) -- ``etoro_websocket.upsert_quote`` also writes
+#: this table, but only for whatever is on the operator's screen, so it is no
+#: unattended producer for a core instrument. ``CORE_MAX_QUOTE_AGE_SECONDS`` is
+#: 5400s, derived from that cadence and NOT from any halt-risk bound. A halt-relevant
+#: bound under an hourly producer does not refuse permanently -- it admits only in a
+#: brief window after each write and refuses the rest of the hour, which for a
+#: submission that must happen at a chosen moment is the same problem wearing a
+#: better name. Specify the risk bound first, then show collection can meet it.
 _HALT_COVERED_ASSET_CLASSES: Final = frozenset({"us_equity"})
 
 #: ⚠ An ALLOW-list, and that direction is the whole point: ``exchanges.asset_class``

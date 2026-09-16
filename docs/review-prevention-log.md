@@ -7123,3 +7123,54 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   readout. Never report a cross-venue match count without having looked at rows.
 - Enforced in: this prevention log; the measurement and its correction are recorded on
   #2312 (clause 4 answer, 2026-09-16).
+
+### A substitute gate must be shown to VARY with the state it stands in for (#2312, 2026-09-16)
+
+- Symptom: #2312's LSE-halt-coverage research recommended admitting a calendar-only venue
+  on a **tighter freshness bound** over the eToro eligibility proof's
+  `allow_open_position`, on the reasoning that "a name eToro will not let us open is
+  already refused", so re-proving nearer the submission closes the 24-hour halt window.
+- Root cause: a freshness bound only pays if the bit moves **with the state it is standing
+  in for**. Labelling every `uk_equity` proof with
+  `market_session_support.venue_session_is_open` puts **26 of 26** observations taken while
+  the LSE was CLOSED at `True`, including 22:20Z on a Sunday — and market-closed is one of
+  the four causes eToro's own documentation says that bit conflates. A bound that tightens
+  a value which does not respond to the only one of those four we can observe widens
+  admission while refusing nothing new.
+- ⚠ **The paired design is what makes it evidence.** Same instruments, same column,
+  observations spanning open and closed sessions. The whole-table figure —
+  `select allow_open_position, count(*), count(distinct instrument_id) from
+  strategy_core_eligibility_proofs group by 1` → `(True, 148, 25)` — looks stronger and is
+  weaker: that population is SELECTED (an instrument is proved because it is a core
+  candidate), and `docs/etoro-api-reference.md` records a demo census where **1 of 8**
+  instruments returned `allowOpenPosition=false`. The bit does vary. It does not vary with
+  session. Citing 148/148 as "the bit is constant" would have been the falsifiable claim.
+- ⚠⚠ **State the narrow finding, not the satisfying one.** No halt exists anywhere in our
+  corpus, so nothing measured here bears on halt sensitivity in either direction. The
+  claim that survives is *"no demonstrated halt sensitivity"* — which is sufficient to
+  refuse the substitution, because an unevidenced gate must not widen admission, and is
+  **not** sufficient to call the signal inert. Two other defects sink the recommendation
+  independently of any measurement: *false suffices to refuse* does not imply *true
+  suffices to admit*, and an OPEN-permission bit says nothing about a rebalance SELL.
+- ⚠ The mirror image, same technique, better result: `quotes.quoted_at` is eToro's own
+  `date` field, not our fetch time. Measured 2026-09-16 04:43Z with the LSE shut 13.2h,
+  every `.L` quote was stamped `15:29Z` = 16:29 London, one minute before the 16:30 close;
+  `SPY.RTH` was stamped `19:59Z` = 15:59 ET, one minute before the 16:00 NYSE close. ⚠⚠
+  **Check every reading against the collector's own period before believing it.** Two
+  readings taken in the same breath were confounded and nearly shipped: UK lags over
+  `strategy_core_quote_observations` capping at ~56 minutes (the hourly sampler's cadence,
+  not the venue's), and a US "21 minutes old" that matches the 04:23 write. The two
+  closing-bell stamps survive only because 13.2h dwarfs any cadence in the system.
+- ⚠ Even the surviving signal is not the thing it resembles: it is BROKER-supplied rather
+  than exchange-origin, `etoro.py` falls back to `now()` when `date` is unparseable (which
+  manufactures freshness on exactly the responses a liveness gate must distrust), and
+  session-associated staleness is not halt detection in either direction.
+- ⚠ Generalises beyond halts: the trigger is *"I am about to accept B as a stand-in for A
+  because A is unavailable."* Before designing around B, find a state B is supposed to
+  track that you CAN observe, and measure B against it within-subject. A stand-in that
+  cannot move for the observable case has not earned the unobservable one.
+- Enforced in: `app/services/market_session_support.py` (the `_HALT_COVERED_ASSET_CLASSES`
+  comment carries the measurements, their limits and the queries) and
+  `tests/test_market_session_support.py::test_admission_cannot_be_widened_on_the_eligibility_proof`,
+  which pins the structure the change would have to break rather than the measurement,
+  since no unit test can observe one.
