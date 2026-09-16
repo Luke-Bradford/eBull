@@ -7220,3 +7220,43 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   `app/services/strategy_paper_executor.py` (the caller that actually binds);
   `tests/test_strategy_paper_executor.py::test_a_shared_capital_refusal_rejects_the_signal_instead_of_aborting_the_cycle`
   (asserts the DURABLE rows, not just the returned code).
+
+### Equal length is not equal content, and `a or b` on a validator swaps in a different version's provenance (#3112, 2026-09-16)
+
+- Symptom: `sec_bulk_refresh._refresh_one_async` had a "seed-on-first-encounter" branch that,
+  when the local `.zip.etag` sidecar was absent, accepted the LOCAL archive as identical to
+  the remote one on **HEAD `Content-Length` equality plus a `zipfile` round-trip**, then wrote
+  the REMOTE ETag beside a SHA-256 of the OLD LOCAL bytes. Both consumers — this module's own
+  skip-the-transfer path and `sec_bulk_download`'s reuse pre-flight — then treat that pair as
+  proof. Two same-length ZIPs with different payloads reproduce it directly.
+- Root cause: the branch was written as a *bandwidth* optimisation against a stated premise
+  ("the bootstrap downloader writes no sidecar, PR-5b is in flight"). The premise went stale —
+  `sec_bulk_download.py:1201-1207` has written both sidecars for months — and nothing re-read
+  the branch when it did. A comment naming an in-flight PR is a dated claim; it does not expire
+  on its own.
+- ⚠ The same defect had a second instance one layer down that no one had filed:
+  `recorded_etag = get_etag or remote_etag`. A CDN answering HEAD with version A and then
+  serving version B *without* an ETag had B's bytes stamped with A's validator — after which
+  the fast-path skips every future update, permanently. **A falsy-fallback between two
+  validators of the same resource is not a default, it is a version swap**: `get_etag` and
+  `remote_etag` describe different HTTP responses and are only interchangeable when they are
+  equal, which is exactly the case where the fallback does nothing.
+- ⚠ The measurement that shaped the fix nearly went the other way. "The fast-path effectively
+  never hits, so requiring a hash costs nothing" was wrong: `sec_submissions_bulk_refresh` is
+  **56 transfers / 30 zero-byte across 86 runs**, so the path runs about one fire in three.
+  Aggregate `sum(row_count)` looked like "downloads every day" and is not the same statistic as
+  the per-run split. Ask for the split, not the total.
+- Prevention: **a cheap check may DECLINE to certify, never certify.** Size, magic bytes and a
+  ZIP central-directory round-trip are pre-filters — they can rule an archive out, and they can
+  order an expensive check, but no combination of them is evidence of identity. Where identity
+  is the question, the evidence is a full-content digest against a sidecar written by the code
+  that fetched those exact bytes (settled 2026-05-22: ETag match **AND** SHA-256 match). Commit
+  ordering follows from the same idea: remove the marker every consumer gates on BEFORE
+  publishing new bytes and write it LAST, so an interruption leaves the archive uncertified
+  rather than certified-wrong.
+- Enforced in: `app/services/sec_bulk_refresh.py` (seed branch deleted; fast-path requires
+  `_local_sha256_matches`; `_is_weak_etag` refuses RFC 9110 §8.8.1 weak validators for both
+  comparison and storage; publish sequence unlinks both sidecars before the rename and writes
+  `.etag` last); `tests/test_sec_bulk_refresh.py::TestNoAdoptionWithoutProvenance` (the
+  same-length/different-content reproduction, the GET-without-ETag case, and old-archive
+  preservation on a failed download).

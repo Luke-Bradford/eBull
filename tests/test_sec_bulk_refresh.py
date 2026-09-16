@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import zipfile
 from collections.abc import AsyncIterator, Callable
@@ -42,6 +43,19 @@ def _zip_bytes(payload: bytes = b"{}") -> bytes:
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("CIK0000320193.json", payload)
     return buf.getvalue()
+
+
+def _write_certified_archive(archive_path: Path, body: bytes, etag: str) -> None:
+    """Write ``body`` plus the FULL sidecar pair that certifies it.
+
+    Skipping a transfer needs both conditions of the 2026-05-22 settled
+    decision, so any test that means "the local copy is provably
+    current" must seed both sidecars — an ETag-only seed is now a
+    re-download case, not a no-op case (#3112).
+    """
+    archive_path.write_bytes(body)
+    _atomic_write_text(_etag_sidecar_path(archive_path), etag)
+    _atomic_write_text(_sha256_sidecar_path(archive_path), hashlib.sha256(body).hexdigest())
 
 
 def _make_handler(
@@ -193,11 +207,10 @@ class TestRefreshOneAsyncUnchanged:
         archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
         etag = '"504b124e9474334e889e9e525db95c14-184"'
 
-        # Pre-seed a matching ETag sidecar + a real (round-trippable)
-        # zip body at the canonical path.
+        # Pre-seed a certified local copy: matching ETag sidecar, a real
+        # (round-trippable) zip body, and a .sha256 that describes it.
         archive_path = tmp_path / _SUBMISSIONS_NAME
-        archive_path.write_bytes(body)
-        _atomic_write_text(_etag_sidecar_path(archive_path), etag)
+        _write_certified_archive(archive_path, body, etag)
 
         handler = _make_handler(archive_url=url, archive_body=body, etag=etag)
         async with _patched_make_client(httpx.MockTransport(handler)):
@@ -213,11 +226,94 @@ class TestRefreshOneAsyncUnchanged:
             bytes_downloaded=0,
             skipped_reason=None,
         )
-        # Sidecar untouched, archive untouched.
+        # Sidecars untouched, archive untouched.
         assert _read_local_etag(archive_path) == etag
         assert archive_path.read_bytes() == body
-        # No SHA-256 sidecar was created (we only create on download).
+        assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(body).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_etag_match_without_sha_sidecar_downloads(self, tmp_path: Path) -> None:
+        """#3112: an ETag match alone does not certify the local bytes.
+
+        The ETag sidecar says "this is the value we last recorded"; it
+        says nothing about whether the bytes on disk are still the ones
+        it was recorded for. Without the `.sha256` half of the settled
+        reuse rule we must re-download rather than skip.
+        """
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        body = _zip_bytes()
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        etag = '"etag-only"'
+
+        archive_path = tmp_path / _SUBMISSIONS_NAME
+        archive_path.write_bytes(body)
+        _atomic_write_text(_etag_sidecar_path(archive_path), etag)
         assert not _sha256_sidecar_path(archive_path).exists()
+
+        handler = _make_handler(archive_url=url, archive_body=body, etag=etag)
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+
+        assert result.bytes_downloaded == len(body)
+        assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(body).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_sha_sidecar_mismatch_downloads(self, tmp_path: Path) -> None:
+        """A `.sha256` that does not describe the bytes on disk is the
+        signature of an interrupted publish (or a tampered/rotted file).
+        It must force a re-download, not a skip.
+        """
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        body = _zip_bytes()
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        etag = '"sha-mismatch"'
+
+        archive_path = tmp_path / _SUBMISSIONS_NAME
+        _write_certified_archive(archive_path, body, etag)
+        _atomic_write_text(_sha256_sidecar_path(archive_path), "0" * 64)
+
+        handler = _make_handler(archive_url=url, archive_body=body, etag=etag)
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+
+        assert result.bytes_downloaded == len(body)
+        assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(body).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_weak_etag_is_not_usable_for_skipping(self, tmp_path: Path) -> None:
+        """RFC 9110 §8.8.1: a weak validator promises only semantic
+        equivalence, so it cannot stand in for byte identity — and it is
+        never stored, or a later fire would compare weak-to-weak and
+        skip a real update.
+        """
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        body = _zip_bytes()
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        weak = 'W/"weak-validator"'
+
+        archive_path = tmp_path / _SUBMISSIONS_NAME
+        _write_certified_archive(archive_path, body, weak)
+
+        handler = _make_handler(archive_url=url, archive_body=body, etag=weak)
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+
+        # Downloaded despite the sidecar "matching" — and the weak value
+        # was NOT re-recorded.
+        assert result.bytes_downloaded == len(body)
+        assert not _etag_sidecar_path(archive_path).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -393,30 +489,59 @@ class TestRefreshOneAsyncFailClosed:
 
 
 # ---------------------------------------------------------------------------
-# Seed-on-first-encounter (no sidecar yet, archive matches HEAD)
+# #3112 — no adoption of unverified local bytes
 # ---------------------------------------------------------------------------
 
 
-class TestSeedOnFirstEncounter:
+class TestNoAdoptionWithoutProvenance:
     @pytest.mark.asyncio
-    async def test_existing_archive_without_sidecar_is_seeded_without_download(self, tmp_path: Path) -> None:
-        """Bootstrap downloader writes the `.zip` but (today) NOT the
-        `.zip.etag` sidecar. The FIRST refresh fire must recognise the
-        existing valid archive matches HEAD by size+ZIP integrity and
-        adopt the live ETag as the sidecar — transferring ZERO bytes.
-        Without this, every install would re-download the multi-GB
-        archive on its first refresh fire.
+    async def test_same_length_different_content_is_never_adopted(self, tmp_path: Path) -> None:
+        """The issue's reproduction. Local and remote archives are both
+        valid ZIPs of IDENTICAL length but DIFFERENT content, and the
+        local ETag sidecar is absent. The deleted seed branch adopted
+        the local bytes under the remote ETag; the correct behaviour is
+        to download the remote bytes and certify those.
+        """
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        local_body = _zip_bytes(payload=b'{"v":1}')
+        remote_body = _zip_bytes(payload=b'{"v":2}')
+        assert len(local_body) == len(remote_body), "fixture must pin equal length"
+        assert local_body != remote_body
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        etag = '"new-version"'
+
+        archive_path = tmp_path / _SUBMISSIONS_NAME
+        archive_path.write_bytes(local_body)
+        assert not _etag_sidecar_path(archive_path).exists()
+
+        handler = _make_handler(archive_url=url, archive_body=remote_body, etag=etag)
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+
+        assert result.etag_changed is True
+        assert result.bytes_downloaded == len(remote_body)
+        # The REMOTE bytes are on disk, and the sidecars describe them.
+        assert archive_path.read_bytes() == remote_body
+        assert _read_local_etag(archive_path) == etag
+        assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(remote_body).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_byte_identical_archive_without_sidecar_still_downloads(self, tmp_path: Path) -> None:
+        """Even when the local copy happens to be correct, absence of a
+        sidecar means absence of PROOF. We pay one transfer rather than
+        certify bytes we cannot vouch for — the fail-safe direction.
         """
         url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
         body = _zip_bytes()
         archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
-        etag = '"seed-test-etag"'
+        etag = '"identical-but-unproven"'
 
-        # Archive present, NO sidecar. Bootstrap-downloader state.
         archive_path = tmp_path / _SUBMISSIONS_NAME
         archive_path.write_bytes(body)
-        assert not _etag_sidecar_path(archive_path).exists()
-        assert not _sha256_sidecar_path(archive_path).exists()
 
         handler = _make_handler(archive_url=url, archive_body=body, etag=etag)
         async with _patched_make_client(httpx.MockTransport(handler)):
@@ -426,25 +551,99 @@ class TestSeedOnFirstEncounter:
                 user_agent="ebull/test (admin@example.com)",
             )
 
-        # ZERO transfer — we adopted the HEAD ETag.
-        assert result.etag_changed is False
-        assert result.bytes_downloaded == 0
-        assert result.skipped_reason is None
-        # Sidecars now exist.
+        assert result.bytes_downloaded == len(body)
         assert _read_local_etag(archive_path) == etag
-        import hashlib
 
-        assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(body).hexdigest()
-        # Archive untouched.
+    @pytest.mark.asyncio
+    async def test_get_without_etag_leaves_archive_uncertified(self, tmp_path: Path) -> None:
+        """#3112, second instance: the recorded ETag must come from the
+        GET that served the bytes. A CDN answering HEAD with version A
+        and then GETting version B WITHOUT an ETag previously had B's
+        bytes stamped with A's validator — after which the fast-path
+        would skip every future update. With no usable GET validator we
+        keep the fresh bytes but record no ETag, so the next fire
+        re-downloads.
+        """
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        body = _zip_bytes(payload=b'{"served": true}')
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        head_etag = '"head-version-a"'
+
+        archive_path = tmp_path / _SUBMISSIONS_NAME
+        _write_certified_archive(archive_path, _zip_bytes(payload=b'{"old": 1}'), '"older"')
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "HEAD":
+                return httpx.Response(
+                    200,
+                    headers={
+                        "etag": head_etag,
+                        "content-length": str(len(body)),
+                        "content-type": "application/zip",
+                    },
+                )
+            # GET carries NO ETag header.
+            return httpx.Response(200, content=body, headers={"content-type": "application/zip"})
+
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+
+        assert result.etag_changed is True
         assert archive_path.read_bytes() == body
+        # HEAD's ETag was NOT stamped onto GET's bytes.
+        assert not _etag_sidecar_path(archive_path).exists()
+        # The hash sidecar still describes what actually landed.
+        assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(body).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_failed_download_preserves_old_archive_and_both_sidecars(self, tmp_path: Path) -> None:
+        """Nothing is invalidated until the new bytes have passed every
+        check: a GET that dies mid-transfer must leave the previous
+        archive AND its certification exactly as they were.
+        """
+        url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        old_body = _zip_bytes(payload=b'{"old": 1}')
+        archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
+        old_etag = '"old-certified"'
+
+        archive_path = tmp_path / _SUBMISSIONS_NAME
+        _write_certified_archive(archive_path, old_body, old_etag)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "HEAD":
+                return httpx.Response(
+                    200,
+                    headers={
+                        "etag": '"new-version"',
+                        "content-length": "999999",
+                        "content-type": "application/zip",
+                    },
+                )
+            # Truncated body — size mismatch against the advertised length.
+            return httpx.Response(200, content=b"short", headers={"etag": '"new-version"'})
+
+        async with _patched_make_client(httpx.MockTransport(handler)):
+            result = await _refresh_one_async(
+                archive=archive,
+                target_dir=tmp_path,
+                user_agent="ebull/test (admin@example.com)",
+            )
+
+        assert result.etag_changed is False
+        assert result.skipped_reason == "get_size_mismatch"
+        assert archive_path.read_bytes() == old_body
+        assert _read_local_etag(archive_path) == old_etag
+        assert _sha256_sidecar_path(archive_path).read_text().strip() == hashlib.sha256(old_body).hexdigest()
 
     @pytest.mark.asyncio
     async def test_existing_archive_with_size_mismatch_falls_through_to_download(self, tmp_path: Path) -> None:
-        """If the local file exists but its size doesn't match HEAD's
-        Content-Length, the seed-on-first-encounter path must NOT
-        adopt — fall through to the genuine re-download. Otherwise
-        a stale/corrupted local archive would be canonicalised under
-        the live ETag.
+        """A local file whose size doesn't match HEAD's Content-Length
+        must obviously not be adopted either — kept as a regression
+        guard on the narrower half of the deleted branch.
         """
         url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
         new_body = _zip_bytes(payload=b'{"new": true}')
@@ -679,10 +878,11 @@ class TestRateLimitAcquisition:
             archive = BulkArchive(name=_SUBMISSIONS_NAME, url=url)
             etag = '"gate-spy-test"'
 
-            # Seed local sidecar so the HEAD path is a no-op (single acquire).
+            # Seed a CERTIFIED local copy (both sidecars) so the HEAD
+            # path is genuinely a no-op — an ETag-only seed would now
+            # download and quietly stop testing the single-acquire case.
             archive_path = tmp_path / _SUBMISSIONS_NAME
-            archive_path.write_bytes(body)
-            _atomic_write_text(_etag_sidecar_path(archive_path), etag)
+            _write_certified_archive(archive_path, body, etag)
 
             handler = _make_handler(archive_url=url, archive_body=body, etag=etag)
             async with _patched_make_client(httpx.MockTransport(handler)):
