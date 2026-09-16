@@ -1,8 +1,12 @@
 # #3109 — the per-CIK poll queue is inverted, the loss is not locally measurable, and the fix is not one line
 
-Status: **research + slice plan, no implementation.** Revised after Codex checkpoint 1 (33
-findings), which **withdrew this spec's own headline measurement** and falsified the one-line
-fix it originally proposed. Target of the eventual slices: `app/services/data_freshness.py`
+Status: **slice 0 DONE (§3a); slices 1-3 are plan, no implementation.** Revised after Codex
+checkpoint 1 (33 findings), which **withdrew this spec's own headline measurement** and
+falsified the one-line fix it originally proposed. §3a then ran slice 0's existence proof and
+two further Codex passes (40 then 26 findings) reversed ITS headline too: the answer is the
+**absence** of a verified missing filing, because `sec_filing_manifest` is not the record of
+what we discovered — 3,415 of 3,420 apparent absences are evidenced elsewhere. Scope: slice 0
+tests DISCOVERY loss only. Target of the eventual slices: `app/services/data_freshness.py`
 (`subjects_due_for_poll`), `app/jobs/sec_per_cik_poll.py`. All figures read-only against the dev
 DB at `548d6bdf`, 2026-09-16 ~16:20-16:40Z.
 
@@ -121,6 +125,185 @@ manifest row at all** for their triple and are unexplained (retention, identity 
 freshness advancing without manifest evidence — each implies something different); and the join
 says nothing about holes *below* a watermark, since a maximum is not completeness (Codex 3).
 
+## 3a. Slice 0 — the existence proof RAN, and the answer is the ABSENCE of one
+
+Slice 0 asked for *"one verified missing accession, **or the absence of one**"*. It is the
+second. Run 2026-09-16, read-only, **zero SEC requests**.
+
+**Result: no filing was verified as lost.** Every candidate resolved to a different ingest
+route, a different subject, or a coverage boundary. Five accessions remain unaccounted for and
+are named below as the residual lead — not as a proven loss.
+
+⚠ This section replaces a first draft that reported the opposite. Codex checkpoint 1 (40
+findings) falsified its headline, and the instrument corrections that did so are more useful
+than the number was. They are recorded in full, because each one is a trap the next measurement
+would fall into.
+
+### The instrument: SEC's own bulk archive, not the API
+
+`submissions.zip` (`resolve_data_dir()/sec/bulk`, 1.564 GB, 990,360 members) is SEC's nightly
+publication of every CIK's filing list, so it is not written by our discovery layers — which is
+what §3 says local data cannot be. Zero requests against the 10 req/s budget.
+
+⚠ Freshness verified from **content**, not mtime: #3112 is open because the bulk refresh can
+accept a same-size stale ZIP and write the new ETag beside the old bytes. `MICROSOFT CORP`'s
+member carries a filing dated **2026-09-15**. ⚠ That certifies one member, not the archive
+(Codex 13), and independence is partial — bootstrap ingests this same ZIP, so an omission
+present in SEC's own publication would escape both sides (Codex 12).
+
+### Correction 1 ⛔⛔ — the post-watermark discriminator is a SECOND tautology
+
+The first form of the experiment asked: *does SEC list anything NEWER than the triple's
+watermark?* Over 120 starved triples it returned **0**.
+
+`seed_freshness_for_manifest_row` sets the watermark from the newest MANIFEST row. A filing we
+never discovered never advances it, and a later filing discovered by any layer jumps the
+watermark **past** the hole. A miss is therefore always BEHIND the watermark, so the question
+can only be true for a triple whose single most recent filing was missed and which has filed
+nothing since.
+
+§3 gestured at this (*"a maximum is not completeness"*). Worth naming as a rule, because it
+caught two different queries on one ticket: **the watermark cannot be a boundary in any test of
+the thing that writes it.** ⚠ Zero still constrains the sampled post-watermark population; it
+is not evidence of completeness, and the sample was biased toward recent discovery success
+(Codex 3).
+
+### Correction 2 ⛔⛔ — `sec_filing_manifest` is NOT the completeness oracle. This is what reversed the result
+
+With the watermark dropped and the discriminator changed to *"absent from
+`sec_filing_manifest` entirely"*, the scan produced **3,420 absent accessions** on the
+issuer-subject arm, and one of them survived every alternative explanation: Form 4
+`0001339727-25-000005`, `FLR.US` (instrument 1554, tradable), filed 2025-12-29, with nine
+present Form 4 neighbours before it and twenty after. It was written up as the existence proof.
+
+**It is not missing.** Sweeping all 155 tables carrying an accession column:
+
+```
+rows for 0001339727-25-000005:
+  filing_documents 4 | filing_raw_documents 1 | insider_filers 1
+  insider_filings 1  | insider_transactions 1 | insider_transaction_footnotes 1
+```
+
+We hold the filing, its raw body, and its parsed transactions. It has no manifest row because
+the **legacy insider path** (`app/services/insider_transactions.py`,
+`insider_form3_ingest.py`) writes the typed tables directly without one. The manifest is one
+ingest route's bookkeeping, not the record of what we have.
+
+Re-testing every absence against the typed tables:
+
+| source | manifest-absent | in `insider_filings` | in `filing_raw_documents` | in `filing_documents` | **absent everywhere** |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| sec_8k | 1,232 | 0 | 0 | 1,232 | **0** |
+| sec_form4 | 1,814 | 1,814 | 1,814 | 1,814 | **0** |
+| sec_10k | 122 | 0 | 0 | 122 | **0** |
+| sec_form3 | 247 | 0 | 0 | 247 | **0** |
+| sec_424b | 5 | 0 | 0 | 0 | **5** |
+| **TOTAL** | **3,420** | 1,814 | 1,814 | 3,415 | **5** |
+
+**3,415 of 3,420 (99.85%) are present in `filing_documents`.** The apparent loss was an artefact
+of asking the wrong table.
+
+⚠ This also voids the first draft's entire narrative — it classified manifest absences into
+"un-backfilled history" versus "interior holes" and read shape as cause. Both the classes and
+the reading are withdrawn: they measured manifest membership, which is not what we hold. Codex
+24/30 were independently right that shape cannot establish backfill history without
+universe-entry evidence, which was never gathered.
+
+### Correction 3 ⚠⚠ — the comparison needs per-subject-type eligibility, not one rule
+
+`CIK 0000029915` (`DOW CHEMICAL CO /DE/`) is a starved triple with
+`subject_type='institutional_filer'`, `instrument_id IS NULL`. SEC lists 12 of its 8-Ks since
+2025-01-01; we hold 11; `0001193125-25-165440` is absent with both neighbours present — a
+textbook interior hole. But the neighbours' manifest rows are all stored under **`0001751788`
+(DOW INC.)**, `subject_type='issuer'`, `instrument_id=9060`, and the absent accession **does not
+appear in Dow Inc's own SEC filing list at all**. It is a Dow-Chemical-only 8-K, and its absence
+is correct.
+
+⚠ Stated precisely, per Codex 8: filer-subject triples are **not** categorically invalid — the
+repo legitimately expects `institutional_filer` 13F and `blockholder_filer` 13D/G manifests.
+What is invalid is applying the ISSUER rule to them. A valid filer-arm comparison needs the
+filing's own party list and that source's role/universe eligibility; the bulk archive does not
+carry per-accession filer lists, so it cannot be built from this instrument alone.
+
+⚠ The first draft claimed "255 of 259 apparent interior misses sat on filer-shaped subjects".
+**Wrong, and it is arithmetic rather than judgement** (Codex 10): 255 was the Form 4 count in
+the unrestricted arm. Restricting to issuer subjects leaves 194, so the filer-shaped share is
+**65**, not 255.
+
+### ⛔ Every rate this section originally reported is WITHDRAWN, for a fourth reason
+
+The scan read only `filings.recent` from each member. The archive also contains **5,373
+overflow members** (`CIK..........-submissions-NNN.json`), and for a high-volume filer the
+recent page does not reach back to the window start — JPMorgan's begins **2025-09-16**. So the
+SEC-side set was **truncated for exactly the busiest filers** (Codex 14).
+
+Truncation cannot manufacture a false absence (an absence is only claimed for an accession
+actually seen in SEC's list), so the **5** below stand. It does destroy every denominator and
+therefore every percentage. Withdrawn accordingly: the 1.976% absence rate, the 94.2%
+prefix-gap share, the 0.112% interior-gap figure, and the "~25× smaller" and "~17× larger"
+comparisons. **Any rerun that wants a rate MUST follow `filings.files[]` pagination.**
+
+Further limits, recorded rather than glossed (Codex 15-23, 26-29, 39): the population omits the
+selector's `state IN (...)` filter and NULL predictions, so it is not the production queue;
+2,397 triples with no in-window SEC filings were not reconciled against missing archive members;
+six sources were scanned, not every issuer lane (10-Q and Form 5 are absent); the `today-3d`
+guard is an unvalidated allowance, calendar-date based and timezone-dependent, not a measured
+dissemination latency; a present neighbour dates a FILING, not a discovery, so it cannot prove
+a layer was running; and present rows may come from bootstrap, rebuild or backfill, so none of
+this measures Atom or daily-index performance. ⚠ The five leads' own windows were observed on
+the recent page only, so "the only 424B in the window" means "the only one on the page
+inspected" (Codex 14).
+
+### The five residual leads — unaccounted for, NOT proven lost
+
+Absent from `sec_filing_manifest` **and** `filing_documents`, all for tradable instruments, all
+in sub-forms `docs/etl/sources/sec_424b.md` documents as tier-1 PARSE+RAW (424B1/B3/B4/B5/B7,
+distinct from the volume-gated 424B2):
+
+| instrument | CIK | form | filed | accession |
+| --- | --- | --- | --- | --- |
+| `TBBK` (2446) | 0001295401 | 424B1 | 2025-08-15 | `0001104659-25-079281` |
+| `OMEX` (1048806) | 0000798528 | 424B1 | 2025-02-07 | `0001193125-25-022760` |
+| `CBAT` (1049358) | 0002086841 | 424B3 | 2026-01-16 | `0001213900-26-005125` |
+| `PACK` (10508) | 0001712463 | 424B1 | 2025-11-19 | `0000950103-25-015015` |
+| `HTCR` (1051861) | 0001892322 | 424B1 | 2025-09-16 | `0001493152-25-013662` |
+
+**No documented exclusion covers them.** All five sub-forms are mapped in `_FORM_TO_SOURCE`;
+the volume cap applies to 424B2 only; and a parse gate leaves a manifest TOMBSTONE rather than
+no row, so gating cannot explain a missing manifest row.
+
+⚠ **What is genuinely unverified is historical coverage, and it is the leading alternative.**
+`docs/etl/sources/sec_424b.md` records 424B as not bootstrap-covered, with historical backfill
+separately driven (`scripts/backfill_1974_sec_424b.py`) off `filing_events` and resolvable CIKs.
+Present tradability does not establish historical universe membership, CIK mapping, deployment
+date, or a completed backfill for these instruments. Possible exemptions, not verified ones —
+which is exactly why these five are leads and not findings.
+
+⚠ Neighbour shape is deliberately NOT used to argue about them. A neighbour dates a filing, not
+a discovery, and its absence does not weaken a lead; what these five lack is verification, not a
+geometric pattern.
+
+### What slice 0 settles, and what it does not
+
+- **No verified loss.** The best candidate out of the whole scan was refuted by the oracle
+  correction, and the five leads lack the shape that would prove a miss. Slices 1-3 should
+  therefore be scoped as **latency and prevention** work, not as loss recovery — the queue being
+  inverted is established by §2 and does not need a loss to justify a fix, but it must not be
+  sold as one. ⚠ A scoping recommendation, not a proof that recovery is pointless — the
+  useful-ingestion gaps behind the 1,601 directory-only rows are untested.
+- ⚠ **This is not "no loss".** Absence of a verified miss over a truncated, six-source,
+  issuer-only scan is weak evidence of completeness, and §3's circularity argument still holds
+  for everything the bulk archive cannot see.
+- ⚠ **Do not assume slice 1 recovers history — read the cursor first.**
+  `sec_submissions.py:315` stops the poll when its known accession appears in the source-filtered
+  recent response; with a NULL or absent known accession it returns the whole filtered page, so
+  older holes on that page CAN be recovered. It does not follow overflow pages. Whether a timely
+  earlier poll would have caught any specific filing is a counterfactual this slice supports
+  neither way.
+- ⚠ **No causal claim is made, and no failure is established.** The five leads are unexplained,
+  not proven lost; all five predate the run history in §2. Present starvation alongside present
+  absence identifies nothing on its own.
+
 ## 4. Why the one-line reorder is not the fix
 
 The original proposal was to copy `expected_filings_poller.py:308,324-326` — eligibility on
@@ -162,11 +345,18 @@ not speculation.
 
 ## 5. Slices
 
-**Slice 0 — one verified missing accession, or the absence of one.** Take a bounded sample of
-starved triples with recent watermarks, ask SEC's submissions API directly (read-only, inside
-the 10 req/s budget), and compare against our watermark. **Existence proof, not a rate** — state
-it as such and do not extrapolate a percentage from it. This is the only evidence that can size
-the rest, and §3 is why nothing local can substitute.
+**Slice 0 — ✅ DONE, §3a. The answer is the ABSENCE of a verified missing filing**, with five
+424B accessions left as unaccounted-for leads rather than proven losses. ⚠ Four corrections to
+this paragraph's own plan, all in §3a: the SEC **API** was not needed (the nightly bulk
+`submissions.zip` costs zero requests); comparing **against our watermark** is a tautology,
+because the watermark is seeded from the newest manifest row, so a miss is always behind it;
+**`sec_filing_manifest` is not the record of what we discovered** — a parallel path writes the
+typed tables with no manifest row, and 3,415 of 3,420 apparent absences turn out to be evidenced
+in `filing_documents`. ⚠ That table is SEC's DIRECTORY LISTING, so it evidences discovery only:
+useful ingestion is untested for the 1,601 candidates it alone covers; and the ISSUER rule cannot be applied to filer-subject triples. ⛔ All
+rates are WITHDRAWN: the scan read only `filings.recent` and the archive has 5,373 overflow
+members, so the denominator was truncated for the busiest filers. **Consequence for slices 1-3:
+scope them as latency/prevention work, not loss recovery.**
 
 **Slice 1 — the selector.** Candidacy stays `expected_next_at IS NULL OR expected_next_at <=
 now()`; ordering becomes a composite of poll-staleness and filing-urgency rather than either
