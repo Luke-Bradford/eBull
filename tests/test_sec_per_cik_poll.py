@@ -566,37 +566,39 @@ class TestCikSelectorInvariants:
         assert row is not None
         assert row.last_polled_outcome == "current", "the row was touched by a poll that cannot see it"
 
-    def test_a_null_deadline_ranks_its_whole_cik_first(
+    def test_a_cik_whose_deadlines_are_all_null_ranks_FIRST(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
-        """⚠⚠ ``MIN`` ignores NULL, so ranking a group on a bare
-        ``MIN(expected_next_at)`` would push a CIK holding a NULL deadline
-        BEHIND an all-NULL one — inverting the row readers' NULLS FIRST.
-        The COALESCE-inside-MIN is what this pins.
+        """⚠⚠ Two NULL traps compose here, and the naive query hits both.
+
+        ``MIN`` ignores NULLs, so a group whose deadlines are ALL NULL gets a
+        NULL rank key — and ``ORDER BY key ASC`` defaults to NULLS **LAST**.
+        So the most urgent CIK (never polled, no prediction) would sort behind
+        every dated one, exactly inverting the row readers' explicit
+        ``NULLS FIRST``. Folding the NULL into the key with
+        ``COALESCE(..., '-infinity')`` fixes both at once.
+
+        ⚠ An earlier version of this test gave the NULL CIK a second, OLD
+        deadline as well — which does NOT discriminate, because ``MIN`` then
+        returns that old date and the CIK ranks first either way. The probe
+        (bare ``MIN``) survived it.
         """
         _seed_aapl(ebull_test_conn)
         _seed_msft(ebull_test_conn)
-        # AAPL: one NULL deadline + one recent one. MSFT: an old deadline.
+        # AAPL: deadlines ALL NULL. MSFT: an old, dated deadline.
         _make_due(ebull_test_conn, "sec_8k", cik="0000320193", instrument_id=1701, subject_id="1701")
         _make_due(ebull_test_conn, "sec_form4", cik="0000320193", instrument_id=1701, subject_id="1701")
         _make_due(ebull_test_conn, "sec_8k", cik="0000789019", instrument_id=1702, subject_id="1702")
         with ebull_test_conn.cursor() as cur:
-            cur.execute(
-                "UPDATE data_freshness_index SET expected_next_at = NULL"
-                " WHERE subject_id = '1701' AND source = 'sec_form4'"
-            )
-            cur.execute(
-                "UPDATE data_freshness_index SET expected_next_at = '2020-01-01'"
-                " WHERE subject_id = '1701' AND source = 'sec_8k'"
-            )
-            cur.execute("UPDATE data_freshness_index SET expected_next_at = '2021-01-01' WHERE subject_id = '1702'")
+            cur.execute("UPDATE data_freshness_index SET expected_next_at = NULL WHERE subject_id = '1701'")
+            cur.execute("UPDATE data_freshness_index SET expected_next_at = '2020-01-01' WHERE subject_id = '1702'")
         ebull_test_conn.commit()
 
         batches = ciks_due_for_poll(ebull_test_conn, limit=1)
         assert len(batches) == 1
-        assert {r.cik for r in batches[0]} == {"0000320193"}
-        # ...and the whole CIK comes with it, not just the NULL row.
+        assert {r.cik for r in batches[0]} == {"0000320193"}, "a dated CIK outranked an unpolled one"
+        # ...and the whole CIK comes with it, not just one of its rows.
         assert {r.source for r in batches[0]} == {"sec_8k", "sec_form4"}
 
     def test_budget_counts_ciks_not_rows(
