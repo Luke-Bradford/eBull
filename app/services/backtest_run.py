@@ -149,6 +149,21 @@ from app.services.strategy_entry_liquidity import (
 from app.services.strategy_entry_liquidity import (
     summarise as summarise_entry_liquidity,
 )
+from app.services.strategy_exit_gap import (
+    ExclusionReason as ExitGapExclusionReason,
+)
+from app.services.strategy_exit_gap import (
+    ExitGapMeasurement,
+    GapObservation,
+    boundary_gaps,
+    worse_of,
+)
+from app.services.strategy_exit_gap import (
+    new_leg_column as new_exit_gap_column,
+)
+from app.services.strategy_exit_gap import (
+    summarise as summarise_exit_gap,
+)
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
 from app.services.strategy_promotion_evidence_measure import (
     LedgerMeasurements,
@@ -1193,6 +1208,44 @@ class _NamespaceBook:
     #: leg — `measured + excluded == realised` is the invariant that makes the
     #: counts auditable, and `EntryLiquidityMeasurement` enforces it.
     entry_liquidity_excluded: Counter[str] = field(default_factory=Counter)
+    #: #3104 slice 9 — per REALISED leg, the MINIMUM and MAXIMUM session gap
+    #: across every boundary the leg held through. ⚠ Named for the arithmetic:
+    #: an all-adverse population has a negative maximum, so "best" would be
+    #: wrong there.
+    #: Positionally parallel to each other and SHORTER than `returns`: a leg
+    #: with no measurable boundary is counted in `exit_gap_excluded` instead.
+    #:
+    #: ⚠⚠ DESCRIPTIVE, NOT A BOUND — `strategy_exit_gap`'s header, and the one
+    #: thing about this field that must not be lost between here and #2500.
+    #:
+    #: ⚠ `array('d')` and not `list`: a Python list boxes 4.2M floats at ~32
+    #: bytes each against 8, twice over.
+    exit_gap_min: array[float] = field(default_factory=new_exit_gap_column)
+    exit_gap_max: array[float] = field(default_factory=new_exit_gap_column)
+    #: Why each unmeasured realised leg has no observation, under
+    #: `strategy_exit_gap.EXCLUSION_PRECEDENCE`. ⚠ Exactly one reason per leg —
+    #: `measured + excluded == realised` is what makes the counts auditable.
+    exit_gap_excluded: Counter[str] = field(default_factory=Counter)
+    #: Coverage, because the accounting equality does NOT establish it: a
+    #: MEASURED leg can still have unmeasurable boundaries, and the excluded one
+    #: could have been its most extreme.
+    #:
+    #: ⚠ The two boundary counts SUM to every boundary visited, across measured
+    #: and wholly excluded legs alike — that sum is the denominator a coverage
+    #: rate needs. Counted once per (leg, boundary): a boundary held by two
+    #: overlapping legs counts for each.
+    exit_gap_measured_boundaries: int = 0
+    exit_gap_partial_legs: int = 0
+    exit_gap_unmeasurable_boundaries: int = 0
+    #: Measured legs on a series `price_series_break` cannot describe at all
+    #: (#2721 step 3's negative name key). ⚠ A CAVEAT with no conservatism
+    #: claim attached: "no break record" is not evidence of no break.
+    exit_gap_unlinked_legs: int = 0
+    #: The binding observations, tracked incrementally rather than as two more
+    #: 4.2M-element columns — the summary needs one of each, and the declared
+    #: tie-break makes an incremental update deterministic.
+    exit_gap_binding_min: GapObservation | None = None
+    exit_gap_binding_max: GapObservation | None = None
     instruments: set[int] = field(default_factory=set)
     positions: int = 0
     open_at_end: int = 0
@@ -1550,6 +1603,107 @@ def _record_entry_liquidity(
     book.entry_liquidity_exit_dates.append(exit_date)
 
 
+def _record_exit_gap(
+    book: _NamespaceBook,
+    *,
+    series: BarSeries,
+    fill_date: date,
+    exit_date: date,
+    name_key: int,
+    close_source: str,
+    policy_known: bool,
+    gaps: Sequence[float],
+    reasons: Sequence[ExitGapExclusionReason | None],
+) -> None:
+    """Give one realised leg exactly one session-gap verdict (#3104 slice 9).
+
+    ⚠ The ORDER is ``strategy_exit_gap.EXCLUSION_PRECEDENCE`` applied literally,
+    and the two LEG-level reasons are evaluated FIRST — before any boundary
+    exists. A ``bars_held = 0`` leg otherwise indexes ``f - 1``, which at
+    ``f = 0`` wraps to the last bar of the series and measures a boundary the
+    position never held.
+
+    ⚠ Everything here is a DIAGNOSTIC: the caller has already appended this
+    leg's return, so an excluded boundary removes the leg's GAP OBSERVATION and
+    never the leg.
+    """
+    fill_index = bar_index_for(series.dates, fill_date)
+    exit_index = bar_index_for(series.dates, exit_date)
+    if fill_index is None or exit_index is None:  # pragma: no cover - both came from this series
+        raise RuntimeError(
+            f"leg {fill_date} -> {exit_date} has a bar absent from the series it was produced on "
+            f"(fill located: {fill_index is not None}, exit located: {exit_index is not None}) — "
+            "the gap walk cannot be located and the ledger is misaligned"
+        )
+    if exit_index < fill_index:  # pragma: no cover - `Position` refuses a close before its fill
+        raise RuntimeError(f"leg closes at index {exit_index} before its fill at {fill_index}")
+    if exit_index == fill_index:
+        book.exit_gap_excluded["no_session_boundary"] += 1
+        return
+    if not policy_known:
+        book.exit_gap_excluded["provenance_unknown"] += 1
+        return
+    # ⚠ ASSERTED, not defended against — slice 7a's recorded lesson. `reasons` is
+    # built from `series.dates` in the same call, so a short array is a plumbing
+    # bug, and silently reporting it as a boundary verdict would hide it.
+    if len(reasons) != len(series.dates) or len(gaps) != len(series.dates):
+        raise RuntimeError(
+            f"{len(reasons)} gap verdicts / {len(gaps)} values against {len(series.dates)} bars — "
+            "the verdict arrays are built from this series and cannot disagree with it"
+        )
+    lowest: GapObservation | None = None
+    highest: GapObservation | None = None
+    measured = 0
+    unmeasurable = 0
+    reason: str | None = None
+    for index in range(fill_index + 1, exit_index + 1):
+        boundary_reason = reasons[index]
+        if boundary_reason is not None:
+            unmeasurable += 1
+            reason = worse_of(reason, boundary_reason)
+            continue
+        measured += 1
+        observation = GapObservation(
+            value=gaps[index],
+            name_key=name_key,
+            fill_date=fill_date,
+            exit_date=exit_date,
+            prior_bar_date=series.dates[index - 1],
+            bar_date=series.dates[index],
+            boundary_calendar_days=(series.dates[index] - series.dates[index - 1]).days,
+            close_source=close_source,
+        )
+        if observation.is_lower_than(lowest):
+            lowest = observation
+        if observation.is_higher_than(highest):
+            highest = observation
+    book.exit_gap_unmeasurable_boundaries += unmeasurable
+    if lowest is None or highest is None:
+        if reason is None:  # pragma: no cover - a leg with no measurable boundary refused at least one
+            # ⚠ RAISED, NOT ASSERTED. `python -O` strips a bare `assert`, and the
+            # next line would then key the Counter on `None` — which is not an
+            # exclusion reason, so `measured + excluded == realised` would still
+            # sum correctly while naming a verdict that does not exist. A silent
+            # violation of the one invariant this recorder exists to provide.
+            raise RuntimeError(
+                f"leg {fill_date} -> {exit_date} measured no boundary and refused none either — "
+                f"{exit_index - fill_index} boundary/ies were walked and every verdict was consumed"
+            )
+        book.exit_gap_excluded[reason] += 1
+        return
+    book.exit_gap_measured_boundaries += measured
+    book.exit_gap_min.append(lowest.value)
+    book.exit_gap_max.append(highest.value)
+    if unmeasurable:
+        book.exit_gap_partial_legs += 1
+    if name_key < 0:
+        book.exit_gap_unlinked_legs += 1
+    if lowest.is_lower_than(book.exit_gap_binding_min):
+        book.exit_gap_binding_min = lowest
+    if highest.is_higher_than(book.exit_gap_binding_max):
+        book.exit_gap_binding_max = highest
+
+
 def _absorb(
     costed: Sequence[CostedPosition],
     *,
@@ -1595,6 +1749,31 @@ def _absorb(
             closes=[row["close"] for row in series.rows],
             volumes=[row["volume"] for row in series.rows],
             provisional_from=liquidity_policy.provisional_from,
+        )
+    # #3104 slice 9 — rolled once per (series, arm) for the same reason, and
+    # gated on PROVENANCE rather than on eligibility: this is a return on the
+    # wealth basis the run already prices every leg on, so `sql/305`'s
+    # unadjusted-level rule (which governs price ATTRIBUTION) does not apply.
+    # What it does need is the archive's pinned `provisional_from`, which is
+    # exactly what an unresolved policy cannot supply.
+    #
+    # ⚠⚠ `offsets` maps EACH series index to its own offset into the dense
+    # PANEL arrays. `series.rows` is on the series; `raw_closes` / `wealth_closes`
+    # are on the panel span. Stepping one index in both reads different bars
+    # wherever the panel carries a date this instrument did not trade.
+    gap_values: tuple[float, ...] = ()
+    gap_reasons: tuple[ExitGapExclusionReason | None, ...] = ()
+    if liquidity_policy is not None and costed:
+        gap_values, gap_reasons = boundary_gaps(
+            dates=series.dates,
+            opens=[row.get("open") for row in series.rows],
+            offsets=[
+                None if (slot := axis_pos.get(when)) is None else slot - first_axis_index for when in series.dates
+            ],
+            raw_closes=raw_closes,
+            wealth_closes=wealth_closes,
+            provisional_from=liquidity_policy.provisional_from,
+            unresolved_breaks=unresolved_breaks,
         )
     for row in costed:
         position = row.position
@@ -1725,6 +1904,20 @@ def _absorb(
                 means=liquidity_means,
                 reasons=liquidity_reasons,
                 unresolved_breaks=unresolved_breaks,
+            )
+            # #3104 slice 9. Same contract as the block above: a DIAGNOSTIC, and
+            # every append has already happened, so a withheld boundary removes
+            # the leg's gap observation and never the leg.
+            _record_exit_gap(
+                book,
+                series=series,
+                fill_date=position.entry_fill_bar_date,
+                exit_date=close_bar_date,
+                name_key=instrument_id,
+                close_source=position.close_source or "open_at_window_end",
+                policy_known=liquidity_policy is not None,
+                gaps=gap_values,
+                reasons=gap_reasons,
             )
         else:
             # #3104 — the open legs #2505's concurrency needs. ⚠ Recorded HERE
@@ -1969,6 +2162,53 @@ def _entry_liquidity_summary(
     )
 
 
+def _exit_gap_summary(
+    book: _NamespaceBook,
+    *,
+    liquidity_policy: ArchivePolicy | None,
+    return_basis: str,
+) -> ExitGapMeasurement:
+    """Summarise the book's session-gap verdicts (#3104 slice 9). NEVER ``None``.
+
+    ⚠⚠ THIS DELIBERATELY DOES NOT INHERIT SLICE 7a's ZERO-RECORD ESCAPE.
+    ``_entry_liquidity_summary`` returns ``None`` when nothing was recorded, so a
+    book that appended returns without ever passing through ``_absorb`` — every
+    hand-built harness book is one — silently bypasses the very accounting the
+    measurement exists to provide. Here that state is the NAMED
+    ``not_instrumented`` exclusion: the equality still holds, the version and the
+    zero counts still travel, and a production path that stopped recording
+    becomes visible as a non-zero count rather than as an absent object.
+
+    ⚠ It is a real distinction and not a formality: ``not_instrumented`` on a
+    production run means a realised-return append lost its recorder call, which
+    is a bug. On a harness book it means the book was never built by ``_absorb``,
+    which is not.
+    """
+    realised = len(book.returns)
+    recorded = len(book.exit_gap_min) + sum(book.exit_gap_excluded.values())
+    excluded = cast("dict[ExitGapExclusionReason, int]", dict(book.exit_gap_excluded))
+    if recorded < realised:
+        excluded["not_instrumented"] = excluded.get("not_instrumented", 0) + (realised - recorded)
+    return summarise_exit_gap(
+        min_per_leg=book.exit_gap_min,
+        max_per_leg=book.exit_gap_max,
+        realised_leg_count=realised,
+        excluded=excluded,
+        measured_boundary_count=book.exit_gap_measured_boundaries,
+        partial_coverage_leg_count=book.exit_gap_partial_legs,
+        unmeasurable_boundary_count=book.exit_gap_unmeasurable_boundaries,
+        unlinked_series_leg_count=book.exit_gap_unlinked_legs,
+        open_leg_count=book.open_at_end,
+        binding_min=book.exit_gap_binding_min,
+        binding_max=book.exit_gap_binding_max,
+        # ⚠ REPORTED WHENEVER IT RESOLVED, eligible or not — slice 7a's ckpt-2
+        # lesson: gating the reported basis on eligibility makes a verified
+        # `split_adjusted` indistinguishable from unresolvable provenance.
+        adjustment_basis=liquidity_policy.adjustment_basis if liquidity_policy is not None else None,
+        return_basis=return_basis,
+    )
+
+
 def _ledger_evidence(
     book: _NamespaceBook,
     *,
@@ -1976,6 +2216,7 @@ def _ledger_evidence(
     window_end: date,
     anchor_year: int,
     liquidity_policy: ArchivePolicy | None = None,
+    return_basis: str = TOTAL_RETURN_BASIS,
 ) -> LedgerMeasurements | None:
     """#2505's ledger arithmetic over one book. ``None`` on an empty population.
 
@@ -2028,6 +2269,7 @@ def _ledger_evidence(
             root_seed=BACKTEST_BOOTSTRAP_SEED,
             anchor_year=anchor_year,
             entry_liquidity=_entry_liquidity_summary(book, liquidity_policy=liquidity_policy),
+            exit_gap=_exit_gap_summary(book, liquidity_policy=liquidity_policy, return_basis=return_basis),
         )
     except ValueError as error:
         raise RuntimeError(
@@ -2045,6 +2287,7 @@ def _measure_namespace(
     raw_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
     wealth_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
     sizing_rule: str = SIZING_RULE_ID,
+    return_basis: str = TOTAL_RETURN_BASIS,
 ) -> NamespaceMeasurement | None:
     """Build every metric on the namespace's complete predeclared panel axis."""
     dates = corpus.in_sample_axis if namespace == "in_sample" else corpus.axis
@@ -2155,6 +2398,7 @@ def _measure_namespace(
             # window.end``. NOT ``dates[-1]`` — see ``_ledger_evidence``.
             anchor_year=corpus.window.end.year,
             liquidity_policy=corpus.liquidity_policy,
+            return_basis=return_basis,
         ),
         label_starts=book.label_starts,
         label_ends=book.label_ends,
@@ -2400,6 +2644,7 @@ def evaluate_arm(
             raw_closes_by_instrument=raw_closes_by_instrument,
             wealth_closes_by_instrument=wealth_closes_by_instrument,
             sizing_rule=sizing_rule,
+            return_basis=return_basis,
         )
         if outcome is not None:
             measured[name] = outcome
@@ -2796,6 +3041,7 @@ def evaluate_level_arms(
                 raw_closes_by_instrument=raw_closes_by_instrument,
                 wealth_closes_by_instrument=wealth_closes_by_instrument,
                 sizing_rule=sizing_rule,
+                return_basis=return_basis,
             )
             if outcome is not None:
                 measured[name] = outcome

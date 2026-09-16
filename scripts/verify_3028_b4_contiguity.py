@@ -322,9 +322,9 @@ WHERE rule_set_version = %(v)s AND 'B4' = ANY(rules)
 
 
 def run_research(conn: psycopg.Connection, as_of: date, sample_limit: int) -> int:  # type: ignore[type-arg]
-    from app.services.research_corpus_ingest import _ASSET_CLASS
+    from app.services.research_corpus_ingest import ASSET_CLASS
 
-    params = params_for(_ASSET_CLASS)
+    params = params_for(ASSET_CLASS)
     ctrl = control_params(params)
     baseline = stored_version(conn, "research_price_quarantine_coverage", RESEARCH_VERSION_SQL)
     baseline_arm = arm_of(baseline)
@@ -342,7 +342,7 @@ def run_research(conn: psycopg.Connection, as_of: date, sample_limit: int) -> in
         ).fetchall()
     ]
     print(
-        f"\n[research] class {_ASSET_CLASS}   T={params.magnitude_threshold}"
+        f"\n[research] class {ASSET_CLASS}   T={params.magnitude_threshold}"
         f"   control B4 gap {ctrl.hole_days}d -> treatment {params.hole_days}d"
         f"\n[research] {len(scope):,} series hold a gap in the formerly-unowned band"
         f" ({ctrl.hole_days + 1}..{params.hole_days}d); a gain requires one",
