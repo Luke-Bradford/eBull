@@ -246,9 +246,27 @@ function CoreSleeveControl({
                 // reconciles core orders every five minutes.
                 result.reason_code === "core_resume_already_resolved"
                 ? "That order was already reconciled by the scheduled cycle. The sleeve was not re-evaluated — rebalance again to check the band."
-                : result.state === "held"
-                  ? "No trade required; the sleeve remains inside its band."
-                  : `Rebalance refused: ${result.reason_code}.`;
+                : // ⚠ `below_min_rebalance_amount` is also `held`, and it means the OPPOSITE
+                  // of the band sentence below: the sleeve is OUTSIDE the band and the gap
+                  // is smaller than the mandate's `min_rebalance_amount`, so the floor wins
+                  // and the breach is reported rather than traded through
+                  // (`strategy_core_allocator.py`: "The floor wins and the breach, if any,
+                  // is reported"). Reachable since #3123 re-enabled the affordance while
+                  // the sleeve holds a position, which is the state a small drift lives in.
+                  //
+                  // ⚠⚠ `state === "held"` is load-bearing, not defensive. The SAME reason
+                  // code arrives as `refused` from `assess_core_broker_preflight`, where
+                  // it is the BROKER's minimum biting, not the operator's. Naming the
+                  // mandate there would send them to lower a setting that cannot resolve
+                  // it. The executor evaluates the allocator without `broker_minimum` on
+                  // the held path, so a held one is unambiguously the mandate floor; a
+                  // refused one falls through to the generic line, because this response
+                  // carries no `floor_source` to say which minimum bound.
+                  result.state === "held" && result.reason_code === "below_min_rebalance_amount"
+                  ? "The sleeve is outside its band, but the gap is below the mandate's minimum rebalance amount, so no trade was placed."
+                  : result.state === "held"
+                    ? "No trade required; the sleeve remains inside its band."
+                    : `Rebalance refused: ${result.reason_code}.`;
       setOutcome(label);
       onUpdated();
     } catch (error) {

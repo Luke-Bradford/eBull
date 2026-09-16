@@ -46,15 +46,17 @@ from app.services.broker_credentials import (
 from app.services.strategy_core_executor import CoreExecutionResult, CoreResumeAuthority
 from app.services.strategy_core_mandate import CoreMandate
 from app.services.strategy_core_selection import CoreCandidateCoverage, CoreSelection
+from app.services.strategy_engine_capital import EngineCapitalObservationError
 
 
 def _capital_authority(
     *,
     active_position_ids: tuple[int, ...] = (),
     alpha_committed: Decimal = Decimal("0"),
+    enabled: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        enabled=True,
+        enabled=enabled,
         capital_limit=Decimal("1000"),
         capital_mode="fixed",
         realised_delta=Decimal("0"),
@@ -406,19 +408,8 @@ def test_operator_view_does_not_promise_resolution_for_a_stranded_authority(
     assert response.pending_order_id == 31
 
 
-@pytest.mark.parametrize(
-    ("capital_authority", "expected_blocker"),
-    [
-        (_capital_authority(active_position_ids=(99,)), "core_live_snapshot_required"),
-        (_capital_authority(alpha_committed=Decimal("1000")), "core_sandbox_exceeded"),
-    ],
-)
-def test_operator_view_does_not_advertise_unavailable_core_headroom(
-    monkeypatch: pytest.MonkeyPatch,
-    capital_authority: SimpleNamespace,
-    expected_blocker: str,
-) -> None:
-    selection = CoreSelection(
+def _ready_selection() -> CoreSelection:
+    return CoreSelection(
         state="ready",
         declared_outcome="pass",
         selected_instrument_id=3417,
@@ -432,21 +423,140 @@ def test_operator_view_does_not_advertise_unavailable_core_headroom(
         configuration_error=None,
         earliest_possible_verdict_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
-    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: selection)
+
+
+def _read_sleeve(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    capital: object,
+    resume: object = None,
+) -> Any:
+    """`read_core_sleeve` with everything except the capital branch held healthy."""
+
+    def load_capital(_conn: object) -> object:
+        if isinstance(capital, Exception):
+            raise capital
+        return capital
+
+    monkeypatch.setattr("app.api.strategies.load_core_selection", lambda _conn: _ready_selection())
     monkeypatch.setattr("app.api.strategies.load_core_mandate", lambda _conn: _mandate(core_instrument_id=3417))
-    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: None)
-    monkeypatch.setattr(
-        "app.api.strategies.load_engine_capital_authority",
-        lambda _conn: capital_authority,
-    )
+    monkeypatch.setattr("app.api.strategies.load_core_resume_authority", lambda _conn: resume)
+    monkeypatch.setattr("app.api.strategies.load_engine_capital_authority", load_capital)
     monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+    return read_core_sleeve(cast(Any, MagicMock()))
 
-    response = read_core_sleeve(cast(Any, MagicMock()))
 
-    assert response.can_enable_pool is True
+@pytest.mark.parametrize(
+    ("label", "capital", "permits", "blockers"),
+    [
+        (
+            "authority_raises",
+            EngineCapitalObservationError("test incomplete", "engine_capital_population_incomplete"),
+            False,
+            ["core_capital_authority_incomplete"],
+        ),
+        ("no_pool_event", None, False, ["core_paper_pool_unconfigured"]),
+        ("pool_disabled", _capital_authority(enabled=False), False, ["core_paper_pool_disabled"]),
+        ("active_commitment", _capital_authority(active_position_ids=(99,)), True, ["core_live_snapshot_required"]),
+        ("headroom_available", _capital_authority(), True, []),
+        (
+            "headroom_overbound",
+            _capital_authority(alpha_committed=Decimal("1000")),
+            False,
+            ["core_sandbox_exceeded"],
+        ),
+    ],
+)
+def test_every_capital_branch_reports_its_affordance_and_its_blocker_together(
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    capital: object,
+    permits: bool,
+    blockers: list[str],
+) -> None:
+    """All six branches of the capital chain, asserted as one table (#3123).
+
+    The predecessor parametrised only two of them and ran both through a single
+    ``can_rebalance is False`` assertion, so the ADVERTISING claim (a blocker is emitted,
+    no headroom figure is exposed) and the AFFORDANCE claim (may the operator ask the
+    endpoint to evaluate) could not be read apart -- and the affordance regressed inside
+    the advertising fix without any test changing.
+
+    ⚠ ``active_commitment`` is the row that moved: it now permits the rebalance while
+    STILL emitting its blocker. The page cannot prove headroom there, because the
+    position's committed amount is a broker fact; the endpoint can, and does, before any
+    order authority exists.
+    """
+    response = _read_sleeve(monkeypatch, capital=capital)
+
+    assert response.can_enable_pool is True, label
+    assert response.can_rebalance is permits, label
+    assert response.execution_action == ("rebalance" if permits else "blocked"), label
+    assert [blocker.code for blocker in response.blockers] == blockers, label
+
+
+def test_active_commitment_permits_a_rebalance_even_when_recorded_capital_looks_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The precedence consequence, asserted rather than left to be discovered.
+
+    The active-commitment branch is an ``elif``, so it SKIPS the recorded-headroom
+    calculation entirely: a pot whose recorded commitment already exhausts the bound now
+    reports ``can_rebalance=True`` and emits no ``core_sandbox_exceeded``.
+
+    ⚠ That is correct and not a weakening. The recorded figure omits the active position's
+    committed amount, so it was never the authority in this state --
+    ``resolve_engine_capital_usage`` charges the sandbox on the broker's ``row.amount`` --
+    and ``execute_core_rebalance`` recomputes ``within_bound`` from the exact snapshot and
+    refuses ``sandbox_exceeded`` before any durable order authority exists. The settled
+    boundary decision (2026-08-22) names the execution guard as the safety net, not a
+    read endpoint's flag.
+    """
+    response = _read_sleeve(
+        monkeypatch,
+        capital=_capital_authority(active_position_ids=(99,), alpha_committed=Decimal("1000")),
+    )
+
+    assert response.can_rebalance is True
+    assert response.execution_action == "rebalance"
+    assert [blocker.code for blocker in response.blockers] == ["core_live_snapshot_required"]
+
+
+def test_a_pending_order_still_wins_over_an_active_commitment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3123 must not let a rebalance start while an order is unresolved.
+
+    ``can_rebalance`` remains ``and resume_authority is None``, so the recovery path keeps
+    precedence exactly as before -- this is the assertion that would fail if the fix had
+    been written as "active commitment forces `can_rebalance`" rather than as one term in
+    the chain.
+    """
+    from uuid import UUID
+
+    resume = CoreResumeAuthority(
+        intent_id=11,
+        trade_id=21,
+        order_id=31,
+        instrument_id=3417,
+        amount=Decimal("49.9"),
+        request_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+        broker_order_ref=None,
+        eligibility_proof_id=7,
+        operator_id=UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"),
+        api_key_credential_id=UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"),
+        user_key_credential_id=UUID("f7306e0b-9494-415e-85fd-97874510cc83"),
+    )
+    monkeypatch.setattr("app.api.strategies.core_authority_is_stranded", lambda _conn, *, order_id: False)
+
+    response = _read_sleeve(
+        monkeypatch,
+        capital=_capital_authority(active_position_ids=(99,)),
+        resume=resume,
+    )
+
     assert response.can_rebalance is False
-    assert response.execution_action == "blocked"
-    assert [blocker.code for blocker in response.blockers] == [expected_blocker]
+    assert response.execution_action == "resume"
 
 
 def test_operator_view_refuses_a_mandate_for_the_previous_reviewed_selection(

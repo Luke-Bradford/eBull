@@ -3633,7 +3633,15 @@ def read_core_sleeve(
     mandate = load_core_mandate(conn)
     resume_authority = load_core_resume_authority(conn)
     blockers: list[CoreSleeveBlockerResponse] = []
-    capital_ready = False
+    # ⚠ This is "may the operator ask the ENDPOINT to evaluate", NOT "has this page proved
+    # headroom" (#3123).  The two were one flag, and the active-commitment branch below --
+    # which cannot prove headroom, because the position's committed amount is a broker fact
+    # -- therefore withdrew the allocator's only attended affordance in exactly the state it
+    # exists to manage.  A readiness flag on a READ endpoint grants no order authority
+    # (`_core_pool_activation_ready`'s docstring makes the same point about the pot), and the
+    # boundary's named safety net is the execution guard's `sandbox_exceeded` refusal
+    # (settled decision 2026-08-22), not a button.
+    capital_permits_rebalance = False
     try:
         capital_authority = load_engine_capital_authority(conn)
     except EngineCapitalObservationError as exc:
@@ -3660,6 +3668,20 @@ def read_core_sleeve(
             )
         )
     elif capital_authority.core_active_position_ids:
+        # The blocker still reports what this page cannot do.  What changed (#3123) is that
+        # it no longer also withdraws the affordance.
+        #
+        # ⚠⚠ This branch SKIPS the recorded-headroom calculation below, so a state whose
+        # recorded commitment already exhausts the bound now reports `can_rebalance=True`
+        # with no `core_sandbox_exceeded` blocker.  That is deliberate: the recorded figure
+        # omits the active position's committed amount, so it was never the authority here.
+        # `execute_core_rebalance` recomputes `within_bound` from the exact snapshot and
+        # refuses `sandbox_exceeded` before any order authority exists.
+        #
+        # ⚠ The detail deliberately carries no "rebalance to evaluate" instruction: this
+        # blocker is emitted independently of mandate, selection, environment and resume
+        # state, so an instruction here would be wrong in several combinations.
+        capital_permits_rebalance = True
         blockers.append(
             CoreSleeveBlockerResponse(
                 code="core_live_snapshot_required",
@@ -3677,8 +3699,8 @@ def read_core_sleeve(
             realised_delta=capital_authority.realised_delta,
             committed=recorded_commitment,
         )
-        capital_ready = recorded_headroom.within_bound and recorded_headroom.remaining > 0
-        if not capital_ready:
+        capital_permits_rebalance = recorded_headroom.within_bound and recorded_headroom.remaining > 0
+        if not capital_permits_rebalance:
             blockers.append(
                 CoreSleeveBlockerResponse(
                     code="core_sandbox_exceeded",
@@ -3836,7 +3858,7 @@ def read_core_sleeve(
         mandate=mandate,
         environment=settings.etoro_env,
     )
-    base_ready = core_pool_ready and capital_ready
+    base_ready = core_pool_ready and capital_permits_rebalance
     can_rebalance = base_ready and resume_authority is None
     can_resume = settings.etoro_env == "demo" and resume_authority is not None
     execution_action: Literal["blocked", "rebalance", "resume"] = (
