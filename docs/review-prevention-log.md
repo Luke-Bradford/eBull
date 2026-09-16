@@ -7024,3 +7024,32 @@ side-session connects). The correction never travelled the ten lines to the next
   the named exclusions, and the anti-join is the fix in situ);
   `docs/proposals/ta/2026-09-15-2414-backdated-insert-record.md` (§Full-population
   verification carries the superseded figure and why it was wrong).
+
+## A `Decimal` comparison is not a float comparison — ordering RAISES on NaN (2026-09-16, #2364, PR #3095)
+
+Review found a BLOCKING defect in a gate prediction: `Decimal(repr(deflated_sharpe))`
+followed directly by `Decimal(0) <= probability <= Decimal(1)`. With a NaN operand that
+raises `decimal.InvalidOperation` and takes down the write path, where the float
+comparison it replaced quietly returns `False` and reaches the intended refusal.
+
+- The same diff's OTHER two arms were already right, which is what made the gap
+  invisible: the gate side converts through a `finite_decimal` helper that returns `None`
+  on a non-finite value, and the sample-size branch two lines below the defect guards
+  with `math.isfinite` first. One of three arms was written without the guard.
+- ⚠ **Three languages, three different NaN orderings, in one change.** Python `float`
+  comparisons return `False`; Python `Decimal` comparisons RAISE; **Postgres orders NaN as
+  GREATER than every non-NaN numeric**, so the SQL arm's `r.deflated_sharpe > 0.95` would
+  have *passed* a NaN. What protects the SQL arm is not a guard at all — it is the
+  `strategy_results_dsr_is_probability` CHECK (`sql/266:111`) refusing the value at write
+  time. A reader who assumes one NaN rule across the three gets a different wrong answer
+  in each.
+- Prevention: any `Decimal(repr(x))` / `Decimal(str(x))` immediately followed by `<`,
+  `<=`, `>` or `>=` needs an `is_finite()` / `math.isfinite` guard before the comparison.
+  Grep shape: `Decimal(\(repr\|str\)(` on a line whose next comparison is an ordering.
+  Where the value is bounded by a CHECK constraint instead, say so at the comparison —
+  "unreachable" is a property of the writer, and the reader cannot see the writer.
+- Enforced in: `app/services/backtest_run.py::_expected_refusals` (the guard, with the
+  raise-vs-False contrast in the comment); `app/services/strategy_result.py::finite_decimal`
+  (the shared conversion, whose docstring names the three states it collapses);
+  `tests/test_backtest_run.py::test_the_deflation_verdict_is_predicted_before_the_write`
+  (`nan`, `+inf`, `-inf` parameters, revert-probed).
