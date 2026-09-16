@@ -32,7 +32,13 @@ import ast
 from pathlib import Path
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "app" / "jobs" / "sec_per_cik_poll.py"
-_REQUIRED_READERS = ("subjects_due_for_poll", "subjects_due_for_recheck")
+
+# ⚠ Renamed by #3109 from ``subjects_due_for_*``. The budget unit moved from
+# rows to CIKs, and the readers now return an eager ``list`` of per-CIK batches
+# rather than a lazy iterator of rows. The G13 invariant they exist to protect
+# is unchanged: both lanes must still be read and drained inside
+# ``run_per_cik_poll``'s own body.
+_REQUIRED_READERS = ("ciks_due_for_poll", "ciks_due_for_recheck")
 
 
 def _module_tree() -> ast.Module:
@@ -70,11 +76,21 @@ class _RunPerCikPollVisitor(ast.NodeVisitor):
     """Single visitor that collects *both* intra-function invariants
     under one nested-scope-skipping traversal:
 
-    1. ``consumed`` — reader-call names whose return value is wrapped
-       in an eager materialiser (``list`` / ``tuple`` / ``set``) or
-       directly iterated (``for``, ``async for``, ``yield from``). A
-       bare ``subjects_due_for_recheck(...)`` whose result is dropped
-       does NOT satisfy this.
+    1. ``consumed`` — reader-call names whose return value is actually
+       used: wrapped in an eager materialiser (``list`` / ``tuple`` /
+       ``set``), directly iterated (``for``, ``async for``,
+       ``yield from``), or **bound to a name that a later for-loop in
+       the same body iterates**. A bare ``ciks_due_for_recheck(...)``
+       whose result is dropped does NOT satisfy this.
+
+       ⚠ The bound-then-iterated case was added by #3109. The readers
+       now return an eager ``list`` of per-CIK batches, so wrapping the
+       call in ``list(...)`` would be redundant noise — but the thing
+       this invariant actually protects is "the lane is drained", not
+       "an iterator is materialised". Accepting only the materialiser
+       form would have forced dead code to satisfy a test. The binding
+       is tracked through ``ast.IfExp`` too, because the budget guard
+       is written ``x = reader(...) if budget > 0 else []``.
     2. ``rebinds`` — reader names that appear as the target of an
        ``ast.Assign`` / ``ast.AnnAssign`` inside the function. A local
        stub (``subjects_due_for_recheck = lambda: iter([])``) would
@@ -99,6 +115,10 @@ class _RunPerCikPollVisitor(ast.NodeVisitor):
         self._watch: frozenset[str] = frozenset(watch_names)
         self.consumed: set[str] = set()
         self.rebinds: list[str] = []
+        # local variable name -> reader it was assigned from
+        self._bound_from: dict[str, str] = {}
+        # local variable names a for-loop iterates
+        self._iterated: set[str] = set()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
         return  # skip nested function bodies
@@ -129,8 +149,23 @@ class _RunPerCikPollVisitor(ast.NodeVisitor):
             self._record_consumed(node.args[0])
         self.generic_visit(node)
 
+    def _reader_in(self, node: ast.AST) -> str | None:
+        """Reader name behind an expression, seeing through ``IfExp``.
+
+        The budget guard is ``reader(...) if budget > 0 else []``, so the
+        call sits in one branch of a conditional rather than at the top.
+        """
+        inner = self._inner_call_name(node)
+        if inner is not None:
+            return inner if inner in self._watch else None
+        if isinstance(node, ast.IfExp):
+            return self._reader_in(node.body) or self._reader_in(node.orelse)
+        return None
+
     def visit_For(self, node: ast.For) -> None:  # noqa: N802
         self._record_consumed(node.iter)
+        if isinstance(node.iter, ast.Name):
+            self._iterated.add(node.iter.id)
         self.generic_visit(node)
 
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:  # noqa: N802
@@ -145,7 +180,21 @@ class _RunPerCikPollVisitor(ast.NodeVisitor):
         for target in node.targets:
             if isinstance(target, ast.Name) and target.id in self._watch:
                 self.rebinds.append(target.id)
+            elif isinstance(target, ast.Name):
+                reader = self._reader_in(node.value)
+                if reader is not None:
+                    self._bound_from[target.id] = reader
         self.generic_visit(node)
+
+    def resolve_bound_then_iterated(self) -> None:
+        """Fold ``x = reader(...)`` + ``for _ in x:`` into ``consumed``.
+
+        Called once after the walk, because the binding and the loop are
+        separate statements and either may be visited first.
+        """
+        for name, reader in self._bound_from.items():
+            if name in self._iterated:
+                self.consumed.add(reader)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
         if isinstance(node.target, ast.Name) and node.target.id in self._watch:
@@ -160,6 +209,7 @@ def _walk_run_per_cik_poll() -> _RunPerCikPollVisitor:
     visitor = _RunPerCikPollVisitor(_REQUIRED_READERS)
     for stmt in fn.body:
         visitor.visit(stmt)
+    visitor.resolve_bound_then_iterated()
     return visitor
 
 

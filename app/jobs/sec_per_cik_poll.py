@@ -10,6 +10,23 @@ Layer 3 is the per-CIK reconcile path — fires only at predicted-next-
 filing windows. AAPL's DEF 14A poll fires once a year; AAPL's 13F
 poll never fires (issuer subject; AAPL doesn't file 13F).
 
+⚠⚠ **One fetch per CIK, not per (subject, source) triple** (#3109).
+``submissions.json`` is an entity-wide response — SEC serves one
+document carrying every form the entity filed, with no per-form
+variant (`.claude/skills/data-sources/sec-edgar.md` §1). This job used
+to fetch it once per due triple and discard every row outside that
+one source, so a CIK with 9 due sources cost 9 identical responses.
+The budget is therefore denominated in **CIKs** (``max_ciks``): the
+same number of logical probes carries 1.92x the triples on the dev
+corpus (66 probes → 127 triples across 66 CIKs, vs 66 triples across
+48 CIKs before; ``scripts/measure_3109_batching.py``).
+
+⚠ This does NOT fix the queue rotation the ticket is named for.
+``record_poll_outcome`` derives ``expected_next_at`` from
+``last_known_filed_at + cadence``, which for an inactive filer stays
+in the past forever, so the head of the queue is reached more
+completely — not replaced.
+
 Item 7 (#1233 ``docs/proposals/etl/run-8-readiness-fixes.md``):
 when the caller supplies the richer ``http_get_with_meta`` callable
 (see ``app/providers/implementations/sec_submissions.py:HttpGetWithMeta``),
@@ -19,9 +36,21 @@ this job rounds the SEC ``Last-Modified`` header through
 see ``_watermark_key``), and short-circuits on HTTP 304 —
 skipping the manifest UPSERT + payload parse, but STILL writing a
 scheduler outcome (``current``/``never``) and re-stamping
-``watermark_at`` so the recheck timing rolls forward and the
-watermark row stays fresh. A 304 is a budget-conserving success,
-not a noop.
+``fetched_at`` so the watermark row stays fresh. A 304 is a
+budget-conserving success, not a noop.
+
+⚠⚠ **It re-stamps ``fetched_at``, NOT ``watermark_at``** — four
+docstring sites here claimed the latter and were wrong (#3109).
+``set_watermark(..., watermark_at=None)`` binds NULL into
+``watermark_at = EXCLUDED.watermark_at`` and sets ``fetched_at =
+NOW()`` (``app/services/watermarks.py``). Nothing depended on the
+false version; it was simply untrue in the place a reader trusts.
+
+⚠ The whole conditional path is **inert in production**: #3110
+measured that ``data.sec.gov`` returned no ``Last-Modified`` and no
+``ETag`` on the submissions responses it probed, and 0 rows exist
+under ``sec.last_modified.*`` across 1,949 runs. It is kept correct
+because correctness does not depend on whether it fires.
 
 Distinct source-key namespace from ``sec.submissions`` (which stores
 top-accession at ``app/services/fundamentals/__init__.py:2030``) to
@@ -39,17 +68,19 @@ from typing import Any
 import psycopg
 
 from app.providers.implementations.sec_submissions import (
+    FreshnessDelta,
     HttpGet,
     HttpGetWithMeta,
     check_freshness,
     check_freshness_conditional,
+    select_new_filings,
 )
 from app.services.data_freshness import (
     FreshnessRow,
     cadence_for,
+    ciks_due_for_poll,
+    ciks_due_for_recheck,
     record_poll_outcome,
-    subjects_due_for_poll,
-    subjects_due_for_recheck,
 )
 from app.services.sec_manifest import ManifestSource, record_manifest_entry
 from app.services.watermarks import get_watermark, set_watermark
@@ -111,123 +142,182 @@ class PerCikPollStats:
     recheck_new_filings_recorded: int = 0
 
 
-def _probe_subject(
+def _record_subject_error(conn: psycopg.Connection[Any], subject: FreshnessRow, exc: Exception) -> None:
+    """Write the ``error`` scheduler outcome for one subject of a failed fetch."""
+    record_poll_outcome(
+        conn,
+        subject_type=subject.subject_type,
+        subject_id=subject.subject_id,
+        source=subject.source,
+        outcome="error",
+        error=f"{type(exc).__name__}: {exc}"[:500],
+        cik=subject.cik,
+        instrument_id=subject.instrument_id,
+    )
+
+
+def _probe_cik(
     conn: psycopg.Connection[Any],
-    subject: FreshnessRow,
+    subjects: list[FreshnessRow],
     *,
     http_get: HttpGet | None = None,
     http_get_with_meta: HttpGetWithMeta | None = None,
-) -> tuple[int, bool]:
-    """Probe one subject. Returns ``(new_filings_recorded, errored)``.
+) -> tuple[int, int]:
+    """Probe every due subject of ONE CIK with ONE fetch (#3109).
 
-    Centralises the per-subject body so the poll and recheck paths
-    share identical fetch + UPSERT + outcome-write logic. The caller
-    increments its own stat counters based on the return.
+    Returns ``(new_filings_recorded, subjects_errored)`` summed over the
+    batch. Every element of ``subjects`` must share a zero-padded CIK — the
+    CIK-grouped readers (``ciks_due_for_poll`` / ``ciks_due_for_recheck``)
+    guarantee that, and it is asserted here.
 
-    Caller MUST ensure ``subject.cik is not None`` (FINRA universe
-    singleton has no submissions.json to poll). Asserted defensively
-    to narrow the type for ``check_freshness``.
+    The response is fetched **unfiltered and untruncated**
+    (``sources=None, last_known_filing_id=None``) because it is entity-wide;
+    the per-triple half — source filter and accession watermark — is then
+    applied per subject through ``select_new_filings``, the SAME function the
+    provider's own ``check_freshness`` calls. A private copy of that rule
+    here is exactly the drift the #3110 review nitpick warned about.
 
-    Item 7 (#1233): when ``http_get_with_meta`` is supplied, this
-    function reads any prior ``sec.last_modified.per_cik_poll`` /
-    ``<cik>:<source>`` watermark (#3110 — see ``_watermark_key``; it was
-    ``<cik>``, which let one source's validator certify another's),
-    sends it as ``If-Modified-Since``, and on
-    HTTP 304 short-circuits the PAYLOAD work — skips manifest writes
-    + parse — but STILL writes a scheduler outcome inside one
-    transaction: ``current`` (rolls ``expected_next_at`` forward) for
-    a filer, or ``never`` (next recheck at now+cadence) for a
-    ``never_filed`` subject; and re-stamps ``watermark_at`` when a
-    prior ``If-Modified-Since`` exists. So a 304 advances
-    freshness/recheck state with zero upserts — a budget-conserving
-    success, not a noop — and it does NOT touch ``attempt_count``
-    (see the ``delta.not_modified`` branch in the body). On 200 with
-    a ``Last-Modified``
-    header the watermark is upserted inside the same transaction as
-    the manifest writes so a crash mid-ingest cannot leave the
-    watermark ahead of the data.
+    ⚠⚠ **A fetch failure now fails EVERY subject of the CIK.** Before
+    batching, three subjects on one CIK got three independent attempts and a
+    transient failure cost one of them; now it costs all three, and they all
+    land in ``error`` together. Accepted rather than claimed equivalent:
+    ``ResilientClient`` already retries 429/5xx beneath this layer, and
+    re-fetching per subject on failure would reinstate precisely the
+    redundancy this change removes.
 
-    Backwards compat: ``http_get`` legacy path is preserved for
-    existing tests (``tests/test_sec_per_cik_poll.py``) that don't
-    care about conditional-GET semantics. Exactly one of the two
+    **Write-failure boundary, unchanged:** each subject's writes stay in
+    their own ``with conn.transaction():`` savepoint. An exception escaping
+    one propagates out of ``run_per_cik_poll`` and ends the run — identical
+    to the unbatched path, where a DB exception on the first subject also
+    aborted before the rest were probed. No new catch is introduced here;
+    adding one would change failure semantics under cover of a batching
+    change.
+
+    Item 7 (#1233) conditional GET, with #3110's key shape kept:
+
+    * ``If-Modified-Since`` is sent **only when the batch holds exactly one
+      subject**, which is byte-identical to the old per-subject probe. ⚠⚠ The
+      tempting alternative — send it when every batched subject agrees on a
+      validator — is unsound, because the ``<cik>:<source>`` key is SHARED by
+      the 963 duplicate ``(cik, source)`` row pairs measured on 2026-09-16.
+      Two subjects with different accession watermarks already read and write
+      one key, so no batch-level agreement check can establish that each of
+      them was processed. That hole predates batching and is recorded on
+      #3109 §4 rather than papered over here.
+    * A ``not_modified`` delta when no ``If-Modified-Since`` was sent is an
+      ERROR, not a success. ``check_freshness_conditional`` takes the 304
+      branch on status alone, so an unsolicited 304 would otherwise mark
+      every batched subject ``current`` without any payload being examined.
+    * The validator is persisted only on an actual 200. The 404 branch also
+      returns a ``last_modified``, and ``recorded == len(new_filings)`` is
+      trivially true at ``0 == 0``, so without the status check a 404 could
+      store a validator.
+
+    Backwards compat: the legacy ``http_get`` path is preserved for tests
+    that do not care about conditional-GET semantics. Exactly one of the two
     callables MUST be supplied.
     """
     if (http_get is None) == (http_get_with_meta is None):
-        raise ValueError("_probe_subject requires exactly one of http_get / http_get_with_meta")
-    assert subject.cik is not None, "_probe_subject requires non-None cik"
-    sources_to_check: set[ManifestSource] | None = {subject.source} if subject.source else None
-    cik_padded = subject.cik
-    # CAVEMAN: read watermark BEFORE the fetch so we know whether to
-    # inject If-Modified-Since. Watermark read is its own statement —
-    # safe outside any open transaction at this point (the outer caller
-    # opens a per-CIK ``with conn.transaction():`` only around the
-    # writes below).
+        raise ValueError("_probe_cik requires exactly one of http_get / http_get_with_meta")
+    if not subjects:
+        return (0, 0)
+    cik_padded = subjects[0].cik
+    assert cik_padded is not None, "_probe_cik requires non-None cik"
+    assert all(s.cik == cik_padded for s in subjects), "_probe_cik requires one CIK per batch"
+
+    # Read the watermark BEFORE the fetch so we know whether to inject
+    # If-Modified-Since. Single-subject batches only — see the docstring.
     if_modified_since: str | None = None
-    # ⚠ Derived from ``sources_to_check`` itself (#3110) — see ``_watermark_key``.
-    watermark_key = _watermark_key(cik_padded, sources_to_check)
-    if http_get_with_meta is not None:
-        wm = get_watermark(conn, _SOURCE_KEY_PER_CIK_POLL, watermark_key)
+    solo_watermark_key: str | None = None
+    if http_get_with_meta is not None and len(subjects) == 1:
+        solo_watermark_key = _watermark_key(cik_padded, {subjects[0].source} if subjects[0].source else None)
+        wm = get_watermark(conn, _SOURCE_KEY_PER_CIK_POLL, solo_watermark_key)
         if_modified_since = wm.watermark if wm and wm.watermark else None
+
     try:
         if http_get_with_meta is not None:
             delta = check_freshness_conditional(
                 http_get_with_meta,
-                cik=subject.cik,
-                last_known_filing_id=subject.last_known_filing_id,
-                sources=sources_to_check,
+                cik=cik_padded,
+                last_known_filing_id=None,
+                sources=None,
                 if_modified_since=if_modified_since,
             )
         else:
             assert http_get is not None  # narrowing for type checker
             delta = check_freshness(
                 http_get,
-                cik=subject.cik,
-                last_known_filing_id=subject.last_known_filing_id,
-                sources=sources_to_check,
+                cik=cik_padded,
+                last_known_filing_id=None,
+                sources=None,
             )
+        if delta.not_modified and if_modified_since is None:
+            # Unsolicited 304. Certifying the batch off this would mean
+            # marking subjects current from a response nobody looked at.
+            raise RuntimeError(f"submissions.json returned 304 without a conditional request: cik={cik_padded}")
     except Exception as exc:
         logger.warning(
-            "per-cik poll: check_freshness raised for cik=%s source=%s: %s",
-            subject.cik,
-            subject.source,
+            "per-cik poll: fetch failed for cik=%s subjects=%d sources=%s: %s",
+            cik_padded,
+            len(subjects),
+            ",".join(sorted(s.source for s in subjects)),
             exc,
         )
-        record_poll_outcome(
-            conn,
-            subject_type=subject.subject_type,
-            subject_id=subject.subject_id,
-            source=subject.source,
-            outcome="error",
-            error=f"{type(exc).__name__}: {exc}"[:500],
-            cik=subject.cik,
-            instrument_id=subject.instrument_id,
-        )
-        return (0, True)
+        for subject in subjects:
+            _record_subject_error(conn, subject, exc)
+        return (0, len(subjects))
 
-    # Item 7 (#1233): 304 short-circuit. Server says "nothing new
-    # since your If-Modified-Since." Skip manifest writes (no new
-    # filings) + bump watermark_at only (NOT watermark — the stored
-    # Last-Modified is still the freshest the server has ever sent).
-    # Scheduler outcome still writes ``current`` so expected_next_at
-    # rolls forward and we don't re-poll this CIK immediately.
+    recorded_total = 0
+    for subject in subjects:
+        recorded_total += _apply_delta_to_subject(
+            conn,
+            subject,
+            delta,
+            conditional=http_get_with_meta is not None,
+            if_modified_since=if_modified_since,
+            solo_watermark_key=solo_watermark_key,
+        )
+    return (recorded_total, 0)
+
+
+def _apply_delta_to_subject(
+    conn: psycopg.Connection[Any],
+    subject: FreshnessRow,
+    delta: FreshnessDelta,
+    *,
+    conditional: bool,
+    if_modified_since: str | None,
+    solo_watermark_key: str | None,
+) -> int:
+    """Apply one CIK-wide response to one subject. Returns rows recorded.
+
+    The source filter and the accession watermark are this subject's own, so
+    the result is identical to what the unbatched probe produced for it given
+    the same response bytes.
+    """
+    assert subject.cik is not None, "_apply_delta_to_subject requires non-None cik"
+
+    # Item 7 (#1233): 304 short-circuit. Server says "nothing new since your
+    # If-Modified-Since." Skip manifest writes + bump fetched_at only (NOT
+    # ``watermark`` — the stored Last-Modified is still the freshest the
+    # server has ever sent). Scheduler outcome still writes ``current`` so
+    # ``expected_next_at`` rolls forward and we don't re-poll immediately.
     if delta.not_modified:
         with conn.transaction():
-            # CAVEMAN: re-stamp watermark_at by upserting the same
-            # ``watermark`` string. set_watermark always touches
-            # ``watermark_at`` via NOW() so we don't need a separate
-            # UPDATE path — the upsert with identical watermark value
-            # is the canonical "bump fetched_at" idiom for this
-            # module.
-            if if_modified_since is not None:
+            # Re-stamp by upserting the same ``watermark`` string:
+            # ``set_watermark`` always sets ``fetched_at = NOW()``, so no
+            # separate UPDATE path is needed. ⚠ It does NOT touch
+            # ``watermark_at`` — passing ``watermark_at=None`` binds NULL
+            # into that column. Four docstrings in this module used to claim
+            # otherwise (#3109).
+            if if_modified_since is not None and solo_watermark_key is not None:
                 set_watermark(
                     conn,
                     source=_SOURCE_KEY_PER_CIK_POLL,
-                    key=watermark_key,
+                    key=solo_watermark_key,
                     watermark=if_modified_since,
                     watermark_at=None,
                 )
-            # Scheduler outcome on 304: same logic as "200 with no new
-            # filings" — current / never depending on prior state.
             if subject.state == "never_filed":
                 outcome_304: str = "never"
                 next_recheck_304: datetime | None = datetime.now(tz=UTC) + cadence_for(subject.source)
@@ -247,11 +337,19 @@ def _probe_subject(
                 cik=subject.cik,
                 instrument_id=subject.instrument_id,
             )
-        return (0, False)
+        return 0
+
+    # The per-triple half: THIS subject's source filter and THIS subject's
+    # accession watermark, applied to the shared CIK-wide parse.
+    new_filings, last_filed_at = select_new_filings(
+        delta.new_filings,
+        sources={subject.source} if subject.source else None,
+        last_known_filing_id=subject.last_known_filing_id,
+    )
 
     # UPSERT manifest rows for the new filings
     recorded = 0
-    for row in delta.new_filings:
+    for row in new_filings:
         if row.source is None:
             continue
         try:
@@ -281,7 +379,7 @@ def _probe_subject(
     # whether the subject actually filed.
     outcome: str
     next_recheck_at: datetime | None = None
-    if delta.new_filings:
+    if new_filings:
         outcome = "new_data"
     elif subject.state == "never_filed":
         outcome = "never"
@@ -293,8 +391,8 @@ def _probe_subject(
         # still tracking until next predicted filing).
         outcome = "current"
 
-    last_known = delta.new_filings[0].accession_number if delta.new_filings else subject.last_known_filing_id
-    last_filed = delta.last_filed_at if delta.last_filed_at else subject.last_known_filed_at
+    last_known = new_filings[0].accession_number if new_filings else subject.last_known_filing_id
+    last_filed = last_filed_at if last_filed_at else subject.last_known_filed_at
     record_poll_outcome(
         conn,
         subject_type=subject.subject_type,
@@ -303,7 +401,7 @@ def _probe_subject(
         outcome=outcome,  # type: ignore[arg-type]
         last_known_filing_id=last_known,
         last_known_filed_at=last_filed,
-        new_filings_since=len(delta.new_filings),
+        new_filings_since=len(new_filings),
         next_recheck_at=next_recheck_at,
         cik=subject.cik,
         instrument_id=subject.instrument_id,
@@ -311,31 +409,31 @@ def _probe_subject(
 
     # Item 7 (#1233): persist the fresh Last-Modified watermark. MUST
     # land in the same transaction as the manifest writes — set_watermark
-    # asserts INTRANS. Only meaningful when the caller is on the
-    # conditional path AND the server returned a Last-Modified header
-    # (older SEC mirrors occasionally omit it; in that case skip
-    # the upsert — next tick will refetch unconditionally).
+    # asserts INTRANS.
     #
     # Codex 2 pre-push P1 fold 2026-05-24: gate the watermark write on
-    # ``recorded == len(delta.new_filings)``. If ANY record_manifest_entry
+    # ``recorded == len(new_filings)``. If ANY record_manifest_entry
     # raised ValueError above (caught + logged, not re-raised), the
-    # accession was NOT persisted but ``last_known`` still advances at
-    # line 246. Without this gate the next tick gets a 304 and the
-    # unrecorded accession is hidden forever. Letting the watermark
-    # stay stale forces a 200 re-fetch + retry. Retention-dropped
-    # filings + new filings that all upserted cleanly still advance
-    # the watermark (the common case).
-    all_recorded = recorded == len(delta.new_filings)
-    if http_get_with_meta is not None and delta.last_modified and all_recorded:
+    # accession was NOT persisted but ``last_known`` still advances.
+    # Without this gate the next tick gets a 304 and the unrecorded
+    # accession is hidden forever. Letting the watermark stay stale
+    # forces a 200 re-fetch + retry.
+    #
+    # ⚠ ``solo_watermark_key`` is None for a multi-subject batch, which is
+    # what withholds the write there: no If-Modified-Since was sent, so
+    # storing a validator would advertise a certification this run never
+    # performed for the other subjects sharing that key.
+    all_recorded = recorded == len(new_filings)
+    if conditional and delta.last_modified and all_recorded and solo_watermark_key is not None:
         with conn.transaction():
             set_watermark(
                 conn,
                 source=_SOURCE_KEY_PER_CIK_POLL,
-                key=watermark_key,
+                key=solo_watermark_key,
                 watermark=delta.last_modified,
                 watermark_at=None,
             )
-    return (recorded, False)
+    return recorded
 
 
 def run_per_cik_poll(
@@ -344,23 +442,39 @@ def run_per_cik_poll(
     http_get: HttpGet | None = None,
     http_get_with_meta: HttpGetWithMeta | None = None,
     source: ManifestSource | None = None,
-    max_subjects: int = 100,
+    max_ciks: int = 100,
 ) -> PerCikPollStats:
-    """One per-CIK poll cycle. For each subject due, call submissions.json
-    and UPSERT manifest + scheduler.
+    """One per-CIK poll cycle. For each CIK due, call submissions.json ONCE
+    and UPSERT manifest + scheduler for every due subject of that CIK.
 
     Drains BOTH reader paths (#1155 G13):
 
-    * ``subjects_due_for_poll`` — 'current' / 'expected_filing_overdue'
-      rows past their ``expected_next_at``. Gets the dominant budget
-      share so steady-state polls are never starved by error backlog.
-    * ``subjects_due_for_recheck`` — 'never_filed' / 'error' rows past
-      their ``next_recheck_at``. Gets the remaining ~1/3 budget so the
-      recheck path drains at a guaranteed rate.
+    * ``ciks_due_for_poll`` — 'unknown' / 'current' /
+      'expected_filing_overdue' rows past their ``expected_next_at``. Gets
+      the dominant budget share so steady-state polls are never starved by
+      error backlog.
+    * ``ciks_due_for_recheck`` — 'never_filed' / 'error' rows past their
+      ``next_recheck_at``. Gets the remaining ~1/3 budget so the recheck
+      path drains at a guaranteed rate.
 
-    Total subjects probed never exceeds ``max_subjects``. For
-    ``max_subjects=100`` → ``poll=66, recheck=34``. For ``max_subjects=1``
-    → ``poll=0, recheck=1`` (degenerate but bounded).
+    ⚠⚠ **The budget is denominated in CIKs, not subjects** (#3109, renamed
+    from ``max_subjects``). ``submissions.json`` is entity-wide, so one
+    fetch answers every due source of that CIK; the previous unit spent one
+    identical fetch per ``(subject, source)`` triple. Total FETCHES never
+    exceeds ``max_ciks``; the number of SUBJECTS processed is now
+    unbounded by it — measured 1.92x on the dev corpus, max 8 per CIK
+    (``scripts/measure_3109_batching.py``).
+
+    For ``max_ciks=100`` → ``poll=66, recheck=34``. For ``max_ciks=1`` →
+    ``poll=0, recheck=1`` (degenerate but bounded).
+
+    ⚠ Both lanes are read into lists BEFORE any write. Selecting rechecks
+    after polling would immediately re-select rows the poll lane had just
+    failed, whose ``next_recheck_at`` is NULL and therefore instantly due.
+
+    ⚠ The lanes are NOT merged: a CIK with rows due in both costs two
+    fetches, exactly as it did when they were separate probes. Merging them
+    would change the budget contract the G13 split exists to enforce.
 
     Pagination (``has_more_in_files`` for first-install / rebuild
     paths) is NOT followed here — that lives in the dedicated drain
@@ -377,10 +491,10 @@ def run_per_cik_poll(
     if (http_get is None) == (http_get_with_meta is None):
         raise ValueError("run_per_cik_poll requires exactly one of http_get / http_get_with_meta")
     # #1155 G13 — bounded total budget split: 2/3 to poll, ~1/3 to
-    # recheck. No max(1, ...) floor so max_subjects=1 stays bounded
+    # recheck. No max(1, ...) floor so max_ciks=1 stays bounded
     # at total=1 (poll=0, recheck=1).
-    poll_budget = max_subjects * 2 // 3
-    recheck_budget = max_subjects - poll_budget
+    poll_budget = max_ciks * 2 // 3
+    recheck_budget = max_ciks - poll_budget
 
     subjects_polled = 0
     new_filings_recorded = 0
@@ -388,45 +502,39 @@ def run_per_cik_poll(
     recheck_subjects_polled = 0
     recheck_new_filings_recorded = 0
 
-    poll_due = list(subjects_due_for_poll(conn, source=source, limit=poll_budget)) if poll_budget > 0 else []
-    recheck_due = (
-        list(subjects_due_for_recheck(conn, source=source, limit=recheck_budget)) if recheck_budget > 0 else []
-    )
+    poll_due = ciks_due_for_poll(conn, source=source, limit=poll_budget) if poll_budget > 0 else []
+    recheck_due = ciks_due_for_recheck(conn, source=source, limit=recheck_budget) if recheck_budget > 0 else []
 
-    for subject in poll_due:
-        if subject.cik is None:
-            # FINRA universe singleton — no submissions.json poll
-            continue
-        subjects_polled += 1
-        recorded, errored = _probe_subject(
+    for batch in poll_due:
+        subjects_polled += len(batch)
+        recorded, errored = _probe_cik(
             conn,
-            subject,
+            batch,
             http_get=http_get,
             http_get_with_meta=http_get_with_meta,
         )
         new_filings_recorded += recorded
-        if errored:
-            poll_errors += 1
+        poll_errors += errored
 
-    for subject in recheck_due:
-        if subject.cik is None:
-            continue
-        recheck_subjects_polled += 1
-        recorded, errored = _probe_subject(
+    for batch in recheck_due:
+        recheck_subjects_polled += len(batch)
+        recorded, errored = _probe_cik(
             conn,
-            subject,
+            batch,
             http_get=http_get,
             http_get_with_meta=http_get_with_meta,
         )
         recheck_new_filings_recorded += recorded
-        if errored:
-            poll_errors += 1
+        poll_errors += errored
 
     logger.info(
-        "per-cik poll: subjects=%d new_filings=%d errors=%d recheck_subjects=%d recheck_new_filings=%d",
+        "per-cik poll: ciks=%d subjects=%d new_filings=%d errors=%d "
+        "recheck_ciks=%d recheck_subjects=%d recheck_new_filings=%d",
+        len(poll_due),
         subjects_polled,
         new_filings_recorded,
         poll_errors,
+        len(recheck_due),
         recheck_subjects_polled,
         recheck_new_filings_recorded,
     )
