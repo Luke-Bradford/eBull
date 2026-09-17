@@ -255,8 +255,14 @@ get_helper_config() {
     # insiders
     insiders:distinct_on)
       printf '%s' "holder_identity_key, ownership_nature" ;;
+    # ⚠ The tail from `split_part(...)` on is #3146: the filing's LAST Table I line wins, not
+    # its lexically-first surrogate key. Keyed off source_document_id (NOT NULL, a PK column)
+    # rather than the nullable source_accession, and ':NDT:' only — ':NDH:' holdings have no
+    # established ordinal. Changing it means changing which balance the operator sees, which is
+    # why it is pinned here. Source rule + the concordance measurement:
+    # docs/proposals/ownership/2026-09-17-3146-insider-line-order.md
     insiders:order_by)
-      printf '%s' "holder_identity_key, ownership_nature, CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN '13d' THEN 3 WHEN '13g' THEN 3 WHEN 'def14a' THEN 4 WHEN '13f' THEN 5 WHEN 'nport' THEN 6 WHEN 'ncsr' THEN 6 WHEN 'xbrl_dei' THEN 7 WHEN '10k_note' THEN 8 WHEN 'finra_si' THEN 9 ELSE 10 END ASC, period_end DESC, filed_at DESC, source ASC, source_document_id ASC" ;;
+      printf '%s' "holder_identity_key, ownership_nature, CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN '13d' THEN 3 WHEN '13g' THEN 3 WHEN 'def14a' THEN 4 WHEN '13f' THEN 5 WHEN 'nport' THEN 6 WHEN 'ncsr' THEN 6 WHEN 'xbrl_dei' THEN 7 WHEN '10k_note' THEN 8 WHEN 'finra_si' THEN 9 ELSE 10 END ASC, period_end DESC, filed_at DESC, source ASC, split_part(source_document_id, ':', 1) ASC, (CASE WHEN source_document_id ~ ':NDT:[0-9]+\$' THEN split_part(source_document_id, ':NDT:', 2)::numeric END) DESC, source_document_id ASC" ;;
     insiders:k_clauses)
       printf '%s' "" ;;
     insiders:category)
@@ -457,6 +463,22 @@ for helper in $HELPERS; do
     | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   # Strip leading "ORDER BY " prefix.
   actual_order="${actual_order#ORDER BY }"
+  # #3146 — the insiders tail lives in a shared Python constant so the single-instrument and
+  # batch projections cannot drift (prevention-log: a DISTINCT ON tie-break must agree between
+  # a per-row reader and its bulk twin). This lint pins the EFFECTIVE ordering, so expand the
+  # constant; pinning the literal "{_INSIDER_WINNER_ORDER_TAIL}" placeholder would pin nothing
+  # and the guard would pass however the tail were rewritten.
+  if [[ "$actual_order" == *"{_INSIDER_WINNER_ORDER_TAIL}"* ]]; then
+    tail_text=$(awk '
+      /^_INSIDER_WINNER_ORDER_TAIL/ { in_c = 1; next }
+      in_c && /^"""/ { exit }
+      in_c { print }
+    ' "$FILE_OBS" | tr '\n' ' ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -z "$tail_text" ]]; then
+      fail "H helper=${helper}: _INSIDER_WINNER_ORDER_TAIL referenced but its body could not be read from ${FILE_OBS}."
+    fi
+    actual_order="${actual_order/\{_INSIDER_WINNER_ORDER_TAIL\}/$tail_text}"
+  fi
   # Normalise expected.
   expected_order_norm=$(printf '%s' "$expected_order" | tr -s ' ' \
     | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
