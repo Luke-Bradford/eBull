@@ -842,6 +842,18 @@ So choosing `outcomes` IS the design, and the obvious choice is wrong by two ord
 | `{"new_filings": n}` — per-CIK | **1,940 of 1,961 successes (98.9%)**, and `candidates_seen > 0` held on 1,030 of 1,030 observed ticks |
 | `{"fulfilled": n}` — expected-filings | ≤ **5,698 of 5,701 (99.9%)**; conditioned on `candidates_seen > 0`, **231 of the 234** such ticks in the sample |
 
+⚠⚠ **The per-CIK rate is a property of the job's PRE-BATCHING steady state and is
+temporarily false today** (Codex ckpt-1 finding 18 predicted this). #3109 landed 2026-09-17 and
+the job is draining a backlog at 1.92x triples per fetch: **20 of its 21 runs since then
+discovered filings**, so the naive bucket would currently degrade only 1 in 21. The historical
+rate returns as the backlog drains — and `expected_filings_poller` is **79 of 79 at zero
+discovery over the same window**, unaffected.
+
+⚠ The argument does not rest on either rate. Rule 2's premise is "produced no terminal outcome",
+so **one** legitimate no-discovery tick is enough to reject the bucket, and both jobs produce them
+in every window measured. The rates say how loud the wrong choice would have been, not whether it
+is wrong.
+
 ⚠ Stated as *would degrade*, not *would falsely degrade*. Zero discovery does not by itself prove
 a tick was healthy — §10j lists paths on which an empty delta is not a certified "nothing new".
 The argument does not need it to: rule 2's premise is "produced no terminal outcome", and a

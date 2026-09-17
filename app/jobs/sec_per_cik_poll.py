@@ -179,6 +179,14 @@ def progress_for(stats: PerCikPollStats) -> JobProgress:
     ``job_progress``'s module docstring exists to forbid: *"'Zero rows written'
     is NOT a degradation."*
 
+    ⚠⚠ That rate is the PRE-BATCHING steady state and is temporarily false:
+    #3109 landed 2026-09-17 and this job is draining a backlog at 1.92x triples
+    per fetch, so 20 of its 21 runs since then DID discover filings. It reverts
+    as the backlog drains. The choice does not depend on the rate — rule 2's
+    premise is "produced no terminal outcome", so one legitimate no-discovery
+    tick is enough to reject the discovery bucket, and every measured window
+    contains them.
+
     ⚠ ``polled`` certifies **the probe stage** — the CIK's submissions response
     was obtained and applied to that subject. It does NOT certify that every
     downstream write for the subject succeeded, which is why
@@ -532,7 +540,20 @@ def _apply_delta_to_subject(
     # accession was NOT persisted but ``last_known`` still advances.
     # Without this gate the next tick gets a 304 and the unrecorded
     # accession is hidden forever. Letting the watermark stay stale
-    # forces a 200 re-fetch + retry.
+    # forces a 200 re-fetch.
+    #
+    # ⚠⚠ **The re-fetch is NOT a retry, and an earlier version of this
+    # comment said it was** (#3111 slice 6, Codex ckpt-1). ``last_known``
+    # advanced at ``record_poll_outcome`` above regardless of whether any
+    # write succeeded, so ``select_new_filings`` truncates the rejected
+    # accession out of the next response and it is never seen again. This
+    # gate protects only the HTTP validator. The loss is real, pre-existing
+    # and recorded as NOT fixed in
+    # ``docs/proposals/etl/2026-09-16-3109-per-cik-multi-source-batching.md``
+    # §4.2, with the reason it is not a one-liner: gating the freshness
+    # watermark too would wedge the row forever on a permanently-rejectable
+    # accession. What slice 6 adds is only that the tick DEGRADES when it
+    # happens instead of reporting a clean success.
     #
     # ⚠ ``solo_watermark_key`` is None for a multi-subject batch, which is
     # what withholds the write there: no If-Modified-Since was sent, so
