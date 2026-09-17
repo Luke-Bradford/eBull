@@ -618,16 +618,20 @@ def sec_insider_ingest_from_dataset_job() -> None:
                     # #2790 — a deliberate Rule 16a-3(g) rejection is not
                     # malformed input and must not read as one.
                     "future_dated": result.rows_skipped_future_dated,
+                    # #2441 — the §16 statutory floor. Reported apart from
+                    # future_dated: they are opposite breaches of opposite bounds.
+                    "pre_section16": result.rows_skipped_pre_section16,
                 },
             )
         logger.info(
             "sec_insider_ingest_from_dataset: archive=%s rows_written=%d unresolved_cik=%d "
-            "retention_skipped=%d future_dated_skipped=%d",
+            "retention_skipped=%d future_dated_skipped=%d pre_section16_skipped=%d",
             archive.name,
             result.rows_written,
             result.rows_skipped_unresolved_cik,
             result.rows_skipped_retention,
             result.rows_skipped_future_dated,
+            result.rows_skipped_pre_section16,
         )
     logger.info(
         "sec_insider_ingest_from_dataset: total_rows_written=%d",

@@ -43,7 +43,7 @@ import xml.etree.ElementTree as ET  # noqa: S405 — Form 4 source is SEC EDGAR,
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 from uuid import uuid4
 
 import psycopg
@@ -271,6 +271,27 @@ class ParsedTransaction:
     txn_date_invalid: bool = False
 
 
+# #2441 — Securities Exchange Act § 16 was enacted "June 6, 1934, ch. 404,
+# title I, § 16, 48 Stat. 896" (15 U.S.C. § 78p). § 16(a)(1) attaches the
+# reporting duty to an insider of a class registered under § 12, and a Form
+# 3/4/5 reports events in that capacity — so no reported § 16 date can precede
+# the statute that creates the duty, the capacity and the registration alike.
+# The enactment date is the deliberately WEAKEST anchor: it cannot reject a
+# date that a later (§ 12 registration) anchor would allow.
+SECTION_16_ENACTED: Final = date(1934, 6, 6)
+
+
+def predates_section_16(value: date | None) -> bool:
+    """True when ``value`` is a date § 16 could not have governed (#2441).
+
+    The floor is form-agnostic, unlike the Rule 16a-3 upper bound: § 16(a)(2)
+    sets only LATEST bounds for a Form 3 (so a Form 3 ahead of its filing is
+    correct — #2790), but nothing makes a pre-enactment date correct on any
+    form.
+    """
+    return value is not None and value < SECTION_16_ENACTED
+
+
 def evaluate_insider_date_validity(
     txn_date: date,
     deemed_execution_date: date | None,
@@ -292,24 +313,37 @@ def evaluate_insider_date_validity(
     - ``deemed_execution_date`` is dropped to ``None`` when it postdates
       ``filed_at`` (nullable ⇒ quarantine, never invent a value).
 
-    Exemptions (return inert ``(False, deemed unchanged)``):
+    Exemptions — they apply to the UPPER bound ONLY (see below):
 
     - ``filed_at is None`` — no authoritative anchor (mirrors the
       ``upsert_filing`` filed_at fallback semantics).
     - ``transaction_timeliness == 'E'`` — an early filing (EDGAR ownership
       XML ``transactionTimeliness``; see ``sql/057``) may legitimately
       report a transaction dated after the filing.
+
+    #2441 adds a statutory FLOOR (:func:`predates_section_16`), and neither
+    exemption is inherited by it: the floor needs no filing anchor, and no
+    reading of ``'E'`` can make a pre-1934 date possible. (What ``'E'``
+    means is itself contested — ``sql/057`` contradicts itself and the EDGAR
+    Ownership XML Tech Spec §4.3.8.2 supports neither reading, #2790 — which
+    is another reason the floor must not depend on it.)
+
+    The two dates are assessed INDEPENDENTLY: a floor hit on ``txn_date``
+    does not skip the ``deemed_execution_date`` assessment, and a bad deemed
+    date never flags an otherwise-valid transaction.
     """
+    # #2441 — statutory floor, evaluated first and unconditionally.
+    txn_date_invalid = predates_section_16(txn_date)
+    deemed_out = None if predates_section_16(deemed_execution_date) else deemed_execution_date
     if filed_at is None or transaction_timeliness == "E":
-        return (False, deemed_execution_date)
+        return (txn_date_invalid, deemed_out)
     # Anchor on the UTC calendar date (the SEC filing date is a UTC-stamped
     # acceptance date) so the boundary is session-timezone independent and
     # matches the migration's ``(filed_at AT TIME ZONE 'UTC')::date``.
     filed_date = filed_at.astimezone(UTC).date()
-    txn_date_invalid = txn_date > filed_date
-    deemed_out = (
-        None if deemed_execution_date is not None and deemed_execution_date > filed_date else deemed_execution_date
-    )
+    txn_date_invalid = txn_date_invalid or txn_date > filed_date
+    if deemed_out is not None and deemed_out > filed_date:
+        deemed_out = None
     return (txn_date_invalid, deemed_out)
 
 

@@ -851,3 +851,54 @@ class TestEvaluateInsiderDateValidity:
         invalid, deemed = evaluate_insider_date_validity(date(2026, 6, 15), deemed_in, self._FILED, None)
         assert invalid is False
         assert deemed == expected_out
+
+
+class TestSection16StatutoryFloor:
+    """#2441 — a reported §16 date cannot precede §16 (48 Stat. 896, 1934-06-06).
+
+    The shape under test, not the count: 20 rows on the corpus carry a
+    two-digit year parsed literally (``0023-06-23``), and a count-based test
+    goes stale on the next harvest.
+    """
+
+    _FILED = datetime(2024, 6, 7, 20, 7, tzinfo=UTC)
+
+    def test_the_boundary_day_is_valid_and_the_day_before_is_not(self):
+        assert evaluate_insider_date_validity(date(1934, 6, 6), None, self._FILED, None)[0] is False
+        assert evaluate_insider_date_validity(date(1934, 6, 5), None, self._FILED, None)[0] is True
+
+    def test_the_two_digit_year_shape_is_flagged(self):
+        # 0023-06-23 in a filing accepted 2024-06-07 (0001434728-24-000220).
+        assert evaluate_insider_date_validity(date(23, 6, 23), None, self._FILED, None)[0] is True
+
+    def test_the_floor_ignores_the_early_filing_exemption(self):
+        # 'E' exempts the UPPER bound. Whatever it means — sql/057 contradicts
+        # itself and EDGAR Tech Spec §4.3.8.2 supports neither reading (#2790)
+        # — it cannot make a pre-1934 date possible.
+        assert evaluate_insider_date_validity(date(23, 6, 23), None, self._FILED, "E")[0] is True
+
+    def test_the_floor_needs_no_filing_anchor(self):
+        # The other upper-bound exemption. The floor compares against a statute,
+        # not against filed_at, so a row with no resolvable filing date is still
+        # bounded.
+        assert evaluate_insider_date_validity(date(23, 6, 23), None, None, None)[0] is True
+
+    def test_a_delinquent_filing_is_not_flagged(self):
+        # The case that refused #2441's preferred anchor. A transaction reported
+        # years late is legal (Reg S-K Item 405 exists for it) and 1,755 such
+        # rows sit on the corpus beyond a 3-year window.
+        assert evaluate_insider_date_validity(date(2021, 6, 7), None, self._FILED, None)[0] is False
+
+    def test_the_two_dates_are_assessed_independently(self):
+        # A floor hit on txn_date must not skip the deemed assessment...
+        invalid, deemed = evaluate_insider_date_validity(date(23, 6, 23), date(24, 1, 2), self._FILED, None)
+        assert invalid is True
+        assert deemed is None
+        # ...and a bad deemed date must never flag a valid transaction.
+        invalid, deemed = evaluate_insider_date_validity(date(2024, 6, 1), date(23, 6, 23), self._FILED, None)
+        assert invalid is False
+        assert deemed is None
+        # A valid deemed date survives a floor-flagged txn_date unchanged.
+        invalid, deemed = evaluate_insider_date_validity(date(23, 6, 23), date(2024, 6, 1), self._FILED, None)
+        assert invalid is True
+        assert deemed == date(2024, 6, 1)

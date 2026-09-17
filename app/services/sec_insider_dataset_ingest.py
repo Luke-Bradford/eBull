@@ -52,6 +52,7 @@ from app.services.insider_transactions import (
     evaluate_insider_date_validity,
     form4_retention_cutoff,
     form5_retention_cutoff,
+    predates_section_16,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,11 @@ class InsiderIngestResult:
     # is: an operator reading the run summary must be able to tell a deliberate
     # invariant rejection from malformed input.
     rows_skipped_future_dated: int = 0
+    # #2441 — a date before the Securities Exchange Act of 1934 is impossible on
+    # ANY §16 form, so it is rejected form-agnostically and counted apart: rolling
+    # it into ``rows_skipped_future_dated`` would report a floor breach to the
+    # operator as a future-dating breach.
+    rows_skipped_pre_section16: int = 0
     parse_errors: int = 0
     touched_instrument_ids: set[int] = field(default_factory=set)
 
@@ -177,15 +183,20 @@ def _parse_iso_date(value: str | None) -> date | None:
     return None
 
 
-def _is_future_dated_for_form(
+def _reject_reason_for_form(
     *,
     form_upper: str,
     period_end: date,
     filed_at: datetime,
     deemed_execution_date: str | None,
     trans_timeliness: str | None,
-) -> bool:
+) -> Literal["pre_section_16", "future_dated"] | None:
     """#2790 — apply #1687's Rule 16a-3(g) invariant on the BULK writer too.
+
+    Returns the rejection reason, or ``None`` when the row is accepted. The
+    two reasons are counted and reported separately (#2441): a pre-1934 date
+    is not "future dated", and the operator-facing ``future_dated`` figure in
+    ``sec_bulk_orchestrator_jobs`` would be a lie if it absorbed them.
 
     The rule was decided in #1687 and implemented for the per-filing XML path in
     :func:`app.services.insider_transactions.evaluate_insider_date_validity`;
@@ -216,16 +227,25 @@ def _is_future_dated_for_form(
     late, empty on-time — which is the same vocabulary as the ownership XML's
     ``transactionTimeliness``, so ``'E'`` means the same thing to the shared
     decision function.
+
+    ⚠ **The #2441 floor is checked BEFORE that form gate, on purpose.** The gate's
+    rationale is specific to the upper bound — §16(a)(2) sets only latest bounds for
+    a Form 3 — and none of it survives below the enactment of §16 itself. A blank or
+    unmapped ``DOCUMENT_TYPE`` is floored for the same reason: there is no form on
+    which a pre-1934 date is correct, so the "never reject what we cannot classify"
+    caution has nothing to protect down there.
     """
+    if predates_section_16(period_end):
+        return "pre_section_16"
     if not form_upper.startswith(("4", "5")):
-        return False
+        return None
     invalid, _ = evaluate_insider_date_validity(
         period_end,
         _parse_iso_date(deemed_execution_date),
         filed_at,
         (trans_timeliness or "").strip().upper() or None,
     )
-    return invalid
+    return "future_dated" if invalid else None
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:
@@ -644,13 +664,18 @@ def ingest_insider_dataset_archive(
                     continue
 
                 # #2790 — #1687's Rule 16a-3(g) invariant, on the bulk writer.
-                if _is_future_dated_for_form(
+                # #2441 — plus the §16 statutory floor, which is form-agnostic.
+                reason = _reject_reason_for_form(
                     form_upper=form_upper,
                     period_end=period_end,
                     filed_at=filed_at,
                     deemed_execution_date=trans.get("DEEMED_EXECUTION_DATE"),
                     trans_timeliness=trans.get("TRANS_TIMELINESS"),
-                ):
+                )
+                if reason == "pre_section_16":
+                    result.rows_skipped_pre_section16 += 1
+                    continue
+                if reason == "future_dated":
                     result.rows_skipped_future_dated += 1
                     continue
 
@@ -748,13 +773,17 @@ def ingest_insider_dataset_archive(
                 # a LATE '3' holding, which is 'L' and not 'E'. So no early
                 # holding exists for the exemption to protect, and
                 # NONDERIV_HOLDING has no timeliness column to read.
-                if _is_future_dated_for_form(
+                reason = _reject_reason_for_form(
                     form_upper=form_upper,
                     period_end=period_end,
                     filed_at=filed_at,
                     deemed_execution_date=None,
                     trans_timeliness=None,
-                ):
+                )
+                if reason == "pre_section_16":
+                    result.rows_skipped_pre_section16 += 1
+                    continue
+                if reason == "future_dated":
                     result.rows_skipped_future_dated += 1
                     continue
 
