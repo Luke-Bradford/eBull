@@ -62,6 +62,16 @@ bash scripts/check_instruments_inserts.sh
 echo "==> Pre-push gate: INSERT INTO external_identifiers lint"
 bash scripts/check_external_identifiers_inserts.sh
 
+# #2789 — every get_ownership_rollup call under app/ or scripts/ must be
+# lexically inside `with snapshot_read(...)`. The reader issues many
+# separate reads and opens no transaction of its own, so a concurrent
+# ownership refresh can otherwise return a denominator and a wedge from
+# different commits — a torn render that raises nothing. AST-based: an
+# import-grep would pass a file that imports snapshot_read and still
+# renders outside one, which is the exact shape 8 of 9 scripts had. ~1s.
+echo "==> Pre-push gate: get_ownership_rollup snapshot_read lint"
+bash scripts/check_ownership_rollup_snapshot.sh
+
 # #1233 §4.3 PR4 — every Form 4 ingest chokepoint must honour the 3y
 # retention cap (legacy SQL `%(retention_cutoff)s` bindings, manifest-
 # worker pre-fetch gate, bulk-dataset per-loop gates, sync_insiders
