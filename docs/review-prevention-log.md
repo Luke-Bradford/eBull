@@ -8050,3 +8050,83 @@ proportional to load. Check direction before "fixing" one: moving the anchor ear
 lengthen elapsed, so it weakens nothing, whereas widening the tolerance would have hidden a
 real under-sleep. Grep test: a `t0 = time.monotonic()` that sits between a warm-up call and the
 calls being measured.
+
+## Choosing a job's `outcomes` bucket IS choosing an alarm predicate (2026-09-17, #3111, PR #3160)
+
+`degradation_reason` rule 2 degrades a run that saw candidates and produced no terminal
+outcome. So the `outcomes` map is not a display field — it is half of a verdict, and the
+intuitive choice for a POLLER is catastrophic. Measured on the full population
+(`job_runs.row_count`, the durable discovery counter for both jobs) before any code:
+
+| bucket the first draft proposed | runs it would have degraded |
+| --- | ---: |
+| `{"new_filings": n}` — `sec_per_cik_poll` | 1,940 of 1,961 successes (98.9%) |
+| `{"fulfilled": n}` — `expected_filings_poller` | 5,698 of 5,701 (99.9%) |
+
+The source rule was already written and was reasoned around rather than read:
+`app/services/job_progress.py:14-22` — *"'Zero rows written' is NOT a degradation… a job
+that saw no work and did none is healthy; a job that saw work and produced no terminal
+outcome is stalled."* **For a poller the completed unit of work is the POLL. The discovery
+is its result, not its purpose.** A CIK probed cleanly whose issuer has filed nothing is
+finished work.
+
+**The rule: before putting a counter in `outcomes`, run it against the job's own history
+and count how many past successes it would have degraded.** One query, and it is the
+difference between a health signal and alarm fatigue — which is strictly worse than no
+signal, because it trains the operator to ignore the one that matters. Discovery-shaped
+counts belong in `context`, which `as_json` carries and the verdict ignores.
+
+Corollary worth stating in the code rather than discovering later: if `outcomes` is defined
+as the complement of the error buckets (`polled = seen - errors`), **rule 2 becomes
+unreachable on a normal return** and the effective verdict is rule 1 alone. That is correct
+for a poller, but it means `outcomes` is there to keep rule 2 silent — not as a second layer
+of protection. Say which one it is.
+
+## A census whose population is "lines in a log" is a SAMPLE (2026-09-17, #3111, PR #3160)
+
+A census of 4,955 poller ticks was written up as *"the full population of observable
+ticks"*, read out of `var/autonomy-logs/launchd.jobs-daemon.err.log`. It is not. Reconciled
+against `job_runs`, the log holds **1,030 of 1,462** and **3,925 of 5,640** successful runs
+— **~70% coverage**, with **23 of 65 days short** and several days holding *zero* lines
+against 96 recorded successes. A Codex pass found the small version of this (27 runs that
+raised before logging their summary); the DB query found the real size.
+
+Counting log lines feels exhaustive because the regex matched every line in the file. What
+it cannot see is the runs whose lines are not in the file at all.
+
+**The rule: before writing "full population" about anything log-derived, run the matching
+`count(*)` on the durable table for the same span and print BOTH numbers.** Then sort the
+claims: an existence-and-scale claim ("this tick shape occurs, at this order of magnitude")
+survives a sample; a RATE claim does not. Look for a durable column carrying the same
+quantity before settling for the log — here `job_runs.row_count` carried the discovery count
+exactly, so the load-bearing claim re-derived on the real full population.
+
+⚠ A **zero** in a log sample is the weakest evidence there is: it cannot separate "did not
+happen" from "happened in the unretained 30%" from "the counter is structurally blind".
+
+⚠ Corollary: if the counter being censused was never persisted, the census is
+**retrospectively unachievable**, and no amount of querying fixes it. That is an argument
+for shipping the counter, not for deferring the work until the census exists — which is how
+this deferral had stood.
+
+## `pytest -x` under this repo's `-n 4` addopts collects nothing and exits 5 (2026-09-17, #3111, PR #3160)
+
+Four revert-probes were run against the branch and all four "failed correctly". They had not
+run: every invocation exited **5** — no tests collected — including the unmodified control.
+Two independent causes, in sequence:
+
+1. `-x` combined with the repo's `addopts = "-q --tb=short -n 4 --durations=20"` exits before
+   xdist collects.
+2. The rewrite that dropped `-x` put the paths in a shell variable, and **zsh does not
+   word-split an unquoted `$VAR`**, so pytest received one argument that was two paths joined
+   by a space, matched nothing, and exited 5 again.
+
+The existing "a broken probe runner proves nothing" entry says to run an unmodified control.
+This is the instance that shows why it is not optional: the control is the ONLY thing that
+distinguishes these two failures from a probe set that genuinely discriminates, and both look
+identical in a transcript that only reports "exit != 0".
+
+**The rule: a probe run's control must assert a POSITIVE test count, not merely exit 0 — and
+exit code 5 is the specific tell.** Print the progress line (`....` / `N passed`) or count
+collected tests; never conclude from the exit code alone. Same tell as the db-skip case
+already in this log.
