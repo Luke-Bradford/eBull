@@ -51,17 +51,14 @@ def _install_fault(fault: str) -> None:
     calling through rather than after, which is the whole point — calling through
     first would commit the marker and produce the scenario it exists to exclude.
 
-    ``after_authority_commit_before_marker`` is the ENTRY twin of that (#2961):
-    the durable authority is committed and ``mark_core_submission_entered`` has
-    NOT run, so the broker verb was provably never entered.  It kills BEFORE
-    calling through for the same reason -- calling through first would commit the
-    marker and produce the very scenario it exists to exclude.
+    ``after_authority_commit_before_marker`` is the ENTRY twin of it (#2961), for
+    the same reasons, against ``mark_core_submission_entered``.
 
-    ⚠ Patching the executor's module attribute is not incidental.
-    ``_submit_core_authority_locked`` calls ``mark_core_submission_entered`` by
-    module-global name, so rebinding it here intercepts the real call site; a
-    fault armed inside the broker double could not reach this point at all,
-    because the double is only entered AFTER the marker.
+    ⚠ Both marker faults must patch a MODULE ATTRIBUTE, and that is what makes
+    them reachable at all: the call sites invoke the marker by module-global name,
+    so rebinding intercepts the real one.  A fault armed inside the broker double
+    could not reach either point, because the double is only entered after the
+    marker has already committed.
     """
     if fault == "after_authority_commit_before_marker":
         from app.services import strategy_core_executor
