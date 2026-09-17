@@ -320,7 +320,14 @@ export type OwnershipCorrectionKind =
    *  ⚠ Do not put a quoted string in this comment — the vocabulary contract test
    *  (tests/test_correction_kind_vocab_contract.py) reads the union by scanning
    *  quoted literals in this block and counts one as a declared kind. */
-  | "insider_beyond_form4_retention";
+  | "insider_beyond_form4_retention"
+  /** #2788 / #2226 M1 — a holder removed from the insiders wedge because their latest
+   *  filing on this instrument carries the Form 4/5 exit box (SEC Form 4 General
+   *  Instruction 1(b): a reporting person no longer subject to Section 16 MUST check it).
+   *  ⚠ A change of STATUS, not a sale — the shares may still sit in the same hands and
+   *  simply stop being attributable to this channel, so any label must read as a status
+   *  change and never as a disposal. Same no-quoted-literal rule as above applies. */
+  | "insider_section16_exit_declared";
 
 export interface OwnershipCorrectionApplied {
   readonly kind: OwnershipCorrectionKind;

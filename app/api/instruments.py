@@ -4763,6 +4763,13 @@ class _CorrectionAppliedModel(BaseModel):
         Special Instruction 5b: a holdings report is a COMPLETE statement of the
         Manager's Section 13(f) holdings, so the omission proves the exit).
         ``superseded_period`` + ``winning_accession`` set, NT fields null.
+      * ``insider_section16_exit_declared`` (#2788 / #2226 M1) — a holder removed from the
+        insiders wedge because their latest filing on this instrument carries the Form 4/5
+        exit box (General Instruction 1(b): a reporting person no longer subject to
+        Section 16 MUST check it). A change of STATUS, not a sale — the shares may still
+        sit in the same hands and simply stop being attributable to this channel.
+        ``winning_accession`` is the filing carrying the box, which for this kind is often
+        the removed row's own accession.
 
     ⚠ This Literal is a CLOSED vocabulary and the service layer's ``kind`` strings are
     NOT validated against it until serialization — so a new kind added to
@@ -4786,6 +4793,7 @@ class _CorrectionAppliedModel(BaseModel):
         "insider_control_group_collapse",
         "superseded_by_later_13f_hr",
         "insider_beyond_form4_retention",
+        "insider_section16_exit_declared",
     ]
     filer_cik: str | None
     filer_name: str
