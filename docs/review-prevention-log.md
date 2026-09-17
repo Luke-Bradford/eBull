@@ -7699,3 +7699,61 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   and Table-I-gated counts side by side, so the vacuity is visible in the output rather than
   inferred); `docs/proposals/ownership/2026-09-17-2794-joint-accession-fold-anchor.md` §4;
   `app/services/ownership_rollup.py::_is_deemed_chain` (the floor that makes the pattern safe).
+
+### "The source documents no rule" is a measurement, not a dead end (#3146, 2026-09-17)
+
+- Symptom: `refresh_insiders_current`'s `DISTINCT ON` ended its `ORDER BY` with
+  `source_document_id ASC`, so a filing reporting several Table I lines for one
+  `(holder, nature)` on one date had its "current" balance chosen by **string order on a DERA
+  surrogate key** — 27,390 live `_current` rows over 3,124 instruments, including a case where
+  the card showed the PRE-sale balance the filing supersedes on its own page. The ticket
+  correctly forbade "just order by the SK descending", because the DERA readme §5.3 defines
+  `NONDERIV_TRANS_SK` as a *surrogate key* and the table carries no ordinal — so SK order was
+  an inference, not a rule.
+- Cause: two halves get conflated. The source fixes the **target** (Form 4 General Instruction
+  4(a)(i): "total beneficial ownership following the reported transaction(s)" — i.e. the last
+  line) but publishes **no line ORDER**. Reading "no documented order" as "unresolvable" leaves
+  an arbitrary rule in place; reading it as "so I'll pick one" invents a citation. Both were on
+  the table here.
+- Prevention: when the source documents the target but not the mechanism, the mechanism is
+  fixed **by construction** and the construction is then **measured against an independent
+  store that does carry the fact** — never asserted. Here: document order lives in the XML
+  (`insider_transactions.txn_row_num`), so ascending SK was tested against it on every
+  accession both stores hold — **123,901/123,901 concordant, 0 discordant**, plus a
+  **swapped-pair negative control** that must report discordance or the comparison is
+  structurally unable to fail (it reported 123,901). Three things that made the evidence real
+  rather than decorative: exclusions counted **with reasons** instead of dropped silently;
+  concordance reported **restricted to the population that actually reaches the tie-break**
+  (same-date groups) as well as overall; and the reach of the oracle stated (**8.9%** of
+  affected groups — so "resolve it from the XML" was rejected on measured coverage, not taste).
+- ⚠ Two traps in the harness itself, both caught late. **A ground-truth oracle must reproduce
+  the grouping of the path it is checking**: taking one "last line" per accession scored a
+  DERA `direct` key that picked the final INDIRECT balance as agreement, hiding the #2385
+  conflation; regrouped per `(filer_cik, direct_indirect)` the unambiguous cohort reads
+  64.5% → 99.0% and the conflated cohort is reported apart. And **the A/B's release gate must
+  compare against the STORED table, not a re-derivation of the old rule** — a one-way `EXCEPT`
+  against a re-derived control cannot see a holder the new rule removes from the card.
+- First seen in: #3146 (2026-09-17). The oracle-grouping and stored-control defects were both
+  Codex checkpoint 2; the SK-is-a-surrogate-key reading was checkpoint 1.
+- Enforced in: this log; `.claude/skills/data-sources/sec-edgar.md` §2.3 (the DERA no-ordinal
+  block + the drift-detector command); `scripts/audit_3146_insider_line_order.py`
+  (`--order-rule` carries the negative control and the exclusion accounting, `--ab` gates on
+  `stored_deleted == 0`); `app/services/ownership_observations.py::_INSIDER_WINNER_ORDER_TAIL`.
+
+### `now() - xact_start` is identically zero inside a transaction (#3146, 2026-09-17)
+
+- Symptom: a snapshot-integrity check written as
+  `SELECT xact_start, now() - xact_start FROM pg_stat_activity WHERE pid = pg_backend_pid()`
+  printed `elapsed 0:00:00` at both the start AND the end of a 30-second run, which reads as
+  "the snapshot is fresh" and is in fact a tautology.
+- Cause: `now()` is `transaction_timestamp()`. Inside an explicit transaction it IS
+  `xact_start`, so the subtraction is 0 by construction and can never report anything else.
+  The check looked like the #3115 "verify the snapshot, don't assert it" lesson and was doing
+  none of its work.
+- Prevention: use `clock_timestamp()` for any elapsed-time measurement inside a transaction.
+  And for snapshot integrity specifically, the load-bearing assertion is not elapsed time at
+  all — it is that the closing read sees the **same `xact_start`** as the opening one; capture
+  it and compare, so a snapshot that silently ended fails the run.
+- First seen in: #3146 (2026-09-17), `scripts/audit_3146_insider_line_order.py`.
+- Enforced in: this log; `scripts/audit_3146_insider_line_order.py::_verify_snapshot` (returns
+  `xact_start`; the caller passes it back as `expect=` and the run fails on any change).
