@@ -8010,3 +8010,24 @@ function with a hypothetical argument.** If you find yourself passing `None` to 
 to ask "what if we did not know", you want a different function — write the input test directly.
 Grep test: two calls to the same predicate inside one function with different arguments for the
 same parameter, where a verdict is derived from one and a gate from the other.
+
+## A bare `ORDER BY` name in a joined query reads as ambiguous even when it cannot be (2026-09-17, #2341, PR #3156)
+
+`ORDER BY f.filer_id, log.period_of_report, filed_at` on a three-table join drew a BLOCKING
+review finding for a possible ambiguous-column error. It could not error: `filed_at` was the
+query's own SELECT output alias (`COALESCE(fe.filing_date::timestamptz, log.fetched_at) AS
+filed_at`), Postgres resolves a bare `ORDER BY` name against output columns before input
+columns, and a schema check showed **no table in that FROM has a `filed_at` at all** — only
+`institutional_holdings`, which the rescue query does not join. The db tier had already run it
+green.
+
+The finding was still worth acting on, because the cost of being right here is a reader (or a
+reviewer) having to know an alias-resolution precedence rule to tell a working query from a
+broken one.
+
+**The rule: in a multi-table query, an `ORDER BY` key is either alias-qualified or is an
+expression spelled out in full — never a bare name that happens to match an output alias.**
+When the key IS a computed output column, repeat the expression rather than naming the alias.
+And when a review finding asserts a runtime error, check the schema and the test evidence
+before either accepting or rebutting it: the answer here changed the reply from "fixed a bug"
+to "fixed the readability, refuted the error", which are different claims about the same edit.

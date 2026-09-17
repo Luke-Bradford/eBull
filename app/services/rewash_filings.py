@@ -1476,6 +1476,13 @@ def _apply_13f_infotable(
     # by data shape only. A 13F accession is single-filer by construction, but
     # the LEFT JOIN to ``filing_events`` can still fan out across share-class
     # siblings, so the guarantee is not one this query owns.
+    #
+    # ⚠ The rescue arm's third sort key repeats the COALESCE rather than naming
+    # the ``filed_at`` output alias. Both are legal and identical — ``ORDER BY``
+    # resolves a bare name against output columns first, and no table in that
+    # FROM even has a ``filed_at`` (only ``institutional_holdings`` does, and it
+    # is not joined there, so the ambiguity a review round raised cannot arise).
+    # It is spelled out so a reader does not have to know that precedence rule.
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1514,7 +1521,8 @@ def _apply_13f_infotable(
                   ON fe.provider_filing_id = log.accession_number
                  AND fe.provider = 'sec'
                 WHERE log.accession_number = %s
-                ORDER BY f.filer_id, log.period_of_report, filed_at
+                ORDER BY f.filer_id, log.period_of_report,
+                         COALESCE(fe.filing_date::timestamptz, log.fetched_at)
                 LIMIT 1
                 """,
                 (raw_doc.accession_number,),
