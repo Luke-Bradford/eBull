@@ -40,8 +40,9 @@ Under-stating live bytes lowers the computed fill ratio, which makes a partition
 look emptier and therefore MORE eligible — i.e. it OVERSTATES reclaimable space.
 Over-stating live bytes is the conservative direction for this predicate. The
 ``+4`` estimator errs low by roughly 2.3 bytes/row (page headers), so
-:func:`_selected_partitions` does not select on the estimate at all — it selects
-on an absolute reclaimable-bytes floor measured against the rebuild.
+:func:`_selected_partitions` inflates its projection by
+:data:`_COMPACT_OVERHEAD_ALLOWANCE` before treating any difference as
+reclaimable.
 
 Selection predicate
 -------------------
@@ -50,9 +51,15 @@ has two defects this relation actually exhibits: a partition holding a handful
 of rows still occupies at least one 8 KiB page, so it can sit permanently below
 any ratio threshold and be re-selected on every run forever; and a ratio
 threshold has an arbitrary boundary where a 19.9% partition qualifies outright
-on evidence gathered from a 1.1-6.6% population. An absolute floor converges —
-once compacted, a partition's reclaimable bytes fall below the floor and it
-drops out — and it is the quantity the ticket actually cares about.
+on evidence gathered from a 1.1-6.6% population.
+
+An absolute floor converges, but ONLY together with the overhead allowance
+above: the estimator's unmodelled page overhead scales with partition size, so
+without the allowance a compacted 2 GiB partition would report ~28.7 MiB of
+phantom reclaim, clear a 16 MiB floor on its own, and be rewritten forever.
+With both, a compacted partition projects to its current size at any size and
+drops out. Verified empirically — a re-run immediately after the first apply
+selected 0 partitions.
 
 What ``--apply`` does and does not guarantee
 --------------------------------------------
@@ -65,9 +72,12 @@ safety property it appears to be:
 * it cannot distinguish a rewrite from a no-op.
 
 This script therefore captures ``n_tup_ins``/``n_tup_del`` around each partition
-and reports the count comparison as **conditional**: an equality claim is only
-made for partitions where the write counters did not move. Where they did, the
-observed write volume is printed instead of a false verdict.
+and reports what it OBSERVED rather than asserting quiescence. ⚠ Those counters
+are flushed asynchronously by each backend, so "no writes observed" is
+corroboration and never proof — a write committing during a sub-second rewrite
+can still read as zero. A count inequality is escalated to an invariant failure
+whatever the counters say, because a rewrite is row-preserving by definition and
+an inequality always wants a human.
 
 ``lock_timeout`` is set before each statement. Read its guarantee narrowly: it
 bounds how long the ``ACCESS EXCLUSIVE`` request WAITS, not how long it is held,
@@ -115,6 +125,14 @@ PARENT = "financial_facts_raw"
 # predicate oscillate, and below the smallest partition this relation actually
 # wants compacted. Frozen here so the choice is one line to audit, not implicit.
 RECLAIM_FLOOR_BYTES = 16 * 1024 * 1024
+
+# Headroom added to the projected post-rewrite size, absorbing the per-page
+# headers and alignment the live-bytes estimator does not model. Measured drift
+# against a real rebuild is 1.4%; 5% is ~3.5x that, so a compacted partition
+# projects to its current size and drops out of selection at ANY size. Without
+# this the phantom gap scales with the partition and the predicate never
+# converges (Codex checkpoint 2).
+_COMPACT_OVERHEAD_ALLOWANCE = 0.05
 
 # Bounds the ACCESS EXCLUSIVE *acquisition* wait. See the module docstring for
 # what this does and does not promise.
@@ -399,6 +417,14 @@ def _selected_partitions(cur: psycopg.Cursor[Any]) -> list[dict[str, Any]]:
     relation achieves on reconstruction. Using a relation-wide ratio rather than
     a per-partition rebuild keeps this cheap enough to recompute at apply time;
     it is a projection and is labelled as one everywhere it is printed.
+
+    ⚠ The live-bytes estimator does not model per-page headers or alignment, so
+    even a freshly-rewritten partition reports a small phantom gap (measured at
+    1.4% on this relation). Left unallowed-for, that gap SCALES WITH SIZE and
+    eventually exceeds the absolute floor on its own: a compacted 2 GiB partition
+    would show ~28.7 MiB of nonexistent reclaim and be re-selected on every run
+    forever, which is precisely the non-convergence the floor exists to avoid.
+    :data:`_COMPACT_OVERHEAD_ALLOWANCE` absorbs it.
     """
     parts = _fetch(cur, _PARTITION_FOOTPRINT, {"parent": PARENT})
     out: list[dict[str, Any]] = []
@@ -407,7 +433,7 @@ def _selected_partitions(cur: psycopg.Cursor[Any]) -> list[dict[str, Any]]:
             continue
         # Index bytes scale with entry count, heap with payload; both collapse to
         # roughly the live fraction. Projection, not measurement.
-        frac = min(1.0, live / heap) if heap else 1.0
+        frac = min(1.0, (live / heap) * (1.0 + _COMPACT_OVERHEAD_ALLOWANCE)) if heap else 1.0
         projected = int((heap + aux) * frac)
         reclaimable = (heap + aux) - projected
         if reclaimable >= RECLAIM_FLOOR_BYTES:
@@ -501,17 +527,25 @@ def _apply(conn: psycopg.Connection[Any]) -> list[str]:
         ins1, del1 = cur.fetchone() or (0, 0)
         after = _fetch(cur, "SELECT pg_total_relation_size(%s)", (r["oid"],))[0][0]
 
-        quiet = (ins1 - ins0) == 0 and (del1 - del0) == 0
-        if quiet and n0 != n1:
-            # No concurrent writes, yet the count moved. That is the real failure.
-            failures.append(f"{r['name']}: rows {n0:,} -> {n1:,} with no concurrent writes")
+        # ⚠ Unchanged counters are CORROBORATION, never proof of quiescence:
+        # backends flush the cumulative statistics asynchronously, so a write
+        # that committed during a sub-second rewrite can still read as zero.
+        # The wording below says "observed" for that reason, and a count
+        # inequality is escalated whatever the counters say — a rewrite is
+        # row-preserving by definition, so an inequality always wants a human.
+        no_writes_seen = (ins1 - ins0) == 0 and (del1 - del0) == 0
+        if n0 != n1:
+            seen = (
+                "no writes observed (counters flush asynchronously, so this is corroboration, not proof)"
+                if no_writes_seen
+                else f"{ins1 - ins0} ins / {del1 - del0} del observed concurrently"
+            )
+            failures.append(f"{r['name']}: rows {n0:,} -> {n1:,}; {seen}")
             verdict = f"⛔ ROWS CHANGED {n0:,} -> {n1:,}"
-        elif quiet:
-            verdict = f"rows {n1:,} preserved (no concurrent writes)"
+        elif no_writes_seen:
+            verdict = f"rows {n1:,} preserved (no writes observed)"
         else:
-            # An inequality here is not evidence of loss; say so rather than
-            # asserting a property the measurement cannot support.
-            verdict = f"rows {n0:,} -> {n1:,}, {ins1 - ins0} ins / {del1 - del0} del concurrent"
+            verdict = f"rows {n1:,} preserved, {ins1 - ins0} ins / {del1 - del0} del concurrent"
         print(f"{r['name']:<36} {_mib(r['current']):>8} -> {_mib(after):>8} MiB  lock {held:5.2f}s  {verdict}")
 
     print(f"\nrelation count(*) after:  {_fetch(cur, f'SELECT count(*) FROM {PARENT}')[0][0]:,}")
@@ -523,6 +557,7 @@ def _apply(conn: psycopg.Connection[Any]) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--census", action="store_true", help="read-only audit (the default; explicit alias)")
     ap.add_argument("--rebuild-probe", action="store_true", help="TEMP reconstruction (writable session)")
     ap.add_argument("--plan", action="store_true", help="dry-run reclaim scope")
     ap.add_argument("--apply", action="store_true", help="execute the reclaim plan")
@@ -534,7 +569,12 @@ def main() -> int:
         with psycopg.connect(settings.database_url, autocommit=True) as conn:
             failures += _apply(conn)
     elif args.rebuild_probe:
-        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        # Writable (TEMP DDL) but REPEATABLE READ, so the as-is rebuild, the
+        # estimator cross-check and the interned rebuild all describe ONE row
+        # population. Under autocommit each would take its own snapshot and any
+        # concurrent ingest would be reported as an interning saving.
+        with psycopg.connect(settings.database_url) as conn:
+            conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             failures += _rebuild_probe(conn.cursor())
     else:
         with psycopg.connect(settings.database_url) as conn:
