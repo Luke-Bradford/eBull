@@ -8217,3 +8217,64 @@ blocked.
 Fix shape: `uv lock --upgrade-package <name>` as its **own** `chore/` PR, merged first, then
 rebase the feature branch. Bundling a lock bump into an unrelated feature PR hides a
 repo-wide break inside one ticket's history, and leaves every *other* open PR still blocked.
+
+## A test suite that seeds its own rows cannot detect a marker that is never written (2026-09-17, #2942, PR pending)
+
+#2942 half 2's DB module had twelve tests over the write-ordering marker: which values
+release a claim, which do not, what the advisory lock blocks, that the release actually
+lifts the unique index. Every one of them seeded `orders` rows directly with an explicit
+`phase=` argument.
+
+The revert-probe that mattered changed `_persist_submitted_intent` to stamp
+`'broker_verb_entered'` at claim time instead of `'claim_committed'`. That inverts the
+whole feature — no row is ever releasable, the stranded claim parks for ever, the ticket's
+defect is untouched — and **all twelve tests passed.** Probes that reverted the consuming
+end (the predicate, the lock, the separate commit) each failed 3, 1 and 1 tests
+respectively, which is what made the twelfth look like a thorough suite.
+
+The shape generalises past markers: **a fixture that supplies the value under test replaces
+the producer, so the suite measures only half the mechanism.** It is the same family as
+"never filter stored rows by a version constant imported from the module under test" —
+there the test asks the code for the answer, here it hands the code the answer — and it has
+the same tell, which is that the failing direction produces a clean green.
+
+- Prevention: for any column whose MEANING is the feature — a marker, a phase, a version
+  stamp, a classification — at least one test must reach it through the **producing
+  function**, not through a fixture argument. Write it as one test that calls the writer and
+  asserts the stored value, then moves it through its transition. Cheap, and it is the only
+  test in the file a producer-side revert can fail.
+- ⚠ The audit question that finds this without a probe: *"which of my tests would still
+  pass if the value were never written correctly?"* If the answer is "all of them", the
+  fixture is the producer.
+- Enforced in: this log;
+  `tests/test_2942_submission_marker_db.py::test_the_claim_insert_stamps_claim_committed_and_the_marker_moves_it`
+  (added after the probe, and it is the only test in that module that fails under it).
+
+## An "idle connection" precondition is a property of the CALLER's shape, not of the function (2026-09-17, #2942, PR pending)
+
+#2961's `terminalise_unsubmitted_core_entry` opens with
+`if conn.info.transaction_status != TransactionStatus.IDLE: raise`. Correct there: its
+caller is a reconciler holding a clean connection, and the assertion protects the broker
+I/O-outside-a-transaction rule.
+
+Porting the same function shape to `order_client.execute_order` carried the assertion with
+it, and it can never hold. psycopg3 in non-autocommit mode opens a transaction on the FIRST
+statement, and by the time the live submission branch runs, `execute_order` has already read
+the recommendation, the cash balance and the runtime config. Every live test failed with
+`RuntimeError: recommendation terminalisation requires an idle connection` — loudly, which
+is the lucky direction.
+
+- Prevention: when lifting a helper between subsystems, treat each of its **preconditions**
+  as a claim about the original caller and re-check it against the new one. An assertion
+  about connection or transaction state is the commonest instance, because it reads as a
+  property of the function and is actually a property of where it sits in a call stack. The
+  contract that survived the move here is #243's — *do not pass a connection carrying
+  unrelated uncommitted writes* — which is about what the commit would PUBLISH, and is true
+  of both callers.
+- ⚠ Related, same PR: a copied context manager's `finally: if not IDLE: conn.rollback()` is
+  safe only while nothing inside the span leaves an uncommitted WRITE. That is worth stating
+  in the comment rather than inferring, because the next writer added inside the span
+  silently loses its data.
+- Enforced in: this log; `app/services/order_client.py::terminalise_unsubmitted_recommendation_attempt`
+  (docstring records why it has no idle precondition) and
+  `::_recommendation_submission_try_lock` (comment states what the rollback can discard).

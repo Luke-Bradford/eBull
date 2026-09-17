@@ -23,6 +23,8 @@ import pytest
 from app.services.order_client import (
     RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS,
     ConcurrentSubmissionInFlightError,
+    _persist_submitted_intent,
+    mark_recommendation_submission_entered,
     terminalise_unsubmitted_recommendation_attempt,
 )
 from tests.fixtures.ebull_test_db import test_database_url
@@ -80,6 +82,22 @@ def _seed_attempt(
     assert row is not None
     conn.commit()
     return int(row[0])
+
+
+def _seed_decision(conn: psycopg.Connection[Any]) -> int:
+    row = conn.execute(
+        "INSERT INTO decision_audit (decision_time, instrument_id, stage, pass_fail, explanation) "
+        "VALUES (%s,%s,'execution','PASS','marker test') RETURNING decision_id",
+        (_NOW, INSTRUMENT_ID),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _phase_of(conn: psycopg.Connection[Any], order_id: int) -> str | None:
+    row = conn.execute("SELECT recommendation_submission_phase FROM orders WHERE order_id=%s", (order_id,)).fetchone()
+    assert row is not None
+    return None if row[0] is None else str(row[0])
 
 
 def _status_of(conn: psycopg.Connection[Any], order_id: int) -> str:
@@ -332,3 +350,35 @@ def test_the_marker_check_constraint_refuses_an_invented_phase(
     with pytest.raises(psycopg.errors.CheckViolation):
         _seed_attempt(ebull_test_conn, recommendation_id=rec, phase="submitting")
     ebull_test_conn.rollback()
+
+
+def test_the_claim_insert_stamps_claim_committed_and_the_marker_moves_it(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The producing end, against the real column.
+
+    Every other test here seeds `orders` directly, so none of them can tell
+    whether the claim INSERT stamps the right value — a revert-probe that
+    stamped `broker_verb_entered` at claim time passed all twelve. That probe is
+    the whole reason this test exists: it inverts the discriminator (nothing is
+    ever releasable) and the suite was blind to it.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    decision_id = _seed_decision(ebull_test_conn)
+
+    order_id, _request_id = _persist_submitted_intent(
+        ebull_test_conn,
+        instrument_id=INSTRUMENT_ID,
+        recommendation_id=rec,
+        decision_id=decision_id,
+        action="BUY",
+        requested_amount=None,
+        requested_units=None,
+        now=_NOW,
+    )
+    ebull_test_conn.commit()
+    assert _phase_of(ebull_test_conn, order_id) == "claim_committed"
+
+    mark_recommendation_submission_entered(ebull_test_conn, order_id=order_id)
+    assert _phase_of(ebull_test_conn, order_id) == "broker_verb_entered"
