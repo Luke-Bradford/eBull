@@ -42,6 +42,7 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.db.snapshot import snapshot_read
 from app.services.ownership_rollup import get_ownership_rollup
 
 # Condition 1's surface UNION condition 2's surface — each taken WITHOUT the other, so
@@ -113,7 +114,13 @@ def _snapshot(conn: psycopg.Connection[Any], symbol: str, instrument_id: int) ->
     because it is the guard's own input — a change there without a state change
     would mean the guard read something other than what it fired on.
     """
-    rollup = get_ownership_rollup(conn, symbol, instrument_id)
+    # #2789 — ``get_ownership_rollup``'s docstring: the caller MUST already be
+    # inside ``snapshot_read``. It issues many separate reads, so without one
+    # REPEATABLE READ snapshot a concurrent ownership refresh can return a
+    # denominator and a wedge from different commits. Nothing raises; the row is
+    # simply wrong, which is the failure mode that looks like a clean run.
+    with snapshot_read(conn):
+        rollup = get_ownership_rollup(conn, symbol, instrument_id)
     wedges = {s.category: str(s.total_shares) for s in rollup.slices if s.denominator_basis == "pie_wedge"}
     pie_total = sum(
         (s.total_shares for s in rollup.slices if s.denominator_basis == "pie_wedge"),

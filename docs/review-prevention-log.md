@@ -7838,3 +7838,37 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - First seen in: #2800 (2026-09-17), `scripts/audit_2800_class_scoped_cover.py`.
 - Enforced in: this log; that script's module docstring (which records the refuted
   discriminator alongside the surviving one).
+
+### A contract that lives only in a docstring is not enforced — and the gate must check the CALL, not the import (#2789, 2026-09-17)
+
+- Symptom: `get_ownership_rollup` states its own precondition in its docstring — *"The caller
+  MUST already be inside `snapshot_read` … The function does NOT open its own transaction."*
+  Nothing checked it, and **8 of the 9 scripts that render the rollup drifted off it**,
+  including the full-population A/B harnesses that decided #2230, #2385, #2386 and #2785. The
+  jobs daemon writes ownership continuously on dev, so the exposure was live: the reader issues
+  many separate reads, and under READ COMMITTED a concurrent refresh can hand one render a
+  denominator from one commit and a wedge from another. **Nothing raises** — the row is simply
+  wrong, the failure mode that looks like a clean run.
+- ⚠ The FastAPI path never drifted, because it wraps at the request boundary. Only the surface
+  with no gate drifted, which is the whole point: a docstring binds whoever reads it.
+- ⚠⚠ **The obvious gate is the wrong gate.** #2789 proposed "any file importing
+  `get_ownership_rollup` must also import `snapshot_read`". An import proves nothing about the
+  call: a file can import the helper, use it elsewhere, and still render outside one — and that
+  file passes. The shipped check is AST-based lexical containment (the call node must have a
+  `with snapshot_read(...)` ancestor), and its self-test carries exactly that case
+  (`_BAD_IMPORTS_BUT_DOES_NOT_USE`) so the weaker gate cannot be reintroduced silently.
+- ⚠ The gate was also shown to FAIL on the real tree before being trusted: a throwaway
+  `scripts/_tmp_probe_2789.py` with an unwrapped render exited 1 naming its line, and the tree
+  returned to exit 0 once removed. A gate never observed failing is not evidence of a pass —
+  see "a check that passes may be structurally unable to fail".
+- Prevention: when a function documents a caller precondition, either **enforce it in code**
+  (raise) or **add a chokepoint lint in the same PR**; a docstring is documentation, not a
+  gate. When the lint is written, state the input that must fail it and put that input in the
+  lint's own self-test. Where a legitimate exception exists, give it a reviewed inline marker
+  (here `# ownership-rollup-snapshot: caller-owned — <why>`, zero sites today) so the pressure
+  is on the exception rather than on the gate.
+- First seen in: #2789 (2026-09-17). Originally spotted by Codex checkpoint 2 on the #2230
+  census, where it was fixed on one script while the eight siblings kept the defect.
+- Enforced in: this log; `scripts/check_ownership_rollup_snapshot.py` (+ `.sh` wrapper), wired
+  into BOTH `.githooks/pre-push` and `.github/workflows/ci.yml` (the `check_ci_mirrors_prepush`
+  parity guard requires both — 26 lints in each).

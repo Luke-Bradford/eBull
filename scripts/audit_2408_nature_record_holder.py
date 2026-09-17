@@ -41,6 +41,7 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.db.snapshot import snapshot_read
 from app.services import ownership_rollup as orl
 from scripts.ab_2230_deemed_chain import POPULATION_SQL
 
@@ -210,7 +211,11 @@ def _census(conn: psycopg.Connection[Any], out: str, limit: int, shard: int, sha
         for n, (instrument_id, symbol) in enumerate(population):
             current = {"instrument_id": int(instrument_id), "symbol": str(symbol)}
             try:
-                orl.get_ownership_rollup(conn, str(symbol), int(instrument_id))
+                # #2789 — the reader requires one REPEATABLE READ snapshot (its
+                # docstring); without it a concurrent refresh can return a denominator
+                # and a wedge from different commits, and a torn render raises nothing.
+                with snapshot_read(conn):
+                    orl.get_ownership_rollup(conn, str(symbol), int(instrument_id))
             except Exception as exc:  # harness error — record, never silently drop
                 folds.append({**current, "error": repr(exc)})
             if n % 100 == 0:

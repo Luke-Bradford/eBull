@@ -31,6 +31,7 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.db.snapshot import snapshot_read
 from app.services.ownership_rollup import get_ownership_rollup
 
 # Every instrument holding at least one equal-value insider cluster (>=2 distinct holder
@@ -54,7 +55,13 @@ SELECT DISTINCT oc.instrument_id, i.symbol
 def _snapshot(conn: psycopg.Connection[Any], symbol: str, instrument_id: int) -> dict[str, Any]:
     """One instrument's comparable state: the insiders wedge plus the identity-level
     detail of every control-group collapse applied to it."""
-    rollup = get_ownership_rollup(conn, symbol, instrument_id)
+    # #2789 — ``get_ownership_rollup``'s docstring: the caller MUST already be
+    # inside ``snapshot_read``. It issues many separate reads, so without one
+    # REPEATABLE READ snapshot a concurrent ownership refresh can return a
+    # denominator and a wedge from different commits. Nothing raises; the row is
+    # simply wrong, which is the failure mode that looks like a clean run.
+    with snapshot_read(conn):
+        rollup = get_ownership_rollup(conn, symbol, instrument_id)
     insiders = next((s for s in rollup.slices if s.category == "insiders"), None)
     collapses = [
         {

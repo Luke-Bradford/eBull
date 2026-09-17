@@ -59,6 +59,17 @@ jobs:
         # are NOT in scope.
         run: bash scripts/check_caller_owned_tx.sh
 
+      - name: get_ownership_rollup snapshot_read lint
+        # #2789 — every get_ownership_rollup call under app/ or scripts/
+        # must be lexically inside `with snapshot_read(...)`. The reader
+        # issues many separate reads and opens no transaction of its own,
+        # so a concurrent ownership refresh can otherwise return a
+        # denominator and a wedge from different commits — a torn render
+        # that raises nothing. AST-based: an import-grep passes a file
+        # that imports snapshot_read and still renders outside one, which
+        # is the exact shape 8 of the 9 rendering scripts had.
+        run: bash scripts/check_ownership_rollup_snapshot.sh
+
       - name: Pooled-conn-across-HTTP lint
         # #1472 PR2 — a route declaring `conn = Depends(get_conn)` holds
         # the pooled connection for its whole body; it MUST NOT reach an

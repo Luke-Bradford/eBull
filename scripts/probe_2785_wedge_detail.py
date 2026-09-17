@@ -31,6 +31,7 @@ import sys
 import psycopg
 
 from app.config import settings
+from app.db.snapshot import snapshot_read
 from app.services.ownership_rollup import get_ownership_rollup
 
 
@@ -46,7 +47,9 @@ def main(symbols: list[str]) -> int:
                 print(f"{symbol}: NOT FOUND")
                 missing.append(symbol)
                 continue
-            rollup = get_ownership_rollup(conn, symbol, int(row[0]))
+            # #2789 — the reader requires one REPEATABLE READ snapshot; see its docstring.
+            with snapshot_read(conn):
+                rollup = get_ownership_rollup(conn, symbol, int(row[0]))
             for sl in rollup.slices:
                 if sl.denominator_basis != "pie_wedge":
                     continue
