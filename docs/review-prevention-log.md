@@ -7994,3 +7994,19 @@ fired". When the `False` branch is destructive, test for the INPUT being determi
 record it as a distinct third verdict. Here that verdict is `unresolved`, and `--apply` refuses to
 run while any exists — because "keep what you could not classify" plus "0 breaches remain" is a
 pair that passes vacuously against an empty cache.
+
+## Two calls to one predicate with different arguments do not compose (2026-09-17, #2790, PR #3155)
+
+A destructive classifier asked the same helper twice in one function — once as a GUARD with the
+form type deliberately blanked (`is_early_form5_line(submission, None, timeliness)`, i.e. "would
+this be exempt if we did not know the line type?") and once for the VERDICT with the real value.
+For a line the archive typed `3` with timeliness `E`, the guard passed via its unknown-type
+fallback while the verdict computed `"3" != "5"` and returned `correctable` — so a row the rule had
+never adjudicated would have been soft-deleted. Latent here (re-adjudicating the 702 applied rows
+under the fix gives 702/702 identical), and caught by the review bot, not by any test.
+
+**The rule: a determinacy check is a predicate over the INPUT, not a second call to the decision
+function with a hypothetical argument.** If you find yourself passing `None` to a decision helper
+to ask "what if we did not know", you want a different function — write the input test directly.
+Grep test: two calls to the same predicate inside one function with different arguments for the
+same parameter, where a verdict is derived from one and a gate from the other.

@@ -205,12 +205,23 @@ def _resolve(
         line = matches[0]
 
     why = f"submission={submission!r} line={line.trans_form_type!r} timeliness={line.timeliness or '(blank)'!r}"
-    # ⚠ "Not exempt" is not the same as "adjudicated". A blank or unrecognised
-    # TRANS_FORM_TYPE with no usable ``E`` fallback establishes NOTHING about the
-    # line — the archive simply did not say — and falling through to "correctable"
-    # would soft-delete it under a rule that never fired. The failure is silent in
-    # the destructive direction, so it is checked before the verdict, not after.
-    if line.trans_form_type not in {"4", "5"} and not is_early_form5_line(submission, None, line.timeliness):
+    # ⚠ "Not exempt" is not the same as "adjudicated". A form type the archive did
+    # not establish — blank, or a value this rule says nothing about, such as the
+    # ``3`` a late Form 3 holding carries on a Form 5 (§4.3.8.3) — falls through to
+    # "correctable" unless it is caught here, and that soft-deletes a row under a
+    # rule that never fired. Silent in the destructive direction, so it is checked
+    # before the verdict.
+    #
+    # ⚠⚠ This is a PREDICATE over the archive, not a second call to the exemption
+    # helper. An earlier revision asked ``is_early_form5_line(submission, None, …)``
+    # here while the verdict below asked it with the REAL form type, so a ``3`` + ``E``
+    # line passed the guard as "unknown ⇒ exempt-able" and was then classified
+    # ``correctable`` by the other call. Two calls to one predicate with different
+    # arguments do not compose (caught by the review bot).
+    determinate = line.trans_form_type in {"4", "5"} or (
+        not line.trans_form_type and line.timeliness.strip().upper() == "E"
+    )
+    if not determinate:
         return ("unresolved", line, f"archive does not establish the line form type ({why})")
 
     verdict = "exempt" if is_early_form5_line(submission, line.trans_form_type, line.timeliness) else "correctable"
@@ -252,7 +263,7 @@ def main() -> int:
         for row in rows:
             verdict, line, why = _resolve(row, submissions, lines)
             buckets[verdict].append({**row, "_why": why, "_archive": line.archive if line else None})
-            shapes[f"{verdict}: {why}" if verdict == "unresolved" else f"{verdict}: {why}"] += 1
+            shapes[f"{verdict}: {why}"] += 1
 
         for verdict in ("correctable", "exempt", "unresolved"):
             print(f"  {verdict:12s} {len(buckets[verdict]):>6,}")
