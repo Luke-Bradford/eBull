@@ -79,8 +79,8 @@ class TestCorrectZeroRelease:
         behind the other. A cover label is not instrument vocabulary and a class
         title is not a cover label."""
         from app.providers.implementations.sec_def14a import (
-            _is_instrument_not_owner,
             _SCHEDULE_13D_COVER_LABEL_RE,
+            _is_instrument_not_owner,
         )
 
         assert not _is_instrument_not_owner("SHARED VOTING POWER -0", strip_class_designator=True)

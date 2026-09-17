@@ -563,8 +563,8 @@ def name_is_not_a_beneficial_owner(name: str) -> bool:
     storage, so a stored name is never the address half.
     """
     from app.providers.implementations.sec_def14a import (
-        _is_instrument_not_owner,
         _SCHEDULE_13D_COVER_LABEL_RE,
+        _is_instrument_not_owner,
     )
 
     return bool(_SCHEDULE_13D_COVER_LABEL_RE.match(name)) or _is_instrument_not_owner(name, strip_class_designator=True)
