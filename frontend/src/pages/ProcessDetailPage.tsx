@@ -771,7 +771,11 @@ function HistoryTab({
                 )}
               </td>
               <td className="px-2 py-2 text-xs">
-                <Badge tone={visual.tone} className={visual.extraClass}>
+                <Badge
+                  tone={visual.tone}
+                  className={visual.extraClass}
+                  data-testid="run-status"
+                >
                   {visual.label}
                 </Badge>
               </td>
