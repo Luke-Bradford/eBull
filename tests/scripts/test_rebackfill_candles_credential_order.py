@@ -84,8 +84,7 @@ def test_i1_key_is_loaded_before_credentials_are_decrypted() -> None:
     )
     assert load is not None, "main() no longer loads eToro credentials at all"
     assert ensure < load, (
-        f"ensure_broker_key_loaded (line {ensure}) must precede "
-        f"load_credential_for_provider_use (line {load})"
+        f"ensure_broker_key_loaded (line {ensure}) must precede load_credential_for_provider_use (line {load})"
     )
 
 
