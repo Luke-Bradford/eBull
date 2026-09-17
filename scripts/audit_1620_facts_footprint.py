@@ -413,10 +413,11 @@ def _rebuild_probe(cur: psycopg.Cursor[Any]) -> list[str]:
 def _selected_partitions(cur: psycopg.Cursor[Any]) -> list[dict[str, Any]]:
     """Partitions whose reclaimable bytes clear the absolute floor.
 
-    ``projected`` scales the partition's CURRENT total by the ratio the whole
-    relation achieves on reconstruction. Using a relation-wide ratio rather than
-    a per-partition rebuild keeps this cheap enough to recompute at apply time;
-    it is a projection and is labelled as one everywhere it is printed.
+    ``projected`` scales the partition's CURRENT total by that partition's OWN
+    live fraction (``live / heap``, from :data:`_PARTITION_FOOTPRINT`). Using the
+    estimator rather than actually rebuilding each partition keeps this cheap
+    enough to recompute at apply time; it is a projection and is labelled as one
+    everywhere it is printed.
 
     ⚠ The live-bytes estimator does not model per-page headers or alignment, so
     even a freshly-rewritten partition reports a small phantom gap (measured at
