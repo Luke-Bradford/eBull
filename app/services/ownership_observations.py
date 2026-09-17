@@ -264,6 +264,45 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION: Final[str] = """
             )
 """
 
+# Final ORDER BY keys of the insider winner set (#3146), shared by the single-instrument and
+# batch projections so the two forms cannot diverge on tied rows (prevention-log: "DISTINCT ON
+# / ROW_NUMBER without a UNIQUE final tie-break diverges between single-key and bulk plans").
+#
+# The problem it solves: when one filing reports several Table I lines for the same
+# (holder_identity_key, ownership_nature) on the same date, every earlier key ties — same
+# source, same period_end (= TRANS_DATE), same filed_at, same accession — so the balance that
+# became "current" was decided by string order on a DERA surrogate key. 27,619 live keys.
+#
+# Source rule. Form 4 General Instruction 4(a)(i) fixes the TARGET: "Report total beneficial
+# ownership following the reported transaction(s)" — i.e. the balance after ALL of the
+# filing's transactions, not an intermediate line. It does NOT publish a line ORDER, and the
+# DERA Insider Transactions readme §5.3 defines NONDERIV_TRANS_SK as a "surrogate key" with no
+# ordinal column anywhere in NONDERIV_TRANS. So the order is fixed BY CONSTRUCTION: document
+# order, which is what the XML path already uses (insider_transactions.py picks the greatest
+# (txn_date, txn_row_num)), carried here by the SK. That the SK ascending IS document order is
+# MEASURED, not assumed — `scripts/audit_3146_insider_line_order.py --order-rule`, which also
+# runs a swapped-pair negative control so the check can fail.
+#
+# Three properties this shape is load-bearing on:
+#   * keyed off ``source_document_id`` (a PK column, NOT NULL) rather than ``source_accession``
+#     (nullable, and nothing constrains it to equal the doc-id prefix) — otherwise NULL
+#     accessions sort last and cross-FILING winners move;
+#   * the prefix key keeps cross-accession ordering exactly as it was, because accession
+#     numbers are fixed-width and contain no ':' — the change is within-filing only;
+#   * ':NDT:' ONLY. ':NDH:' rows are Form 3 / holdings lines — a simultaneous snapshot per
+#     class and ownership form, not a sequence — and no ordinal has been established for
+#     NONDERIV_HOLDING_SK. An XML row has no ':NDT:' segment, so the CASE yields NULL and DESC
+#     (NULLS FIRST in Postgres) preserves today's XML-row-wins behaviour on a mixed tie;
+#     NULLS LAST would hand the group to a DERA row the de-collision may then drop, deleting
+#     the key outright via the MERGE's NOT MATCHED BY SOURCE prune.
+# Spec: docs/proposals/ownership/2026-09-17-3146-insider-line-order.md
+_INSIDER_WINNER_ORDER_TAIL: Final[str] = """
+                        split_part(source_document_id, ':', 1) ASC,
+                        (CASE WHEN source_document_id ~ ':NDT:[0-9]+$'
+                              THEN split_part(source_document_id, ':NDT:', 2)::numeric END) DESC,
+                        source_document_id ASC
+"""
+
 
 def refresh_insiders_current(
     conn: psycopg.Connection[Any],
@@ -338,7 +377,7 @@ def refresh_insiders_current(
                         period_end DESC,
                         filed_at DESC,
                         source ASC,
-                        source_document_id ASC
+                        {_INSIDER_WINNER_ORDER_TAIL}
                 )
                 SELECT w.* FROM winners w
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}
@@ -2059,7 +2098,7 @@ def refresh_insiders_current_batch(
                         period_end DESC,
                         filed_at DESC,
                         source ASC,
-                        source_document_id ASC
+                        {_INSIDER_WINNER_ORDER_TAIL}
                 )
                 SELECT w.* FROM winners w
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}
