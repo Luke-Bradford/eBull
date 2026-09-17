@@ -7805,3 +7805,36 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - Enforced in: this log; `docs/specs/ownership/2026-09-17-2441-insider-date-floor.md` §3, which
   records the withdrawn design rather than deleting it; `sql/390_insider_pre_section16_date_floor.sql`
   header ("⛔ NOT touched").
+
+### A denominator smaller than the entity total is not thereby wrong — check what the NUMERATOR counts (#2800, 2026-09-17)
+
+- Symptom: #2800 established, correctly and with the issuer's own conversion arithmetic, that
+  `AVAL`'s `dei:EntityCommonStockSharesOutstanding` tracks the **preference class alone**
+  (7,565,150,834) rather than the entity-wide total (23,743,475,754), and concluded the
+  denominator was "~3.15x too small" and every rendered percentage overstated.
+- ⛔ **The inference is refuted by the same filing's cover page.** The FY2025 20-F
+  (`0001104659-26-044493`, `R1.htm`) registers under Section 12(b): *"American Depositary
+  Shares, each representing 20 **preferred** shares"*, title of 12(b) security *"Preferred
+  Shares"*. The preference class **is** the listed class — so a preference-scoped denominator
+  is the class-MATCHED one, which is exactly what invariant I18's posture requires
+  (per-class numerators ÷ per-class denominator). Swapping in the entity-wide total would
+  have *understated* every percentage by 3.15x, converting a non-defect into I18's defect.
+- ⚠ The measured population says the same thing. A full pass over the three cached FSDS
+  quarters found **26 in-universe instruments** whose stored cover value equals ONE
+  `ClassOfStock` member and sits below the class sum — and the shape is **normal**, not a
+  defect signature: `MBLY`'s cover (`0001104659-26-086264`) reports 252,419,583 against a
+  12(b) security of *"Class A common stock"*, its Class B being Intel-held and unregistered.
+  A cover page reports the **registered** class. That is the rule, not an error.
+- Prevention: a denominator is right or wrong only **relative to its numerator**. Before
+  calling one too small, state what the numerator counts and in what unit, and find the
+  **registered-security definition** — `dei:Security12bTitle` / the cover's "Title of each
+  class" — rather than reasoning from an entity-wide total in a note. Test: name the security
+  the percentage is *about*.
+- ⚠⚠ The corollary bit: on `AVAL` a real defect does survive, and it is a **unit** mismatch
+  rather than a class one — the 13F numerators are ADSs (89 filers, 5,298,280) while the
+  denominator is preferred SHARES at 20 per ADS, and `ads_ratio` (5 rows) has no `AVAL` row.
+  That is #2117/#2136's ADS-adjustment family. Finding the right defect required rejecting
+  the plausible one first.
+- First seen in: #2800 (2026-09-17), `scripts/audit_2800_class_scoped_cover.py`.
+- Enforced in: this log; that script's module docstring (which records the refuted
+  discriminator alongside the surviving one).
