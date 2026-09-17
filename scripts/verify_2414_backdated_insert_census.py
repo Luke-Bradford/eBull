@@ -165,30 +165,112 @@ def _gap_census(conn: psycopg.Connection) -> None:  # type: ignore[type-arg]
     print("⚠ A missing session date is CAPACITY, not a pending write.")
 
 
+#: The migration that created ``price_daily_backdated_insert``. Its ledger
+#: ``applied_at`` is the earliest instant at which the insert writer could have
+#: been present, and it is read from the DB rather than written down here —
+#: repo rule, "never hardcode a derived statistic".
+_INSERT_TABLE_MIGRATION = "388_price_daily_backdated_insert.sql"
+
+#: ONE statement, deliberately. Under READ COMMITTED each statement takes its own
+#: snapshot, so asking for the census and the witness separately lets a deepening
+#: commit land between them: query 1 sees zero inserts, query 2 sees the
+#: revisions that same transaction wrote, and the script certifies "zero" over a
+#: state that never existed. Codex checkpoint 2 (#2414). Both aggregates here are
+#: scalar subqueries of a single SELECT, so they describe one snapshot.
+_CENSUS_SQL = """
+WITH writer_since AS (
+    SELECT applied_at FROM schema_migrations WHERE filename = %(migration)s
+)
+SELECT (SELECT count(*)                  FROM price_daily_backdated_insert),
+       (SELECT count(DISTINCT instrument_id) FROM price_daily_backdated_insert),
+       (SELECT min(inserted_at)          FROM price_daily_backdated_insert),
+       (SELECT max(inserted_at)          FROM price_daily_backdated_insert),
+       (SELECT count(*) FILTER (WHERE price_date >= frontier_before)
+          FROM price_daily_backdated_insert),
+       (SELECT count(*)            FROM price_daily_revision r, writer_since w
+         WHERE r.cause = 'force_backfill' AND r.revised_at >= w.applied_at),
+       (SELECT min(r.revised_at)::date FROM price_daily_revision r, writer_since w
+         WHERE r.cause = 'force_backfill' AND r.revised_at >= w.applied_at),
+       (SELECT max(r.revised_at)::date FROM price_daily_revision r, writer_since w
+         WHERE r.cause = 'force_backfill' AND r.revised_at >= w.applied_at),
+       (SELECT applied_at FROM writer_since)
+"""
+
+
 def _census(conn: psycopg.Connection) -> None:  # type: ignore[type-arg]
-    row = conn.execute(
-        """
-        SELECT count(*),
-               count(DISTINCT instrument_id),
-               min(inserted_at),
-               max(inserted_at),
-               count(*) FILTER (WHERE price_date >= frontier_before)
-          FROM price_daily_backdated_insert
-        """
-    ).fetchone()
+    """Report the stored backdated-insert rows, and whether a zero is READABLE.
+
+    The witness for an empty table is a ``price_daily_revision`` row with
+    ``cause='force_backfill'``. ``_record_bar_revisions`` and
+    ``_record_backdated_inserts`` are invoked from ONE transaction block in
+    ``refresh_market_data`` (``market_data.py:817`` and ``:851``) under one
+    resolved ``write_branch``, so such a row is evidence that block executed on a
+    run where ``force_backfill=True`` — the only caller that can push a bar below
+    an instrument's stored minimum.
+
+    ⚠⚠ LIVENESS WITNESS, NOT A CROSS-CHECK OF THE COUNT. The two tables share a
+    writer, so neither can corroborate the other's CONTENT — the #3109 "two
+    records written by one code path" tautology. The question asked here is
+    strictly "did the code run", and a shared path is the right witness for that
+    rather than a disqualifying one.
+
+    ⚠ BOUNDED AT ``388``'s ``applied_at``. ``sql/387`` (revisions) was applied
+    before ``sql/388`` (backdated inserts) — 100 minutes apart on the dev DB — so
+    an unbounded witness would let a revision written in that window attest to a
+    block that did not yet contain the insert writer. Migrations run in-process
+    at lifespan startup, so the process that applied 388 already carried the
+    writer. ⚠ Residual, stated rather than closed: a SEPARATE process still on
+    pre-``a33176b0`` code could write a revision after 388 applied. It shrinks to
+    nothing once any deploy has followed the migration.
+
+    ⚠ Sufficient, not necessary: a deepening pass that revised no existing bar
+    writes no revision row, so an absent witness means "cannot tell", never
+    "never ran". ``incremental`` and ``adjustment_heal`` are excluded — the
+    hourly job writes those and it cannot deepen.
+    """
+    row = conn.execute(_CENSUS_SQL, {"migration": _INSERT_TABLE_MIGRATION}).fetchone()
     assert row is not None
-    rows, instruments, first, last, inconsistent = row
+    rows, instruments, first, last, inconsistent = row[:5]
+    n_witness, first_witness, last_witness, writer_since = row[5:]
     print(f"rows            : {rows:,} across {instruments:,} instruments")
     if rows == 0:
         print()
-        print("⚠⚠ UNINTERPRETABLE. An empty table cannot distinguish 'no bar appeared behind a")
-        print("   frontier' from 'the writer has not run'. Backdated inserts come from gap")
-        print("   closure and from force_backfill deepening, neither of which an hourly")
-        print("   ~9-second daily_candle_refresh pass with items_done=0 performs. The")
-        print("   acceptance is A BIG SWEEP COMPLETED ON CODE CARRYING THE WRITER, not 'a run")
-        print("   completed'. Check:")
-        print("     SELECT max(started_at) FROM job_runs")
-        print("      WHERE job_name='daily_candle_refresh' AND status='success';")
+        if writer_since is None:
+            print(f"⚠⚠ UNINTERPRETABLE. {_INSERT_TABLE_MIGRATION} is not in schema_migrations, so")
+            print("   this database has no backdated-insert writer to have run.")
+            return
+        if not n_witness:
+            print("⚠⚠ UNINTERPRETABLE. An empty table cannot distinguish 'no bar appeared behind a")
+            print("   frontier' from 'the writer has not run'.")
+            print()
+            print("   ⚠ The trigger is NOT 'a big sweep'. An 11k-instrument daily_candle_refresh")
+            print("     runs the INCREMENTAL branch; `force_backfill=True` is a separate path")
+            print("     with a single caller. Run it, bounded, and re-run this census:")
+            print("       PYTHONPATH=. uv run python scripts/rebackfill_candles_5y.py --apply --limit 12")
+            print()
+            print(f"   ⚠ Witness bounded at {writer_since} ({_INSERT_TABLE_MIGRATION} applied).")
+            print("     force_backfill revisions OLDER than that attest to a block predating")
+            print("     the insert writer, so they are deliberately not counted.")
+            return
+        print(f"deepening witness: {n_witness:,} price_daily_revision row(s) with cause='force_backfill'")
+        print(f"                   {first_witness} .. {last_witness}  (>= {writer_since})")
+        print()
+        print("✅ INTERPRETABLE, and the reading is ZERO BACKDATED INSERTS — a measurement,")
+        print("   not an absence of coverage. `_record_bar_revisions` and")
+        print("   `_record_backdated_inserts` are called from the SAME transaction block in")
+        print("   `refresh_market_data`, so a force_backfill revision row proves that block")
+        print("   executed on a deepening run with `frontier_before` resolved.")
+        print()
+        print("   ⚠ THIS WITNESSES EXECUTION, NOT CONTENT. Using one of two writers to")
+        print("     corroborate the other's NUMBER would be circular — they share a code")
+        print("     path, so they cannot be independent observations of the same fact")
+        print("     (the #3109 tautology). The claim made here is only 'the block ran'.")
+        print("   ⚠ SUFFICIENT, NOT NECESSARY. A deepening run that revised no existing bar")
+        print("     leaves no witness, so ABSENCE of one proves nothing either way.")
+        print("   ⚠ Covers the DEEPENING class only. Gap closure on the incremental branch")
+        print("     also produces backdated inserts and has no witness here.")
+        print("   ⚠ A separate process still on pre-writer code could have written a witness")
+        print(f"     after {writer_since}. Residual only until a deploy follows the migration.")
         return
     print(f"observed window : {first} .. {last}")
     # Self-consistency: the writer classified against `frontier_before`, which it
