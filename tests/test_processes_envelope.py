@@ -154,6 +154,7 @@ def test_run_summary_skip_dict_is_addressable() -> None:
         rows_processed=42,
         rows_skipped_by_reason={"unresolved_cusip": 3, "rate_limited": 1},
         rows_errored=0,
+        progress_errors=None,
         status="success",
         cancelled_by_operator_id=None,
     )

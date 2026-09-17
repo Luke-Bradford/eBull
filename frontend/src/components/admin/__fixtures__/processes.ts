@@ -142,6 +142,7 @@ export function makeProcessRow(
       rows_processed: 4520,
       rows_skipped_by_reason: {},
       rows_errored: 0,
+      progress_errors: null,
       status: "success",
       cancelled_by_operator_id: null,
     },

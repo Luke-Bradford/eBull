@@ -114,6 +114,7 @@ describe("ProcessDetailPage", () => {
         rows_processed: 4520,
         rows_skipped_by_reason: {},
         rows_errored: 0,
+        progress_errors: null,
         status: "success",
         cancelled_by_operator_id: null,
       },
@@ -142,6 +143,7 @@ describe("ProcessDetailPage", () => {
         rows_processed: 5,
         rows_skipped_by_reason: {},
         rows_errored: 5,
+        progress_errors: null,
         status: "degraded",
         cancelled_by_operator_id: null,
       },
@@ -153,6 +155,7 @@ describe("ProcessDetailPage", () => {
         rows_processed: 5,
         rows_skipped_by_reason: {},
         rows_errored: 0,
+        progress_errors: null,
         status: "success",
         cancelled_by_operator_id: null,
       },
@@ -186,6 +189,111 @@ describe("ProcessDetailPage", () => {
       "degraded",
       "success",
     ]);
+  });
+
+  it("History tab shows the JobProgress error buckets the scalar cannot see", async () => {
+    // #3111 slice 5 — TWO disjoint error counters reach this cell and they are
+    // NOT summable. The only `degraded` run in the corpus
+    // (`daily_candle_refresh` 133470) has `rows_errored=0` and
+    // `progress_json.errors={"failed":1}`, so slice 4's column rendered `—` on
+    // the one run it was shipped to flag. All four branches asserted here:
+    // buckets present, scalar only, both (buckets win), neither.
+    mockedDetail.mockResolvedValue(makeProcessRow());
+    mockedRuns.mockResolvedValue([
+      {
+        // The real 133470 shape.
+        run_id: 13,
+        started_at: "2026-05-08T13:40:00+00:00",
+        finished_at: "2026-05-08T13:40:30+00:00",
+        duration_seconds: 30,
+        rows_processed: 11524,
+        rows_skipped_by_reason: {},
+        rows_errored: 0,
+        progress_errors: { failed: 1 },
+        status: "degraded",
+        cancelled_by_operator_id: null,
+      },
+      {
+        // Buckets win over the scalar, and they render UNSUMMED — `5` would
+        // be the fold this slice exists to avoid, and sorted order matches
+        // `degradation_reason`'s own sorted reason string.
+        run_id: 12,
+        started_at: "2026-05-08T13:30:00+00:00",
+        finished_at: "2026-05-08T13:30:30+00:00",
+        duration_seconds: 30,
+        rows_processed: 9,
+        rows_skipped_by_reason: {},
+        rows_errored: 5,
+        progress_errors: { failed: 3, dispatch_errors: 2 },
+        status: "degraded",
+        cancelled_by_operator_id: null,
+      },
+      {
+        // Scalar only — the pre-slice-5 behaviour, unchanged.
+        run_id: 11,
+        started_at: "2026-05-08T13:20:00+00:00",
+        finished_at: "2026-05-08T13:20:30+00:00",
+        duration_seconds: 30,
+        rows_processed: 5,
+        rows_skipped_by_reason: {},
+        rows_errored: 5,
+        progress_errors: null,
+        status: "failure",
+        cancelled_by_operator_id: null,
+      },
+      {
+        // Reported, none positive. `{}` and `null` are DIFFERENT answers on
+        // the API (sql/254: NULL is not a measured zero) and deliberately the
+        // same em-dash here — the cell does not need the distinction, the
+        // audit trail does.
+        run_id: 10,
+        started_at: "2026-05-08T13:15:00+00:00",
+        finished_at: "2026-05-08T13:15:30+00:00",
+        duration_seconds: 30,
+        rows_processed: 5,
+        rows_skipped_by_reason: {},
+        rows_errored: 0,
+        progress_errors: {},
+        status: "success",
+        cancelled_by_operator_id: null,
+      },
+    ]);
+    renderAt();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "History" })).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "History" }));
+    await waitFor(() => expect(mockedRuns).toHaveBeenCalled());
+
+    const errored = screen.getAllByTestId("run-rows-errored");
+    expect(errored.map((cell) => cell.textContent)).toEqual([
+      "failed 1",
+      "dispatch_errors 2 · failed 3",
+      "5",
+      "—",
+    ]);
+
+    // The bucket branch HIDES the scalar, so the tooltip must state its actual
+    // value rather than assert one. Codex ckpt-2 caught an earlier draft
+    // claiming "rows_errored is 0 or absent" — false for run 12 below, which
+    // is exactly the shape the manifest worker produces.
+    const titles = errored.map((cell) => cell.getAttribute("title") ?? "");
+    expect(titles[0]).toContain("rows_errored on this run is 0");
+    expect(titles[1]).toContain("rows_errored on this run is 5");
+  });
+
+  it("Errors tab states which counter it reads instead of denying all errors", async () => {
+    // #3111 slice 5 — this tab reads ONLY `job_runs.error_classes`. "No errors
+    // on the latest terminal run" was a universal denial it cannot support,
+    // and it would sit beside a History row reading `failed 1`.
+    mockedDetail.mockResolvedValue(makeProcessRow({ last_n_errors: [] }));
+    mockedRuns.mockResolvedValue([]);
+    renderAt();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Errors" })).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Errors" }));
+    expect(await screen.findByText(/job_runs.error_classes/)).toBeTruthy();
   });
 
   it("Errors tab renders grouped error classes", async () => {
