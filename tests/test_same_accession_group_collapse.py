@@ -12,6 +12,7 @@ See docs/specs/etl/2026-06-28-insider-same-accession-control-group-collapse.md.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -201,3 +202,53 @@ def test_blockholder_same_accession_pair_collapses() -> None:
     assert len([h for h in out_b if h.shares == Decimal("154000")]) == 1
     (corr,) = corrs
     assert corr.shares_removed == Decimal("154000")
+
+
+# ---------------------------------------------------------------------------
+# #2794 — why the value must stay in the bucket key
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_value_joint_accession_folds_only_the_equal_subcluster() -> None:
+    """A joint accession carrying TWO amounts folds the equal pair and leaves the rest.
+
+    Pins the counterexample that refuted #2794's first draft (Codex checkpoint 1). That
+    draft proposed dropping ``shares`` from this pass's bucket key, on the docstring's own
+    argument that a shared accession needs no numeric proxy — and gating the newly-admitted
+    unequal clusters on "at most one member reports ``direct``".
+
+    On this shape the widening makes the rollup WORSE, not better: the accession-only bucket
+    is ``{A, B, C}``, its values are unequal, two members report ``direct``, so the gate
+    refuses and NOTHING folds — 400 instead of today's 300. "All existing folds are
+    preserved by construction" was false.
+
+    The rule the shape teaches: co-filing (Rule 16a-3(j)) establishes GROUP MEMBERSHIP, and
+    Form 4 General Instruction 4(b)(v) expressly permits separately owned securities inside
+    a joint filing — so it does NOT establish that two reported amounts describe one block.
+    The equal value is what carries that second proposition. See
+    docs/proposals/ownership/2026-09-17-2794-joint-accession-fold-anchor.md §3.
+    """
+    survivors = [
+        replace(_h("0000000040", "Chain Member A", "100"), ownership_nature="direct"),
+        replace(_h("0000000041", "Chain Member B", "100"), ownership_nature="direct"),
+        replace(_h("0000000042", "Separate Holder C", "200"), ownership_nature="beneficial"),
+    ]
+    # The natures are set explicitly because they are what the refuted gate would have read:
+    # two `direct` members is exactly the shape that gate rejects. A fixture leaving them at
+    # the default ``None`` would assert 300 just as happily while encoding none of that.
+    assert sum(1 for h in survivors if h.ownership_nature == "direct") == 2
+
+    out_s, _out_b, corrs = _reconcile_same_accession_groups(survivors, [])
+
+    # Today: the {100, 100} bucket folds; C is a singleton bucket and passes through.
+    assert _kinds(corrs) == ["insider_control_group_collapse"]
+    assert sorted(h.shares for h in out_s) == [Decimal("100"), Decimal("200")]
+    assert sum(h.shares for h in out_s) == Decimal("300")
+
+    # Under an accession-only bucket the cluster is {A, B, C}: values unequal, two members
+    # `direct`, so the proposed chain-shape gate refuses and NOTHING folds. Asserted on the
+    # inputs rather than by running that arm — it was never implemented, and a test that
+    # claims to execute code which does not exist is worse than one that states the
+    # arithmetic (Codex checkpoint 1).
+    assert len({h.shares for h in survivors}) > 1
+    assert sum(h.shares for h in survivors) == Decimal("400")

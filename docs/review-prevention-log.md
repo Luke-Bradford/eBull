@@ -7636,3 +7636,66 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - Enforced in: this log; `scripts/audit_2790_insider_future_period.py`, whose write path was removed
   entirely — it now measures and reconciles, and the correction waits on the `E` source-rule
   conflict the same review surfaced.
+
+### Two signals over the same rows can prove DIFFERENT propositions — check which one each guard carries before calling one redundant
+
+- Symptom: `_reconcile_same_accession_groups` (#1764) buckets on `(winning_accession, shares)` while
+  its own docstring argues a shared accession "needs **NO** magnitude floor or roundness proxy —
+  those guards exist only to substitute for the membership evidence that a shared accession already
+  provides". Reading the exact-value key as one more such substitute, and dropping it, looks like
+  applying the function's own argument consistently. It is not.
+- Root cause: co-filing and equal value answer different questions. Rule 16a-3(j) / Rule 13d-1(k)
+  co-filing establishes **group membership**; Form 4 General Instruction 4(b)(v) expressly permits
+  separately owned securities inside a joint filing, so co-filing does NOT establish that two
+  reported amounts describe **one block**. The magnitude floor and the roundness proxy are guards
+  against numeric COINCIDENCE, which a shared accession really does displace; the value equality is
+  the only thing carrying the second proposition, and nothing displaces it.
+- ⚠ The failure direction is the one that reads as progress: the widening was specced as
+  "all 1,688 existing folds preserved by construction", and an executed counterexample killed that
+  in one line — `A direct 100`, `B direct 100`, `C beneficial 200` on one accession is 300 today
+  and **400** under an accession-only bucket, because the wider cluster is unequal and the proposed
+  chain-shape gate then refuses the whole thing. A widening can make an existing fold WORSE by
+  swallowing it into a cluster that fails a gate the narrower bucket never had to pass.
+- Prevention: before deleting a key from a grouping predicate because "the other key already proves
+  membership", **write down the two propositions separately** and name which key carries each. If a
+  docstring justifies dropping guards, check what those guards were guarding — a coincidence guard
+  and an identity guard are not interchangeable. And test a widening against a MIXED input (some
+  members satisfying the old narrow key, some not), never only against inputs the new key admits:
+  the regression lives in the cluster that grew, not in the one that appeared.
+- First seen in: #2794 (2026-09-17), Codex checkpoint 1 on the spec — 38 findings, the design
+  withdrawn rather than patched.
+- Enforced in: this log;
+  `docs/proposals/ownership/2026-09-17-2794-joint-accession-fold-anchor.md` §3;
+  `tests/test_same_accession_group_collapse.py::test_mixed_value_joint_accession_folds_only_the_equal_subcluster`.
+
+### A provenance-gated counter used as an UPPER BOUND is vacuous without a positive floor on the same gated set
+
+- Symptom: `.claude/skills/data-sources/sec-edgar.md` mandates that "any read-path branch on
+  `ownership_nature == 'direct'` must also check `Holder.nature_from_table_i`" (#2385: reading the
+  raw string moved 224 control-group folds and promoted 59 role-derived rows — an officer's name
+  onto a fund's block). Applying that gate to a proposed discriminator of the shape
+  `n_direct <= 1` returned **408 of 408** clusters in the "safe" bucket, admitting every one of
+  the 95 that the ungated raw string refused.
+- Root cause: `sec_insider_dataset_ingest._map_relationship` writes the DERA dataset's
+  RELATIONSHIP flags into `ownership_nature` and never reads the D/I field, so on a DERA-heavy
+  population almost nothing is Table-I-attested. An upper bound over an empty attested set is
+  satisfied trivially — `0 <= 1` — so the gate's output is constant and it cannot refuse.
+- ⚠ The first draft of this entry blamed the DIRECTION of use ("the skill's rule is for SELECT
+  and inverts for REFUSE"). That is wrong, and the codebase already contains the counter-example:
+  `ownership_rollup._is_deemed_chain` applies the very same provenance gate in a refusal context
+  and is NOT vacuous, because the same attested set must also clear a **positive floor**
+  (`n_indirect >= _DEEMED_CHAIN_MIN_INDIRECT`). With no attested rows that floor is 0 and the gate
+  refuses. The pairing is what carries the safety, not the direction.
+- Prevention: whenever a predicate is gated on provenance (or any attestation/quality filter),
+  **check whether the gated set can be empty, and what the predicate returns when it is.** If the
+  predicate is a `<=` bound, pair it with a `>=` floor over the SAME gated set so an empty set
+  fails closed. Then name the input that would make the gate refuse — if no such input exists in
+  the population, the check is absent, not conservative. Same family as the existing entry on a
+  measurement that cannot detect its own failure: a gate reporting "all safe" and a gate that
+  cannot say "unsafe" print the same thing.
+- First seen in: #2794 (2026-09-17), full-population `--joint` census; the wrong first framing was
+  caught by Codex checkpoint 1 against `_is_deemed_chain`.
+- Enforced in: this log; `scripts/audit_2794_fold_anchor.py` (`JOINT_SQL` reports the raw-string
+  and Table-I-gated counts side by side, so the vacuity is visible in the output rather than
+  inferred); `docs/proposals/ownership/2026-09-17-2794-joint-accession-fold-anchor.md` §4;
+  `app/services/ownership_rollup.py::_is_deemed_chain` (the floor that makes the pattern safe).
