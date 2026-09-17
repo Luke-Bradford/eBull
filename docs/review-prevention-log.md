@@ -8130,3 +8130,90 @@ identical in a transcript that only reports "exit != 0".
 exit code 5 is the specific tell.** Print the progress line (`....` / `N passed`) or count
 collected tests; never conclude from the exit code alone. Same tell as the db-skip case
 already in this log.
+
+## A write-ordering marker proves its own COMMIT, never the statement that follows it (2026-09-17, #2961, PR #3162)
+
+The whole value of a "we are about to call the broker" marker is the inference its ABSENCE
+licenses. The first draft of #2961's spec put the marker inside the provider via a
+`mark_submitting` callback and argued it bought the span right up to `self._http_write.post(...)`.
+Codex checkpoint 1 falsified that three ways, and all three generalise:
+
+1. **A marker bounds the instant it commits, not the line after it.** Whatever follows —
+   `ResilientClient`'s throttle and shared-lock wait, header construction, the socket write —
+   is on the unprovable side. The value was therefore named `broker_verb_entered`, meaning
+   *"may subsequently have been entered"*, rather than `entered`. **Name a marker for what it
+   proves, not for the statement it precedes**; the optimistic name is what later reads as a
+   guarantee nobody checked.
+2. **The placement bought far less than claimed.** The submitter already acquires the blocking
+   per-order lock BEFORE either candidate placement, so moving the marker into the provider
+   bought only the unattended guard and body construction — microseconds — in exchange for
+   changing the `BrokerProvider` protocol and three concrete providers. The callback was
+   dropped entirely. Before paying for a placement, enumerate what actually sits between the
+   two candidate points.
+3. **It was not the last client-side instant anyway.** "As late as possible" is a claim about
+   a call stack; read the stack.
+
+⚠ The corollary that cost the most to find: **the marker alone is not a safe discriminator.**
+Between the authority commit and the marker commit, a LIVE submitter's row reads exactly like
+a dead one's, so terminalising on the marker alone releases capital under a submission that
+then places a real order. It needs a second, independent condition proving no submitter is
+alive — here a session-scoped advisory lock that Postgres drops when the backend dies.
+
+## An advisory try-lock proves "no OTHER session holds it", NOT that no process is alive (2026-09-17, #2961, PR #3162)
+
+Postgres advisory locks are **reentrant**. A caller that already owns the key succeeds on its
+own nested `pg_try_advisory_lock`, so "the try succeeded" is not "nobody is working". On #2961
+the attended resume holds `CORE_SUBMISSION_ADVISORY_LOCK` and then reconciles through the same
+connection, and its nested try succeeds every time.
+
+That happened to be CORRECT there — a resume is forbidden to resubmit, so it is not a submitter
+in flight — but it is a *reasoned exemption*, and the difference between reasoning it and
+assuming it is whether the next change to the resume path silently breaks the guarantee. It is
+asserted by a test that also checks the outer holder still owns the key afterwards, because the
+release decrements a reference count rather than freeing the lock.
+
+**The rule: when a lock is used as EVIDENCE rather than as mutual exclusion, write down which
+sessions can already hold it, and test the reentrant caller explicitly.** Related: the release
+must be balanced on every path, or the outer holder's own unlock-ownership assertion fires
+somewhere unrelated.
+
+⚠ Second half: take the evidence lock BEFORE the narrower per-order lock, and take it only
+AFTER a cheap candidacy read. Taking a GLOBAL key before checking whether the row is even a
+candidate makes one unrelated in-flight submission starve reconciliation for every other arm —
+a blast radius with no relationship to the feature.
+
+## A fault point's NAME can describe a different window than the line it fires on — and an acceptance criterion written against the name inherits that (2026-09-17, #2961, PR #3162)
+
+#2961's issue body states the fault as *"the engine dies after the durable authority commits and
+**before** `place_demo_core_order`"*, and reports `mutation_calls == 0` as evidence. The harness
+fault named `after_commit_before_submit` fires at the first statement **inside**
+`place_demo_core_order` (`tests/fixtures/core_restart.py:538`). Those are different windows, and
+only the first is resolvable from client-side state: `mutation_calls == 0` is a fact the *fake
+broker* knows by construction, never one the application could derive.
+
+The ticket's stated acceptance — "this test inverts" — was therefore **unmeetable without
+weakening the gate**, and a fix built to satisfy it literally would have terminalised rows whose
+broker call may genuinely have happened. The test kept its assertions, gained a docstring saying
+why it must NOT invert, and became the negative control; the case actually carved out got its own
+fault point.
+
+**The rule: before building to an acceptance criterion that names a fault, read the line the
+fault fires on.** A fault name describes an intent; only the injection site describes a window.
+Same family as "verify before asserting", pointed at test fixtures — which are read as
+specifications far more often than they are read as code.
+
+## A dependency advisory can turn every PR in the repo red between two green runs (2026-09-17, PR #3163)
+
+`supply-chain` (`pip-audit --strict`) failed on PR #3162 for `soupsieve` 2.8.4
+(CVE-2026-85999, CVE-2026-86000) — a **transitive** dep, nothing to do with the diff. The
+instinct is to check whether main is green; main *was* green, which reads as "so it is my
+branch".
+
+It was not. **Compare the TIMESTAMP of main's last run against the failure, not its
+conclusion.** Main's last run was 20:31Z and the first run to see the advisory was 21:52Z, so
+main was green only because nothing had re-run since the advisory landed. Every open PR was
+blocked.
+
+Fix shape: `uv lock --upgrade-package <name>` as its **own** `chore/` PR, merged first, then
+rebase the feature branch. Bundling a lock bump into an unrelated feature PR hides a
+repo-wide break inside one ticket's history, and leaves every *other* open PR still blocked.
