@@ -7965,7 +7965,7 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 sessions, from the same correct quotation. The EDGAR Ownership XML Tech Spec §4.3.8.2 says *"a '5'
 transaction is early"*, and reasoning from those words alone gives "early means before the
 deadline, and a deadline is after the event, so the event has happened" — which says the exemption
-should be REMOVED. Reading one filing kills that: `0001127602-24-023-…` — `0001127602-24-015987`
+should be REMOVED. Reading one filing kills that: `0001127602-24-015987`
 (RANGE RESOURCES) carries `transactionFormType=5` lines dated 14 days AFTER filing, with footnote
 F2 naming *"a scheduled deferred compensation plan distribution with a distribution date of June 3,
 2024"*. The event genuinely had not happened, and reporting it was legal.
