@@ -7457,3 +7457,56 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - Enforced in: `scripts/audit_3115_document_catalogue.py::free_space` (extension existence probe,
   no exception path) and `::main` (the `xact_start` equality check, which calls `_fail` and exits
   non-zero, plus the `WARNINGS` summary block).
+
+## `pg_column_size(row)` already carries the tuple header — and a storage estimator's error direction is load-bearing
+
+- Symptom: a bloat audit estimated live payload as `sum(pg_column_size(f.*)) + 27`, reasoning that
+  the composite gives column bytes and a tuple needs its 23-byte header plus alignment. It does
+  not: **`pg_column_size` of a whole-row composite ALREADY includes the tuple header.** On a table
+  of one `bigint NOT NULL` column it returns **32, not 8**. The extra term overstated live bytes by
+  **101.1 MiB** across 4.61M rows. The tell was partitions reporting a fill ratio **above 100%** —
+  without that arithmetic impossibility the figure would have been quietly wrong in a report whose
+  whole purpose was sizing.
+- The correct per-row on-disk estimator is **`pg_column_size(row) + 4`** (the 4-byte line pointer).
+  Per-page headers and alignment are the residual and came to 1.4% on a 4.61M-row relation.
+- ⚠⚠ The second half, which is the more general lesson: the spec asserted that **under-counting
+  live bytes was "the safe direction"**. It is the opposite. Under-stating live bytes lowers the
+  computed fill ratio, so the relation looks emptier and **more** space looks reclaimable —
+  under-stating OVERSTATES the saving. Over-stating is the conservative direction. **An
+  error-direction claim is a load-bearing claim: reason it through, never write it as a
+  reassurance.** Caught by Codex checkpoint 1 on the spec, not by any gate.
+- Prevention: never trust a storage estimator you derived. **Cross-validate it against an
+  independent measurement** — building the same rows into a `TEMP` relation with the same index
+  definitions is non-destructive, takes seconds even at 4.6M rows, and measures the true minimum
+  rather than estimating bloat. That also removes any dependence on `pgstattuple`, which is not
+  installed on this cluster (recorded on #3115 too). Verify the header claim in one query:
+  `CREATE TEMP TABLE t(a bigint NOT NULL); INSERT …; SELECT pg_column_size(t.*) FROM t`.
+- First seen in: #1620 (2026-09-17, PR #3142) — `financial_facts_raw` footprint audit.
+- Enforced in: this log; `scripts/audit_1620_facts_footprint.py` (the `_LIVE_BYTES` constant, its
+  module-docstring derivation, and `_rebuild_probe`'s estimator cross-check, which raises an
+  invariant failure if drift exceeds 5%).
+
+## A check that passes can be structurally unable to fail — name the falsifying input before citing it as evidence
+
+- Symptom: a reclaim predicate was documented as converging ("once compacted, a partition drops out
+  of selection") and the claim was **verified empirically** — re-running immediately after the
+  compaction selected **0 partitions**. Codex then constructed the failing case by hand: the
+  selection subtracts an estimated minimum from the current size, and the estimator's unmodelled
+  page overhead **scales with partition size** while the eligibility floor is **absolute**. A
+  compacted 2 GiB partition reports ~28.7 MiB of phantom reclaim, clears a 16 MiB floor unaided,
+  and is rewritten on every run forever. Every partition in the relation is ≤170 MiB, so the defect
+  was real, live in the shipped predicate, and **invisible to the measurement that "confirmed" its
+  absence**. The green result was true and proved nothing.
+- Prevention: before citing a check as evidence, **state the input that would make it fail**. If
+  you cannot name one, it is not evidence — it is a property of today's data. Specifically: when an
+  **absolute** threshold gates a quantity that is **proportional** to something (size, row count,
+  elapsed time), the two cross somewhere; find where, and say whether current data sits on the safe
+  side by design or by luck. Same family as the tautological guard (#3115's `is_primary AND NOT
+  is_primary`, which returns 0 against any implementation) and the verifier pinned to its own
+  version constant — **a check that cannot fail is indistinguishable from a check that passed.**
+- First seen in: #1620 (2026-09-17, PR #3142), Codex checkpoint 2, which executed a synthetic
+  partition through `_selected_partitions` to demonstrate it rather than arguing it.
+- Enforced in: this log; `scripts/audit_1620_facts_footprint.py::_COMPACT_OVERHEAD_ALLOWANCE` (a
+  named, justified allowance that makes a compacted partition project to its current size at ANY
+  size) and the `Selection predicate` section of its module docstring, which states the failure
+  mode rather than only the guarantee.
