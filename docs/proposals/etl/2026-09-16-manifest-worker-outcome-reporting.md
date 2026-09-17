@@ -1003,11 +1003,15 @@ JobProgress(
 JobProgress(
     candidates_seen=stats.subjects_polled,
     outcomes={"polled": stats.subjects_polled - stats.poll_errors},
-    errors={"probe_failed": stats.poll_errors,
+    errors={"poll_fetch_failed": stats.poll_errors,
             "fundamentals_refresh_failed": stats.fundamentals_refresh_failed},
     context={"fulfilled": stats.fulfilled},
 )
 ```
+
+⚠ Both jobs name a failed fetch `poll_fetch_failed` (review NITPICK on PR #3160) — a
+cross-job readout would otherwise have to special-case one concept under two names. The per-CIK
+job keeps the lane suffix on `recheck_fetch_failed` because it genuinely has a second lane.
 
 ⚠ Zero-valued error buckets are emitted rather than omitted. `degradation_reason` filters on
 `n > 0`, so they are inert to the verdict, and slice 5's §9 rule already distinguishes `None`

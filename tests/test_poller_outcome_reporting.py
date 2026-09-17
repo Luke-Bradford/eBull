@@ -140,6 +140,17 @@ def test_expected_filings_acceptance_matrix(case: str, stats: PollStats, degrade
     assert (degradation_reason(expected_progress_for(stats)) is not None) is degraded, case
 
 
+def test_both_pollers_name_a_failed_fetch_the_same_way() -> None:
+    """Review NITPICK on PR #3160: the two jobs used different bucket names for
+    one concept, which a cross-job readout would have to special-case. The
+    per-CIK job keeps its lane suffixes because it HAS two lanes."""
+    per_cik = per_cik_progress_for(_per_cik(subjects_polled=1, poll_errors=1))
+    expected = expected_progress_for(PollStats(subjects_polled=1, fulfilled=0, poll_errors=1))
+
+    assert "poll_fetch_failed" in per_cik.errors
+    assert "poll_fetch_failed" in expected.errors
+
+
 def test_expected_filings_an_open_window_with_no_filing_is_healthy() -> None:
     """Matrix row 2 — the 99.9% case. An expectation whose issuer has not filed
     yet is the steady state, not a stall."""

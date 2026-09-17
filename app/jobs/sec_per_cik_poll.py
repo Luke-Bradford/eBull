@@ -187,6 +187,12 @@ def progress_for(stats: PerCikPollStats) -> JobProgress:
     tick is enough to reject the discovery bucket, and every measured window
     contains them.
 
+    ⚠ Reproduce the figure rather than trusting it — it is a derived statistic
+    in a docstring, which goes stale silently::
+
+        select count(*) successes, count(*) filter (where row_count = 0)
+          from job_runs where job_name = 'sec_per_cik_poll' and status = 'success';
+
     ⚠ ``polled`` certifies **the probe stage** — the CIK's submissions response
     was obtained and applied to that subject. It does NOT certify that every
     downstream write for the subject succeeded, which is why

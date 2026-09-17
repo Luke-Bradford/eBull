@@ -309,21 +309,27 @@ class PollStats:
 def progress_for(stats: PollStats) -> JobProgress:
     """#2218 progress verdict for one tick — #3111 slice 6.
 
-    ⚠⚠ **``polled`` is the outcome, NOT ``fulfilled``.** An open expectation
-    whose issuer has not filed yet is the normal state: **5,698 of this job's
-    5,701 successful runs fulfilled nothing** (full population, ``job_runs``
-    2026-06-28 → 2026-09-17; spec §10c), and 3,691 of 3,925 observed ticks had
-    no due subject at all. Using ``fulfilled`` would degrade the job's entire
-    steady state.
+        ⚠⚠ **``polled`` is the outcome, NOT ``fulfilled``.** An open expectation
+        whose issuer has not filed yet is the normal state: **5,698 of this job's
+        5,701 successful runs fulfilled nothing** (full population, ``job_runs``
+        2026-06-28 → 2026-09-17; spec §10c), and 3,691 of 3,925 observed ticks had
+        no due subject at all. Using ``fulfilled`` would degrade the job's entire
+        steady state.
 
-    See ``sec_per_cik_poll.progress_for`` for what ``polled`` certifies and for
-    why rule 2 is unreachable on a normal return — the same reasoning applies.
+    ⚠ Reproduce the figure rather than trusting it — it is a derived statistic
+        in a docstring, which goes stale silently::
+
+            select count(*) successes, count(*) filter (where row_count = 0)
+              from job_runs where job_name = 'expected_filings_poller' and status = 'success';
+
+        See ``sec_per_cik_poll.progress_for`` for what ``polled`` certifies and for
+        why rule 2 is unreachable on a normal return — the same reasoning applies.
     """
     return JobProgress(
         candidates_seen=stats.subjects_polled,
         outcomes={"polled": stats.subjects_polled - stats.poll_errors},
         errors={
-            "probe_failed": stats.poll_errors,
+            "poll_fetch_failed": stats.poll_errors,
             "fundamentals_refresh_failed": stats.fundamentals_refresh_failed,
         },
         context={"fulfilled": stats.fulfilled},
