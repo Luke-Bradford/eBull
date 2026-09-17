@@ -48,7 +48,11 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from app.services.insider_transactions import form4_retention_cutoff, form5_retention_cutoff
+from app.services.insider_transactions import (
+    evaluate_insider_date_validity,
+    form4_retention_cutoff,
+    form5_retention_cutoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +74,12 @@ class InsiderIngestResult:
     # rows outside the 18-month cap. Form 3 rows are still unbounded
     # (per §4.4 — Form 3 is read-side latest-per-pair).
     rows_skipped_retention: int = 0
+    # #2790 — rows whose reported date postdates their own filing date on a
+    # Form 4/5, which Rule 16a-3(g) makes impossible. Counted separately from
+    # ``rows_skipped_bad_data`` for the same reason ``rows_skipped_retention``
+    # is: an operator reading the run summary must be able to tell a deliberate
+    # invariant rejection from malformed input.
+    rows_skipped_future_dated: int = 0
     parse_errors: int = 0
     touched_instrument_ids: set[int] = field(default_factory=set)
 
@@ -165,6 +175,57 @@ def _parse_iso_date(value: str | None) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _is_future_dated_for_form(
+    *,
+    form_upper: str,
+    period_end: date,
+    filed_at: datetime,
+    deemed_execution_date: str | None,
+    trans_timeliness: str | None,
+) -> bool:
+    """#2790 — apply #1687's Rule 16a-3(g) invariant on the BULK writer too.
+
+    The rule was decided in #1687 and implemented for the per-filing XML path in
+    :func:`app.services.insider_transactions.evaluate_insider_date_validity`;
+    this drain is the second writer and never got it, which is how 998 of the
+    1,147 breaching observation rows were written. The decision function is
+    REUSED rather than re-derived, so both of its exemptions (no authoritative
+    ``filed_at``; ``transaction_timeliness == 'E'``) apply identically on both
+    writers and cannot drift apart.
+
+    **Form 4 / Form 5 only.** 17 CFR 240.16a-3(g) requires a Form 4 "before the
+    end of the second business day following the day on which the subject
+    transaction has been executed", and 16a-3(f) puts Form 5 within 45 days
+    *after* the fiscal year it reports — so in both the filing follows the
+    reported date. A **Form 3 is the opposite**: Exchange Act §16(a)(2) sets
+    only latest bounds ("by the effective date of a registration statement",
+    "within 10 days after"), never an earliest one, so a Form 3 whose event date
+    postdates its filing is correct and must not be rejected.
+
+    ⚠ A blank or unmapped ``DOCUMENT_TYPE`` is deliberately NOT gated. Rejecting
+    a row whose form cannot be established is the failure mode that loses Form 3
+    data — full population 2026-09-17, 101 breaching rows carry a form4-mapped
+    ``source`` but sit on accessions that produced only ``:NDH:`` holdings rows
+    and never an ``:NDT:`` transaction row, the same signature as the 165 known
+    Form 3 rows. This gate's coverage is bounded by that, on purpose.
+
+    DERA field names are the readme's own (NONDERIV_TRANS): ``TRANS_TIMELINESS``
+    is VARCHAR2(1) over the Appendix 6.1 Timeliness List — ``E`` early, ``L``
+    late, empty on-time — which is the same vocabulary as the ownership XML's
+    ``transactionTimeliness``, so ``'E'`` means the same thing to the shared
+    decision function.
+    """
+    if not form_upper.startswith(("4", "5")):
+        return False
+    invalid, _ = evaluate_insider_date_validity(
+        period_end,
+        _parse_iso_date(deemed_execution_date),
+        filed_at,
+        (trans_timeliness or "").strip().upper() or None,
+    )
+    return invalid
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:
@@ -582,6 +643,17 @@ def ingest_insider_dataset_archive(
                     result.rows_skipped_bad_data += 1
                     continue
 
+                # #2790 — #1687's Rule 16a-3(g) invariant, on the bulk writer.
+                if _is_future_dated_for_form(
+                    form_upper=form_upper,
+                    period_end=period_end,
+                    filed_at=filed_at,
+                    deemed_execution_date=trans.get("DEEMED_EXECUTION_DATE"),
+                    trans_timeliness=trans.get("TRANS_TIMELINESS"),
+                ):
+                    result.rows_skipped_future_dated += 1
+                    continue
+
                 shares = _parse_decimal(trans.get("SHRS_OWND_FOLWNG_TRANS"))
 
                 trans_sk = (trans.get("NONDERIV_TRANS_SK") or trans.get("NON_DERIV_TRANS_SK") or "").strip() or "0"
@@ -659,6 +731,31 @@ def ingest_insider_dataset_archive(
                 period_end = _parse_iso_date(sub.get("PERIOD_OF_REPORT"))
                 if period_end is None:
                     result.rows_skipped_bad_data += 1
+                    continue
+
+                # #2790 — a Form 4/5 can carry holdings rows too, and its
+                # PERIOD_OF_REPORT is the earliest reported transaction date
+                # (Form 4) or the fiscal year end (Form 5); neither can postdate
+                # the filing. A Form 3's PERIOD_OF_REPORT is the Date of Event
+                # Requiring Statement and legitimately can, so the helper's
+                # form check — not this call site — decides.
+                # Passing None for timeliness is not a gap: a holdings row
+                # CANNOT carry one. EDGAR Ownership XML Technical Specification
+                # 4.3.8.1 and 4.3.8.2 — "Holdings reported in '3' and '3/A'
+                # submissions do not have <transactionCoding> or
+                # <transactionTimeliness> elements", and the same sentence for
+                # '4'/'4/A'. 4.3.8.3 allows one exception on a '5' submission,
+                # a LATE '3' holding, which is 'L' and not 'E'. So no early
+                # holding exists for the exemption to protect, and
+                # NONDERIV_HOLDING has no timeliness column to read.
+                if _is_future_dated_for_form(
+                    form_upper=form_upper,
+                    period_end=period_end,
+                    filed_at=filed_at,
+                    deemed_execution_date=None,
+                    trans_timeliness=None,
+                ):
+                    result.rows_skipped_future_dated += 1
                     continue
 
                 shares = _parse_decimal(holding.get("SHRS_OWND_FOLWNG_TRANS"))
