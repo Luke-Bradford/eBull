@@ -490,28 +490,43 @@ register_parser(
 # ---------------------------------------------------------------------------
 
 
-def _stored_rows_are_all_13d_cover_labels(conn: psycopg.Connection[Any], accession_number: str) -> bool:
-    """True when EVERY stored holder for ACCESSION_NUMBER is a 13D/G form field.
+def _stored_rows_name_no_beneficial_owner(conn: psycopg.Connection[Any], accession_number: str) -> bool:
+    """True when NO stored holder for ACCESSION_NUMBER names a beneficial owner.
 
-    Source rule: 17 CFR 240.13d-101 (Schedule 13D) and 240.13d-102 (Schedule
-    13G) prescribe a numbered cover page whose rows 7-11 are the voting and
-    dispositive-power lines. Proxies embed those cover pages as exhibits, and
-    before #2163 the numbered layout parsed as a table whose "holder names"
-    were the item labels and whose "share counts" were the ROW NUMBERS.
+    Source rule: 17 CFR 229.403 column 2 is a *beneficial owner*, which Rule
+    13d-3 (17 CFR 240.13d-3) defines as a person or entity holding voting or
+    investment power. An accession whose every stored row fails that test holds
+    no Item 403 data at all, so zero rows is the reg-correct outcome and an
+    empty parse may supersede.
 
-    17 CFR 229.403 column 2 is a *beneficial owner*, which Rule 13d-3 (17 CFR
-    240.13d-3) defines as a person or entity holding voting or investment
-    power. A cover-page item label is neither, so an accession whose every
-    stored row is one of them holds no Item 403 data at all and zero rows is
-    the reg-correct outcome.
+    ⚠ **This is the STORAGE path's own row rule, applied to stored names** — not
+    a second vocabulary (#2371). The two halves are one rule at two times: the
+    parser refuses to store such a row, and this refuses to keep one it stored
+    before the rule existed. :func:`name_is_not_a_beneficial_owner` imports both
+    predicates from the parser so they cannot drift.
+
+    Widened from "every stored row is a Schedule 13D/G cover-page label" (#2173).
+    That vocabulary was 13D-only, so an all-*Title of class* table — 229.403
+    column 1 values leaking into the name column — kept its junk rows forever.
+    ⚠ #2371's own follow-up comment proposed reusing
+    ``_is_beneficial_owner_identity`` instead; measured, that does **not** work.
+    ``_is_beneficial_owner_identity("Class C Common Stock")`` is ``True`` by
+    design, because it must not turn ``strip_class_designator`` on — that would
+    narrow owner identity, which feeds ``_ROW_IDENTITY_FLOOR`` and de-admits
+    whole tables. The storage guard is the caller that may opt in, and so is
+    this one, for the same reason: neither feeds table selection.
 
     ALL, not ANY: a mixed accession has at least one row that may be a genuine
     holder, and superseding those is the data loss the guard exists to prevent.
-    Measured full-population — 2 of 7,141 accessions with stored holdings are
-    all-cover-label, and NONE is mixed.
 
     Returns ``False`` for an accession with no stored rows, so it can never be
     the reason an empty parse is accepted.
+
+    ⚠ Do not hand-copy a population figure into this docstring — the previous
+    one ("2 of 7,141 … and NONE is mixed") was measured on a corpus that has
+    since moved, and by 2026-09-17 the old rule matched **nothing at all**, which
+    read as "rare" when it meant "dead". Reproduce with
+    ``PYTHONPATH=. uv run python -m scripts.audit_2371_correct_zero_release``.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -519,22 +534,55 @@ def _stored_rows_are_all_13d_cover_labels(conn: psycopg.Connection[Any], accessi
             (accession_number,),
         )
         names = [row[0] for row in cur.fetchall()]
-    return all_names_are_13d_cover_labels(names)
+    return no_stored_name_is_a_beneficial_owner(names)
 
 
-def all_names_are_13d_cover_labels(names: Sequence[str | None]) -> bool:
-    """The DECISION behind :func:`_stored_rows_are_all_13d_cover_labels`, pure.
+def name_is_not_a_beneficial_owner(name: str) -> bool:
+    """True when NAME is one the storage path itself refuses to store.
+
+    Mirrors ``_extract_holder_rows``' two row refusals exactly
+    (``sec_def14a.py:3278`` and ``:3296``) by importing both predicates rather
+    than restating either:
+
+    * a Schedule 13D/G cover-page item label (17 CFR 240.13d-101 / -102) — a
+      FORM FIELD, not a person; and
+    * a name composed entirely of equity/award vocabulary once its class
+      designator is set aside, i.e. an INSTRUMENT.
+
+    ⚠ ``strip_class_designator=True`` matches the storage guard's own call. It is
+    what makes "Class B Common Stock" an instrument rather than an owner, and it
+    is safe here for the reason the parameter's docstring gives: it is a STORAGE
+    decision, and nothing on this path reaches ``_owner_identity_fraction`` or
+    ``_ROW_IDENTITY_FLOOR``.
+
+    ⚠ The input is the STORED name, which is already the parser's cleaned form
+    (``_clean_beneficial_holder_name`` runs at ``sec_def14a.py:3277``, before
+    both refusals), so this tests the same string the parser tested. It does NOT
+    reproduce the parser's *stateful* decisions — the pending-owner carry for a
+    stacked address row — but it does not need to: that state resolves before
+    storage, so a stored name is never the address half.
+    """
+    from app.providers.implementations.sec_def14a import (
+        _is_instrument_not_owner,
+        _SCHEDULE_13D_COVER_LABEL_RE,
+    )
+
+    return bool(_SCHEDULE_13D_COVER_LABEL_RE.match(name)) or _is_instrument_not_owner(name, strip_class_designator=True)
+
+
+def no_stored_name_is_a_beneficial_owner(names: Sequence[str | None]) -> bool:
+    """The DECISION behind :func:`_stored_rows_name_no_beneficial_owner`, pure.
 
     Split out so the release rule is table-testable without a database — the
     SQL above is a plain read and carries none of the judgement.
     """
-    from app.providers.implementations.sec_def14a import _SCHEDULE_13D_COVER_LABEL_RE
-
     cleaned = [(name or "").strip() for name in names]
     if not cleaned or any(not name for name in cleaned):
-        # An empty or blank-bearing set is never proof of a correct zero.
+        # An empty or blank-bearing set is never proof of a correct zero. A blank
+        # stored name is missing evidence, and missing evidence is not evidence
+        # of absence.
         return False
-    return all(_SCHEDULE_13D_COVER_LABEL_RE.match(name) for name in cleaned)
+    return all(name_is_not_a_beneficial_owner(name) for name in cleaned)
 
 
 def _apply_def14a(
@@ -634,20 +682,25 @@ def _apply_def14a(
 
     # #2173 — the zero-holder guard cannot, on its own, tell "the parser broke"
     # from "zero is the RIGHT answer", so it pins the latter forever with the
-    # junk still live. Release it on exactly one provable case: every stored row
-    # is a Schedule 13D/G COVER-PAGE item label (17 CFR 240.13d-101 / -102).
-    # 229.403 column 2 is a beneficial owner, which Rule 13d-3 defines as a
-    # person or entity holding voting or investment power; a cover-page item
-    # label is a FORM FIELD and is neither. Superseding those rows is the
-    # correction, not data loss.
+    # junk still live. Release it on exactly one provable case: NO stored row
+    # names a beneficial owner. 229.403 column 2 is a beneficial owner, which
+    # Rule 13d-3 defines as a person or entity holding voting or investment
+    # power; a Schedule 13D/G cover-page item label is a FORM FIELD and a
+    # *Title of class* value is an INSTRUMENT, and neither is a person.
+    # Superseding those rows is the correction, not data loss.
+    #
+    # #2371 widened this from a 13D-cover-label vocabulary to the STORAGE path's
+    # own row rule. The old form matched 0 accessions on the 2026-09-17 corpus
+    # while an all-*Title of class* accession kept its junk — a guard that had
+    # gone dead without anyone noticing, because "rare" and "never" read the same
+    # in a docstring.
     #
     # Keyed on what is STORED, deliberately, rather than on a reason threaded
     # out of the parser: the test can then only ever release rows that are
     # provably not Item 403 data, so a genuine table that the parser stops
-    # finding still raises. Full population: 2 of 7,141 accessions with stored
-    # holdings qualify — exactly the two #2163 created — and none is mixed.
+    # finding still raises.
     supersede_correct_zero = (
-        not parsed.rows and had_existing_rows and _stored_rows_are_all_13d_cover_labels(conn, raw_doc.accession_number)
+        not parsed.rows and had_existing_rows and _stored_rows_name_no_beneficial_owner(conn, raw_doc.accession_number)
     )
     if supersede_correct_zero:
         # Falls through to the replace-then-insert path below, which with zero
@@ -658,8 +711,8 @@ def _apply_def14a(
         # SOURCE. No special-case SQL, and in particular no empty-array
         # ``<> ALL('{}')`` path — ``_supersede_dropped_holdings`` is not on it.
         logger.info(
-            "DEF 14A accession=%s re-parses to zero holders and every stored row is a "
-            "Schedule 13D/G cover-page label — superseding rather than failing the rewash",
+            "DEF 14A accession=%s re-parses to zero holders and no stored row names a "
+            "beneficial owner (17 CFR 240.13d-3) — superseding rather than failing the rewash",
             raw_doc.accession_number,
         )
     if not parsed.rows and not supersede_correct_zero:
