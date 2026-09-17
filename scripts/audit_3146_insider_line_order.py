@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any, LiteralString
+from typing import Any, LiteralString, NoReturn, cast
 
 import psycopg
 from psycopg import IsolationLevel
@@ -95,29 +95,53 @@ _WINNER_ORDER_HEAD: LiteralString = """
 """
 
 
-def _winner_sql(order_tail: str) -> str:
-    """The projection's winner set for the WHOLE population, under one ORDER BY tail.
+def _materialise_winners(cur: psycopg.Cursor[Any], *, target: str, order_tail: str) -> None:
+    """Build one arm's post-de-collision winner set for the WHOLE population.
 
     Mirrors ``refresh_insiders_current_batch``'s source query — same DISTINCT ON key, same
-    ORDER BY head, same de-collision filter applied to the ``winners`` CTE (never to raw
+    ORDER BY head, and the de-collision filter applied to the ``winners`` set (never to raw
     observations, which would drop a different set — see the constant's own comment).
+
+    ⚠ The two steps are split because the de-collision predicate is a correlated ``EXISTS``
+    over ``winners``. In production ``winners`` is one instrument's handful of rows; at
+    full-population scale the same CTE re-scans ~2M rows per probe and does not finish. A TEMP
+    TABLE named ``winners`` with the EXISTS's own key indexed makes it index-driven while
+    leaving ``_INSIDER_DUAL_PIPELINE_DECOLLISION`` textually verbatim — the filter must be the
+    shipped one, not a re-spelling of it.
     """
-    return f"""
-                WITH winners AS (
-                    SELECT DISTINCT ON (instrument_id, holder_identity_key, ownership_nature)
-                        instrument_id, holder_cik, holder_name, holder_identity_key,
-                        ownership_nature, source, source_document_id, source_accession,
-                        filed_at, period_end, shares
-                    FROM ownership_insiders_observations
-                    WHERE known_to IS NULL
-                    ORDER BY {_WINNER_ORDER_HEAD} {order_tail}
-                )
-                SELECT w.* FROM winners w
-                {_INSIDER_DUAL_PIPELINE_DECOLLISION}
-    """
+    cur.execute(
+        cast(
+            LiteralString,
+            f"""
+        CREATE TEMP TABLE winners AS
+        SELECT DISTINCT ON (instrument_id, holder_identity_key, ownership_nature)
+            instrument_id, holder_cik, holder_name, holder_identity_key,
+            ownership_nature, source, source_document_id, source_accession,
+            filed_at, period_end, shares
+        FROM ownership_insiders_observations
+        WHERE known_to IS NULL
+        ORDER BY {_WINNER_ORDER_HEAD} {order_tail}
+    """,
+        )
+    )
+    cur.execute("CREATE INDEX ON winners(instrument_id, holder_cik, source_accession)")
+    cur.execute("ANALYZE winners")
+    cur.execute(
+        cast(
+            LiteralString,
+            f"""
+        CREATE TEMP TABLE {target} AS
+        SELECT w.* FROM winners w
+        {_INSIDER_DUAL_PIPELINE_DECOLLISION}
+    """,
+        )
+    )
+    cur.execute(cast(LiteralString, f"CREATE INDEX ON {target}(instrument_id, holder_identity_key, ownership_nature)"))
+    cur.execute(cast(LiteralString, f"ANALYZE {target}"))
+    cur.execute("DROP TABLE winners")
 
 
-def _fail(msg: str) -> None:
+def _fail(msg: str) -> NoReturn:
     print(f"FAIL: {msg}")
     sys.exit(1)
 
@@ -239,7 +263,7 @@ def run_order_rule(cur: psycopg.Cursor[Any]) -> None:
     print(f"  repeated (accn, date, balance) on the XML side  {x_excl:>9,}")
     print(f"  no counterpart on the other side                {unmatched:>9,}")
 
-    acc, conc, disc = cur.execute(_CONCORDANCE_SQL.format(src="m")).fetchone()  # type: ignore[misc]
+    acc, conc, disc = cur.execute(cast(LiteralString, _CONCORDANCE_SQL.format(src="m"))).fetchone()  # type: ignore[misc]
     print(f"\nALL multi-line accessions:  tested {acc:,}  concordant {conc:,}  discordant {disc:,}")
 
     # Restricted to same-date groups — the population that actually reaches this tie-break,
@@ -250,7 +274,7 @@ def run_order_rule(cur: psycopg.Cursor[Any]) -> None:
     """)
     cur.execute("ANALYZE m_sameday")
     sd_acc, sd_conc, sd_disc = cur.execute(
-        _CONCORDANCE_SQL.format(src="(SELECT accn || '|' || d AS accn, sk, rn FROM m_sameday) q")
+        cast(LiteralString, _CONCORDANCE_SQL.format(src="(SELECT accn || '|' || d AS accn, sk, rn FROM m_sameday) q"))
     ).fetchone()  # type: ignore[misc]
     print(f"SAME-DATE groups only:      tested {sd_acc:,}  concordant {sd_conc:,}  discordant {sd_disc:,}")
 
@@ -268,7 +292,7 @@ def run_order_rule(cur: psycopg.Cursor[Any]) -> None:
       FROM ranked
     """)
     cur.execute("ANALYZE m_swapped")
-    nc_acc, nc_conc, nc_disc = cur.execute(_CONCORDANCE_SQL.format(src="m_swapped")).fetchone()  # type: ignore[misc]
+    nc_acc, nc_conc, nc_disc = cur.execute(cast(LiteralString, _CONCORDANCE_SQL.format(src="m_swapped"))).fetchone()  # type: ignore[misc]
     print(f"NEGATIVE CONTROL (swapped): tested {nc_acc:,}  concordant {nc_conc:,}  discordant {nc_disc:,}")
 
     span = cur.execute("SELECT min(d), max(d) FROM m").fetchone()
@@ -371,29 +395,53 @@ def run_census(cur: psycopg.Cursor[Any]) -> None:
 
 def run_ab(cur: psycopg.Cursor[Any]) -> None:
     print("\n=== #3146 --ab: full-population A/B of the projection's winner set ===")
-    cur.execute(f"CREATE TEMP TABLE w_old AS {_winner_sql(_OLD_ORDER_TAIL)}")
-    cur.execute("CREATE INDEX ON w_old(instrument_id, holder_identity_key, ownership_nature)")
-    cur.execute("ANALYZE w_old")
-    cur.execute(f"CREATE TEMP TABLE w_new AS {_winner_sql(_INSIDER_WINNER_ORDER_TAIL)}")
-    cur.execute("CREATE INDEX ON w_new(instrument_id, holder_identity_key, ownership_nature)")
-    cur.execute("ANALYZE w_new")
+    _materialise_winners(cur, target="w_old", order_tail=_OLD_ORDER_TAIL)
+    print("  old arm materialised")
+    _materialise_winners(cur, target="w_new", order_tail=_INSIDER_WINNER_ORDER_TAIL)
+    print("  new arm materialised")
     n_old = cur.execute("SELECT count(*) FROM w_old").fetchone()[0]  # type: ignore[index]
     n_new = cur.execute("SELECT count(*) FROM w_new").fetchone()[0]  # type: ignore[index]
     print(f"\nwinner rows  old {n_old:,}   new {n_new:,}")
     if n_old == 0:
         _fail("--ab derived an empty old winner set")
 
-    # Harness validation: the re-derived OLD arm must reproduce what is STORED. The control
-    # the verdict rests on is the stored table, not this re-derivation.
-    stored_mismatch = cur.execute("""
-      SELECT count(*) FROM (
-        SELECT instrument_id, holder_identity_key, ownership_nature, source_document_id, shares FROM w_old
-        EXCEPT
-        SELECT instrument_id, holder_identity_key, ownership_nature, source_document_id, shares
-          FROM ownership_insiders_current) z
-    """).fetchone()[0]  # type: ignore[index]
+    # Harness validation, SYMMETRIC. A one-way EXCEPT sees only rows the re-derivation adds and
+    # would miss a stored row it drops, which is the direction that matters — a holder that
+    # disappears from the operator's card. Reported both ways.
     stored_n = cur.execute("SELECT count(*) FROM ownership_insiders_current").fetchone()[0]  # type: ignore[index]
-    print(f"stored _current rows {stored_n:,}; rows the re-derived OLD arm does not reproduce: {stored_mismatch:,}")
+    only_derived, only_stored = cur.execute("""
+      SELECT (SELECT count(*) FROM (
+                SELECT instrument_id, holder_identity_key, ownership_nature, source_document_id, shares FROM w_old
+                EXCEPT
+                SELECT instrument_id, holder_identity_key, ownership_nature, source_document_id, shares
+                  FROM ownership_insiders_current) a),
+             (SELECT count(*) FROM (
+                SELECT instrument_id, holder_identity_key, ownership_nature, source_document_id, shares
+                  FROM ownership_insiders_current
+                EXCEPT
+                SELECT instrument_id, holder_identity_key, ownership_nature, source_document_id, shares FROM w_old) b)
+    """).fetchone()  # type: ignore[misc]
+    print(f"stored _current rows {stored_n:,}")
+    print(f"  in the re-derived OLD arm but not stored: {only_derived:,}   (instruments never projected)")
+    print(f"  stored but NOT in the re-derived OLD arm: {only_stored:,}   ← must be 0")
+
+    # The release gate the operator actually cares about: does the new rule remove a holder
+    # that is on the card TODAY? Measured against the STORED table, not against a re-derivation
+    # of the old rule (full-population-ab.md: never simulate the control).
+    stored_added, stored_deleted, stored_changed = cur.execute("""
+      SELECT count(*) FILTER (WHERE c.instrument_id IS NULL),
+             count(*) FILTER (WHERE n.instrument_id IS NULL),
+             count(*) FILTER (WHERE c.instrument_id IS NOT NULL AND n.instrument_id IS NOT NULL
+                              AND c.shares IS DISTINCT FROM n.shares)
+      FROM ownership_insiders_current c FULL OUTER JOIN w_new n
+        ON c.instrument_id = n.instrument_id
+       AND c.holder_identity_key = n.holder_identity_key
+       AND c.ownership_nature = n.ownership_nature
+    """).fetchone()  # type: ignore[misc]
+    print("\nNEW arm vs STORED _current (the operator-visible control):")
+    print(f"  keys added     {stored_added:,}")
+    print(f"  keys REMOVED   {stored_deleted:,}   ← release condition: must be 0")
+    print(f"  value changed  {stored_changed:,}")
 
     print("\nFULL OUTER comparison over (instrument, holder, nature) keys:")
     cur.execute("""
@@ -454,6 +502,10 @@ def run_ab(cur: psycopg.Cursor[Any]) -> None:
 
     if deleted != 0:
         _fail(f"{deleted:,} keys DELETED by the new ordering — not shippable")
+    if stored_deleted != 0:
+        _fail(f"{stored_deleted:,} keys present in STORED _current are absent from the new arm")
+    if only_stored != 0:
+        _fail(f"{only_stored:,} stored rows the re-derived OLD arm cannot reproduce — harness is not the control")
     if cross != 0:
         _fail(f"{cross:,} keys changed winning accession — the change is not within-filing")
     if ndh != 0:
@@ -463,45 +515,76 @@ def run_ab(cur: psycopg.Cursor[Any]) -> None:
 def _run_xml_oracle(cur: psycopg.Cursor[Any]) -> None:
     """Ground truth: on keys with NO XML sibling, does the new winner match the XML's last line?
 
-    Restricted to DERA-only keys because where the plain XML observation already wins the key,
+    Restricted to DERA-won keys because where the plain XML observation already wins the key,
     agreement with the XML says nothing about the SK ordering (Codex ckpt-1 #21). The oracle
     reproduces the XML path's own filters — ``txn_date_invalid`` and NULL post-balances
     excluded, per ``insider_transactions.py``'s holdings reduction.
+
+    ⚠ **Grouped the way the XML path groups**, per ``(filer_cik, direct_indirect)``, not one
+    last line for the whole accession (Codex ckpt-2 P2). An accession can carry a Direct and an
+    Indirect series at once; taking the accession-wide last line would score a DERA `direct`
+    key that picked the final INDIRECT balance as "agreement", masking exactly the #2385/#2386
+    conflation the proposal says it does not fix. The cohorts are therefore reported apart:
+
+    * **single-series accessions** — one ``(filer_cik, direct_indirect)`` series, so the
+      terminal balance is unambiguous. This is the real ground truth.
+    * **multi-series accessions** — the DERA key's role-derived nature cannot be mapped to a
+      D/I series at all, so the oracle can only ask whether the winner is SOME series'
+      terminal line. Reported separately and never pooled into the headline.
     """
     print("\nXML oracle — DERA-won keys whose accession we ALSO hold parsed XML for:")
     cur.execute("""
+      CREATE TEMP TABLE xml_series AS
+      SELECT DISTINCT ON (instrument_id, accession_number, filer_cik, direct_indirect)
+             instrument_id, accession_number, filer_cik, direct_indirect,
+             post_transaction_shares::numeric AS terminal
+        FROM insider_transactions
+       WHERE NOT is_derivative AND NOT txn_date_invalid AND post_transaction_shares IS NOT NULL
+       ORDER BY instrument_id, accession_number, filer_cik, direct_indirect,
+                txn_date DESC, txn_row_num DESC
+    """)
+    cur.execute("CREATE INDEX ON xml_series(instrument_id, accession_number)")
+    cur.execute("ANALYZE xml_series")
+    cur.execute("""
       CREATE TEMP TABLE oracle AS
-      SELECT n.instrument_id, n.holder_identity_key, n.ownership_nature,
-             n.shares AS new_shares, o.shares AS old_shares,
-             (SELECT t.post_transaction_shares::numeric
-                FROM insider_transactions t
-               WHERE t.instrument_id = n.instrument_id
-                 AND t.accession_number = split_part(n.source_document_id, ':', 1)
-                 AND NOT t.is_derivative
-                 AND NOT t.txn_date_invalid
-                 AND t.post_transaction_shares IS NOT NULL
-               ORDER BY t.txn_date DESC, t.txn_row_num DESC
-               LIMIT 1) AS xml_last_line
-      FROM w_new n JOIN w_old o
-        ON o.instrument_id = n.instrument_id
-       AND o.holder_identity_key = n.holder_identity_key
-       AND o.ownership_nature = n.ownership_nature
-      WHERE n.source_document_id ~ ':NDT:'
+      SELECT n.instrument_id, n.shares AS new_shares, o.shares AS old_shares,
+             s.n_series, s.terminals
+        FROM w_new n
+        JOIN w_old o
+          ON o.instrument_id = n.instrument_id
+         AND o.holder_identity_key = n.holder_identity_key
+         AND o.ownership_nature = n.ownership_nature
+        JOIN LATERAL (
+              SELECT count(*) AS n_series, array_agg(x.terminal) AS terminals
+                FROM xml_series x
+               WHERE x.instrument_id = n.instrument_id
+                 AND x.accession_number = split_part(n.source_document_id, ':', 1)
+             ) s ON s.n_series > 0
+       WHERE n.source_document_id ~ ':NDT:'
     """)
     cur.execute("ANALYZE oracle")
     cur.execute("""
-      SELECT count(*) FILTER (WHERE xml_last_line IS NOT NULL) AS testable,
-             count(*) FILTER (WHERE xml_last_line IS NOT NULL AND new_shares = xml_last_line) AS new_agrees,
-             count(*) FILTER (WHERE xml_last_line IS NOT NULL AND old_shares = xml_last_line) AS old_agrees
+      SELECT count(*) FILTER (WHERE n_series = 1) AS single,
+             count(*) FILTER (WHERE n_series = 1 AND new_shares = terminals[1]) AS single_new,
+             count(*) FILTER (WHERE n_series = 1 AND old_shares = terminals[1]) AS single_old,
+             count(*) FILTER (WHERE n_series > 1) AS multi,
+             count(*) FILTER (WHERE n_series > 1 AND new_shares = ANY(terminals)) AS multi_new,
+             count(*) FILTER (WHERE n_series > 1 AND old_shares = ANY(terminals)) AS multi_old
       FROM oracle
     """)
-    testable, new_agrees, old_agrees = cur.fetchone()  # type: ignore[misc]
-    if testable == 0:
+    single, single_new, single_old, multi, multi_new, multi_old = cur.fetchone()  # type: ignore[misc]
+    if single == 0 and multi == 0:
         print("  no testable keys — oracle inconclusive")
         return
-    print(f"  testable keys {testable:,}")
-    print(f"  NEW winner equals the XML's last line: {new_agrees:,} ({new_agrees / testable * 100:.1f}%)")
-    print(f"  OLD winner equals the XML's last line: {old_agrees:,} ({old_agrees / testable * 100:.1f}%)")
+    if single:
+        print(f"  UNAMBIGUOUS cohort — accession carries one (filer, D/I) series: {single:,} keys")
+        print(f"    NEW winner is that series' terminal line: {single_new:,} ({single_new / single * 100:.1f}%)")
+        print(f"    OLD winner is that series' terminal line: {single_old:,} ({single_old / single * 100:.1f}%)")
+    if multi:
+        print(f"  CONFLATED cohort — accession carries >1 series, D/I unmappable (#2385): {multi:,} keys")
+        print(f"    NEW winner is SOME series' terminal line: {multi_new:,} ({multi_new / multi * 100:.1f}%)")
+        print(f"    OLD winner is SOME series' terminal line: {multi_old:,} ({multi_old / multi * 100:.1f}%)")
+        print("    ⚠ this cohort sizes the conflation exposure; it is NOT pooled into the headline.")
 
 
 def main() -> None:
@@ -518,6 +601,7 @@ def main() -> None:
     try:
         with conn.transaction(), conn.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = '30min'")
+            cur.execute("SET LOCAL work_mem = '256MB'")  # two full-population DISTINCT ON sorts
             started = _verify_snapshot(cur, "start")
             if args.order_rule:
                 run_order_rule(cur)

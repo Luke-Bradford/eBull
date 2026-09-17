@@ -369,6 +369,39 @@ and `insider_transaction_footnotes`, and consumed by
   the deemed owner matchable beside the holder. Do not "improve" this without re-running
   the arm (`scripts/audit_2408_nature_record_holder --validate`).
 
+#### ⚠⚠ Nothing in the DERA insider dataset orders two Table I lines (#3146)
+
+`NONDERIV_TRANS` is keyed on `(ACCESSION_NUMBER, NONDERIV_TRANS_SK)` and the readme §5.3
+defines `NONDERIV_TRANS_SK` as a **"Non-derivative transaction surrogate key"**. There is
+**no ordinal, line-number or sequence column in that table** — the only ordering-capable
+fields are `TRANS_DATE` and `DEEMED_EXECUTION_DATE`. So a filing's several same-day Table I
+lines carry no documented order, and `source_document_id`-lexical ordering over
+`{accession}:NDT:{sk}` is **not** a rule, it is an accident (it also compares the SK as a
+STRING, so `:NDT:1000` sorts before `:NDT:999`).
+
+Form 4 General Instruction 4(a)(i) fixes the target but not the order: *"Report total
+beneficial ownership following the reported transaction(s)"* — i.e. the balance after ALL of
+the filing's transactions, which is its last line for that series. The order itself is
+recovered **by construction** from document order, which the XML carries
+(`insider_transactions.txn_row_num`, `sql/056:25-28`) and the dataset does not.
+
+Measured, because the readme does not say it: **ascending `NONDERIV_TRANS_SK` IS ascending
+XML document order** — 123,901 of 123,901 multi-line accessions concordant, 0 discordant
+(111,971/111,971 restricted to same-date groups), with a swapped-pair negative control at
+0 concordant. Re-run as the drift detector:
+
+```bash
+PYTHONPATH=. uv run python -m scripts.audit_3146_insider_line_order --order-rule
+```
+
+⚠ That cohort is the accessions this deployment holds parsed XML for. XML document order
+reaches only **8.9%** of the affected `_current` groups, so a fix that resolved ordering by
+reading `insider_transactions` would miss ~91% of the population.
+
+⚠ `:NDH:` (holdings) rows are OUT of this rule: a Form 3 / holdings table is a simultaneous
+snapshot per class and ownership form, not a sequence, and no ordinal has been established
+for `NONDERIV_HOLDING_SK`.
+
 ### 2.4 Schedule 13D / 13G — beneficial ownership
 
 XML mandate **since 2024-12-18**. Current EDGAR XML technical spec revision is **2.2** (2026-03-16) — verify against `https://www.sec.gov/edgar/filer-information/current-edgar-technical-specifications` before relying on the schema. Pre-mandate filings are HTML/text — no `primary_doc.xml` exists; legacy coverage is lower-fidelity unless you write a parallel HTML extractor.

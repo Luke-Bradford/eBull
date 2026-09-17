@@ -57,6 +57,12 @@ balance that becomes "current" is decided by **string order on a DERA surrogate 
    NULL balances, parser-rejected lines) are reported with counts and reasons, not dropped
    silently. Concordance is reported **twice**: over all multi-line accessions, and restricted
    to the same-date groups that actually exercise this tie-break.
+
+   Measured: **123,901 accessions tested, 123,901 concordant, 0 discordant**; restricted to
+   same-date groups, **111,971 / 111,971 / 0**; negative control **0 concordant / 123,901
+   discordant**, so the comparison can fail. Exclusions: 47,541 DERA-side and 14,278 XML-side
+   rows with a repeated `(accession, date, balance)` — which no ordering can attribute to one
+   line and whose order cannot change a value — plus 36,414 rows with no counterpart.
    ⚠ **Scope of that evidence, stated:** it covers accessions this deployment holds parsed XML
    for. It is not evidence about the 91% cohort below, nor a guarantee the SEC will keep
    assigning SKs in document order; `--order-rule` is re-runnable as the drift detector.
@@ -65,18 +71,23 @@ balance that becomes "current" is decided by **string order on a DERA surrogate 
 
 `scripts/audit_3146_insider_line_order.py --census` — every figure computed at run time:
 
-- The tie is **DERA-vs-DERA only**. Splitting every live `_current` row that has a tied
-  sibling observation (tied on *all* of source-priority, `period_end`, `filed_at` and
-  `source`, per Codex #18, with `known_to IS NULL` on both sides) by provenance yields
-  `(winner DERA, sibling DERA)` and `(winner XML, sibling DERA)` and **no XML-vs-XML pair** —
-  the XML path's own reduction never emits two rows for one key per accession, and #788's
-  de-collision means a DERA row never beats an XML sibling on the same CIK.
-- Groups whose tied set holds more than one distinct balance — counted NULL-aware, since
-  `count(DISTINCT shares)` cannot see a NULL-vs-value disagreement (Codex #19).
-- **XML document order reaches only 8.9% of those groups**; the rest sit on accessions this
-  deployment holds no parsed XML for at all, spanning `period_end` 1998 … 2026. A fix that
-  resolved the order by reading `insider_transactions` would miss ~91% of the population —
-  it is rejected for that reason, not on complexity.
+⚠ **A first draft of this section claimed the ties are "DERA-vs-DERA only". The census
+falsified it** once the sibling predicate was widened to tie on `filed_at` as Codex #18 asked:
+two filings can share `period_end` and `filed_at`, so all four provenance combinations exist.
+Measured (winner / tied sibling, keys): DERA·DERA **32,614**, XML·DERA **34,661**,
+XML·XML **255**, DERA·XML **2**. The narrower claim that survives, and the one the fix rests
+on, is that **within a single accession** the tie is DERA-vs-DERA — the XML path's own
+reduction never emits two rows for one key per accession, and #788's de-collision stops a DERA
+row beating an XML sibling on the same CIK. Cross-filing ties are real, and are exactly what
+the `split_part` prefix key leaves untouched.
+
+- Groups the DERA path won whose tied set **disagrees on value**, counted NULL-aware because
+  `count(DISTINCT shares)` cannot see a NULL-vs-value disagreement (Codex #19): **27,795**
+  keys over **3,134** instruments.
+- **XML document order reaches 2,463 of those 27,795 groups (8.9%)**; the remaining 25,332 sit
+  on **19,268** accessions this deployment holds no parsed XML for at all, spanning `period_end`
+  **1998-08-08 … 2026-03-13**. A fix that resolved the order by reading `insider_transactions`
+  would miss 91% of the population — it is rejected for that reason, not on complexity.
 
 ## The change
 
