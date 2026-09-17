@@ -9466,6 +9466,7 @@ def sec_per_cik_poll() -> None:
     Bounded total budget: poll=2/3, recheck=~1/3 of ``max_subjects``
     (default 100 → 66+34).
     """
+    from app.jobs.sec_per_cik_poll import progress_for as per_cik_progress_for
     from app.jobs.sec_per_cik_poll import run_per_cik_poll
 
     with _tracked_job(JOB_SEC_PER_CIK_POLL) as tracker:
@@ -9481,13 +9482,24 @@ def sec_per_cik_poll() -> None:
             )
             conn.commit()
         tracker.row_count = stats.new_filings_recorded + stats.recheck_new_filings_recorded
+        # #3111 slice 6 — outcome reporting. ``polled`` is the SUCCESSFUL-PROBE
+        # count, NOT the discovery count: a CIK polled cleanly whose issuer has
+        # filed nothing is completed work, and using discovery here would have
+        # degraded 1,940 of this job's 1,961 successful runs (spec §10c).
+        # ``polled`` certifies the PROBE STAGE only — not that every downstream
+        # write for the subject succeeded, which is why ``manifest_rejected``
+        # can be non-zero alongside a full ``polled`` (§10d/§10e).
+        tracker.progress = per_cik_progress_for(stats)
         logger.info(
-            "sec_per_cik_poll: poll_subjects=%d poll_new=%d errors=%d recheck_subjects=%d recheck_new=%d",
+            "sec_per_cik_poll: poll_subjects=%d poll_new=%d errors=%d recheck_subjects=%d "
+            "recheck_new=%d recheck_errors=%d manifest_rejected=%d",
             stats.subjects_polled,
             stats.new_filings_recorded,
             stats.poll_errors,
             stats.recheck_subjects_polled,
             stats.recheck_new_filings_recorded,
+            stats.recheck_poll_errors,
+            stats.manifest_rejected,
         )
 
 
@@ -9516,6 +9528,7 @@ def expected_filings_poller() -> None:
     Polls submissions.json for instruments in an expected filing window;
     on a strictly-newer exact-form non-amendment accession records the
     manifest row + force-refreshes fundamentals (Part A)."""
+    from app.jobs.expected_filings_poller import progress_for as expected_filings_progress_for
     from app.jobs.expected_filings_poller import run_expected_filings_poller
 
     with _tracked_job(JOB_EXPECTED_FILINGS_POLLER) as tracker:
@@ -9530,11 +9543,17 @@ def expected_filings_poller() -> None:
                 user_agent=settings.sec_user_agent,
             )
         tracker.row_count = stats.fulfilled
+        # #3111 slice 6 — see the sibling block in ``sec_per_cik_poll``.
+        # ``fulfilled`` is NOT the outcome bucket: 5,698 of this job's 5,701
+        # successful runs fulfilled nothing, because an open expectation whose
+        # issuer has not filed yet is the normal state (spec §10c).
+        tracker.progress = expected_filings_progress_for(stats)
         logger.info(
-            "expected_filings_poller: subjects=%d fulfilled=%d errors=%d",
+            "expected_filings_poller: subjects=%d fulfilled=%d errors=%d refresh_failed=%d",
             stats.subjects_polled,
             stats.fulfilled,
             stats.poll_errors,
+            stats.fundamentals_refresh_failed,
         )
 
 

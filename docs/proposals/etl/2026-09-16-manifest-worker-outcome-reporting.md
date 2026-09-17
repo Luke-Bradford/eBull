@@ -753,3 +753,310 @@ projection, and reverting `_convert_run` must each fail a test.
 
 No producer, no counter, no degradation verdict, no retry behaviour, no job, no schema. It is a
 read path and a render. `rows_errored` keeps its meaning and its column position.
+
+## 10. Slice 6 — the two pollers
+
+Status: **spec, rewritten after Codex checkpoint 1 (21 findings)**, which falsified three claims
+in the first draft — the census population, the "data is not lost" reading of the rejected-
+accession path, and the 98% figure's denominator — and supplied four source rules the draft had
+reasoned around. Touches `app/jobs/sec_per_cik_poll.py`,
+`app/jobs/expected_filings_poller.py`, `app/workers/scheduler.py` (the two invokers), plus both
+jobs' test modules. No schema, no migration, no read path.
+
+### 10a. What §7 deferred, and what settles it
+
+§7 held both pollers back on one stated unblock — *"there is no full-population error census for
+either poller"* — plus four correctness objections. §10b runs what can be run.
+
+⚠⚠ **The unblock as written is retrospectively unachievable, and that is the argument for the
+slice rather than against it.** A per-tick error count was never persisted anywhere; it exists
+only as a line in the daemon's stderr, which §10b shows covers ~70% of runs. No query run today
+can recover the error rate of the other 30% — *because the counter this slice adds did not
+exist*. Persisting it is the precondition for the census, not the other way round.
+
+### 10b. The census — with what it cannot establish stated first
+
+Two populations, deliberately separated, because they support different claims.
+
+**(1) Full population — `job_runs`, every successful run ever recorded.** `row_count` is durable
+and is, for both jobs, exactly the discovery count (`sec_per_cik_poll` sets
+`new_filings_recorded + recheck_new_filings_recorded`, `scheduler.py:9483`;
+`expected_filings_poller` sets `fulfilled`, `scheduler.py:9532`).
+
+```sql
+select job_name, count(*) successes,
+       count(*) filter (where row_count = 0) zero_discovery
+  from job_runs where status='success'
+   and job_name in ('sec_per_cik_poll','expected_filings_poller')
+ group by 1;
+```
+
+| job | successes | `row_count = 0` | span |
+| --- | ---: | ---: | --- |
+| `sec_per_cik_poll` | 1,961 | **1,940 — 98.9%** | 2026-06-05 → 2026-09-17 |
+| `expected_filings_poller` | 5,701 | **5,698 — 99.9%** | 2026-06-28 → 2026-09-17 |
+
+**(2) Sample — the daemon stderr log**, which is where the per-tick counters are and the only
+place they are. Frozen cutoff `2026-09-17 20:00:41`:
+
+```bash
+LOG=~/Dev/eBull/var/autonomy-logs/launchd.jobs-daemon.err.log
+rg -N "sec_per_cik_poll: poll_subjects="   "$LOG" | awk '$1" "$2 <= "2026-09-17 20:00:41"'
+rg -N "expected_filings_poller: subjects=" "$LOG" | awk '$1" "$2 <= "2026-09-17 20:00:41"'
+```
+
+| axis | `sec_per_cik_poll` | `expected_filings_poller` |
+| --- | ---: | ---: |
+| summary lines observed | 1,030 | 3,925 |
+| `job_runs` successes over the same span | 1,462 | 5,640 |
+| **coverage** | **70.4%** | **69.6%** |
+| ticks with `errors > 0` | 0 | 0 |
+| ticks with `candidates_seen > 0` | 1,030 (all) | 234 |
+| corroborating `per-cik poll: fetch failed` warnings | 0 | — |
+
+⚠⚠ **This is a SAMPLE and the first draft called it a full population.** 23 of 65 days carry a
+material shortfall and several carry no lines at all against 96 recorded successes — whole days
+of the daemon's output are not in this file. So:
+
+- **What it CAN support:** an existence-and-scale argument (§10c). One legitimate no-discovery
+  tick is enough to reject the naive outcome bucket; 1,242 observed make it a regime, and the
+  full population in table (1) settles the magnitude independently of the log.
+- **What it CANNOT support:** any rate claim about errors, now or predicted. "0 observed" is not
+  "0 occurred", and it is certainly not evidence about the **two new buckets, which have no
+  history at all** because neither counter exists yet.
+- **What it CANNOT validate:** `sec_per_cik_poll`'s current batching. **1,011 of the 1,030 lines
+  predate #3109** (the `per-cik poll: ciks=…` line it introduced appears 19 times). Batch error
+  arithmetic is therefore covered by tests (§10i), never by this history. The recheck lane is at
+  0 subjects on all 1,030, so it is likewise untested by history.
+- **Runs that raised are outside both regexes** — they log no summary. `job_runs` reconciles
+  them: 2 failures for `sec_per_cik_poll`, 26 for `expected_filings_poller`, plus 11 / 241
+  `skipped`. Those already surface as `failure`; they are not part of the defect (§10e).
+
+### 10c. ⛔ The naive outcome bucket, rejected on the full population
+
+`degradation_reason` rule 2 degrades a run that saw candidates and produced no terminal outcome.
+So choosing `outcomes` IS the design, and the obvious choice is wrong by two orders of magnitude:
+
+| if `outcomes` were… | runs it would degrade |
+| --- | ---: |
+| `{"new_filings": n}` — per-CIK | **1,940 of 1,961 successes (98.9%)**, and `candidates_seen > 0` held on 1,030 of 1,030 observed ticks |
+| `{"fulfilled": n}` — expected-filings | ≤ **5,698 of 5,701 (99.9%)**; conditioned on `candidates_seen > 0`, **231 of the 234** such ticks in the sample |
+
+⚠⚠ **The per-CIK rate is a property of the job's PRE-BATCHING steady state and is
+temporarily false today** (Codex ckpt-1 finding 18 predicted this). #3109 landed 2026-09-17 and
+the job is draining a backlog at 1.92x triples per fetch: **20 of its 21 runs since then
+discovered filings**, so the naive bucket would currently degrade only 1 in 21. The historical
+rate returns as the backlog drains — and `expected_filings_poller` is **79 of 79 at zero
+discovery over the same window**, unaffected.
+
+⚠ The argument does not rest on either rate. Rule 2's premise is "produced no terminal outcome",
+so **one** legitimate no-discovery tick is enough to reject the bucket, and both jobs produce them
+in every window measured. The rates say how loud the wrong choice would have been, not whether it
+is wrong.
+
+⚠ Stated as *would degrade*, not *would falsely degrade*. Zero discovery does not by itself prove
+a tick was healthy — §10j lists paths on which an empty delta is not a certified "nothing new".
+The argument does not need it to: rule 2's premise is "produced no terminal outcome", and a
+completed poll IS a terminal outcome whether or not the issuer filed.
+
+**Source rule, cited rather than re-derived.** `JobProgress`'s docstring
+(`app/services/job_progress.py:43-47`) defines `outcomes` as *"terminal buckets that each
+represent work genuinely completed"*, and the module docstring (`:14-22`) fixes the governing
+distinction: *"'Zero rows written' is NOT a degradation… a job that saw no work and did none is
+healthy; a job that saw work and produced no terminal outcome is stalled."* For a poller the
+completed unit is **the poll**; the discovery is its result, not its purpose. Discovery counts
+stay in `context`, which `as_json` carries and `degradation_reason` ignores — and they are
+already in `row_count`.
+
+### 10d. What `polled` certifies — and the consequence, stated rather than hidden
+
+**`polled` certifies THE PROBE STAGE for a subject: the CIK's `submissions.json` response was
+obtained and applied to that subject.** It does NOT certify that every downstream write for that
+subject succeeded. The first draft alternated between those two meanings (Codex 5); this
+sentence is the contract, it is repeated in both jobs' docstrings, and it is what makes the
+post-probe buckets (`manifest_rejected`, `fundamentals_refresh_failed`) coherent alongside a
+positive `polled`.
+
+Disjointness holds in the form the contract requires — *"a job must NOT put a bucket here that it
+also reports as an error"* — because no bucket name appears in both maps, and `polled` subtracts
+that lane's **subject-denominated** errors.
+
+⚠⚠ **Honest consequence: rule 2 is unreachable for these two jobs on a normal return.** With
+`polled = seen − lane errors`, every tick falls into one of two cases — some error is non-zero
+and rule 1 degrades it, or none is and `polled = seen > 0`. So the effective verdict for both
+pollers is exactly *"any error bucket > 0"*. `outcomes` exists here **to keep rule 2 silent**,
+which is its job, not to add an independent signal — and saying so is better than implying a
+second layer of protection that cannot fire. The silent-stall shape rule 2 catches is a
+different failure than a poller has.
+
+⚠ `candidates_seen` is denominated in **subjects** — selected `(subject_type, subject_id,
+source)` triples — for per-CIK, after `_drop_claimed` dedup, summed across both lanes; and in
+**selected `expected_filings` rows** for the other. Not CIKs, not batches, not `max_ciks`
+(Codex 1): #3109 changed the *budget's* unit to CIKs while the work stayed per-subject, and the
+two must not be conflated.
+
+### 10e. Two counters that cannot fire — and a claim from the first draft that was false
+
+Both are §7's own findings (Codex 21, 22), re-verified in code at this HEAD. Both have **0
+observed occurrences**, which per §10b is not a measurement — they are fixed because they are
+**unfalsifiable as written**, not in response to an incident.
+
+1. **`sec_per_cik_poll.py:397`.** `record_manifest_entry`'s `ValueError` is logged and swallowed;
+   `_apply_delta_to_subject` returns only `recorded`, and `_probe_cik`'s success path hard-codes
+   `return (recorded_total, 0)` (`:301`). A subject whose every accession is rejected is
+   indistinguishable from one with nothing new. New error bucket **`manifest_rejected`**.
+
+   ⛔⛔ **The first draft wrote "the data is not lost — the `all_recorded` gate at `:453`
+   withholds the Last-Modified watermark so the next tick re-fetches." That is FALSE, and it was
+   already written down.** #3109 §4.2 records it: `last_known` advances to the newest accession
+   at `:420` regardless of whether any write succeeded, so `select_new_filings` (`:369`)
+   truncates the rejected accession away on the next poll and it is **never retried**. The
+   `all_recorded` gate protects only the HTTP validator, *"which is inert."* #3109 also records
+   why it is not a one-liner: gating the freshness watermark too would wedge the row forever on
+   a permanently-rejectable accession. **Consequence for this slice, stated plainly: the bucket
+   fires on the tick that rejects and then goes quiet while the omission stands.** That is
+   strictly better than today's silence and is not a repair; the repair is #3109 §4.2's.
+
+   ⚠ Its denominator is **subject × accession write attempts** (Codex 4) — one subject can reject
+   many accessions, and sibling subjects of one CIK can each reject the same accession. It is
+   therefore never subtracted from `polled` and never summed with subject-denominated errors.
+
+2. **`expected_filings_poller.py:419`.** `run_force_refresh(conn, [row.symbol])`'s return value
+   is discarded, then `fulfilled += 1` claims success. New error bucket
+   **`fundamentals_refresh_failed`** = `len(result.missing) + result.facts.symbols_failed`.
+
+**Aborted runs need nothing (Codex 3).** `_tracked_job`'s failure branch (`scheduler.py:2705`)
+calls `record_job_finish(status="failure", error_msg=…)` and persists no progress, so a tick that
+raises is already visible as a failure with its message — the opposite of this ticket's defect.
+Neither job checkpoints progress mid-run and neither starts to: a partial count written before a
+raise would compete with the `failure` status for the operator's reading. ⚠ The subtraction is
+consequently valid **only on a normal return** (Codex 2), which is the only path that reports.
+A mid-batch exception aborts the tick rather than being caught — `_probe_cik`'s docstring
+already fixes that as deliberate (*"No new catch is introduced here"*), and this slice adds none.
+
+### 10f. §7's other two objections — honoured by the design
+
+- *"`subjects_polled` includes errored subjects, so using it as an outcomes bucket reports failed
+  attempts as completed work"* (Codex 1). `polled` subtracts that lane's errored subjects, which
+  is what makes the per-lane split a **prerequisite** rather than a nicety.
+- *"Recheck errors fold into the shared `poll_errors`, so a per-lane success count needs per-lane
+  error counters first"* (Codex 2), and the recorded *"`PerCikPollStats` has no
+  `recheck_poll_errors`"*. `poll_errors` becomes poll-lane-only; `recheck_poll_errors` is added.
+
+⚠ **This changes a log format the §10b census parses.** The scheduler line gains
+`recheck_errors=` and the inner `run_per_cik_poll` line splits its combined `errors=`. Re-running
+§10b after this slice needs the new pattern. Called out rather than left to break silently.
+
+⚠ **Chronic degradation** (§7 Codex 3/4) is not a reason to keep deferring, and its inherited
+premise is stale: #3109 gave a failed poll a finite `ERROR_RECHECK_INTERVAL` backoff
+(`data_freshness.py:484-494`), so an errored row no longer pins the head of the recheck lane with
+a NULL deadline. The recheck lane is at 0 subjects, the state `run_per_cik_poll`'s docstring
+already records (*"0 rows on dev, 2026-09-16"*) — documented, not a fault, and not filed as one.
+If it ever fills with a persistently failing cohort, this slice is what makes that visible.
+
+### 10g. Source rules for the fundamentals bucket
+
+Three, all pre-existing and none re-derived here:
+
+1. **`ForceRefreshResult`** (`app/services/fundamentals/force_refresh.py:51-63`): `missing` is
+   UPPER-cased symbols with no primary SEC CIK; `symbols_failed` counts failures among `fetched`,
+   i.e. `resolved` deduped by `instrument_id`. The two populations are **disjoint** (unresolved
+   vs resolved), and this call site passes exactly one symbol, so their sum is bounded by 1 and
+   cannot double-count. That — not "both vaguely mean failure" — is why the sum is sound.
+2. **Companyfacts lag is permitted and must NOT become a failure criterion**
+   (`docs/specs/etl/2026-06-28-expected-filings-poller.md:149-151`): if XBRL lags the filing,
+   *"the row stays fulfilled until the daily `daily_financial_facts` backstop normalizes it…
+   never-worse-than-status-quo."* So the bucket counts **returned failures only**. Zero new facts
+   or periods is not an error and is not inspected.
+3. **Normalization failures are swallowed by contract**
+   (`docs/specs/api/2026-06-28-fundamentals-force-refresh.md:34`):
+   `normalize_financial_periods` *"swallows per-instrument exceptions internally (logged
+   server-side) and returns only success counts"*. ⚠ So `missing=[] ∧ symbols_failed=0` does not
+   prove the refresh fully succeeded — **this bucket is incomplete by construction**, and closing
+   that gap means changing a documented contract on another ticket, not here.
+
+⚠ **Reporting, not repairing (Codex 12).** A failed refresh still writes `fulfilled_at` and still
+increments `fulfilled`, so the expectation is consumed and later ticks exclude the row. This
+slice makes the failure *visible on the tick it happens*; it does not change #1788's fulfilment
+or retry semantics, which would be a behavioural change to a different contract.
+
+### 10h. The exact reporting shape
+
+`PerCikPollStats` gains `recheck_poll_errors: int = 0` and `manifest_rejected: int = 0`;
+`poll_errors` narrows to the poll lane. `_apply_delta_to_subject` returns `(recorded, rejected)`
+and `_probe_cik` returns `(recorded, errored_subjects, rejected)`.
+
+```python
+# sec_per_cik_poll
+seen = stats.subjects_polled + stats.recheck_subjects_polled
+JobProgress(
+    candidates_seen=seen,
+    outcomes={"polled": seen - stats.poll_errors - stats.recheck_poll_errors},
+    errors={"poll_fetch_failed": stats.poll_errors,
+            "recheck_fetch_failed": stats.recheck_poll_errors,
+            "manifest_rejected": stats.manifest_rejected},
+    context={"new_filings": stats.new_filings_recorded,
+             "recheck_new_filings": stats.recheck_new_filings_recorded},
+)
+
+# expected_filings_poller
+JobProgress(
+    candidates_seen=stats.subjects_polled,
+    outcomes={"polled": stats.subjects_polled - stats.poll_errors},
+    errors={"poll_fetch_failed": stats.poll_errors,
+            "fundamentals_refresh_failed": stats.fundamentals_refresh_failed},
+    context={"fulfilled": stats.fulfilled},
+)
+```
+
+⚠ Both jobs name a failed fetch `poll_fetch_failed` (review NITPICK on PR #3160) — a
+cross-job readout would otherwise have to special-case one concept under two names. The per-CIK
+job keeps the lane suffix on `recheck_fetch_failed` because it genuinely has a second lane.
+
+⚠ Zero-valued error buckets are emitted rather than omitted. `degradation_reason` filters on
+`n > 0`, so they are inert to the verdict, and slice 5's §9 rule already distinguishes `None`
+(job does not report) from `{}` / all-zero (measured zero) at the read boundary — emitting them
+is what makes "this job measured zero errors" sayable at all.
+
+### 10i. Acceptance matrix — one row per decision above
+
+| # | tick shape | expected verdict |
+| --- | --- | --- |
+| 1 | no due subjects (`seen = 0`) | healthy — rule 2 needs `seen > 0` |
+| 2 | subjects polled, **no discovery** | **healthy** — §10c, the 98.9%/99.9% case |
+| 3 | subjects polled, discovery > 0 | healthy |
+| 4 | every subject's fetch fails | `degraded`, `poll_fetch_failed = seen`, `polled = 0` |
+| 5 | one batch of N fails, others succeed | `degraded`, `polled = seen − N` |
+| 6 | recheck-only tick, all succeed | healthy — recheck subjects are in `seen` AND in `polled` |
+| 7 | mixed lanes, recheck errors only | `degraded` via `recheck_fetch_failed`, poll lane still counted |
+| 8 | valid 304 | healthy, counted as `polled` |
+| 9 | unsolicited 304 | `poll_fetch_failed` — it raises inside `_probe_cik`'s try |
+| 10 | accession rejected, subject otherwise polled | `degraded` via `manifest_rejected`, `polled` unchanged |
+| 11 | two subjects reject the same accession | `manifest_rejected = 2` — attempts, not distinct accessions |
+| 12 | mid-batch exception | no progress row; `status='failure'` with `error_msg` |
+| 13 | fulfilment with `missing = ['XYZ']` | `degraded` via `fundamentals_refresh_failed = 1` |
+| 14 | fulfilment, refresh clean, companyfacts lag | **healthy** — §10g rule 2 |
+| 15 | progress survives into `job_runs.progress_json` and the Errored column | slices 4/5 read path, unchanged |
+
+### 10j. Explicitly NOT fixed — cited, not inherited as unknowns
+
+All pre-existing and all already recorded in
+`docs/proposals/etl/2026-09-16-3109-per-cik-multi-source-batching.md` §4, which is why they are
+named here rather than re-discovered: the rejected-accession truncation (§4.2, and see §10e), 404
+and malformed-payload deltas classifying as `current` (§4.6), `sec_xbrl_facts` having no
+submissions form mapping (§4.7), and the shared `(cik, source)` validator key (§4.4). Each means
+a `polled` count can include a subject whose intended work did not happen. ⚠ Also unfixed and
+recorded here for the first time: `run_force_refresh` re-resolves the symbol through the
+primary-listing winner, so a duplicate symbol or an intervening identifier change could refresh a
+different instrument than the one the expectation named — zero refresh errors does not prove
+target identity (Codex 11). **`polled` certifying the probe stage (§10d) is exactly what keeps
+these honest: none of them is claimed to be certified work.**
+
+### 10k. What slice 6 does not change
+
+No schema, no migration, no read path, no threshold — `degradation_reason`'s existing `n > 0`
+predicate is reused unchanged, which is what the census bought. No retry behaviour, no manifest
+state transition, no poll budget, no cadence, no HTTP behaviour, no fulfilment semantics.
+`row_count` keeps its meaning on both jobs.
+
+Refs #3111. Refs #2218. Refs #3109. Refs #1788. Refs #2437.

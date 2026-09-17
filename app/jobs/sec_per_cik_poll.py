@@ -82,6 +82,7 @@ from app.services.data_freshness import (
     ciks_due_for_recheck,
     record_poll_outcome,
 )
+from app.services.job_progress import JobProgress
 from app.services.sec_manifest import ManifestSource, record_manifest_entry
 from app.services.watermarks import get_watermark, set_watermark
 
@@ -148,6 +149,83 @@ class PerCikPollStats:
     # 'never_filed' or 'error' at the start of the tick.
     recheck_subjects_polled: int = 0
     recheck_new_filings_recorded: int = 0
+    # #3111 slice 6 — the counters the job's JobProgress is built from.
+    #
+    # ⚠⚠ THE TWO DENOMINATORS ARE DIFFERENT AND MUST NOT BE MIXED.
+    #
+    # ``poll_errors`` / ``recheck_poll_errors`` are SUBJECT-denominated: one
+    # per due subject whose CIK fetch failed. They are subtracted from
+    # ``subjects_polled`` / ``recheck_subjects_polled`` to give the ``polled``
+    # outcome bucket, which is only sound because the two are the same unit.
+    # ⚠ ``poll_errors`` was previously the COMBINED total for both lanes
+    # (#3111 §7 recorded the missing split); it is now the poll lane alone.
+    #
+    # ``manifest_rejected`` is SUBJECT × ACCESSION write attempts: one subject
+    # can reject many accessions, and two subjects of one CIK can each reject
+    # the same accession. Never subtract it from a subject count, never sum it
+    # with the two above — spec §10e.
+    recheck_poll_errors: int = 0
+    manifest_rejected: int = 0
+
+
+def progress_for(stats: PerCikPollStats) -> JobProgress:
+    """#2218 progress verdict for one tick — #3111 slice 6.
+
+    ⚠⚠ **``polled`` is the outcome, NOT the discovery.** A CIK probed cleanly
+    whose issuer has filed nothing is completed work, not a stall. Using
+    ``new_filings_recorded`` here would have degraded **1,940 of this job's
+    1,961 successful runs** (full population, ``job_runs`` 2026-06-05 →
+    2026-09-17; spec §10c) — manufacturing exactly the alarm fatigue
+    ``job_progress``'s module docstring exists to forbid: *"'Zero rows written'
+    is NOT a degradation."*
+
+    ⚠⚠ That rate is the PRE-BATCHING steady state and is temporarily false:
+    #3109 landed 2026-09-17 and this job is draining a backlog at 1.92x triples
+    per fetch, so 20 of its 21 runs since then DID discover filings. It reverts
+    as the backlog drains. The choice does not depend on the rate — rule 2's
+    premise is "produced no terminal outcome", so one legitimate no-discovery
+    tick is enough to reject the discovery bucket, and every measured window
+    contains them.
+
+    ⚠ Reproduce the figure rather than trusting it — it is a derived statistic
+    in a docstring, which goes stale silently::
+
+        select count(*) successes, count(*) filter (where row_count = 0)
+          from job_runs where job_name = 'sec_per_cik_poll' and status = 'success';
+
+    ⚠ ``polled`` certifies **the probe stage** — the CIK's submissions response
+    was obtained and applied to that subject. It does NOT certify that every
+    downstream write for the subject succeeded, which is why
+    ``manifest_rejected`` can be non-zero on a tick where ``polled == seen``.
+    The paths on which a probe can succeed without doing the intended work are
+    listed in ``docs/proposals/etl/2026-09-16-3109-per-cik-multi-source-batching.md``
+    §4 and are deliberately NOT claimed as certified here.
+
+    ⚠ Consequence, stated rather than hidden: ``degradation_reason``'s rule 2
+    (saw candidates, produced no outcome) is UNREACHABLE for this job on a
+    normal return, because ``polled`` is the complement of the subject-
+    denominated errors. The effective verdict is rule 1 alone — any error
+    bucket above zero. ``outcomes`` is here to keep rule 2 silent, which is its
+    job; it is not a second layer of protection.
+
+    Zero-valued error buckets are emitted rather than omitted: the verdict
+    filters on ``n > 0`` so they are inert, and slice 5's read path
+    distinguishes ``None`` (job does not report) from a measured zero.
+    """
+    seen = stats.subjects_polled + stats.recheck_subjects_polled
+    return JobProgress(
+        candidates_seen=seen,
+        outcomes={"polled": seen - stats.poll_errors - stats.recheck_poll_errors},
+        errors={
+            "poll_fetch_failed": stats.poll_errors,
+            "recheck_fetch_failed": stats.recheck_poll_errors,
+            "manifest_rejected": stats.manifest_rejected,
+        },
+        context={
+            "new_filings": stats.new_filings_recorded,
+            "recheck_new_filings": stats.recheck_new_filings_recorded,
+        },
+    )
 
 
 def _record_subject_error(conn: psycopg.Connection[Any], subject: FreshnessRow, exc: Exception) -> None:
@@ -170,11 +248,18 @@ def _probe_cik(
     *,
     http_get: HttpGet | None = None,
     http_get_with_meta: HttpGetWithMeta | None = None,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Probe every due subject of ONE CIK with ONE fetch (#3109).
 
-    Returns ``(new_filings_recorded, subjects_errored)`` summed over the
-    batch. Every element of ``subjects`` must share a zero-padded CIK — the
+    Returns ``(new_filings_recorded, subjects_errored, manifest_rejected)``
+    summed over the batch. ⚠ The last element is in a DIFFERENT unit from the
+    other two — subject × accession write attempts, not subjects (#3111 §10e).
+
+    ``subjects_errored`` is 0 or ``len(subjects)`` and nothing between: the
+    fetch is entity-wide, so it either answered for the whole batch or for
+    none of it. That is what makes ``polled = seen - errored`` well defined.
+
+    Every element of ``subjects`` must share a zero-padded CIK — the
     CIK-grouped readers (``ciks_due_for_poll`` / ``ciks_due_for_recheck``)
     guarantee that, and it is re-checked here with a ``raise`` rather than an
     ``assert`` — this is the safeguard deciding which entity's URL is fetched,
@@ -230,7 +315,7 @@ def _probe_cik(
     if (http_get is None) == (http_get_with_meta is None):
         raise ValueError("_probe_cik requires exactly one of http_get / http_get_with_meta")
     if not subjects:
-        return (0, 0)
+        return (0, 0, 0)
     cik_padded = subjects[0].cik
     # ⚠ NOT ``assert`` — this is the safeguard deciding WHICH ENTITY'S URL gets
     # fetched, and ``python -O`` strips asserts. Under ``-O`` a mis-grouped
@@ -287,11 +372,16 @@ def _probe_cik(
         )
         for subject in subjects:
             _record_subject_error(conn, subject, exc)
-        return (0, len(subjects))
+        # Every subject of this batch is errored: the fetch is entity-wide, so
+        # no subject of it was probed. This is the ONLY site that produces a
+        # non-zero subject-error count, which is what keeps ``poll_errors``
+        # subject-denominated and therefore subtractable (spec §10d).
+        return (0, len(subjects), 0)
 
     recorded_total = 0
+    rejected_total = 0
     for subject in subjects:
-        recorded_total += _apply_delta_to_subject(
+        recorded, rejected = _apply_delta_to_subject(
             conn,
             subject,
             delta,
@@ -299,7 +389,9 @@ def _probe_cik(
             if_modified_since=if_modified_since,
             solo_watermark_key=solo_watermark_key,
         )
-    return (recorded_total, 0)
+        recorded_total += recorded
+        rejected_total += rejected
+    return (recorded_total, 0, rejected_total)
 
 
 def _apply_delta_to_subject(
@@ -310,12 +402,18 @@ def _apply_delta_to_subject(
     conditional: bool,
     if_modified_since: str | None,
     solo_watermark_key: str | None,
-) -> int:
-    """Apply one CIK-wide response to one subject. Returns rows recorded.
+) -> tuple[int, int]:
+    """Apply one CIK-wide response to one subject. Returns ``(recorded, rejected)``.
 
     The source filter and the accession watermark are this subject's own, so
     the result is identical to what the unbatched probe produced for it given
     the same response bytes.
+
+    ``rejected`` (#3111 slice 6) counts ``record_manifest_entry`` calls this
+    subject made that raised ``ValueError`` — previously logged and dropped, so
+    a subject whose every accession was rejected was indistinguishable from one
+    with nothing new. ⚠ It is an ATTEMPT count, not a distinct-accession count:
+    see ``PerCikPollStats.manifest_rejected``.
     """
     # Pure type narrowing, not a safeguard: ``_probe_cik`` has already raised
     # if any batch member's cik is None, and this function is only reachable
@@ -363,7 +461,7 @@ def _apply_delta_to_subject(
                 cik=subject.cik,
                 instrument_id=subject.instrument_id,
             )
-        return 0
+        return (0, 0)
 
     # The per-triple half: THIS subject's source filter and THIS subject's
     # accession watermark, applied to the shared CIK-wide parse.
@@ -375,6 +473,7 @@ def _apply_delta_to_subject(
 
     # UPSERT manifest rows for the new filings
     recorded = 0
+    rejected = 0
     for row in new_filings:
         if row.source is None:
             continue
@@ -395,6 +494,10 @@ def _apply_delta_to_subject(
             )
             recorded += 1
         except ValueError as exc:
+            # #3111 slice 6 — counted as well as logged. Swallowing stays
+            # correct (one bad accession must not abandon the CIK's other
+            # subjects), but the tick now degrades on it.
+            rejected += 1
             logger.warning("per-cik poll: rejected accession=%s: %s", row.accession_number, exc)
 
     # Update scheduler outcome. #1155 G13 — never_filed rows that
@@ -443,7 +546,20 @@ def _apply_delta_to_subject(
     # accession was NOT persisted but ``last_known`` still advances.
     # Without this gate the next tick gets a 304 and the unrecorded
     # accession is hidden forever. Letting the watermark stay stale
-    # forces a 200 re-fetch + retry.
+    # forces a 200 re-fetch.
+    #
+    # ⚠⚠ **The re-fetch is NOT a retry, and an earlier version of this
+    # comment said it was** (#3111 slice 6, Codex ckpt-1). ``last_known``
+    # advanced at ``record_poll_outcome`` above regardless of whether any
+    # write succeeded, so ``select_new_filings`` truncates the rejected
+    # accession out of the next response and it is never seen again. This
+    # gate protects only the HTTP validator. The loss is real, pre-existing
+    # and recorded as NOT fixed in
+    # ``docs/proposals/etl/2026-09-16-3109-per-cik-multi-source-batching.md``
+    # §4.2, with the reason it is not a one-liner: gating the freshness
+    # watermark too would wedge the row forever on a permanently-rejectable
+    # accession. What slice 6 adds is only that the tick DEGRADES when it
+    # happens instead of reporting a clean success.
     #
     # ⚠ ``solo_watermark_key`` is None for a multi-subject batch, which is
     # what withholds the write there: no If-Modified-Since was sent, so
@@ -459,7 +575,7 @@ def _apply_delta_to_subject(
                 watermark=delta.last_modified,
                 watermark_at=None,
             )
-    return recorded
+    return (recorded, rejected)
 
 
 def _triples_of(batches: list[list[FreshnessRow]]) -> set[tuple[str, str, str]]:
@@ -570,6 +686,10 @@ def run_per_cik_poll(
     poll_errors = 0
     recheck_subjects_polled = 0
     recheck_new_filings_recorded = 0
+    # #3111 slice 6 — the recheck lane's errors used to fold into
+    # ``poll_errors``, which made a per-lane success count uncomputable.
+    recheck_poll_errors = 0
+    manifest_rejected = 0
 
     recheck_due = ciks_due_for_recheck(conn, source=source, limit=recheck_budget) if recheck_budget > 0 else []
     poll_budget = max_ciks - len(recheck_due)
@@ -587,7 +707,7 @@ def run_per_cik_poll(
 
     for batch in poll_due:
         subjects_polled += len(batch)
-        recorded, errored = _probe_cik(
+        recorded, errored, rejected = _probe_cik(
             conn,
             batch,
             http_get=http_get,
@@ -595,21 +715,24 @@ def run_per_cik_poll(
         )
         new_filings_recorded += recorded
         poll_errors += errored
+        manifest_rejected += rejected
 
     for batch in recheck_due:
         recheck_subjects_polled += len(batch)
-        recorded, errored = _probe_cik(
+        recorded, errored, rejected = _probe_cik(
             conn,
             batch,
             http_get=http_get,
             http_get_with_meta=http_get_with_meta,
         )
         recheck_new_filings_recorded += recorded
-        poll_errors += errored
+        recheck_poll_errors += errored
+        manifest_rejected += rejected
 
     logger.info(
         "per-cik poll: ciks=%d subjects=%d new_filings=%d errors=%d "
-        "recheck_ciks=%d recheck_subjects=%d recheck_new_filings=%d",
+        "recheck_ciks=%d recheck_subjects=%d recheck_new_filings=%d "
+        "recheck_errors=%d manifest_rejected=%d",
         len(poll_due),
         subjects_polled,
         new_filings_recorded,
@@ -617,6 +740,8 @@ def run_per_cik_poll(
         len(recheck_due),
         recheck_subjects_polled,
         recheck_new_filings_recorded,
+        recheck_poll_errors,
+        manifest_rejected,
     )
     return PerCikPollStats(
         subjects_polled=subjects_polled,
@@ -624,4 +749,6 @@ def run_per_cik_poll(
         poll_errors=poll_errors,
         recheck_subjects_polled=recheck_subjects_polled,
         recheck_new_filings_recorded=recheck_new_filings_recorded,
+        recheck_poll_errors=recheck_poll_errors,
+        manifest_rejected=manifest_rejected,
     )

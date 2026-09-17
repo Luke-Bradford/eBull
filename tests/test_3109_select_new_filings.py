@@ -177,4 +177,6 @@ class TestProbeCikBatchContract:
     def test_an_empty_batch_is_a_no_op_not_an_error(self) -> None:
         """The readers never emit one, but a defensive path must not raise on
         it — an empty batch has no CIK to disagree about."""
-        assert _probe_cik(cast(Any, None), [], http_get=lambda u, h: (200, b"{}")) == (0, 0)
+        # (recorded, subjects_errored, manifest_rejected) — the third element
+        # was added by #3111 slice 6.
+        assert _probe_cik(cast(Any, None), [], http_get=lambda u, h: (200, b"{}")) == (0, 0, 0)
