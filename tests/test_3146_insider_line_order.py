@@ -107,8 +107,14 @@ def test_last_table_i_line_wins_within_one_filing(conn: psycopg.Connection[Any])
 
 
 @pytest.mark.db
-def test_surrogate_key_is_compared_numerically_not_lexically(conn: psycopg.Connection[Any]) -> None:
-    """Digit-length boundary: lexical order puts ``:NDT:1000`` before ``:NDT:9999``."""
+def test_the_last_line_wins_against_ascending_document_id(conn: psycopg.Connection[Any]) -> None:
+    """Equal-width SKs, where the old rule's ascending doc id picks the FIRST line.
+
+    ⚠ This case pins last-line-wins, NOT the ``::numeric`` cast — with equal digit counts,
+    text and numeric ordering agree. The cast is pinned by the boundary case below. (The first
+    version of this test claimed to be the digit-length boundary and was not; caught in review
+    on PR #3148.)
+    """
     iid = 931461
     _instrument(conn, iid)
     accn = "0001753926-25-000002"
@@ -118,6 +124,27 @@ def test_surrogate_key_is_compared_numerically_not_lexically(conn: psycopg.Conne
 
     doc, shares = _winner(conn, iid)
     assert doc == f"{accn}:NDT:9999"
+    assert shares == Decimal("222")
+
+
+@pytest.mark.db
+def test_surrogate_key_is_compared_numerically_not_as_text(conn: psycopg.Connection[Any]) -> None:
+    """The digit-length boundary that makes the ``::numeric`` cast load-bearing.
+
+    ``:NDT:999`` vs ``:NDT:1000``: descending TEXT order puts ``'999'`` first (``'9' > '1'``),
+    descending NUMERIC order puts ``1000`` first. Dropping the cast therefore changes the
+    answer here and nowhere in the equal-width cases — which is exactly why this fixture exists
+    as well as, not instead of, the one above.
+    """
+    iid = 931467
+    _instrument(conn, iid)
+    accn = "0001753926-25-000008"
+    _observe(conn, instrument_id=iid, doc_id=f"{accn}:NDT:999", shares="111")
+    _observe(conn, instrument_id=iid, doc_id=f"{accn}:NDT:1000", shares="222")
+    oo.refresh_insiders_current(conn, instrument_id=iid)
+
+    doc, shares = _winner(conn, iid)
+    assert doc == f"{accn}:NDT:1000"
     assert shares == Decimal("222")
 
 
