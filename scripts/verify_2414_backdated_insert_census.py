@@ -165,6 +165,41 @@ def _gap_census(conn: psycopg.Connection) -> None:  # type: ignore[type-arg]
     print("⚠ A missing session date is CAPACITY, not a pending write.")
 
 
+def _deepening_witness(conn: psycopg.Connection) -> tuple[int, date, date] | None:  # type: ignore[type-arg]
+    """Has the backdated-insert writer's enclosing block ever run on a DEEPENING pass?
+
+    ``_record_bar_revisions`` and ``_record_backdated_inserts`` are invoked from
+    one transaction block in ``refresh_market_data`` (``market_data.py:817`` and
+    ``:851``), under one resolved ``write_branch``. So a ``price_daily_revision``
+    row carrying ``cause='force_backfill'`` is proof that the block executed on a
+    run where ``force_backfill=True`` — which is the only caller that can push a
+    bar below an instrument's stored minimum.
+
+    ⚠⚠ THIS IS A LIVENESS WITNESS, NOT A CROSS-CHECK OF THE COUNT. The two tables
+    share a writer, so neither can corroborate the other's CONTENT — that is the
+    #3109 "two records written by one code path" tautology. What is being asked
+    here is strictly "did the code run", and for that a shared path is the right
+    witness rather than a disqualifying one.
+
+    ⚠ Sufficient, not necessary: a deepening pass that revised no existing bar
+    writes no revision row, so ``None`` means "cannot tell", never "never ran".
+
+    Filtered to ``force_backfill`` deliberately. ``incremental`` and
+    ``adjustment_heal`` rows are written by the hourly job, which cannot deepen —
+    counting them would witness the wrong branch.
+    """
+    row = conn.execute(
+        """
+        SELECT count(*), min(revised_at)::date, max(revised_at)::date
+          FROM price_daily_revision
+         WHERE cause = 'force_backfill'
+        """
+    ).fetchone()
+    if row is None or row[0] == 0:
+        return None
+    return int(row[0]), row[1], row[2]
+
+
 def _census(conn: psycopg.Connection) -> None:  # type: ignore[type-arg]
     row = conn.execute(
         """
@@ -180,15 +215,35 @@ def _census(conn: psycopg.Connection) -> None:  # type: ignore[type-arg]
     rows, instruments, first, last, inconsistent = row
     print(f"rows            : {rows:,} across {instruments:,} instruments")
     if rows == 0:
+        witness = _deepening_witness(conn)
         print()
-        print("⚠⚠ UNINTERPRETABLE. An empty table cannot distinguish 'no bar appeared behind a")
-        print("   frontier' from 'the writer has not run'. Backdated inserts come from gap")
-        print("   closure and from force_backfill deepening, neither of which an hourly")
-        print("   ~9-second daily_candle_refresh pass with items_done=0 performs. The")
-        print("   acceptance is A BIG SWEEP COMPLETED ON CODE CARRYING THE WRITER, not 'a run")
-        print("   completed'. Check:")
-        print("     SELECT max(started_at) FROM job_runs")
-        print("      WHERE job_name='daily_candle_refresh' AND status='success';")
+        if witness is None:
+            print("⚠⚠ UNINTERPRETABLE. An empty table cannot distinguish 'no bar appeared behind a")
+            print("   frontier' from 'the writer has not run'.")
+            print()
+            print("   ⚠ The trigger is NOT 'a big sweep'. An 11k-instrument daily_candle_refresh")
+            print("     runs the INCREMENTAL branch; `force_backfill=True` is a separate path")
+            print("     with a single caller. Run it, bounded, and re-run this census:")
+            print("       PYTHONPATH=. uv run python scripts/rebackfill_candles_5y.py --apply --limit 12")
+            return
+        n_witness, first_witness, last_witness = witness
+        print(f"deepening witness: {n_witness:,} price_daily_revision row(s) with cause='force_backfill'")
+        print(f"                   {first_witness} .. {last_witness}")
+        print()
+        print("✅ INTERPRETABLE, and the reading is ZERO BACKDATED INSERTS — a measurement,")
+        print("   not an absence of coverage. `_record_bar_revisions` and")
+        print("   `_record_backdated_inserts` are called from the SAME transaction block in")
+        print("   `refresh_market_data`, so a force_backfill revision row proves that block")
+        print("   executed on a deepening run with `frontier_before` resolved.")
+        print()
+        print("   ⚠ THIS WITNESSES EXECUTION, NOT CONTENT. Using one of two writers to")
+        print("     corroborate the other's NUMBER would be circular — they share a code")
+        print("     path, so they cannot be independent observations of the same fact")
+        print("     (the #3109 tautology). The claim made here is only 'the block ran'.")
+        print("   ⚠ SUFFICIENT, NOT NECESSARY. A deepening run that revised no existing bar")
+        print("     leaves no witness, so ABSENCE of one proves nothing either way.")
+        print("   ⚠ Covers the DEEPENING class only. Gap closure on the incremental branch")
+        print("     also produces backdated inserts and has no witness here.")
         return
     print(f"observed window : {first} .. {last}")
     # Self-consistency: the writer classified against `frontier_before`, which it

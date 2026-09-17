@@ -28,6 +28,12 @@ backoff so the script does not need to manage rate limits itself.
 
 Quotes are skipped (``skip_quotes=True``) so this script does not
 shadow the hourly fx_rates_refresh job's quote freshness.
+
+⚠ This is the SOLE ``force_backfill=True`` caller in the repo
+(``app/services/market_data.py:981``), which makes it the only path that
+deepens a series behind its own frontier — and therefore the only thing
+that exercises #2414's ``price_daily_backdated_insert`` writer. An empty
+census is uninterpretable until this has run.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ import psycopg
 
 from app.config import settings
 from app.providers.implementations.etoro import EtoroMarketDataProvider
+from app.security.master_key import ensure_broker_key_loaded
 from app.services.broker_credentials import (
     CredentialNotFound,
     load_credential_for_provider_use,
@@ -113,34 +120,6 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="Cap on instruments processed")
     args = parser.parse_args()
 
-    try:
-        with psycopg.connect(settings.database_url) as conn:
-            op_id = sole_operator_id(conn)
-            api_key = load_credential_for_provider_use(
-                conn,
-                operator_id=op_id,
-                provider="etoro",
-                label="api_key",
-                environment=settings.etoro_env,
-                caller="rebackfill_candles_5y",
-            )
-            conn.commit()
-            user_key = load_credential_for_provider_use(
-                conn,
-                operator_id=op_id,
-                provider="etoro",
-                label="user_key",
-                environment=settings.etoro_env,
-                caller="rebackfill_candles_5y",
-            )
-            conn.commit()
-    except (NoOperatorError, AmbiguousOperatorError) as exc:
-        logger.error("operator lookup failed: %s", exc)
-        return 1
-    except CredentialNotFound as exc:
-        logger.error("eToro credentials missing: %s", exc)
-        return 1
-
     # autocommit=True per refresh_market_data's connection contract (#2269):
     # without it the whole force_backfill deepening — up to 1000 bars per
     # instrument — rides on a single transaction and is lost whole if the run
@@ -152,11 +131,52 @@ def main() -> int:
             return 0
 
         logger.info("Selected %d instruments for deepening.", len(instruments))
+        # The credential load is deliberately AFTER this branch. It decrypts,
+        # so it needs the broker key — and a dry run that the docstring
+        # promises makes "no API calls" must not require one. Before this
+        # ordering the dry run raised MasterKeyNotLoadedError on a host with
+        # no derivable key, i.e. the one situation it exists to be safe in.
         if not args.apply:
             logger.info("DRY RUN — pass --apply to actually fetch. Sample (first 5):")
             for iid, sym in instruments[:5]:
                 logger.info("  %d %s", iid, sym)
             return 0
+
+        try:
+            # ⚠ NOT master_key.bootstrap(): that runs _revoke_stale_ciphertext
+            # unconditionally, so on a host with no derivable key it would
+            # SOFT-REVOKE every broker credential on its way to failing. This
+            # is the sanctioned read-only counterpart (#1265) — it installs a
+            # key if one resolves and mutates nothing if one does not.
+            if not ensure_broker_key_loaded(conn):
+                logger.error(
+                    "broker-encryption key is not derivable on this host — cannot decrypt "
+                    "eToro credentials. Nothing was fetched and nothing was mutated."
+                )
+                return 1
+            op_id = sole_operator_id(conn)
+            api_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="api_key",
+                environment=settings.etoro_env,
+                caller="rebackfill_candles_5y",
+            )
+            user_key = load_credential_for_provider_use(
+                conn,
+                operator_id=op_id,
+                provider="etoro",
+                label="user_key",
+                environment=settings.etoro_env,
+                caller="rebackfill_candles_5y",
+            )
+        except (NoOperatorError, AmbiguousOperatorError) as exc:
+            logger.error("operator lookup failed: %s", exc)
+            return 1
+        except CredentialNotFound as exc:
+            logger.error("eToro credentials missing: %s", exc)
+            return 1
 
         with EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider:
             summary = refresh_market_data(
