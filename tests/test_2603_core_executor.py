@@ -38,8 +38,14 @@ USER_CREDENTIAL = UUID("f7306e0b-9494-415e-85fd-97874510cc83")
 
 
 class FakeResult:
-    def __init__(self, row: tuple[object, ...] | None = None) -> None:
+    def __init__(self, row: tuple[object, ...] | None = None, *, rowcount: int = 0) -> None:
         self._row = row
+        # #2961's marker gates the submission on affecting EXACTLY ONE row, so the
+        # double has to answer the count. Defaulting to 0 rather than 1 is
+        # deliberate: an unmatched statement then LOOKS like a no-op, so a future
+        # writer that also counts rows fails loudly here instead of being handed a
+        # silent success by the fixture.
+        self.rowcount = rowcount
 
     def fetchone(self) -> tuple[object, ...] | None:
         return self._row
@@ -81,6 +87,11 @@ class FakeConn:
             return FakeResult((31,))
         if normalized.startswith("INSERT INTO strategy_order_reconciliation_state"):
             self.events.append("persist_reconciliation")
+            # The authority transaction DECLARES the phase; nothing else may.
+            assert "'authority_committed'" in normalized
+        if "submission_phase='broker_verb_entered'" in normalized:
+            self.events.append("mark_submitting")
+            return FakeResult(rowcount=1)
         if normalized.startswith("UPDATE orders SET broker_order_ref"):
             self.events.append("persist_acceptance")
         if "state='rejected'" in normalized:
@@ -334,6 +345,13 @@ def test_acceptance_identity_is_persisted_after_authority_commits() -> None:
         < events.index("persist_acceptance")
         < events.index("order_lock_released")
     )
+    # #2961. The marker is committed AFTER the authority and BEFORE the broker
+    # verb, and both bounds are load-bearing in opposite directions: moved above
+    # `persist_reconciliation` there is no separate commit to observe and every
+    # authority reads as "may have reached the broker"; moved below
+    # `broker_submit` a crash inside the call leaves a row that claims the verb
+    # was never entered, which is the direction that costs real money.
+    assert events.index("persist_reconciliation") < events.index("mark_submitting") < events.index("broker_submit")
 
 
 @pytest.mark.parametrize(

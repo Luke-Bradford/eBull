@@ -93,6 +93,12 @@ ACCOUNT_CASH = Decimal("1000")
 FaultPoint = Literal[
     "none",
     "before_authority_commit",
+    # ⚠ The ONLY entry fault that lands before `mark_core_submission_entered`
+    # commits (#2961) -- so it is the only one where our own write ordering
+    # PROVES the broker verb was never entered.  `after_commit_before_submit`
+    # lands after it, inside the provider, which is why the two are told apart
+    # by the marker and not by anything the broker double knows.
+    "after_authority_commit_before_marker",
     "after_commit_before_submit",
     "after_broker_accept",
     # -- the EXIT lifecycle (round 2, matrix 7) -------------------------------
@@ -895,6 +901,8 @@ def core_state_report(conn: psycopg.Connection[Any]) -> dict[str, Any]:
           (SELECT count(*) FROM strategy_position_ownership WHERE status='active'),
           (SELECT array_agg(DISTINCT status ORDER BY status) FROM strategy_trades),
           (SELECT array_agg(DISTINCT state ORDER BY state) FROM strategy_order_reconciliation_state),
+          (SELECT array_agg(DISTINCT submission_phase ORDER BY submission_phase)
+             FROM strategy_order_reconciliation_state WHERE submission_phase IS NOT NULL),
           (SELECT count(*) FROM orders WHERE execution_origin='strategy' AND broker_order_ref IS NOT NULL),
           (SELECT coalesce(sum(requested_amount),0) FROM orders WHERE execution_origin='strategy')
         """
@@ -909,8 +917,12 @@ def core_state_report(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         "active_ownership": int(row[4]),
         "trade_statuses": list(row[5] or []),
         "reconciliation_states": list(row[6] or []),
-        "orders_with_broker_ref": int(row[7]),
-        "requested_amount_total": Decimal(str(row[8])),
+        # #2961's write-ordering marker. NULLs are filtered in SQL rather than
+        # coalesced to a label: a NULL means "not a core entry row", and giving it
+        # a name here would put a third value in front of every assertion below.
+        "submission_phases": list(row[7] or []),
+        "orders_with_broker_ref": int(row[8]),
+        "requested_amount_total": Decimal(str(row[9])),
     }
 
 

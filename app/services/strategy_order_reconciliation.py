@@ -43,7 +43,7 @@ from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, LiteralString, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -58,6 +58,7 @@ from app.providers.broker import (
     BrokerProvider,
 )
 from app.services.strategy_control_plane import StrategyControlError, StrategyOwnershipError
+from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -733,6 +734,164 @@ def _apply_detail(
     )
 
 
+#: Every condition a core ENTRY must satisfy before it may be terminalised as
+#: never-submitted.  Writer assumptions are NOT schema guarantees, so each is
+#: re-read under both locks rather than inferred from "the executor only writes
+#: this shape" (Codex checkpoint 1, #2961).
+_UNSUBMITTED_CORE_ENTRY_SQL: Final[LiteralString] = """
+SELECT trade.strategy_trade_id
+FROM strategy_order_reconciliation_state state
+JOIN orders o ON o.order_id = state.order_id
+JOIN strategy_trade_orders link ON link.order_id = o.order_id
+JOIN strategy_trades trade ON trade.strategy_trade_id = link.strategy_trade_id
+WHERE state.order_id = %(order_id)s
+  AND state.submission_phase = 'authority_committed'
+  AND state.state NOT IN ('resolved', 'rejected')
+  AND o.execution_origin = 'strategy'
+  AND o.broker_order_ref IS NULL
+  AND link.purpose = 'entry'
+  AND trade.core_rebalance_intent_id IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM strategy_order_position_executions execution
+      WHERE execution.order_id = o.order_id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM strategy_position_ownership ownership
+      WHERE ownership.strategy_trade_id = trade.strategy_trade_id
+        AND ownership.status = 'active'
+  )
+  AND (
+      SELECT count(*) FROM strategy_trade_orders sibling
+      WHERE sibling.strategy_trade_id = trade.strategy_trade_id
+  ) = 1
+"""
+
+
+@contextmanager
+def _core_submission_try_lock(conn: psycopg.Connection[Any]) -> Iterator[bool]:
+    """Take ``CORE_SUBMISSION_ADVISORY_LOCK`` without waiting, or report failure.
+
+    ⚠⚠ What success proves, exactly: **no OTHER session holds the key**.  Advisory
+    locks are reentrant, so a caller that already owns it -- ``resume_core_submission``,
+    which holds ``core_submission_lock`` and then reconciles -- succeeds on its own
+    nested try.  That is correct rather than a hole, because the attended resume is
+    forbidden to resubmit and so is not a submitter in flight; but it is a reasoned
+    exemption and is asserted by test, not assumed.
+
+    The release decrements the reference count, so an outer holder keeps the lock
+    and ``core_submission_lock``'s own unlock-ownership assertion still sees it.
+
+    ⚠ Never blocks.  The submitter's ``reconciliation_order_lock`` acquire DOES
+    block, so a waiting try-lock here would close a deadlock cycle; a try cannot.
+    """
+    acquired = conn.execute("SELECT pg_try_advisory_lock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK).fetchone()
+    conn.commit()
+    if acquired != (True,):
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
+        # Same discipline as `_release_order_lock`: never let a release failure
+        # replace the body's exception, and never leave the key held on the way out.
+        try:
+            released = conn.execute("SELECT pg_advisory_unlock(%s, %s)", CORE_SUBMISSION_ADVISORY_LOCK).fetchone()
+            conn.commit()
+            if released != (True,):
+                logger.error("core submission advisory lock ownership was lost during terminalisation")
+        except Exception:
+            logger.exception("releasing the core submission advisory lock failed")
+
+
+def terminalise_unsubmitted_core_entry(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+) -> ReconciliationResult | None:
+    """Terminalise a core ENTRY whose broker verb was provably never entered (#2961).
+
+    ``None`` means "not this path's business" -- the ordinary reconciliation must
+    then run normally.  A :class:`StrategyReconciliationBusy` means "a candidate,
+    but something owns it"; the batch skips and re-selects next cycle.
+
+    **The evidence is our own write ordering, never a broker observation.**
+    ``submission_phase='authority_committed'`` means ``mark_core_submission_entered``
+    did not commit, and it commits before the provider call -- so the verb was never
+    entered and no order can exist.  That is what the 2026-09-13 abandon-authority
+    design lacked: its guards were a ``referenceId`` lookup miss and the absence of a
+    position, which are correlated observations that cannot prove non-acceptance.
+    The 2026-09-17 demo probe then settled the lookup half outright -- a v2 order that
+    FILLED echoed our ``referenceId`` and ``orders:lookup?referenceId=`` still
+    returned 404 (#2961).
+
+    **Two conditions, and the marker alone is not enough.**  Between the authority
+    commit and the marker the row reads ``authority_committed`` while a LIVE
+    submitter is still working, so terminalising on the marker alone would release
+    capital under a submission that then places a real order.
+    ``CORE_SUBMISSION_ADVISORY_LOCK`` closes that: it is session-scoped, held by
+    ``execute_core_rebalance`` across the authority commit, the marker and the
+    provider call, and Postgres releases it when the backend dies.
+
+    ⚠ Candidacy is read BEFORE any lock is taken, and that ordering is load-bearing:
+    taking the global core key first would let one unrelated core submission make
+    every ALPHA and legacy order skip reconciliation entirely.
+
+    ⚠ Zero broker calls on every path.
+    """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise StrategyReconciliationError("core terminalisation requires an idle connection")
+    phase = conn.execute(
+        "SELECT submission_phase FROM strategy_order_reconciliation_state WHERE order_id=%s",
+        (order_id,),
+    ).fetchone()
+    conn.commit()
+    if phase is None or phase[0] != "authority_committed":
+        return None
+    with _core_submission_try_lock(conn) as core_idle:
+        if not core_idle:
+            raise StrategyReconciliationBusy(
+                f"a core entry submission is in flight; order {order_id} cannot be shown unsubmitted"
+            )
+        # Per-order lock is ALWAYS last (see this module's stated lock ordering).
+        with try_reconciliation_order_lock(conn, order_id):
+            candidate = conn.execute(_UNSUBMITTED_CORE_ENTRY_SQL, {"order_id": order_id}).fetchone()
+            conn.commit()
+            if candidate is None:
+                return None
+            trade_id = int(candidate[0])
+            # ⚠ ONE transaction, both locks still held.  A partially committed
+            # terminal reconciliation row drops out of the backlog partial index
+            # while its trade still holds capital -- strictly worse than the state
+            # being repaired.  Statement order follows the module lock ordering:
+            # orders -> reconciliation state -> strategy_trades.
+            with conn.transaction():
+                conn.execute("UPDATE orders SET status='rejected' WHERE order_id=%s", (order_id,))
+                conn.execute(
+                    """
+                    UPDATE strategy_order_reconciliation_state
+                    SET state='rejected', reconciled_at=now(), last_attempt_at=now(),
+                        attempt_count=attempt_count+1,
+                        last_error_code='core_authority_never_submitted', updated_at=now()
+                    WHERE order_id=%s
+                    """,
+                    (order_id,),
+                )
+                conn.execute(
+                    "UPDATE strategy_trades SET status='failed', updated_at=now() WHERE strategy_trade_id=%s",
+                    (trade_id,),
+                )
+            return ReconciliationResult(
+                order_id=order_id,
+                state="rejected",
+                broker_order_ref=None,
+                broker_status=None,
+                position_ids=(),
+                error_code="core_authority_never_submitted",
+            )
+
+
 def reconcile_strategy_order(
     conn: psycopg.Connection[Any],
     *,
@@ -748,6 +907,14 @@ def reconcile_strategy_order(
         raise StrategyReconciliationError(
             "reconciliation requires an idle connection so broker I/O cannot run inside a DB transaction"
         )
+    # ⚠ #2961, and it runs FIRST because it needs the global core key, which this
+    # module's stated ordering puts before the per-order lock.  It returns None for
+    # every order that is not an unsubmitted core entry -- alpha, manual, closes,
+    # and every row predating `submission_phase` -- so ordinary reconciliation is
+    # unaffected.  Zero broker calls either way.
+    never_submitted = terminalise_unsubmitted_core_entry(conn, order_id=order_id)
+    if never_submitted is not None:
+        return never_submitted
     # ⚠ The lock is taken BEFORE the identity read, not around the writes. That
     # ordering is what makes two workers which selected the same due row safe:
     # the loser reads the state the winner just wrote and short-circuits on the
@@ -1090,5 +1257,6 @@ __all__ = [
     "reconcile_backlog",
     "reconcile_strategy_order",
     "reconciliation_order_lock",
+    "terminalise_unsubmitted_core_entry",
     "try_reconciliation_order_lock",
 ]

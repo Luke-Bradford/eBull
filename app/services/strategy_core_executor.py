@@ -252,11 +252,21 @@ def core_authority_is_stranded(conn: psycopg.Connection[Any], *, order_id: int) 
     * the reconciliation state is ``not_found`` -- a lookup has ALREADY run and
       the broker said it has no such order.
 
-    ⚠ True is NOT proof the broker never received it. ``orders:lookup``'s
-    ``referenceId`` coverage is undocumented (the #2942 half-2 capability
-    question), so a miss is an observation, not an absence proof -- which is
-    exactly why resubmission stays refused and why this returns a flag for a
-    read surface rather than a verdict for a writer.
+    ⚠ True is NOT proof the broker never received it, and the reason is now
+    MEASURED rather than open.  ``orders:lookup?referenceId=`` does not resolve a
+    v2-submitted order on demo at all: on 2026-09-17 a consented probe submitted
+    through ``place_demo_core_order``, the response echoed our ``referenceId``
+    exactly, the order FILLED, and the lookup still returned HTTP 404 -- only
+    ``orderId`` resolved it (issue #2961).  So a miss is an observation, not an
+    absence proof, and resubmission stays refused.
+
+    ⚠ This is NOT the terminalisation discriminator, and must not be used as one.
+    Since #2961 the provable case is carried by
+    ``strategy_order_reconciliation_state.submission_phase``: only
+    ``authority_committed`` proves the broker verb was never entered, and only
+    ``terminalise_unsubmitted_core_entry`` may act on it -- under the two locks
+    that establish no submitter is in flight.  This function answers the narrower
+    read-surface question above and returns a flag, not a verdict.
     """
     row = conn.execute(
         """
@@ -407,12 +417,70 @@ def _submit_core_authority(
         return _submit_core_authority_locked(conn, broker=broker, authority=authority)
 
 
+def mark_core_submission_entered(conn: psycopg.Connection[Any], *, order_id: int) -> None:
+    """Commit "the core broker verb is about to be entered" BEFORE entering it.
+
+    The #2961 half of #2979's separation, and durable-before-the-call by
+    construction: this UPDATE commits, and only then does the caller touch the
+    broker.  So a crash leaving ``authority_committed`` PROVES the verb was never
+    entered, while ``broker_verb_entered`` proves only that it MAY subsequently
+    have been -- never what the broker then did.
+
+    ⚠ ``broker_verb_entered`` is deliberately NOT read as "entered".  The marker
+    can only bound its own commit; everything after it (``ResilientClient``'s
+    throttle and shared-lock wait, header construction, the socket write) is on
+    the unprovable side.  Naming it for what it proves rather than for the line
+    that follows it is what keeps the discriminator honest.
+
+    ⚠ Module-level and public rather than inlined, for the same reason
+    ``mark_close_submitting`` is: ``tests/fixtures/core_restart_child.py`` has no
+    other way to place a fault between the two commits, and a fault it can only
+    arm by name is the difference between testing the ordering and asserting it.
+
+    ⚠ Requires an IDLE connection.  ``conn.transaction()`` inside an already-open
+    transaction opens a SAVEPOINT, not a transaction, so the "commit" would not be
+    durable and the marker would be a lie told in the safe-looking direction.
+
+    ⚠ Requires EXACTLY ONE affected row.  A zero-row UPDATE must not be allowed to
+    fall through into the submission: a row that could not record "about to call"
+    must not then call.
+    """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise StrategyCoreExecutionError("the core submission marker requires an idle connection")
+    with conn.transaction():
+        updated = conn.execute(
+            """
+            UPDATE strategy_order_reconciliation_state
+            SET submission_phase='broker_verb_entered', updated_at=now()
+            WHERE order_id=%s AND submission_phase='authority_committed'
+            """,
+            (order_id,),
+        ).rowcount
+    if updated != 1:
+        raise StrategyCoreExecutionError(
+            f"the core submission marker for order {order_id} did not advance exactly one row ({updated})"
+        )
+
+
 def _submit_core_authority_locked(
     conn: psycopg.Connection[Any],
     *,
     broker: BrokerProvider,
     authority: CoreResumeAuthority,
 ) -> CoreExecutionResult:
+    # ⚠ OUTSIDE the `try` below, deliberately.  That `try` maps broker failures to
+    # `BrokerOrderSubmissionUncertain`/`Error`; a marker failure is neither, and
+    # reporting it as an uncertain submission would claim the broker may have been
+    # reached by a call that provably never happened.
+    #
+    # ⚠ This is the LATEST point our own code can reach by name without changing
+    # the `BrokerProvider` protocol.  A first draft put it inside the provider via
+    # a `mark_submitting` callback; Codex checkpoint 1 falsified the gain -- the
+    # blocking `reconciliation_order_lock` acquire in `_submit_core_authority`
+    # already precedes this either way, so the callback bought only the unattended
+    # guard and body construction, and it was not the last client-side instant
+    # anyway (`ResilientClient` throttles after it).
+    mark_core_submission_entered(conn, order_id=authority.order_id)
     try:
         submission = broker.place_demo_core_order(
             BrokerCoreOrder(instrument_id=authority.instrument_id, amount=authority.amount),
@@ -746,8 +814,15 @@ def execute_core_rebalance(
                 raise StrategyCoreExecutionError("core order INSERT did not return an id")
             order_id = int(order_row[0])
             link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose=order_purpose)
+            # ⚠ `submission_phase` is declared HERE, in the authority transaction,
+            # and advanced by `mark_core_submission_entered` in a SEPARATE commit
+            # before the broker verb (#2961).  Two distinct commits is the whole
+            # of the separation: folding the marker into this statement would make
+            # every core entry read as "may have reached the broker", which is the
+            # vacuous shape `strategy_position_manager.py:854-857` warns about.
             conn.execute(
-                "INSERT INTO strategy_order_reconciliation_state (order_id) VALUES (%s)",
+                "INSERT INTO strategy_order_reconciliation_state (order_id, submission_phase) "
+                "VALUES (%s, 'authority_committed')",
                 (order_id,),
             )
 
@@ -780,5 +855,6 @@ __all__ = [
     "core_order_shape_for",
     "execute_core_rebalance",
     "load_core_resume_authority",
+    "mark_core_submission_entered",
     "resume_core_submission",
 ]
