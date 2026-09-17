@@ -139,7 +139,7 @@ def _cols(cur: psycopg.Cursor[Any], table: str) -> list[str]:
 # ───────────────────────────── 1. footprint ──────────────────────────────
 
 
-def _footprint(cur: psycopg.Cursor[Any]) -> dict[str, dict[str, float]]:
+def _footprint(cur: psycopg.Cursor[Any]) -> None:
     """Heap / TOAST / index / live bytes per store, and fill ratio.
 
     Fill ratio is the whole point of the section: it separates "large because
@@ -152,7 +152,6 @@ def _footprint(cur: psycopg.Cursor[Any]) -> dict[str, dict[str, float]]:
         f"{'store':38s} {'rows':>12s} {'live MiB':>10s} {'heap MiB':>10s} "
         f"{'fill%':>7s} {'free MiB':>9s} {'toast':>7s} {'idx MiB':>9s}"
     )
-    out: dict[str, dict[str, float]] = {}
     for t in ALL_STORES:
         t0 = time.time()
         rows, live = _q(cur, f"SELECT count(*), {LIVE_BYTES} FROM {t} t")[0]
@@ -169,7 +168,6 @@ def _footprint(cur: psycopg.Cursor[Any]) -> dict[str, dict[str, float]]:
         )[0]
         heap, idx, toast = float(heap or 0), float(idx or 0), float(toast or 0)
         fill = 100 * live / heap if heap else 0.0
-        out[t] = {"rows": rows, "live": live, "heap": heap, "idx": idx, "toast": toast, "fill": fill}
         print(
             f"{t:38s} {rows:12,d} {_mib(live):>10s} {_mib(heap):>10s} {fill:6.1f}% "
             f"{_mib(heap - live):>9s} {_mib(toast):>7s} {_mib(idx):>9s}  ({time.time() - t0:.0f}s)"
@@ -196,7 +194,6 @@ def _footprint(cur: psycopg.Cursor[Any]) -> dict[str, dict[str, float]]:
                 f"    {name:52s} {n:10,d} live={_mib(live):>8s} heap={_mib(heap):>8s} "
                 f"fill={100 * live / heap if heap else 0:5.1f}% idx={_mib(idx):>8s}"
             )
-    return out
 
 
 # ────────────────────────────── 2. indexes ───────────────────────────────
@@ -962,8 +959,13 @@ def _census() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--census", action="store_true", help="read-only audit (the default)")
-    ap.add_argument(
+    # Mutually exclusive: --census was previously parsed and never read, so
+    # `--census --rebuild-probe` silently ran the probe and reported it as if
+    # the caller had asked for the census. A mode flag that can be passed and
+    # ignored is worse than no flag.
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--census", action="store_true", help="read-only audit (the default)")
+    mode.add_argument(
         "--rebuild-probe",
         action="store_true",
         help="TEMP reconstruction to measure minimum heap + index size (writable session)",
