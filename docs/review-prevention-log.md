@@ -7388,3 +7388,39 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   handler containing no `ast.Raise`.
 - Verification step: `rg -n "CancelledError" app/` — every handler that names it must
   contain a `raise`, or carry a comment stating why absorbing it is the contract.
+
+### A verifier whose window is smaller than its subject certifies by arithmetic
+
+- First seen in: #3109 (PR #3135), Codex checkpoint 2. The post-deploy check answering
+  "does the per-CIK poll queue rotate?" compared the CIKs the last run polled against the
+  selector's **66-CIK prefix** — while the same PR raised the worker's effective budget to
+  **100** by rolling unused recheck slots into the poll lane. If all 100 polled CIKs stayed
+  pinned at the head, the check subtracts 66 from 100, reports **34 "rotated"**, prints a
+  tick, and certifies a queue that had not moved. Nothing about the queue is measured; the
+  pass is produced by the two limits disagreeing.
+- ⚠ The gap opens precisely when the change works — i.e. right after raising throughput,
+  which is exactly when the check is run. A verifier and its subject each carrying their
+  own size constant is the bug; the prefix was correct on the day it was written.
+- ⚠ Absence from a bounded selection is **not** exclusion. "Is X in the top N" and "is X
+  still eligible" are different questions, and only the second one is the property under
+  test. Same containment error as the gap-count rule ("a subtraction is not a gap count
+  unless observed ⊆ reference").
+- Prevention: a post-deploy or acceptance check must ask the **predicate**, unbounded —
+  "of the things we just processed, how many still satisfy the selection condition?" — not
+  "are they inside the current `LIMIT N` selection". If the check must carry a limit, it has
+  to be *the same constant* the subject uses, bound in one place, not a copy. State the
+  failure DIRECTION next to the query: in the #3109 fix, under-scoping the sample can only
+  shrink it, never turn a pinned head into a rotating one — a caveat without a direction is
+  not a caveat.
+- Corollary, same PR: a diagnostic must **refuse to render a verdict its data cannot
+  support**. Immediately after the `sql/389` backfill every `next_poll_at` was identical, so
+  the verdict was driven purely by the `cik` tie-break rather than by exclusion. The script
+  now prints the value spread and says so itself. It fired on the first dev run and stopped
+  a false "✅" — the honest reading at that moment was "HEAD IS PINNED", which was correct.
+- Enforced in: `scripts/measure_3109_batching.py::_r1_rotation_discriminator` (unbounded
+  eligibility query, not a prefix diff) and `::_r2_reach` (capacity derived from
+  `ciks_due_for_recheck`, the same reader the allocator uses, rather than a `count(*)` over
+  recheck-state rows that ignored `next_recheck_at` entirely).
+- Verification step: for any script that prints a pass/fail verdict, ask "what input makes
+  this print a tick while the property is false?" If the answer involves a `LIMIT`, a
+  sample, or a constant duplicated from the code under test, it is this defect.
