@@ -1583,6 +1583,18 @@ def _park_uncertain_submission(
 RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS = 2942
 
 
+def _concurrent_submission_error(recommendation_id: int, consequence: str) -> ConcurrentSubmissionInFlightError:
+    """One place the "someone else holds the key" wording lives.
+
+    Both raise sites mean the same thing about the world and differ only in what
+    they were about to do, so the shared clause is built here and the caller
+    supplies its own consequence (bot NITPICK, PR #3165).
+    """
+    return ConcurrentSubmissionInFlightError(
+        f"another session is submitting recommendation {recommendation_id}; {consequence}"
+    )
+
+
 @contextmanager
 def _recommendation_submission_try_lock(conn: psycopg.Connection[Any], recommendation_id: int) -> Iterator[bool]:
     """Take the per-recommendation submission key without waiting (#2942 half 2).
@@ -1602,6 +1614,16 @@ def _recommendation_submission_try_lock(conn: psycopg.Connection[Any], recommend
     the broker call — which is the entire reason it can bound that window. It
     also outlives the request if it is not released, and ``execute_order``'s
     connection comes from a pool, so every exit path releases in ``finally``.
+
+    ⚠ A FAILED release only logs, deliberately (bot NITPICK, PR #3165). Raising
+    there would replace the body's exception — the one that says what actually
+    went wrong — with a cleanup error. The residual is bounded and points the
+    safe way: the key stays held until that backend goes away, and a later
+    submission for the same recommendation then *refuses*
+    (``ConcurrentSubmissionInFlightError``) rather than placing a second order.
+    No metrics surface exists in this module to emit to; the ``logger.error``
+    matches the landed core equivalent (``_core_submission_try_lock``), and
+    inventing a second reporting channel for one line is not this slice's work.
     """
     key = (RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS, recommendation_id)
     acquired = conn.execute("SELECT pg_try_advisory_lock(%s, %s)", key).fetchone()
@@ -1707,10 +1729,7 @@ def terminalise_unsubmitted_recommendation_attempt(
     """
     with _recommendation_submission_try_lock(conn, recommendation_id) as idle:
         if not idle:
-            raise ConcurrentSubmissionInFlightError(
-                f"another session is submitting recommendation {recommendation_id}; "
-                "no claim of theirs can be shown unsubmitted"
-            )
+            raise _concurrent_submission_error(recommendation_id, "no claim of theirs can be shown unsubmitted")
         # ONE statement, under the lock: selecting and then updating would open a
         # window in which the marker moves to 'broker_verb_entered' between the
         # two, and the UPDATE would then release a claim whose verb HAD been
@@ -1879,9 +1898,8 @@ def execute_order(
         # 'broker_verb_entered' and is no longer terminalisable by anyone.
         with _recommendation_submission_try_lock(conn, recommendation_id) as submission_idle:
             if not submission_idle:
-                raise ConcurrentSubmissionInFlightError(
-                    f"another session is submitting recommendation {recommendation_id}; "
-                    "refusing rather than risking a second economic order"
+                raise _concurrent_submission_error(
+                    recommendation_id, "refusing rather than risking a second economic order"
                 )
             # Release a claim whose broker verb was provably never entered, so a
             # process death inside the window below does not park this
