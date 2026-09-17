@@ -757,10 +757,24 @@ function HistoryTab({
                 Zero renders as an em-dash rather than "0": a column of zeroes
                 trains the eye to skip it, which is how the one non-zero gets
                 missed.
+
+                ⚠⚠ THIS IS `job_runs.rows_errored` AND NOT THE ONLY ERROR
+                COUNTER. `JobProgress.errors` (`progress_json`) is a second,
+                disjointly-written one, and it is what fired on the only
+                `degraded` run in the corpus (`daily_candle_refresh` 133470,
+                `rows_errored=0`, `progress_json.errors={"failed":1}`). They
+                are NOT summable: `sec_manifest_worker.py:760` records
+                `agg.rows_errored == failed + dispatch_errors` while the same
+                tick also puts `failed` into its JobProgress, so a sum would
+                double-count it. No rule says which is authoritative per job,
+                so the cell names its source in a tooltip instead of folding
+                two counters under one number. Second counter recorded on
+                #3111; not invented here.
               */}
               <td
                 className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400"
                 data-testid="run-rows-errored"
+                title="job_runs.rows_errored — rows this run recorded as errored. A run can also degrade on JobProgress errors, which this column does not count; the Status cell reflects those."
               >
                 {r.rows_errored > 0 ? (
                   <span className="font-medium text-amber-700 dark:text-amber-300">
