@@ -232,7 +232,19 @@ function ProcessRowImpl({
         <div className="text-xs text-slate-500 dark:text-slate-400">
           {row.process_id} · {row.mechanism}
         </div>
-        {row.status === "failed" && row.last_n_errors.length > 0 ? (
+        {/*
+          #3111 — NO `status === "failed"` TEST HERE. Suppression is the
+          BACKEND's decision and it already made it: `scheduled_adapter.py`
+          returns `last_n_errors = ()` for the two states where a retry is
+          already covering the failed scope (`running` / `pending_retry`,
+          `_ERROR_SUMMARY_SUPPRESSED_STATUSES`), and otherwise returns
+          whatever the terminal run recorded. Slice 2 deliberately made that
+          a state LIST rather than an equality test; re-testing for `failed`
+          here silently re-narrowed it, hiding the errors on a `degraded`
+          row — which is precisely the status this ticket made a failed batch
+          report. A non-empty list is now the whole condition.
+        */}
+        {row.last_n_errors.length > 0 ? (
           <ErrorPreview errors={row.last_n_errors} />
         ) : null}
       </td>
@@ -439,7 +451,10 @@ function ErrorPreview({
   const remainder = errors.length - 2;
   const shown = expanded ? errors : errors.slice(0, 2);
   return (
-    <ul className="mt-1 space-y-0.5 text-xs text-red-700 dark:text-red-300">
+    <ul
+      data-testid="error-preview"
+      className="mt-1 space-y-0.5 text-xs text-red-700 dark:text-red-300"
+    >
       {shown.map((e) => (
         <li key={e.error_class} className="truncate" title={e.sample_message}>
           <span className="font-medium">{e.error_class}</span>{" "}

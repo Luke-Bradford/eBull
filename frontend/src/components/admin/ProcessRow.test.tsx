@@ -145,6 +145,31 @@ describe("ProcessRow", () => {
     expect(screen.getByText("MissingCIK")).toBeTruthy();
   });
 
+  it("#3111: a degraded row shows its errors — suppression is the backend's call, not a status test here", () => {
+    // `scheduled_adapter._ERROR_SUMMARY_SUPPRESSED_STATUSES` is a state LIST
+    // (`running` / `pending_retry` — a retry is already covering the failed
+    // scope), deliberately not an `== "failed"` equality test (slice 2).
+    // Re-testing for `failed` in the FE silently re-narrowed that, hiding the
+    // errors on exactly the status this ticket made an all-failed batch report.
+    renderRow({
+      row: makeProcessRow({
+        status: "degraded",
+        last_n_errors: [makeError({ error_class: "ParserRaised", count: 5 })],
+      }),
+    });
+    expect(screen.getByText("ParserRaised")).toBeTruthy();
+  });
+
+  it("#3111: an empty last_n_errors renders no preview, whatever the status", () => {
+    // The other half of the same rule — dropping the status test must not
+    // turn into "always render". A backend that suppressed the list is
+    // saying there is nothing to show.
+    const { container } = renderRow({
+      row: makeProcessRow({ status: "degraded", last_n_errors: [] }),
+    });
+    expect(container.querySelector('[data-testid="error-preview"]')).toBeNull();
+  });
+
   it("#1229: '+N more' expands the full failed-stage list, then collapses", () => {
     // A bootstrap in partial_error surfaces each failed stage as an entry
     // keyed by stage_key (bootstrap_adapter). With >2, the surplus hides
