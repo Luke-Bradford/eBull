@@ -884,6 +884,114 @@ _INSIDER_BEYOND_RETENTION_SQL: Final = """
     oc.source = 'form4' AND oc.filed_at::date < %(form4_cutoff)s
 """
 
+# The holder's TIP period — the newest ``period_end`` this holder has on this instrument
+# across BOTH ingest pipelines, because ``ownership_insiders_current`` is the projection of
+# every observation. Held as its own fragment so the three arms of
+# :data:`_INSIDER_SECTION16_EXIT_SQL` cannot drift apart on what "latest" means.
+_INSIDER_TIP_PERIOD_SQL: Final = """
+    (SELECT MAX(m.period_end) FROM ownership_insiders_current m
+      WHERE m.instrument_id       = oc.instrument_id
+        AND m.holder_identity_key = oc.holder_identity_key)
+"""
+
+# #2788 / #2226 M1 — the insider half of "no ``_current`` table can ever release a position".
+#
+# SOURCE RULE. SEC Form 4 General Instruction 1(b) (and Form 5's, identically):
+# "A reporting person no longer subject to Section 16 of the Securities Exchange Act of 1934
+# ... MUST CHECK THE EXIT BOX appearing on this Form." SEC's own name for it is the exit
+# box; it rides the ownership XML as document-level ``<notSubjectToSection16>`` and is
+# stored as ``insider_filings.not_subject_to_section_16`` (sql/057). Form 3 has no such box.
+#
+# ⚠ This does NOT contradict :func:`_read_beyond_retention_insiders`' docstring ("Section 16
+# has no such rule"). That is true of SILENCE — Form 4 is transaction-triggered, so a filer
+# who stops filing proves nothing. The exit box is a statement INSIDE a filing, which is the
+# same class of evidence as a 13F-NT, and is the one affirmative exit signal Section 16
+# publishes.
+#
+# ⚠ It declares a change of STATUS, never a disposal. The shares may still sit in the same
+# hands; what ended is the holder's membership of the population this channel reports. They
+# move to the unattributed residual, exactly as a beyond-retention row does (#790 posture).
+#
+# HOLDER-level, not row-level (Codex ckpt-1): 992 of the 4,135 row-level candidates left a
+# sibling ``_current`` row for the same holder at another (nature, source) — 233 of them
+# ``form3``, i.e. the INITIAL statement, an even older balance than the row removed. The
+# declaration is about the person, so the release is too. Anchoring on the holder's tip also
+# removes the self-match, later-amendment and repeat-exit edge cases by construction instead
+# of by predicate.
+#
+# Five arms, and each one is load-bearing:
+#   1. ``holder_cik IS NOT NULL`` — an unidentified holder cannot be guarded by arm 4, and a
+#      NULL CIK silently SATISFIES a bare ``NOT EXISTS``. Without this line the least
+#      identifiable rows would be the easiest to release. 0 such rows today.
+#   2. POSITIVE arm — at least one tip row resolves to a live filing carrying the box, keyed
+#      on accession AND instrument, with the holder among that filing's reporting owners.
+#      Arm 3 alone is satisfiable vacuously (an empty tip set passes a NOT EXISTS), which is
+#      the ``x <> ALL('{}')`` failure mode.
+#   3. UNANIMITY arm — no tip row FAILS to carry it. ``IS NOT TRUE`` deliberately covers
+#      NULL as well as FALSE: 310,780 filings have a NULL flag, and a NULL is "we do not
+#      know", never an exit. This is what makes an all-NULL tip fail closed.
+#   4. NO-LATER-FILING arm — no live filing for this (instrument, filer) past the tip. Closes
+#      the 36 holders whose later filing produced no observation. ⚠ ``period_of_report`` is
+#      NULL on 28,173 rows, which would fail this comparison OPEN — every one is a tombstone
+#      and the predicate excludes tombstones, but a future live NULL reopens it.
+#   5. DEREGISTRATION carve-out — Section 16 attaches to a class registered under Section 12,
+#      so when an issuer's registration terminates EVERY reporting person becomes "no longer
+#      subject to Section 16" while remaining a director or officer. There the box is right
+#      and a release would be wrong, so a Form 25 issuer is refused. Date-free on purpose: a
+#      window would be a fitted constant with no source rule (#2231).
+_INSIDER_SECTION16_EXIT_SQL: Final = f"""
+    oc.holder_cik IS NOT NULL
+    AND EXISTS (
+        SELECT 1
+          FROM ownership_insiders_current t
+          JOIN insider_filings tf
+            ON tf.accession_number = t.source_accession
+           AND tf.instrument_id    = t.instrument_id
+          JOIN insider_filers tfl
+            ON tfl.accession_number = tf.accession_number
+           AND tfl.filer_cik        = oc.holder_cik
+         WHERE t.instrument_id       = oc.instrument_id
+           AND t.holder_identity_key = oc.holder_identity_key
+           AND t.period_end          = {_INSIDER_TIP_PERIOD_SQL}
+           AND NOT tf.is_tombstone
+           AND tf.not_subject_to_section_16 IS TRUE
+    )
+    AND NOT EXISTS (
+        SELECT 1
+          FROM ownership_insiders_current t2
+          LEFT JOIN insider_filings tf2
+            ON tf2.accession_number = t2.source_accession
+           AND tf2.instrument_id    = t2.instrument_id
+           AND NOT tf2.is_tombstone
+         WHERE t2.instrument_id       = oc.instrument_id
+           AND t2.holder_identity_key = oc.holder_identity_key
+           AND t2.period_end          = {_INSIDER_TIP_PERIOD_SQL}
+           AND tf2.not_subject_to_section_16 IS NOT TRUE
+    )
+    AND NOT EXISTS (
+        SELECT 1
+          FROM insider_filers lfl
+          JOIN insider_filings lf
+            ON lf.accession_number = lfl.accession_number
+         WHERE lfl.filer_cik    = oc.holder_cik
+           AND lf.instrument_id = oc.instrument_id
+           AND NOT lf.is_tombstone
+           AND lf.period_of_report > {_INSIDER_TIP_PERIOD_SQL}
+    )
+    AND NOT EXISTS (
+        SELECT 1
+          FROM ownership_insiders_current t3
+          JOIN insider_filings tf3
+            ON tf3.accession_number = t3.source_accession
+           AND tf3.instrument_id    = t3.instrument_id
+          JOIN sec_form25_common_equity_delistings d25
+            ON LPAD(d25.issuer_cik, 10, '0') = LPAD(tf3.issuer_cik, 10, '0')
+         WHERE t3.instrument_id       = oc.instrument_id
+           AND t3.holder_identity_key = oc.holder_identity_key
+           AND t3.period_end          = {_INSIDER_TIP_PERIOD_SQL}
+    )
+"""
+
 # Dual-pipeline de-collision (#788), extracted so the insiders read and every producer
 # that must agree with it share ONE copy. A DERA-dataset row (``:NDT:`` / ``:NDH:``
 # marker) is dropped whenever an XML-manifest row exists for the same
@@ -966,6 +1074,10 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
               -- _INSIDER_BEYOND_RETENTION_SQL and _read_beyond_retention_insiders,
               -- which lists exactly the rows this removes.
               AND NOT ({_INSIDER_BEYOND_RETENTION_SQL})
+              -- #2788 / #2226 M1 — holders who declared a Section 16 exit on the form
+              -- itself; see _INSIDER_SECTION16_EXIT_SQL and
+              -- _read_section16_exit_insiders, which lists exactly the rows this removes.
+              AND NOT ({_INSIDER_SECTION16_EXIT_SQL})
             """,
             {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
         )
@@ -1344,6 +1456,87 @@ def _read_beyond_retention_insiders(conn: psycopg.Connection[Any], instrument_id
                         f"(#1233 §4.3). NOT evidence the holder sold — Form 4 is "
                         f"transaction-triggered, so silence proves nothing; we no longer "
                         f"hold in-retention evidence of the position."
+                    ),
+                )
+            )
+    return tuple(rows)
+
+
+def _read_section16_exit_insiders(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[CorrectionApplied, ...]:
+    """List the insider rows EXCLUDED because the holder declared a Section 16 exit on the
+    form itself (#2788 / #2226 M1), for the ``corrections_applied`` telemetry.
+
+    Selects the exact complement of the insiders read by interpolating the SAME
+    :data:`_INSIDER_SECTION16_EXIT_SQL`, plus the rest of that query's selection —
+    ``shares IS NOT NULL``, the instrument, and
+    :data:`_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL`. Without the de-collision an accession
+    present in both ingest pipelines contributes one row to the wedge and two here, so
+    ``shares_removed`` would tell an operator twice the shares had left (the #2788 ckpt-2
+    finding recorded on :data:`_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL`).
+
+    A row matching BOTH this and :data:`_INSIDER_BEYOND_RETENTION_SQL` is reported ONCE,
+    under retention — hence the ``AND NOT (retention)`` below. Retention is the weaker
+    claim about the same row ("we no longer hold evidence") and is already shipped;
+    reporting both would double-count the same shares in the telemetry. Mirrors
+    :func:`_read_notice_suppressions` winning over :func:`_read_hr_supersessions`.
+
+    ⚠ ``winning_accession`` here is the TIP filing carrying the exit box, and for this kind
+    that is frequently the removed row's OWN accession. On
+    ``superseded_by_later_13f_hr`` pointing the winner at the removed row was a defect
+    (Codex ckpt-2 on #2229); here it is correct, because the evidence IS that row's filing.
+    Do not "fix" it to point elsewhere.
+
+    ⚠ The correction is NOT an exit from the stock. Section 16 status ended; the shares may
+    still sit in the same hands and simply stop being attributable to this channel. The
+    ``detail`` string below is the operator-facing contract for that and must keep saying
+    it. Reproduce the census with
+    ``PYTHONPATH=. uv run python -m scripts.audit_2788_section16_exit --census``; do not
+    hand-copy its figures into prose, they move with every ingest."""
+    rows: list[CorrectionApplied] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT oc.holder_cik, oc.holder_name, oc.shares, oc.period_end,
+                   (SELECT t.source_accession
+                      FROM ownership_insiders_current t
+                      JOIN insider_filings tf
+                        ON tf.accession_number = t.source_accession
+                       AND tf.instrument_id    = t.instrument_id
+                     WHERE t.instrument_id       = oc.instrument_id
+                       AND t.holder_identity_key = oc.holder_identity_key
+                       AND t.period_end          = {_INSIDER_TIP_PERIOD_SQL}
+                       AND NOT tf.is_tombstone
+                       AND tf.not_subject_to_section_16 IS TRUE
+                     ORDER BY t.source_accession DESC
+                     LIMIT 1) AS evidence_accession,
+                   {_INSIDER_TIP_PERIOD_SQL} AS tip_period
+            FROM ownership_insiders_current oc
+            WHERE oc.instrument_id = %(iid)s
+              AND oc.shares IS NOT NULL
+              AND NOT ({_INSIDER_DUAL_PIPELINE_DECOLLISION_SQL})
+              AND NOT ({_INSIDER_BEYOND_RETENTION_SQL})
+              AND ({_INSIDER_SECTION16_EXIT_SQL})
+            ORDER BY oc.shares DESC, oc.holder_cik, oc.holder_name
+            """,
+            {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
+        )
+        for row in cur.fetchall():
+            rows.append(
+                CorrectionApplied(
+                    kind="insider_section16_exit_declared",
+                    filer_cik=str(row["holder_cik"]) if row["holder_cik"] else None,
+                    filer_name=str(row["holder_name"]),
+                    shares_removed=Decimal(row["shares"]),
+                    superseded_period=row["period_end"],
+                    source_channel="form4",
+                    winning_source="form4",
+                    winning_accession=(str(row["evidence_accession"]) if row["evidence_accession"] else None),
+                    detail=(
+                        f"Reporting person checked the Form 4/5 exit box on accession "
+                        f"{row['evidence_accession']} (period {row['tip_period']}), declaring "
+                        f"they are no longer subject to Section 16 (Form 4 General Instruction "
+                        f"1(b)). A change of STATUS, not a sale: these shares are no longer "
+                        f"insider ownership and move to the unattributed residual."
                     ),
                 )
             )
@@ -5229,6 +5422,10 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         # #2788 — the insider rows the retention bound excluded. Read the kind's
         # docstring before quoting it as an exit; it is a coverage statement, not one.
         *_read_beyond_retention_insiders(conn, instrument_id),
+        # #2788 / #2226 M1 — the insider rows removed because the holder declared a
+        # Section 16 exit on the form. Ordered AFTER retention deliberately: a row matching
+        # both is reported once, under retention, and this producer excludes those.
+        *_read_section16_exit_insiders(conn, instrument_id),
         *family_corrections,
         *same_accession_corrections,
         *insider_group_corrections,
