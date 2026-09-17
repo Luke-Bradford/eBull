@@ -12,9 +12,26 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from app.services.sec_insider_dataset_ingest import _is_future_dated_for_form
+from app.services.sec_insider_dataset_ingest import _reject_reason_for_form
 
 FILED = datetime(2026, 6, 10, 14, 30, tzinfo=UTC)
+
+
+def _reason(
+    form: str,
+    period_end: date,
+    *,
+    timeliness: str | None = None,
+    deemed: str | None = None,
+    filed_at: datetime = FILED,
+) -> str | None:
+    return _reject_reason_for_form(
+        form_upper=form,
+        period_end=period_end,
+        filed_at=filed_at,
+        deemed_execution_date=deemed,
+        trans_timeliness=timeliness,
+    )
 
 
 def _call(
@@ -25,13 +42,13 @@ def _call(
     deemed: str | None = None,
     filed_at: datetime = FILED,
 ) -> bool:
-    return _is_future_dated_for_form(
-        form_upper=form,
-        period_end=period_end,
-        filed_at=filed_at,
-        deemed_execution_date=deemed,
-        trans_timeliness=timeliness,
-    )
+    """Rejected-or-not, the shape this file's tables were written against.
+
+    #2441 turned the gate's bool into a reason string so the two bounds are
+    counted apart; the #2790 assertions below are about rejection itself and
+    are kept verbatim through this adapter.
+    """
+    return _reason(form, period_end, timeliness=timeliness, deemed=deemed, filed_at=filed_at) is not None
 
 
 class TestRejectsImpossibleForm45Dates:
@@ -119,3 +136,36 @@ class TestSharesTheDecisionFunctionWithTheXmlPath:
         # the first. A deemed date that postdates filing quarantines the deemed
         # value in the XML path but must not by itself reject the row here.
         assert _call("4", date(2026, 6, 1), deemed="2026-06-30") is False
+
+
+class TestTheSection16FloorIsFormAgnostic:
+    """#2441 — the form gate above is an UPPER-bound rule and stops at 1934.
+
+    §16(a)(2)'s "only latest bounds" argument is what exempts a Form 3 from the
+    future-dating rule. Nothing in it says a Form 3 may report a date before
+    §16 existed, so the floor runs BEFORE the form check — and reports its own
+    reason, because an operator reading ``future_dated`` must not be shown a
+    breach of the opposite bound.
+    """
+
+    @pytest.mark.parametrize("form", ["3", "3/A", "4", "4/A", "5", "5/A", "", "UNKNOWN"])
+    def test_every_form_is_floored(self, form: str) -> None:
+        assert _reason(form, date(1934, 6, 5)) == "pre_section_16"
+
+    def test_the_two_bounds_report_different_reasons(self) -> None:
+        # The whole point of the split: one figure per bound.
+        assert _reason("4", date(2026, 6, 11)) == "future_dated"
+        assert _reason("4", date(23, 6, 23)) == "pre_section_16"
+
+    def test_the_enactment_date_itself_is_kept(self) -> None:
+        # 48 Stat. 896 — the boundary day is inside the statute, not before it.
+        assert _reason("4", date(1934, 6, 6)) is None
+
+    def test_the_floor_takes_neither_upper_bound_exemption(self) -> None:
+        # 'E' and a missing filing date both exempt the UPPER bound only.
+        assert _reason("4", date(23, 6, 23), timeliness="E") == "pre_section_16"
+        assert _reason("4", date(23, 6, 23), filed_at=None) == "pre_section_16"  # type: ignore[arg-type]
+
+    def test_a_form3_ahead_of_its_filing_is_still_kept(self) -> None:
+        # The floor must not become an excuse to gate Form 3 generally (#2790).
+        assert _reason("3", date(2026, 11, 6)) is None

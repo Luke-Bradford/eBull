@@ -170,6 +170,9 @@ def test_each_job_calls_only_its_own_ingester(
                 # #2790 — InsiderIngestResult-specific counter the orchestrator
                 # reads for the Rule 16a-3(g) rejection path.
                 rows_skipped_future_dated=0,
+                # #2441 — the §16 statutory floor is counted apart from the
+                # future-dating rejection, so the orchestrator reads both.
+                rows_skipped_pre_section16=0,
                 # NPortIngestResult-specific field the orchestrator reads.
                 holdings_seen=0,
                 touched_instrument_ids=set(),

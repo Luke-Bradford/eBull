@@ -7757,3 +7757,51 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - First seen in: #3146 (2026-09-17), `scripts/audit_3146_insider_line_order.py`.
 - Enforced in: this log; `scripts/audit_3146_insider_line_order.py::_verify_snapshot` (returns
   `xact_start`; the caller passes it back as `expect=` and the run fails on any change).
+
+### Filtering a write path's INPUT does not retract what it already wrote (#2441, 2026-09-17)
+
+- Symptom: #2441's spec claimed that flagging 20 transactions `txn_date_invalid` would make the
+  5 observation rows derived from them "leave the observations layer on the next sync". It would
+  not. `ownership_observations_sync.sync_insiders` filters its SELECT on
+  `NOT it.txn_date_invalid` and upserts the survivors — there is no `NOT MATCHED BY SOURCE`
+  arm and no tombstone pass, so anything already written stays live forever.
+- ⚠ The mistake is easy because the filter reads like a delete: the guard that stops a bad row
+  being written is the same clause you would grep for when asking "are bad rows excluded?".
+  They are excluded from the INPUT. The output is a separate question with a separate answer.
+- ⚠⚠ And the correction is not a `DELETE`: invariant **I6** (`app/services/
+  ownership_observations.py:455`, *"never hard-delete observations"*) makes the retraction
+  `known_to = NOW()`, and obliges the caller to run `refresh_insiders_current` for every
+  affected instrument afterwards — the tombstone alone leaves the projection unreconciled.
+- Prevention: when a fix changes what a write path considers valid, ask separately (a) what it
+  will stop writing and (b) what it has already written, and name the retraction mechanism for
+  (b). Test: if the plan's only mechanism is a `WHERE` clause on a SELECT, there is no
+  retraction. Then assert the projection **after** the refresh rather than predicting it — here
+  the `ownership_insiders_current` business-column hash was captured before and after and is
+  identical, which is evidence; "0 of them reach `_current` today" was only a premise.
+- First seen in: #2441 (2026-09-17), Codex checkpoint 1 findings 10-12.
+- Enforced in: this log; `sql/390_insider_pre_section16_date_floor.sql` (tombstone statement +
+  header naming I6 and the required refresh); `docs/specs/ownership/2026-09-17-2441-insider-date-floor.md` §4.
+
+### A defect's SHAPE recurring in another column does not carry the source rule with it (#2441, 2026-09-17)
+
+- Symptom: #2441 found 20 `insider_transactions.txn_date` values with a literal two-digit year
+  (`0023-06-23`). The same shape appears in `exercise_date` (12 rows, min `0018-02-26`) and
+  `expiration_date` (24 rows, min `0024-03-01`), so the first draft of the spec quarantined
+  those to `NULL` too — "same typo, same treatment, and the columns are nullable".
+- Cause: the source rule licensing the fix is Exchange Act §16 (48 Stat. 896) — *a reported §16
+  **event** date cannot precede §16*. `exerciseDate` / `expirationDate` are not §16 event dates:
+  they are terms of the derivative security itself (Form 4 General Instruction 4(c)). The
+  statutory argument does not reach them, and **nullability is a storage fact, not a licence**.
+  Nulling them would have been a treatment reasoned from first principles — with a citation
+  attached that did not cover it, which is worse than no citation.
+- ⚠ The tell is that the justification changes shape mid-sentence: from "the statute makes this
+  impossible" to "it looks like the other broken ones". The second is a hypothesis about the
+  filer, not a rule about the data.
+- Prevention: re-derive the source rule **per column**, naming the reported item that column
+  holds, before extending any treatment across columns of the same table. Where the rule does
+  not reach, measure the column and record the number — the ticket asked for the siblings to be
+  "checked and the result recorded either way", and recording is a complete answer.
+- First seen in: #2441 (2026-09-17), Codex checkpoint 1 findings 2 and 6.
+- Enforced in: this log; `docs/specs/ownership/2026-09-17-2441-insider-date-floor.md` §3, which
+  records the withdrawn design rather than deleting it; `sql/390_insider_pre_section16_date_floor.sql`
+  header ("⛔ NOT touched").
