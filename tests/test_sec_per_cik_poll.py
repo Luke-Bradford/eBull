@@ -1048,3 +1048,78 @@ class TestPollRotation:
             )
             row = cur.fetchone()
         assert row == ("error", False, True), "errored row is still immediately due forever"
+
+
+class TestOutcomeCounters:
+    """#3111 slice 6 — the counters feeding the job's #2218 progress verdict.
+
+    The VERDICT is table-tested pure in ``tests/test_poller_outcome_reporting.py``;
+    these two exercise the plumbing that produces the numbers it reads, which
+    needs a real connection.
+    """
+
+    def test_a_rejected_accession_is_counted_not_only_logged(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """``record_manifest_entry``'s ``ValueError`` was logged and dropped, so
+        a subject whose every accession was rejected looked identical to one
+        with nothing new (#3111 §10e).
+
+        ⚠ The rejection is triggered through ``record_manifest_entry``'s own
+        format guard (``sec_manifest.py:287``) rather than by patching it, so
+        the test exercises the real raise site.
+        """
+        _seed_aapl(ebull_test_conn)
+        _make_due(ebull_test_conn, "sec_8k", cik="0000320193", instrument_id=1701, subject_id="1701")
+
+        payload = _aapl_submissions_recent()
+        # Malformed: the guard expects NNNNNNNNNN-NN-NNNNNN.
+        payload["filings"]["recent"]["accessionNumber"] = ["not-an-accession"]
+
+        stats = run_per_cik_poll(
+            ebull_test_conn,
+            http_get=_fake_get(200, payload),
+            source="sec_8k",
+        )
+        ebull_test_conn.commit()
+
+        assert stats.manifest_rejected == 1
+        # The subject WAS probed — the rejection is post-probe, so it must not
+        # move the subject-denominated counters (different denominators).
+        assert stats.subjects_polled == 1
+        assert stats.poll_errors == 0
+        assert stats.new_filings_recorded == 0
+
+    def test_recheck_lane_errors_do_not_land_in_the_poll_lane_bucket(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """§7's recorded gap: recheck errors folded into ``poll_errors``, which
+        made a per-lane success count uncomputable."""
+        _seed_aapl(ebull_test_conn)
+        record_poll_outcome(
+            ebull_test_conn,
+            subject_type="issuer",
+            subject_id="1701",
+            source="sec_8k",
+            outcome="never",
+            last_known_filing_id=None,
+            last_known_filed_at=None,
+            cik="0000320193",
+            instrument_id=1701,
+        )
+        with ebull_test_conn.cursor() as cur:
+            cur.execute("UPDATE data_freshness_index SET next_recheck_at = '2024-01-01' WHERE source = 'sec_8k'")
+        ebull_test_conn.commit()
+
+        stats = run_per_cik_poll(
+            ebull_test_conn,
+            http_get=_fake_get(503, b""),
+            source="sec_8k",
+        )
+        ebull_test_conn.commit()
+
+        assert stats.recheck_subjects_polled == 1
+        assert stats.recheck_poll_errors == 1
+        assert stats.poll_errors == 0

@@ -29,6 +29,7 @@ from app.providers.implementations.sec_submissions import (
     check_freshness,
 )
 from app.services.fundamentals.force_refresh import run_force_refresh
+from app.services.job_progress import JobProgress
 from app.services.sec_manifest import record_manifest_entry
 
 logger = logging.getLogger(__name__)
@@ -285,6 +286,48 @@ class PollStats:
     subjects_polled: int
     fulfilled: int
     poll_errors: int
+    # #3111 slice 6 — ``run_force_refresh``'s return value used to be
+    # discarded, and ``fulfilled`` was then incremented regardless, so a
+    # filing recorded whose fundamentals refresh failed reported a clean
+    # fulfilment. Counts RETURNED failures only:
+    # ``len(result.missing) + result.facts.symbols_failed``.
+    #
+    # ⚠⚠ Zero new facts or periods is NOT counted and must not be. The
+    # poller's own spec (docs/specs/etl/2026-06-28-expected-filings-poller.md
+    # :149-151) makes companyfacts lag an expected, healthy state: "the row
+    # stays fulfilled until the daily daily_financial_facts backstop
+    # normalizes it ... never-worse-than-status-quo."
+    #
+    # ⚠ Incomplete BY CONTRACT: normalize_financial_periods swallows its
+    # per-instrument exceptions and returns only success counts
+    # (docs/specs/api/2026-06-28-fundamentals-force-refresh.md:34), so
+    # ``missing == [] and symbols_failed == 0`` does not prove the refresh
+    # fully succeeded. Closing that needs a change to THAT contract.
+    fundamentals_refresh_failed: int = 0
+
+
+def progress_for(stats: PollStats) -> JobProgress:
+    """#2218 progress verdict for one tick — #3111 slice 6.
+
+    ⚠⚠ **``polled`` is the outcome, NOT ``fulfilled``.** An open expectation
+    whose issuer has not filed yet is the normal state: **5,698 of this job's
+    5,701 successful runs fulfilled nothing** (full population, ``job_runs``
+    2026-06-28 → 2026-09-17; spec §10c), and 3,691 of 3,925 observed ticks had
+    no due subject at all. Using ``fulfilled`` would degrade the job's entire
+    steady state.
+
+    See ``sec_per_cik_poll.progress_for`` for what ``polled`` certifies and for
+    why rule 2 is unreachable on a normal return — the same reasoning applies.
+    """
+    return JobProgress(
+        candidates_seen=stats.subjects_polled,
+        outcomes={"polled": stats.subjects_polled - stats.poll_errors},
+        errors={
+            "probe_failed": stats.poll_errors,
+            "fundamentals_refresh_failed": stats.fundamentals_refresh_failed,
+        },
+        context={"fulfilled": stats.fulfilled},
+    )
 
 
 @dataclass(frozen=True)
@@ -360,6 +403,7 @@ def run_expected_filings_poller(
 
     fulfilled = 0
     errors = 0
+    refresh_failed = 0
     for row in due:
         source = _SOURCE_FOR_FORM[row.expected_filing_type]
         try:
@@ -416,7 +460,14 @@ def run_expected_filings_poller(
         )
         conn.commit()
 
-        run_force_refresh(conn, [row.symbol])
+        # #3111 slice 6 — the result was previously discarded. ``missing``
+        # (symbols with no primary SEC CIK) and ``facts.symbols_failed``
+        # (failures among the deduped fetch set) are DISJOINT populations by
+        # the ForceRefreshResult contract (force_refresh.py:51-63), and this
+        # call site passes exactly one symbol, so the sum is bounded by 1 and
+        # cannot double-count.
+        refresh = run_force_refresh(conn, [row.symbol])
+        refresh_failed += len(refresh.missing) + refresh.facts.symbols_failed
 
         conn.execute(
             """
@@ -435,4 +486,9 @@ def run_expected_filings_poller(
             match.accession_number,
         )
 
-    return PollStats(subjects_polled=len(due), fulfilled=fulfilled, poll_errors=errors)
+    return PollStats(
+        subjects_polled=len(due),
+        fulfilled=fulfilled,
+        poll_errors=errors,
+        fundamentals_refresh_failed=refresh_failed,
+    )
