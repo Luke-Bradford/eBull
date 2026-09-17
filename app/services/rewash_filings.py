@@ -627,12 +627,34 @@ def _apply_def14a(
     # DELETE"). No SEC fetch in this function — safe to hold.
     raw_filings.acquire_filing_accession_write_lock(conn, raw_doc.accession_number)
 
+    # #2341 — both probes below are ``LIMIT 1`` over a set that is NOT
+    # single-valued, so without an ORDER BY the resolved instrument is
+    # whatever the plan happens to return first (#2340 flipped this one
+    # from Seq Scan to Index Scan, which is what surfaced it). Measured on
+    # the 2026-09-17 dev corpus: 99 of 7,293 accessions carry >1 instrument
+    # here (2-5 each), and 405 of 35,902 rescue-cohort accessions do below.
+    # ``issuer_cik`` is single-valued on BOTH (0 accessions with >1), which
+    # is why the ambiguity has stayed latent rather than mis-routing a CIK.
+    #
+    # The order is the settled policy, not a fitted tie-break: #2108
+    # Decision 2 (FINAL) fixes the entity-row instrument as the unambiguous
+    # ``instrument_cik_history`` instrument when one exists, else
+    # ``min(sibling set)``, and records that NO SEC source rule for a
+    # "primary class" exists (``is_primary_listing`` is per-symbol dedup and
+    # cannot express it). There is no discovery instrument at this call site
+    # — a rewash holds only the accession — so ``pick_entity_instrument``'s
+    # history arm cannot arm and the policy degrades to exactly ``min``.
+    # Sorting on both projected columns makes the RESULT deterministic even
+    # though ``(accession_number, instrument_id)`` is not unique here (the
+    # typed key is ``(accession_number, holder_name)``) — prevention-log
+    # "DISTINCT ON / LIMIT 1 need a UNIQUE final tie-break".
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT issuer_cik, instrument_id
             FROM def14a_beneficial_holdings
             WHERE accession_number = %s
+            ORDER BY instrument_id, issuer_cik
             LIMIT 1
             """,
             (raw_doc.accession_number,),
@@ -649,6 +671,7 @@ def _apply_def14a(
                   ON fe.provider_filing_id = log.accession_number
                  AND fe.provider = 'sec'
                 WHERE log.accession_number = %s
+                ORDER BY fe.instrument_id, log.issuer_cik
                 LIMIT 1
                 """,
                 (raw_doc.accession_number,),
@@ -659,6 +682,26 @@ def _apply_def14a(
         # into ``def14a_beneficial_holdings``. Happy-path (above)
         # skips the cap because it operates on already-existing
         # typed rows (spec §6.3 — existing rows untouched).
+        #
+        # ⚠ #2341 — this is the branch where the pick is a live DECISION and
+        # not merely a union member: ``def14a_within_cap`` ranks against
+        # ``_resolve_target_cik_for_cap(instrument_id=...)``, so a different
+        # instrument could rank against a different CIK. Measured bound on the
+        # 2026-09-17 corpus: of the 405 ambiguous rescue accessions only 15 are
+        # cap-eligible at all (the rest are supplemental DEFA/DEFR/DEFM 14A,
+        # which the cap passes unconditionally), 0 have candidates whose
+        # ``instrument_sec_profile.cik`` disagrees, and 1 has a candidate with
+        # no profile row (step-2 sibling fallback). So the verdict is invariant
+        # TODAY by data shape, not by construction — the ORDER BY above is what
+        # makes it invariant by construction.
+        #
+        # ⚠ The order this probe previously got was an ACCIDENT of the index:
+        # ``uq_filing_events_provider_unique`` is ``(provider,
+        # provider_filing_id, instrument_id)`` and the WHERE pins the first two,
+        # so the scan already yielded ``instrument_id`` ascending. That is the
+        # same kind of accidental guarantee #2340 destroyed for the typed probe
+        # above by changing its plan — which is why it is now written down
+        # rather than inherited from an index that may be re-homed (#3116).
         if row is not None and not def14a_within_cap(
             conn,
             accession_number=raw_doc.accession_number,
@@ -1424,12 +1467,29 @@ def _apply_13f_infotable(
     #      empty 13F-HRs and all-CUSIPs-unresolved accessions write
     #      zero holdings rows but DO record a row in the ingest log.
     #      Codex pre-push review caught the gap.
+    #
+    # #2341 — same ``LIMIT 1``-with-no-``ORDER BY`` shape as the DEF 14A arm
+    # above, and it gets the same treatment. ⚠ Unlike that arm the ambiguity
+    # here is ZERO on the 2026-09-17 corpus (0 of 71,708 accessions carry >1
+    # distinct ``(filer_id, period_of_report, filed_at)``; 0 of 213,005 log
+    # accessions do on the rescue join), so these two are deterministic today
+    # by data shape only. A 13F accession is single-filer by construction, but
+    # the LEFT JOIN to ``filing_events`` can still fan out across share-class
+    # siblings, so the guarantee is not one this query owns.
+    #
+    # ⚠ The rescue arm's third sort key repeats the COALESCE rather than naming
+    # the ``filed_at`` output alias. Both are legal and identical — ``ORDER BY``
+    # resolves a bare name against output columns first, and no table in that
+    # FROM even has a ``filed_at`` (only ``institutional_holdings`` does, and it
+    # is not joined there, so the ambiguity a review round raised cannot arise).
+    # It is spelled out so a reader does not have to know that precedence rule.
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT filer_id, period_of_report, filed_at
             FROM institutional_holdings
             WHERE accession_number = %s
+            ORDER BY filer_id, period_of_report, filed_at
             LIMIT 1
             """,
             (raw_doc.accession_number,),
@@ -1461,6 +1521,8 @@ def _apply_13f_infotable(
                   ON fe.provider_filing_id = log.accession_number
                  AND fe.provider = 'sec'
                 WHERE log.accession_number = %s
+                ORDER BY f.filer_id, log.period_of_report,
+                         COALESCE(fe.filing_date::timestamptz, log.fetched_at)
                 LIMIT 1
                 """,
                 (raw_doc.accession_number,),

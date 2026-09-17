@@ -840,6 +840,121 @@ def test_def14a_apply_replaces_holders_on_rewash(
     assert holders == ["Holder A", "Holder C"]
 
 
+def test_def14a_rescue_resolves_the_lowest_instrument_when_filing_events_fan_out(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """#2341 — the rescue probe's ``LIMIT 1`` had no ``ORDER BY``, so which
+    instrument it resolved was whatever the plan returned first (405 of 35,902
+    rescue-cohort accessions carry >1 ``filing_events`` instrument full-pop).
+
+    The pick is only a union member on the happy path, but here it DECIDES the
+    write target: with no sibling set for the CIK, ``_resolve_siblings`` falls
+    back to ``[resolved_instrument_id]``, so the holdings land under exactly the
+    instrument this query picked.
+
+    The expected winner is ``min``: #2108 Decision 2 (FINAL), which also records
+    that no SEC "primary class" rule exists to prefer instead.
+
+    ⚠⚠ What this test CAN and CANNOT catch, measured rather than assumed. It
+    fails when the order is WRONG (flipping to ``instrument_id DESC`` gives
+    ``assert [950121] == [950120]``). It does NOT fail when the ``ORDER BY`` is
+    REMOVED — verified by deleting it and re-running, which still passed.
+    ``uq_filing_events_provider_unique`` is ``(provider, provider_filing_id,
+    instrument_id)``, and this query pins the first two columns, so the index
+    scan already yields ``instrument_id`` ascending on any data size. That
+    accidental guarantee is precisely what #2340 removed for the sibling typed
+    probe by changing its plan, which is why the explicit ``ORDER BY`` is worth
+    having even though no test can observe its absence here.
+    """
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialHolder,
+        Def14ABeneficialOwnershipTable,
+    )
+
+    conn = ebull_test_conn
+    higher_id = 950_121
+    lower_id = 950_120
+    accession = "0001234567-26-000041"
+    # Insert the HIGHER id first so physical row order favours the wrong answer.
+    for iid, sym in ((higher_id, "D14FB"), (lower_id, "D14FA")):
+        conn.execute(
+            """
+            INSERT INTO instruments (
+                instrument_id, symbol, company_name, exchange, currency, is_tradable
+            ) VALUES (%s, %s, 'DEF 14A Fan-out', '4', 'USD', TRUE)
+            ON CONFLICT (instrument_id) DO NOTHING
+            """,
+            (iid, sym),
+        )
+    # Rescue cohort: ingest_log row, zero typed rows. The CIK has no
+    # external_identifiers mapping, so siblings_for_issuer_cik returns empty and
+    # the resolved instrument is the whole write set.
+    conn.execute(
+        """
+        INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status)
+        VALUES (%s, '0000999041', 'partial')
+        """,
+        (accession,),
+    )
+    # DEFA14A is supplemental, so def14a_within_cap passes unconditionally —
+    # this test is about the pick, not about the latest-N cap.
+    for iid in (higher_id, lower_id):
+        conn.execute(
+            """
+            INSERT INTO filing_events (
+                instrument_id, filing_date, filing_type, source_url,
+                provider, provider_filing_id, primary_document_url
+            ) VALUES (%s, '2025-03-01', 'DEFA14A', 'https://example.com/f',
+                      'sec', %s, 'https://example.com/f')
+            """,
+            (iid, accession),
+        )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: Def14ABeneficialOwnershipTable(
+            as_of_date=None,
+            rows=[
+                Def14ABeneficialHolder(
+                    holder_name="Fan-out Holder",
+                    holder_role="director",
+                    shares=Decimal("500"),
+                    percent_of_class=Decimal("3.0"),
+                ),
+            ],
+            raw_table_score=15,
+        ),
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT instrument_id
+            FROM def14a_beneficial_holdings
+            WHERE accession_number = %s
+            """,
+            (accession,),
+        )
+        written = sorted(r[0] for r in cur.fetchall())
+    assert written == [lower_id]
+
+
 def test_def14a_apply_rescues_tombstoned_accession(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
