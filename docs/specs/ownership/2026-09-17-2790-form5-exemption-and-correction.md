@@ -228,6 +228,59 @@ in its own ticket rather than inside a correction.
 re-states `COMMENT ON COLUMN insider_transactions.transaction_timeliness` with §3.6.8's vocabulary
 and §4.3.8.2's form-type reading.
 
+## Result (applied to dev, run `643dbd33-abe7-4dd6-8730-10aac4206c9c`)
+
+702 soft-deleted, 304 instruments refreshed, one transaction, postcondition asserted before commit.
+
+| | before | after |
+| --- | ---: | ---: |
+| future-dated `ownership_insiders_current` rows (the ticket's headline) | **20** | **1** |
+| `_current` rows breaching `period_end > filed_at` | 90 | 4 — all form-type-5-on-Form-4, none correctable |
+| `ownership_insiders_current` as-of anchor for `RMCF` | 2027-07-27 | **2026-09-01** |
+
+The surviving 1 is the named residual (instrument 8884). The other 3 of the 4 are exempt lines
+whose dates have since passed, so they no longer read as "future".
+
+**Full-population A/B through the real read path**, control re-measured on this branch immediately
+before `--apply` (`scripts/audit_2230_insider_oversubscription`, 4 shards): 12,825 instruments,
+**0 harness errors both arms**, 4,430 with a usable denominator.
+
+| | control | treatment |
+| --- | ---: | ---: |
+| insiders wedge > `shares_outstanding` | 388 | **389** |
+| severity 1.0-1.5× / 1.5-5× / 5-100× / ≥100× | 126 / 169 / 89 / 4 | 127 / 169 / 89 / 4 |
+
+11 instruments moved: 9 grew, 2 shrank, **1 newly over-subscribed and 0 cleared**.
+
+⚠ **The one newly-over instrument is `RMCF`, and it is the correction working.** 0.867 → 1.075.
+Seven `_current` rows — six co-filer CIKs of one joint Form 4 group — all carried the same
+709,835-share balance at a typo'd `2027-07-27`, and that bogus balance was the winner for each
+identity. Removing them promotes the group's real latest balance, **1,971,306 at 2026-01-16**
+(`0001193125-26-019954`), which is 2.8× larger. The wedge grows because six identities now each
+report the true joint block — which is **#2230's attribution-overlap axis**, a mechanism this
+change does not touch and did not create. It replaced a wrong number with a right one; the right
+one happens to sit above the threshold.
+
+⚠ The two arms ran ~40 minutes apart with ordinary ingest running between them, so the non-insider
+correction counters moved too (`suppressed_by_13f_nt` 777 → 778, `superseded_by_later_13f_hr`
+15,709 → 15,722). Those are churn, not treatment; the per-instrument diff above is the controlled
+comparison. `insider_section16_exit_declared` 338 → 345 is **not** churn — removing a holder's
+future-dated tip can let #2788's exit-box release fire, which is the expected interaction.
+
+**Operator-visible figures on the live endpoint** after the correction
+(`GET /instruments/{symbol}/ownership-rollup`, dev API, HTTP 200 for all six):
+
+| symbol | insiders slice | pct outstanding | filers |
+| --- | ---: | ---: | ---: |
+| AAPL | 9,811,301 | 0.00067 | 20 |
+| GME | 48,022,385 | 0.09518 | 7 |
+| MSFT | 2,511,214.65 | 0.00033 | 20 |
+| JPM | 9,096,971.24 | 0.00342 | 28 |
+| HD | 556,544.84 | 0.00055 | 19 |
+| RMCF | 10,147,459 | **1.07498** | 23 |
+
+`RMCF` renders exactly the A/B treatment figure, so the harness and the endpoint agree.
+
 ## Acceptance
 
 1. A form-type-**4** line dated after its filing date is rejected (DERA) / flagged (XML), on any

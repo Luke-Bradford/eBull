@@ -134,6 +134,27 @@ def _load_archives(paths: list[Path], accessions: set[str]) -> tuple[dict[str, s
     return submissions, lines
 
 
+_BREACHING_CURRENT_SQL = """
+    SELECT c.instrument_id, c.holder_identity_key, c.ownership_nature, c.source,
+           c.source_document_id, c.period_end, c.source_accession
+      FROM ownership_insiders_current c
+     WHERE c.period_end > (c.filed_at AT TIME ZONE 'UTC')::date
+       AND c.source_document_id NOT LIKE '%:NDH:%'
+"""
+
+
+def _key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """The six-column identity — this table has no surrogate id."""
+    return (
+        row["instrument_id"],
+        row["holder_identity_key"],
+        row["ownership_nature"],
+        row["source"],
+        row["source_document_id"],
+        row["period_end"],
+    )
+
+
 def _resolve(
     row: dict[str, Any],
     submissions: dict[str, str],
@@ -183,9 +204,16 @@ def _resolve(
             return ("unresolved", None, f"date match is not unanimous on form type: {sorted(form_types)}")
         line = matches[0]
 
-    exempt = is_early_form5_line(submission, line.trans_form_type, line.timeliness)
-    verdict = "exempt" if exempt else "correctable"
     why = f"submission={submission!r} line={line.trans_form_type!r} timeliness={line.timeliness or '(blank)'!r}"
+    # ⚠ "Not exempt" is not the same as "adjudicated". A blank or unrecognised
+    # TRANS_FORM_TYPE with no usable ``E`` fallback establishes NOTHING about the
+    # line — the archive simply did not say — and falling through to "correctable"
+    # would soft-delete it under a rule that never fired. The failure is silent in
+    # the destructive direction, so it is checked before the verdict, not after.
+    if line.trans_form_type not in {"4", "5"} and not is_early_form5_line(submission, None, line.timeliness):
+        return ("unresolved", line, f"archive does not establish the line form type ({why})")
+
+    verdict = "exempt" if is_early_form5_line(submission, line.trans_form_type, line.timeliness) else "correctable"
     return (verdict, line, why)
 
 
@@ -245,11 +273,19 @@ def main() -> int:
 
         targets = buckets["correctable"]
         instrument_ids = sorted({int(r["instrument_id"]) for r in targets})
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(_BREACHING_CURRENT_SQL)
+            breaching_before = {_key(row) for row in cur.fetchall()}
+        print(f"breaching _current rows before: {len(breaching_before):,}")
         stamped = datetime.now(UTC)
         # ⚠ The table has NO surrogate id — its PK is the six-column identity
         # below, and one source row fans out across share-class siblings (#1117),
         # so instrument_id is part of what a reversal has to name.
-        with args.ledger.open("w", encoding="utf-8") as handle:
+        # ``x`` — exclusive create. A rerun against the same path would otherwise
+        # truncate the only row-by-row reversal record of the first run, and the
+        # second run has nothing left to write, so the ledger would end up empty
+        # for a correction that did happen.
+        with args.ledger.open("x", encoding="utf-8") as handle:
             for row in targets:
                 handle.write(
                     json.dumps(
@@ -311,16 +347,38 @@ def main() -> int:
             if updated != len(targets):
                 raise SystemExit(f"expected {len(targets)} soft-deletes, applied {updated} — rolled back")
             refreshed = refresh_insiders_current_batch(conn, instrument_ids=instrument_ids)
-            with conn.cursor() as cur:
-                # #26 — removing a winner can PROMOTE another future-dated
-                # observation, so assert the projection after the refresh rather
-                # than inferring it from the delete count.
-                cur.execute("SELECT count(*) FROM ownership_insiders_current WHERE period_end > current_date")
-                residual_row = cur.fetchone()
-                residual = int(residual_row[0]) if residual_row else -1
+
+            # POSTCONDITION, asserted inside the transaction — soft-deleting a
+            # winner PROMOTES an older observation, which can itself breach, so
+            # the projection is re-examined rather than inferred from the delete
+            # count. It is checked against ``filed_at``, the invariant actually
+            # being corrected: ``period_end > current_date`` would go quiet on a
+            # historical wrong-year row the moment that date passes.
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(_BREACHING_CURRENT_SQL)
+                remaining = cur.fetchall()
+            # ⚠ ``submissions``/``lines`` were loaded for the SCOPE's accessions,
+            # so a promoted row on any other accession resolves as "unresolved"
+            # here — which must not read as "fine". Hence the second clause: an
+            # unadjudicated breach is tolerated only if it was ALREADY breaching
+            # before this run. The correction may not introduce one.
+            unexpected = []
+            for row in remaining:
+                verdict = _resolve(row, submissions, lines)[0]
+                if verdict == "correctable" or (verdict == "unresolved" and _key(row) not in breaching_before):
+                    unexpected.append((verdict, row))
+            if unexpected:
+                for verdict, row in unexpected[:10]:
+                    print(
+                        f"  UNEXPECTED [{verdict}] {row['source_accession']} "
+                        f"{row['source_document_id']} {row['period_end']}"
+                    )
+                raise SystemExit(
+                    f"{len(unexpected)} rows still breach after the refresh and are not exempt — rolled back"
+                )
             print(
                 f"soft-deleted {updated:,} rows; refreshed {refreshed:,} instruments; "
-                f"future-dated _current now {residual}"
+                f"{len(remaining)} breaching _current rows remain, none correctable"
             )
         print(f"COMMITTED run {run_id}")
     return 0

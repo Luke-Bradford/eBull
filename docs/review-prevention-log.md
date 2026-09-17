@@ -7958,3 +7958,39 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - First seen in: #2371 (2026-09-17), on a 4-probe batch where 3 applied and were caught.
 - Enforced in: this log; the probe pattern used on #2371 and #2788 (control first, then
   `assert` inside every patch step).
+
+## A source rule read without a filing is half a rule (2026-09-17, #2790)
+
+`transaction_timeliness == 'E'` had been read two ways and both were wrong, by two different
+sessions, from the same correct quotation. The EDGAR Ownership XML Tech Spec §4.3.8.2 says *"a '5'
+transaction is early"*, and reasoning from those words alone gives "early means before the
+deadline, and a deadline is after the event, so the event has happened" — which says the exemption
+should be REMOVED. Reading one filing kills that: `0001127602-24-023-…` — `0001127602-24-015987`
+(RANGE RESOURCES) carries `transactionFormType=5` lines dated 14 days AFTER filing, with footnote
+F2 naming *"a scheduled deferred compensation plan distribution with a distribution date of June 3,
+2024"*. The event genuinely had not happened, and reporting it was legal.
+
+**The lesson is not "read the spec harder".** It is that a spec tells you what a field MAY contain
+and a filing tells you what it DOES mean in context. Where a data-treatment decision turns on a
+field's semantics, fetch one real document that exercises it before writing the rule down.
+
+⚠ The same pass produced the mirror error. Keying the exemption on the FORM TYPE alone — the
+obvious fix once the filing is read — is also wrong, and the full population says so: 50 of the 778
+breaching rows are form-type-5 lines on a **Form 5 submission**, where Rule 16a-3(f) binds that
+filing directly. `0001415889-23-002362` (ARCH CAPITAL, Form 5 for FY2022) carries the SAME gift at
+`15-NOV-2022` and `15-NOV-2023`. The rule needed BOTH fields, and neither the spec quote nor the
+first filing was enough to see that — the census was.
+
+## "Not exempt" is not "adjudicated" (2026-09-17, #2790)
+
+A correction script classified each row by calling the shipped exemption predicate and treating
+`False` as **correctable**. But the predicate answers "is this line exempt", not "did the source
+establish what this line is" — so a blank or unrecognised form type in the archive, which
+establishes nothing, fell through to the destructive bucket. Caught at Codex checkpoint 2, before
+`--apply`.
+
+The shape is general: a boolean helper's `False` covers both "the rule says no" and "the rule never
+fired". When the `False` branch is destructive, test for the INPUT being determinate first, and
+record it as a distinct third verdict. Here that verdict is `unresolved`, and `--apply` refuses to
+run while any exists — because "keep what you could not classify" plus "0 breaches remain" is a
+pair that passes vacuously against an empty cache.
