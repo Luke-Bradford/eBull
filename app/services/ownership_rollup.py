@@ -1568,6 +1568,15 @@ def _read_section16_exit_insiders(conn: psycopg.Connection[Any], instrument_id: 
                     # from a removed Form 4 row (Codex ckpt-2). ``winning_source`` below
                     # already records that the evidence itself is a Form 4/5.
                     source_channel=removed_channel,
+                    # ``form4`` covers Form 5 too, and the distinction is genuinely lost
+                    # here — but it was lost UPSTREAM, by design, not in this producer.
+                    # :data:`SourceTag` has no ``form5`` member because
+                    # ``sec_insider_dataset_ingest._map_form_to_source`` folds 4 / 4-A /
+                    # 5 / 5-A into ``form4`` ("Form 5 is the annual catch-up of the same
+                    # Form-4 transaction universe"). Both forms carry the exit box under
+                    # the same General Instruction 1(b), so nothing about THIS rule turns
+                    # on which one it was; 20 of the 3,270 flagged filings are a "5", and
+                    # anyone who needs that reads ``insider_filings.document_type``.
                     winning_source="form4",
                     winning_accession=(str(row["evidence_accession"]) if row["evidence_accession"] else None),
                     detail=(
