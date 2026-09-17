@@ -57,6 +57,7 @@ from uuid import UUID
 
 import psycopg
 import pytest
+from psycopg.pq import TransactionStatus
 
 from app.providers.broker import BrokerOrderResult, BrokerOrderSubmissionUncertain, OrderParams
 from app.security.unattended_guard import UnattendedExecutionRefused
@@ -180,6 +181,35 @@ def _exit_lot_lock_cursor(units: float | Decimal = 1000.0) -> MagicMock:
     return cur
 
 
+def _advisory_lock_aware_result(result: MagicMock, sql: object) -> MagicMock:
+    """Make the shared `conn.execute` result answer advisory locks like Postgres.
+
+    `pg_try_advisory_lock` / `pg_advisory_unlock` answer `(True,)` on a healthy
+    connection nobody else is holding. Everything else answers `fetchone() ->
+    None`, which for the #2942 release UPDATE means "no never-submitted claim to
+    release" — the ordinary case in every test that does not set one up.
+
+    ⚠ It MUTATES and returns the one shared `conn.execute.return_value` rather
+    than building a fresh mock per call, so a test that sets
+    `conn.execute.return_value.rowcount = 0` still steers the statement it means
+    to (`_update_position_exit`'s one-row assertion, #3013).
+
+    ⚠ Only those two statements are special-cased. Everything else keeps the
+    pre-#2942 behaviour — `fetchone()` returns a bare mock — because several
+    readers (`_engine_owned_long_lot_count`) assert the row is not None, and a
+    blanket `None` default would fail them for a reason unrelated to what they
+    test.
+    """
+    text = str(sql)
+    if "pg_try_advisory_lock" in text or "pg_advisory_unlock" in text:
+        result.fetchone.return_value = (True,)
+    elif "recommendation_submission_phase = 'claim_committed'" in text:
+        result.fetchone.return_value = None
+    else:
+        result.fetchone.return_value = MagicMock()
+    return result
+
+
 def _make_conn(cursor_sequence: list[MagicMock]) -> MagicMock:
     """
     Build a fake psycopg connection.
@@ -190,6 +220,19 @@ def _make_conn(cursor_sequence: list[MagicMock]) -> MagicMock:
     conn = MagicMock()
     conn.cursor.side_effect = cursor_sequence
     conn.execute.return_value = MagicMock()
+    # #2942 half 2: the live path takes a session-scoped advisory lock and then
+    # runs one `UPDATE … RETURNING` that releases a never-submitted claim. Both
+    # go through `conn.execute(...).fetchone()`, and they want DIFFERENT answers,
+    # so the fake has to read the statement rather than return one constant:
+    # a healthy Postgres answers the lock `(True,)`, and the release UPDATE
+    # matches no row in the ordinary case (`None`). Returning a bare MagicMock
+    # for both would make every live test refuse with
+    # `ConcurrentSubmissionInFlightError`.
+    conn.execute.side_effect = lambda sql, *_a, **_kw: _advisory_lock_aware_result(conn.execute.return_value, sql)
+    # A bare MagicMock compares unequal to IDLE, which would make the lock's
+    # release path roll back on every exit and make `assert conn.rollback.called`
+    # trivially true wherever it is asserted. The fake reports the real state.
+    conn.info.transaction_status = TransactionStatus.IDLE
     # #3013: _update_position_exit asserts its UPDATE matched exactly one row.
     # A bare MagicMock's rowcount is a MagicMock and compares unequal to 1, so
     # the default here has to be the HEALTHY value; the zero-row case is set
@@ -1167,6 +1210,23 @@ class TestExecuteOrderLiveMode:
 
         conn.commit.side_effect = _commit_tag
 
+        # #2942 half 2: tag the statements the marker mechanism depends on, so
+        # the assertion below pins WHERE the marker commits, not merely that it
+        # does. Delegates to the shared fake for the actual result.
+        def _execute_tag(sql: object, *_args: object, **_kwargs: object) -> MagicMock:
+            text = str(sql)
+            if "pg_try_advisory_lock" in text:
+                sequence.append("lock")
+            elif "pg_advisory_unlock" in text:
+                sequence.append("unlock")
+            elif "recommendation_submission_phase = 'broker_verb_entered'" in text:
+                sequence.append("marker_update")
+            elif "status = 'refused'" in text:
+                sequence.append("release_probe")
+            return _advisory_lock_aware_result(conn.execute.return_value, sql)
+
+        conn.execute.side_effect = _execute_tag
+
         with pytest.raises(RuntimeError, match="simulated broker crash"):
             execute_order(
                 conn,
@@ -1175,10 +1235,36 @@ class TestExecuteOrderLiveMode:
                 broker=broker,
             )
 
-        # Order matters: intent → commit → broker call.
-        assert sequence == ["intent_insert", "commit", "broker.place_order"], (
-            f"durable-intent ordering violated: {sequence}"
-        )
+        # Order matters, and every step of it is load-bearing:
+        #   lock            — the evidence key, taken before the claim exists
+        #   release_probe   — a never-submitted claim from a previous crash goes
+        #                     first; here it matches nothing
+        #   intent_insert   — the claim
+        #   commit          — the claim is on disk before anything external
+        #   marker_update + commit — its OWN commit; folded into the claim's it
+        #                     would prove nothing
+        #   broker.place_order — the unprovable side starts here
+        assert sequence == [
+            "lock",
+            "commit",
+            "lock",
+            "commit",
+            "release_probe",
+            "unlock",
+            "commit",
+            "intent_insert",
+            "commit",
+            "marker_update",
+            "commit",
+            "broker.place_order",
+            "unlock",
+            "commit",
+        ], f"durable-intent ordering violated: {sequence}"
+        # The two things the sequence has to get right, stated separately so a
+        # future reordering fails with a readable message rather than a diff.
+        assert sequence.index("intent_insert") < sequence.index("marker_update")
+        assert sequence.index("marker_update") < sequence.index("broker.place_order")
+        assert sequence[sequence.index("marker_update") + 1] == "commit"
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_buy_zero_row_update_raises(self, _mock_now: MagicMock) -> None:
@@ -1281,11 +1367,15 @@ class TestExecuteOrderFailures:
         assert "failed" in result.explanation
 
         # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
-        # rec status update + audit = 2. Total 4 (no fill/position/cash
-        # on a failed broker call). The #243 post-broker UPDATE goes
-        # through a cursor, not conn.execute, so it does not bump this
-        # counter.
-        assert conn.execute.call_count == 4
+        # rec status update + audit = 2. No fill/position/cash on a failed
+        # broker call. The #243 post-broker UPDATE goes through a cursor, not
+        # conn.execute, so it does not bump this counter.
+        #
+        # #2942 half 2 adds six more, all on the live submission span:
+        # the outer evidence-lock acquire, the terminaliser's own nested
+        # acquire, its release UPDATE (matching nothing here), its nested
+        # unlock, the marker UPDATE, and the outer unlock.
+        assert conn.execute.call_count == 4 + 6
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_broker_pending_persists_order_with_pending_status(self, _mock_now: MagicMock) -> None:
