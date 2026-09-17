@@ -3872,20 +3872,19 @@ def core_candidate_quote_refresh() -> None:
     on each of the four days the lane covered it, and the 13:00 bucket is
     ``observed`` on zero of them.
 
-    ⚠⚠ THIS DOES NOT MOVE THE BOUND, AND THE ORDER IS DELIBERATE.
-    ``CORE_MAX_QUOTE_AGE_SECONDS`` stays 5400 s, derived from ``quotes_refresh``'s
-    hourly period by ``strategy_core_preflight._freshness_bound``.  Re-deriving it
-    from THIS job's 300 s period would tighten it 18-fold, which is safer in
-    steady state and strictly more dangerous on the first attended evaluation:
-    a bound tightened ahead of any run history for the producer it now depends on
-    can refuse for a reason nobody has observed.  Tightening is a separate step,
-    to be taken once this job has a measured run history, and it is a policy
-    VERSION bump rather than an edit to the constant.
+    ⚠⚠ THE BOUND NOW FOLLOWS THIS JOB (#3157), and the order was deliberate.
+    #3118 left ``CORE_MAX_QUOTE_AGE_SECONDS`` at 5400 s — derived from
+    ``quotes_refresh``'s hourly period — because a bound tightened ahead of any run
+    history for the producer it newly depends on can refuse for a reason nobody has
+    observed.  #3157 re-derived it once that history existed: 750 s, this job's
+    300 s period with ONE lost fire tolerated, as a ``CORE_PREFLIGHT_POLICY_VERSION``
+    bump (v2 -> v3) rather than an edit to the constant.
 
-    Consequence, stated rather than left to be rediscovered: until then the bound
-    is LOOSE against this producer.  A stopped ``core_candidate_quote_refresh``
-    is not detected for up to 5400 s, exactly as today — the realised age
-    improves, the guarantee does not.
+    ⚠ The naive re-derivation was falsified by that history and the reason is here:
+    2 of this job's first 352 slots wrote NO ``job_runs`` row of any status, so its
+    realised inter-arrival reaches 600 s and a 1.5-period (450 s) bound would refuse
+    a healthy state for ~150 s after each loss.  Diagnosing the loss is not #3157's
+    scope; tolerating it is why ``tolerated_missed_fires=1``.
 
     ⚠ No session prerequisite, on purpose.  A session predicate on the producer
     is the coupling that caused #3118 in the first place, and the cost of running

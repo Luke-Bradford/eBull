@@ -45,6 +45,7 @@ from app.services.broker_credentials import (
 )
 from app.services.strategy_core_executor import CoreExecutionResult, CoreResumeAuthority
 from app.services.strategy_core_mandate import CoreMandate
+from app.services.strategy_core_preflight import CORE_PREFLIGHT_POLICY_VERSION
 from app.services.strategy_core_selection import CoreCandidateCoverage, CoreSelection
 from app.services.strategy_engine_capital import EngineCapitalObservationError
 
@@ -283,7 +284,11 @@ def test_rebalance_passes_the_exact_loaded_credential_ids_to_the_executor(
 
     assert response.state == "held"
     assert response.submission_policy_version == "core-submission-v1"
-    assert response.preflight_policy_version == "core-preflight-v2"
+    # Read from the module rather than re-typed: this assertion is about the API
+    # SURFACING the version it ran under, and a literal here re-breaks on every
+    # policy bump for no coverage (#3157 moved it v2 -> v3). The value itself is
+    # pinned in tests/test_2603_core_preflight.py, where the policy lives.
+    assert response.preflight_policy_version == CORE_PREFLIGHT_POLICY_VERSION
     assert response.broker_preflight_policy_version == "core-broker-preflight-v2"
     assert execute.call_args.kwargs["api_key_credential_id"] == api.id
     assert execute.call_args.kwargs["user_key_credential_id"] == user.id
