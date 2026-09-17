@@ -129,11 +129,26 @@ def test_acquire_actually_sleeps_for_its_grant(sec_gate_pool):
     reservation cost the caller anything, so one test still has to run the real
     sleep path. Asserted as a LOWER bound on elapsed time, which oversleep can
     only satisfy harder.
+
+    ⚠ `t0` is taken BEFORE the warm-up, not after it (#2341, PR #3156). The
+    warm-up reserves `next_free_at = <db now> + floor`, so the following acquire
+    sleeps until that instant — which is a full floor from the DB's clock but
+    only `floor - round_trip` from the moment the warm-up RETURNS. Anchoring
+    `t0` after the warm-up therefore excluded the round trip from elapsed while
+    the ladder had already spent it, and the 0.9 tolerance absorbed only ~10ms
+    of it. Measured failure on the push gate at xdist load: elapsed 0.0841
+    against a 0.09 bound, i.e. a ~16ms round trip. Serial it passed 8/8, which
+    is why it reads as a flake rather than as the scale-dependent bound it is.
+
+    Moving `t0` earlier can only make elapsed LARGER, so it cannot mask a real
+    under-sleep: the ladder must still advance two floors across the two
+    acquires below, and a gate that skipped its sleeps entirely would spend only
+    three round trips here and still fail the bound.
     """
     floor = 0.05
     gate = PostgresFloorGate(sec_gate_pool, budget="sec", floor_s=floor)
-    gate.acquire()  # may return immediately off a stale ladder
     t0 = time.monotonic()
+    gate.acquire()  # may return immediately off a stale ladder
     gate.acquire()
     gate.acquire()
     assert time.monotonic() - t0 >= floor * 2 * 0.9

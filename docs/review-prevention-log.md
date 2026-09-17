@@ -8031,3 +8031,22 @@ When the key IS a computed output column, repeat the expression rather than nami
 And when a review finding asserts a runtime error, check the schema and the test evidence
 before either accepting or rebutting it: the answer here changed the reply from "fixed a bug"
 to "fixed the readability, refuted the error", which are different claims about the same edit.
+
+## A timing bound anchored after a warm-up excludes the latency the warm-up already spent (2026-09-17, #2341, PR #3156)
+
+`tests/db/test_postgres_rate_gate.py::test_acquire_actually_sleeps_for_its_grant` failed the
+push gate at `0.0841 >= 0.09`. It is not my diff and it is not noise: the warm-up `acquire()`
+reserves `next_free_at = <db now> + floor`, so the next acquire sleeps a full floor **from the
+DB's clock** but only `floor - round_trip` from the instant the warm-up RETURNED. The clock
+started after the warm-up, so the round trip was spent by the ladder and not counted in
+elapsed, and the 0.9 tolerance covered only ~10ms of it. Serial it passed 8/8; it fails under
+xdist load, which is what makes it read as a flake instead of as a bound that is a function of
+machine load.
+
+**The rule: when a test asserts elapsed time against a budget that some SETUP step has already
+begun consuming, the clock starts before that step.** The general form is the scale-dependent
+bound already in this log — a threshold that is fixed while the quantity it gates is
+proportional to load. Check direction before "fixing" one: moving the anchor earlier can only
+lengthen elapsed, so it weakens nothing, whereas widening the tolerance would have hidden a
+real under-sleep. Grep test: a `t0 = time.monotonic()` that sits between a warm-up call and the
+calls being measured.
