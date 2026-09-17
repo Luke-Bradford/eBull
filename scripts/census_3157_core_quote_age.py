@@ -60,9 +60,7 @@ def main() -> None:
     args = parser.parse_args()
 
     with psycopg.connect(settings.database_url) as conn:
-        cohort = conn.execute(
-            CORE_QUOTE_REFRESH_SCOPE_SQL, {"pass_verdict": CORE_ELIGIBILITY_PASS_VERDICT}
-        ).fetchall()
+        cohort = conn.execute(CORE_QUOTE_REFRESH_SCOPE_SQL, {"pass_verdict": CORE_ELIGIBILITY_PASS_VERDICT}).fetchall()
     ids = [int(r[0]) for r in cohort]
     print(f"cohort: {len(ids)} instruments — {', '.join(str(r[1]) for r in cohort)}", flush=True)
 

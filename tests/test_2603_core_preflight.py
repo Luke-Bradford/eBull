@@ -329,8 +329,7 @@ def test_each_freshness_bound_still_agrees_with_its_producers_registered_cadence
         period = _period_seconds(cadence)
         lo, hi = (tolerated + 1) * period, (tolerated + 2) * period
         assert lo <= bound < hi, (
-            f"{job_name}: bound {bound}s is outside [{lo}, {hi}) — "
-            "the cadence moved and the derivation no longer holds"
+            f"{job_name}: bound {bound}s is outside [{lo}, {hi}) — the cadence moved and the derivation no longer holds"
         )
         assert bound == _freshness_bound(period, tolerated_missed_fires=tolerated)
 

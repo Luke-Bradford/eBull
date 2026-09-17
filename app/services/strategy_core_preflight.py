@@ -149,10 +149,18 @@ def _freshness_bound(period_seconds: int, *, tolerated_missed_fires: int = 0) ->
 #: ``quotes`` is also written by ``quotes_refresh`` (hourly) and by
 #: ``etoro_websocket.upsert_quote``, so a dead ``core_candidate_quote_refresh`` does
 #: not age this row without limit -- the hourly write keeps it under 3600 s and
-#: admission reopens briefly after each one.  What the bound guarantees is the
-#: property a verdict actually needs: every quote-quality refusal below
-#: (``core_quote_crossed``, ``core_quote_price_invalid``, ``spread_flag``) and the
-#: admission itself are reached on a row at most this old.
+#: admission reopens briefly after each one.  What the bound guarantees is narrower
+#: and is the property a verdict actually needs: an ADMITTED submission is admitted
+#: on a row at most this old.
+#:
+#: ⚠ It does NOT bound the row behind the quote-QUALITY refusals.
+#: ``core_quote_price_invalid``, ``core_quote_crossed`` and
+#: ``core_quote_spread_flagged`` are returned BEFORE ``_age_ok`` runs (see the
+#: precedence order in ``_decide``), so a stale and crossed quote reports
+#: ``core_quote_crossed``, not ``core_quote_stale``.  Left that way deliberately:
+#: every one of those branches refuses, so the safety property is identical and only
+#: the diagnosis label differs, and the return ORDER is itself a frozen contract
+#: (``CorePreflightRefusal``) that #3157 has no evidence to re-open.
 CORE_MAX_QUOTE_AGE_SECONDS: Final = _freshness_bound(300, tolerated_missed_fires=1)
 
 #: ``strategy_halt_feed_refresh`` is ``Cadence.every_n_minutes(interval=5)``
