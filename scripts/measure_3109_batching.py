@@ -25,7 +25,7 @@ from typing import Any, LiteralString
 import psycopg
 
 from app.config import settings
-from app.services.data_freshness import POLL_REPOLL_INTERVAL
+from app.services.data_freshness import POLL_REPOLL_INTERVAL, ciks_due_for_recheck
 
 # The states each lane treats as candidates (``app/services/data_freshness.py``),
 # inlined as literals because this script must describe what the selector does
@@ -272,44 +272,61 @@ def _r1_rotation_discriminator(conn: psycopg.Connection[Any], cur: psycopg.Curso
     from "different rows that happen to share a timestamp". Codex checkpoint 1
     was right to reject that inference.
 
-    So ask the queue directly instead: run the REAL selector now, and diff its
-    CIK set against the CIKs the most recent run actually polled.
+    So ask the corpus directly: of the CIKs the most recent run actually
+    polled, how many are **still eligible** right now?
 
-      polled_only == 0  →  polling removed nothing. The head is pinned.
-      polled_only  > 0  →  polling rotates the queue.
+      still_eligible == 0  →  the poll excluded them. Rotation works.
+      still_eligible  > 0  →  polling removed nothing. The head is pinned.
 
-    Measured 2026-09-16T23:30Z, before the fix: selector 66, polled 48,
-    intersection 48, **polled_only 0**.
+    Measured 2026-09-16T23:30Z, before the fix: 48 polled, **48 still
+    eligible** — a completed poll excluded nothing.
 
-    The selector is imported rather than re-expressed here on purpose: the
-    thing under test is the selector, and the comparand (``last_polled_at``)
-    comes from the corpus, so this is not a verifier pinned to its own code.
-    ⚠ All four counts are printed, not just the verdict — an EMPTY selector
-    would otherwise produce ``polled_only = len(polled)`` and read as a pass.
+    ⚠⚠ This asks the ELIGIBILITY PREDICATE, not "is it in the selector's
+    prefix". Codex checkpoint 2 killed the prefix version: it diffed against a
+    66-CIK prefix while the worker now polls up to 100, so if all 100 polled
+    CIKs stayed at the head it would report 34 "rotated" and certify a queue
+    that had not moved. A verifier whose window is smaller than the thing it
+    verifies reports success by arithmetic.
+
+    The predicate is re-expressed here in SQL rather than imported, because the
+    imported reader is LIMIT-bounded and the question is unbounded. It is kept
+    honest by ``_POLL_STATES`` being the same literal the rest of this script
+    uses, and by printing the raw counts rather than only the verdict.
     """
     from app.services.data_freshness import ciks_due_for_poll
 
-    selected = {b[0].cik for b in ciks_due_for_poll(conn, limit=_POLL_BUDGET) if b}
     cur.execute(
-        """
-        SELECT DISTINCT lpad(cik, 10, '0') FROM data_freshness_index
-        WHERE last_polled_at = (SELECT max(last_polled_at) FROM data_freshness_index)
+        f"""
+        WITH last_run AS (
+            SELECT DISTINCT lpad(cik, 10, '0') AS cik_padded
+            FROM data_freshness_index
+            WHERE last_polled_at = (SELECT max(last_polled_at) FROM data_freshness_index)
+        )
+        SELECT (SELECT count(*) FROM last_run),
+               (SELECT count(DISTINCT lpad(d.cik, 10, '0'))
+                  FROM data_freshness_index d
+                  JOIN last_run l ON lpad(d.cik, 10, '0') = l.cik_padded
+                 WHERE d.state IN {_POLL_STATES}
+                   AND d.next_poll_at <= now())
         """
     )
-    polled = {r[0] for r in cur.fetchall()}
+    row = cur.fetchone()
+    assert row is not None, "discriminator query returned no row"
+    polled, still_eligible = row
+    selector_now = len(ciks_due_for_poll(conn, limit=_POLL_BUDGET))
     print(
-        f"R1 rotation discriminator: selector_now={len(selected)} last_run_polled={len(polled)} "
-        f"intersection={len(selected & polled)} polled_only={len(polled - selected)}"
+        f"R1 rotation discriminator: last_run_polled={polled} still_eligible={still_eligible} "
+        f"(selector prefix now={selector_now}, budget={_POLL_BUDGET})"
     )
-    if not selected:
-        print("    ⚠ selector returned NOTHING — polled_only is meaningless here, not a pass")
-    elif polled and not (polled - selected):
-        print("    ⚠ polled_only=0 — a completed poll removed no CIK from the queue. HEAD IS PINNED.")
+    if not polled:
+        print("    ⚠ no run has polled anything yet — this says nothing either way")
+    elif still_eligible:
+        print(f"    ⚠ {still_eligible} of {polled} just-polled CIKs are STILL ELIGIBLE. HEAD IS PINNED.")
     else:
-        print("    ✅ polling removes CIKs from the queue head")
+        print("    ✅ every just-polled CIK is excluded — the queue rotates")
 
 
-def _r2_reach(cur: psycopg.Cursor[Any]) -> None:
+def _r2_reach(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any]) -> None:
     """How much of the index has EVER been polled, and how fast can it rotate?"""
     rows, ciks, polled_rows, polled_ciks, oldest = _one(
         cur,
@@ -349,9 +366,16 @@ def _r2_reach(cur: psycopg.Cursor[Any]) -> None:
     # ⚠ Computed, never written down — the interval and the budget both live in
     # code, and a hand-copied cycle time goes stale the moment either moves.
     # ``_RECHECK_BUDGET`` is the CAP; the poll lane gets the residual, so the
-    # drain rate depends on how full the recheck lane actually is right now.
-    (recheck_rows,) = _one(cur, f"SELECT count(*) FROM data_freshness_index WHERE state IN {_RECHECK_STATES}")
-    recheck_ciks_now = min(recheck_rows, _RECHECK_BUDGET)
+    # drain rate depends on how many CIKs the recheck lane actually claims.
+    #
+    # ⚠⚠ Ask the PRODUCTION selector for that number. Codex checkpoint 2 killed
+    # the `count(*) ... WHERE state IN (...)` version, which was wrong twice
+    # over: it counted ROWS where the budget is denominated in CIKs, and it
+    # ignored `next_recheck_at` entirely — so 34 rows all due TOMORROW read as
+    # a full recheck lane and reported the poll budget as 66/SATURATED when the
+    # worker would in fact allocate all 100. A capacity figure derived from a
+    # different predicate than the allocator's is not a capacity figure.
+    recheck_ciks_now = len(ciks_due_for_recheck(conn, limit=_RECHECK_BUDGET))
     per_tick = _TOTAL_BUDGET - recheck_ciks_now
     per_day = per_tick * 24
     if ciks and per_day:
@@ -382,7 +406,7 @@ def main() -> None:
                 _m3_collisions(cur)
                 _m4_runtime(cur)
             _r1_rotation_discriminator(conn, cur)
-            _r2_reach(cur)
+            _r2_reach(conn, cur)
 
 
 if __name__ == "__main__":
