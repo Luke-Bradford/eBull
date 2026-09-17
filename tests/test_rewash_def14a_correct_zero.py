@@ -96,19 +96,70 @@ class TestCorrectZeroRelease:
         assert not no_stored_name_is_a_beneficial_owner([*_ACC_0001731122_26_000671, "BlackRock, Inc."])
 
     def test_a_real_holder_is_never_an_instrument(self) -> None:
-        """The widened rule's risk is over-removal, so pin the other direction.
-
-        ``strip_class_designator`` drops every token of length <= 2 from a name
-        containing 'class' or 'series', which is blunt — these names survive it
-        because a proper noun is not equity vocabulary."""
+        """The widened rule's risk is over-removal, so pin the other direction."""
         for holder in (
             "BlackRock, Inc.",
             "The Vanguard Group",
             "Class Action Capital Partners LLC",
             "Series Fund Advisors, L.P.",
+            "Series B Partners LP",
+            "Class A Holdings Co",
             "All directors and executive officers as a group (10 persons)",
         ):
             assert not name_is_not_a_beneficial_owner(holder), holder
+
+    def test_the_class_designator_strip_has_a_known_blunt_edge(self) -> None:
+        """⚠ Records the boundary instead of claiming there isn't one.
+
+        An earlier version of the test above asserted the strip is blunt "but
+        these names survive it", which over-claims. ``strip_class_designator``
+        drops EVERY token of length <= 2 from a name containing 'class' or
+        'series' — including the corporate designator — so 'Series A LP' reduces
+        to ['series'] and reads as an instrument. Found by a Codex checkpoint-3
+        pass that executed the predicate rather than reading it.
+
+        This is NOT introduced here. It is the STORAGE path's behaviour, and the
+        next test pins that the two agree by construction: a name in this shape
+        is already refused storage today, so it cannot become a stored row for
+        the release rule to act on. Legacy rows predate that refusal, which is
+        why the exposure is measured rather than argued — on the 2026-09-17
+        corpus the rule releases 3 accessions and none carries a name of this
+        shape (``scripts/audit_2371_correct_zero_release``).
+        """
+        assert name_is_not_a_beneficial_owner("Series A LP")
+        assert name_is_not_a_beneficial_owner("Class A Common Stock LP")
+
+    def test_the_release_rule_never_diverges_from_the_storage_rule(self) -> None:
+        """The actual invariant: this rule may only ever release a row the parser
+        would itself refuse to store.
+
+        That is what makes the widened predicate safe despite the blunt edge
+        above — it cannot be MORE eager than the parser, whatever the parser's
+        vocabulary happens to do. Asserted as an equivalence over both the
+        agreeing and the disagreeing cases, so a future edit to either side that
+        breaks the mirror fails here rather than silently widening a deletion.
+        """
+        from app.providers.implementations.sec_def14a import (
+            _SCHEDULE_13D_COVER_LABEL_RE,
+            _is_instrument_not_owner,
+        )
+
+        for name in (
+            "Series A LP",
+            "Class A Common Stock LP",
+            "Series Fund Advisors, L.P.",
+            "Class A Holdings Co",
+            "BlackRock, Inc.",
+            "Class B Common Stock",
+            "Common Stock",
+            "SHARED VOTING POWER -0",
+            "Sole voting power",
+            "All directors and executive officers as a group (10 persons)",
+        ):
+            storage_refuses = bool(_SCHEDULE_13D_COVER_LABEL_RE.match(name)) or _is_instrument_not_owner(
+                name, strip_class_designator=True
+            )
+            assert name_is_not_a_beneficial_owner(name) is storage_refuses, name
 
     def test_an_empty_or_blank_set_is_never_proof(self) -> None:
         """``all()`` over an empty sequence is vacuously TRUE — the same shape
