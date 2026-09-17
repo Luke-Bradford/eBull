@@ -224,7 +224,11 @@ def _raw_payload_retention_census(conn: psycopg.Connection[object]) -> list[dict
         SELECT document_kind,
                count(*) FILTER (WHERE payload IS NOT NULL) AS live_rows,
                count(*) FILTER (WHERE payload IS NULL)     AS compacted_rows,
-               COALESCE(sum(byte_count) FILTER (WHERE payload IS NOT NULL), 0) AS live_bytes
+               -- No payload filter on the SUM: byte_count is GENERATED from
+               -- octet_length(payload) (sql/107:68), so it NULLs out with the
+               -- payload and sums to live bytes already. The COUNTs above DO
+               -- need the predicate — count(*) carries no such coupling.
+               COALESCE(sum(byte_count), 0) AS live_bytes
         FROM filing_raw_documents
         GROUP BY document_kind
         ORDER BY 4 DESC
