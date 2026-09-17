@@ -65,6 +65,7 @@ from app.services.sec_insider_dataset_ingest import _iter_tsv, _parse_iso_date
 # for the population it deletes from (the #2788 census lesson, prevention log).
 from scripts.audit_2790_insider_future_period import _SCOPE
 
+
 def _default_archive_dir() -> Path:
     """The bulk cache the ingest orchestrator itself uses (``_bulk_dir``)."""
     return resolve_data_dir() / "sec" / "bulk"
@@ -107,7 +108,9 @@ def _load_archives(paths: list[Path], accessions: set[str]) -> tuple[dict[str, s
                 doc_type = (row.get("DOCUMENT_TYPE") or row.get("FORM_TYPE") or row.get("FORM") or "").strip()
                 prior = submissions.get(accession)
                 if prior is not None and prior != doc_type:
-                    raise SystemExit(f"conflicting DOCUMENT_TYPE for {accession}: {prior!r} vs {doc_type!r} ({path.name})")
+                    raise SystemExit(
+                        f"conflicting DOCUMENT_TYPE for {accession}: {prior!r} vs {doc_type!r} ({path.name})"
+                    )
                 submissions[accession] = doc_type
             for row in _iter_tsv(zf, "NONDERIV_TRANS.tsv", "NON_DERIV_TRANS.tsv"):
                 accession = (row.get("ACCESSION_NUMBER") or "").strip()
@@ -124,7 +127,8 @@ def _load_archives(paths: list[Path], accessions: set[str]) -> tuple[dict[str, s
                 if prior_line is not None and prior_line.trans_form_type != line.trans_form_type:
                     raise SystemExit(
                         f"conflicting TRANS_FORM_TYPE for {accession}:{sk}: "
-                        f"{prior_line.trans_form_type!r} ({prior_line.archive}) vs {line.trans_form_type!r} ({path.name})"
+                        f"{prior_line.trans_form_type!r} ({prior_line.archive}) "
+                        f"vs {line.trans_form_type!r} ({path.name})"
                     )
                 lines[(accession, sk)] = line
     return submissions, lines
@@ -164,7 +168,8 @@ def _resolve(
         # row. Confirm the archive line carries the date we are about to delete
         # for, so a re-keyed or revised extract cannot adjudicate a different one.
         if line.trans_date is not None and line.trans_date != row["period_end"]:
-            return ("unresolved", None, f"archive TRANS_DATE {line.trans_date} != stored period_end {row['period_end']}")
+            mismatch = f"archive TRANS_DATE {line.trans_date} != stored period_end {row['period_end']}"
+            return ("unresolved", None, mismatch)
     else:
         matches = [
             candidate
@@ -180,7 +185,8 @@ def _resolve(
 
     exempt = is_early_form5_line(submission, line.trans_form_type, line.timeliness)
     verdict = "exempt" if exempt else "correctable"
-    return (verdict, line, f"submission={submission!r} line={line.trans_form_type!r} timeliness={line.timeliness or '(blank)'!r}")
+    why = f"submission={submission!r} line={line.trans_form_type!r} timeliness={line.timeliness or '(blank)'!r}"
+    return (verdict, line, why)
 
 
 def main() -> int:
@@ -194,17 +200,17 @@ def main() -> int:
         raise SystemExit("--apply requires --ledger: an unlogged destructive run cannot be reversed row by row")
 
     run_id = str(uuid4())
-    with psycopg.connect(settings.database_url, row_factory=psycopg.rows.dict_row) as conn:
-        with conn.cursor() as cur:
+    with psycopg.connect(settings.database_url) as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SET statement_timeout='900s'")
             cur.execute(
                 f"""
-                SELECT o.id, o.instrument_id, o.holder_identity_key, o.source, o.source_accession,
-                       o.source_document_id, o.period_end, o.shares,
+                SELECT o.instrument_id, o.holder_identity_key, o.ownership_nature, o.source,
+                       o.source_document_id, o.period_end, o.source_accession, o.shares,
                        (o.filed_at AT TIME ZONE 'UTC')::date AS filed_date
                   FROM ownership_insiders_observations o
                  WHERE {_SCOPE}
-                 ORDER BY o.id
+                 ORDER BY o.instrument_id, o.holder_identity_key, o.source_document_id, o.period_end
                 """  # noqa: S608 — _SCOPE is a module constant, no interpolation of input
             )
             rows = cur.fetchall()
@@ -237,26 +243,32 @@ def main() -> int:
             print("vacuously on a partial archive cache. Resolve or exclude them explicitly first.")
             return 2
 
-        target_ids = [r["id"] for r in buckets["correctable"]]
-        instrument_ids = sorted({int(r["instrument_id"]) for r in buckets["correctable"]})
+        targets = buckets["correctable"]
+        instrument_ids = sorted({int(r["instrument_id"]) for r in targets})
         stamped = datetime.now(UTC)
+        # ⚠ The table has NO surrogate id — its PK is the six-column identity
+        # below, and one source row fans out across share-class siblings (#1117),
+        # so instrument_id is part of what a reversal has to name.
         with args.ledger.open("w", encoding="utf-8") as handle:
-            for row in buckets["correctable"]:
+            for row in targets:
                 handle.write(
                     json.dumps(
                         {
                             "run_id": run_id,
                             "ticket": "2790",
-                            "observation_id": row["id"],
-                            "instrument_id": row["instrument_id"],
-                            "holder_identity_key": row["holder_identity_key"],
-                            "source": row["source"],
+                            "key": {
+                                "instrument_id": row["instrument_id"],
+                                "holder_identity_key": row["holder_identity_key"],
+                                "ownership_nature": row["ownership_nature"],
+                                "source": row["source"],
+                                "source_document_id": row["source_document_id"],
+                                "period_end": row["period_end"].isoformat(),
+                            },
                             "source_accession": row["source_accession"],
-                            "source_document_id": row["source_document_id"],
-                            "period_end": row["period_end"].isoformat(),
                             "filed_date": row["filed_date"].isoformat() if row["filed_date"] else None,
                             "shares": str(row["shares"]),
-                            "prior_known_to": None,  # scope selects known_to IS NULL only
+                            "prior_known_to": None,  # the scope selects known_to IS NULL only
+                            "known_to_set_to": stamped.isoformat(),
                             "evidence": row["_why"],
                             "archive": row["_archive"],
                         },
@@ -264,26 +276,52 @@ def main() -> int:
                     )
                     + "\n"
                 )
-        print(f"\nledger written: {args.ledger} ({len(target_ids):,} rows, run {run_id})")
+        print(f"\nledger written: {args.ledger} ({len(targets):,} rows, run {run_id})")
 
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE ownership_insiders_observations SET known_to = %(t)s"
-                    " WHERE id = ANY(%(ids)s::bigint[]) AND known_to IS NULL",
-                    {"t": stamped, "ids": target_ids},
+                    """
+                    UPDATE ownership_insiders_observations o
+                       SET known_to = %(t)s
+                      FROM unnest(
+                             %(instrument_ids)s::bigint[], %(holders)s::text[], %(natures)s::text[],
+                             %(sources)s::text[], %(documents)s::text[], %(periods)s::date[]
+                           ) AS k(instrument_id, holder_identity_key, ownership_nature, source,
+                                  source_document_id, period_end)
+                     WHERE o.instrument_id       = k.instrument_id
+                       AND o.holder_identity_key = k.holder_identity_key
+                       AND o.ownership_nature    = k.ownership_nature
+                       AND o.source              = k.source
+                       AND o.source_document_id  = k.source_document_id
+                       AND o.period_end          = k.period_end
+                       AND o.known_to IS NULL
+                    """,
+                    {
+                        "t": stamped,
+                        "instrument_ids": [int(r["instrument_id"]) for r in targets],
+                        "holders": [r["holder_identity_key"] for r in targets],
+                        "natures": [r["ownership_nature"] for r in targets],
+                        "sources": [r["source"] for r in targets],
+                        "documents": [r["source_document_id"] for r in targets],
+                        "periods": [r["period_end"] for r in targets],
+                    },
                 )
                 updated = cur.rowcount
-            if updated != len(target_ids):
-                raise SystemExit(f"expected {len(target_ids)} soft-deletes, applied {updated} — rolled back")
+            if updated != len(targets):
+                raise SystemExit(f"expected {len(targets)} soft-deletes, applied {updated} — rolled back")
             refreshed = refresh_insiders_current_batch(conn, instrument_ids=instrument_ids)
             with conn.cursor() as cur:
                 # #26 — removing a winner can PROMOTE another future-dated
                 # observation, so assert the projection after the refresh rather
                 # than inferring it from the delete count.
-                cur.execute("SELECT count(*) AS n FROM ownership_insiders_current WHERE period_end > current_date")
-                residual = int(cur.fetchone()["n"])
-            print(f"soft-deleted {updated:,} rows; refreshed {refreshed:,} instruments; future-dated _current now {residual}")
+                cur.execute("SELECT count(*) FROM ownership_insiders_current WHERE period_end > current_date")
+                residual_row = cur.fetchone()
+                residual = int(residual_row[0]) if residual_row else -1
+            print(
+                f"soft-deleted {updated:,} rows; refreshed {refreshed:,} instruments; "
+                f"future-dated _current now {residual}"
+            )
         print(f"COMMITTED run {run_id}")
     return 0
 

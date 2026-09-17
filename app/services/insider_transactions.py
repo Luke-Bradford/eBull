@@ -330,8 +330,9 @@ def is_early_form5_line(
     Three things this deliberately is NOT:
 
     * **not the timeliness letter alone.** ``E`` is OPTIONAL on a form-type-5
-      line (§4.3.8.2), so keying on it misses most of them — full population
-      2026-09-17, 62 of the 76 exempt rows carry a BLANK timeliness. It survives
+      line (§4.3.8.2), so keying on it misses a quarter of them — full
+      population, ``scripts/correct_2790_insider_future_period.py``: 22 of the 76
+      exempt rows carry a BLANK timeliness (54 carry ``E``). It survives
       here only as a fallback for an UNKNOWN line form type, because EDGAR
       permits ``E`` nowhere else ("a value other than 'E' will cause a SUSPENSE
       error"). An explicit ``4`` + ``E`` is malformed and is NOT exempted — the

@@ -79,8 +79,9 @@ year typo — and a form-type-5 line, which is why the exemption cannot key on f
   `:338` — "early (filed before the deadline)" — is right, and the deadline is **16a-3(f)**'s,
   which is why a future date survives it.
 - **The exemption keys on the wrong field and is too NARROW.** `E` is optional on a form-type-5
-  line: 62 of the 76 exempt rows carry a blank timeliness, so the gate shipped in `604e3c06`
-  rejects them. That is a live regression, shipped today, and this spec is also its fix.
+  line: **22 of the 76** exempt rows carry a blank timeliness (54 carry `E`), so the gate shipped
+  in `604e3c06` rejects those 22. That is a live regression, shipped today, and this spec is also
+  its fix.
 - **But form type alone is too WIDE** (Codex ckpt-1 #6): it would exempt 50 rows on Form 5
   submissions, including the ACGL typo above. The exemption needs both fields.
 
@@ -95,18 +96,29 @@ Scope predicate is PR #3145's, unchanged (`scripts/audit_2790_insider_future_per
 Form 4/5-attributable live rows; 266 Form 3 / holdings rows are out of scope by that predicate and
 are not re-adjudicated here.
 
-| line form type | submission | rows | treatment |
-| --- | --- | ---: | --- |
-| 4 | 4 | 637 | **correct** |
-| 4 | 4/A | 10 | **correct** |
-| 4 | 5 | 5 | **correct** |
-| 5 | 5 | 49 | **correct** — 16a-3(f), the ACGL shape |
-| 5 | 5/A | 1 | **correct** |
-| 5 | 4 | 62 | exempt |
-| 5 | 4/A | 2 | exempt |
-| *(no `:NDT:` — XML path)* | 4 | 12 | exempt — all six accessions are the RRC deferred-comp family, `transactionFormType=5` in the XML |
+`PYTHONPATH=. uv run python scripts/correct_2790_insider_future_period.py` (census mode, the
+default, read-only) prints this and the SQL/archive evidence behind it:
 
-**Correctable: 702. Exempt: 76.** 637 + 10 + 5 + 49 + 1 = 702; 62 + 2 + 12 = 76; 702 + 76 = 778. ✅
+| submission | line form type | timeliness | rows | treatment |
+| --- | --- | --- | ---: | --- |
+| 4 | 4 | *(blank)* | 637 | **correct** |
+| 5 | 5 | *(blank)* | 47 | **correct** — 16a-3(f), the ACGL shape |
+| 4/A | 4 | *(blank)* | 10 | **correct** |
+| 5 | 4 | L | 4 | **correct** |
+| 5 | 5 | L | 2 | **correct** |
+| 5/A | 5 | *(blank)* | 1 | **correct** |
+| 5 | 4 | *(blank)* | 1 | **correct** |
+| 4 | 5 | E | 54 | exempt |
+| 4 | 5 | *(blank)* | 20 | exempt |
+| 4/A | 5 | *(blank)* | 2 | exempt |
+
+**Correctable: 702. Exempt: 76. Unresolved: 0.** 702 + 76 = 778. ✅
+
+The 12 rows with no `:NDT:` key (the XML write path stores the bare accession) resolve through the
+secondary resolver — archive lines on that accession at the stored `period_end`, requiring
+unanimity on the form type — and land in the `4 / 5 / E` exempt row above. Accession-level
+agreement is **not** assumed: the RRC filings are mixed (one form-type-4 line and two form-type-5
+lines), which is exactly why a non-unanimous date match stays unresolved instead of guessing.
 
 The inherited framing ("24 `E` rows, 732 unresolvable") was an artefact of *storage*, not of the
 source: `transactionFormType` is stored **nowhere** in this repo

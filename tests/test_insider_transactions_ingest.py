@@ -1275,6 +1275,7 @@ def _txn_1687(
     post: Decimal,
     timeliness: str | None = None,
     deemed: date | None = None,
+    form_type: str | None = None,
 ) -> ParsedTransaction:
     return ParsedTransaction(
         txn_row_num=row_num,
@@ -1285,6 +1286,7 @@ def _txn_1687(
         deemed_execution_date=deemed,
         txn_code="P",
         equity_swap_involved=None,
+        txn_form_type=form_type,
         transaction_timeliness=timeliness,
         shares=Decimal("10"),
         price=Decimal("5"),

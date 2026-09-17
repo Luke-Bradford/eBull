@@ -122,7 +122,7 @@ class TestDeraGateReadsTheLineFormType:
         )
 
     def test_a_form5_line_with_blank_timeliness_is_kept(self) -> None:
-        """The live gate rejects this today — 62 of the 76 exempt rows."""
+        """The live gate rejects this today — 22 of the 76 exempt rows."""
         assert self._reason("4", "5") is None
 
     def test_a_form5_line_on_a_form5_submission_is_rejected(self) -> None:
