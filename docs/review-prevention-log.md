@@ -7958,3 +7958,55 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - First seen in: #2371 (2026-09-17), on a 4-probe batch where 3 applied and were caught.
 - Enforced in: this log; the probe pattern used on #2371 and #2788 (control first, then
   `assert` inside every patch step).
+
+## A source rule read without a filing is half a rule (2026-09-17, #2790)
+
+`transaction_timeliness == 'E'` had been read two ways and both were wrong, by two different
+sessions, from the same correct quotation. The EDGAR Ownership XML Tech Spec §4.3.8.2 says *"a '5'
+transaction is early"*, and reasoning from those words alone gives "early means before the
+deadline, and a deadline is after the event, so the event has happened" — which says the exemption
+should be REMOVED. Reading one filing kills that: `0001127602-24-015987`
+(RANGE RESOURCES) carries `transactionFormType=5` lines dated 14 days AFTER filing, with footnote
+F2 naming *"a scheduled deferred compensation plan distribution with a distribution date of June 3,
+2024"*. The event genuinely had not happened, and reporting it was legal.
+
+**The lesson is not "read the spec harder".** It is that a spec tells you what a field MAY contain
+and a filing tells you what it DOES mean in context. Where a data-treatment decision turns on a
+field's semantics, fetch one real document that exercises it before writing the rule down.
+
+⚠ The same pass produced the mirror error. Keying the exemption on the FORM TYPE alone — the
+obvious fix once the filing is read — is also wrong, and the full population says so: 50 of the 778
+breaching rows are form-type-5 lines on a **Form 5 submission**, where Rule 16a-3(f) binds that
+filing directly. `0001415889-23-002362` (ARCH CAPITAL, Form 5 for FY2022) carries the SAME gift at
+`15-NOV-2022` and `15-NOV-2023`. The rule needed BOTH fields, and neither the spec quote nor the
+first filing was enough to see that — the census was.
+
+## "Not exempt" is not "adjudicated" (2026-09-17, #2790)
+
+A correction script classified each row by calling the shipped exemption predicate and treating
+`False` as **correctable**. But the predicate answers "is this line exempt", not "did the source
+establish what this line is" — so a blank or unrecognised form type in the archive, which
+establishes nothing, fell through to the destructive bucket. Caught at Codex checkpoint 2, before
+`--apply`.
+
+The shape is general: a boolean helper's `False` covers both "the rule says no" and "the rule never
+fired". When the `False` branch is destructive, test for the INPUT being determinate first, and
+record it as a distinct third verdict. Here that verdict is `unresolved`, and `--apply` refuses to
+run while any exists — because "keep what you could not classify" plus "0 breaches remain" is a
+pair that passes vacuously against an empty cache.
+
+## Two calls to one predicate with different arguments do not compose (2026-09-17, #2790, PR #3155)
+
+A destructive classifier asked the same helper twice in one function — once as a GUARD with the
+form type deliberately blanked (`is_early_form5_line(submission, None, timeliness)`, i.e. "would
+this be exempt if we did not know the line type?") and once for the VERDICT with the real value.
+For a line the archive typed `3` with timeliness `E`, the guard passed via its unknown-type
+fallback while the verdict computed `"3" != "5"` and returned `correctable` — so a row the rule had
+never adjudicated would have been soft-deleted. Latent here (re-adjudicating the 702 applied rows
+under the fix gives 702/702 identical), and caught by the review bot, not by any test.
+
+**The rule: a determinacy check is a predicate over the INPUT, not a second call to the decision
+function with a hypothetical argument.** If you find yourself passing `None` to a decision helper
+to ask "what if we did not know", you want a different function — write the input test directly.
+Grep test: two calls to the same predicate inside one function with different arguments for the
+same parameter, where a verdict is derived from one and a gate from the other.

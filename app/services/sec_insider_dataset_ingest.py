@@ -190,6 +190,7 @@ def _reject_reason_for_form(
     filed_at: datetime,
     deemed_execution_date: str | None,
     trans_timeliness: str | None,
+    trans_form_type: str | None = None,
 ) -> Literal["pre_section_16", "future_dated"] | None:
     """#2790 — apply #1687's Rule 16a-3(g) invariant on the BULK writer too.
 
@@ -203,8 +204,9 @@ def _reject_reason_for_form(
     this drain is the second writer and never got it, which is how 998 of the
     1,147 breaching observation rows were written. The decision function is
     REUSED rather than re-derived, so both of its exemptions (no authoritative
-    ``filed_at``; ``transaction_timeliness == 'E'``) apply identically on both
-    writers and cannot drift apart.
+    ``filed_at``; a Form-5-eligible line volunteered early on a Form 4, per
+    :func:`app.services.insider_transactions.is_early_form5_line`) apply
+    identically on both writers and cannot drift apart.
 
     **Form 4 / Form 5 only.** 17 CFR 240.16a-3(g) requires a Form 4 "before the
     end of the second business day following the day on which the subject
@@ -224,9 +226,10 @@ def _reject_reason_for_form(
 
     DERA field names are the readme's own (NONDERIV_TRANS): ``TRANS_TIMELINESS``
     is VARCHAR2(1) over the Appendix 6.1 Timeliness List — ``E`` early, ``L``
-    late, empty on-time — which is the same vocabulary as the ownership XML's
-    ``transactionTimeliness``, so ``'E'`` means the same thing to the shared
-    decision function.
+    late, empty on-time — and ``TRANS_FORM_TYPE`` is the same field the ownership
+    XML calls ``transactionCoding/transactionFormType``. Both mean the same thing
+    to the shared decision function, which is why the archive can adjudicate rows
+    this writer already stored (#2790's correction).
 
     ⚠ **The #2441 floor is checked BEFORE that form gate, on purpose.** The gate's
     rationale is specific to the upper bound — §16(a)(2) sets only latest bounds for
@@ -237,13 +240,21 @@ def _reject_reason_for_form(
     """
     if predates_section_16(period_end):
         return "pre_section_16"
-    if not form_upper.startswith(("4", "5")):
+    line_form = (trans_form_type or "").strip()
+    # #2790 — the LINE's own form type establishes a §16 transaction line even
+    # when the submission header is blank or unmapped, and §4.3.8.2 makes it
+    # mandatory. Without this clause a future-dated line explicitly typed "4"
+    # rides out on a blank ``DOCUMENT_TYPE`` — the fail-open was wider than its
+    # own rationale, which is only about not losing Form 3 HOLDINGS.
+    if line_form not in {"4", "5"} and not form_upper.startswith(("4", "5")):
         return None
     invalid, _ = evaluate_insider_date_validity(
         period_end,
         _parse_iso_date(deemed_execution_date),
         filed_at,
         (trans_timeliness or "").strip().upper() or None,
+        submission_form_type=form_upper or None,
+        txn_form_type=line_form or None,
     )
     return "future_dated" if invalid else None
 
@@ -671,6 +682,7 @@ def ingest_insider_dataset_archive(
                     filed_at=filed_at,
                     deemed_execution_date=trans.get("DEEMED_EXECUTION_DATE"),
                     trans_timeliness=trans.get("TRANS_TIMELINESS"),
+                    trans_form_type=trans.get("TRANS_FORM_TYPE"),
                 )
                 if reason == "pre_section_16":
                     result.rows_skipped_pre_section16 += 1
@@ -772,7 +784,10 @@ def ingest_insider_dataset_archive(
                 # '4'/'4/A'. 4.3.8.3 allows one exception on a '5' submission,
                 # a LATE '3' holding, which is 'L' and not 'E'. So no early
                 # holding exists for the exemption to protect, and
-                # NONDERIV_HOLDING has no timeliness column to read.
+                # NONDERIV_HOLDING has neither a timeliness nor a form-type
+                # column to read (#2790): a holding is not a transaction line, so
+                # §4.3.8.2's per-line rule has nothing to say about it and the
+                # submission type governs alone.
                 reason = _reject_reason_for_form(
                     form_upper=form_upper,
                     period_end=period_end,
