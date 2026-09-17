@@ -47,7 +47,7 @@ amended).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -75,8 +75,13 @@ DocumentKind = Literal[
     # #1015 — SEC Form 12b-25 late-filing notice body (NT 10-K / NT 10-Q).
     # Small HTML (~3-8 KB); retained, not swept. sql/208.
     "nt_body",
-    # #1892 — SEC PRE 14A / PRER14A proposal-signal body. Small HTML;
-    # retained, not swept. sql/211.
+    # #1892 — SEC PRE 14A / PRER14A proposal-signal body. sql/211.
+    # ⚠ Originally classified kept-and-negligible on "small HTML". MEASURED
+    # 2026-09-17 (#2774) at 557 rows / 3.803 GB logical — mean 6.83 MB,
+    # median 2.40 MB, max 313.6 MB, the largest per-row kind in the table.
+    # Proxy statements carry inline base64 graphics and barely compress
+    # (3.407 GB as stored). Write-only and NOT small ⇒ swept, by #1617's own
+    # criterion. Reproduce: scripts/verify_2774_pre14a_recoverability.py --census
     "pre14a_body",
     # #1816 — 424B prospectus body (tier-1 subtypes B1/B3/B4/B5/B7). LARGE
     # (100 KB-12 MB; B4s bundle full financial statements) → swept
@@ -101,7 +106,9 @@ DocumentKind = Literal[
 # disjoint from the rewash registry (a rewash parser reads stored bodies,
 # which a born-compacted row lacks). Canonical here (single source of
 # truth); ``raw_payload_retention`` imports it.
-SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset({"primary_doc", "prospectus_body", "tender_body"})
+SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset(
+    {"primary_doc", "prospectus_body", "tender_body", "pre14a_body"}
+)
 # Future PR adds a sibling ``cik_raw_documents`` table for those.
 
 # Write-only kinds we deliberately KEEP uncompacted because they are
@@ -145,11 +152,73 @@ KEPT_NEGLIGIBLE_DOCUMENT_KINDS: dict[DocumentKind, str] = {
     # wired), so it has no payload reader. Reuse-on-redrain deferred (negligible
     # volume), mirroring nport_xml's #1731 rationale.
     "nt_body": "write-only ~3-8KB; sec_nt re-fetches from EDGAR, no payload reader (reuse deferred by volume #1015)",
-    # #1892 — PRE 14A / PRER14A proposal-signal body. Stored for the #938
-    # raw-before-parse invariant; the sec_pre14a parser always re-fetches on
-    # re-drain (no stored-body reuse wired), mirroring nt_body's rationale.
-    "pre14a_body": ("write-only; sec_pre14a re-fetches from EDGAR, no payload reader (reuse deferred by volume #1892)"),
+    # pre14a_body MOVED to SWEPT_DOCUMENT_KINDS in #2774. It was write-only
+    # (correct) AND "small" (false — 3.803 GB across 557 rows). The class
+    # requires both; see KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES below, which is why
+    # the next one is caught by measurement instead of by reading a comment.
 }
+
+# The size half of "kept-and-negligible". #1617 gives the adjective and no
+# number, and no published or in-repo formulation of "negligible" exists
+# (grepped 2026-09-17: docs/specs/etl/retention-rubric.md caps typed ROWS per
+# source and never payload bytes; postgres_health carries DB-level alarms
+# only). So it is fixed BY CONSTRUCTION here and frozen — changing it is a
+# code change with a recorded reason.
+#
+# Anchors (#2774, measured on the full population 2026-09-17):
+#   * every kind legitimately in the class is <= 0.144 GB, so 1 GiB sits ~7x
+#     above the largest and cannot fire on a correct classification TODAY;
+#   * the largest backlog this repo has called acceptable-to-leave is the
+#     sweep's "~274 MB eligible" (postgres_health.py) — 1 GiB is ~4x that;
+#   * it is ~1.7% of DB_SIZE_WARN_BYTES (60 GiB), i.e. under the resolution at
+#     which the DB-size alarm could notice one kind growing.
+# Requirement the construction had to meet (not evidence for the value): it
+# must fire on pre14a_body's 3.803 GB, the case that motivated it.
+#
+# This is a DRIFT DETECTOR, not a deletion rule: a breach means the kind's
+# justification no longer holds and it needs a verdict. It cannot prove a
+# classification safe — only that one has stopped being true. Checked by
+# ``scripts/dq_audit.py``; deliberately not a db-tier test, because the db
+# tier is on the pre-push gate and a push gate keyed on corpus growth fails
+# diffs that did not cause it.
+KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES: int = 1024**3  # 1 GiB
+
+RetentionClass = Literal["re-read", "swept", "kept-and-negligible", "unclassified"]
+
+
+def retention_class_for(document_kind: str, *, rewash_kinds: Collection[str]) -> RetentionClass:
+    """Which #1617 bucket ``document_kind`` sits in.
+
+    ``rewash_kinds`` is injected (``rewash_filings.registered_specs()``)
+    because ``rewash_filings`` imports THIS module — taking the set as an
+    argument keeps the classifier pure and the import one-directional.
+
+    ``"unclassified"`` is returned for a kind the DB holds that no bucket
+    claims. That is the shape ``test_every_document_kind_is_classified``
+    forbids in code; this arm exists because the CORPUS can hold a kind the
+    code no longer declares (a renamed or retired kind), which the test
+    cannot see.
+    """
+    if document_kind in rewash_kinds:
+        return "re-read"
+    if document_kind in SWEPT_DOCUMENT_KINDS:
+        return "swept"
+    if document_kind in KEPT_NEGLIGIBLE_DOCUMENT_KINDS:
+        return "kept-and-negligible"
+    return "unclassified"
+
+
+def kept_negligible_breaches_bar(document_kind: str, live_payload_bytes: int) -> bool:
+    """True when a kept-and-negligible kind holds more live payload than the
+    class allows. Strict ``>``: a kind exactly at the bar has not breached it.
+
+    Only ever true for the kept class — a swept or re-read kind holding bytes
+    is a different finding (an uncollected sweep backlog / a legitimate
+    stored body), not a misclassification.
+    """
+    if document_kind not in KEPT_NEGLIGIBLE_DOCUMENT_KINDS:
+        return False
+    return live_payload_bytes > KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES
 
 
 @dataclass(frozen=True)

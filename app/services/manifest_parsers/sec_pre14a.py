@@ -13,6 +13,15 @@ separate source/table for a different (proposal-signal) purpose.
 
 All field logic lives in ``pre14a_proposals`` (single-chokepoint discipline);
 this module only orchestrates fetch / store / transition.
+
+⚠ Since #2774 ``pre14a_body`` is in ``SWEPT_DOCUMENT_KINDS``, so ``store_raw``
+writes it BORN-COMPACTED: sha256 + ``source_url`` recorded, bytes never
+persisted (3.803 GB measured across 557 rows, a mean 6.83 MB per proxy). This
+parser needs no change for that — it already re-fetches unconditionally on
+every parse and re-parse rather than reading a stored body, which is what put
+the kind in the write-only class in the first place. ``raw_status='stored'``
+below still means "a raw evidence row exists", per ``sql/195``; the
+bytes-present predicate is ``payload IS NOT NULL``.
 """
 
 from __future__ import annotations

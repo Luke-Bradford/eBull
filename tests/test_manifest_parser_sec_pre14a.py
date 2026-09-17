@@ -1,7 +1,8 @@
 """Tests for the PRE 14A / PRER14A manifest-worker parser adapter (#1892).
 
 Covers:
-- Happy path: HTML fetch -> store_raw (pre14a_body, RETAINED) -> parse ->
+- Happy path: HTML fetch -> store_raw (pre14a_body, BORN-COMPACTED since
+  #2774 — sha256 + source_url recorded, bytes never stored) -> parse ->
   upsert pre14a_proposal_signals -> ParseOutcome(parsed, raw_status=stored).
 - Tombstone: fetch returns empty body.
 - Tombstone with raw stored: body has no recognizable numbered proposals list.
@@ -13,6 +14,7 @@ run without touching SEC.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 
 import psycopg
@@ -131,18 +133,27 @@ def test_happy_path_parses_and_retains_raw(
     assert say_on_pay is True
     assert len(agenda_items) == 3
 
-    # pre14a_body is RETAINED (not swept): payload present.
+    # #2774 — pre14a_body is BORN-COMPACTED (SWEPT_DOCUMENT_KINDS): the bytes
+    # are never persisted, the sha256 of the fetched body is, and source_url is
+    # the recovery locator. Asserting the hash EQUALS the hash of the body the
+    # parser fetched is the point: a row carrying some other hash would satisfy
+    # chk_swept_rows_carry_hash and still be unrecoverable.
     with ebull_test_conn.cursor() as cur:
         cur.execute(
             """
-            SELECT payload, byte_count FROM filing_raw_documents
+            SELECT payload, byte_count, payload_sha256, payload_swept_at, source_url
+            FROM filing_raw_documents
             WHERE accession_number = '0001805521-26-000001' AND document_kind = 'pre14a_body'
             """
         )
         raw = cur.fetchone()
     assert raw is not None
-    payload, byte_count = raw
-    assert payload is not None and byte_count is not None and byte_count > 0
+    payload, byte_count, payload_sha256, payload_swept_at, source_url = raw
+    assert payload is None
+    assert byte_count is None  # generated from octet_length(payload)
+    assert payload_sha256 == hashlib.sha256(_FAKE_PRE14A_HTML.encode("utf-8")).hexdigest()
+    assert payload_swept_at is not None
+    assert source_url
 
 
 def test_empty_fetch_tombstones(
