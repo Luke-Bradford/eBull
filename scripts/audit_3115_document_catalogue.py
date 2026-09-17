@@ -19,9 +19,11 @@ state while reading as one coherent report (the #2414 two-snapshot lesson).
 
 ``--inventory`` prints a *dry-run* eligible-row count per class. It is a
 proposal, not an authorised deletion scope (#3117: "no destructive sweep is
-authorised by this planning ticket"). **Exit status is 1 when any invariant in
-section 5 fails** — an inventory whose safety checks only *print* their verdict
-is an inventory that gets read as clean.
+authorised by this planning ticket"). **Exit status is 1 when any invariant
+fails** — the section-5 safety checks, and the single-snapshot claim above,
+which is verified against ``pg_stat_activity.xact_start`` at the end rather than
+merely asserted in this docstring. An inventory whose safety checks only *print*
+their verdict is an inventory that gets read as clean.
 
 Two measured facts shape how the output should be read, both re-checkable with
 ``--consumers``:
@@ -30,8 +32,9 @@ Two measured facts shape how the output should be read, both re-checkable with
   #723 established that SEC's ``index.json`` ``type`` field is a content-type
   icon name (``text.gif``), not the document-type label (``EX-99.1``), so
   :func:`app.services.filing_documents.parse_filing_index` writes ``None`` to
-  both. ``idx_filing_documents_type`` is therefore a partial index whose
-  predicate can never be satisfied.
+  both. ``idx_filing_documents_type`` is therefore a partial index no current
+  writer can satisfy. (Not "can never be": nothing in the schema or in
+  ``upsert_filing_documents`` forbids another writer populating it.)
 * **Child-row existence is the completion signal.**
   :func:`app.services.filing_documents.ingest_filing_documents` selects
   candidates with ``LEFT JOIN filing_documents … WHERE fd.id IS NULL``, so a
@@ -142,10 +145,19 @@ UNDECIDED_CLASSES: list[tuple[str, LiteralString]] = [
 # Invariant failures collected across sections; a non-empty list exits 1.
 FAILURES: list[str] = []
 
+# Measurements this run could NOT make. Surfaced in the summary rather than
+# printed once mid-report, so a coverage hole is not mistaken for a null result.
+WARNINGS: list[str] = []
+
 
 def _fail(msg: str) -> None:
     FAILURES.append(msg)
     print(f"    ⚠ INVARIANT FAILED: {msg}")
+
+
+def _warn(msg: str) -> None:
+    WARNINGS.append(msg)
+    print(f"  ⚠ NOT MEASURED: {msg}")
 
 
 def _q(cur: psycopg.Cursor[Any], sql: LiteralString) -> list[tuple[Any, ...]]:
@@ -235,7 +247,16 @@ def free_space(cur: psycopg.Cursor[Any], phys: dict[str, int]) -> None:
     print(f"  n_live_tup (estimate) {int(live):>12,}   n_dead_tup {int(dead):>12,}")
     print(f"  last_vacuum {last_vac}   last_autovacuum {last_autovac}")
 
-    try:
+    # ⚠⚠ ASK whether the extension exists; do NOT call it and catch the error.
+    # A failed statement aborts the transaction, and the only way to continue
+    # from there is a rollback — which ENDS the REPEATABLE READ transaction this
+    # whole script's single-snapshot guarantee depends on. Every later section
+    # would then run in a new, later snapshot while the report still reads as
+    # one coherent measurement. That is not hypothetical: pgstattuple is not
+    # installed on this dev cluster, so the first version took that path on
+    # every run. A probe that degrades gracefully must not degrade the caller.
+    installed = bool(_q(cur, "SELECT count(*) FROM pg_extension WHERE extname = 'pgstattuple'")[0][0])
+    if installed:
         row = _q(
             cur,
             f"SELECT table_len, tuple_len, dead_tuple_len, free_space FROM pgstattuple('{TABLE}')",  # noqa: S608
@@ -244,11 +265,12 @@ def free_space(cur: psycopg.Cursor[Any], phys: dict[str, int]) -> None:
         print(f"  pgstattuple: table {_mib(table_len)}  live tuples {_mib(tuple_len)} ({_pct(tuple_len, table_len)})")
         print(f"               dead {_mib(dead_len)}  free space {_mib(free)} ({_pct(free, table_len)})")
         print("    free space + dead bytes are reclaimable by VACUUM without a rewrite.")
-    except psycopg.Error as exc:
-        cur.connection.rollback()
-        print(f"  pgstattuple unavailable ({str(exc).splitlines()[0]}).")
-        print("    Heap bloat is therefore NOT decomposed. Install the extension to")
-        print("    separate live bytes from reusable free space before sizing a rewrite.")
+    else:
+        _warn(
+            "pgstattuple is not installed: heap bloat is NOT decomposed, so no figure in "
+            "this report separates live bytes from reusable free space. Install it before "
+            "sizing any rewrite."
+        )
     print(f"  (heap as reported in section 1: {_mib(phys['heap'])})")
 
 
@@ -606,8 +628,11 @@ def main() -> int:
         conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         with conn.cursor() as cur:
             cur.execute("SET statement_timeout = '1800s'")
-            db, rev = _q(cur, "SELECT current_database(), txid_current_if_assigned()")[0]
-            print(f"database={db}  snapshot=REPEATABLE READ  read_only=True  txid={rev}")
+            db, start_xact = _q(
+                cur,
+                "SELECT current_database(), (SELECT xact_start FROM pg_stat_activity WHERE pid = pg_backend_pid())",
+            )[0]
+            print(f"database={db}  snapshot=REPEATABLE READ  read_only=True  xact_start={start_xact}")
             phys = physical(cur)
             free_space(cur, phys)
             cnt = counts(cur)
@@ -615,7 +640,24 @@ def main() -> int:
             redundant_representation(cur, phys, cnt)
             content_classes(cur, cnt, inventory=args.inventory)
             db_dependants(cur)
+            # The single-snapshot claim is checked, not asserted. A mid-run
+            # rollback (the defect this replaced) starts a new transaction, so
+            # the backend's transaction start time would move away from the one
+            # section 1 ran under. Same snapshot → same xact_start.
+            end_xact = _q(cur, "SELECT xact_start FROM pg_stat_activity WHERE pid = pg_backend_pid()")[0][0]
+            if end_xact != start_xact:
+                _fail(
+                    f"snapshot broke mid-run: transaction started {start_xact}, now {end_xact}. "
+                    "Sections do not describe one database state."
+                )
+            else:
+                print(f"\nSnapshot held: one transaction from {start_xact} to close.")
     consumers()
+
+    if WARNINGS:
+        print(f"\n⚠ {len(WARNINGS)} measurement(s) this run could NOT make:")
+        for w in WARNINGS:
+            print(f"  - {w}")
 
     if FAILURES:
         print(f"\n⚠ {len(FAILURES)} INVARIANT(S) FAILED — this inventory is NOT a safe scope:")
