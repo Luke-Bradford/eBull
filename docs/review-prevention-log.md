@@ -7424,3 +7424,36 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - Verification step: for any script that prints a pass/fail verdict, ask "what input makes
   this print a tick while the property is false?" If the answer involves a `LIMIT`, a
   sample, or a constant duplicated from the code under test, it is this defect.
+
+### A mid-run `rollback()` silently ends the snapshot the whole report depends on
+
+- First seen in: #3115 PR #3141 review round 1 (Claude bot WARNING). `audit_3115_document_catalogue.py`
+  opens ONE `REPEATABLE READ` transaction because its sections are multi-minute full-table scans
+  and a report whose counts, column widths, fan-out and exclusion union each describe a different
+  database state is not a measurement. An optional `pgstattuple()` probe was written as
+  `try: … except psycopg.Error: conn.rollback()` so a missing extension would degrade gracefully.
+  It degrades the CALLER: a failed statement aborts the transaction, the rollback ends it, and
+  every later section runs in a NEW, later-starting snapshot while the report still reads as one
+  coherent measurement.
+- Why it is dangerous: the failure is **silent and it fired on every run**. `pgstattuple` is not
+  installed on the dev cluster, so the very run quoted in the #3115 verdict had taken that path —
+  section 1's sizes and sections 2-8's counts were from different snapshots, under a docstring
+  promising otherwise. Nothing in the output changed. The graceful-degradation branch is exactly
+  where this hides, because it is the path nobody exercises deliberately and the one that prints a
+  reassuring "unavailable, continuing" message.
+- Prevention: in a single-transaction reporting script, **ASK whether an optional facility exists
+  rather than calling it and catching the error** — `SELECT count(*) FROM pg_extension WHERE
+  extname = '…'` costs nothing and cannot abort a transaction. Where a statement genuinely may
+  fail, wrap it in a SAVEPOINT (`with conn.transaction():` inside an open transaction), never a
+  bare `rollback()`. Grep for `.rollback()` inside any function called between the isolation-level
+  setup and the final commit; a mid-run rollback should abort the whole run, not continue.
+- Corollary: **verify the snapshot claim, do not assert it in a docstring.** Capture
+  `pg_stat_activity.xact_start` for the backend at the start and compare at the end — same
+  snapshot, same value. A promise written in prose is not a check, and this defect is invisible
+  without one.
+- Second corollary: a measurement the run could NOT make must surface in the SUMMARY, not as one
+  line mid-report. "Bloat is not decomposed" printed at section 1b scrolls past 400 lines of
+  output and is read as a null result rather than a coverage hole.
+- Enforced in: `scripts/audit_3115_document_catalogue.py::free_space` (extension existence probe,
+  no exception path) and `::main` (the `xact_start` equality check, which calls `_fail` and exits
+  non-zero, plus the `WARNINGS` summary block).
