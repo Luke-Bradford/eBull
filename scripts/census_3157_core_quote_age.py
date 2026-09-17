@@ -69,6 +69,13 @@ def main() -> None:
     deadline = time.monotonic() + args.minutes * 60
     while True:
         now = datetime.now(UTC)
+        # ⚠ A connection PER SAMPLE, not one held across the run, and that is the
+        # deliberate choice on this box: the dev cluster is `max_connections = 30`
+        # with demand already at its usable ceiling, so a diagnostic holding a slot
+        # idle for the whole run can starve a job lane. Each sample holds one for the
+        # duration of a single indexed SELECT instead. The cost is a connect per
+        # 30 s tick; the risk it accepts is that a sample can fail to connect at a
+        # moment of exhaustion, which is the right way round for a read-only census.
         with psycopg.connect(settings.database_url) as conn:
             rows = conn.execute(_AGE_SQL, {"ids": ids}).fetchall()
         line = []
