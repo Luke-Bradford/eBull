@@ -441,9 +441,16 @@ def _cases(path: str, symbols: list[str]) -> int:
     return 1 if absent else 0
 
 
-def _scalar_census(sql: LiteralString, title: str) -> int:
+def _scalar_census(sql: LiteralString, title: str, params: dict[str, Any] | None = None) -> int:
+    """Run a one-row aggregate census and print it.
+
+    ``params`` is per-query rather than a shared dict: ``JOINT_SQL`` carries
+    ``%(form4_cutoff)s`` through ``_INSIDER_BEYOND_RETENTION_SQL`` and ``BALANCES_SQL`` takes
+    no parameters at all. psycopg ignores unused named parameters silently, so passing one
+    dict to both would hide a placeholder typo in whichever query stopped using it (review
+    NITPICK on PR #3147)."""
     with psycopg.connect(settings.database_url) as conn, snapshot_read(conn), conn.cursor() as cur:
-        cur.execute(sql, {"form4_cutoff": form4_retention_cutoff()})
+        cur.execute(sql, params or {})
         row = cur.fetchone()
         names = [d.name for d in cur.description or ()]
     print(title)
@@ -478,7 +485,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.summarise:
         return _summarise(args.summarise)
     if args.joint:
-        return _scalar_census(JOINT_SQL, "Joint-accession insider clusters (identity-level):")
+        return _scalar_census(
+            JOINT_SQL,
+            "Joint-accession insider clusters (identity-level):",
+            {"form4_cutoff": form4_retention_cutoff()},
+        )
     if args.balances:
         return _scalar_census(BALANCES_SQL, "Keys decided by the projection's lexical tie-break:")
     if args.edges or args.out:
