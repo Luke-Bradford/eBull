@@ -55,7 +55,9 @@ COMMENT ON COLUMN data_freshness_index.next_poll_at IS
 -- per-subject ``expected_next_at`` timing probe" and probes
 -- state='error' instead. An index with no reader costs write
 -- amplification on a column this change touches on every poll.
-DROP INDEX idx_freshness_due_for_poll;
+-- IF EXISTS: the CREATE immediately below establishes the desired state either
+-- way, so a hard failure here buys nothing over a no-op (review NITPICK).
+DROP INDEX IF EXISTS idx_freshness_due_for_poll;
 
 CREATE INDEX idx_freshness_due_for_poll
     ON data_freshness_index (next_poll_at, source)

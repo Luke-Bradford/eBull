@@ -295,6 +295,14 @@ def _r1_rotation_discriminator(conn: psycopg.Connection[Any], cur: psycopg.Curso
     """
     from app.services.data_freshness import ciks_due_for_poll
 
+    # ⚠ "the last run" is approximated by ``max(last_polled_at)``, and that is a
+    # BEST-EFFORT diagnostic scope, not an exact run boundary (review NITPICK).
+    # ``record_poll_outcome`` is the only writer of that column, but two
+    # overlapping poll runs — or one straddling the query — would blur the set
+    # either way. It is adequate here because the verdict is driven by
+    # ``still_eligible``, which is computed from the eligibility predicate over
+    # whatever set this scopes: under-scoping shrinks the sample, it cannot turn
+    # a pinned head into a rotating one.
     cur.execute(
         f"""
         WITH last_run AS (
