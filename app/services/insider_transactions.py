@@ -248,6 +248,12 @@ class ParsedTransaction:
     deemed_execution_date: date | None
     txn_code: str
     equity_swap_involved: bool | None
+    # ``transactionCoding/transactionFormType`` — "4" or "5", mandatory on a
+    # Form 4 submission (EDGAR Ownership XML Tech Spec §4.3.8.2). Carried for
+    # the date-validity decision only (#2790) and deliberately NOT persisted: a
+    # new stored column is a parse-shape change, which ``sql/057`` says bumps
+    # ``parser_version`` and therefore costs a full Form 4 rewash.
+    txn_form_type: str | None
     transaction_timeliness: str | None
     shares: Decimal | None
     price: Decimal | None
@@ -292,11 +298,71 @@ def predates_section_16(value: date | None) -> bool:
     return value is not None and value < SECTION_16_ENACTED
 
 
+#: Ownership submission types whose transaction lines §4.3.8.2 governs — the only
+#: submissions on which a ``transactionFormType`` of "5" means "volunteered early".
+_FORM4_SUBMISSION_TYPES: Final = frozenset({"4", "4/A"})
+
+
+def is_early_form5_line(
+    submission_form_type: str | None,
+    txn_form_type: str | None,
+    transaction_timeliness: str | None,
+) -> bool:
+    """True when Rule 16a-3(g)'s upper bound does not govern this line (#2790).
+
+    SOURCE RULE. EDGAR Ownership XML Technical Specification v5.1 §4.3.8.2, for
+    submission types "4" and "4/A": *"The ``<transactionFormType>`` is mandatory
+    and must be '4' or '5.' … By definition, a '4' transaction is on time.
+    Provide no value for this case. By definition, a '5' transaction is early.
+    You do not have to provide a value of 'E,' but you can if you wish. A value
+    other than 'E' will cause a SUSPENSE error."*
+
+    A form-type-**5** line on a Form 4 is a Form-5-eligible transaction the filer
+    volunteered ahead of its own deadline, and that deadline is Rule 16a-3(f)'s —
+    45 days after the fiscal year end, on a LATER filing. So this filing's date
+    does not bound the event, and a future date is legitimate. Worked case:
+    ``0001127602-24-015987`` (RANGE RESOURCES / FUNK JAMES M), filed 2024-05-20,
+    two form-type-5 lines dated 2024-06-03, footnote F2 — *"exempt from
+    reporting, however the reporting person is voluntarily disclosing … a
+    scheduled deferred compensation plan distribution with a distribution date of
+    June 3, 2024."*
+
+    Three things this deliberately is NOT:
+
+    * **not the timeliness letter alone.** ``E`` is OPTIONAL on a form-type-5
+      line (§4.3.8.2), so keying on it misses most of them — full population
+      2026-09-17, 62 of the 76 exempt rows carry a BLANK timeliness. It survives
+      here only as a fallback for an UNKNOWN line form type, because EDGAR
+      permits ``E`` nowhere else ("a value other than 'E' will cause a SUSPENSE
+      error"). An explicit ``4`` + ``E`` is malformed and is NOT exempted — the
+      alternative would exempt a row #2790's correction deletes.
+    * **not the line form type alone.** On a Form **5** submission the same
+      form-type-5 line is bound by 16a-3(f) directly: that filing reports
+      transactions *during the fiscal year already ended*, so an event after it
+      was not in that year. Measured: 50 breaching rows have this shape,
+      including ``0001415889-23-002362`` (ARCH CAPITAL, Form 5 for FY2022 filed
+      2023-02-13), which carries the SAME gift at ``15-NOV-2022`` and
+      ``15-NOV-2023`` — a year typo visible inside one filing.
+    * **not a claim that the date is right.** It is a claim that no published
+      rule makes it impossible. Nothing bounds how far ahead a Form-5-eligible
+      event may be volunteered, and #2441 refused inventing such a window.
+    """
+    submission = (submission_form_type or "").strip().upper()
+    line = (txn_form_type or "").strip()
+    timeliness = (transaction_timeliness or "").strip().upper()
+    submission_ok = not submission or submission in _FORM4_SUBMISSION_TYPES
+    line_is_form5 = line == "5" or (not line and timeliness == "E")
+    return submission_ok and line_is_form5
+
+
 def evaluate_insider_date_validity(
     txn_date: date,
     deemed_execution_date: date | None,
     filed_at: datetime | None,
     transaction_timeliness: str | None,
+    *,
+    submission_form_type: str | None = None,
+    txn_form_type: str | None = None,
 ) -> tuple[bool, date | None]:
     """Apply the Rule 16a-3(a) execution-date invariant to one transaction.
 
@@ -317,16 +383,18 @@ def evaluate_insider_date_validity(
 
     - ``filed_at is None`` — no authoritative anchor (mirrors the
       ``upsert_filing`` filed_at fallback semantics).
-    - ``transaction_timeliness == 'E'`` — an early filing (EDGAR ownership
-      XML ``transactionTimeliness``; see ``sql/057``) may legitimately
-      report a transaction dated after the filing.
+    - :func:`is_early_form5_line` — a Form-5-eligible line volunteered early on
+      a Form 4 is bound by Rule 16a-3(f), not 16a-3(g), so it may legitimately
+      report a transaction dated after this filing. #2790 re-keyed this from the
+      bare ``transaction_timeliness == 'E'`` test onto (submission type × line
+      form type); see that function for the spec citation and both worked
+      filings. ``sql/057``'s ``:264`` comment ("filed early (before the event)")
+      was the wrong half of its own contradiction — ``:338`` ("before the
+      deadline") is the reading the spec supports.
 
     #2441 adds a statutory FLOOR (:func:`predates_section_16`), and neither
-    exemption is inherited by it: the floor needs no filing anchor, and no
-    reading of ``'E'`` can make a pre-1934 date possible. (What ``'E'``
-    means is itself contested — ``sql/057`` contradicts itself and the EDGAR
-    Ownership XML Tech Spec §4.3.8.2 supports neither reading, #2790 — which
-    is another reason the floor must not depend on it.)
+    exemption is inherited by it: the floor needs no filing anchor, and no form
+    type makes a pre-1934 date possible.
 
     The two dates are assessed INDEPENDENTLY: a floor hit on ``txn_date``
     does not skip the ``deemed_execution_date`` assessment, and a bad deemed
@@ -335,7 +403,7 @@ def evaluate_insider_date_validity(
     # #2441 — statutory floor, evaluated first and unconditionally.
     txn_date_invalid = predates_section_16(txn_date)
     deemed_out = None if predates_section_16(deemed_execution_date) else deemed_execution_date
-    if filed_at is None or transaction_timeliness == "E":
+    if filed_at is None or is_early_form5_line(submission_form_type, txn_form_type, transaction_timeliness):
         return (txn_date_invalid, deemed_out)
     # Anchor on the UTC calendar date (the SEC filing date is a UTC-stamped
     # acceptance date) so the boundary is session-timezone independent and
@@ -810,6 +878,9 @@ def _extract_transactions(root: ET.Element, *, default_filer_cik: str) -> tuple[
 _VALID_DIRECT_INDIRECT = {"D", "I"}
 _VALID_ACQUIRED_DISPOSED = {"A", "D"}
 _VALID_TIMELINESS = {"E", "L"}
+# EDGAR Ownership XML Tech Spec §4.3.8.2/§4.3.8.3 — the only values the element
+# may carry ("3" appears only on a late Form 3 holding reported via a Form 5).
+_VALID_TXN_FORM_TYPES = {"3", "4", "5"}
 
 
 def _parse_one_transaction(
@@ -839,6 +910,13 @@ def _parse_one_transaction(
 
     timeliness_raw = _child_text(txn, "./transactionTimeliness/value")
     transaction_timeliness = timeliness_raw if timeliness_raw in _VALID_TIMELINESS else None
+
+    # #2790 — mandatory on a Form 4 submission per EDGAR Ownership XML Tech Spec
+    # §4.3.8.2 and the field that decides whether Rule 16a-3(g)'s upper bound
+    # governs the line. Unrecognised values collapse to None (⇒ unknown), which
+    # lets the ``E`` fallback in :func:`is_early_form5_line` speak instead.
+    form_type_raw = _child_text(txn, "./transactionCoding/transactionFormType")
+    txn_form_type = form_type_raw if form_type_raw in _VALID_TXN_FORM_TYPES else None
 
     shares = _safe_decimal(
         _child_text(txn, "./transactionAmounts/transactionShares/value"),
@@ -902,6 +980,7 @@ def _parse_one_transaction(
         deemed_execution_date=deemed_execution_date,
         txn_code=txn_code,
         equity_swap_involved=equity_swap_involved,
+        txn_form_type=txn_form_type,
         transaction_timeliness=transaction_timeliness,
         shares=shares,
         price=price,
@@ -1294,7 +1373,15 @@ def upsert_filing(
     sanitised: list[ParsedTransaction] = []
     for txn in parsed.transactions:
         invalid, deemed = evaluate_insider_date_validity(
-            txn.txn_date, txn.deemed_execution_date, filed_at, txn.transaction_timeliness
+            txn.txn_date,
+            txn.deemed_execution_date,
+            filed_at,
+            txn.transaction_timeliness,
+            # #2790 — the submission type comes from the document header and the
+            # line type from the row; parsing either without passing BOTH here
+            # is inert, which is why a test asserts this wiring.
+            submission_form_type=parsed.document_type,
+            txn_form_type=txn.txn_form_type,
         )
         if invalid != txn.txn_date_invalid or deemed != txn.deemed_execution_date:
             txn = replace(txn, txn_date_invalid=invalid, deemed_execution_date=deemed)
