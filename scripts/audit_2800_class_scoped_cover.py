@@ -272,7 +272,12 @@ def main() -> None:
         verdicts: collections.Counter[str] = collections.Counter()
         matches_one_member: list[tuple[str, str, Decimal, Decimal, str, int, str]] = []
         compared = 0
+        # #3150 review (WARNING): the cap has to leave the OUTER loop too — a
+        # `break` in the inner one only ends that group's instruments and the
+        # next group resumes, so `--limit` capped nothing.
         for group in sorted(in_universe.values(), key=lambda g: (g.cik, g.ddate)):
+            if args.limit is not None and compared >= args.limit:
+                break
             for instrument_id, symbol in by_cik[group.cik]:
                 if args.limit is not None and compared >= args.limit:
                     break
@@ -312,11 +317,14 @@ def main() -> None:
     print("\n--- the #2800 shape: stored cover BELOW the class sum AND equal to one member ---")
     print("second witness = our own UNDIMENSIONED us-gaap:CommonStockSharesOutstanding vs the class sum")
     print(f"{'symbol':8s} {'stored':>16s} {'class sum':>16s} {'ratio':>6s} {'member':20s} {'n':>2s}  us-gaap witness")
-    seen: set[str] = set()
+    # #3150 review (NITPICK): key the dedup on (symbol, cik), not symbol alone.
+    # Collapsing a symbol's several INSTANTS into one line is the intent; silently
+    # dropping a second issuer that shares the ticker is not.
+    seen: set[tuple[str, str]] = set()
     for symbol, _cik, value, total, member, n_members, corroboration in sorted(matches_one_member):
-        if symbol in seen:
+        if (symbol, _cik) in seen:
             continue
-        seen.add(symbol)
+        seen.add((symbol, _cik))
         ratio = float(total / value) if value else float("inf")
         print(
             f"{symbol:8s} {value:16,.0f} {total:16,.0f} {ratio:6.2f} {member[:20]:20s} {n_members:2d}  {corroboration}"
