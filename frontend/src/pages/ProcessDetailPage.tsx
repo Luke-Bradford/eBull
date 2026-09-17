@@ -697,6 +697,25 @@ function KeyValueRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+/**
+ * Positive JobProgress error buckets for a run, in stable name order.
+ *
+ * The `n > 0` filter deliberately lives in ONE place — the adapter
+ * (`scheduled_adapter._progress_error_buckets`), which mirrors
+ * `job_progress.degradation_reason`'s predicate so the Errored cell and the
+ * Status cell cannot disagree about which buckets fired. Re-filtering here
+ * would fork that rule. This sorts only, matching `degradation_reason`'s own
+ * sorted reason string so the cell and `error_msg` read in the same order.
+ *
+ * `null` (job reports no JobProgress) and `{}` (reported, none positive) both
+ * yield `[]` for rendering — the API keeps them distinct, the cell does not
+ * need to.
+ */
+function progressErrorEntries(run: ProcessRunSummaryResponse): [string, number][] {
+  if (!run.progress_errors) return [];
+  return Object.entries(run.progress_errors).sort(([a], [b]) => a.localeCompare(b));
+}
+
 function HistoryTab({
   runs,
   loading,
@@ -758,31 +777,66 @@ function HistoryTab({
                 trains the eye to skip it, which is how the one non-zero gets
                 missed.
 
-                ⚠⚠ THIS IS `job_runs.rows_errored` AND NOT THE ONLY ERROR
-                COUNTER. `JobProgress.errors` (`progress_json`) is a second,
-                disjointly-written one, and it is what fired on the only
-                `degraded` run in the corpus (`daily_candle_refresh` 133470,
-                `rows_errored=0`, `progress_json.errors={"failed":1}`). They
-                are NOT summable: `sec_manifest_worker.py:760` records
-                `agg.rows_errored == failed + dispatch_errors` while the same
-                tick also puts `failed` into its JobProgress, so a sum would
-                double-count it. No rule says which is authoritative per job,
-                so the cell names its source in a tooltip instead of folding
-                two counters under one number. Second counter recorded on
-                #3111; not invented here.
+                ⚠⚠ TWO DISJOINT ERROR COUNTERS REACH THIS CELL AND THEY ARE NOT
+                SUMMABLE. `job_runs.rows_errored` is one;
+                `JobProgress.errors` (`progress_json`) is the other, and it is
+                what fired on the only `degraded` run in the corpus
+                (`daily_candle_refresh` 133470, `rows_errored=0`,
+                `progress_json.errors={"failed":1}`) — which slice 4 rendered
+                as `—`, the defect slice 5 fixes. A sum would double-count:
+                `sec_manifest_worker.py:760` pins
+                `agg.rows_errored == failed + dispatch_errors` while `:367`
+                puts the same two counters into its JobProgress.
+
+                BUCKETS FIRST, then the scalar. Not a claim about authority —
+                a producer census. `rows_errored` has exactly one producer
+                (`JobTelemetryAggregator`, instantiated only at
+                `scheduler.py:8093`), that same job also writes the buckets,
+                and there the scalar is their sum by construction. So showing
+                the buckets loses nothing recoverable and gains the split that
+                matters operationally: `failed` means the row returns on a
+                retry stamp, `dispatch_errors` means the transition itself
+                failed. Every OTHER bucket producer writes no scalar at all.
+
+                ⚠ Trigger to revisit: a producer emitting a positive bucket
+                that is NOT part of its `rows_errored` total. Then the cell
+                needs two labelled segments rather than a precedence. Guarded
+                by a test pinning WorkerStats' buckets against the aggregator.
               */}
               <td
                 className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400"
                 data-testid="run-rows-errored"
-                title="job_runs.rows_errored — rows this run recorded as errored. A run can also degrade on JobProgress errors, which this column does not count; the Status cell reflects those."
+                title={
+                  progressErrorEntries(r).length > 0
+                    ? // ⚠ The scalar is STATED, not assumed. An earlier draft said
+                      // "rows_errored is 0 or absent" here — false for the one job
+                      // that writes both counters, where it is their sum, and the
+                      // cell hides it. Codex ckpt-2 caught it against this file's
+                      // own test fixture.
+                      `job_runs.progress_json.errors — the buckets this run reported as errors, shown unsummed. job_runs.rows_errored on this run is ${r.rows_errored}; the two counters are disjointly written and never added.`
+                    : r.rows_errored > 0
+                      ? "job_runs.rows_errored — rows this run recorded as errored. This run reported no positive JobProgress error buckets."
+                      : "No errors on either counter (job_runs.rows_errored and progress_json.errors). A run can still be degraded for making no terminal progress, which is not an error count."
+                }
               >
-                {r.rows_errored > 0 ? (
-                  <span className="font-medium text-amber-700 dark:text-amber-300">
-                    {r.rows_errored}
-                  </span>
-                ) : (
-                  "—"
-                )}
+                {(() => {
+                  const buckets = progressErrorEntries(r);
+                  if (buckets.length > 0) {
+                    return (
+                      <span className="font-medium text-amber-700 dark:text-amber-300">
+                        {buckets.map(([name, n]) => `${name} ${n}`).join(" · ")}
+                      </span>
+                    );
+                  }
+                  if (r.rows_errored > 0) {
+                    return (
+                      <span className="font-medium text-amber-700 dark:text-amber-300">
+                        {r.rows_errored}
+                      </span>
+                    );
+                  }
+                  return "—";
+                })()}
               </td>
               <td className="px-2 py-2 text-xs">
                 <Badge
@@ -815,10 +869,18 @@ function ErrorsTab({
   if (loading) return <SectionSkeleton rows={3} />;
   if (error) return <SectionError onRetry={onRetry} />;
   if (!row) return <p className="text-sm text-slate-500">No detail available.</p>;
+  // #3111 slice 5 — this tab reads ONLY `job_runs.error_classes`, so "no errors
+  // on the latest terminal run" was a universal denial it cannot support. It
+  // would now sit beside a History row reading `failed 1`, because a run can
+  // report positive `JobProgress.errors` while writing no `error_classes` at
+  // all (they are disjointly written counters). The copy states what it reads.
+  // Copy only — no new read path here.
   if (row.last_n_errors.length === 0) {
     return (
       <p className="text-sm text-slate-500 dark:text-slate-400">
-        No errors on the latest terminal run.
+        No per-class error detail (<code>job_runs.error_classes</code>) on the
+        latest terminal run. A run can still report errors on the other counter
+        — check the Errored column in History.
       </p>
     );
   }

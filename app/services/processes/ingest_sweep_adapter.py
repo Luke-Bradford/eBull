@@ -485,6 +485,12 @@ def _build_last_run_from_log(row: dict[str, Any]) -> ProcessRunSummary:
         rows_processed=rows_processed,
         rows_skipped_by_reason=skips,
         rows_errored=0,
+        # #3111 slice 5 — the ingest log is not ``job_runs``-backed and carries
+        # no ``JobProgress``, so "does not report progress" (sql/254's NULL) is
+        # the only truthful value. ⚠ NOT ``{}``: that would claim a measured
+        # zero, which this adapter cannot support — its ``rows_errored`` above
+        # is itself a hard-coded 0 that does not count failed log rows.
+        progress_errors=None,
         status=summary_status,
         cancelled_by_operator_id=None,
     )

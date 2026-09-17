@@ -36,6 +36,9 @@ def _make_run(
     error_classes: dict[str, dict[str, object]] | None = None,
     rows_skipped_by_reason: dict[str, int] | None = None,
     rows_errored: int = 0,
+    # #3111 slice 5 — default None is the corpus default (133,706 of 133,952
+    # rows) and sql/254's "does not report progress", NOT an empty payload.
+    progress_json: dict[str, object] | None = None,
     finished: bool = False,
     cancel_requested: bool = False,
     processed_count: int = 0,
@@ -46,10 +49,11 @@ def _make_run(
         INSERT INTO job_runs
                (job_name, started_at, finished_at, status, row_count,
                 error_classes, rows_skipped_by_reason, rows_errored,
-                cancel_requested_at, processed_count, target_count)
+                progress_json, cancel_requested_at, processed_count,
+                target_count)
         VALUES (%s, now() - interval '5 minutes',
                 CASE WHEN %s THEN now() ELSE NULL END,
-                %s, NULL, %s, %s, %s,
+                %s, NULL, %s, %s, %s, %s,
                 CASE WHEN %s THEN now() ELSE NULL END,
                 %s, %s)
         RETURNING run_id
@@ -61,6 +65,7 @@ def _make_run(
             Jsonb(error_classes or {}),
             Jsonb(rows_skipped_by_reason or {}),
             rows_errored,
+            None if progress_json is None else Jsonb(progress_json),
             cancel_requested,
             processed_count,
             target_count,
@@ -265,6 +270,57 @@ def test_list_runs_returns_terminal_history(
     assert len(runs) == 2
     statuses = {r.status for r in runs}
     assert statuses == {"success", "failure"}
+
+
+def test_progress_errors_reach_both_read_paths(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3111 slice 5 — `progress_json` must be SELECTed by both queries.
+
+    The extraction itself is table-tested pure in
+    `tests/test_progress_error_buckets.py`. What only a DB round-trip can catch
+    is the projection: `_build_last_run` reads the column with `.get`, so a
+    query that never selects it returns `None` forever and the whole change is
+    inert while every unit test still passes. There are TWO such queries —
+    `list_runs` (History tab) and `_read_latest_terminal_run` (via `get_row`,
+    the process row's `last_run`) — and they are separate SQL statements, so
+    one can be fixed and the other missed.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        status="degraded",
+        finished=True,
+        rows_errored=0,
+        progress_json={"candidates_seen": 5, "outcomes": {"parsed": 4}, "errors": {"failed": 1}},
+    )
+    ebull_test_conn.commit()
+
+    runs = scheduled_adapter.list_runs(ebull_test_conn, process_id=JOB_RETRY_DEFERRED, days=7)
+    assert [r.progress_errors for r in runs] == [{"failed": 1}]
+    # The scalar stays 0 — the two counters are disjoint, and nothing here sums.
+    assert runs[0].rows_errored == 0
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None and row.last_run is not None
+    assert row.last_run.progress_errors == {"failed": 1}
+
+
+def test_run_without_progress_json_reports_none_not_empty(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """sql/254: NULL `progress_json` is "does not report", not "reported zero".
+
+    Asserted through the real column rather than the helper, because the two
+    answers render identically and only the stored value distinguishes them.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.commit()
+
+    runs = scheduled_adapter.list_runs(ebull_test_conn, process_id=JOB_RETRY_DEFERRED, days=7)
+    assert runs[0].progress_errors is None
 
 
 def test_watermark_surfaces_filed_at_for_sec_ingest_job(

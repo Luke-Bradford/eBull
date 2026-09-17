@@ -297,6 +297,12 @@ def _build_last_run(
         rows_processed=rows_processed,
         rows_skipped_by_reason=skip_reasons,
         rows_errored=len(failed_stages),
+        # #3111 slice 5 — ``bootstrap_runs`` carries no ``JobProgress``, so
+        # "does not report progress" (sql/254's NULL) is the truthful value.
+        # ⚠ NOT ``{}``: ``rows_errored`` above counts failed STAGES, a
+        # different unit from the per-row error buckets, so this adapter has
+        # nothing to report on that axis rather than a measured zero.
+        progress_errors=None,
         status=summary_status,
         # bootstrap_runs has no operator id on cancellation; the originating
         # operator lives in process_stop_requests.requested_by_operator_id

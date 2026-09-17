@@ -299,7 +299,8 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
             f"""
             SELECT run_id, started_at, finished_at, status, row_count,
                    error_msg, error_classes, rows_skipped_by_reason,
-                   rows_errored, cancelled_at, next_retry_at, attempt
+                   rows_errored, progress_json, cancelled_at, next_retry_at,
+                   attempt
               FROM job_runs
              WHERE job_name = %(name)s
                AND status   IN {TERMINAL_STATUS_SQL}
@@ -437,6 +438,11 @@ def _read_latest_terminal_sync_run(conn: psycopg.Connection[Any], *, scope: str)
         "error_classes": None,
         "rows_skipped_by_reason": None,
         "rows_errored": None,
+        # #3111 slice 5 — ``sync_runs`` has no ``progress_json`` column and the
+        # orchestrator jobs carry no ``JobProgress``. Explicit None (= "does not
+        # report progress", sql/254) rather than relying on ``.get`` returning
+        # it, so the synthesised row states the same shape as the real one.
+        "progress_json": None,
         "cancelled_at": row["finished_at"] if job_status == "cancelled" else None,
         # Task 5 (#1508): orchestrator/sync_runs terminal — kind ``sync_run``,
         # keyed on the original ``sync_run_id`` (surfaced as ``run_id`` above).
@@ -788,6 +794,52 @@ def _build_active_run(active_row: dict[str, Any]) -> ActiveRunSummary:
     )
 
 
+def _progress_error_buckets(progress_json: Any) -> dict[str, int] | None:
+    """Positive ``JobProgress.errors`` buckets, or ``None`` if unreported.
+
+    ⚠ ``None`` and ``{}`` are DIFFERENT answers and sql/254 says so in the
+    column comment: *"NULL means the job does not report progress, which is NOT
+    the same as reporting zero."* ``None`` = no ``progress_json`` (133,706 of
+    133,952 dev rows, plus every adapter that has no ``JobProgress`` at all);
+    ``{}`` = reported, nothing positive (245 rows, mostly the ``{"failed": 0}``
+    shape ``scheduler.py:3464`` seeds before a sweep runs). Collapsing the two
+    would delete the distinction the column was given.
+
+    The ``n > 0`` predicate is NOT chosen here — it is
+    ``job_progress.degradation_reason``'s (``job_progress.py:100``), which
+    records its own reasoning: truthiness would make ``{"api_errors": -1}``
+    degrade while ``{"done": -1}`` reads as progress. The Errored cell and the
+    Status cell are computed from the same map, so they must apply the same
+    predicate or an operator sees a run flagged ``degraded`` with nothing in
+    the column that flagged it.
+
+    Defensive in the style of ``_build_error_summaries`` — a single malformed
+    row must not break the History tab:
+
+    * non-dict payload / non-dict ``errors`` -> ``None`` (nothing was reported
+      in a readable shape, which is not the same as reporting zero either);
+    * ``bool`` values dropped — Python makes ``True > 0`` true, and a boolean
+      is not a count;
+    * non-``int`` and ``<= 0`` values dropped.
+
+    ⚠ The ``int`` filter's cost, measured rather than assumed: a positive
+    NON-INTEGRAL value would degrade the run and render ``—``. Across all
+    133,952 rows there are **0 non-numeric and 0 non-integral** bucket values,
+    and every producer in the tree assigns an ``int`` counter, so it drops
+    nothing any producer can emit today.
+    """
+    if not isinstance(progress_json, dict):
+        return None
+    errors = progress_json.get("errors")
+    if not isinstance(errors, dict):
+        return None
+    return {
+        str(name): value
+        for name, value in errors.items()
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+
+
 def _build_last_run(terminal_row: dict[str, Any]) -> ProcessRunSummary:
     started_at: datetime = terminal_row["started_at"]
     finished_at: datetime | None = terminal_row["finished_at"]
@@ -802,6 +854,7 @@ def _build_last_run(terminal_row: dict[str, Any]) -> ProcessRunSummary:
         rows_processed=terminal_row.get("row_count"),
         rows_skipped_by_reason={k: int(v) for k, v in skips.items()},
         rows_errored=int(terminal_row.get("rows_errored") or 0),
+        progress_errors=_progress_error_buckets(terminal_row.get("progress_json")),
         status=summary_status,
         # History-tab operator UUID — distinct from the Task 5 (#1508) verdict
         # boolean ``cancel_was_operator_initiated`` (computed in ``_build_row``
@@ -905,9 +958,15 @@ def _build_row(
     # recorded anything. A job whose rows all failed while the tick itself
     # completed cleanly writes ``status='success'`` (that is #3111's whole
     # premise), so its ``error_classes`` could never be rendered — a second
-    # write-with-no-reader, which is the exact defect that reshaped this ticket
-    # (``progress_json`` has no operator reader either). Suppression is now
-    # scoped to the two states the rule above actually names.
+    # write-with-no-reader, which is the exact defect that reshaped this ticket.
+    # Suppression is now scoped to the two states the rule above actually names.
+    #
+    # ⚠ This comment used to add "(``progress_json`` has no operator reader
+    # either)". That parenthetical was WRONG when written and is now doubly so:
+    # ``watermarks.py:288-291`` already selected four ``progress_json`` paths
+    # and ``ProcessDetailPage`` already rendered them, and #3111 slice 5 added a
+    # reader of the ``errors`` axis specifically
+    # (``_progress_error_buckets`` -> ``ProcessRunSummary.progress_errors``).
     #
     # Strictly a widening, and inert on every pre-#3111 row: with no producer
     # wired, ``error_classes`` is NULL everywhere and ``_build_error_summaries``
@@ -1156,7 +1215,8 @@ def list_runs(conn: psycopg.Connection[Any], *, process_id: str, days: int) -> l
         cur.execute(
             f"""
             SELECT run_id, started_at, finished_at, status, row_count,
-                   rows_skipped_by_reason, rows_errored, cancelled_at
+                   rows_skipped_by_reason, rows_errored, progress_json,
+                   cancelled_at
               FROM job_runs
              WHERE job_name   = %(name)s
                AND status     IN {TERMINAL_STATUS_SQL}

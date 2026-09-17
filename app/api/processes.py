@@ -125,6 +125,11 @@ class ProcessRunSummaryResponse(BaseModel):
     rows_processed: int | None
     rows_skipped_by_reason: dict[str, int]
     rows_errored: int
+    # #3111 slice 5 — the SECOND error counter, disjointly written from
+    # ``rows_errored`` and NOT summable with it. ``None`` means the run reports
+    # no ``JobProgress`` at all (sql/254: "NULL ... is NOT the same as reporting
+    # zero"); ``{}`` means it reported errors and none were positive.
+    progress_errors: dict[str, int] | None
     status: RunStatus
     cancelled_by_operator_id: UUID | None
 
@@ -390,6 +395,9 @@ def _convert_run(summary: ProcessRunSummary) -> ProcessRunSummaryResponse:
         rows_processed=summary.rows_processed,
         rows_skipped_by_reason=dict(summary.rows_skipped_by_reason),
         rows_errored=summary.rows_errored,
+        # dict() copy mirrors rows_skipped_by_reason above, but must preserve
+        # None — it is a distinct answer, not an empty map.
+        progress_errors=None if summary.progress_errors is None else dict(summary.progress_errors),
         status=summary.status,
         cancelled_by_operator_id=summary.cancelled_by_operator_id,
     )

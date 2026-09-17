@@ -515,6 +515,10 @@ def _row(
         rows_processed=0,
         rows_skipped_by_reason={},
         rows_errored=0,
+        # #3111 slice 5 — the health verdict does not read this axis; None
+        # ("does not report progress") keeps the fixture honest rather than
+        # asserting a measured zero it never measured.
+        progress_errors=None,
         status=last_run_status if last_run_status is not None else ("failure" if status == "failed" else "success"),
         cancelled_by_operator_id=None,
     )

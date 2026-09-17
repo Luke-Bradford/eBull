@@ -357,12 +357,20 @@ class WorkerStats:
 
         ⚠ Every value here must be JSON-serialisable: ``as_json`` feeds
         ``Jsonb``. The tick's "next eligible retry", which the acceptance also
-        asks for, is deliberately ABSENT — see §5c of the spec: it would land
-        only in ``progress_json``, which this ticket's own §3 established has no
-        operator-facing reader, and the one column that IS read
-        (``job_runs.next_retry_at``) is the retry sweeper's re-enqueue trigger
-        (``job_retry.py:108,219``), so writing a manifest-row stamp there would
-        re-fire the whole job.
+        asks for, is deliberately ABSENT — see §5c of the spec: the one column
+        that IS read (``job_runs.next_retry_at``) is the retry sweeper's
+        re-enqueue trigger (``job_retry.py:108,219``), so writing a
+        manifest-row stamp there would re-fire the whole job.
+
+        ⚠ §5c's OTHER reason — "it would land only in ``progress_json``, which
+        has no operator-facing reader" — no longer holds and is struck here
+        rather than left to rot. Slice 5 gave the ``errors`` axis a reader
+        (``scheduled_adapter._progress_error_buckets`` ->
+        ``ProcessRunSummary.progress_errors``), and ``watermarks.py:288-291``
+        had been reading other ``progress_json`` paths all along. The deferral
+        STANDS on the ``next_retry_at`` reason alone: a per-manifest-row retry
+        stamp is a different field with different semantics from an error
+        census, so slice 5 does not smuggle it in.
         """
         return JobProgress(
             candidates_seen=self.rows_processed,

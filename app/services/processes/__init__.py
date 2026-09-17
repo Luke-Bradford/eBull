@@ -125,6 +125,24 @@ class ProcessRunSummary:
     (sql/137). Adapters that lack per-reason granularity emit
     ``{"unknown": <count>}`` rather than ``{}`` so the FE chart always
     has a key.
+
+    ``progress_errors`` is the SECOND error counter (#3111 slice 5): the
+    positive buckets of ``job_runs.progress_json -> 'errors'``, which is a
+    different axis from ``rows_errored`` and **not summable with it** — the
+    only job writing both (``sec_manifest_worker``) pins
+    ``rows_errored == failed + dispatch_errors`` (``sec_manifest_worker.py:760``)
+    while putting the same two counters in its ``JobProgress`` (``:367``), so a
+    sum double-counts.
+
+    ⚠ ``None`` is NOT ``{}``. ``sql/254``'s ``progress_json`` column comment is
+    explicit — *"NULL means the job does not report progress, which is NOT the
+    same as reporting zero"* — so ``None`` means the run (or the whole adapter)
+    has no ``JobProgress`` at all, and ``{}`` means it reported errors and none
+    were positive. 133,706 of 133,952 dev rows are the former.
+
+    Bucket selection mirrors ``job_progress.degradation_reason``'s ``n > 0``
+    predicate exactly, deliberately: the Errored cell and the Status cell are
+    derived from the same map and must not disagree about which buckets fired.
     """
 
     run_id: int
@@ -134,6 +152,7 @@ class ProcessRunSummary:
     rows_processed: int | None
     rows_skipped_by_reason: dict[str, int]
     rows_errored: int
+    progress_errors: dict[str, int] | None
     status: RunStatus
     cancelled_by_operator_id: UUID | None
 

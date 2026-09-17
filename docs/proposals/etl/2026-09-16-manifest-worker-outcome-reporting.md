@@ -66,13 +66,23 @@ already built and both already surfaced:
 
 | mechanism | what it records | where it surfaces |
 | --- | --- | --- |
-| `JobProgress` (#2218) → `tracker.progress` | `candidates_seen` / `outcomes` / `errors`, and the degradation verdict | `status='degraded'` + the reason in `error_msg`, which the admin row and `/system/jobs` already render |
+| `JobProgress` (#2218) → `tracker.progress` | `candidates_seen` / `outcomes` / `errors`, and the degradation verdict | `status='degraded'` + the reason in `error_msg`, which the admin row and `/system/jobs` already render; `context`/`outcomes` paths via `watermarks.py:288-291`; **and, since slice 5, the `errors` buckets via `ProcessRunSummary.progress_errors` → History's Errored column** |
 | `JobTelemetryAggregator` (`app/services/job_telemetry.py`) | `record_processed` / `record_error(error_class, message, subject)` / `record_warning` / `record_skip(reason)` → `rows_errored`, `error_classes` JSONB, `rows_skipped_by_reason` | `scheduled_adapter.py:788-797` → `/processes` `ProcessRunSummary` |
 
 ⚠ **Codex 6 was right and it matters: `progress_json` has NO operator-facing reader.**
 `app/api/jobs.py`'s queries select `row_count, error_msg, linked_request_id` and never
 `progress_json`; `scheduled_adapter` does not read it either. So persisting progress alone
 cannot satisfy the acceptance's *"jobs-page drilldown exposes failed scope"*.
+
+> ⛔ **SUPERSEDED — and it was already too strong when written.** Slice 5's checkpoint 1
+> established that `processes/watermarks.py:288-291` selected four `progress_json` paths and
+> `ProcessDetailPage.tsx` rendered them, so a reader existed all along; what was missing was a
+> reader of the **`errors` axis** specifically. Slice 5 (§9) adds one —
+> `scheduled_adapter._progress_error_buckets` → `ProcessRunSummary.progress_errors` →
+> the History tab's Errored column. The paragraph above is kept rather than rewritten because
+> slices 2 and 4 were designed against it and §5c's deferral cites it by name; read it as a
+> claim about the `errors` axis at `b23d2a13`, now discharged. The slice-2/4 conclusions do not
+> change — `JobTelemetryAggregator` was still the right mechanism for the failed SCOPE.
 
 ⚠ **Codex 17 was right too.** `scheduled_adapter:794` maps `row_count → rows_processed` while
 reading `rows_errored` from its own column, which this job never writes. So the first draft's
@@ -440,6 +450,10 @@ Codex checkpoint 2**, which pointed out it had no reader. That is the defect thi
 to remove, so shipping it would have been self-contradictory. Both candidate homes fail:
 
 - **`progress_json`** — §3 of this very document establishes it has no operator-facing reader.
+  ⛔ **This half of the deferral is DISCHARGED by slice 5** (§9e): the `errors` axis now has a
+  reader, and §3's claim was already too strong. The deferral STANDS on the second reason
+  alone — a per-manifest-row retry stamp is a different field with different semantics from an
+  error census, so slice 5 does not smuggle it in.
 - **`job_runs.next_retry_at`**, which `scheduled_adapter._read_latest_terminal_run` DOES select
   (`:302`, `:1084`) — but that column is machinery, not a display field. `jobs_retry_sweeper`
   scans it and **re-enqueues the job** (`job_retry.py:108` — *"only ever set on a
@@ -510,3 +524,232 @@ lane's errors are indistinguishable from the primary lane's.
 - No second health model. Both mechanisms used here already exist and are already surfaced.
 
 Refs #3111. Refs #2218. Refs #2274. Refs #2437.
+
+
+## 9. Slice 5 — `JobProgress.errors` reaches the Errored column
+
+Status: **spec, rewritten after Codex checkpoint 1 (21 findings)**, which falsified three claims
+in the first draft, replaced the display rule, and pointed at two documented source rules the
+draft had reasoned around instead of citing. Filed on #3111 by the slice-4 close-out as *"the
+obvious next slice — an API shape change with data semantics, so it wants its own diff"*.
+
+Touches `app/services/processes/__init__.py`, `app/services/processes/scheduled_adapter.py`,
+`app/services/processes/ingest_sweep_adapter.py`, `app/services/processes/bootstrap_adapter.py`,
+`app/api/processes.py`, `frontend/src/api/types.ts`,
+`frontend/src/components/admin/__fixtures__/processes.ts`,
+`frontend/src/pages/ProcessDetailPage.tsx`, plus the two Python test modules and
+`ProcessDetailPage.test.tsx`.
+
+### 9a. The defect, and the full-population partition behind it
+
+Slice 4 shipped the **Errored** column reading `job_runs.rows_errored`. Dev-verify then found
+the one `degraded` run in the corpus rendering `—`:
+
+```
+133470 | daily_candle_refresh | degraded | rows_errored=0 | progress_json.errors={'failed': 1}
+```
+
+Census re-run here with the predicate the VERDICT uses (`any bucket > 0`), not a sum — a sum is
+the wrong discriminator because `{a: 2, b: -2}` degrades the run and totals zero (Codex 12). Dev
+DB, 2026-09-17, exhaustive partition, reproduce with:
+
+```sql
+with p as (select rows_errored, progress_json as pj, progress_json->'errors' as errs from job_runs)
+select count(*) total,
+       count(*) filter (where pj is null)                                     pj_null,
+       count(*) filter (where pj is not null)                                 pj_present,
+       count(*) filter (where pj is not null and jsonb_typeof(errs) is distinct from 'object') pj_no_errors_obj,
+       count(*) filter (where errs = '{}'::jsonb)                             errs_empty,
+       count(*) filter (where exists (select 1 from jsonb_each(errs) e
+                                       where jsonb_typeof(e.value)='number' and (e.value)::numeric > 0))  any_positive,
+       count(*) filter (where exists (select 1 from jsonb_each(errs) e where jsonb_typeof(e.value) <> 'number')) non_numeric,
+       count(*) filter (where exists (select 1 from jsonb_each(errs) e
+                                       where jsonb_typeof(e.value)='number'
+                                         and (e.value)::numeric <> trunc((e.value)::numeric)))            non_integral,
+       count(*) filter (where rows_errored > 0) scalar_pos,
+       count(*) filter (where rows_errored < 0) scalar_neg
+  from p;
+```
+
+| axis | count |
+| --- | --- |
+| total `job_runs` | 133,952 |
+| `progress_json` **NULL** — the job does not report progress at all | 133,706 |
+| `progress_json` present | 246 |
+| …present but carrying no `errors` object | **0** |
+| …`errors` present and empty `{}` | 7 |
+| …**any bucket > 0** | **1** (run 133470) |
+| …any non-numeric bucket value | **0** |
+| …any non-integral numeric value | **0** |
+| `rows_errored > 0` | **0** |
+| `rows_errored < 0` | **0** |
+
+The 245 present-but-not-positive rows are 239 `success` + 6 `failure` — no `degraded` run hides
+in there, which is what the verdict predicts. Most carry error KEYS with ZERO values
+(`{"failed": 0}`; `scheduler.py:3464` seeds that shape before the sweep runs): **presence of a
+key is not an error**, and filtering on the key rather than the value would flag 239 clean
+successes.
+
+⚠ **Correction to the draft (Codex 5).** It claimed a run can only reach `degraded` *through*
+`JobProgress.errors`. False — `degradation_reason` (`job_progress.py:105`) has a **second** rule:
+saw candidates, produced no terminal outcome. Such a run is `degraded` with an empty error map
+and **correctly** renders `—`; that case is in the acceptance below rather than papered over.
+
+### 9b. Source rule — the predicate is already written down, twice
+
+**Rule 1 — which buckets count.** `degradation_reason` (`app/services/job_progress.py:96-103`)
+filters `{name: n for name, n in progress.errors.items() if n > 0}` and states why in its own
+comment: *"`n > 0` rather than truthiness (Codex ckpt-3): a negative count is nonsense either
+way, but truthiness makes `{"api_errors": -1}` degrade while `{"done": -1}` reads as progress"*.
+The draft derived a `> 0` filter from the census. **It is not ours to derive** — the extraction
+mirrors that predicate exactly, because the Errored cell and the Status cell are computed from
+the same map and must never disagree about which buckets fired.
+
+**Rule 2 — NULL is not zero.** `sql/254`'s `COMMENT ON COLUMN job_runs.progress_json` is
+explicit: *"NULL means the job does not report progress, which is NOT the same as reporting
+zero."* The draft collapsed NULL, unsupported adapters and measured-zero into one `{}` (Codex 7)
+— the exact "a default value is not a measurement" shape it claimed to be avoiding. Corrected:
+the field is **`dict[str, int] | None`**, `None` for "does not report", `{}` for "reports, none
+positive".
+
+### 9c. Display rule — buckets first, never summed
+
+`rows_errored` and `JobProgress.errors` are disjointly written and **not summable**:
+`sec_manifest_worker.py:760` pins `agg.rows_errored == failed + dispatch_errors` while `:367`
+puts the same two counters into its `JobProgress`, so a sum double-counts. This slice does not
+fold them.
+
+The close-out left open *"no rule says which is authoritative per job"*. Answer it by enumerating
+producers, not by picking an authority:
+
+- **`rows_errored` has exactly ONE producer in the tree.** `JobTelemetryAggregator` is the sole
+  writer (`job_telemetry.py:407`) and `rg` finds one instantiation — `scheduler.py:8093`, the
+  `sec_manifest_worker` tick.
+- That job is also a `JobProgress.errors` producer, and there the scalar is the buckets' **sum by
+  construction** (`:367` vs `:760`).
+- **Every other `JobProgress.errors` producer writes no `rows_errored` at all**
+  (`scheduler.py:3464`, `:3508`, `:9296`, `:9909`; `:7073`/`:7107` declare no `errors` axis).
+
+> **Render the positive `JobProgress.errors` buckets when there are any. Otherwise render
+> `rows_errored` when it is `> 0`. Otherwise `—`. Never add them, never show both.**
+
+⚠ **Buckets first, not scalar first** (Codex 16 changed this). The draft preferred the scalar and
+justified it as "the buckets are only its decomposition". That is wrong on the operational axis:
+`failed` means the row is coming back on a retry stamp, `dispatch_errors` means the state
+transition itself failed. Equal totals do not make the split uninformative — so for the one job
+that writes both, `failed 3 · dispatch_errors 2` is strictly more than `5` and still never
+double-counts.
+
+⚠ **This is a narrowing gate, so what it REJECTS is enumerated**: the scalar on a run that also
+has positive buckets. Population affected today: **0 runs** (both `any_positive` and `scalar_pos`
+partitions above are disjoint and the latter is empty). Right for `sec_manifest_worker`, the only
+job able to produce that case, because there the scalar is recoverable as the buckets' sum.
+**Trigger to revisit (widened per Codex 17):** any producer emitting a positive `errors` bucket
+that is NOT part of its `rows_errored` total — which the manifest worker could do without a
+second scalar producer ever landing. Guarded executably by a test pinning
+`WorkerStats.as_progress().errors` against `rows_errored`, so the assumption fails a gate rather
+than a reader's memory.
+
+`rows_errored > 0`, not "non-zero" (Codex 11): `sql/137` puts no non-negative constraint on the
+column, and `> 0` is both the existing UI predicate and rule 1's.
+
+### 9d. Shape
+
+`ProcessRunSummary` (`processes/__init__.py`) and `ProcessRunSummaryResponse`
+(`api/processes.py`) each gain:
+
+```python
+progress_errors: dict[str, int] | None   # positive buckets only; None = job does not report progress
+```
+
+A **map**, not a scalar: `JobProgress`'s docstring warns `outcomes` buckets may overlap and says
+nothing that makes `errors` buckets disjoint, so summing them here is the same unlicensed fold in
+miniature. It also mirrors `rows_skipped_by_reason`, already `dict[str, int]` on this model.
+
+**No dataclass default.** All three adapters set it explicitly — a default would let a new adapter
+silently report a counter it was never asked about. ⚠ Corrected from the draft (Codex 4): they
+pass **`None`**, not `{}`, and the reason is *not* "they report errors through `rows_errored`" —
+that was false. `ingest_sweep_adapter:487` hard-codes `rows_errored=0` even for failed log rows,
+and `bootstrap_adapter:299` counts failed **stages**, not rows. Neither is `job_runs`-backed and
+neither has a `JobProgress`, so `None` — "does not report" — is the only truthful value.
+
+**Both SQL projections must change** (Codex 1): `_read_latest_terminal_run` (`:300`) and
+`list_runs` (`:1158`) each add `progress_json` to the SELECT, or the builder's `.get` returns
+`None` forever and the change is inert. `_read_latest_terminal_sync_run` synthesises a terminal
+row for orchestrator-driven jobs and has no such column; it gains an explicit
+`"progress_json": None` beside its existing `"rows_errored": None`.
+
+**`_convert_run` forwards it explicitly** (`api/processes.py:384`, Codex 2) — it hand-constructs
+the response, so a model field alone would drop the measurement.
+
+Extraction is defensive in the style of `_build_error_summaries`: a non-dict payload, a non-dict
+`errors`, a `bool` value (Python's `True > 0` is `True`, and a boolean is not a count — Codex 9),
+a non-`int` value and any value `<= 0` are all dropped, so one malformed row cannot break the
+History tab. ⚠ **What that int filter could cost, stated rather than assumed** (Codex 10): a
+positive non-integral value would degrade the run and render `—`. The census above measures
+**0 non-numeric and 0 non-integral values across all 133,952 rows**, and every producer in the
+tree assigns an `int` counter (`self.failed`, `summary.candles_failed`, `report.api_errors`,
+`report.parse_failures`, …), so the filter drops nothing any producer can emit. If one ever does,
+the behaviour is today's — `—` in the column with the Status cell still telling the truth — not a
+regression.
+
+### 9e. ⛔ This slice invalidates a premise used twice as a deferral reason — and the premise was
+already narrower than written
+
+Two comments say, in code, that `progress_json` has no operator-facing reader:
+
+- `scheduled_adapter.py:909` — the slice-2 suppression comment.
+- `sec_manifest_worker.py:361` — the §5c deferral of "next eligible retry", whose first rejected
+  home is *"`progress_json`, which this ticket's own §3 established has no operator-facing
+  reader"*.
+
+⚠ **That claim was already false when written (Codex 6)**, and this slice is not what breaks it:
+`processes/watermarks.py:288-291` selects four `progress_json` paths and `ProcessDetailPage.tsx`
+renders the result. What did not exist is a reader of the **errors axis**, which is what slice 5
+adds. §3's table, §3's prose, §5c's deferral paragraph and both code comments are corrected in the
+same diff (Codex 21) — a stale claim is worst in the place a reader trusts most.
+
+⚠ **The §5c deferral does NOT reopen.** Its second home stays barred for an unrelated and
+unchanged reason (`job_runs.next_retry_at` is the retry sweeper's re-enqueue trigger), and a
+per-manifest-row retry stamp is a different field with different semantics from an error census.
+The premise moved; the slice stays deferred, recorded on #3111 rather than quietly acted on.
+
+### 9f. Two operator-visible contradictions this creates, and their copy fixes
+
+1. **The Errored tooltip becomes false** (Codex 18). It currently reads *"…A run can also degrade
+   on JobProgress errors, which this column does not count"*. Replaced with per-branch wording
+   that names the source actually rendered in that cell.
+2. **The Errors tab would deny what History shows** (Codex 19). `ErrorsTab` reads only
+   `error_classes` and says *"No errors on the latest terminal run"* — a universal denial it
+   cannot support, and it would sit beside a History row reading `failed 1`. Narrowed to state
+   what it reads. Copy only; no new read path.
+
+### 9g. Acceptance
+
+Backend, per Codex 20 — both SQL paths through serialisation, not one:
+
+- `list_runs` and `get_row().last_run` both surface `progress_errors` for run 133470 (`{"failed": 1}`).
+- `progress_json` NULL → `None`, not `{}` (sql/254's distinction survives to the API).
+- Buckets present but all zero → `{}`.
+- Multiple positive buckets are preserved separately, unsummed.
+- A mixed map (`{"a": 2, "b": 0, "c": -1, "d": true, "e": "x"}`) yields `{"a": 2}` exactly.
+- Orchestrator-driven job (synthesised `sync_runs` terminal) → `None`.
+- `ingest_sweep` / `bootstrap` adapters → `None`.
+- `WorkerStats.as_progress().errors` sums to the aggregator's `rows_errored` (the §9c revisit trigger, as a gate).
+
+Frontend:
+
+- `rows_errored=0, progress_errors={"failed":1}` → `failed 1`; `rows_errored=5, progress_errors=null` → `5`;
+  both positive → buckets only; neither → `—`; `progress_errors={}` → `—`.
+- A `degraded` run with no positive buckets (the no-terminal-outcome rule) → `—`, and that is correct.
+
+Dev-verify on the real stack: `/admin/processes/daily_candle_refresh` → History renders `failed 1`
+on run 133470 and `—` on its neighbours.
+
+Revert-probes: dropping the value filter, dropping the bucket branch, dropping either SQL
+projection, and reverting `_convert_run` must each fail a test.
+
+### 9h. What slice 5 does not change
+
+No producer, no counter, no degradation verdict, no retry behaviour, no job, no schema. It is a
+read path and a render. `rows_errored` keeps its meaning and its column position.

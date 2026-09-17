@@ -2186,6 +2186,13 @@ export interface ProcessRunSummaryResponse {
   rows_processed: number | null;
   rows_skipped_by_reason: Record<string, number>;
   rows_errored: number;
+  /**
+   * #3111 slice 5 — positive `JobProgress.errors` buckets. A SECOND error
+   * counter, disjointly written from `rows_errored` and NOT summable with it.
+   * `null` = the run reports no JobProgress at all (sql/254: NULL is not the
+   * same as reporting zero); `{}` = reported, none positive.
+   */
+  progress_errors: Record<string, number> | null;
   status: ProcessRunStatus;
   cancelled_by_operator_id: string | null;
 }
