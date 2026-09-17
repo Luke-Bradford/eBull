@@ -155,6 +155,28 @@ def _parse_filing_date(value: str | None) -> datetime | None:
     return None
 
 
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    text = value.strip()
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        pass
+    for fmt in _FALLBACK_DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    titled = text.title()
+    for fmt in _FALLBACK_DATE_FORMATS:
+        try:
+            return datetime.strptime(titled, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def _is_future_dated_for_form(
     *,
     form_upper: str,
@@ -204,28 +226,6 @@ def _is_future_dated_for_form(
         (trans_timeliness or "").strip().upper() or None,
     )
     return invalid
-
-
-def _parse_iso_date(value: str | None) -> date | None:
-    if not value:
-        return None
-    text = value.strip()
-    try:
-        return date.fromisoformat(text[:10])
-    except ValueError:
-        pass
-    for fmt in _FALLBACK_DATE_FORMATS:
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    titled = text.title()
-    for fmt in _FALLBACK_DATE_FORMATS:
-        try:
-            return datetime.strptime(titled, fmt).date()
-        except ValueError:
-            continue
-    return None
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:
@@ -739,9 +739,15 @@ def ingest_insider_dataset_archive(
                 # the filing. A Form 3's PERIOD_OF_REPORT is the Date of Event
                 # Requiring Statement and legitimately can, so the helper's
                 # form check — not this call site — decides.
-                # No timeliness column exists on NONDERIV_HOLDING (it is a
-                # holding, not a transaction), so the 'E' exemption cannot apply
-                # here and None is passed rather than a guessed column name.
+                # Passing None for timeliness is not a gap: a holdings row
+                # CANNOT carry one. EDGAR Ownership XML Technical Specification
+                # 4.3.8.1 and 4.3.8.2 — "Holdings reported in '3' and '3/A'
+                # submissions do not have <transactionCoding> or
+                # <transactionTimeliness> elements", and the same sentence for
+                # '4'/'4/A'. 4.3.8.3 allows one exception on a '5' submission,
+                # a LATE '3' holding, which is 'L' and not 'E'. So no early
+                # holding exists for the exemption to protect, and
+                # NONDERIV_HOLDING has no timeliness column to read.
                 if _is_future_dated_for_form(
                     form_upper=form_upper,
                     period_end=period_end,
