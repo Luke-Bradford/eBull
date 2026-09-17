@@ -7872,3 +7872,89 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - Enforced in: this log; `scripts/check_ownership_rollup_snapshot.py` (+ `.sh` wrapper), wired
   into BOTH `.githooks/pre-push` and `.github/workflows/ci.yml` (the `check_ci_mirrors_prepush`
   parity guard requires both — 26 lints in each).
+
+---
+
+### An audit script that RESTATES the predicate it describes measures a proxy, and its drift test guards the wrong seam (#2788, 2026-09-17)
+
+- Symptom: `scripts/audit_2788_section16_exit.py` copied the release rule's *tip* definition
+  into its own SQL, and a test asserted the two strings matched. Both were green. The census
+  still reported a population **326 holders larger than anything that shipped** — 3,992 holders
+  / 4,869 rows / 27.0B shares against the 3,666 / 4,461 / 21.3B the predicate actually selects
+  — because the shipped rule also carries three guard arms the copy did not. Those figures had
+  already been written into a spec and were on their way into a PR body.
+- Root cause: the drift test pinned that the COPY matched, not that the census measured the
+  CODE. A copy plus a drift test looks like one definition and is not: it is two definitions
+  plus an assertion about a substring, and the assertion stays true while the thing being
+  measured diverges. The failure is silent in the direction that matters — the census reports
+  *more* than ships, so every number reads as conservative when it is inflated.
+- Prevention: an audit/census whose output will be quoted as evidence for a code path must
+  **import that path's own definition**, never restate it. Correlate on the service's alias so
+  the fragment drops in unchanged (`from app.services import x; _EXIT = x._FRAGMENT`). Pin
+  **object identity** (`assert census._EXIT is service._FRAGMENT`), not string equality — and
+  add an assertion that at least one query actually contains it, or the import is decorative
+  and the check passes vacuously (the `x <> ALL('{}')` shape again). Self-review prompt: for
+  every figure a PR quotes, ask "which line of shipped code produced this number?" — if the
+  answer is "a copy of it", the number is not evidence.
+- Generalises to: any harness that re-implements a threshold, filter or predicate in order to
+  count how often it fires. Sibling of "a verifier pinned to its own code hash" (there the
+  verifier imported a constant from the module under test and printed 0; here it restated a
+  predicate and printed too much) and of "a check that passes may be structurally unable to
+  fail".
+- First seen in: #2788 (2026-09-17), caught while writing the PR body, not by any gate.
+- Enforced in: this log; `scripts/audit_2788_section16_exit.py` (imports
+  `_INSIDER_SECTION16_EXIT_SQL` and `_INSIDER_TIP_PERIOD_SQL`);
+  `tests/test_insider_section16_exit_release.py::test_census_measures_the_shipped_predicate`
+  (identity, plus "a query actually uses it"); `scripts/audit_2371_correct_zero_release.py`
+  (same pattern, written this way from the start).
+
+---
+
+### A hand-written population figure in a guard's docstring cannot distinguish "rare" from "DEAD" (#2371, 2026-09-17)
+
+- Symptom: `_stored_rows_are_all_13d_cover_labels` carried *"Measured full-population — 2 of
+  7,141 accessions with stored holdings are all-cover-label, and NONE is mixed."* On the
+  2026-09-17 corpus (7,293 accessions / 111,732 rows) the rule matched **0**. The guard had
+  stopped firing entirely and nothing failed, because a guard that never fires and a guard that
+  rarely fires produce identical output: silence.
+- Root cause: the existing rule "never hardcode a derived statistic into prose" is usually
+  argued on staleness — the number drifts and misleads. On a GUARD it is worse than misleading:
+  the hand-written "2" is the only thing telling a reader the guard is alive, so when the true
+  count reaches zero the docstring actively certifies a dead branch as a working one. Nothing
+  in the test suite covers "does this guard still match anything in the corpus", because its
+  unit tests pass synthetic names straight to the pure predicate and will pass forever.
+- Prevention: never write a corpus count into a guard's docstring. Point at a reproduction
+  command instead (`scripts/audit_2371_correct_zero_release.py`). Where a figure genuinely must
+  be written down, put the query beside it. And when picking up any ticket whose premise is "X
+  is rare", **re-run the count before designing around it** — `0` and `2` are different
+  diagnoses (dead vs narrow) and they demand different fixes.
+- First seen in: #2371 (2026-09-17). The stale figure came from #2173 and was correct when
+  written; #2176's parser changes moved the corpus out from under it.
+- Enforced in: this log; `app/services/rewash_filings.py::_stored_rows_name_no_beneficial_owner`
+  (docstring names the script and explicitly refuses to carry a figure);
+  `scripts/audit_2371_correct_zero_release.py`.
+
+---
+
+### A revert probe that never APPLIED is indistinguishable from one the tests missed (#2371, 2026-09-17)
+
+- Symptom: a probe intended to delete the instrument disjunct from
+  `name_is_not_a_beneficial_owner` reported `NOT CAUGHT`. It had never applied —
+  `ruff format` had reflowed the target return statement onto one line after the probe string
+  was written, so the `str.replace` matched nothing and the "mutated" tree was the original.
+  Re-run against the actual text, the mutation is caught immediately.
+- Root cause: the probe harness reported the TEST's exit code and nothing about whether the
+  source changed. A no-op mutation trivially passes the suite, and `NOT CAUGHT` is exactly the
+  result that prompts someone to go write more tests for a gap that does not exist — or worse,
+  to conclude the assertion is unreachable and delete it. Distinct from the existing
+  "broken probe RUNNER" entry: there the runner failed loudly and the verdict was a false
+  CAUGHT; here the runner was fine and the EDIT silently did nothing, giving a false NOT CAUGHT.
+- Prevention: assert the mutation landed before believing any verdict — `assert old in s` (or
+  `assert s2 != s`) inside the patch step, so a stale literal aborts the probe instead of
+  producing a result. Re-read the target text after any `ruff format` / `ruff check --fix` run
+  in the same session; formatters reflow exactly the multi-line expressions probes target. And
+  run an unmodified CONTROL first: a green control plus an asserted mutation is what makes
+  `NOT CAUGHT` mean something.
+- First seen in: #2371 (2026-09-17), on a 4-probe batch where 3 applied and were caught.
+- Enforced in: this log; the probe pattern used on #2371 and #2788 (control first, then
+  `assert` inside every patch step).
