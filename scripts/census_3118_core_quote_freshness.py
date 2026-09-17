@@ -109,7 +109,8 @@ def _open_gap(asset_class: str | None, *, on: date, fire_minute: int | None) -> 
     return (
         f"  {calendar.calendar_id}: open {open_utc:%H:%M}Z on {on} — "
         f"first fetch at or after it {fire:%H:%M}Z — "
-        f"uncovered {gap_s}s ({gap_s / 60:.0f} min), bound {CORE_MAX_QUOTE_AGE_SECONDS}s"
+        f"uncovered {gap_s}s ({gap_s / 60:.0f} min) by the HOURLY lane alone; "
+        f"preflight bound {CORE_MAX_QUOTE_AGE_SECONDS}s"
     )
 
 
@@ -130,7 +131,12 @@ def main() -> None:
     args = parser.parse_args()
 
     kind, fire_minute = _refresh_fire_minute()
-    print(f"quote bound            {CORE_MAX_QUOTE_AGE_SECONDS}s  ({CORE_PREFLIGHT_POLICY_VERSION})")
+    # ⚠ The bound stopped following this script's subject in #3157: it is derived from
+    # `core_candidate_quote_refresh` (300 s, one lost fire tolerated), not from the
+    # hourly lane whose coverage this census measures. Printed together on purpose —
+    # the gap below is what the hourly lane alone leaves, and the bound is what a
+    # verdict is held to; reading the second as the first was the #3118 confusion.
+    print(f"preflight quote bound  {CORE_MAX_QUOTE_AGE_SECONDS}s  ({CORE_PREFLIGHT_POLICY_VERSION})")
     print(f"{JOB_QUOTES_REFRESH} cadence  kind={kind} minute={fire_minute}")
     print()
 

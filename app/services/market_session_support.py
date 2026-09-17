@@ -176,15 +176,20 @@ _ASSET_CLASS_CALENDARS: Final = MappingProxyType({"us_equity": _NYSE, "uk_equity
 #: the clock without a halt, and an auction or an indicative quote may keep it
 #: moving through one.
 #:
-#: ⚠ And it is not reachable at today's cadence. The only SCHEDULED producer is
-#: ``quotes_refresh`` (hourly @ :23) -- ``etoro_websocket.upsert_quote`` also writes
-#: this table, but only for whatever is on the operator's screen, so it is no
-#: unattended producer for a core instrument. ``CORE_MAX_QUOTE_AGE_SECONDS`` is
-#: 5400s, derived from that cadence and NOT from any halt-risk bound. A halt-relevant
-#: bound under an hourly producer does not refuse permanently -- it admits only in a
-#: brief window after each write and refuses the rest of the hour, which for a
-#: submission that must happen at a chosen moment is the same problem wearing a
-#: better name. Specify the risk bound first, then show collection can meet it.
+#: ⚠ THE CADENCE HALF OF THIS PARAGRAPH IS NO LONGER TRUE, and the rest is (#3157).
+#: It read "not reachable at today's cadence: the only SCHEDULED producer is
+#: ``quotes_refresh`` (hourly @ :23)". Since #3118 the core cohort also has
+#: ``core_candidate_quote_refresh`` every 300 s, and since #3157
+#: ``CORE_MAX_QUOTE_AGE_SECONDS`` is 750 s derived from it -- so the quote clock IS
+#: continuously covered in an open session for this cohort, and the old objection
+#: (a bound under an hourly producer admits only briefly after each write and
+#: refuses the rest of the hour) no longer applies to it.
+#: ⚠⚠ That changes the COST, not the verdict. No venue is admitted on a quote clock,
+#: because the three limits above are unanswered and because
+#: ``CORE_MAX_QUOTE_AGE_SECONDS`` is derived from a producer cadence and NOT from any
+#: halt-risk bound. Specify the risk bound first, then show collection can meet it.
+#: ``etoro_websocket.upsert_quote`` also writes this table, but only for whatever is
+#: on the operator's screen, so it remains no unattended producer for anything.
 _HALT_COVERED_ASSET_CLASSES: Final = frozenset({"us_equity"})
 
 #: ⚠ An ALLOW-list, and that direction is the whole point: ``exchanges.asset_class``

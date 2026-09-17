@@ -299,32 +299,76 @@ def test_each_freshness_bound_still_agrees_with_its_producers_registered_cadence
     """The bound is derived from the PRODUCER, so it must break when the producer moves.
 
     ⚠ This is the assertion that makes the derivation real rather than narrated.
-    ``quotes_refresh`` is hourly and ``strategy_halt_feed_refresh`` every five
-    minutes TODAY; re-cadencing either without revisiting the bound would leave a
-    constant whose stated derivation no longer holds. Read from the scheduler's own
+    ``core_candidate_quote_refresh`` and ``strategy_halt_feed_refresh`` are both
+    five-minutely TODAY; re-cadencing either without revisiting the bound would leave
+    a constant whose stated derivation no longer holds. Read from the scheduler's own
     registered ``ScheduledJob`` rows, never re-typed here.
 
-    The invariant is the derived INTERVAL — ``period <= bound < 2 * period`` — not
-    the midpoint, which is a construction choice frozen in the policy version.
+    ⚠ The quote bound's producer CHANGED in #3157. It was ``quotes_refresh`` (hourly),
+    which stopped being the binding producer the moment #3118 gave the core cohort its
+    own five-minute job — ``CORE_QUOTE_REFRESH_SCOPE_SQL`` is what decides which rows
+    ``_PREFLIGHT_SQL`` can read, and that is this job's scope, not the hourly one's.
+
+    ⚠⚠ EXACT EQUALITY, not interval membership. A cadence change from five to six
+    minutes leaves 750 s inside ``[720, 1080)``, so an interval assertion alone would
+    not see the drift this test exists to catch. The interval is asserted too, because
+    it is the reasoning the equality encodes and a reader needs both.
     """
     from app.workers.scheduler import (
-        JOB_QUOTES_REFRESH,
+        JOB_CORE_CANDIDATE_QUOTE_REFRESH,
         JOB_STRATEGY_HALT_FEED_REFRESH,
         SCHEDULED_JOBS,
     )
 
     by_name = {job.name: job for job in SCHEDULED_JOBS}
-    for job_name, bound in (
-        (JOB_QUOTES_REFRESH, CORE_MAX_QUOTE_AGE_SECONDS),
-        (JOB_STRATEGY_HALT_FEED_REFRESH, CORE_MAX_HALT_FEED_AGE_SECONDS),
+    for job_name, bound, tolerated in (
+        (JOB_CORE_CANDIDATE_QUOTE_REFRESH, CORE_MAX_QUOTE_AGE_SECONDS, 1),
+        (JOB_STRATEGY_HALT_FEED_REFRESH, CORE_MAX_HALT_FEED_AGE_SECONDS, 0),
     ):
         cadence = by_name[job_name].cadence
         period = _period_seconds(cadence)
-        assert period <= bound < 2 * period, (
-            f"{job_name}: bound {bound}s is outside [{period}, {2 * period}) — "
+        lo, hi = (tolerated + 1) * period, (tolerated + 2) * period
+        assert lo <= bound < hi, (
+            f"{job_name}: bound {bound}s is outside [{lo}, {hi}) — "
             "the cadence moved and the derivation no longer holds"
         )
-        assert bound == _freshness_bound(period)
+        assert bound == _freshness_bound(period, tolerated_missed_fires=tolerated)
+
+
+def test_the_two_preflight_bounds_are_the_values_the_policy_version_froze() -> None:
+    """Pin the CONCRETE seconds, not only the self-referential derivation.
+
+    Without this, editing ``_freshness_bound`` moves both constants and every other
+    test in this file follows them silently — the derivation would keep agreeing with
+    itself while the served policy changed. ⚠ Changing either number here is a
+    ``CORE_PREFLIGHT_POLICY_VERSION`` bump, which is the point.
+    """
+    assert (CORE_MAX_QUOTE_AGE_SECONDS, CORE_MAX_HALT_FEED_AGE_SECONDS) == (750, 450)
+    assert CORE_PREFLIGHT_POLICY_VERSION == "core-preflight-v3"
+
+
+def test_the_generalised_bound_reduces_to_the_pre_3157_rule_when_no_loss_is_tolerated() -> None:
+    """``k = 0`` must be the old ``period * 3 // 2`` for EVERY period, odd ones included.
+
+    The floor divide is where a generalisation of this shape goes wrong: ``(2k + 3)``
+    is odd for every ``k``, so an odd period truncates, and it has to truncate exactly
+    where the original did.
+    """
+    for period in (1, 2, 3, 5, 7, 60, 300, 301, 3599, 3600):
+        assert _freshness_bound(period) == period * 3 // 2
+        # k raises the bound by exactly one period per tolerated loss.
+        for k in (0, 1, 2, 3):
+            assert _freshness_bound(period, tolerated_missed_fires=k) == _freshness_bound(period) + k * period
+
+
+@pytest.mark.parametrize(
+    ("period", "tolerated"),
+    [(0, 0), (-1, 0), (300, -1)],
+)
+def test_the_bound_refuses_a_nonsensical_producer_description(period: int, tolerated: int) -> None:
+    """A zero or negative period is a caller bug, not a bound of zero seconds."""
+    with pytest.raises(ValueError):
+        _freshness_bound(period, tolerated_missed_fires=tolerated)
 
 
 def _period_seconds(cadence: Any) -> int:

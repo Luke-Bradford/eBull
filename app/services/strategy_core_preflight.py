@@ -54,7 +54,13 @@ from app.services.strategy_halt_identity import INSTRUMENT_HALT_SYMBOL_SQL
 #: their POSITION in that interval is a choice -- see the constants), the
 #: ``us_equity`` session allow-list, the refusal precedence order, and the shared
 #: versioned Nasdaq/eToro halt-symbol identity rule.
-CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v2"
+#:
+#: v3 (#3157): ``CORE_MAX_QUOTE_AGE_SECONDS`` is re-derived from
+#: ``core_candidate_quote_refresh`` (300 s, one lost fire tolerated) rather than from
+#: ``quotes_refresh`` (3600 s), moving it 5400 -> 750 s.  Nothing else in the rule set
+#: moves: the halt bound, the ``us_equity`` allow-list, the precedence order and the
+#: halt-symbol identity rule are byte-identical.
+CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v3"
 
 #: The venue allow-list and the session predicate both live in
 #: ``app/services/market_session_support.py``.
@@ -85,36 +91,78 @@ CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v2"
 _FUTURE_SKEW: Final = timedelta(seconds=5)
 
 
-def _freshness_bound(period_seconds: int) -> int:
+def _freshness_bound(period_seconds: int, *, tolerated_missed_fires: int = 0) -> int:
     """The freshness bound derived from a producer's nominal cadence.
 
     A bound BELOW one period refuses a healthy state in the tail of every cycle:
     immediately before each refresh the newest possible row is one full period old,
     so such a bound is a recurring false refusal by construction.  A bound at or
     above TWO periods does not make a stopped producer undetectable, but defers
-    detection by a further full period -- during which a submission is sized off a
-    quote whose producer has already stopped.  So the usable interval is
+    detection by a further full period.  So the usable interval is
     ``[period, 2 * period)``.
 
-    ⚠ WHERE IN THAT INTERVAL IS A CHOICE, NOT A DERIVATION.  The midpoint tolerates
-    half a period of scheduler lateness (lane ticks, prerequisite skips and
-    ``catch_up_on_boot`` all make lateness real) while capping detection latency
-    below two periods.  Nothing in the producer settles that trade-off, so it is
-    frozen in ``CORE_PREFLIGHT_POLICY_VERSION`` rather than presented as derived.
+    ⚠ THAT INTERVAL ASSUMES EVERY SCHEDULED FIRE LANDS, and #3157 measured that it
+    does not: ``core_candidate_quote_refresh`` wrote no ``job_runs`` row at all for
+    2 of 352 slots in its first 29 hours, so its realised inter-arrival reaches
+    600 s against a 300 s cadence.  ``tolerated_missed_fires`` (``k``) admits that:
+    with ``k`` consecutive losses tolerated the same reasoning gives
+    ``[(k + 1) * period, (k + 2) * period)`` -- below it refuses whenever ``k``
+    fires are lost, at or above it defers detection by a further period.
+
+    ⚠ WHERE IN THAT INTERVAL IS A CHOICE, NOT A DERIVATION, and so is ``k``.  The
+    midpoint tolerates half a period of scheduler lateness (lane ticks, prerequisite
+    skips and ``catch_up_on_boot`` all make lateness real) while capping detection
+    latency below the next whole period.  Nothing in the producer settles either
+    trade-off, so both are frozen in ``CORE_PREFLIGHT_POLICY_VERSION`` rather than
+    presented as derived.  ``k`` is a POLICY tolerance informed by an observed loss
+    rate; it is not a prediction of the maximum future loss.
 
     ⚠ Derived from NOMINAL cadence only.  Dispatch latency, fetch duration, retries
-    and lane contention are not modelled.  What this catches is a producer that has
-    STOPPED; it is not an SLO, and the coupling tests prove configuration
-    agreement, not that a producer lands a row inside the bound.
+    and lane contention are not modelled.  What this bounds is the AGE of the row a
+    verdict is reached on; it is not producer-health detection (``quotes`` has other
+    writers -- see ``CORE_MAX_QUOTE_AGE_SECONDS``) and it is not an SLO.  The
+    coupling tests prove configuration agreement, not that a producer lands a row
+    inside the bound.
     """
-    return period_seconds * 3 // 2
+    if period_seconds <= 0:
+        raise ValueError(f"period_seconds must be positive, got {period_seconds}")
+    if tolerated_missed_fires < 0:
+        raise ValueError(f"tolerated_missed_fires must be >= 0, got {tolerated_missed_fires}")
+    return period_seconds * (2 * tolerated_missed_fires + 3) // 2
 
 
-#: ``quotes_refresh`` is ``Cadence.hourly(minute=23)`` -> period 3600 s.
-CORE_MAX_QUOTE_AGE_SECONDS: Final = _freshness_bound(3600)
+#: ``core_candidate_quote_refresh`` is ``Cadence.every_n_minutes(interval=5)``
+#: (``scheduler.CORE_QUOTE_REFRESH_INTERVAL_MINUTES``) -> period 300 s, with ONE
+#: lost fire tolerated -> 750 s.  #3157.
+#:
+#: ⚠ It was ``_freshness_bound(3600)`` = 5400 s until #3157, derived from
+#: ``quotes_refresh``.  #3118 gave the core cohort its own five-minute producer and
+#: deliberately did NOT move this constant, because tightening a bound ahead of any
+#: run history for the producer it newly depends on can refuse for a reason nobody
+#: has observed.  The history now exists and is what sets ``k = 1``: 2 of 352
+#: intervals reached 600 s, each a slot for which NO ``job_runs`` row of any status
+#: was written, so ``k = 0`` (450 s) would refuse a healthy state for ~150 s after
+#: each loss -- the "refuses on the clock rather than on the market" defect #3118
+#: exists to remove.
+#:
+#: ⚠⚠ THIS IS NOT PRODUCER-HEALTH DETECTION, and reading it as such overstates it.
+#: ``quotes`` is also written by ``quotes_refresh`` (hourly) and by
+#: ``etoro_websocket.upsert_quote``, so a dead ``core_candidate_quote_refresh`` does
+#: not age this row without limit -- the hourly write keeps it under 3600 s and
+#: admission reopens briefly after each one.  What the bound guarantees is the
+#: property a verdict actually needs: every quote-quality refusal below
+#: (``core_quote_crossed``, ``core_quote_price_invalid``, ``spread_flag``) and the
+#: admission itself are reached on a row at most this old.
+CORE_MAX_QUOTE_AGE_SECONDS: Final = _freshness_bound(300, tolerated_missed_fires=1)
 
 #: ``strategy_halt_feed_refresh`` is ``Cadence.every_n_minutes(interval=5)``
-#: -> period 300 s.
+#: -> period 300 s, with NO lost fire tolerated.
+#:
+#: ⚠ Deliberately NOT moved by #3157, which tightened the quote bound beside it.
+#: That job's in-session successful-run gaps reach 1,349-1,508 s, so it is exposed
+#: to the same lost-fire defect -- but raising this constant WIDENS a halt gate,
+#: which is the opposite direction of harm from tightening a quote bound, and wants
+#: its own evidence and its own ticket.  Recorded rather than folded in.
 #:
 #: ⚠ Only meaningful INSIDE an open session, which is why the session check
 #: precedes it.  That job carries ``prerequisite=_strategy_halt_collection_due``
