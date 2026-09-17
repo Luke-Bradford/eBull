@@ -117,18 +117,29 @@ The rule is **holder-level**, not row-level (§4 explains why). For each
 their *tip* — and release the holder only if **every** tip row resolves to a filing whose
 exit box is TRUE.
 
-| | |
+| tip rule ALONE | |
 | --- | ---: |
-| holders whose whole tip carries the box | **3,992** |
-| holders whose tip DISAGREES (fail-closed, not released) | **6** |
-| `_current` rows released | **4,869** |
-| shares carried by them | **27,007,679,629.4919** |
-| distinct instruments | **1,378** |
+| holders whose whole tip carries the box | 3,992 |
+| holders whose tip DISAGREES (fail-closed, not released) | 6 |
 
-⚠ These are the rows the predicate selects. They are **not** a treatment effect: the
-released rows still pass through retention exclusion, dual-pipeline de-collision, the
-owner-once and control-group folds, and slice routing before anything renders. §6 measures
-the effect; this table only sizes the input.
+| the SHIPPED predicate (tip rule + arms 1, 4, 5) | |
+| --- | ---: |
+| holders released | **3,666** |
+| `_current` rows released | **4,461** |
+| …of which `form3` rows carried along with their holder | 203 |
+| shares carried by them | **21,308,664,022.1629** |
+| distinct instruments | **1,295** |
+
+⚠ **Both tables are here because an earlier revision quoted only the first one.** The
+census script restated the tip definition instead of importing the predicate, so it
+measured a population 326 holders larger than anything that ships — the guards refuse
+those. It now imports `_INSIDER_SECTION16_EXIT_SQL` directly, and
+`test_census_measures_the_shipped_predicate` pins that it is the same object rather than a
+matching string.
+
+⚠ These are still only the rows the predicate selects. They are **not** a treatment effect:
+they pass through retention exclusion, dual-pipeline de-collision, the owner-once and
+control-group folds and slice routing before anything renders. §6 measures the effect.
 
 ### 3.4 Why row-level was wrong (Codex ckpt-1, and it changed the design)
 

@@ -85,9 +85,23 @@ def test_exclusion_and_telemetry_share_one_predicate() -> None:
     # is what makes an all-NULL tip fail closed; 310,780 filings carry a NULL flag.
     assert "IS NOT TRUE" in fragment
     assert "IS NOT FALSE" not in fragment
-    # Arm 4 and arm 5 — the later-filing guard and the deregistration carve-out.
-    assert "period_of_report >" in fragment
+    # Arm 4 — the later-filing guard must be ``>=`` minus the tip's own accessions, not a
+    # strict ``>``. ``period_of_report`` is the covered transaction date, not filing order,
+    # so a same-period amendment clearing the box slips past a strict comparison (93
+    # holders measured). Asserted on the operator because it is a one-character regression.
+    assert "lf.period_of_report >= " in fragment
+    assert "lf.period_of_report > " not in fragment
+    # Arm 4 must also reach share-class siblings via the issuer, since the entity-level
+    # filing lives under ONE instrument while observations fan out to all of them.
+    assert "lf.issuer_cik" in fragment
+    # Arm 5 — the deregistration carve-out.
     assert "sec_form25_common_equity_delistings" in fragment
+    # ⚠ The evidence joins key on accession, which is ``insider_filings``' PRIMARY KEY.
+    # Adding an instrument equality there looks like tighter attribution and is not: it is
+    # redundant on a PK join and silently drops share-class siblings, 1,284 of 74,164
+    # resolvable rows. The holder is attributed through ``insider_filers`` instead.
+    assert "tf.instrument_id    = t.instrument_id" not in fragment
+    assert "insider_filers tfl" in fragment
     # Tombstones are excluded everywhere the flag or a date is read: ``period_of_report``
     # is NULL on every tombstone, and a NULL fails the arm-4 comparison OPEN.
     assert fragment.count("is_tombstone") >= 3
@@ -105,19 +119,23 @@ def test_exclusion_and_telemetry_share_one_predicate() -> None:
         assert name in producer_src, f"producer does not reproduce {name}"
 
 
-def test_census_tip_matches_reader_tip() -> None:
-    """The census script's tip definition must be the reader's. They are two copies of the
-    same idea in two files, which is exactly the shape that drifts — and a census measuring
-    a different population from the code it describes reports numbers that were never true
-    of the shipped predicate.
+def test_census_measures_the_shipped_predicate() -> None:
+    """The census must IMPORT the shipped predicate, not restate it.
+
+    An earlier revision copied the tip definition into the script and kept the copies in
+    step with a string-equality test. That test passed while the census measured the wrong
+    thing: the tip rule alone, without arms 1, 4 and 5, which is 3,992 holders against the
+    3,666 that actually ship. A census is only evidence if it measures the code it
+    describes, and a copy plus a drift test is not the same as one definition.
     """
-    from scripts.audit_2788_section16_exit import _TIP
+    from scripts import audit_2788_section16_exit as census
 
-    def _norm(sql: str) -> str:
-        return " ".join(sql.split())
-
-    # The census correlates on ``c``; the reader on ``oc``. Same predicate otherwise.
-    assert _norm(_TIP).replace("c.", "oc.") == _norm(ownership_rollup._INSIDER_TIP_PERIOD_SQL)
+    assert census._EXIT is ownership_rollup._INSIDER_SECTION16_EXIT_SQL
+    assert census._TIP is ownership_rollup._INSIDER_TIP_PERIOD_SQL
+    # And the guards must actually reach the queries, not merely be imported.
+    shipped = [sql for title, sql in census.QUERIES if "SHIPPED" in title]
+    assert shipped, "no census query exercises the shipped predicate"
+    assert any(ownership_rollup._INSIDER_SECTION16_EXIT_SQL in sql for sql in shipped)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +407,53 @@ def test_disagreeing_tip_is_not_released(
 
 
 @pytest.mark.integration
+def test_tip_mixing_a_flagged_row_with_an_unreadable_one_is_not_released(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """Flagged row + NULL-flag row at the same tip → refuse.
+
+    ⚠ This is the ONLY case that discriminates ``IS NOT TRUE`` from ``IS FALSE`` in the
+    unanimity arm, and it was added after a revert probe: flipping the operator left every
+    other behavioural test green, because an all-NULL tip is already refused by the
+    POSITIVE arm and a FALSE-vs-TRUE tip is refused either way. Without this case the
+    NULL hole would have been caught only by a string assertion.
+
+    The hole matters at scale: 310,780 filings carry a NULL flag and 71.2% of the live
+    population has no readable status at all, so "NULL does not object" would release
+    holders on the strength of one flagged row beside evidence we cannot read.
+    """
+    conn = ebull_test_conn
+    iid = 2_226_009
+    _seed_instrument(conn, iid=iid, symbol="MIXNUL")
+    _seed_outstanding(conn, iid=iid, shares="1000")
+    flagged = _seed_filing(conn, iid=iid, holder_cik=_EXITED_CIK, on=_TIP_DAY, exit_box=True)
+    unreadable = _accession(iid, _EXITED_CIK, _TIP_DAY.replace(day=3))
+    conn.execute(
+        """
+        INSERT INTO insider_filings (accession_number, instrument_id, document_type,
+                                     period_of_report, not_subject_to_section_16, issuer_cik)
+        VALUES (%s, %s, '4', %s, NULL, %s)
+        ON CONFLICT (accession_number) DO NOTHING
+        """,
+        (unreadable, iid, _TIP_DAY, _ISSUER_CIK),
+    )
+    conn.execute(
+        "INSERT INTO insider_filers (accession_number, filer_cik, filer_name) VALUES (%s, %s, %s)"
+        " ON CONFLICT DO NOTHING",
+        (unreadable, _EXITED_CIK, "HOLDER"),
+    )
+    _seed_insider_current(conn, iid=iid, holder_cik=_EXITED_CIK, shares="300", on=_TIP_DAY, accession=flagged)
+    _seed_insider_current(
+        conn, iid=iid, holder_cik=_EXITED_CIK, shares="100", on=_TIP_DAY, accession=unreadable, nature="indirect"
+    )
+
+    rollup = ownership_rollup.get_ownership_rollup(conn, symbol="MIXNUL", instrument_id=iid)
+
+    assert _EXITED_CIK in _insider_ciks(rollup)
+    assert _exit_corrections(rollup) == []
+
+
+@pytest.mark.integration
 def test_null_holder_cik_is_never_released(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
@@ -396,9 +461,17 @@ def test_null_holder_cik_is_never_released(
     released — even though its tip row points at a filing carrying the box.
 
     Written because the natural predicate has this exactly backwards: a NULL
-    ``holder_cik`` makes the later-filing ``NOT EXISTS`` succeed trivially, so without the
-    explicit ``IS NOT NULL`` the LEAST identifiable rows would be the EASIEST to remove.
-    0 such rows exist today, which is why only a test can hold the line.
+    ``holder_cik`` makes the later-filing ``NOT EXISTS`` succeed trivially, so without an
+    explicit refusal the LEAST identifiable rows would be the EASIEST to remove. 0 such
+    rows exist today, which is why only a test holds the line.
+
+    ⚠ Honest about what this case does and does not prove. TWO arms currently refuse it:
+    the explicit ``oc.holder_cik IS NOT NULL``, and the positive arm's join to
+    ``insider_filers`` on that same CIK, which cannot match a NULL. A revert probe that
+    deleted the explicit arm left this test GREEN for that reason — it is caught by the
+    structural test instead. The explicit arm stays because it is the one that survives if
+    the positive arm's join is ever relaxed, and because a reader should not have to derive
+    the refusal from a join condition three lines further down.
     """
     conn = ebull_test_conn
     iid = 2_226_005
@@ -449,6 +522,118 @@ def test_older_sibling_row_is_released_with_its_holder(
     assert _EXITED_CIK not in _insider_ciks(rollup)
     removed = {c.shares_removed for c in _exit_corrections(rollup)}
     assert removed == {Decimal(300), Decimal(500)}
+    # Each correction reports the channel of the row it REMOVED, not the channel the
+    # evidence came from. Reporting the Form 3 row as form4 would make it
+    # indistinguishable from a removed Form 4 row in the telemetry, while
+    # ``winning_source`` is what records that the exit box itself is a Form 4/5 thing.
+    by_shares = {c.shares_removed: c for c in _exit_corrections(rollup)}
+    assert by_shares[Decimal(300)].source_channel == "form4"
+    assert by_shares[Decimal(500)].source_channel == "form3"
+    assert {c.winning_source for c in _exit_corrections(rollup)} == {"form4"}
+
+
+@pytest.mark.integration
+def test_same_period_filing_outside_the_tip_blocks_the_release(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """A live filing at the SAME period as the tip, which produced no observation, blocks
+    the release.
+
+    ``period_of_report`` is the covered transaction date, not filing order — so an
+    amendment filed later that clears the exit box can carry the same period as the flagged
+    filing and would slip past a strict ``>``. 93 released holders have a filing in this
+    position. The guard is ``>=`` minus the tip's OWN accessions, because a bare ``>=``
+    would match the flagged filing itself and block every release.
+    """
+    conn = ebull_test_conn
+    iid = 2_226_010
+    _seed_instrument(conn, iid=iid, symbol="SAMEPD")
+    _seed_outstanding(conn, iid=iid, shares="1000")
+    tip = _seed_filing(conn, iid=iid, holder_cik=_EXITED_CIK, on=_TIP_DAY, exit_box=True)
+    # Same period, different accession, no ``_current`` row of its own.
+    other = _accession(iid, _EXITED_CIK, _TIP_DAY.replace(day=4))
+    conn.execute(
+        """
+        INSERT INTO insider_filings (accession_number, instrument_id, document_type,
+                                     period_of_report, not_subject_to_section_16, issuer_cik)
+        VALUES (%s, %s, '4/A', %s, FALSE, %s)
+        ON CONFLICT (accession_number) DO NOTHING
+        """,
+        (other, iid, _TIP_DAY, _ISSUER_CIK),
+    )
+    conn.execute(
+        "INSERT INTO insider_filers (accession_number, filer_cik, filer_name) VALUES (%s, %s, %s)"
+        " ON CONFLICT DO NOTHING",
+        (other, _EXITED_CIK, "HOLDER"),
+    )
+    _seed_insider_current(conn, iid=iid, holder_cik=_EXITED_CIK, shares="400", on=_TIP_DAY, accession=tip)
+
+    rollup = ownership_rollup.get_ownership_rollup(conn, symbol="SAMEPD", instrument_id=iid)
+
+    assert _EXITED_CIK in _insider_ciks(rollup)
+    assert _exit_corrections(rollup) == []
+
+
+@pytest.mark.integration
+def test_later_filing_on_a_share_class_sibling_blocks_the_release(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """A later filing stored under a SIBLING instrument of the same issuer blocks the
+    release.
+
+    Observations fan out to every share-class sibling (#1117 PR-B) while the entity-level
+    ``insider_filings`` row keeps ONE ``instrument_id``. An instrument-keyed guard therefore
+    cannot see a later filing recorded against the other class, and would release a holder
+    whose exit has already been superseded. The guard reaches it through ``issuer_cik``.
+
+    ⚠ Deliberately NOT relaxed to filer-only: ``insider_filers.filer_cik`` is global, so a
+    later filing about an unrelated issuer would then block a release it says nothing about
+    — 1,320 released holders have one of those, against 1 genuine sibling case.
+    """
+    conn = ebull_test_conn
+    iid = 2_226_011
+    sibling_iid = 2_226_012
+    _seed_instrument(conn, iid=iid, symbol="CLASSA")
+    _seed_instrument(conn, iid=sibling_iid, symbol="CLASSB")
+    _seed_outstanding(conn, iid=iid, shares="1000")
+    tip = _seed_filing(conn, iid=iid, holder_cik=_EXITED_CIK, on=_TIP_DAY, exit_box=True)
+    # Later filing recorded against the SIBLING instrument, same issuer.
+    _seed_filing(conn, iid=sibling_iid, holder_cik=_EXITED_CIK, on=_LATER, exit_box=False)
+    _seed_insider_current(conn, iid=iid, holder_cik=_EXITED_CIK, shares="400", on=_TIP_DAY, accession=tip)
+
+    rollup = ownership_rollup.get_ownership_rollup(conn, symbol="CLASSA", instrument_id=iid)
+
+    assert _EXITED_CIK in _insider_ciks(rollup)
+    assert _exit_corrections(rollup) == []
+
+
+@pytest.mark.integration
+def test_later_filing_about_a_different_issuer_does_not_block(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """The other side of the sibling guard: a later filing by the same person about an
+    UNRELATED issuer must not block.
+
+    Written because the cheap fix for the sibling case — drop the instrument condition and
+    key on ``filer_cik`` alone — passes the sibling test above and is wrong. A director of
+    two companies files for both; the filings say nothing about each other. 1,320 released
+    holders would have been wrongly retained by that version, against the 1 the sibling
+    case fixes.
+    """
+    conn = ebull_test_conn
+    iid = 2_226_013
+    other_iid = 2_226_014
+    _seed_instrument(conn, iid=iid, symbol="ISSUR1")
+    _seed_instrument(conn, iid=other_iid, symbol="ISSUR2")
+    _seed_outstanding(conn, iid=iid, shares="1000")
+    tip = _seed_filing(conn, iid=iid, holder_cik=_EXITED_CIK, on=_TIP_DAY, exit_box=True)
+    _seed_filing(conn, iid=other_iid, holder_cik=_EXITED_CIK, on=_LATER, exit_box=False, issuer_cik="0008888888")
+    _seed_insider_current(conn, iid=iid, holder_cik=_EXITED_CIK, shares="400", on=_TIP_DAY, accession=tip)
+
+    rollup = ownership_rollup.get_ownership_rollup(conn, symbol="ISSUR1", instrument_id=iid)
+
+    assert _EXITED_CIK not in _insider_ciks(rollup)
+    assert len(_exit_corrections(rollup)) == 1
 
 
 @pytest.mark.integration

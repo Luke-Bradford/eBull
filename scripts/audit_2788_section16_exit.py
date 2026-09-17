@@ -19,20 +19,20 @@ import argparse
 from typing import Any
 
 import psycopg
+import psycopg.rows
 
 from app.config import settings
 from app.db.snapshot import snapshot_read
+from app.services import ownership_rollup
 
-# The tip definition the shipped predicate uses, restated here so the census measures the
-# SAME population the reader excludes. ⚠ If :data:`app.services.ownership_rollup
-# ._INSIDER_TIP_PERIOD_SQL` changes, this must change with it — the two are kept in step by
-# ``tests/test_insider_section16_exit_release.py::test_census_tip_matches_reader_tip``,
-# not by this comment.
-_TIP = """
-    (SELECT MAX(m.period_end) FROM ownership_insiders_current m
-      WHERE m.instrument_id       = c.instrument_id
-        AND m.holder_identity_key = c.holder_identity_key)
-"""
+# ⚠ IMPORTED, not restated. An earlier revision copied the tip definition into this file
+# and kept the copies in step with a test — which measured the TIP RULE rather than the
+# shipped predicate, and so quoted a population 115 holders larger than anything that
+# actually ships (the guards refuse those). A census that measures a proxy for the code it
+# describes reports numbers that were never true of it. Both the correlation name (``oc``)
+# and the guards therefore come from the service.
+_TIP = ownership_rollup._INSIDER_TIP_PERIOD_SQL
+_EXIT = ownership_rollup._INSIDER_SECTION16_EXIT_SQL
 
 QUERIES: tuple[tuple[str, str], ...] = (
     (
@@ -77,41 +77,34 @@ QUERIES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
-        "tip rule - holders released, holders refused on a disagreeing tip",
+        "SHIPPED predicate - what the reader actually excludes",
         f"""
-        WITH tip AS (
-            SELECT c.instrument_id, c.holder_identity_key, c.holder_cik,
-                   bool_and(f.not_subject_to_section_16 IS TRUE) AS all_flagged,
-                   bool_or (f.not_subject_to_section_16 IS TRUE) AS any_flagged
-              FROM ownership_insiders_current c
-              LEFT JOIN insider_filings f ON f.accession_number = c.source_accession
-             WHERE c.period_end = {_TIP}
-             GROUP BY 1, 2, 3
-        )
-        SELECT count(*) FILTER (WHERE all_flagged)                     AS holders_released,
-               count(*) FILTER (WHERE any_flagged AND NOT all_flagged) AS holders_tip_disagrees,
-               count(*) FILTER (WHERE all_flagged
-                                  AND holder_cik IS NULL)              AS released_holder_cik_null
-          FROM tip
+        SELECT count(*)                        AS rows_released,
+               sum(oc.shares)                  AS shares_released,
+               count(DISTINCT oc.instrument_id) AS instruments,
+               count(DISTINCT (oc.instrument_id, oc.holder_identity_key)) AS holders,
+               count(*) FILTER (WHERE oc.source = 'form3') AS form3_rows_carried_along
+          FROM ownership_insiders_current oc
+         WHERE ({_EXIT})
         """,
     ),
     (
-        "tip rule - rows and shares selected (INPUT size, not treatment effect)",
+        "tip rule ALONE, before the guards - the gap is what arms 1/4/5 refuse",
         f"""
         WITH tip AS (
-            SELECT c.instrument_id, c.holder_identity_key,
-                   bool_and(f.not_subject_to_section_16 IS TRUE) AS all_flagged
-              FROM ownership_insiders_current c
-              LEFT JOIN insider_filings f ON f.accession_number = c.source_accession
-             WHERE c.period_end = {_TIP}
-             GROUP BY 1, 2
+            SELECT oc.instrument_id, oc.holder_identity_key, oc.holder_cik,
+                   bool_and(f.not_subject_to_section_16 IS TRUE) AS all_flagged,
+                   bool_or (f.not_subject_to_section_16 IS TRUE) AS any_flagged
+              FROM ownership_insiders_current oc
+              LEFT JOIN insider_filings f ON f.accession_number = oc.source_accession
+             WHERE oc.period_end = {_TIP}
+             GROUP BY 1, 2, 3
         )
-        SELECT count(*)                       AS rows_selected,
-               sum(r.shares)                  AS shares_selected,
-               count(DISTINCT r.instrument_id) AS instruments
-          FROM ownership_insiders_current r
-          JOIN tip t USING (instrument_id, holder_identity_key)
-         WHERE t.all_flagged
+        SELECT count(*) FILTER (WHERE all_flagged)                     AS holders_passing_tip,
+               count(*) FILTER (WHERE any_flagged AND NOT all_flagged) AS holders_tip_disagrees,
+               count(*) FILTER (WHERE all_flagged
+                                  AND holder_cik IS NULL)              AS tip_holder_cik_null
+          FROM tip
         """,
     ),
     (
@@ -140,13 +133,13 @@ QUERIES: tuple[tuple[str, str], ...] = (
         "residual fail-open surface the guards close",
         f"""
         WITH tip AS (
-            SELECT c.instrument_id, c.holder_identity_key, c.holder_cik,
-                   max(c.period_end)                             AS tip_period,
+            SELECT oc.instrument_id, oc.holder_identity_key, oc.holder_cik,
+                   max(oc.period_end)                            AS tip_period,
                    bool_and(f.not_subject_to_section_16 IS TRUE) AS all_flagged,
                    max(f.issuer_cik)                             AS issuer_cik
-              FROM ownership_insiders_current c
-              LEFT JOIN insider_filings f ON f.accession_number = c.source_accession
-             WHERE c.period_end = {_TIP}
+              FROM ownership_insiders_current oc
+              LEFT JOIN insider_filings f ON f.accession_number = oc.source_accession
+             WHERE oc.period_end = {_TIP}
              GROUP BY 1, 2, 3
         )
         SELECT count(*) AS released_holders,
@@ -195,7 +188,9 @@ QUERIES: tuple[tuple[str, str], ...] = (
 
 
 def _census() -> int:
-    with psycopg.connect(settings.database_url, row_factory=psycopg.rows.dict_row) as conn:
+    # Row factory is set per-cursor, not on the connection: ``psycopg.connect`` is typed
+    # for ``TupleRow`` and the repo's own readers take the per-cursor form.
+    with psycopg.connect(settings.database_url) as conn:
         # One REPEATABLE READ snapshot for the whole census: the tables move under ordinary
         # ingest, and two figures taken minutes apart cannot be quoted in the same table.
         with snapshot_read(conn):

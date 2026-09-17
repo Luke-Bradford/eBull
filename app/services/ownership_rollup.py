@@ -923,17 +923,31 @@ _INSIDER_TIP_PERIOD_SQL: Final = """
 #   1. ``holder_cik IS NOT NULL`` — an unidentified holder cannot be guarded by arm 4, and a
 #      NULL CIK silently SATISFIES a bare ``NOT EXISTS``. Without this line the least
 #      identifiable rows would be the easiest to release. 0 such rows today.
-#   2. POSITIVE arm — at least one tip row resolves to a live filing carrying the box, keyed
-#      on accession AND instrument, with the holder among that filing's reporting owners.
-#      Arm 3 alone is satisfiable vacuously (an empty tip set passes a NOT EXISTS), which is
-#      the ``x <> ALL('{}')`` failure mode.
+#   2. POSITIVE arm — at least one tip row resolves to a live filing carrying the box, with
+#      the holder among that filing's reporting owners. Arm 3 alone is satisfiable vacuously
+#      (an empty tip set passes a NOT EXISTS), which is the ``x <> ALL('{}')`` failure mode.
+#      ⚠ Joined on ACCESSION ALONE, which is ``insider_filings``' primary key. An earlier
+#      revision also required ``tf.instrument_id = t.instrument_id``; that is redundant on a
+#      PK join and it BREAKS share-class siblings — observations fan out to every sibling
+#      instrument (#1117 PR-B) while the entity-level filing keeps one row, so the equality
+#      silently excluded 1,284 of 74,154 resolvable rows. Evidence attribution is carried by
+#      the ``insider_filers`` join, which is the check that actually matters.
 #   3. UNANIMITY arm — no tip row FAILS to carry it. ``IS NOT TRUE`` deliberately covers
 #      NULL as well as FALSE: 310,780 filings have a NULL flag, and a NULL is "we do not
 #      know", never an exit. This is what makes an all-NULL tip fail closed.
-#   4. NO-LATER-FILING arm — no live filing for this (instrument, filer) past the tip. Closes
-#      the 36 holders whose later filing produced no observation. ⚠ ``period_of_report`` is
-#      NULL on 28,173 rows, which would fail this comparison OPEN — every one is a tombstone
-#      and the predicate excludes tombstones, but a future live NULL reopens it.
+#   4. NO-LATER-FILING arm — no live filing for this filer, on this instrument OR on any
+#      instrument sharing the tip filing's ``issuer_cik``, at or after the tip period.
+#      Three things it is deliberately NOT:
+#        * not instrument-only — the same share-class fan-out would hide a later filing
+#          stored under a sibling (1 holder measured);
+#        * not filer-only — ``insider_filers.filer_cik`` is global, and a later filing about
+#          a DIFFERENT issuer says nothing here (1,320 holders have one, correctly ignored);
+#        * not strictly ``>`` — ``period_of_report`` is the covered transaction date, not
+#          filing order, so a same-period amendment that clears the box would slip past
+#          (93 holders measured). Hence ``>=`` minus the tip's own accessions.
+#      ⚠ ``period_of_report`` is NULL on 28,173 rows, which would fail this comparison OPEN —
+#      every one is a tombstone and the predicate excludes tombstones, but a future live NULL
+#      reopens it.
 #   5. DEREGISTRATION carve-out — Section 16 attaches to a class registered under Section 12,
 #      so when an issuer's registration terminates EVERY reporting person becomes "no longer
 #      subject to Section 16" while remaining a director or officer. There the box is right
@@ -946,7 +960,6 @@ _INSIDER_SECTION16_EXIT_SQL: Final = f"""
           FROM ownership_insiders_current t
           JOIN insider_filings tf
             ON tf.accession_number = t.source_accession
-           AND tf.instrument_id    = t.instrument_id
           JOIN insider_filers tfl
             ON tfl.accession_number = tf.accession_number
            AND tfl.filer_cik        = oc.holder_cik
@@ -961,7 +974,6 @@ _INSIDER_SECTION16_EXIT_SQL: Final = f"""
           FROM ownership_insiders_current t2
           LEFT JOIN insider_filings tf2
             ON tf2.accession_number = t2.source_accession
-           AND tf2.instrument_id    = t2.instrument_id
            AND NOT tf2.is_tombstone
          WHERE t2.instrument_id       = oc.instrument_id
            AND t2.holder_identity_key = oc.holder_identity_key
@@ -973,17 +985,35 @@ _INSIDER_SECTION16_EXIT_SQL: Final = f"""
           FROM insider_filers lfl
           JOIN insider_filings lf
             ON lf.accession_number = lfl.accession_number
-         WHERE lfl.filer_cik    = oc.holder_cik
-           AND lf.instrument_id = oc.instrument_id
+         WHERE lfl.filer_cik = oc.holder_cik
            AND NOT lf.is_tombstone
-           AND lf.period_of_report > {_INSIDER_TIP_PERIOD_SQL}
+           AND (
+                 lf.instrument_id = oc.instrument_id
+                 OR LPAD(lf.issuer_cik, 10, '0') IN (
+                      SELECT LPAD(tfi.issuer_cik, 10, '0')
+                        FROM ownership_insiders_current ti
+                        JOIN insider_filings tfi
+                          ON tfi.accession_number = ti.source_accession
+                       WHERE ti.instrument_id       = oc.instrument_id
+                         AND ti.holder_identity_key = oc.holder_identity_key
+                         AND ti.period_end          = {_INSIDER_TIP_PERIOD_SQL}
+                         AND tfi.issuer_cik IS NOT NULL
+                 )
+               )
+           AND lf.period_of_report >= {_INSIDER_TIP_PERIOD_SQL}
+           AND lf.accession_number NOT IN (
+                 SELECT ta.source_accession
+                   FROM ownership_insiders_current ta
+                  WHERE ta.instrument_id       = oc.instrument_id
+                    AND ta.holder_identity_key = oc.holder_identity_key
+                    AND ta.period_end          = {_INSIDER_TIP_PERIOD_SQL}
+           )
     )
     AND NOT EXISTS (
         SELECT 1
           FROM ownership_insiders_current t3
           JOIN insider_filings tf3
             ON tf3.accession_number = t3.source_accession
-           AND tf3.instrument_id    = t3.instrument_id
           JOIN sec_form25_common_equity_delistings d25
             ON LPAD(d25.issuer_cik, 10, '0') = LPAD(tf3.issuer_cik, 10, '0')
          WHERE t3.instrument_id       = oc.instrument_id
@@ -1496,12 +1526,11 @@ def _read_section16_exit_insiders(conn: psycopg.Connection[Any], instrument_id: 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             f"""
-            SELECT oc.holder_cik, oc.holder_name, oc.shares, oc.period_end,
+            SELECT oc.holder_cik, oc.holder_name, oc.shares, oc.period_end, oc.source,
                    (SELECT t.source_accession
                       FROM ownership_insiders_current t
                       JOIN insider_filings tf
                         ON tf.accession_number = t.source_accession
-                       AND tf.instrument_id    = t.instrument_id
                      WHERE t.instrument_id       = oc.instrument_id
                        AND t.holder_identity_key = oc.holder_identity_key
                        AND t.period_end          = {_INSIDER_TIP_PERIOD_SQL}
@@ -1521,6 +1550,11 @@ def _read_section16_exit_insiders(conn: psycopg.Connection[Any], instrument_id: 
             {"iid": instrument_id, "form4_cutoff": form4_retention_cutoff()},
         )
         for row in cur.fetchall():
+            # The insiders projection only ever holds these two sources (its CHECK admits
+            # more, but no writer uses them here). Narrowed explicitly rather than cast, so
+            # a third source arriving surfaces as a visibly missing channel instead of a
+            # Literal violation at serialization — the #2229 failure shape.
+            removed_channel: SourceTag | None = "form3" if str(row["source"]) == "form3" else "form4"
             rows.append(
                 CorrectionApplied(
                     kind="insider_section16_exit_declared",
@@ -1528,7 +1562,12 @@ def _read_section16_exit_insiders(conn: psycopg.Connection[Any], instrument_id: 
                     filer_name=str(row["holder_name"]),
                     shares_removed=Decimal(row["shares"]),
                     superseded_period=row["period_end"],
-                    source_channel="form4",
+                    # The REMOVED row's own channel, not the evidence's. A declared exit
+                    # takes the holder's whole position, so an older form3 row goes with
+                    # it — and reporting that as form4 would make it indistinguishable
+                    # from a removed Form 4 row (Codex ckpt-2). ``winning_source`` below
+                    # already records that the evidence itself is a Form 4/5.
+                    source_channel=removed_channel,
                     winning_source="form4",
                     winning_accession=(str(row["evidence_accession"]) if row["evidence_accession"] else None),
                     detail=(
