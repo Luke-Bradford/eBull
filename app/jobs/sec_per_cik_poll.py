@@ -462,6 +462,32 @@ def _apply_delta_to_subject(
     return recorded
 
 
+def _triples_of(batches: list[list[FreshnessRow]]) -> set[tuple[str, str, str]]:
+    """The ``(subject_type, subject_id, source)`` primary keys in ``batches``."""
+    return {(r.subject_type, r.subject_id, r.source) for batch in batches for r in batch}
+
+
+def _drop_claimed(
+    batches: list[list[FreshnessRow]],
+    *,
+    claimed: set[tuple[str, str, str]],
+) -> list[list[FreshnessRow]]:
+    """Remove rows already claimed by the other lane, dropping empty batches.
+
+    A batch that loses every member is dropped entirely rather than left as an
+    empty list — ``_probe_cik`` would otherwise be handed a batch with no CIK
+    to fetch, and ``len(poll_due)`` is the job's reported CIK-fetch count.
+    """
+    if not claimed:
+        return batches
+    kept: list[list[FreshnessRow]] = []
+    for batch in batches:
+        survivors = [r for r in batch if (r.subject_type, r.subject_id, r.source) not in claimed]
+        if survivors:
+            kept.append(survivors)
+    return kept
+
+
 def run_per_cik_poll(
     conn: psycopg.Connection[Any],
     *,
@@ -476,12 +502,13 @@ def run_per_cik_poll(
     Drains BOTH reader paths (#1155 G13):
 
     * ``ciks_due_for_poll`` — 'unknown' / 'current' /
-      'expected_filing_overdue' rows past their ``expected_next_at``. Gets
-      the dominant budget share so steady-state polls are never starved by
-      error backlog.
+      'expected_filing_overdue' rows past their ``next_poll_at`` (#3109: the
+      poll-eligibility clock, NOT the filing-derived ``expected_next_at``).
+      Gets the dominant budget share so steady-state polls are never starved
+      by error backlog, plus whatever the recheck lane leaves unspent.
     * ``ciks_due_for_recheck`` — 'never_filed' / 'error' rows past their
-      ``next_recheck_at``. Gets the remaining ~1/3 budget so the recheck
-      path drains at a guaranteed rate.
+      ``next_recheck_at``. Selected FIRST, capped at the remaining ~1/3, so
+      the recheck path drains at a guaranteed rate.
 
     ⚠⚠ **The budget is denominated in CIKs, not subjects** (#3109, renamed
     from ``max_subjects``). ``submissions.json`` is entity-wide, so one
@@ -491,12 +518,16 @@ def run_per_cik_poll(
     unbounded by it — measured 1.92x on the dev corpus, max 8 per CIK
     (``scripts/measure_3109_batching.py``).
 
-    For ``max_ciks=100`` → ``poll=66, recheck=34``. For ``max_ciks=1`` →
-    ``poll=0, recheck=1`` (degenerate but bounded).
+    For ``max_ciks=100`` → recheck capped at 34, poll gets ``100 - len(recheck)``
+    — so 100 when the recheck lane is empty (its state on dev), 66 when it is
+    full. For ``max_ciks=1`` → ``recheck=1, poll=0`` (degenerate but bounded).
 
     ⚠ Both lanes are read into lists BEFORE any write. Selecting rechecks
     after polling would immediately re-select rows the poll lane had just
-    failed, whose ``next_recheck_at`` is NULL and therefore instantly due.
+    failed — which used to mean instantly, because a failed poll wrote a NULL
+    ``next_recheck_at``. #3109 gave errors a finite ``ERROR_RECHECK_INTERVAL``
+    backoff, so that is no longer true; the read-before-write ordering is kept
+    anyway because it is the simpler invariant.
 
     ⚠ The lanes are NOT merged: a CIK with rows due in both costs two
     fetches, exactly as it did when they were separate probes. Merging them
@@ -519,8 +550,20 @@ def run_per_cik_poll(
     # #1155 G13 — bounded total budget split: 2/3 to poll, ~1/3 to
     # recheck. No max(1, ...) floor so max_ciks=1 stays bounded
     # at total=1 (poll=0, recheck=1).
-    poll_budget = max_ciks * 2 // 3
-    recheck_budget = max_ciks - poll_budget
+    #
+    # #3109 — the recheck lane's share is a CAP, not a reservation. It is
+    # selected FIRST and the poll lane gets the residual, because the recheck
+    # lane is usually empty (0 rows on dev, 2026-09-16) and 34 of 100 slots
+    # per hour were buying nothing. G13's guarantee is untouched: recheck
+    # still gets up to its full share and is still read before any write.
+    #
+    # ⚠ The rollover is ONE-WAY by design. Spare poll capacity is not returned
+    # to recheck: with 15,483 CIKs in the poll lane against 0 in recheck, the
+    # useful direction is the only one implemented, and the symmetric case
+    # would need a second SELECT for a situation the measurement says does not
+    # arise. ⚠ At max_ciks=1 with recheck work pending the poll lane still gets
+    # 0 — degenerate but bounded, exactly as before.
+    recheck_budget = max_ciks - (max_ciks * 2 // 3)
 
     subjects_polled = 0
     new_filings_recorded = 0
@@ -528,8 +571,19 @@ def run_per_cik_poll(
     recheck_subjects_polled = 0
     recheck_new_filings_recorded = 0
 
-    poll_due = ciks_due_for_poll(conn, source=source, limit=poll_budget) if poll_budget > 0 else []
     recheck_due = ciks_due_for_recheck(conn, source=source, limit=recheck_budget) if recheck_budget > 0 else []
+    poll_budget = max_ciks - len(recheck_due)
+    poll_due = ciks_due_for_poll(conn, source=source, limit=poll_budget) if poll_budget > 0 else []
+
+    # ⚠ The two lanes are separate statements under READ COMMITTED, so a
+    # concurrent discovery producer can promote a row from 'never_filed' to
+    # 'current' BETWEEN them and the same triple lands in both lists. That
+    # matters because ``new_filings_since`` is additive in the UPSERT
+    # (``data_freshness.py``: ``new_filings_since + EXCLUDED.new_filings_since``),
+    # so applying one response twice double-counts it. Drop the duplicates from
+    # the poll lane — the recheck lane already holds its claim, and its budget
+    # was the one guaranteed.
+    poll_due = _drop_claimed(poll_due, claimed=_triples_of(recheck_due))
 
     for batch in poll_due:
         subjects_polled += len(batch)

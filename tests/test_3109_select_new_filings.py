@@ -156,6 +156,7 @@ class TestProbeCikBatchContract:
             new_filings_since=0,
             expected_next_at=None,
             next_recheck_at=None,
+            next_poll_at=datetime(2024, 1, 1, tzinfo=UTC),
             state="current",
         )
 

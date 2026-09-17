@@ -497,19 +497,27 @@ class TestIterators:
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     ) -> None:
+        """#3109 — the exclusion is on ``next_poll_at``, not ``expected_next_at``.
+
+        The two are set in OPPOSITE directions here on purpose. A row whose
+        filing-derived deadline is long past (1994) but which we polled
+        recently must be excluded; keying the queue on ``expected_next_at``
+        is exactly the starvation bug this ticket fixes, and that version of
+        the predicate would return this row.
+        """
         _seed_instrument(ebull_test_conn, iid=1, symbol="X", cik="0000000001")
         with ebull_test_conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO data_freshness_index (
                     subject_type, subject_id, source, instrument_id, cik,
-                    state, expected_next_at
+                    state, expected_next_at, next_poll_at
                 ) VALUES (
                     'issuer', '1', 'sec_form4', 1, '0000000001',
-                    'current', %s
+                    'current', %s, %s
                 )
                 """,
-                (datetime(2099, 1, 1, tzinfo=UTC),),
+                (datetime(1994, 3, 30, tzinfo=UTC), datetime(2099, 1, 1, tzinfo=UTC)),
             )
         ebull_test_conn.commit()
 

@@ -19,11 +19,13 @@ Usage::
 
 from __future__ import annotations
 
+import sys
 from typing import Any, LiteralString
 
 import psycopg
 
 from app.config import settings
+from app.services.data_freshness import POLL_REPOLL_INTERVAL, ciks_due_for_recheck
 
 # The states each lane treats as candidates (``app/services/data_freshness.py``),
 # inlined as literals because this script must describe what the selector does
@@ -31,8 +33,14 @@ from app.config import settings
 _POLL_STATES = "('unknown','current','expected_filing_overdue')"
 _RECHECK_STATES = "('never_filed','error')"
 
-# Budget as the scheduler runs it today: 100 → poll 66 / recheck 34
-# (``run_per_cik_poll``; ``scheduler.py`` passes no override).
+# Budget as the scheduler runs it today. ``scheduler.sec_per_cik_poll`` passes
+# no override and ``_adapt_zero_arg`` discards the params dict, so max_ciks=100
+# is a code constant and NOT operator-tunable.
+#
+# ⚠ Since #3109 the split is asymmetric: ``_RECHECK_BUDGET`` is a CAP selected
+# FIRST, and the poll lane gets ``_TOTAL_BUDGET - len(recheck_due)``. So 66 is
+# the poll lane's WORST case (recheck full), not its value.
+_TOTAL_BUDGET = 100
 _POLL_BUDGET = 66
 _RECHECK_BUDGET = 34
 
@@ -94,8 +102,8 @@ def _m1_prefixes(cur: psycopg.Cursor[Any]) -> None:
         WITH p AS (
           SELECT cik FROM data_freshness_index
           WHERE state IN {_POLL_STATES}
-            AND (expected_next_at IS NULL OR expected_next_at <= now())
-          ORDER BY expected_next_at ASC NULLS FIRST LIMIT %s
+            AND next_poll_at <= now()
+          ORDER BY next_poll_at ASC, cik ASC LIMIT %s
         )
         SELECT count(*), count(DISTINCT cik) FROM p
         """,
@@ -111,12 +119,12 @@ def _m1_prefixes(cur: psycopg.Cursor[Any]) -> None:
         cur,
         f"""
         WITH p AS (
-          SELECT expected_next_at FROM data_freshness_index
+          SELECT next_poll_at FROM data_freshness_index
           WHERE state IN {_POLL_STATES}
-            AND (expected_next_at IS NULL OR expected_next_at <= now())
-          ORDER BY expected_next_at ASC NULLS FIRST LIMIT 200
+            AND next_poll_at <= now()
+          ORDER BY next_poll_at ASC, cik ASC LIMIT 200
         )
-        SELECT count(*), count(DISTINCT expected_next_at) FROM p
+        SELECT count(*), count(DISTINCT next_poll_at) FROM p
         """,
     )
     print(f"    tie density over the first {seen} due rows: {distinct} distinct deadlines")
@@ -145,14 +153,14 @@ def _m2_cik_budget(cur: psycopg.Cursor[Any]) -> None:
         cur,
         f"""
         WITH due AS (
-          SELECT lpad(cik, 10, '0') AS cik_padded, expected_next_at
+          SELECT lpad(cik, 10, '0') AS cik_padded, next_poll_at
           FROM data_freshness_index
           WHERE state IN {_POLL_STATES}
-            AND (expected_next_at IS NULL OR expected_next_at <= now())
+            AND next_poll_at <= now()
             AND cik ~ '{_CIK_SHAPE}'
         ), ranked AS (
           SELECT cik_padded, count(*) AS t FROM due GROUP BY cik_padded
-          ORDER BY min(COALESCE(expected_next_at, '-infinity'::timestamptz)), cik_padded
+          ORDER BY min(next_poll_at), cik_padded
           LIMIT %s
         )
         SELECT count(*), sum(t), max(t), round(sum(t)::numeric / count(*), 3) FROM ranked
@@ -170,14 +178,14 @@ def _m2_cik_budget(cur: psycopg.Cursor[Any]) -> None:
         cur,
         f"""
         WITH due AS (
-          SELECT lpad(cik, 10, '0') AS cik_padded, expected_next_at, last_known_filing_id
+          SELECT lpad(cik, 10, '0') AS cik_padded, next_poll_at, last_known_filing_id
           FROM data_freshness_index
           WHERE state IN {_POLL_STATES}
-            AND (expected_next_at IS NULL OR expected_next_at <= now())
+            AND next_poll_at <= now()
             AND cik ~ '{_CIK_SHAPE}'
         ), ranked AS (
           SELECT cik_padded FROM due GROUP BY cik_padded
-          ORDER BY min(COALESCE(expected_next_at, '-infinity'::timestamptz)), cik_padded
+          ORDER BY min(next_poll_at), cik_padded
           LIMIT %s
         )
         SELECT count(*), count(*) FILTER (WHERE d.last_known_filing_id IS NULL)
@@ -191,7 +199,7 @@ def _m2_cik_budget(cur: psycopg.Cursor[Any]) -> None:
 def _m6_population(cur: psycopg.Cursor[Any]) -> None:
     lanes: tuple[tuple[str, LiteralString], ...] = (
         ("candidate", ""),
-        ("due", " AND (expected_next_at IS NULL OR expected_next_at <= now())"),
+        ("due", " AND next_poll_at <= now()"),
     )
     for label, predicate in lanes:
         triples, ciks = _one(
@@ -206,7 +214,7 @@ def _m6_population(cur: psycopg.Cursor[Any]) -> None:
         f"""
         SELECT count(*) FROM data_freshness_index
         WHERE state IN {_POLL_STATES}
-          AND (expected_next_at IS NULL OR expected_next_at <= now())
+          AND next_poll_at <= now()
           AND last_known_filing_id IS NULL
         """,
     )
@@ -216,7 +224,7 @@ def _m6_population(cur: psycopg.Cursor[Any]) -> None:
         f"""
         SELECT source, count(*) FROM data_freshness_index
         WHERE state IN {_POLL_STATES}
-          AND (expected_next_at IS NULL OR expected_next_at <= now())
+          AND next_poll_at <= now()
         GROUP BY source ORDER BY 2 DESC
         """
     )
@@ -255,17 +263,158 @@ def _m4_runtime(cur: psycopg.Cursor[Any]) -> None:
     print(f"M4 sec_per_cik_poll 48h (old path): runs={runs} avg={avg_s}s max={max_s}s success={ok} failed={bad}")
 
 
+def _r1_rotation_discriminator(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any]) -> None:
+    """Does a completed poll actually REMOVE a CIK from the queue head? (#3109)
+
+    ⚠ This is the discriminator, and it exists because the obvious measurement
+    cannot answer the question. ``last_polled_at`` is overwritten in place, so
+    its distribution across hours cannot distinguish "the same rows every hour"
+    from "different rows that happen to share a timestamp". Codex checkpoint 1
+    was right to reject that inference.
+
+    So ask the corpus directly: of the CIKs the most recent run actually
+    polled, how many are **still eligible** right now?
+
+      still_eligible == 0  →  the poll excluded them. Rotation works.
+      still_eligible  > 0  →  polling removed nothing. The head is pinned.
+
+    Measured 2026-09-16T23:30Z, before the fix: 48 polled, **48 still
+    eligible** — a completed poll excluded nothing.
+
+    ⚠⚠ This asks the ELIGIBILITY PREDICATE, not "is it in the selector's
+    prefix". Codex checkpoint 2 killed the prefix version: it diffed against a
+    66-CIK prefix while the worker now polls up to 100, so if all 100 polled
+    CIKs stayed at the head it would report 34 "rotated" and certify a queue
+    that had not moved. A verifier whose window is smaller than the thing it
+    verifies reports success by arithmetic.
+
+    The predicate is re-expressed here in SQL rather than imported, because the
+    imported reader is LIMIT-bounded and the question is unbounded. It is kept
+    honest by ``_POLL_STATES`` being the same literal the rest of this script
+    uses, and by printing the raw counts rather than only the verdict.
+    """
+    from app.services.data_freshness import ciks_due_for_poll
+
+    # ⚠ "the last run" is approximated by ``max(last_polled_at)``, and that is a
+    # BEST-EFFORT diagnostic scope, not an exact run boundary (review NITPICK).
+    # ``record_poll_outcome`` is the only writer of that column, but two
+    # overlapping poll runs — or one straddling the query — would blur the set
+    # either way. It is adequate here because the verdict is driven by
+    # ``still_eligible``, which is computed from the eligibility predicate over
+    # whatever set this scopes: under-scoping shrinks the sample, it cannot turn
+    # a pinned head into a rotating one.
+    cur.execute(
+        f"""
+        WITH last_run AS (
+            SELECT DISTINCT lpad(cik, 10, '0') AS cik_padded
+            FROM data_freshness_index
+            WHERE last_polled_at = (SELECT max(last_polled_at) FROM data_freshness_index)
+        )
+        SELECT (SELECT count(*) FROM last_run),
+               (SELECT count(DISTINCT lpad(d.cik, 10, '0'))
+                  FROM data_freshness_index d
+                  JOIN last_run l ON lpad(d.cik, 10, '0') = l.cik_padded
+                 WHERE d.state IN {_POLL_STATES}
+                   AND d.next_poll_at <= now())
+        """
+    )
+    row = cur.fetchone()
+    assert row is not None, "discriminator query returned no row"
+    polled, still_eligible = row
+    selector_now = len(ciks_due_for_poll(conn, limit=_POLL_BUDGET))
+    print(
+        f"R1 rotation discriminator: last_run_polled={polled} still_eligible={still_eligible} "
+        f"(selector prefix now={selector_now}, budget={_POLL_BUDGET})"
+    )
+    if not polled:
+        print("    ⚠ no run has polled anything yet — this says nothing either way")
+    elif still_eligible:
+        print(f"    ⚠ {still_eligible} of {polled} just-polled CIKs are STILL ELIGIBLE. HEAD IS PINNED.")
+    else:
+        print("    ✅ every just-polled CIK is excluded — the queue rotates")
+
+
+def _r2_reach(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any]) -> None:
+    """How much of the index has EVER been polled, and how fast can it rotate?"""
+    rows, ciks, polled_rows, polled_ciks, oldest = _one(
+        cur,
+        f"""
+        SELECT count(*) FILTER (WHERE state IN {_POLL_STATES}),
+               count(DISTINCT lpad(cik, 10, '0'))
+                   FILTER (WHERE state IN {_POLL_STATES} AND cik ~ %s),
+               count(*) FILTER (WHERE last_polled_at IS NOT NULL),
+               count(DISTINCT lpad(cik, 10, '0')) FILTER (WHERE last_polled_at IS NOT NULL),
+               min(last_polled_at)
+        FROM data_freshness_index
+        """,
+        [_CIK_SHAPE],
+    )
+    share = f"{polled_rows / rows:.2%}" if rows else "n/a"
+    print(f"R2 reach: poll-lane rows={rows:,} ciks={ciks:,}")
+    print(f"    ever polled: rows={polled_rows:,} ({share}) ciks={polled_ciks:,} since={oldest}")
+
+    # ⚠ Read this BEFORE trusting R1. Immediately after the sql/389 backfill
+    # every row shares one ``next_poll_at``, so the queue is ordered purely by
+    # the ``cik`` tie-break — and R1's ``polled_only`` flips to non-zero for
+    # that reason alone, not because exclusion is working. Only once the
+    # clocks have SPREAD (distinct > 1, max in the future) is R1 reporting on
+    # rotation rather than on the tie-break.
+    distinct, lo, hi, future = _one(
+        cur,
+        f"""
+        SELECT count(DISTINCT next_poll_at), min(next_poll_at), max(next_poll_at),
+               count(*) FILTER (WHERE next_poll_at > now())
+        FROM data_freshness_index WHERE state IN {_POLL_STATES}
+        """,
+    )
+    print(f"    next_poll_at spread: distinct={distinct:,} min={lo} max={hi} excluded_now={future:,}")
+    if distinct <= 1:
+        print("    ⚠ all clocks identical (fresh backfill) — R1 is measuring the cik tie-break, not exclusion")
+
+    # ⚠ Computed, never written down — the interval and the budget both live in
+    # code, and a hand-copied cycle time goes stale the moment either moves.
+    # ``_RECHECK_BUDGET`` is the CAP; the poll lane gets the residual, so the
+    # drain rate depends on how many CIKs the recheck lane actually claims.
+    #
+    # ⚠⚠ Ask the PRODUCTION selector for that number. Codex checkpoint 2 killed
+    # the `count(*) ... WHERE state IN (...)` version, which was wrong twice
+    # over: it counted ROWS where the budget is denominated in CIKs, and it
+    # ignored `next_recheck_at` entirely — so 34 rows all due TOMORROW read as
+    # a full recheck lane and reported the poll budget as 66/SATURATED when the
+    # worker would in fact allocate all 100. A capacity figure derived from a
+    # different predicate than the allocator's is not a capacity figure.
+    recheck_ciks_now = len(ciks_due_for_recheck(conn, limit=_RECHECK_BUDGET))
+    per_tick = _TOTAL_BUDGET - recheck_ciks_now
+    per_day = per_tick * 24
+    if ciks and per_day:
+        cycle_d = ciks / per_day
+        arrivals = ciks / (POLL_REPOLL_INTERVAL.total_seconds() / 86400)
+        print(
+            f"    budget: total={_TOTAL_BUDGET} recheck_claim={recheck_ciks_now} "
+            f"→ poll={per_tick}/tick = {per_day:,}/day"
+        )
+        print(
+            f"    full sweep={cycle_d:.2f}d vs re-poll interval="
+            f"{POLL_REPOLL_INTERVAL.days}d · steady arrivals={arrivals:,.0f}/day "
+            f"vs drain={per_day:,}/day → {'DRAINS' if per_day > arrivals else 'SATURATED'}"
+        )
+
+
 def main() -> None:
+    rotation_only = "--rotation" in sys.argv
     with psycopg.connect(settings.database_url) as conn:
         conn.read_only = True
         with conn.cursor() as cur:
-            _m5_state_census(cur)
-            _m0_cik_shape(cur)
-            _m1_prefixes(cur)
-            _m2_cik_budget(cur)
-            _m6_population(cur)
-            _m3_collisions(cur)
-            _m4_runtime(cur)
+            if not rotation_only:
+                _m5_state_census(cur)
+                _m0_cik_shape(cur)
+                _m1_prefixes(cur)
+                _m2_cik_budget(cur)
+                _m6_population(cur)
+                _m3_collisions(cur)
+                _m4_runtime(cur)
+            _r1_rotation_discriminator(conn, cur)
+            _r2_reach(conn, cur)
 
 
 if __name__ == "__main__":

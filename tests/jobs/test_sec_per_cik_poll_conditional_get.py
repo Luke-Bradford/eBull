@@ -110,7 +110,10 @@ def _seed_subject(conn: psycopg.Connection[tuple]) -> None:
         instrument_id=_TEST_INSTRUMENT_ID,
     )
     with conn.cursor() as cur:
-        cur.execute("UPDATE data_freshness_index SET expected_next_at = '2024-01-01' WHERE source = 'sec_8k'")
+        cur.execute(
+            "UPDATE data_freshness_index SET expected_next_at = '2024-01-01',"
+            " next_poll_at = '2024-01-01' WHERE source = 'sec_8k'"
+        )
     conn.commit()
 
 
@@ -337,7 +340,10 @@ class TestPerCikPollWatermarkIsSourceScoped:
             instrument_id=_TEST_INSTRUMENT_ID,
         )
         with conn.cursor() as cur:
-            cur.execute("UPDATE data_freshness_index SET expected_next_at = '2024-01-01' WHERE source = 'sec_10q'")
+            cur.execute(
+                "UPDATE data_freshness_index SET expected_next_at = '2024-01-01',"
+                " next_poll_at = '2024-01-01' WHERE source = 'sec_10q'"
+            )
         conn.commit()
 
     def test_one_sources_validator_does_not_certify_another(
@@ -455,7 +461,10 @@ class TestPerCikPollWatermarkIsSourceScoped:
         )
         ebull_test_conn.commit()
         with ebull_test_conn.cursor() as cur:
-            cur.execute("UPDATE data_freshness_index SET expected_next_at = '2024-01-01' WHERE source = 'sec_8k'")
+            cur.execute(
+                "UPDATE data_freshness_index SET expected_next_at = '2024-01-01',"
+                " next_poll_at = '2024-01-01' WHERE source = 'sec_8k'"
+            )
         ebull_test_conn.commit()
 
         captured: list[dict[str, str]] = []

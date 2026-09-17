@@ -160,7 +160,13 @@ def _resolve_scope(conn: psycopg.Connection[Any], scope: RebuildScope) -> list[t
 
 
 def _reset_scheduler_rows(conn: psycopg.Connection[Any], triples: list[tuple[str, str, ManifestSource]]) -> int:
-    """Reset state='unknown' + expected_next_at=NOW() for each triple."""
+    """Reset state='unknown' + both clocks to NOW() for each triple.
+
+    ⚠ ``next_poll_at`` must be reset alongside ``expected_next_at`` (#3109).
+    Since the poll queue is keyed on ``next_poll_at``, leaving it alone would
+    make a rebuild wait up to ``POLL_REPOLL_INTERVAL`` before re-polling — a
+    reset that does not reset.
+    """
     if not triples:
         return 0
     with conn.cursor() as cur:
@@ -169,6 +175,7 @@ def _reset_scheduler_rows(conn: psycopg.Connection[Any], triples: list[tuple[str
             UPDATE data_freshness_index
             SET state = 'unknown',
                 expected_next_at = NOW(),
+                next_poll_at = NOW(),
                 last_known_filing_id = NULL,
                 last_known_filed_at = NULL,
                 last_polled_outcome = 'never',
