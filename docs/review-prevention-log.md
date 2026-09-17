@@ -7510,3 +7510,82 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
   named, justified allowance that makes a compacted partition project to its current size at ANY
   size) and the `Selection predicate` section of its module docstring, which states the failure
   mode rather than only the guarantee.
+
+## A design decision can live in a migration header, where the settled-decisions grep will never find it
+
+- Symptom: a spike proposed adding an `IS DISTINCT FROM` guard to the
+  `ON CONFLICT … DO UPDATE` in `record_institution_observation`, on measured evidence that
+  **99.988% of 7,755,802 re-writes change nothing**. The working-order step 2 grep of
+  `docs/settled-decisions.md` for the effect returned nothing, so the change read as a pure
+  optimisation. It is not. `sql/119_ownership_observations_ingested_at.sql`'s header states the
+  opposite requirement in full, with its reasoning: *"The repair sweep needs SYSTEM-time so a
+  re-ingest of an unchanged row still bumps the watermark and signals `_current` to refresh…
+  `record_*_observation` is updated in the same PR to bump `ingested_at` to `clock_timestamp()`
+  on DO UPDATE so every UPSERT advances the watermark."* `tests/test_sec_manifest.py` pins it per
+  category. The proposal was a **reversal of a documented decision** presented as a tuning fix,
+  and nothing in the standard reading order would have caught it.
+- ⚠ The existing rule "never assert a CAUSE without checking whether the effect is a settled
+  decision" says to read the **docstring of the function that produces the effect**. That was
+  done, and it was not enough: `record_institution_observation`'s docstring explains the conflict
+  *key*, not the timestamp bump. The rationale lived one layer down, in the migration that added
+  the column. ⚠ This is the mirror of entry "before a migration header is used to settle a design
+  question, state the subject of the sentence" — that entry guards against over-reading a
+  migration header; this one guards against never reading it.
+- Prevention: **before proposing to change what a column is written to, `rg -n '<column>' sql/`
+  and read the header of the migration that introduced it.** A column added for a named consumer
+  usually carries its contract there, because that is where the author was when they decided it.
+  Test: if you are about to remove or condition a write, name the migration that created the
+  column and quote the sentence that justifies the write — or establish there isn't one.
+- First seen in: #3116 (2026-09-17), Codex checkpoint 1, finding 18 of 50. The spike's central
+  recommendation had to be withdrawn and replaced.
+- Enforced in: this log; `docs/proposals/storage/2026-09-17-3116-typed-store-footprint.md` §4.3,
+  which records the withdrawn proposal and the contract it would have reversed rather than
+  deleting it.
+
+## `n_tup_hot_upd = 0` says HOT never applied, not why — intersect the index set with the writer's SET list
+
+- Symptom: `ownership_institutions_observations` showed **n_tup_upd = 7,721,662 against
+  n_tup_hot_upd = 0** and a heap at **46.1% fill**. A HOT (heap-only tuple) update rewrites a row
+  without touching any index, so zero HOT means every update also paid a fresh entry in all four
+  indexes — 3,472.9 MiB of them. The first draft read the zero as proof that an indexed column
+  changes on every update. ⚠ That is one of **two** conditions: Postgres needs no indexed column
+  to change **and** room on the original page. The counter cannot separate them, so on its own it
+  diagnoses nothing.
+- Measured: the diagnosis is a set intersection, not a counter. The four indexes cover
+  `{instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind,
+  ingested_at}`; the `DO UPDATE` sets twelve columns; **the intersection is exactly
+  `{ingested_at}`**, which the writer sets to `clock_timestamp()` unconditionally. That makes the
+  indexed-column condition provably false on every update and identifies the single index
+  responsible. ⚠ Removing it is then *necessary but not sufficient* — page space is still
+  untested, and `fillfactor = 100` neither means "no space" nor prevents HOT.
+- Prevention: when a relation shows large `n_tup_upd` with near-zero `n_tup_hot_upd`, **list the
+  indexed columns and the writer's SET list and intersect them** before proposing anything. If the
+  intersection is empty the cause is page pressure and an index change will not help; if it is a
+  single column, you have found both the cause and the cheapest lever. Never quote
+  `n_tup_newpage_upd` as relation growth — it counts updates that landed on a *different* page,
+  which may be an existing page with reusable space.
+- First seen in: #3116 (2026-09-17), Codex checkpoint 1 finding 1 and the follow-up pass.
+- Enforced in: this log; `scripts/audit_3116_typed_stores.py::_churn` docstring, which states
+  both HOT conditions and what the counter can and cannot establish.
+
+## A no-op-rate measurement must compare every column the UPDATE sets — and name the ones it cannot
+
+- Symptom: a full-population join measured "99.988% of these upserts are no-ops" while comparing
+  **4 of the 12 columns** the `DO UPDATE` actually sets. Codex named a concrete omission:
+  `sync_institutions` passes `source_url=None` while the bulk drain supplies an SEC URL, so a row
+  could be identical on all four compared columns and still have its provenance cleared. The
+  figure survived re-measurement against all twelve — but it was luck, not method, and the
+  corrected query also produced the per-column attribution the original claim ("all 912 are
+  `filer_name`") had asserted without evidence.
+- ⚠ Two columns genuinely cannot be compared: `ingested_at` is `clock_timestamp()` and
+  `ingest_run_id` is a fresh UUID per run, so both differ by construction on every candidate row.
+  **That is exactly why a whole-row `IS DISTINCT FROM` cannot be used as the guard** — and it is
+  why they must be named as exclusions rather than quietly dropped.
+- Prevention: derive the compared column list from the `DO UPDATE SET` clause itself, one counter
+  per column so a mismatch is attributed rather than guessed; reproduce the writer's own
+  normalisation (COALESCE fallbacks, blank-to-NULL) rather than comparing raw source columns; and
+  print coverage as anti-joins **both ways**, because a no-op rate over an intersection says
+  nothing about rows outside it (here: 2,357,067 observations had no source row at all).
+- First seen in: #3116 (2026-09-17), Codex checkpoint 1 findings 8-12.
+- Enforced in: this log; `scripts/audit_3116_typed_stores.py::_noop_rate`, whose docstring names
+  the two excluded columns and whose query emits per-column mismatch counters plus both anti-joins.
