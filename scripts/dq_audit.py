@@ -39,6 +39,7 @@ import psycopg
 import psycopg.rows
 
 from app.config import settings
+from app.services.raw_filings import KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES
 from scripts._dev_guard import assert_dev_environment
 
 # (table, holder-key column, share column) — the three ownership rollups the
@@ -188,6 +189,71 @@ def _ttm_snapshot_view_mismatch(conn: psycopg.Connection[object]) -> dict[str, o
     }
 
 
+def _raw_payload_retention_census(conn: psycopg.Connection[object]) -> list[dict[str, object]]:
+    """#2774 — per-kind LIVE payload census of ``filing_raw_documents``,
+    tagged with each kind's #1617 retention class.
+
+    Closes the gap that let ``pre14a_body`` reach 3.803 GB under a
+    "negligible volume" justification with CI green throughout: the
+    partition test enforces that every kind is CLASSIFIED, and nothing
+    re-measured the adjective.
+
+    Three things this reports, and they are not the same finding:
+
+    - a **kept-and-negligible kind over the bar** — a misclassification;
+      the kind needs a verdict (candidate).
+    - a **swept kind still holding live bytes** — an uncollected sweep
+      backlog, NOT a classification error. Born-compaction binds new writes
+      only, and the retroactive sweep is manual, so this is expected to be
+      non-zero; reported as a measurement rather than an alarm, because a
+      permanently-red check is the #1221 failure mode.
+    - an **unclassified kind** — a kind the corpus holds that no bucket
+      claims (a renamed/retired kind). The code-side test cannot see this.
+
+    "Bytes present" is ``payload IS NOT NULL``, not
+    ``payload_swept_at IS NULL``: ``chk_swept_rows_carry_hash`` (sql/190) is
+    one-directional and permits a live payload beside a sweep timestamp, and
+    ``byte_count`` is generated from the payload so it NULLs out together
+    with it.
+    """
+    from app.services import rewash_filings
+    from app.services.raw_filings import kept_negligible_breaches_bar, retention_class_for
+
+    rewash_kinds = set(rewash_filings.registered_specs())
+    sql = """
+        SELECT document_kind,
+               count(*) FILTER (WHERE payload IS NOT NULL) AS live_rows,
+               count(*) FILTER (WHERE payload IS NULL)     AS compacted_rows,
+               -- No payload filter on the SUM: byte_count is GENERATED from
+               -- octet_length(payload) (sql/107:68), so it NULLs out with the
+               -- payload and sums to live bytes already. The COUNTs above DO
+               -- need the predicate — count(*) carries no such coupling.
+               COALESCE(sum(byte_count), 0) AS live_bytes
+        FROM filing_raw_documents
+        GROUP BY document_kind
+        ORDER BY 4 DESC
+    """
+    rows: list[dict[str, object]] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql)
+        for row in cur.fetchall():
+            kind = str(row["document_kind"])
+            live_bytes = int(row["live_bytes"])
+            klass = retention_class_for(kind, rewash_kinds=rewash_kinds)
+            rows.append(
+                {
+                    "kind": kind,
+                    "retention_class": klass,
+                    "live_rows": int(row["live_rows"]),
+                    "compacted_rows": int(row["compacted_rows"]),
+                    "live_bytes": live_bytes,
+                    "breaches_bar": kept_negligible_breaches_bar(kind, live_bytes),
+                    "sweep_backlog": klass == "swept" and live_bytes > 0,
+                }
+            )
+    return rows
+
+
 def main() -> int:
     assert_dev_environment()  # read-only, but dev scripts never touch a remote DB (#1765)
     findings: list[dict[str, object]] = []
@@ -195,6 +261,8 @@ def main() -> int:
     # doesn't poison the transaction for the remaining checks.
     dual_pipeline: dict[str, object] = {}
     ttm_check: dict[str, object] = {}
+    retention: list[dict[str, object]] = []
+    retention_error: str | None = None
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         for table, holder_col, share_col in _OWNERSHIP_CURRENT:
             try:
@@ -209,6 +277,10 @@ def main() -> int:
             ttm_check = _ttm_snapshot_view_mismatch(conn)
         except psycopg.Error as exc:
             ttm_check = {"check": "ttm_snapshot_view_mismatch", "error": str(exc)}
+        try:
+            retention = _raw_payload_retention_census(conn)
+        except psycopg.Error as exc:
+            retention_error = str(exc)
 
     print("=== DQ audit — control-group double-count in ownership rollups ===")
     print("(raw-table scan; the read-path rollup collapses same-accession dups — see note below)")
@@ -258,6 +330,32 @@ def main() -> int:
             f"{flag}  snapshot vs complete-TTM revenue >25% apart: {mism} instruments; "
             f"complete windows with NULLed revenue sum: {rot} (both expected 0 — "
             f"non-zero means a second snapshot writer or view/write-through rule drift)"
+        )
+
+    print("\n=== DQ audit — raw-payload retention classes (#2774 / #1617) ===")
+    if retention_error is not None:
+        print(f"  raw_payload_retention_census: ERROR {retention_error}")
+    else:
+        bar_gb = KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES / 1e9
+        print(f"  (kept-and-negligible bar: {bar_gb:.3f} GB live payload per kind)")
+        for row in retention:
+            if row["breaches_bar"] or row["retention_class"] == "unclassified":
+                flag = "  ⚠ CANDIDATE"
+            elif row["sweep_backlog"]:
+                flag = "  sweep-backlog"
+            else:
+                flag = "  ok"
+            live_bytes = int(row["live_bytes"])  # type: ignore[call-overload]
+            print(
+                f"{flag}  {row['kind']:<26} {row['retention_class']:<20} "
+                f"live={live_bytes / 1e9:>7.3f} GB / {row['live_rows']:>7,} rows  "
+                f"compacted={row['compacted_rows']:>7,} rows"
+            )
+        print(
+            "  A kept-and-negligible breach is a MISCLASSIFICATION (the kind needs a verdict, "
+            "not a deletion). A sweep-backlog line is an uncollected #1014 sweep on an "
+            "already-approved source, not a classification error — confirm eligibility with "
+            "sweep_raw_payloads(dry_run=True) before proposing anything destructive."
         )
 
     print(

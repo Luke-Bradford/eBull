@@ -14,15 +14,19 @@ from __future__ import annotations
 import hashlib
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 import pytest
 
 from app.services import rewash_filings
 from app.services.raw_filings import (
     KEPT_NEGLIGIBLE_DOCUMENT_KINDS,
+    KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES,
     DocumentKind,
     _row_to_document,
+    kept_negligible_breaches_bar,
+    retention_class_for,
+    store_raw,
 )
 from app.services.raw_payload_retention import (
     SWEPT_DOCUMENT_KINDS,
@@ -108,6 +112,64 @@ def test_every_document_kind_is_classified() -> None:
 def test_batch_size_must_be_positive() -> None:
     with pytest.raises(ValueError, match="batch_size"):
         sweep_raw_payloads(database_url="postgresql://unused/unused", batch_size=0)
+
+
+# ---------------------------------------------------------------------------
+# #2774 — the size half of "kept-and-negligible"
+# ---------------------------------------------------------------------------
+
+
+def test_pre14a_body_is_swept_not_kept() -> None:
+    """#2774: measured 3.803 GB over 557 rows (mean 6.83 MB) against a
+    justification reading "small HTML". The class needs write-only AND small;
+    pre14a_body is only the first, so it belongs in the swept bucket. Pinned
+    here because the partition tests would pass with it in either one."""
+    assert "pre14a_body" in SWEPT_DOCUMENT_KINDS
+    assert "pre14a_body" not in KEPT_NEGLIGIBLE_DOCUMENT_KINDS
+
+
+def test_retention_class_for_covers_every_bucket() -> None:
+    rewash = set(rewash_filings.registered_specs())
+    assert retention_class_for("def14a_body", rewash_kinds=rewash) == "re-read"
+    assert retention_class_for("pre14a_body", rewash_kinds=rewash) == "swept"
+    assert retention_class_for("nt_body", rewash_kinds=rewash) == "kept-and-negligible"
+    # A kind the CORPUS can hold that the code no longer declares. The
+    # partition test cannot see this case — it enumerates the Literal.
+    assert retention_class_for("retired_kind_from_2024", rewash_kinds=rewash) == "unclassified"
+
+
+@pytest.mark.parametrize(
+    ("kind", "live_bytes", "expected"),
+    [
+        ("nt_body", 0, False),
+        ("nt_body", KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES - 1, False),
+        # Strict '>': exactly at the bar has not breached it.
+        ("nt_body", KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES, False),
+        ("nt_body", KEPT_NEGLIGIBLE_MAX_PAYLOAD_BYTES + 1, True),
+        # The measured pre14a_body figure the bar was constructed to catch —
+        # but it is no longer IN the kept class, so it is not a breach. A
+        # swept kind holding bytes is a sweep backlog, a different finding.
+        ("pre14a_body", 3_802_824_197, False),
+        # A re-read kind's stored body is the point of the class, at any size.
+        ("def14a_body", 32_564_000_000, False),
+    ],
+)
+def test_kept_negligible_breaches_bar(kind: str, live_bytes: int, expected: bool) -> None:
+    assert kept_negligible_breaches_bar(kind, live_bytes) is expected
+
+
+def test_store_raw_refuses_pre14a_without_source_url() -> None:
+    """Born-compaction's precondition, now binding on pre14a_body: the row
+    keeps no bytes, so ``source_url`` is its ONLY recovery locator. The guard
+    fires before any DB work, which is why a null connection reaches it."""
+    with pytest.raises(ValueError, match="source_url is required"):
+        store_raw(
+            cast(Any, None),
+            accession_number="0001805521-26-000001",
+            document_kind="pre14a_body",
+            payload="<html>proxy</html>",
+            source_url=None,
+        )
 
 
 # ---------------------------------------------------------------------------
