@@ -65,8 +65,16 @@ def _is_target_call(node: ast.AST) -> bool:
     return False
 
 
-def _opens_snapshot(node: ast.With) -> bool:
-    """True when any ``with`` item is a ``snapshot_read(...)`` call."""
+def _opens_snapshot(node: ast.With | ast.AsyncWith) -> bool:
+    """True when any ``with`` item is a ``snapshot_read(...)`` call.
+
+    ⚠ ``ast.AsyncWith`` is a DISTINCT node type, not a flavour of ``ast.With``:
+    matching only the latter would flag an ``async with snapshot_read(...)``
+    render as unsnapshotted and fail the build on correct code. (A plain
+    ``with`` inside an ``async def`` — which is what the three production call
+    sites use, ``snapshot_read`` being a sync context manager — is an
+    ``ast.With`` and was always handled.) Caught by the review bot on PR #3151.
+    """
     for item in node.items:
         expr = item.context_expr
         if not isinstance(expr, ast.Call):
@@ -105,7 +113,7 @@ def _violations(source: str, path: str) -> list[str]:
         cursor: ast.AST | None = node
         snapshotted = False
         while cursor is not None:
-            if isinstance(cursor, ast.With) and _opens_snapshot(cursor):
+            if isinstance(cursor, ast.With | ast.AsyncWith) and _opens_snapshot(cursor):
                 snapshotted = True
                 break
             cursor = parents.get(cursor)
@@ -142,6 +150,31 @@ def render(conn, symbol, iid):
     return get_ownership_rollup(conn, symbol, iid)
 """
 
+_ASYNC_GOOD = """
+from app.db.snapshot import snapshot_read
+from app.services.ownership_rollup import get_ownership_rollup
+
+async def render(conn, symbol, iid):
+    async with snapshot_read(conn):
+        return get_ownership_rollup(conn, symbol, iid)
+"""
+
+_ASYNC_BAD = """
+from app.services.ownership_rollup import get_ownership_rollup
+
+async def render(conn, symbol, iid):
+    return get_ownership_rollup(conn, symbol, iid)
+"""
+
+_SYNC_WITH_IN_ASYNC_DEF = """
+from app.db.snapshot import snapshot_read
+from app.services import ownership_rollup
+
+async def render(conn, symbol, iid):
+    with snapshot_read(conn):
+        return ownership_rollup.get_ownership_rollup(conn, symbol, iid)
+"""
+
 _ESCAPED = """
 from app.services.ownership_rollup import get_ownership_rollup
 
@@ -162,6 +195,9 @@ def _self_test() -> int:
         ("good", _GOOD, 0),
         ("bad", _BAD, 1),
         ("bad_imports_but_does_not_use", _BAD_IMPORTS_BUT_DOES_NOT_USE, 1),
+        ("async_good", _ASYNC_GOOD, 0),
+        ("async_bad", _ASYNC_BAD, 1),
+        ("sync_with_in_async_def", _SYNC_WITH_IN_ASYNC_DEF, 0),
         ("escaped", _ESCAPED, 0),
     ]
     failed = 0
