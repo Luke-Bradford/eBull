@@ -27,8 +27,10 @@ Corroboration, not the basis: 123 of 165 `source='form3'` reject rows lead by ex
 
 **DERA field names — SEC Insider Transactions Data Sets readme, NONDERIV_TRANS table:**
 `TRANS_DATE`, `DEEMED_EXECUTION_DATE`, `TRANS_TIMELINESS` (VARCHAR2(1)). Appendix 6.1 Timeliness
-List: **`E` = Early, `L` = Late, empty = On-time** — identical semantics to the XML
-`transactionTimeliness`, so #1687's exemption transfers verbatim rather than being re-derived.
+List: **`E` = Early, `L` = Late, empty = On-time** — the same vocabulary as the XML
+`transactionTimeliness`, so whatever #1687 means by `E` transfers verbatim to the new writer
+rather than being re-derived. ⚠ What `E` *means* is itself disputed — see the correction section;
+the gate deliberately inherits the existing behaviour rather than resolving it.
 
 ## The premise is false, and that reframes the ticket
 
@@ -39,9 +41,11 @@ invariant, citing the same reg, added by **#1687**. It sets `insider_transaction
 precisely the reason this ticket gives; readers exclude them at `:2356` and `:2478`. 86 of
 1,064,351 transactions are flagged.
 
-It also carries an exemption the first draft would have broken: **`transaction_timeliness == 'E'`**
-— an early filing may legitimately report a future date — pinned by
-`tests/test_insider_transactions_ingest.py::test_early_filing_future_txn_is_kept`.
+It also carries an exemption the first draft would have broken: **`transaction_timeliness == 'E'`**,
+on the stated premise that an early filing may legitimately report a future date — pinned by
+`tests/test_insider_transactions_ingest.py::test_early_filing_future_txn_is_kept`. ⚠ That premise
+does not survive the SEC spec (correction section below), but it is live, tested behaviour, so the
+gate matches it and does not silently reverse it.
 
 **So this is a second-writer gap, not a missing rule.** `app/services/sec_insider_dataset_ingest.py:336`
 carries its own `INSERT INTO ownership_insiders_observations` for the bulk DERA drain, bypassing
@@ -98,13 +102,44 @@ New counter `rows_skipped_future_dated` on `InsiderIngestResult`, separate from
 `rows_skipped_bad_data` for the same reason `rows_skipped_retention` is separate — an operator
 reading the run summary must be able to tell a deliberate invariant rejection from malformed input.
 
-### Correction
+### Correction — specified, measured, and deliberately NOT shipped
 
-Soft-delete (`known_to`), never hard-delete: `refresh_insiders_current` selects
-`WHERE instrument_id = %(iid)s AND known_to IS NULL` (`ownership_observations.py:320`), so the
-re-derivation drops the rows from the current layer without destroying evidence.
+⚠⚠ **Blocked on a source-rule conflict this ticket surfaced, not on effort.**
 
-Predicate — attribution, not `source`:
+`evaluate_insider_date_validity` exempts `transaction_timeliness == 'E'`, on the premise recorded
+at `sql/057:264` that `E` means *"filed early (before the event)"*. **The SEC spec says otherwise.**
+EDGAR Ownership XML Technical Specification §4.3.8.2, submission types "4" and "4/A":
+
+> *"By definition, a '4' transaction is on time. Provide no value for this case. By definition, a
+> **'5' transaction is early**. You do not have to provide a value of 'E,' but you can if you wish…
+> EDGAR will add a 'V' to the generated transaction code for an early '5' transaction."*
+
+So on a Form 4, `E` marks a **Form-5-eligible transaction voluntarily reported early on a Form 4**.
+It is a statement about which form the transaction is reported on, **not** about the transaction
+postdating the filing. `sql/057` contradicts itself on exactly this point — `:264` says "before the
+event", `:338` says "before the deadline" — and #1687's exemption rests on the first.
+
+The consequence is measured, not argued (`scripts/audit_2790_insider_future_period.py`):
+
+| of the 778 Form 4/5-attributable live rows | count |
+|---|---|
+| resolve to an `E` transaction — **the live gate keeps these** | 24 |
+| unresolvable (bulk DERA drain stores no timeliness) | 732 |
+| **correctable under BOTH readings of `E`** | **22** |
+
+Correcting the 756 would contradict the shipped gate; exempting them all corrects 22 rows. Either
+way the answer depends on a decision that is #1687's to revise, carries a passing test
+(`test_early_filing_future_txn_is_kept`), and is a documented rationale in a migration header —
+the precise shape the prevention log now warns about. **So the correction waits for that call and
+the gate ships alone**, which stops the bleed without depending on the answer.
+
+⚠ This was learned the hard way inside this ticket. A first correction *was* applied to the dev DB
+(778 rows soft-deleted, `_current` refreshed) before Codex checkpoint 2 caught the missing `E`
+exemption; **24 legitimately-early rows were removed**. All 778 were restored in the same session
+and the dev DB verified back to its pre-correction state (1,044 live breaching observations, 20
+future-dated `_current` rows — both matching the before-capture exactly).
+
+When it is unblocked, the predicate is attribution-based and must never select on `source`:
 
 ```
 period_end > (filed_at AT TIME ZONE 'UTC')::date
@@ -116,27 +151,29 @@ AND ( source_document_id LIKE '%:NDT:%'            -- a transaction row implies 
                    AND m.form IN ('4','4/A','5','5/A')) )
 ```
 
-Then `refresh_insiders_current_batch` over the affected instruments.
+Soft-delete (`known_to`), never hard-delete — `refresh_insiders_current` selects
+`WHERE instrument_id = %(iid)s AND known_to IS NULL` (`ownership_observations.py:320`) — and the
+`_current` re-derivation must share the UPDATE's transaction, because the repair sweep cannot
+rescue a half-done correction: its drift predicate compares `MAX(ingested_at)`, which setting
+`known_to` does not move.
 
-⚠ **Do NOT infer the intended year** for the 300–399 day band. That is a repair, not an ingest
-guard, and a 2047 date does not identify what was meant at all.
+⚠ **Do NOT infer the intended year** for the 300-399 day band. That is a repair, not a correction,
+and a 2047 date does not identify what was meant at all.
 
-## Acceptance
+## Acceptance (this PR ships the gate only)
 
-1. `period_end > filed_at::date` returns **0** among live rows attributable to Form 4/5 by the
-   predicate above, in `ownership_insiders_observations` and `ownership_insiders_current`.
-2. **The 266 exempt rows survive** (165 `source='form3'` + 101 `NDH`-only). A gate or correction
-   that also removed them is over-broad, and this is the assertion that catches it.
-3. The 2047-05-24 row (`instrument_id` 10510) is gone from `_current`.
-4. Re-running the DERA ingest over a corrected accession does not re-create the row.
-5. An `E`-timeliness DERA row with a future `TRANS_DATE` is **kept** — the #1687 exemption holds
-   on the new writer too.
+1. A DERA Form 4/5 row whose reported date postdates its filing date is **not written**, and is
+   counted under `rows_skipped_future_dated` rather than `rows_skipped_bad_data`.
+2. A DERA **Form 3** row whose event date postdates its filing date **is** written — §16(a)(2)
+   sets only latest bounds. This is the assertion that catches an over-broad gate.
+3. A row whose `DOCUMENT_TYPE` is blank or unmapped is written (documented fail-open).
+4. The `E` exemption behaves identically on both writers, because both call the same function.
+5. Measured harness credibility, not assumed: with the gate disabled the suite fails 9 of 26; with
+   the gate applied to every form it fails 6 of 26 (the Form 3 assertions); unmodified, 0 of 26.
 
-⚠ **Not claimed: "exactly N fewer `_current` rows, nothing else changed".** Removing a winner can
-promote an older observation for the same key rather than delete the key, so the current-layer
-delta is measured after the fact, not predicted. ⚠ `ownership_history.py:189` filters closed rows,
-so `as_of_min/max` move retroactively for affected instruments — a read-path consequence, recorded
-because it is not obvious from the storage change.
+⚠ **Not claimed**: that the stored 1,044 breaching rows are fixed. They are not — see the
+correction section. `scripts/audit_2790_insider_future_period.py` reports the standing population
+so the follow-up starts from a measured denominator.
 
 ## Tests
 

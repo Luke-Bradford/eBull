@@ -7589,3 +7589,50 @@ of the pinned-evidence predicate and went on filtering `deflated_sharpe IS NOT N
 - First seen in: #3116 (2026-09-17), Codex checkpoint 1 findings 8-12.
 - Enforced in: this log; `scripts/audit_3116_typed_stores.py::_noop_rate`, whose docstring names
   the two excluded columns and whose query emits per-column mismatch counters plus both anti-joins.
+
+## Before building a guard, grep for an existing implementation of the same INVARIANT — not the symptom
+
+- Symptom: #2790 says *"There is precedent for the guard… The insider path has none."* It has one.
+  `app/services/insider_transactions.py:274::evaluate_insider_date_validity` (#1687) is the exact
+  Rule 16a-3(a) invariant the ticket proposes, citing the same reg; `:1609` excludes flagged rows
+  from the observation write for precisely the reason the ticket gives, and readers exclude them at
+  `:2356`/`:2478`. A full spec was written, Codex-reviewed and about to be implemented before the
+  existing one surfaced — at Codex checkpoint 1, not from any search I ran.
+- ⚠ The working order's searches all missed it, and it is worth knowing why: `docs/settled-decisions.md`
+  has no entry; the prevention log had none; the ticket asserted absence; and grepping the write
+  path showed where `period_end` is set but not where it is *validated*. The guard lives in a
+  `evaluate_*` helper called from `upsert_filing`, two hops from the column.
+- ⚠⚠ The existing guard also carried an **exemption** the new one would have broken
+  (`transaction_timeliness == 'E'`), so the reinvention was not merely redundant — it was a
+  regression wearing a fix's clothes.
+- Prevention: when a ticket says a validation is missing, **grep for the RULE, not the symptom** —
+  the reg number (`16a-3`), the invariant's shape (`> filed`, `_invalid`, `_valid`, `sanity`), and
+  the column's `*_invalid` / `*_flag` siblings in the schema — before writing a line of spec. Test:
+  name the function that would already implement it if it existed, and confirm it does not.
+  Corollary: when the guard DOES exist, the ticket is usually a **second-writer gap** — here the
+  bulk DERA drain bypasses the helper and wrote 87% of the bad rows.
+- First seen in: #2790 (2026-09-17), Codex checkpoint 1.
+- Enforced in: this log; `docs/specs/ownership/2026-09-17-2790-insider-period-gate.md` §"The premise
+  is false", which records the withdrawn design rather than deleting it.
+
+## Run the checkpoint BEFORE mutating data, not before the push — a correction is not a diff
+
+- Symptom: #2790's correction script passed self-review, its dry run reconciled exactly
+  (778 in scope + 266 exempt = 1,044 live), and it was applied to the dev DB. **Codex checkpoint 2
+  then found the correction predicate lacked the `transaction_timeliness = 'E'` exemption that the
+  ingest gate in the same PR has** — so it had soft-deleted rows the gate is written to keep.
+  Measured after the fact: **24 of the 778**. All 778 were restored in the same session and the DB
+  verified back to its pre-correction state, but the restore was luck as much as design — it worked
+  only because `known_to::date = current_date` happened to identify exactly that run's rows.
+- ⚠ The checkpoint is specified as "before first push". A data correction executes **before** the
+  push, so following the rule literally puts the review after the irreversible-ish step. The two
+  are not the same event and the ladder's wording quietly assumes they are.
+- Prevention: **if a change includes a script that mutates stored data, checkpoint 2 fires before
+  `--apply`, not before `git push`.** Additionally: a correction and the guard it accompanies must
+  share one predicate or one decision function — if the guard keeps a row the correction deletes,
+  one of them is wrong, and that contradiction is checkable mechanically without any review.
+  Self-review prompt: "does my correction remove anything my gate would keep?"
+- First seen in: #2790 (2026-09-17, PR #3145), Codex checkpoint 2.
+- Enforced in: this log; `scripts/audit_2790_insider_future_period.py`, whose write path was removed
+  entirely — it now measures and reconciles, and the correction waits on the `E` source-rule
+  conflict the same review surfaced.

@@ -167,6 +167,9 @@ def test_each_job_calls_only_its_own_ingester(
                 # PR6 #1233 §4.5 — all three ingest-result dataclasses now
                 # carry a retention-skip counter the orchestrator reads.
                 rows_skipped_retention=0,
+                # #2790 — InsiderIngestResult-specific counter the orchestrator
+                # reads for the Rule 16a-3(g) rejection path.
+                rows_skipped_future_dated=0,
                 # NPortIngestResult-specific field the orchestrator reads.
                 holdings_seen=0,
                 touched_instrument_ids=set(),
