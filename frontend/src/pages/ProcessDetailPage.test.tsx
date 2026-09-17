@@ -127,6 +127,67 @@ describe("ProcessDetailPage", () => {
     expect(screen.getByText(/4520/)).toBeTruthy();
   });
 
+  it("History tab distinguishes a degraded run that errored from a clean one", async () => {
+    // #3111 — `rows_processed` COUNTS the failures (`scheduler.py:7860`
+    // assigned `parsed + tombstoned + failed` to row_count), so both rows
+    // below report 5 rows. Without the errored column and the status tone,
+    // the degraded one is indistinguishable from the successful one.
+    mockedDetail.mockResolvedValue(makeProcessRow());
+    mockedRuns.mockResolvedValue([
+      {
+        run_id: 9,
+        started_at: "2026-05-08T13:10:00+00:00",
+        finished_at: "2026-05-08T13:10:30+00:00",
+        duration_seconds: 30,
+        rows_processed: 5,
+        rows_skipped_by_reason: {},
+        rows_errored: 5,
+        status: "degraded",
+        cancelled_by_operator_id: null,
+      },
+      {
+        run_id: 8,
+        started_at: "2026-05-08T13:00:00+00:00",
+        finished_at: "2026-05-08T13:00:30+00:00",
+        duration_seconds: 30,
+        rows_processed: 5,
+        rows_skipped_by_reason: {},
+        rows_errored: 0,
+        status: "success",
+        cancelled_by_operator_id: null,
+      },
+    ]);
+    renderAt();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "History" })).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "History" }));
+    await waitFor(() => expect(mockedRuns).toHaveBeenCalled());
+
+    const errored = screen.getAllByTestId("run-rows-errored");
+    expect(errored).toHaveLength(2);
+    expect(errored.map((cell) => cell.textContent)).toEqual([
+      "5",
+      // Zero renders as an em-dash, not "0" — a column of zeroes trains the
+      // eye to skip it, which is how the one non-zero gets missed.
+      "—",
+    ]);
+
+    // Rendered as a TONED BADGE, not bare text — a degraded run sitting at the
+    // same visual weight as a clean one is half the defect. Asserted through
+    // the testid rather than a colour class: the tone→class map belongs to
+    // `Badge`, and pinning raw Tailwind in a test is how `eightKSeverity.ts`
+    // shipped light-only chips past the dark gate.
+    const statuses = screen.getAllByTestId("run-status");
+    expect(statuses.map((el) => el.textContent)).toEqual([
+      // The stored value verbatim, so the operator can query `job_runs.status`
+      // with what they read. `STATUS_VISUAL.degraded` says "no progress",
+      // which on a run that errored on every row would be false.
+      "degraded",
+      "success",
+    ]);
+  });
+
   it("Errors tab renders grouped error classes", async () => {
     mockedDetail.mockResolvedValue(
       makeProcessRow({

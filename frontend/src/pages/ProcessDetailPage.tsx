@@ -46,6 +46,7 @@ import { Modal } from "@/components/ui/Modal";
 import { AdvancedParamsForm } from "@/components/admin/AdvancedParamsForm";
 import {
   REASON_TOOLTIP,
+  RUN_STATUS_VISUAL,
   STATUS_VISUAL,
   reasonTooltip,
 } from "@/components/admin/processStatus";
@@ -724,29 +725,77 @@ function HistoryTab({
           <th className="px-2 py-2">Finished</th>
           <th className="px-2 py-2">Duration</th>
           <th className="px-2 py-2">Rows</th>
+          <th className="px-2 py-2">Errored</th>
           <th className="px-2 py-2">Status</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-        {runs.map((r) => (
-          <tr key={r.run_id} className="text-sm">
-            <td className="px-2 py-2 text-slate-700 dark:text-slate-200">
-              {formatDateTime(r.started_at)}
-            </td>
-            <td className="px-2 py-2 text-slate-600 dark:text-slate-400">
-              {formatDateTime(r.finished_at)}
-            </td>
-            <td className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400">
-              {r.duration_seconds.toFixed(1)}s
-            </td>
-            <td className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400">
-              {r.rows_processed ?? "—"}
-            </td>
-            <td className="px-2 py-2 text-xs text-slate-700 dark:text-slate-200">
-              {r.status}
-            </td>
-          </tr>
-        ))}
+        {runs.map((r) => {
+          const visual = RUN_STATUS_VISUAL[r.status];
+          return (
+            <tr key={r.run_id} className="text-sm">
+              <td className="px-2 py-2 text-slate-700 dark:text-slate-200">
+                {formatDateTime(r.started_at)}
+              </td>
+              <td className="px-2 py-2 text-slate-600 dark:text-slate-400">
+                {formatDateTime(r.finished_at)}
+              </td>
+              <td className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400">
+                {r.duration_seconds.toFixed(1)}s
+              </td>
+              <td className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400">
+                {r.rows_processed ?? "—"}
+              </td>
+              {/*
+                #3111 — `rows_processed` COUNTS THE FAILURES. That is the defect
+                this ticket was filed about (`scheduler.py:7860` assigned
+                `parsed + tombstoned + failed` to row_count), so "5 rows" on a
+                tick where all five threw read exactly like five extractions.
+                Showing the errored count beside it is what makes the two
+                distinguishable without opening the Errors tab.
+
+                Zero renders as an em-dash rather than "0": a column of zeroes
+                trains the eye to skip it, which is how the one non-zero gets
+                missed.
+
+                ⚠⚠ THIS IS `job_runs.rows_errored` AND NOT THE ONLY ERROR
+                COUNTER. `JobProgress.errors` (`progress_json`) is a second,
+                disjointly-written one, and it is what fired on the only
+                `degraded` run in the corpus (`daily_candle_refresh` 133470,
+                `rows_errored=0`, `progress_json.errors={"failed":1}`). They
+                are NOT summable: `sec_manifest_worker.py:760` records
+                `agg.rows_errored == failed + dispatch_errors` while the same
+                tick also puts `failed` into its JobProgress, so a sum would
+                double-count it. No rule says which is authoritative per job,
+                so the cell names its source in a tooltip instead of folding
+                two counters under one number. Second counter recorded on
+                #3111; not invented here.
+              */}
+              <td
+                className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400"
+                data-testid="run-rows-errored"
+                title="job_runs.rows_errored — rows this run recorded as errored. A run can also degrade on JobProgress errors, which this column does not count; the Status cell reflects those."
+              >
+                {r.rows_errored > 0 ? (
+                  <span className="font-medium text-amber-700 dark:text-amber-300">
+                    {r.rows_errored}
+                  </span>
+                ) : (
+                  "—"
+                )}
+              </td>
+              <td className="px-2 py-2 text-xs">
+                <Badge
+                  tone={visual.tone}
+                  className={visual.extraClass}
+                  data-testid="run-status"
+                >
+                  {visual.label}
+                </Badge>
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

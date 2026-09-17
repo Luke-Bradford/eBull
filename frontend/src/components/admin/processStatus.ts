@@ -9,6 +9,7 @@
 
 import type {
   HealthVerdict,
+  ProcessRunStatus,
   ProcessStatus,
   StaleReason,
   TriggerConflictReason,
@@ -53,6 +54,39 @@ export const STATUS_VISUAL: Record<ProcessStatus, StatusVisual> = {
   // neutral, and the operator distinguishes them by label. Opacity is
   // theme-independent, so unlike the old dimmer slate it cannot drift in dark.
   disabled: { label: "disabled", tone: "neutral", extraClass: "opacity-70" },
+};
+
+/**
+ * Visuals for ONE TERMINAL RUN's stored status (#3111), as rendered in the
+ * process-detail run-history table.
+ *
+ * ⚠⚠ A SEPARATE MAP FROM `STATUS_VISUAL`, AND IT MUST STAY SEPARATE.
+ * `ProcessRunStatus` and `ProcessStatus` are different enums that share two
+ * spellings. `degraded` on a PROCESS means the #2218 no-progress shape, which
+ * is why its `STATUS_VISUAL` label is "no progress". `degraded` on a RUN is
+ * whatever `job_progress.degradation_reason` fired on, and its FIRST rule is
+ * `errors reported: …` — so reusing the process label would caption a tick
+ * that errored on every row as having made "no progress". That is the same
+ * class of lie #3111 exists to remove, in the opposite direction.
+ *
+ * Labels are therefore the STORED VALUE verbatim. The operator can put any of
+ * these straight into a `job_runs.status` query and get the same rows back;
+ * a friendlier word would break that and assert a cause the status does not
+ * carry. The REASON is already rendered separately (`verdict_reason`).
+ *
+ * `partial` and `degraded` are `warn` and not `risk`: the run completed and
+ * committed real work, so they are not incidents — but neither is calm, and
+ * painting them `ok` alongside a clean run is exactly the defect this ticket
+ * was filed about. `skipped` is neutral, not `ok`: nothing ran, so there is
+ * nothing to call healthy.
+ */
+export const RUN_STATUS_VISUAL: Record<ProcessRunStatus, StatusVisual> = {
+  success: { label: "success", tone: "ok" },
+  failure: { label: "failure", tone: "risk" },
+  partial: { label: "partial", tone: "warn" },
+  degraded: { label: "degraded", tone: "warn" },
+  cancelled: { label: "cancelled", tone: "neutral", extraClass: "line-through" },
+  skipped: { label: "skipped", tone: "neutral" },
 };
 
 /**
