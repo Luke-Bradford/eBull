@@ -181,13 +181,19 @@ The hourly immutable evidence writer must not queue behind the multi-hour full
 sync. APScheduler, this slot and its dedicated source lock each independently
 keep a second instance serialized.
 
-⚠ STILL ONE PERMIT with two member jobs since #3118 — ``quotes_refresh`` and
-``core_candidate_quote_refresh`` serialise against each other here exactly as
-they already do on the ``etoro_quotes`` source lock, so the demand arithmetic
-below is unchanged. What the second member needs is a DISPATCH thread, and
-``build_scheduler_executors`` sizes the reserved pool ``max(permits, members)``
-for that reason. Raising this constant instead would cost a connection slot the
-dev profile does not have (measured 2026-09-16: usable 27, demand 27)."""
+⚠ STILL ONE PERMIT with THREE member jobs since #3159 — ``quotes_refresh``,
+``core_candidate_quote_refresh`` and ``strategy_halt_feed_refresh`` serialise
+against each other here, so the demand arithmetic below is unchanged. What each
+extra member needs is a DISPATCH thread, and ``build_scheduler_executors`` sizes
+the reserved pool ``max(permits, members)`` for that reason. Raising this
+constant instead would cost a connection slot the dev profile does not have
+(measured 2026-09-16: usable 27, demand 27).
+
+⚠ The two quote jobs also serialise on the ``etoro_quotes`` source lock, so for
+them this semaphore adds no contention that did not already exist. The halt feed
+is on the ``nasdaq`` source and therefore meets its lane peers for the FIRST time
+here — see ``_CORE_PREFLIGHT_FRESHNESS_PRODUCERS`` for the slack arithmetic that
+makes that safe, and the test that pins it."""
 
 JOBS_NON_SEC_MAX_CONCURRENCY: Final[int] = (
     JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY + JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY + JOBS_QUOTE_OBSERVATION_MAX_CONCURRENCY
