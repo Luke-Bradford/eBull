@@ -471,3 +471,30 @@ class TestUpdateRuntimeConfigAllowlist:
         )
         with pytest.raises(ValueError, match="allow-list"):
             update_runtime_config(conn, updated_by="op", reason="r", llm_base_url="http://localhost:11434/v1", now=_NOW)
+
+    def test_park_sentinel_does_not_block_an_unrelated_write(self) -> None:
+        # #3196: #2855 parks the thesis path by storing a sentinel the
+        # allow-list rejects ON PURPOSE -- that rejection is what makes
+        # `make_llm_clients` record a PREREQ_SKIP. A patch that supplies no LLM
+        # column cannot move the triple, so re-validating it only re-rejects a
+        # state already stored: before this fix, enabling the paper pot (which
+        # writes enable_auto_trading) 500'd and blocked the core sleeve's first
+        # order.
+        conn = _make_conn(
+            [
+                _make_cursor([_row(llm_model_writer="parked-2855", llm_model_critic="parked-2855")]),
+                _make_cursor([{"updated_at": _NOW}]),
+            ]
+        )
+        rc = update_runtime_config(conn, updated_by="op", reason="enable pot", enable_auto_trading=True, now=_NOW)
+        assert rc.enable_auto_trading is True
+        # the park survives the write untouched -- it is not silently repaired
+        assert rc.llm_model_writer == "parked-2855"
+
+    def test_park_sentinel_still_rejected_when_the_patch_touches_llm_config(self) -> None:
+        # The complement of the test above, and the reason it is narrow: once a
+        # patch supplies ANY LLM column the resulting triple is back in scope,
+        # so #2187's rule is unchanged.
+        conn = _make_conn([_make_cursor([_row(llm_model_writer="parked-2855", llm_model_critic="parked-2855")])])
+        with pytest.raises(ValueError, match="allow-list"):
+            update_runtime_config(conn, updated_by="op", reason="r", llm_base_url="http://localhost:11434/v1", now=_NOW)
