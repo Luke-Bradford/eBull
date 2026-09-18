@@ -466,18 +466,34 @@ def update_runtime_config(
         # provided fields: a PATCH that only moves llm_base_url from a
         # remote endpoint to localhost newly subjects the (unchanged)
         # model columns to the local-memory rule.
-        for field_name, new_model in (
-            ("llm_model_writer", new_llm_model_writer),
-            ("llm_model_critic", new_llm_model_critic),
-        ):
-            violation = local_llm_model_violation(
-                provider=new_llm_provider,
-                base_url=new_llm_base_url,
-                model=new_model,
-                field=field_name,
-            )
-            if violation is not None:
-                raise ValueError(violation)
+        #
+        # ⚠ #3196 — but ONLY when this patch can actually move that triple. A
+        # patch supplying none of the four LLM columns cannot change it, so
+        # validating it can only reject a state already stored, and the stored
+        # state is legitimately un-allow-listed: #2855 parks the thesis path by
+        # writing the sentinel 'parked-2855' into the model columns precisely
+        # BECAUSE `local_llm_model_violation` rejects it, which is what makes
+        # `make_llm_clients` record a PREREQ_SKIP. Re-validating on an unrelated
+        # write turned that park into a poison pill for the whole singleton:
+        # `enable_auto_trading` could not be written at all, which blocked the
+        # core sleeve's first order. #2187's own case still validates, because
+        # it supplies llm_base_url.
+        llm_fields_touched = any(
+            value is not None for value in (llm_provider, llm_base_url, llm_model_writer, llm_model_critic)
+        )
+        if llm_fields_touched:
+            for field_name, new_model in (
+                ("llm_model_writer", new_llm_model_writer),
+                ("llm_model_critic", new_llm_model_critic),
+            ):
+                violation = local_llm_model_violation(
+                    provider=new_llm_provider,
+                    base_url=new_llm_base_url,
+                    model=new_model,
+                    field=field_name,
+                )
+                if violation is not None:
+                    raise ValueError(violation)
 
         # No-op patch detection: if every provided field already matches the
         # current row, refuse the patch.  Otherwise the UPDATE would silently
