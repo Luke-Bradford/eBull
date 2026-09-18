@@ -17,6 +17,7 @@ Own module because the ``db`` marker is module-scoped: one DB test inside
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -25,6 +26,7 @@ from uuid import uuid4
 import psycopg
 import psycopg.rows
 import pytest
+from psycopg.pq import TransactionStatus
 
 from app.providers.broker import (
     BrokerOrderDetail,
@@ -428,7 +430,18 @@ def test_an_order_whose_recommendation_key_is_held_elsewhere_is_skipped(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     """A live submitter owns this recommendation's span. The poller must not
-    call the broker or write anything while somebody else is mid-submission."""
+    call the broker, and must not touch the claim — ``status`` and the
+    recommendation stay exactly as the submitter left them.
+
+    ⚠⚠ It MUST still advance the rotation key (#3189 finding 7). This test
+    previously asserted ``recommendation_last_polled_at is None`` under a
+    docstring reading *"must not write anything"*, and that rule was too broad:
+    it collides with ``_stamp_polled``'s own invariant that the key moves on
+    every attempt path, so contention became the absorbing state #2948 exists
+    to prevent. The narrow rule is what is asserted now — nothing that is part
+    of the SUBMISSION is written, and the rotation key, which the submitter
+    neither reads nor owns, is.
+    """
     _seed_instrument(ebull_test_conn)
     rec = _seed_recommendation(ebull_test_conn)
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
@@ -443,7 +456,149 @@ def test_an_order_whose_recommendation_key_is_held_elsewhere_is_skipped(
     broker.lookup_order.assert_not_called()
     row = _order_row(ebull_test_conn, order_id)
     assert row["status"] == "pending"
-    assert row["recommendation_last_polled_at"] is None
+    assert _rec_status(ebull_test_conn, rec) == "execution_pending"
+    assert row["recommendation_last_polled_at"] == _NOW
+
+
+def test_contended_rows_do_not_occupy_the_bounded_head_for_ever(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2948's absorbing state, reached through CONTENTION instead of a stuck
+    status (#3189 finding 7).
+
+    The first order's recommendation key is held elsewhere, so it can only ever
+    return ``lock_busy``. With ``limit=1`` and a rotation key that did not move
+    on that path, the bounded window would select it again on every fire and
+    the second order would never be visited at all.
+    """
+    _seed_instrument(ebull_test_conn)
+    held_rec = _seed_recommendation(ebull_test_conn)
+    free_rec = _seed_recommendation(ebull_test_conn)
+    held = _seed_order(ebull_test_conn, recommendation_id=held_rec, last_polled_at=_NOW - timedelta(hours=2))
+    free = _seed_order(ebull_test_conn, recommendation_id=free_rec, last_polled_at=_NOW - timedelta(hours=1))
+
+    broker = _broker(detail=_detail("Pending"))
+    with psycopg.connect(test_database_url()) as holder:
+        holder.execute("SELECT pg_advisory_lock(%s, %s)", (RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS, held_rec))
+        holder.commit()
+        first_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, limit=1, now=_NOW)
+        second_pass = reconcile_pending_recommendation_orders(
+            ebull_test_conn, broker=broker, limit=1, now=_NOW + timedelta(minutes=1)
+        )
+
+    assert [(r.order_id, r.verdict) for r in first_pass] == [(held, "lock_busy")]
+    assert [r.order_id for r in second_pass] == [free], "the contended row starved the tail"
+
+
+def test_the_rotation_key_never_moves_backward(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Overlapping pollers must not regress the key (#3189, Codex checkpoint 2).
+
+    Two pollers overlap by design — a boot catch-up racing the scheduled fire —
+    and each carries the ``now`` captured when its own batch began. So a run
+    holding the lock since ``T1`` can finish and stamp *after* a later run
+    stamped ``lock_busy`` at ``T2 > T1``. A plain assignment would move the key
+    backward and re-postpone every row stamped between the two, undoing exactly
+    the fairness the contention stamp was added to provide.
+
+    Driven through the poller rather than through ``_stamp_polled`` directly, so
+    it is the shipped call path that is pinned.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
+    broker = _broker(detail=_detail("Pending"))
+
+    later = _NOW + timedelta(minutes=5)
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=later)
+    assert _order_row(ebull_test_conn, order_id)["recommendation_last_polled_at"] == later
+    # ⚠ `_order_row` opens a read transaction and does not close it, and the
+    # poller refuses a non-idle connection. Other tests never hit this because
+    # they read only after their last call.
+    ebull_test_conn.rollback()
+
+    # The straggler: a poller that began earlier and is only now stamping.
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert _order_row(ebull_test_conn, order_id)["recommendation_last_polled_at"] == later, (
+        "a late stamp from an earlier batch moved the rotation key backward"
+    )
+
+
+def test_a_row_that_raises_unexpectedly_is_contained_and_the_batch_continues(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """One unpredicted raise must not abort the batch (#3189 finding 7).
+
+    Without per-row containment the exception escapes before any later row is
+    attempted, and because the raising row never stamps, the next fire selects
+    the same head and raises again — the same absorbing state, reached through
+    an exception. ``RuntimeError`` is deliberately outside the broker-error
+    vocabulary the poller handles: the paths it predicted already stamp, so the
+    only failures that reach this guard are the ones nobody predicted.
+    """
+    _seed_instrument(ebull_test_conn)
+    first_rec = _seed_recommendation(ebull_test_conn)
+    second_rec = _seed_recommendation(ebull_test_conn)
+    boom = _seed_order(ebull_test_conn, recommendation_id=first_rec, last_polled_at=_NOW - timedelta(hours=2))
+    later = _seed_order(ebull_test_conn, recommendation_id=second_rec, last_polled_at=_NOW - timedelta(hours=1))
+
+    broker = MagicMock(spec=BrokerProvider)
+    broker.lookup_order.side_effect = [RuntimeError("something nobody predicted"), _detail("Pending")]
+
+    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert [(r.order_id, r.verdict) for r in results] == [(boom, "poll_error"), (later, "still_pending")]
+    assert _order_row(ebull_test_conn, boom)["recommendation_last_polled_at"] == _NOW, (
+        "an uncontained row keeps its rotation key and re-occupies the head"
+    )
+    assert _order_row(ebull_test_conn, boom)["status"] == "pending", "an unexplained failure must not move the claim"
+
+
+def test_containment_survives_a_raise_that_left_a_failed_transaction(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Containment still stamps when the raise poisoned the transaction first.
+
+    ⚠ This test exists because of what it FAILED to prove. It was written to
+    make a defensive ``conn.rollback()`` in the containment block load-bearing,
+    and it could not: a revert-probe deleting that rollback stayed green, because
+    ``_recommendation_submission_try_lock``'s own ``finally`` has already rolled
+    back by the time the exception reaches the batch loop. The rollback was
+    removed rather than kept as unexercised insurance; what remains worth
+    pinning is that a poisoned transaction does not defeat the stamp, whichever
+    layer cleans it up.
+    """
+    _seed_instrument(ebull_test_conn)
+    first_rec = _seed_recommendation(ebull_test_conn)
+    second_rec = _seed_recommendation(ebull_test_conn)
+    boom = _seed_order(ebull_test_conn, recommendation_id=first_rec, last_polled_at=_NOW - timedelta(hours=2))
+    later = _seed_order(ebull_test_conn, recommendation_id=second_rec, last_polled_at=_NOW - timedelta(hours=1))
+
+    calls: dict[str, Any] = {"n": 0, "poisoned": False}
+
+    def _first_call_poisons_then_raises(*_args: Any, **_kwargs: Any) -> BrokerOrderDetail:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            return _detail("Pending")
+        with contextlib.suppress(psycopg.Error):
+            ebull_test_conn.execute("SELECT 1 / 0")
+        # ⚠ RECORDED, not asserted here. An assertion inside the region under
+        # containment is structurally unable to fail the test — the guard would
+        # be caught and reported as `poll_error` like any other raise. Checked
+        # after the call instead.
+        calls["poisoned"] = ebull_test_conn.info.transaction_status == TransactionStatus.INERROR
+        raise RuntimeError("raised with a failed transaction open")
+
+    broker = MagicMock(spec=BrokerProvider)
+    broker.lookup_order.side_effect = _first_call_poisons_then_raises
+
+    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert calls["poisoned"] is True, "the probe never poisoned the transaction, so it proves nothing"
+    assert [(r.order_id, r.verdict) for r in results] == [(boom, "poll_error"), (later, "still_pending")]
+    assert _order_row(ebull_test_conn, boom)["recommendation_last_polled_at"] == _NOW
 
 
 def test_the_backlog_rotates_and_does_not_starve_the_tail(

@@ -2364,6 +2364,7 @@ PendingOrderVerdict = Literal[
     "ref_not_pollable",
     "lock_busy",
     "no_longer_pending",
+    "poll_error",
 ]
 
 #: Verdicts that describe a PERMANENT property of the row, so re-asking cannot
@@ -2372,6 +2373,8 @@ PendingOrderVerdict = Literal[
 #: ``not_found`` and ``lookup_error`` (a transport failure is not a fact about
 #: the order) and ``unsafe_status`` (an unsettled partial fill can still
 #: progress to Filled). ⚠ Parked is not resolved — see ``sql/395``.
+#: ⚠ ``poll_error`` and ``lock_busy`` are deliberately absent for the same
+#: reason: both are statements about THIS attempt, not about the row (#3189).
 _PARKING_POLL_VERDICTS: dict[str, str] = {
     "filled_not_booked": "filled_unbooked",
     "ref_not_pollable": "ref_not_pollable",
@@ -2450,6 +2453,17 @@ def _stamp_polled(
     key, and #2948 established that ordering a bounded backlog on a key that does
     not move for a non-terminal row is an absorbing state rather than a delay.
 
+    ⚠⚠ MONOTONIC (#3189, Codex checkpoint 2). The key only ever moves FORWARD.
+    Two pollers overlap by design — the module's own docstring names "a boot
+    catch-up racing the scheduled fire" — and each carries the ``now`` it
+    captured when its batch began. So a run that took the lock at ``T1`` can
+    finish and stamp *after* a later run stamped ``lock_busy`` at ``T2 > T1``; a
+    plain assignment would move the key BACKWARD and re-postpone every row
+    stamped between them, which is the fairness this whole slice exists to
+    provide. ``GREATEST`` ignores NULL arguments (verified on PG 17.9) rather
+    than propagating it like most functions, so the never-polled case still
+    takes ``now``.
+
     ``park_reason`` stops the asking. It is set only for a verdict that is a
     PERMANENT property of the row (``sql/395``), never for a transport failure —
     otherwise a blip would silently retire a live order from reconciliation.
@@ -2458,7 +2472,7 @@ def _stamp_polled(
     conn.execute(
         """
         UPDATE orders
-        SET recommendation_last_polled_at = %(now)s,
+        SET recommendation_last_polled_at = GREATEST(recommendation_last_polled_at, %(now)s),
             recommendation_poll_parked_reason = COALESCE(
                 recommendation_poll_parked_reason, %(park)s)
         WHERE order_id = %(oid)s
@@ -2664,7 +2678,50 @@ def reconcile_pending_recommendation_orders(
 
     results: list[PendingOrderPollResult] = []
     for row in due:
-        results.append(_poll_one_pending_order(conn, broker=broker, row=row, now=at))
+        # ⚠⚠ PER-ROW CONTAINMENT (#3189 finding 7). Without it one unexpected
+        # raise aborts the whole batch before any later row is attempted, and
+        # because the raising row never stamps, the next fire selects the same
+        # head and raises again — the rotation key's absorbing state reached
+        # through an exception instead of through contention. Every path
+        # `_poll_one_pending_order` handles deliberately already stamps; this
+        # catches the ones nobody predicted, which is the only kind that gets
+        # here.
+        try:
+            results.append(_poll_one_pending_order(conn, broker=broker, row=row, now=at))
+        # ⚠ `Exception`, and it must NEVER widen to `BaseException`. Breadth is
+        # the point here — the whole value is catching what nobody predicted —
+        # but `KeyboardInterrupt` and `SystemExit` are a shutdown in progress,
+        # and containing those would keep polling the broker through a SIGTERM
+        # drain instead of letting the batch stop.
+        except Exception:
+            order_id = int(row["order_id"])
+            # ⚠ No rollback here, and that is checked rather than assumed. A
+            # raise that left a failed transaction would make `_stamp_polled`
+            # fail too — but every path in `_poll_one_pending_order` runs inside
+            # `_recommendation_submission_try_lock`, whose `finally` already
+            # rolls back on the way out precisely so the unlock cannot run
+            # inside a transaction. A defensive `conn.rollback()` was written
+            # here first and REMOVED: a revert-probe deleting it could not be
+            # made to fail, because the connection is already clean by the time
+            # this block runs.
+            try:
+                _stamp_polled(conn, order_id=order_id, now=at)
+            except Exception:
+                # A stamp that cannot be written means the connection is gone,
+                # which is not a per-row problem and must not be swallowed into
+                # a per-row verdict.
+                logger.exception(
+                    "reconcile_pending_recommendation_orders: order_id=%d could not be stamped after an "
+                    "unexpected failure; aborting the batch",
+                    order_id,
+                )
+                raise
+            logger.exception(
+                "reconcile_pending_recommendation_orders: order_id=%d raised unexpectedly; stamped and "
+                "continuing with the rest of the batch",
+                order_id,
+            )
+            results.append(PendingOrderPollResult(order_id, int(row["recommendation_id"]), "poll_error"))
     return tuple(results)
 
 
@@ -2694,6 +2751,25 @@ def _poll_one_pending_order(
 
     with _recommendation_submission_try_lock(conn, recommendation_id) as acquired:
         if not acquired:
+            # ⚠⚠ STAMP BEFORE RETURNING (#3189 finding 7). `lock_busy` is an
+            # attempt path — we asked and were told "someone else has this
+            # recommendation" — so `_stamp_polled`'s invariant applies to it
+            # exactly as it does to `lookup_error`. Without the stamp the row
+            # keeps its old (or NULL) rotation key and re-occupies the head of
+            # the bounded window on every fire, so `limit` contended rows
+            # starve every order behind them permanently. That is #2948's
+            # absorbing state reached through contention instead of through a
+            # stuck status.
+            #
+            # ⚠ Safe to write here: the try-lock committed before yielding
+            # False, so the connection is idle, and the session holding the key
+            # is doing broker I/O OUTSIDE a transaction by this module's own
+            # rule — so this UPDATE contends for the row lock only briefly, and
+            # the holder's own `_stamp_polled` simply overwrites ours later.
+            #
+            # ⚠ NOT parked: `lock_busy` is a statement about this attempt, not
+            # a permanent property of the row.
+            _stamp_polled(conn, order_id=order_id, now=now)
             return PendingOrderPollResult(order_id, recommendation_id, "lock_busy")
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:

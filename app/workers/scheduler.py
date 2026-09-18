@@ -6363,6 +6363,23 @@ def recommendation_order_reconcile() -> None:
             verdicts[result.verdict] = verdicts.get(result.verdict, 0) + 1
         breakdown = " ".join(f"{name}={count}" for name, count in sorted(verdicts.items())) or "no_due_orders"
         tracker.note = f"polled={len(results)} {breakdown}"
+        # ⚠⚠ #3189 (Codex checkpoint 2): `poll_error` is a row the poller could
+        # not process for a reason nobody predicted. Before per-row containment
+        # existed that exception failed the whole run, so containing it without
+        # this would trade a loud failure for a silent `success` — the #2218
+        # shape exactly. `errors` is the axis whose non-zero value degrades the
+        # run, so the containment keeps every other order resolvable and the
+        # operator still sees that something went wrong.
+        #
+        # ⚠ `tracker.note` wins over the derived reason in `_finish_tracked`, so
+        # the degraded row explains itself with the full verdict breakdown —
+        # which names `poll_error=N` — rather than a generic string.
+        poll_errors = verdicts.get("poll_error", 0)
+        tracker.progress = JobProgress(
+            candidates_seen=len(results),
+            outcomes={name: count for name, count in verdicts.items() if name != "poll_error"},
+            errors={"poll_error": poll_errors},
+        )
         logger.info("recommendation_order_reconcile: %s", tracker.note)
 
 
