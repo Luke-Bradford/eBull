@@ -52,6 +52,12 @@ Usage (read-only, one REPEATABLE READ snapshot per mode):
 
 Exits 1 on any per-instrument error, on an empty census, and on a summary whose input held
 no instruments — a census that measured nothing must not look clean.
+
+⚠ ``--balances`` exits **2** unconditionally. It is withdrawn pending a re-spec: its ORDER BY
+is a hand copy of the pre-#3146 winner rule, so it measures something production no longer
+does. See the ``BALANCES_SQL`` header. That is the same principle one step further on — a
+census measuring the WRONG thing must not look clean either, and only an exit code says so to
+a caller that is not a person.
 """
 
 from __future__ import annotations
@@ -151,9 +157,29 @@ SELECT instrument_id, acc
  WHERE distinct_values > 1
 """
 
-# The projection's own winner rule, spelled from ``ownership_observations.py:321-341`` so the
-# census asks the same question the MERGE answers. The last key is a LEXICAL tie-break, and
-# this census counts the keys it decides between same-filing observations at different values.
+# The projection's own winner rule, spelled from ``ownership_observations.py`` so the census
+# asks the same question the MERGE answers. The last key is a LEXICAL tie-break, and this
+# census counts the keys it decides between same-filing observations at different values.
+#
+# ⚠⚠ STALE — DO NOT QUOTE THIS CENSUS'S FIGURE. The ORDER BY below is a hand copy of the
+# pre-#3146 rule, and #3146 (PR #3148) added a component to exactly this key. Production now
+# orders by ``_INSIDER_WINNER_ORDER_TAIL`` (``ownership_observations.py:299``) — accession
+# prefix ASC, then the ``:NDT:`` surrogate key as a NUMERIC DESC (the filing's LAST Table I
+# line, document order, measured by ``scripts/audit_3146_insider_line_order.py --order-rule``),
+# and only THEN ``source_document_id ASC``. So the lexical key is no longer the tie-break that
+# decides these keys; it is the third one, reached only when the prefix ties AND the NDT
+# numeric ties or is NULL on both sides (XML rows and Form 3 ``:NDH:`` holdings).
+#
+# The 13,787 this still prints is therefore not the quantity its own label describes, and its
+# ``winner`` join to the live row silently narrows the population to keys where the old and new
+# rules happen to agree. Re-speccing it means ranking on the real tail and then counting only
+# the keys the FINAL lexical key separates — a different question, not a one-line swap, which
+# is why this is flagged rather than half-fixed.
+#
+# This is a live instance of the prevention-log entry "A test that re-spells a shared sort key
+# INLINE is a copy, and a copy drifts when the key gains a component" (#2385, 2026-08-07).
+# That entry's own prevention step — grep the key for inline re-spellings before changing it —
+# was not run when #3146 changed it.
 #
 # ⚠ Two things this census deliberately does NOT claim, both caught at Codex checkpoint 1
 # after the first draft asserted them:
@@ -692,7 +718,25 @@ def main(argv: list[str] | None = None) -> int:
             {"form4_cutoff": form4_retention_cutoff()},
         )
     if args.balances:
-        return _scalar_census(BALANCES_SQL, "Keys decided by the projection's lexical tie-break:")
+        # The banner is printed, not just commented: the failure mode is someone reading the
+        # number off a terminal, which a source comment does not reach.
+        rc = _scalar_census(
+            BALANCES_SQL,
+            "Keys decided by the projection's lexical tie-break:\n"
+            "  ⚠⚠ STALE since #3146 — this ORDER BY is a hand copy of the PRE-#3146 rule, so the\n"
+            "     figure below is not the quantity the label describes. Do not quote it; see the\n"
+            "     BALANCES_SQL header for what re-speccing it requires.",
+        )
+        # ⚠ Non-zero by CONTRACT, not because anything failed. This module's rule is that a
+        # census which measured nothing must not look clean; one measuring the WRONG thing is
+        # the worse case of it, because it looks clean AND hands back a number. A banner stops
+        # a human reading a terminal — only the exit code stops a script (review WARNING,
+        # PR #3178). No caller exists in `.py`/`.sh`/CI today, but the #2794 proposal doc
+        # prints this command for an operator to run, so "nobody automates it" is a property
+        # of this week rather than of the script.
+        # 2, not 1, so "withdrawn pending re-spec" stays distinguishable from _scalar_census's
+        # own 1 ("ran and measured nothing"), which is preserved when it fires.
+        return rc or 2
     if args.edges or args.out:
         if not args.out:
             ap.error("--edges requires --out")
