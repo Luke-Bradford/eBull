@@ -48,7 +48,23 @@ def _selection_with_verdict(
     return load_core_selection(conn if conn is not None else _candidate_connection())
 
 
-def test_missing_candidates_are_unavailable_not_perpetually_collecting() -> None:
+def _clear_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the PRE-verdict state these cases are about.
+
+    Until 2026-09-18 the shipped constants were `None`, so a test about "before the
+    verdict" needed no setup. #2833's verdict has since been transcribed into the
+    module, so the precondition has to be stated rather than inherited — otherwise
+    these cases quietly start exercising the post-verdict path and stop testing what
+    their names claim. Mirror of `_selection_with_verdict`; neither weakens an
+    assertion, both only supply the constant state the case is written about.
+    """
+    monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_OUTCOME", None)
+    monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_INSTRUMENT_ID", None)
+    monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_EVIDENCE_REF", None)
+
+
+def test_missing_candidates_are_unavailable_not_perpetually_collecting(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_verdict(monkeypatch)
     selection = load_core_selection(_empty_connection())
     assert selection.state == "unavailable"
     assert selection.selected_instrument_id is None
@@ -70,7 +86,8 @@ def test_overall_progress_counts_common_dates_not_the_minimum_individual_count()
     assert selection.observed_trading_days == 4
 
 
-def test_mandate_enablement_refuses_before_2833_verdict() -> None:
+def test_mandate_enablement_refuses_before_2833_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_verdict(monkeypatch)
     with pytest.raises(CoreSelectionError, match="five-trading-day cost verdict"):
         require_selected_core_instrument(_candidate_connection(), instrument_id=3417)
 
@@ -81,13 +98,20 @@ def test_the_refusal_names_the_state_it_is_in_not_a_generic_wait(monkeypatch: py
     One sentence for every non-ready state meant the operator was told to keep waiting
     for a study that had already finished.
     """
+    _clear_verdict(monkeypatch)
     monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_OUTCOME", "cash")
     monkeypatch.setattr("app.services.strategy_core_selection.SELECTED_CORE_EVIDENCE_REF", "#2833 verdict")
+    # ⚠ The instrument id must stay None: a declared 'cash' that also names an
+    # instrument is a DIFFERENT refusal ("declares outcome 'cash' but also names
+    # instrument"), and this case is about the cash wording, not that one.
     with pytest.raises(CoreSelectionError, match="reviewed verdict is cash"):
         require_selected_core_instrument(_candidate_connection(), instrument_id=3417)
 
 
-def test_absent_candidate_rows_refuse_on_coverage_not_on_a_pending_verdict() -> None:
+def test_absent_candidate_rows_refuse_on_coverage_not_on_a_pending_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_verdict(monkeypatch)
     with pytest.raises(CoreSelectionError, match="candidate coverage is incomplete"):
         require_selected_core_instrument(_empty_connection(), instrument_id=3417)
 

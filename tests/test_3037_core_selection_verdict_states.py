@@ -55,9 +55,30 @@ def _classify(
     )
 
 
-def test_the_shipped_constants_are_inert() -> None:
-    """This PR records no verdict. A shipped non-None constant would BE the adoption."""
-    assert (SELECTED_CORE_OUTCOME, SELECTED_CORE_INSTRUMENT_ID, SELECTED_CORE_EVIDENCE_REF) == (None, None, None)
+def test_the_shipped_constants_are_never_half_written() -> None:
+    """The invariant that outlived "this PR records no verdict".
+
+    Until 2026-09-18 this asserted all three constants were ``None``, because a shipped
+    non-None value would have BEEN the adoption. #2833's verdict has since opened at its
+    declared boundary and been transcribed, so that literal assertion has expired — but
+    the thing it was protecting has not. All three are hand-edited, and a partially
+    applied edit is the dangerous state: ``classify_core_selection`` has a distinct
+    refusal for each half, and every one of those refusals reads as a configuration
+    fault on the operator's surface.
+
+    What the constants SAY is checked against the committed evidence payload in
+    ``tests/test_2833_transcribed_verdict.py`` — deliberately not here, because
+    restating the literals in a second file would pass just as happily if both were
+    typed wrong together.
+    """
+    written = [
+        value is not None for value in (SELECTED_CORE_OUTCOME, SELECTED_CORE_INSTRUMENT_ID, SELECTED_CORE_EVIDENCE_REF)
+    ]
+    assert len(set(written)) == 1, (
+        "the #2833 verdict constants are half-written: outcome="
+        f"{SELECTED_CORE_OUTCOME!r} instrument={SELECTED_CORE_INSTRUMENT_ID!r} "
+        f"evidence_ref={SELECTED_CORE_EVIDENCE_REF!r}"
+    )
 
 
 # ---------------------------------------------------------------- the state table
