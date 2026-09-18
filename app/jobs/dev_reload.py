@@ -282,7 +282,31 @@ def live_job() -> str | None:
             ).fetchone()
     except Exception:
         # Intentionally broad: a probe is not worth an exception class.
-        logger.debug("jobs dev-reload: live-job probe failed; treating as no live job", exc_info=True)
+        #
+        # ⚠⚠ WARNING, not DEBUG (#2274). The BEHAVIOUR here is right and is
+        # not changing — fail-open degrades to the pre-#2274 reload-anyway
+        # path rather than wedging the daemon on stale code. What was wrong
+        # is that it left no record. The daemon logs at INFO, so a failed
+        # probe and a genuinely idle queue produced *byte-identical*
+        # evidence: both are the absence of a DEFERRING line. A reap that
+        # followed could therefore not be attributed to either, and the
+        # deferral is invisible precisely when it has stopped working.
+        #
+        # ⚠ This is instrumentation, NOT a cause claim — this ticket's own
+        # ordering is "instrument first, no cause claim in the fix". It does
+        # not assert that any observed reap came from this path; it makes the
+        # next one answerable.
+        #
+        # ⚠ Cadence: the caller probes at most every _LIVE_JOB_PROBE_PERIOD_S
+        # while changes are pending, so a sustained outage warns ~4x/min. That
+        # is accepted rather than throttled — an unreachable database is
+        # already loud on every other surface, and a throttle would reintroduce
+        # the silence this line exists to remove.
+        logger.warning(
+            "jobs dev-reload: live-job probe failed; treating as no live job — "
+            "reload deferral is OFF for this cycle and an in-flight job may be reaped",
+            exc_info=True,
+        )
         return None
     if row is None:
         return None
