@@ -8525,3 +8525,64 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this log; `scripts/audit_2794_fold_anchor.py` (`BALANCES_SQL`'s header states the
   drift and what re-speccing requires; `--balances` prints a STALE banner above the figure so it
   cannot be read off a terminal without the caveat).
+
+## A shutdown guard lands on a return value something else already reads (#2274 M1, 2026-09-18)
+
+- Symptom: adding "refuse to start once the process is stopping" to a shared path produced,
+  twice in one branch and in two different files, a change that would have made a **routine
+  deploy silently discard an operator's queued request**. Neither was visible in the file
+  being edited; both were two frames away.
+  - `_run_prelude` returning `None` for shutdown collided with the FENCE verdict.
+    `_run_manual_bounded` reads `run_with_prelude`'s `False` as *"full-wash in progress"*
+    and marks `pending_job_requests` **`rejected`**; boot recovery replays only
+    `claimed`/`dispatched`, so the request is gone for good.
+  - `_run_layers_loop` skipping the remaining layers returned a partial run *normally*, and
+    the queue lifecycle then called `mark_request_completed` — acknowledging work that
+    never happened.
+- ⚠⚠ Generalise: *"the process is stopping"* and *"a fence or peer refused this"* are
+  different facts, and a boolean return cannot carry both. **Before adding a new reason to
+  produce an existing return value, grep for what READS it.**
+- The fix shape that holds is an **opt-in** abort given only to the path with no durable
+  record. ⚠ The discriminating property is NOT "scheduled vs manual" — it is
+  **`linked_request_id is None`**: is there a row that would be wrongly terminalised? A
+  scheduled fire has none and simply runs again at its cadence; an orphaned manual run
+  already self-heals because its request stays `claimed`.
+- Caught by: Codex checkpoint 2, rounds 4 and 6 of seven. ⚠ Worth recording that the rounds
+  were not wasted: 1-6 each found something real, and **round 5 moved the fix site** — see
+  the next entry. Round 7 found only sub-write windows and was the stop signal.
+- Enforced in: this entry; `app/jobs/runtime.py::_run_prelude` (`abort_if_stopping`, with
+  the reason on the parameter); `app/services/sync_orchestrator/executor.py::run_sync`
+  (`abort_if_stopping=linked_request_id is None`);
+  `tests/test_jobs_runtime_fence.py::test_a_stopping_process_does_not_abort_the_manual_path`;
+  `tests/test_sync_orchestrator_executor.py::test_a_queued_request_is_not_abandoned_on_shutdown`.
+
+## "Where is the row written" is a SUB-SECOND question, not one the log line answers (#2274 M1, 2026-09-18)
+
+- Symptom: a ticket's own root-cause wording — *"a boot catch-up dispatches a job INTO a
+  child already draining"* — named the right window and the **wrong actor**, and a fix built
+  on it would not have fixed the rows the ticket measured.
+- The trace that settles it needs microseconds on both sides:
+
+  ```
+  08:45:22.907            recommendation_order_reconcile  skipped
+  08:45:23.071 → .219     fx_rates_refresh                success
+  08:45:23.203            <-- SIGTERM (supervisor log, BST)
+  08:45:23.267 → reaped   daily_candle_refresh            FAILURE: orphaned
+  ```
+
+  The orphaned row opens **64 ms after the signal**, from inside a walk that was dispatched
+  *before* it. So the guard belongs in the per-layer loop, not at the dispatch boundary.
+- ⚠ A second premise failed the same way one step earlier: the job the trace NAMES
+  (`daily_candle_refresh`) is not in `SCHEDULED_JOBS` at all — it is an orchestrator layer
+  adapter. Of 14 orphan reaps with the M1 span shape, **1** was in the `catch_up_on_boot`
+  set. **Check whether the job you are about to gate is even in the registry you are gating.**
+- Generalise: when a defect is "a row that should not exist", the only question that matters
+  is *which line WRITES the row*, and log lines naming a job are evidence about the job, not
+  about the writer. ⚠ Cross-source timestamps here are BST (supervisor) vs UTC (`job_runs`) —
+  already in this log, and load-bearing again.
+- Caught by: Codex checkpoint 2 round 5, pushing back on a dispatch-only placement that
+  passed its own tests. The tests were right about what they asserted and asserted the wrong
+  boundary.
+- Enforced in: this entry;
+  `app/services/sync_orchestrator/executor.py::_run_layers_loop` (gate #0 carries the trace);
+  `tests/test_sync_orchestrator_executor.py::TestShutdownStopsTheWalk`.
