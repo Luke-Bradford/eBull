@@ -4211,6 +4211,19 @@ def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[H
     that 13G, so the row is true; what it cannot say is that B's wedge row is the same
     block. Detecting that needs group membership this overlay does not carry.
 
+    ⚠⚠ **The overlay MIRRORS the pie; it does not police it.** The A/B measured 15
+    instruments (19 rows) where two or more overlay rows carry the identical share count
+    — HSAI lists Kai Sun, Shaoqing Xiang and Yifan Li at 27,163,892 each. Checked rather
+    than assumed: every one of those is a DISTINCT surviving pie holder whose own
+    ``winning_source`` is 13D/G, and the ``insiders`` wedge already carries all three at
+    that figure. Whether a deemed block should have been collapsed there is
+    :func:`_reconcile_13d_groups` / :func:`_reconcile_insider_control_groups`' question
+    (#1645/#1652) and is equally visible in the pie. Suppressing the route where a
+    ``blockholders`` wedge happens to render would NOT fix it and would hide the #2215
+    census's ``rendered_partial`` state — a wedge that is present and understated,
+    which HSAI is: its wedge shows three names, none of them the three largest 13D
+    filers.
+
     Scanning pie slices is exhaustive rather than convenient:
     :func:`_reconcile_owner_once` emits only ``insiders`` / ``blockholders`` /
     ``institutions`` / ``etfs``, all pie wedges, so no 13D/G filing can reach a
