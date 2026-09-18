@@ -48,6 +48,7 @@ from app.services.strategy_core_submission_gate import (
     core_lock_held,
 )
 from app.services.strategy_halt_identity import INSTRUMENT_HALT_SYMBOL_SQL
+from app.services.strategy_halts import MAX_SOURCE_LAG
 
 #: Frozen with the rule set it stamps.  v2 fixes, BY CONSTRUCTION: the two
 #: freshness bounds below (their INTERVAL is derived from each producer's cadence,
@@ -186,6 +187,33 @@ CORE_MAX_QUOTE_AGE_SECONDS: Final = _freshness_bound(300, tolerated_missed_fires
 #: and runs only from 09:00 ET to the close plus 15 minutes; outside that window
 #: its producer is deliberately idle and the feed is legitimately hours stale.
 CORE_MAX_HALT_FEED_AGE_SECONDS: Final = _freshness_bound(300)
+
+#: The real age of the halt INFORMATION behind an admitted core order (#3189
+#: finding 1), as distinct from the age of our fetch.
+#:
+#: The check below ages ``fetched_at``, deliberately — see the comment at the
+#: call site — and that is one of TWO bounds. The other lives in another module:
+#: ``strategy_halts.store_halt_snapshot`` refuses a publication stamp more than
+#: ``MAX_SOURCE_LAG`` behind the fetch it arrived with. Composed, an admitted
+#: order can rest on halt information published up to this many seconds ago.
+#:
+#: ⚠ IT IS COMPUTED, NOT TYPED. The composition was previously stated only in a
+#: prose comment, so widening either half silently widened the real ceiling while
+#: the comment went on asserting the old one. Importing the ingest constant makes
+#: the coupling structural, and ``tests/test_2603_core_preflight.py`` asserts both
+#: halves so the change cannot be silent.
+#:
+#: ⚠ NOT a new refusal, and deliberately so. With both halves enforced the
+#: composition CANNOT be exceeded, so a check against it would be unfireable
+#: today — and tightening it is a policy choice on a path that now places real
+#: demo orders, with its own refusal risk and its own evidence. What this
+#: constant does is name the guarantee and make it break loudly if either half
+#: moves.
+#:
+#: ⚠ It equals ``CORE_MAX_QUOTE_AGE_SECONDS`` by COINCIDENCE (750 = 450 + 300 and
+#: 750 = _freshness_bound(300, tolerated_missed_fires=1)). Different derivations,
+#: different producers — do not unify them.
+CORE_MAX_HALT_SOURCE_AGE_SECONDS: Final = CORE_MAX_HALT_FEED_AGE_SECONDS + int(MAX_SOURCE_LAG.total_seconds())
 
 CorePreflightRefusal = Literal[
     "core_runtime_config_corrupt",
@@ -532,7 +560,13 @@ def decide_core_preflight(
     # monotonicity rule: a regressed stamp carrying UNCHANGED halt content is now
     # accepted as a CDN re-serve.  The bound above survives it, because the stored
     # `source_pub_at` is held at the maximum (`GREATEST`) and every accepted stamp
-    # passed the 5-minute lag check against the `fetched_at` written with it.
+    # passed the `MAX_SOURCE_LAG` check against the `fetched_at` written with it.
+    #
+    # ⚠ "Transitively bounds" is a COMPOSITION, and the composed number is
+    # `CORE_MAX_HALT_SOURCE_AGE_SECONDS` (#3189 finding 1) -- this bound plus the
+    # ingest lag allowance. That is the figure to quote when asked how old the
+    # halt information behind an admitted order can be; this one answers only how
+    # recently we asked.
     if observation.halt_feed_at is None:
         return refuse("core_halt_feed_missing")
     if not _age_ok(observation.halt_feed_at, now=now, max_seconds=CORE_MAX_HALT_FEED_AGE_SECONDS):
@@ -581,6 +615,7 @@ def decide_core_preflight(
 
 __all__ = [
     "CORE_MAX_HALT_FEED_AGE_SECONDS",
+    "CORE_MAX_HALT_SOURCE_AGE_SECONDS",
     "CORE_MAX_QUOTE_AGE_SECONDS",
     "CORE_PREFLIGHT_POLICY_VERSION",
     "CorePreflightObservation",

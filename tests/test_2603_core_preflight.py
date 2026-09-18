@@ -25,6 +25,7 @@ import pytest
 
 from app.services.strategy_core_preflight import (
     CORE_MAX_HALT_FEED_AGE_SECONDS,
+    CORE_MAX_HALT_SOURCE_AGE_SECONDS,
     CORE_MAX_QUOTE_AGE_SECONDS,
     CORE_PREFLIGHT_POLICY_VERSION,
     CorePreflightObservation,
@@ -33,6 +34,7 @@ from app.services.strategy_core_preflight import (
     _freshness_bound,
     decide_core_preflight,
 )
+from app.services.strategy_halts import MAX_SOURCE_LAG
 
 #: A Wednesday, 15:00 UTC = 11:00 ET — inside the regular session, not a holiday.
 _OPEN = datetime(2026, 8, 12, 15, 0, tzinfo=UTC)
@@ -243,6 +245,35 @@ def test_feed_health_is_reported_ahead_of_the_halt_it_supports() -> None:
         is_halted=True,
     )
     assert _decide(observation).reason_code == "core_halt_feed_stale"
+
+
+def test_the_halt_information_age_ceiling_is_the_composition_of_both_bounds() -> None:
+    """#3189 finding 1 — the bound that matters is a COMPOSITION across two modules.
+
+    The preflight check ages `fetched_at`, which answers "how recently did we
+    ask". How old the halt INFORMATION behind an admitted order can be is that
+    bound plus what ingest tolerates between publication and fetch, and until
+    this constant existed that sum was stated only in a prose comment — so
+    widening either half silently widened the real ceiling while the comment
+    went on asserting the old one.
+
+    Asserted on both halves, not just the total: a test of the sum alone passes
+    while one half grows and the other shrinks.
+    """
+    assert CORE_MAX_HALT_FEED_AGE_SECONDS == 450
+    assert MAX_SOURCE_LAG == timedelta(minutes=5)
+    assert CORE_MAX_HALT_SOURCE_AGE_SECONDS == CORE_MAX_HALT_FEED_AGE_SECONDS + 300
+    assert CORE_MAX_HALT_SOURCE_AGE_SECONDS == 750
+
+
+def test_the_halt_source_ceiling_is_not_the_quote_bound() -> None:
+    """They are equal (750) and have nothing to do with each other: one is
+    450 + 300 across two modules, the other is `_freshness_bound(300, k=1)` for a
+    different producer. The numeric coincidence is exactly what would invite a
+    later "tidy-up" into one constant, so it is pinned as a coincidence."""
+    assert CORE_MAX_HALT_SOURCE_AGE_SECONDS == CORE_MAX_QUOTE_AGE_SECONDS
+    assert CORE_MAX_QUOTE_AGE_SECONDS == _freshness_bound(300, tolerated_missed_fires=1)
+    assert CORE_MAX_HALT_SOURCE_AGE_SECONDS != _freshness_bound(300, tolerated_missed_fires=1) + 1
 
 
 # --------------------------------------------------------------------------- #

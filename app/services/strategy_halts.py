@@ -28,7 +28,14 @@ _NY = ZoneInfo("America/New_York")
 _MAX_BYTES = 2_000_000
 _MAX_ITEMS = 5_000
 _RETENTION_DAYS = 90
-_MAX_SOURCE_LAG = timedelta(minutes=5)
+#: How far BEHIND its fetch a halt-feed publication stamp may be and still be
+#: stored. Public because it is half of a bound that lives in another module:
+#: `strategy_core_preflight.CORE_MAX_HALT_SOURCE_AGE_SECONDS` is this plus the
+#: fetch-age bound, and that sum is the real age of the halt information behind
+#: an admitted core order (#3189 finding 1). Renaming or widening this WIDENS
+#: that ceiling; `tests/test_2603_core_preflight.py` asserts the composition so
+#: the change cannot be silent.
+MAX_SOURCE_LAG = timedelta(minutes=5)
 
 
 class HaltFeedError(ValueError):
@@ -164,7 +171,7 @@ def store_halt_snapshot(
         raise HaltFeedError("fetched_at must be timezone-aware")
     if snapshot.source_pub_at > fetched_at + timedelta(minutes=5):
         raise HaltFeedError("halt feed pubDate is implausibly in the future")
-    if snapshot.source_pub_at < fetched_at - _MAX_SOURCE_LAG:
+    if snapshot.source_pub_at < fetched_at - MAX_SOURCE_LAG:
         raise HaltFeedError("halt feed pubDate is stale")
     current = conn.execute(
         "SELECT source_pub_at, content_sha256 FROM strategy_halt_feed_state WHERE source = %s FOR UPDATE",
