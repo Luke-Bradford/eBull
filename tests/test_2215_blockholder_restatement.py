@@ -298,25 +298,44 @@ def test_a_superseded_amendment_at_a_LARGER_figure_does_not_win() -> None:
     assert restated.winning_accession == "13d-amendment"
 
 
-def test_supersession_is_within_a_tag_and_the_cross_tag_regime_is_still_MAX() -> None:
-    """The two regimes must not be collapsed into one another either way round: a
-    LATER 13G does not supersede an EARLIER 13D (they are different channels, so the
-    cross-tag rule is MAX — #1640/#1889), while within the 13D chain the amendment
-    still wins."""
+def test_supersession_crosses_the_13d_13g_tags_because_upstream_does() -> None:
+    """Checkpoint 2 killed the version that partitioned supersession BY SOURCE TAG.
+    ``_dedup_within_source`` receives the 13D and 13G rows in one pool and groups them
+    on identity + ``ownership_nature``, NOT on source, so a filer who moved from a 13D
+    to a 13G has ONE amendment chain upstream and the pie carries the 13G's figure.
+    Treating the tags as independent chains republishes the retired 13D."""
+    survivor = _holder(
+        "Switcher",
+        "900",
+        dropped=(
+            _dropped("13d", "310", accession="13d-original", as_of=date(2026, 1, 15)),
+            _dropped("13g", "200", accession="13g-later", as_of=date(2026, 6, 30)),
+        ),
+    )
+
+    [restated] = _blockholder_restatement_holders([_slice("institutions", [survivor])])
+
+    assert restated.shares == Decimal(200)
+    assert restated.winning_accession == "13g-later"
+
+
+def test_two_filings_of_the_SAME_vintage_take_the_MAX() -> None:
+    """Supersession leads, but where two filings share an as-of date neither retires the
+    other — they are one block through two lenses, so MAX, never SUM (#1640/#1889). This
+    is the regime the shipped #2215 docstring named, kept intact under the new ordering."""
     survivor = _holder(
         "Dual Filer",
         "900",
         dropped=(
-            _dropped("13d", "100", accession="13d-original", as_of=date(2025, 1, 15)),
-            _dropped("13d", "310", accession="13d-amendment", as_of=date(2026, 1, 15)),
-            _dropped("13g", "200", accession="13g-acc", as_of=date(2026, 6, 30)),
+            _dropped("13d", "250", accession="13d-acc", as_of=date(2026, 3, 31)),
+            _dropped("13g", "310", accession="13g-acc", as_of=date(2026, 3, 31)),
         ),
     )
 
     [restated] = _blockholder_restatement_holders([_slice("institutions", [survivor])])
 
     assert restated.shares == Decimal(310)
-    assert restated.winning_accession == "13d-amendment"
+    assert restated.winning_accession == "13g-acc"
 
 
 def test_a_foreign_entry_is_restated_under_the_filer_not_the_representative() -> None:
@@ -357,24 +376,37 @@ def test_a_foreign_entry_is_NOT_dropped_when_it_is_the_only_13dg_evidence() -> N
     assert len(_blockholder_restatement_holders([_slice("insiders", [rep])])) == 1
 
 
-def test_the_survivors_own_entry_still_emits_alongside_a_foreign_one() -> None:
-    """Attributing by identity must not lose the ordinary same-owner fold: a rep can
-    carry BOTH its own folded 13G and a consumed member's 13D, and they are two
-    different filers, hence two rows."""
+def test_one_surviving_holder_emits_ONE_row_however_many_filings_it_carries() -> None:
+    """Checkpoint 2 killed the version that emitted one row per IDENTITY found. Every
+    13D/G filing hanging off one surviving holder describes ONE block — that is why the
+    collapses folded them onto that holder, each member being deemed to own the whole
+    group's securities (Rule 13d-5(b)(1) / 16a-1(a)(2)). Per-identity emission renders a
+    two-member 10M group as two 10M rows and a 20M slice total against a pie carrying one
+    10M block."""
     rep = _holder(
         "Rep Fund",
         "700",
         cik="REP",
         source="form4",
         dropped=(
-            _dropped("13g", "600", accession="rep-acc", filer_cik="REP", filer_name="Rep Fund"),
-            _dropped("13d", "500", accession="member-acc", filer_cik="MEMBER", filer_name="Co-Filer LLC"),
+            _dropped(
+                "13d", "1000", accession="rep-acc", as_of=date(2026, 1, 1), filer_cik="REP", filer_name="Rep Fund"
+            ),
+            _dropped(
+                "13d",
+                "1000",
+                accession="member-acc",
+                as_of=date(2026, 6, 30),
+                filer_cik="MEMBER",
+                filer_name="Co-Filer LLC",
+            ),
         ),
     )
 
     restated = _blockholder_restatement_holders([_slice("insiders", [rep])])
 
-    assert sorted(h.filer_name for h in restated) == ["Co-Filer LLC", "Rep Fund"]
+    assert [h.filer_name for h in restated] == ["Co-Filer LLC"]
+    assert restated[0].shares == Decimal(1000)
 
 
 def test_one_block_copied_onto_two_representatives_emits_ONE_row() -> None:

@@ -4102,20 +4102,39 @@ class _RestatementCandidate:
     edgar_url: str | None
 
 
-def _restatement_sort_key(c: _RestatementCandidate) -> tuple[Decimal, date, str, str]:
-    """Total ordering over the fields a :class:`DroppedSource` actually has, largest
-    first under ``max`` / ``reverse=True`` (#3189 finding 16).
+def _restatement_sort_key(c: _RestatementCandidate) -> tuple[date, Decimal, str, str]:
+    """Which of an owner's 13D/G filings the overlay publishes. Largest first under
+    ``max`` / ``reverse=True``; total over the fields a :class:`DroppedSource` has.
 
-    Reuses :func:`_dedup_by_priority`'s settled sequence — ``as_of_date`` desc with
-    NULL last, then ``accession_number`` desc — and substitutes ``source`` for its
-    final ``source_row_id`` pin, which a ``DroppedSource`` does not carry. ``source``
-    is needed because ``13d`` and ``13g`` share ``_PRIORITY_RANK`` 3 deliberately, so
-    rank cannot separate them and without it the winner depended on ``set`` iteration
-    order. No published rule chooses between a 13D and a 13G at equal shares; this is
-    fixed BY CONSTRUCTION, lexicographically larger winning, the same direction the
-    accession key already uses. ``edgar_url`` needs no key — it is
+    **``as_of_date`` leads, and that ordering is the fix for #3189 finding 14b.**
+    A later filing SUPERSEDES an earlier one by the same person (Rule 13d-2), whatever
+    direction the revision went, and ``_dedup_within_source`` (`:2093`) already
+    implements exactly that — it keeps the latest and ships the retired originals as
+    ``dropped_sources``, still tagged ``13d``/``13g``. Selecting on shares first
+    republishes a figure the amendment retired.
+
+    ⚠⚠ It is deliberately NOT partitioned by source tag, and Codex checkpoint 2 caught
+    the version that was. ``_dedup_within_source`` receives the 13D and 13G rows in ONE
+    pool (`:5597`) and groups them on ``_identity_key`` + ``ownership_nature``, NOT on
+    source — so a filer who moved from a 13D to a 13G has a single amendment chain
+    upstream, and treating the tags as independent chains resurrects the superseded
+    13D's figure while the pie carries the 13G's.
+
+    ``shares`` comes SECOND, which is where the overlapping-restatement regime lives: two
+    filings of the same vintage for one owner are the same block through two lenses, so
+    MAX, never SUM (prevention-log "One beneficial owner, counted once — MAX overlapping,
+    SUM additive"; #1640/#1889).
+
+    ``accession_number`` then ``source`` are the determinism pins (#3189 finding 16),
+    reusing :func:`_dedup_by_priority`'s accession-desc direction and substituting
+    ``source`` for its final ``source_row_id``, which a ``DroppedSource`` does not carry.
+    ``source`` is needed because ``13d`` and ``13g`` share ``_PRIORITY_RANK`` 3
+    deliberately, so rank cannot separate them, and ``accession_number`` is
+    ``str(row["source_accession"] or "")`` upstream — empty accessions occur. No
+    published rule chooses between a 13D and a 13G otherwise equal; this is fixed BY
+    CONSTRUCTION, lexicographically larger winning. ``edgar_url`` needs no key — it is
     ``edgar_archive_url(accession)``, a function of a key already present."""
-    return (c.shares, c.as_of_date or date.min, c.accession_number, c.source)
+    return (c.as_of_date or date.min, c.shares, c.accession_number, c.source)
 
 
 def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[Holder]:
@@ -4170,9 +4189,17 @@ def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[H
     wins on Form 4, B's filing is the only 13D/G evidence there is, so filtering it
     re-opens #2215 for that case.
 
-    ⚠ Because identity is the unit, the result is de-duplicated GLOBALLY by identity
-    across every scanned slice: one block copied onto two representatives is one filer,
-    hence one row, not two.
+    ⚠⚠ **ONE ROW PER SURVIVING HOLDER, not one per identity found**, and Codex
+    checkpoint 2 caught the version that emitted per identity. Every 13D/G filing hanging
+    off one surviving holder describes ONE block — that is *why* the collapses folded
+    them onto that holder, each member being deemed to own the whole group's securities
+    (Rule 13d-5(b)(1) / 16a-1(a)(2)). Emitting each member separately renders a
+    two-member 10M group as two 10M rows and a 20M slice total against a pie carrying one
+    10M block. So the cardinality is the one #2215 shipped; all that changes is WHICH
+    NAME goes on the row.
+
+    ⚠ The result is then de-duplicated GLOBALLY on ``(identity, accession)``: the same
+    filing reached by two representatives is one filing, hence one row.
 
     ⚠ ``blockholders`` itself is EXCLUDED from the scan — an owner inside that wedge is
     already rendered as a blockholder, and re-listing them would show one stake twice in
@@ -4190,11 +4217,13 @@ def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[H
     memo-overlay holder. It is the same scope :func:`build_rollup_csv`'s ``__dropped:``
     loop already uses.
     """
-    candidates: list[_RestatementCandidate] = []
+    per_holder: list[_RestatementCandidate] = []
     for slice_ in pie_slices:
         if slice_.category == "blockholders":
             continue
         for holder in slice_.holders:
+            candidates: list[_RestatementCandidate] = []
+            # Route 1 — the survivor IS the 13D/G filing (#3189 finding 14).
             if holder.winning_source in _BLOCKHOLDER_SOURCES:
                 candidates.append(
                     _RestatementCandidate(
@@ -4207,6 +4236,8 @@ def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[H
                         edgar_url=holder.winning_edgar_url,
                     )
                 )
+            # Route 2 — the 13D/G channel lost the cross-channel MAX, or was folded onto
+            # this holder by a group collapse. Identity comes from the ENTRY (finding 15).
             candidates.extend(
                 _RestatementCandidate(
                     filer_cik=d.filer_cik,
@@ -4220,28 +4251,20 @@ def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[H
                 for d in holder.dropped_sources
                 if d.source in _BLOCKHOLDER_SOURCES
             )
+            if candidates:
+                # ONE block per surviving holder, so ONE row — see the ⚠⚠ above.
+                per_holder.append(max(candidates, key=_restatement_sort_key))
 
-    # Regime 1 — supersession, within (identity, source tag). Keyed on the SOURCE too,
-    # so a 13D chain never supersedes a 13G: those are the other regime's business.
-    latest: dict[tuple[str, SourceTag], _RestatementCandidate] = {}
-    for candidate in candidates:
-        key = (_identity_key(candidate.filer_cik, candidate.filer_name), candidate.source)
-        incumbent = latest.get(key)
-        # Deliberately NOT keyed on shares: the later amendment wins even when it
-        # reports FEWER shares, which is the whole point of Rule 13d-2.
-        if incumbent is None or (candidate.as_of_date or date.min, candidate.accession_number) > (
-            incumbent.as_of_date or date.min,
-            incumbent.accession_number,
-        ):
-            latest[key] = candidate
-
-    # Regime 2 — overlapping restatement, across tags, per identity. Also the global
-    # identity de-dup: two representatives carrying one filer's block converge here.
-    best_by_identity: dict[str, _RestatementCandidate] = {}
-    for (identity, _source), candidate in latest.items():
-        incumbent = best_by_identity.get(identity)
+    # Two representatives can carry the SAME filing (one accession reached by two
+    # collapses). That is one filing, so one row; ``accession`` is in the key rather
+    # than identity alone because one filer legitimately has several live filings
+    # across the scanned slices only when they are genuinely different documents.
+    best_by_filing: dict[tuple[str, str], _RestatementCandidate] = {}
+    for candidate in per_holder:
+        key = (_identity_key(candidate.filer_cik, candidate.filer_name), candidate.accession_number)
+        incumbent = best_by_filing.get(key)
         if incumbent is None or _restatement_sort_key(candidate) > _restatement_sort_key(incumbent):
-            best_by_identity[identity] = candidate
+            best_by_filing[key] = candidate
 
     return [
         Holder(
@@ -4258,7 +4281,7 @@ def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[H
         )
         # Sorted so the rendered order is a property of the data, not of dict insertion
         # order, which inherits the slice/set ordering this fix exists to remove.
-        for c in sorted(best_by_identity.values(), key=_restatement_sort_key, reverse=True)
+        for c in sorted(best_by_filing.values(), key=_restatement_sort_key, reverse=True)
     ]
 
 

@@ -7,7 +7,9 @@ One 20-line helper — `app/services/ownership_rollup.py::_blockholder_restateme
 (`:4017`) — carries all three. They are one slice because they share the helper, the
 scan and the population. **Codex checkpoint 1 surfaced a fourth defect in the same
 selection expression** (superseded amendments, F14b below), which is fixed here because
-no correct version of that expression can leave it standing.
+no correct version of that expression can leave it standing; **checkpoint 2 then
+corrected the FIX twice** — supersession crosses the 13D/13G tags because upstream's
+chain does, and the overlay emits one row per surviving holder, not per identity found.
 
 ## What the overlay is for
 
@@ -84,16 +86,19 @@ chain as `dropped_sources`, still tagged `13d`/`13g`. A filer who reported 100 o
 and then 60 on the 13D/A that replaced it has both in the list, and the shipped helper
 publishes **100** — a figure Rule 13d-2 says no longer holds.
 
-**Fix — use the module's two regimes in order, not one shares comparison.** They are
-different rules and the existing code already states both:
+**Fix — order the candidates by AS-OF FIRST, then shares.** The two rules the module
+already states, expressed as one total ordering:
 
-1. **within a source tag, latest supersedes** — `as_of_date desc (NULL last) →
-   accession desc`, exactly `_dedup_within_source`'s own sort (Rule 13d-2);
-2. **across `13d` and `13g`, MAX** — a 13D and a 13G from one filer are overlapping
-   restatements of one block, never additive (I14, #1640/#1889; the existing docstring
-   ⚠ already says so).
+1. **a later filing supersedes an earlier one** by the same person, whatever direction
+   the revision went (Rule 13d-2) — so `as_of_date` leads;
+2. **two filings of the same vintage MAX**, never sum: one block through two lenses
+   (I14, #1640/#1889) — so `shares` comes second.
 
-Applied per IDENTITY, so stage 1 never compares two people's amendment chains.
+⚠⚠ **NOT partitioned by source tag, and Codex checkpoint 2 killed the version that
+was.** `_dedup_within_source` receives the 13D and 13G rows in ONE pool (`:5597`) and
+groups them on `_identity_key` + `ownership_nature`, **not** on source — so a filer who
+moved from a 13D to a 13G has a single amendment chain upstream. Treating the tags as
+independent chains resurrects the retired 13D's figure while the pie carries the 13G's.
 
 ## F15 — an overlay row can be attributed to an identity that did not file it
 
@@ -127,9 +132,14 @@ representative A, and A wins on Form 4, B's 13D is the ONLY 13D/G evidence on th
 instrument. Filtering it deletes the overlay entirely and re-opens #2215 for that case.
 Emitting it under B's true name is both honest and the thing #2215 exists to show.
 
-⚠ It does not inflate a group into N rows either, because the selection is MAX per
-identity and then **de-duplicated globally by identity across all surviving holders** —
-a block copied onto two representatives yields one row, not two.
+⚠⚠ **ONE ROW PER SURVIVING HOLDER, not one per identity found** — Codex checkpoint 2
+killed the per-identity version. Every 13D/G filing hanging off one surviving holder
+describes ONE block: that is *why* the collapses folded them onto that holder, each
+member being deemed to own the whole group's securities. Per-identity emission renders a
+two-member 10M group as two 10M rows and a 20M slice total against a pie carrying one
+10M block. The cardinality stays the one #2215 shipped; all that changes is WHICH NAME
+goes on the row. The result is then de-duplicated globally on `(identity, accession)` —
+the same filing reached by two representatives is one filing.
 
 ⚠ **Known residual, stated rather than silently accepted** (checkpoint 1): where a
 group's block is rendered in the `blockholders` wedge under member B while member A's
@@ -162,11 +172,13 @@ salted per process, so the accession/URL/as-of date published for an owner whose
 available and `source` replaces it):
 
 ```
-shares desc → as_of_date desc (NULL last) → accession_number desc → source desc
+as_of_date desc (NULL last) → shares desc → accession_number desc → source desc
 ```
 
-`source` is the last key because `13d` and `13g` tie on rank; `desc` matches the
-accession key's direction rather than introducing a second convention. `edgar_url` needs
+The leading two keys are F14b's regimes; `accession_number` and `source` are the
+determinism pins. `source` is needed because `13d` and `13g` tie on `_PRIORITY_RANK`,
+and `accession_number` is `str(row["source_accession"] or "")` upstream, so empty
+accessions occur and a pair can otherwise tie outright. `edgar_url` needs
 no key — it is `edgar_archive_url(accession)`, a function of a key already present.
 
 ⚠ **`_argmax_source` (`:2200`) has the same defect one level up** and a final sort alone
@@ -192,10 +204,12 @@ now names the correct filer.
 | a 13D that beat a 13F emits an overlay row (F14) | the pre-fix helper returns `[]` here |
 | an ETF-typed and an insider-categorised F14 winner both emit | the branch that produces them differs |
 | a superseded 13D original at a LARGER figure does not win (F14b) | a shares-only MAX passes every other test |
-| 13D vs 13G for one filer still MAXes | a supersession-only fix would break the cross-tag regime |
+| two filings of the same VINTAGE still MAX | a supersession-only fix would break the overlapping regime |
+| supersession crosses the 13D/13G tags, because upstream's chain does | tag-partitioned supersession passes every other supersession test |
+| one surviving holder emits ONE row however many filings it carries | per-identity emission inflates a group's slice total N× |
 | a foreign dropped entry emits a row under the TRUE filer, not the rep (F15) | attribution is invisible to a count-only assertion |
-| the survivor's OWN dropped entry still emits (F15 regression) | a filter that drops everything also passes the line above |
-| one block copied onto two reps emits ONE row (F15 global de-dup) | otherwise the slice total reads N× |
+| that row is NOT dropped when it is the only 13D/G evidence (F15) | a filter that drops everything also passes the line above |
+| one filing reached by two reps emits ONE row (global de-dup) | otherwise the slice total reads 2× |
 | a foreign entry does not suppress the survivor's own entry in `_reconcile_owner_once`'s `seen` | the de-dup key widening has no other observable effect |
 | two tied entries pick the same one under a permuted input order (F16) | the defect is order-sensitivity, so the test must permute |
 | `_argmax_source` picks the same source under a permuted set (F16) | different function, same defect |
