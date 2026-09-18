@@ -2367,6 +2367,17 @@ PendingOrderVerdict = Literal[
     "poll_error",
 ]
 
+#: The two verdicts this module BRANCHES on, named once (review NITPICK, PR #3193).
+#:
+#: ⚠ The stated risk was drift on a rename; the measured one is sharper.
+#: `verdict` is a ``PendingOrderVerdict``, so pyright rejects a misspelled
+#: ASSIGNMENT (`verdict = "filled_not_bookd"` → 1 error) but is SILENT on a
+#: misspelled COMPARISON (`verdict == "terminalised_rejectd"` → 0 errors), which
+#: is an always-false branch that no gate catches. Comparing against a typed
+#: constant makes the typo a name error instead (measured: reportUndefinedVariable).
+_TERMINALISED_REJECTED: Final[PendingOrderVerdict] = "terminalised_rejected"
+_FILLED_NOT_BOOKED: Final[PendingOrderVerdict] = "filled_not_booked"
+
 #: Verdicts that describe a PERMANENT property of the row, so re-asking cannot
 #: change the answer. Parking them is what stops an unresolvable order polling
 #: the broker hourly for ever (PR #3168 WARNING). Deliberately NOT here:
@@ -2845,7 +2856,50 @@ def _poll_one_pending_order(
             )
             return PendingOrderPollResult(order_id, recommendation_id, "unsafe_status", detail.broker_status)
 
-        if verdict == "terminalised_rejected":
+        # ⚠⚠ A REJECTED ORDER THAT CARRIES POSITION EXECUTIONS IS A
+        # CONTRADICTION, AND THIS IS THE ONE VERDICT THAT RELEASES THE CLAIM
+        # (#3189 finding 3). `classify_broker_order_status` reads the status
+        # word only; the detail can still name executions the broker actually
+        # made. Terminalising on the word alone would leave a partial execution
+        # unbooked AND lift the submission claim, so a second economic order
+        # for the same recommendation becomes possible — the #2942 defect
+        # reintroduced through a different door.
+        #
+        # The same contradiction is already refused one subsystem over, against
+        # the same eToro contract (#2451/#2965):
+        # `strategy_order_reconciliation.py` raises
+        # "rejected broker order unexpectedly has position executions". This is
+        # that rule, carried to the poller, which had the unsafe half.
+        #
+        # ⚠⚠ It resolves to `filled_not_booked`, and stamping alone is NOT
+        # enough (Codex checkpoint 2, P1). A bare `_stamp_polled` leaves the row
+        # selectable, so the contradiction spends a broker read every hour —
+        # and, worse, a LATER `Rejected` that omitted the executions would reach
+        # `_terminalise_rejected_order` and release the claim despite the
+        # earlier proof of an economic execution. The observation has to be
+        # durable, not just this attempt.
+        #
+        # `_record_unbooked_fill` is that mechanism and it already exists:
+        # it parks (`sql/395`), which removes the row from
+        # `_POLLABLE_ORDER_PREDICATE` so a later omission can never terminalise
+        # it; it deliberately leaves `status='pending'`, so the claim stays
+        # held; and it writes a `decision_audit` row naming the broker status,
+        # which is what keeps the trade path auditable. Reusing it also means
+        # the executions are not the only record that something happened.
+        #
+        # The verdict is the honest one: positions exist and we have not booked
+        # them, whatever word the status carried.
+        if verdict == _TERMINALISED_REJECTED and detail.position_executions:
+            logger.error(
+                "reconcile_pending_recommendation_orders: order_id=%d broker_status=%r is rejected but carries "
+                "%d position execution(s); parking with the claim held rather than terminalising",
+                order_id,
+                detail.broker_status,
+                len(detail.position_executions),
+            )
+            verdict = _FILLED_NOT_BOOKED
+
+        if verdict == _TERMINALISED_REJECTED:
             _terminalise_rejected_order(
                 conn,
                 order_id=order_id,
@@ -2855,7 +2909,7 @@ def _poll_one_pending_order(
                 raw_payload=detail.raw_payload,
                 now=now,
             )
-        elif verdict == "filled_not_booked":
+        elif verdict == _FILLED_NOT_BOOKED:
             _record_unbooked_fill(
                 conn,
                 order_id=order_id,
