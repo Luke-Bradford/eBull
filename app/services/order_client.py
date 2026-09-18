@@ -2499,10 +2499,11 @@ def _terminalise_rejected_order(
     order_id: int,
     instrument_id: int,
     recommendation_id: int,
+    broker_order_ref: str,
     broker_status: str,
     raw_payload: dict[str, Any],
     now: datetime,
-) -> None:
+) -> bool:
     """Release the claim on an order the broker says has ceased to exist.
 
     ``rejected`` is outside ``idx_orders_recommendation_open_attempt``'s
@@ -2518,21 +2519,75 @@ def _terminalise_rejected_order(
     The UPDATEs are left outstanding for ``_write_refusal_audit``'s commit, the
     pattern that helper documents: the resolved status and its audit row are one
     event and must become visible together or not at all.
+
+    ⚠⚠ BOTH WRITES ARE COMPARE-AND-SET (#3189 finding 5). The caller re-reads
+    the row under the lock, then spends a broker round-trip OUTSIDE any
+    transaction, and only then arrives here — so the state the decision was
+    taken on is not the state being written, and this is the one verdict that
+    RELEASES a submission claim. Guarding it is the module's own promoted rule
+    (``sql-correctness.md``, "Single-row UPDATE must verify rowcount"; the
+    prevention-log entry that promoted it was written against
+    ``_update_order_with_broker_result`` in this same file).
+
+    Returns ``True`` when the order was terminalised. ``False`` means the CAS
+    matched nothing — the row is no longer the ``pending`` row carrying
+    ``broker_order_ref`` that was looked up — in which case **nothing is
+    written and the claim is not released**; the caller reports
+    ``no_longer_pending``. ⚠ ``rowcount == 1`` and not ``!= 0`` deliberately:
+    psycopg v3 reports ``-1`` when the server gives no count, and for both
+    guards here that sentinel must fall to the fail-closed side.
+
+    ⚠ The recommendation guard RAISES rather than returning, because a miss
+    there is a different fact: the order CAS just held, so the row *was* the
+    pending order for this recommendation, and its recommendation nevertheless
+    is not ``execution_pending``. Writing half of a claim release — order
+    resolved, recommendation saying something else — is worse than failing.
+    The raise leaves both UPDATEs uncommitted (they are one implicit
+    transaction until ``_write_refusal_audit`` commits), the lock context
+    manager's ``finally`` rolls them back, and #3189 finding 7's per-row
+    containment turns it into ``poll_error`` + a degraded run rather than a
+    wedged batch. Posture follows the prevention log's ledger/mirror rule:
+    both tables are ledger on the claim path, so a failed write aborts.
     """
-    conn.execute(
-        """
-        UPDATE orders
-        SET status = 'rejected',
-            raw_payload_json = %(payload)s,
-            recommendation_last_polled_at = %(now)s
-        WHERE order_id = %(oid)s
-        """,
-        {"oid": order_id, "payload": Jsonb(raw_payload), "now": now},
-    )
-    conn.execute(
-        "UPDATE trade_recommendations SET status = 'execution_failed' WHERE recommendation_id = %(rid)s",
-        {"rid": recommendation_id},
-    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE orders
+            SET status = 'rejected',
+                raw_payload_json = %(payload)s,
+                recommendation_last_polled_at = %(now)s
+            WHERE order_id = %(oid)s
+              AND status = 'pending'
+              AND broker_order_ref = %(ref)s
+            """,
+            {"oid": order_id, "payload": Jsonb(raw_payload), "now": now, "ref": broker_order_ref},
+        )
+        terminalised = cur.rowcount == 1
+    if not terminalised:
+        # Explicit, even though a zero-row UPDATE wrote nothing: the lock
+        # context manager's `finally` documents "only READS can be outstanding
+        # here", and leaving a DML statement open would quietly falsify it.
+        conn.rollback()
+        logger.warning(
+            "reconcile_pending_recommendation_orders: order_id=%d was no longer the pending order for ref=%s "
+            "when the broker's %s verdict came back; nothing written and the claim stays held",
+            order_id,
+            broker_order_ref,
+            broker_status,
+        )
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE trade_recommendations SET status = 'execution_failed' "
+            "WHERE recommendation_id = %(rid)s AND status = 'execution_pending'",
+            {"rid": recommendation_id},
+        )
+        demoted = cur.rowcount == 1
+    if not demoted:
+        raise RuntimeError(
+            f"terminalising order_id={order_id} released the claim on recommendation {recommendation_id} "
+            f"but the recommendation is not execution_pending; refusing to write half a claim release"
+        )
     _write_refusal_audit(
         conn,
         instrument_id=instrument_id,
@@ -2555,6 +2610,7 @@ def _terminalise_rejected_order(
         order_id,
         broker_status,
     )
+    return True
 
 
 def _record_unbooked_fill(
@@ -2900,15 +2956,24 @@ def _poll_one_pending_order(
             verdict = _FILLED_NOT_BOOKED
 
         if verdict == _TERMINALISED_REJECTED:
-            _terminalise_rejected_order(
+            # ⚠ The CAS can miss (#3189 finding 5): the row was re-read under
+            # the lock, but the broker round-trip since then ran outside any
+            # transaction. A miss means nothing was written and the claim is
+            # still held — the same fact the pre-lookup check reports, so the
+            # same verdict, which is deliberately not parked and not stamped
+            # (a non-`pending` row is outside `_POLLABLE_ORDER_PREDICATE`, so
+            # it cannot occupy the rotation head).
+            if not _terminalise_rejected_order(
                 conn,
                 order_id=order_id,
                 instrument_id=instrument_id,
                 recommendation_id=recommendation_id,
+                broker_order_ref=ref,
                 broker_status=detail.broker_status,
                 raw_payload=detail.raw_payload,
                 now=now,
-            )
+            ):
+                return PendingOrderPollResult(order_id, recommendation_id, "no_longer_pending", detail.broker_status)
         elif verdict == _FILLED_NOT_BOOKED:
             _record_unbooked_fill(
                 conn,

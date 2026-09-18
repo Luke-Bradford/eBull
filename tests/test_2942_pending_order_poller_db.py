@@ -253,6 +253,92 @@ def test_a_rejected_status_carrying_executions_keeps_the_claim(
     assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
 
 
+def test_an_order_settled_during_the_broker_round_trip_is_not_regressed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3189 finding 5 — the terminalising write is compare-and-set.
+
+    The row is re-read under the lock, but the broker round-trip after that runs
+    OUTSIDE any transaction, and the advisory-lock namespace covers only the
+    recommendation-submission writers. So the state the ``Rejected`` verdict was
+    taken on is not necessarily the state being written, and this is the one
+    verdict that releases a submission claim.
+
+    The probe settles the order from a SECOND session while the lookup is in
+    flight — the realistic shape, a writer outside the namespace resolving the
+    row — and the poller must then write nothing at all rather than regress a
+    settled order to ``rejected`` and demote its recommendation.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
+
+    def _settled_elsewhere_mid_lookup(*_args: Any, **_kwargs: Any) -> BrokerOrderDetail:
+        with psycopg.connect(test_database_url()) as other:
+            other.execute("UPDATE orders SET status='filled' WHERE order_id=%s", (order_id,))
+            other.commit()
+        return _detail("Rejected")
+
+    broker = MagicMock(spec=BrokerProvider)
+    broker.lookup_order.side_effect = _settled_elsewhere_mid_lookup
+
+    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert [(r.verdict, r.broker_status) for r in results] == [("no_longer_pending", "Rejected")]
+    assert _order_row(ebull_test_conn, order_id)["status"] == "filled", (
+        "a settled order was regressed to rejected by a decision taken before it settled"
+    )
+    assert _rec_status(ebull_test_conn, rec) == "execution_pending"
+    assert _audit_count(ebull_test_conn, rec) == 0, "nothing happened, so nothing may be audited as having happened"
+
+
+def test_a_recommendation_that_moved_blocks_the_claim_release(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3189 finding 5, the other half — half a claim release is worse than none.
+
+    Here the ORDER is still the pending row that was looked up, so its
+    compare-and-set holds, but the recommendation has moved off
+    ``execution_pending`` under us. Releasing the claim on an order whose
+    recommendation says something else is a state nothing downstream can read,
+    so the write refuses: both UPDATEs are one implicit transaction until the
+    audit row commits, the lock context manager's ``finally`` rolls them back,
+    and #3189 finding 7's per-row containment reports ``poll_error`` — which
+    degrades the run — instead of wedging the batch.
+
+    The claim is asserted the way this module always asserts it: by a second
+    INSERT, which the partial index refuses while the claim is held.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
+
+    def _recommendation_moved_mid_lookup(*_args: Any, **_kwargs: Any) -> BrokerOrderDetail:
+        with psycopg.connect(test_database_url()) as other:
+            other.execute(
+                "UPDATE trade_recommendations SET status='executed' WHERE recommendation_id=%s",
+                (rec,),
+            )
+            other.commit()
+        return _detail("Rejected")
+
+    broker = MagicMock(spec=BrokerProvider)
+    broker.lookup_order.side_effect = _recommendation_moved_mid_lookup
+
+    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert [r.verdict for r in results] == ["poll_error"]
+    row = _order_row(ebull_test_conn, order_id)
+    assert row["status"] == "pending", "the order half of the claim release was committed on its own"
+    assert row["recommendation_last_polled_at"] == _NOW, "containment must still advance the rotation key"
+    assert _rec_status(ebull_test_conn, rec) == "executed", "the poller overwrote a status it did not read"
+    assert _audit_count(ebull_test_conn, rec) == 0
+    # The claim really is still held: this INSERT must hit the partial index.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _seed_order(ebull_test_conn, recommendation_id=rec)
+    ebull_test_conn.rollback()
+
+
 @pytest.mark.parametrize("broker_status", ["Rejected", "Failed", "Cancelled", "Canceled", "Expired"])
 def test_every_documented_rejection_status_terminalises(
     ebull_test_conn: psycopg.Connection[tuple], broker_status: str
