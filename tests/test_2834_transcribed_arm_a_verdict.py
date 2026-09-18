@@ -25,7 +25,9 @@ Pure-logic tier: reads two committed files and hashes three. No DB, no client ha
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,20 @@ def _payload() -> dict[str, Any]:
 
 def _declaration() -> dict[str, Any]:
     return _load(DECLARATION_PATH)
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
+    """Run git in the repo, never inheriting the caller's cwd.
+
+    The two commit fields are the only payload values nothing else in this file can check
+    — every other one is a digest, a declared constant or arithmetic over the candidate
+    rows. Checking them costs two subprocess calls and needs real history, which is why it
+    lives in the pure-logic tier and not in CI: this repo's CI does not run pytest, so
+    these assertions are a pre-push gate. A shallow clone would fail them loudly rather
+    than skip, which is the intended direction — a commit this artefact names and the
+    checkout cannot resolve is not a provenance claim anyone can act on.
+    """
+    return subprocess.run(["git", "-C", str(_REPO_ROOT), *args], capture_output=True, check=False)
 
 
 def test_the_payload_is_an_OPENED_verdict_and_not_a_readiness_report() -> None:
@@ -107,6 +123,34 @@ def test_the_payload_pins_the_verifier_that_emitted_it() -> None:
     the verifier was legitimately edited, the fix is to re-open and re-transcribe, not to
     relax the assertion."""
     assert _payload()["verifier_sha256"] == sha256_of(_REPO_ROOT / VERIFIER_PATH)
+
+
+def test_the_execution_commit_is_in_this_history() -> None:
+    """`execution_commit` is the code the verdict was measured at. A hash that is not an
+    ancestor of `HEAD` names a state this branch never had — a typo, or a payload copied
+    from somewhere else."""
+    commit = _payload()["execution_commit"]
+    assert _git("cat-file", "-e", f"{commit}^{{commit}}").returncode == 0, (
+        f"execution_commit {commit} does not resolve to a commit in this checkout"
+    )
+    assert _git("merge-base", "--is-ancestor", commit, "HEAD").returncode == 0, (
+        f"execution_commit {commit} is not an ancestor of HEAD"
+    )
+
+
+def test_the_declaration_commit_holds_the_declared_bytes() -> None:
+    """Stronger than "it matches `git log -1` on the path", and rename-proof: read the
+    declaration blob AS IT WAS at `declaration_commit` and hash it. That is the claim the
+    field is actually making — this commit contains the declaration this verdict was
+    measured against — and it catches a wrong hash that happens to be a real commit."""
+    payload = _payload()
+    commit = payload["declaration_commit"]
+    assert _git("merge-base", "--is-ancestor", commit, "HEAD").returncode == 0, (
+        f"declaration_commit {commit} is not an ancestor of HEAD"
+    )
+    blob = _git("cat-file", "blob", f"{commit}:{DECLARATION_PATH.as_posix()}")
+    assert blob.returncode == 0, f"{DECLARATION_PATH} does not exist at {commit}"
+    assert hashlib.sha256(blob.stdout).hexdigest() == payload["declaration_sha256"]
 
 
 def test_the_window_is_the_declared_one() -> None:
