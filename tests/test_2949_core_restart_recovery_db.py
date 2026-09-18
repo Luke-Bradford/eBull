@@ -1132,6 +1132,12 @@ def test_scenario_6_mandate_revocation_refuses_a_clean_re_entry_after_a_crash(
     is: every other fault leaves the allocator's ``hold`` or the gate's
     ``core_trade_in_flight`` binding first, so the assertion would pass without
     the mandate ever being consulted.
+
+    ⚠ The revoked revision KEEPS its ``core_instrument_id`` (see
+    ``revoke_core_mandate``). The gate puts three conditions behind one message,
+    so a revocation that also nulled the instrument would leave this test unable
+    to tell which one fired — and a revert-probe deleting ``not mandate.enabled``
+    passed until the instrument was retained.
     """
     process = run_engine_until_fault(
         database_url=test_database_url(), workdir=core_world, fault="before_authority_commit"

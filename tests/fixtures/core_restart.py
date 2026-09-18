@@ -932,10 +932,20 @@ def revoke_core_mandate(conn: psycopg.Connection[Any]) -> None:
     """Append a DISABLED mandate revision, and COMMIT (matrix 6, round 3).
 
     The events table is append-only, so revocation is revision 2 with
-    ``enabled=FALSE`` — never an UPDATE of revision 1. ``core_instrument_id`` is
-    dropped with it because ``strategy_core_mandate_enabled_has_instrument`` is
-    one-directional: a disabled revision may carry no instrument, and leaving one
-    in would understate what revocation actually removes.
+    ``enabled=FALSE`` — never an UPDATE of revision 1.
+
+    ⚠⚠ ``core_instrument_id`` is deliberately RETAINED, and the first version of
+    this helper dropped it. That was wrong twice over. It is not what the writer
+    does — ``validate_core_mandate`` only refuses ``enabled AND instrument IS
+    NULL`` and otherwise passes the caller's instrument through
+    (``strategy_core_mandate.py:239-242``), so "turn the sleeve off, keep the
+    configuration" is a legitimate and likelier revocation. And it CONFOUNDED the
+    scenario: ``execute_core_rebalance``'s gate is
+    ``mandate is None or not mandate.enabled or mandate.core_instrument_id is
+    None`` behind ONE message, so a null instrument made the refusal
+    indistinguishable from the ``enabled`` half the test claims to pin. A
+    revert-probe that deleted ``not mandate.enabled`` still passed. Retaining the
+    instrument is what makes the probe fail.
 
     Raw INSERT rather than the mandate writer for the reason the whole seed is
     raw: the harness measures what survives a crash, so setup must not depend on
@@ -947,10 +957,10 @@ def revoke_core_mandate(conn: psycopg.Connection[Any]) -> None:
             revision, enabled, base_currency, core_instrument_id, core_target_pct,
             liquidity_reserve_pct, rebalance_band_pct, min_rebalance_amount,
             policy_version, changed_by, reason, mode
-        ) VALUES (2, FALSE, 'USD', NULL, 60, 5, 5, 25, %s, 'core-restart-harness',
+        ) VALUES (2, FALSE, 'USD', %s, 60, 5, 5, 25, %s, 'core-restart-harness',
                   '#2949 matrix 6 — mandate revoked between phases', %s)
         """,
-        (CORE_MANDATE_POLICY_VERSION, CORE_MANDATE_MODE),
+        (CORE_INSTRUMENT_ID, CORE_MANDATE_POLICY_VERSION, CORE_MANDATE_MODE),
     )
     conn.commit()
 
