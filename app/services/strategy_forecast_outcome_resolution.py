@@ -184,6 +184,12 @@ def _resolve_forecast(
     try:
         fill_index = locate_fill_index(series, forecast.fill_bar_date)
     except ValueError:
+        # ⚠⚠ Outside the loaded span means the corpus is not VISIBLE here, not
+        # that it moved — `load_masked_bars` is fail-closed at the instrument
+        # level (Codex ckpt-2). Pending, so it retries once coverage lands;
+        # see the signal resolver's `_inside_loaded_span` for the full argument.
+        if not (series.dates and series.dates[0] <= forecast.fill_bar_date <= series.dates[-1]):
+            return None
         return _unresolved_forecast_row(forecast.forecast_id, "fill_bar_absent")
     # ⚠⚠ This path reads the SAME stored `strategy_signals.fill_price` as the
     # signal resolver, so it carries the same defect (#2414) — and one step

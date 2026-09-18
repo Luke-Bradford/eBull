@@ -145,12 +145,13 @@ def test_a_fill_date_the_corpus_lost_is_terminal_without_aborting_the_batch() ->
     nested loops to abort the strategy BEFORE its cursor was written. The guard's
     intent survives: the row NAMES the disagreement instead of re-reading
     whatever bar now sits at that position."""
-    series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
+    series = _gapped_series()
     fill = PendingFill(
         signal_id=7,
         instrument_id=42,
         signal_bar_date=series.dates[0],
-        fill_bar_date=date(2099, 1, 1),  # not in the loaded series
+        # Inside the loaded span, and gone from it — the corpus moved.
+        fill_bar_date=date(2026, 8, 2),
         fill_price=Decimal("100"),
         universe="survivor_only",
     )
@@ -164,11 +165,11 @@ def test_a_fill_date_the_corpus_lost_is_terminal_without_aborting_the_batch() ->
 def test_a_signal_date_the_corpus_lost_is_terminal_without_aborting_the_batch() -> None:
     """The other locator, and a DISTINCT reason: which half of the stored pair
     disagreed with the corpus is the whole operator-facing content of the row."""
-    series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
+    series = _gapped_series()
     fill = PendingFill(
         signal_id=7,
         instrument_id=42,
-        signal_bar_date=date(2099, 1, 1),  # not in the loaded series
+        signal_bar_date=date(2026, 8, 2),  # inside the loaded span, gone from it
         fill_bar_date=series.dates[1],
         fill_price=Decimal("100"),
         universe="survivor_only",
@@ -178,6 +179,55 @@ def test_a_signal_date_the_corpus_lost_is_terminal_without_aborting_the_batch() 
 
     assert row is not None
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "signal_bar_absent", None)
+
+
+@pytest.mark.parametrize("field", ["fill_bar_date", "signal_bar_date"])
+def test_a_date_outside_the_loaded_span_stays_pending(field: str) -> None:
+    """What the new terminal rows must NOT claim (Codex checkpoint 2, P1).
+
+    ``load_masked_bars`` is fail-closed at the INSTRUMENT level: no
+    ``price_quarantine_coverage`` row, or one at a stale ``rule_set_version``,
+    returns ZERO bars, and a partially-covered instrument returns a narrower
+    span. Recording a terminal row there would be far worse than the wedge it
+    replaces — outcomes are immutable and the selection anti-joins on the
+    version pair, so a corpus resolved during an incomplete quarantine refresh
+    would be permanently mislabelled at exactly the version pair the refresh
+    was producing. Outside the span it stays pending and is retried.
+    """
+    series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
+    dates = {"signal_bar_date": series.dates[0], "fill_bar_date": series.dates[1]}
+    dates[field] = date(2099, 1, 1)  # beyond anything the loader returned
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=dates["signal_bar_date"],
+        fill_bar_date=dates["fill_bar_date"],
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    assert _resolve_fill(_entry(), fill, series=series, unresolved_breaks=()) is None
+
+
+def _gapped_series() -> BarSeries:
+    """Three bars with 2026-08-02 missing from the middle.
+
+    The gap is the point: a date the loader SPANS but does not hold is the only
+    shape that proves the corpus itself moved, as opposed to a corpus this
+    process cannot currently see.
+    """
+    dates = (date(2026, 8, 1), date(2026, 8, 3), date(2026, 8, 4))
+    rows = tuple(
+        {
+            "open": Decimal("100"),
+            "high": Decimal("105"),
+            "low": Decimal("95"),
+            "close": Decimal("100"),
+            "volume": Decimal("1000"),
+        }
+        for _ in dates
+    )
+    return BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
 
 
 def test_a_fill_bar_whose_open_no_longer_loads_is_terminal() -> None:

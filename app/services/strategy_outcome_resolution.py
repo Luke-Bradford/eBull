@@ -104,6 +104,29 @@ def _locate_signal_index(series_dates: Sequence[date], signal_bar_date: date) ->
         ) from None
 
 
+def _inside_loaded_span(series: BarSeries, day: date) -> bool:
+    """Does the loaded series actually REACH ``day``?
+
+    ⚠⚠ The discriminator between a corpus that changed and a corpus we cannot
+    see (#3189 finding 10, Codex checkpoint 2). ``load_masked_bars`` is
+    fail-closed at the INSTRUMENT level: an instrument with no
+    ``price_quarantine_coverage`` row, or one evaluated at a stale
+    ``rule_set_version``, returns ZERO bars, and a partially-covered one returns
+    a narrower span — in both cases bars that still exist in ``price_daily``
+    are simply absent here.
+
+    Recording a terminal row in that state would be far worse than the wedge it
+    replaces: outcomes are immutable and the selection anti-joins on
+    ``(rule_set_version, input_rule_set_version)``, so a whole corpus resolved
+    during an incomplete quarantine refresh would be permanently mislabelled at
+    the very version pair the refresh was producing. So a date OUTSIDE the
+    loaded span leaves the fill pending and it is retried once coverage lands;
+    only a date missing from INSIDE a span that brackets it is evidence the
+    corpus itself moved.
+    """
+    return bool(series.dates) and series.dates[0] <= day <= series.dates[-1]
+
+
 def _unresolved_row(signal_id: int, reason: UnresolvedReason) -> OutcomeRow:
     """One recorded refusal, so a corpus disagreement cannot abort the batch.
 
@@ -158,10 +181,14 @@ def _resolve_fill(
     try:
         signal_index = _locate_signal_index(series.dates, fill.signal_bar_date)
     except ValueError:
+        if not _inside_loaded_span(series, fill.signal_bar_date):
+            return None
         return _unresolved_row(fill.signal_id, "signal_bar_absent")
     try:
         fill_index = locate_fill_index(series, fill.fill_bar_date)
     except ValueError:
+        if not _inside_loaded_span(series, fill.fill_bar_date):
+            return None
         return _unresolved_row(fill.signal_id, "fill_bar_absent")
     signal_scale_segment_end = segment_end_index(
         series,

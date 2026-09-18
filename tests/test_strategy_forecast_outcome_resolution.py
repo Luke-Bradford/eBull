@@ -166,20 +166,47 @@ def test_a_fill_date_the_corpus_lost_is_terminal_without_aborting_the_batch() ->
         (Decimal("100"), Decimal("101"), Decimal("99")),
         (Decimal("100"), Decimal("101"), Decimal("99")),
     )
+    # A date the loader SPANS but does not hold: the corpus itself moved.
+    gapped = BarSeries(
+        dates=(date(2026, 8, 1), date(2026, 8, 3)),
+        rows=series.rows[:2],
+    )
     forecast = PendingForecast(
         forecast_id=7,
         instrument_id=42,
-        fill_bar_date=date(2099, 1, 1),  # not in the loaded series
+        fill_bar_date=date(2026, 8, 2),
         fill_price=Decimal("100"),
         target_barrier_pct=Decimal("10"),
         stop_barrier_pct=Decimal("5"),
         horizon_market_days=2,
     )
 
-    row = _resolve_forecast(forecast, series=series, unresolved_breaks=())
+    row = _resolve_forecast(forecast, series=gapped, unresolved_breaks=())
 
     assert row is not None
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_absent", None)
+
+
+def test_a_fill_date_outside_the_loaded_span_stays_pending() -> None:
+    """Fail-closed coverage is not a corpus change (Codex ckpt-2, P1) — see the
+    signal resolver's `_inside_loaded_span`. Outcomes are immutable, so a
+    terminal row written during an incomplete quarantine refresh could never be
+    corrected at that version pair."""
+    series = _series(
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+    )
+    forecast = PendingForecast(
+        forecast_id=7,
+        instrument_id=42,
+        fill_bar_date=date(2099, 1, 1),  # beyond anything the loader returned
+        fill_price=Decimal("100"),
+        target_barrier_pct=Decimal("10"),
+        stop_barrier_pct=Decimal("5"),
+        horizon_market_days=2,
+    )
+
+    assert _resolve_forecast(forecast, series=series, unresolved_breaks=()) is None
 
 
 def test_a_fill_bar_whose_open_no_longer_loads_is_terminal() -> None:

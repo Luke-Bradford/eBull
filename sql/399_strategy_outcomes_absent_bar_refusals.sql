@@ -45,15 +45,41 @@
 -- `signal_bar_absent`: that path locates no signal index, so storing it would
 -- assert a state the writer cannot reach.
 --
--- Population at authoring time (dev, full corpus, 59,135 fired signals):
---   fill_bar_date absent from price_daily                     0
---   signal_bar_date absent from price_daily                   0
---   fill bar with open NULL or <= 0                           0
---   fill bar outside price_quarantine_coverage                0
--- So this is wedge PREVENTION, not an incident. The class is not hypothetical:
--- #2414 measured its sibling (`fill_price_superseded`) at 221 of 59,069, and the
--- corpus holds 154 bars whose open is NULL or <= 0 — none of them currently the
--- fill bar of a fired signal.
+-- Population at authoring time (dev, 2026-09-18). Every figure below is
+-- reproduced by the query beside it, so a stale one is visible rather than
+-- inherited:
+--
+--   -- fired signals (denominator): 59,135
+--   SELECT count(*) FROM strategy_signals WHERE verdict = 'fired';
+--
+--   -- fill date the corpus no longer holds: 0
+--   SELECT count(*) FROM strategy_signals s WHERE s.verdict = 'fired'
+--     AND s.fill_bar_date IS NOT NULL AND NOT EXISTS (
+--       SELECT 1 FROM price_daily p WHERE p.instrument_id = s.instrument_id
+--         AND p.price_date = s.fill_bar_date);
+--
+--   -- signal date the corpus no longer holds: 0   (same shape, signal_bar_date)
+--
+--   -- fill bar whose open does not load: 0
+--   SELECT count(*) FROM strategy_signals s WHERE s.verdict = 'fired'
+--     AND EXISTS (SELECT 1 FROM price_daily p
+--       WHERE p.instrument_id = s.instrument_id AND p.price_date = s.fill_bar_date
+--         AND (p.open IS NULL OR p.open <= 0));
+--
+--   -- fill bar outside quarantine coverage: 0
+--   SELECT count(*) FROM strategy_signals s WHERE s.verdict = 'fired'
+--     AND s.fill_bar_date IS NOT NULL AND NOT EXISTS (
+--       SELECT 1 FROM price_quarantine_coverage cov
+--        WHERE cov.instrument_id = s.instrument_id
+--          AND s.fill_bar_date BETWEEN cov.first_bar AND cov.last_bar);
+--
+--   -- bars whose open would mask, anywhere in the corpus: 154
+--   SELECT count(*) FROM price_daily WHERE open IS NULL OR open <= 0;
+--
+-- So this is wedge PREVENTION, not an incident — though the class is not
+-- hypothetical: #2414 measured its sibling (`fill_price_superseded`) at 221 of
+-- 59,069, and 154 bars would mask an open, none of them currently the fill bar
+-- of a fired signal.
 
 BEGIN;
 
