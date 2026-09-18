@@ -1089,7 +1089,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # 06:30, core_rebalance_observation 22:45). The cost is stated rather
         # than hidden: worst-case one hour to notice an asynchronous rejection.
         cadence=Cadence.hourly(minute=7),
-        prerequisite=_has_pending_recommendation_orders,
+        # Bootstrap-gated as well as work-gated: the poller reads broker
+        # credentials, and a pre-bootstrap fire would burn a credential read
+        # to discover there is nothing to reconcile.
+        prerequisite=_all_of(_bootstrap_complete, _has_pending_recommendation_orders),
         # A restart is exactly when a pending order deserves a look, and the
         # job mutates no broker state.
         catch_up_on_boot=True,
