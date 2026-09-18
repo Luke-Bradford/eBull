@@ -1399,6 +1399,15 @@ def consume_invoker_request_context() -> tuple[int | None, str | None]:
     return ctx
 
 
+class _ProcessStoppingAbort(Exception):
+    """Internal: unwind the prelude transaction when the process is stopping.
+
+    Raised INSIDE ``conn.transaction()`` on purpose — that rolls the
+    ``job_runs`` INSERT back, so a fire abandoned at shutdown leaves nothing
+    for the next boot's orphan reaper to find. Never escapes ``_run_prelude``.
+    """
+
+
 def _run_prelude(
     database_url: str,
     job_name: str,
@@ -1406,6 +1415,7 @@ def _run_prelude(
     bypass_fence_check: bool = False,
     linked_request_id: int | None = None,
     params_snapshot: Mapping[str, Any] | None = None,
+    abort_if_stopping: bool = False,
 ) -> int | None:
     """One-tx prelude: acquire lock, check fence, write job_runs INSERT.
 
@@ -1414,6 +1424,17 @@ def _run_prelude(
     when the fence rejects the run — the caller MUST NOT invoke the
     underlying job in that case (the ``status='skipped'`` row is already
     committed for audit).
+
+    ``abort_if_stopping`` (#2274 M1) also returns ``None`` when this process
+    has been signalled to stop, with NO row written. ⚠ It defaults to False
+    and the SCHEDULED path is the only caller that sets it, because ``None``
+    is otherwise the fence verdict: ``_run_manual_bounded`` reads it as
+    "full-wash in progress" and marks the durable ``pending_job_requests``
+    row ``rejected``, which boot recovery does not replay — a deploy would
+    silently discard an operator's queued request (Codex ckpt-2 round 4 P1).
+    A manual fire that IS orphaned by a deploy already self-heals: its
+    request stays ``claimed`` and boot recovery replays it. A scheduled fire
+    has no such record, which is why it is the one that needs this.
 
     Process_id == job_name for scheduled jobs. The advisory-lock key is
     ``hashtext(process_id)::bigint`` so the same key is acquired by every
@@ -1479,13 +1500,8 @@ def _run_prelude(
             # value in a row recording that a fire did not happen while the
             # process was dying, and writing one needs the connection we are
             # about to lose.
-            if process_is_stopping():
-                logger.info(
-                    "prelude for %r abandoned: the process was signalled to stop while the "
-                    "prelude was acquiring its locks. No job_runs row written.",
-                    job_name,
-                )
-                return None
+            if abort_if_stopping and process_is_stopping():
+                raise _ProcessStoppingAbort
 
             with conn.cursor() as cur:
                 if not bypass_fence_check:
@@ -1604,6 +1620,13 @@ def _run_prelude(
                 if row is None:
                     raise RuntimeError("prelude: job_runs INSERT returned no row")
                 run_id = int(row[0])
+                # ⚠ The LAST word (Codex ckpt-2 round 4 P1). The fence SELECT
+                # and this INSERT both run after the check above, so a stop
+                # signal can still land between them. Raising here rolls the
+                # row back inside the open transaction — the row never
+                # existed, rather than existing and needing to be reaped.
+                if abort_if_stopping and process_is_stopping():
+                    raise _ProcessStoppingAbort
     if fence_held:
         logger.info(
             "prelude: skipping %r — %s (job_runs.run_id=%d committed)",
@@ -1623,6 +1646,7 @@ def run_with_prelude(
     bypass_fence_check: bool = False,
     linked_request_id: int | None = None,
     params: Mapping[str, Any] | None = None,
+    abort_if_stopping: bool = False,
 ) -> bool:
     """Run ``invoker`` after the lock+fence prelude.
 
@@ -1659,13 +1683,27 @@ def run_with_prelude(
     ``None``.
     """
     effective_params: Mapping[str, Any] = params if params is not None else {}
-    run_id = _run_prelude(
-        database_url,
-        job_name,
-        bypass_fence_check=bypass_fence_check,
-        linked_request_id=linked_request_id,
-        params_snapshot=effective_params,
-    )
+    try:
+        run_id = _run_prelude(
+            database_url,
+            job_name,
+            bypass_fence_check=bypass_fence_check,
+            linked_request_id=linked_request_id,
+            params_snapshot=effective_params,
+            abort_if_stopping=abort_if_stopping,
+        )
+    except _ProcessStoppingAbort:
+        # #2274 M1. Raised inside the prelude transaction, so any row it had
+        # already INSERTed is rolled back — there is nothing to reap and
+        # nothing to finalise. Caught HERE rather than inside the prelude
+        # because the prelude's body is one tx block and the unwind IS the
+        # mechanism; letting it escape would surface at the caller's generic
+        # ``except Exception`` as a scheduled-fire failure.
+        logger.info(
+            "prelude for %r abandoned: the process was signalled to stop. No job_runs row written.",
+            job_name,
+        )
+        return False
     if run_id is None:
         return False  # fence held; skipped row already committed
     token = _prelude_run_id.set(run_id)
@@ -2728,7 +2766,15 @@ class JobRuntime:
                     finally:
                         _params_snapshot_var.reset(snap_token)
                 else:
-                    run_with_prelude(database_url, job_name, invoker, params=params)
+                    # ``abort_if_stopping`` is set on the SCHEDULED path only —
+                    # see ``_run_prelude`` for why the manual path must not.
+                    run_with_prelude(
+                        database_url,
+                        job_name,
+                        invoker,
+                        params=params,
+                        abort_if_stopping=True,
+                    )
 
             try:
                 # #1538 — retry the source-level lane acquire on transient

@@ -430,7 +430,12 @@ def test_a_process_signalled_to_stop_writes_no_prelude_row(
     stop.set()
     monkeypatch.setattr(jobs_runtime, "_process_stop_event", stop)
 
-    invoked = jobs_runtime.run_with_prelude(test_database_url(), job_name, lambda _p=None: invocations.append(1))
+    invoked = jobs_runtime.run_with_prelude(
+        test_database_url(),
+        job_name,
+        lambda _p=None: invocations.append(1),
+        abort_if_stopping=True,
+    )
 
     assert invoked is False
     assert invocations == []
@@ -441,3 +446,35 @@ def test_a_process_signalled_to_stop_writes_no_prelude_row(
     ).fetchone()
     assert row is not None
     assert row[0] == 0, "a job_runs row was opened in a process that had been told to stop"
+
+
+def test_a_stopping_process_does_not_abort_the_manual_path(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2274 M1's scope boundary, pinned (Codex ckpt-2 round 4 P1).
+
+    ``abort_if_stopping`` defaults to False and the manual path must leave it
+    there. ``run_with_prelude`` returning False is read by
+    ``_run_manual_bounded`` as the FENCE verdict, and it marks the durable
+    ``pending_job_requests`` row ``rejected`` — which boot recovery does not
+    replay. Aborting the manual path on shutdown would make a routine deploy
+    silently discard an operator's queued request. An orphaned manual run
+    already self-heals: its request stays ``claimed`` and is replayed.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+    job_name = "fence_test_process_stopping_manual"
+    invocations: list[int] = []
+
+    stop = threading.Event()
+    stop.set()
+    monkeypatch.setattr(jobs_runtime, "_process_stop_event", stop)
+
+    invoked = jobs_runtime.run_with_prelude(test_database_url(), job_name, lambda _p=None: invocations.append(1))
+
+    assert invoked is True
+    assert invocations == [1]
+    ebull_test_conn.rollback()
+    _, status, _ = _read_latest_job_run(ebull_test_conn, job_name=job_name)
+    assert status == "running"
