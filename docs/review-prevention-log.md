@@ -8335,3 +8335,44 @@ original, because the gate now *looked* like a bound.
   (now calls `count_pending_recommendation_orders`, with the incident in its docstring);
   `tests/test_2942_pending_order_poller_db.py::test_the_scheduler_prerequisite_closes_once_every_row_is_parked`
   (exercises the scheduler function, not the service helper).
+
+## A STORED COPY of a source value is a free, exact staleness detector — look for one before building an audit relation
+
+- Symptom: #2414 ("a corrected historical bar cannot be reflected in an already-written
+  `strategy_signals` row") was worked as an audit-relation problem for three attempts.
+  `sql/386` proved no pass-scoped digest can answer it; `sql/387` shipped
+  `price_daily_revision` for per-entity identity and its own header records that the
+  obvious `strategy_signals ⋈ price_daily_revision` join is *"neither an upper nor a
+  lower bound"*, listing five overcounts and three undercounts. All three attempts
+  reasoned about **detecting** that the corpus moved.
+- ⚠⚠ The ledger already stored the answer. `strategy_signals.fill_price` is a copy of
+  `price_daily.open` at the fill bar (`resolve_fills` prices every fill there;
+  `load_masked_bars` masks fields to `None` and rescales nothing), so
+  `fill_price = price_daily.open` is an INVARIANT and any inequality is *proof* the bar
+  moved after the verdict was stored. One `LEFT JOIN`, no audit table, **no telemetry
+  floor** — it reads the whole ledger, including every row written before any audit
+  relation existed.
+- Measured 2026-09-18, full population: **221 of 59,069 stored fill prices (0.374%)
+  across 27 instruments no longer match**, and **every disagreement is an exact
+  corporate-action ratio** (0.5 = 2:1, 0.6667 = 3:2, and 9/10/12/15/20/25/30/50/80/100/125
+  reverse splits). The audit-relation route saw **4** hits over its 1.5-day window —
+  and the reconciliation shows all 4 are OVERCOUNTS whose `open` never moved. The
+  instrument that needed no new table beat the one that did, by 55×.
+- ⚠ Why the audit route found nothing real: the killed join's `signal_bar_date >=
+  price_date` excludes the FILL bar by construction (`fill_bar_date > signal_bar_date`
+  is a CHECK), and the fill bar is where every real hit lives. It is also structurally
+  the most exposed bar in the ledger — the scan decides on `t` and prices at
+  `open(t+1)`, so every fresh verdict's stored price sits on the frontier-adjacent bar
+  the next day's `incremental` pass rewrites.
+- Prevention: before designing provenance capture, **grep the consuming table for a
+  column that already holds a copy of the upstream value**, and diff it against the
+  upstream. Denormalised copies are usually described as a performance decision; they
+  are also a free audit log, and unlike an audit relation they are retroactive. Ask
+  "what does this row already store that came from somewhere else?" before "what would
+  I have to start recording?". ⚠ The tell that you are on the expensive path: a design
+  whose first question is *when do we start capturing*, because that question concedes
+  the whole existing corpus is unmeasurable.
+- Enforced in: this log; `scripts/census_2414_decided_bar_revisions.py` (part 1 is the
+  direct arm and leads; part 2's audit arms are scoped to what part 1 cannot see);
+  `docs/proposals/ta/2026-09-18-decided-bar-revision-census.md`;
+  `tests/test_2414_decided_bar_revision_census.py::TestDirectArm::test_it_carries_no_floor_because_it_needs_no_telemetry`.
