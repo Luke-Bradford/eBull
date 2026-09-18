@@ -471,6 +471,16 @@ JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # unsubmittable for ever. Informational (`lookup_order`); mutates no broker
 # state and must never reach a method that does.
 JOB_RECOMMENDATION_ORDER_RECONCILE = "recommendation_order_reconcile"
+#: Poll verdicts that are work the job COULD NOT DO, not outcomes it produced —
+#: so they belong on ``JobProgress.errors``, whose non-zero value degrades the
+#: run (#3189). ``poll_error`` is an unpredicted exception the batch contained;
+#: ``identity_mismatch`` is the broker answering about a different order, a
+#: violation of the contract the whole path rests on. On the outcome axis a run
+#: where EVERY lookup broke that contract would still record ``success``, which
+#: is the #2218 shape. Named here rather than inline so the wiring is assertable
+#: without credentials, a broker and a database
+#: (``tests/test_order_client.py::TestContainedPollErrorsAreNotSilent``).
+RECONCILE_ERROR_VERDICTS: Final[tuple[str, ...]] = ("poll_error", "identity_mismatch")
 # #2603 item 3 step 3b-3 — observe the core sleeve and store one rebalance
 # verdict. Produces submission-gate INPUT, never authority: nothing invokes
 # the gate, and the only provider call is informational.
@@ -6374,11 +6384,20 @@ def recommendation_order_reconcile() -> None:
         # ⚠ `tracker.note` wins over the derived reason in `_finish_tracked`, so
         # the degraded row explains itself with the full verdict breakdown —
         # which names `poll_error=N` — rather than a generic string.
-        poll_errors = verdicts.get("poll_error", 0)
+        #
+        # ⚠⚠ `identity_mismatch` sits on the SAME axis (#3189 finding 4, Codex
+        # checkpoint 2). It means the broker answered about a different order or
+        # a different instrument — a violation of the contract the whole path
+        # rests on, not an ordinary outcome. On the outcome axis a run in which
+        # EVERY lookup broke that contract and resolved nothing would still be
+        # recorded `success`, which is precisely the self-consistent health
+        # signal this repo's instructions call out: a job that no-ops and
+        # reports success is invisible to every automated check we have. The
+        # verdict keeps its own name in the breakdown either way.
         tracker.progress = JobProgress(
             candidates_seen=len(results),
-            outcomes={name: count for name, count in verdicts.items() if name != "poll_error"},
-            errors={"poll_error": poll_errors},
+            outcomes={name: count for name, count in verdicts.items() if name not in RECONCILE_ERROR_VERDICTS},
+            errors={name: verdicts.get(name, 0) for name in RECONCILE_ERROR_VERDICTS},
         )
         logger.info("recommendation_order_reconcile: %s", tracker.note)
 
