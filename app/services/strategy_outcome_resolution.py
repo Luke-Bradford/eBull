@@ -23,7 +23,14 @@ import psycopg
 
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
-from app.services.outcome_ledger import OutcomeRow, PendingFill, locate_fill_index, select_pending_fills, store_outcomes
+from app.services.outcome_ledger import (
+    OutcomeRow,
+    PendingFill,
+    fill_price_is_superseded,
+    locate_fill_index,
+    select_pending_fills,
+    store_outcomes,
+)
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.outcome_resolver import Outcome, UnresolvedReason, resolve_outcome
 from app.services.price_masked_bars import MASKED_REASON, QUARANTINE_RULE_SET_VERSION, load_masked_bars
@@ -136,6 +143,29 @@ def _resolve_fill(
         index=signal_index,
         unresolved_breaks=unresolved_breaks,
     )
+    # ⚠⚠ BEFORE the levels factory, not after. This is the first point at which
+    # the STORED entry price meets a FRESHLY LOADED series, and the factory is
+    # its first consumer — it derives a bracket from both, so on a rescaled
+    # series it can return levels that are unorderable against the stored entry,
+    # and `resolve_outcome` then raises. Either way the raise escapes the batch:
+    # `_resolve_fill` is called inside three nested loops with no handler, so one
+    # unresolvable row aborts its strategy before the cursor advances AND every
+    # alphabetically later strategy in the same tick. Same treatment as #2489's
+    # unorderable bracket (sql/296): a closed refusal code, recorded.
+    #
+    # ⚠ AFTER the series-break test, so no row that resolves today is relabelled.
+    # A break between signal and fill keeps `series_break`.
+    if fill_price_is_superseded(series, fill_index=fill_index, fill_price=fill.fill_price):
+        return OutcomeRow.from_outcome(
+            fill.signal_id,
+            Outcome(
+                outcome="unresolved",
+                resolution_method="daily_bar",
+                rule_set_version=OUTCOME_RULE_SET_VERSION,
+                reason="fill_price_superseded",
+            ),
+            input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+        )
     levels = entry.exit_levels(
         signal_segment,
         signal_index=local_signal_index,

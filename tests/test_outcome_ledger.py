@@ -32,7 +32,10 @@ from app.services.outcome_resolver import (
 from app.services.technical_analysis import OHLCVRow
 
 _MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "256_strategy_outcomes.sql"
-_REASON_MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "296_strategy_outcomes_unorderable_exit_levels.sql"
+#: ⚠ The LATEST reason migration, not the first. Each one drops and recreates the
+#: whole CHECK, so only the newest describes the live constraint — pinning an
+#: older file would assert a union that no longer exists.
+_REASON_MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "396_strategy_outcomes_fill_price_superseded.sql"
 
 _VERSIONS = {"rule_set_version": "outcome-resolver-v1+abc123", "input_rule_set_version": "price-quarantine-v1+def456"}
 
@@ -284,8 +287,24 @@ class TestMigrationVocabularyContract:
     def test_resolution_methods(self) -> None:
         assert self._check_members("resolution_method") == set(RESOLUTION_METHODS)
 
-    def test_unresolved_reasons(self) -> None:
+    @staticmethod
+    def _reason_unions() -> list[set[str]]:
         text = _REASON_MIGRATION.read_text()
-        match = re.search(r"reason IS NULL OR reason IN \(([^)]*)\)", text, re.DOTALL)
-        assert match is not None
-        assert set(re.findall(r"'([^']+)'", match.group(1))) == set(UNRESOLVED_REASONS)
+        return [
+            set(re.findall(r"'([^']+)'", body))
+            for body in re.findall(r"reason IS NULL OR reason IN \(([^)]*)\)", text, re.DOTALL)
+        ]
+
+    def test_unresolved_reasons(self) -> None:
+        unions = self._reason_unions()
+        # ⚠ Positional, and the count is asserted: sql/396 widens TWO ledgers and a
+        # third appearing unnoticed is exactly the #2218 shape this class exists for.
+        assert len(unions) == 2
+        assert unions[0] == set(UNRESOLVED_REASONS)
+
+    def test_the_forecast_ledger_keeps_its_deliberately_smaller_union(self) -> None:
+        """``window_truncated`` is not storable on the forecast path — an immature
+        horizon returns ``None`` and is retried rather than written (sql/315). The
+        subtraction is the contract, so the two vocabularies cannot silently drift
+        into one."""
+        assert self._reason_unions()[1] == set(UNRESOLVED_REASONS) - {"window_truncated"}

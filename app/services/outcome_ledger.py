@@ -187,6 +187,32 @@ def locate_fill_index(series: BarSeries, fill_bar_date: date) -> int:
         ) from None
 
 
+def fill_price_is_superseded(series: BarSeries, *, fill_index: int, fill_price: Decimal) -> bool:
+    """Has the bar this stored fill was priced from moved since it was written?
+
+    ``strategy_signals.fill_price`` is a stored COPY of one bar value:
+    ``resolve_fills`` prices every fill at ``open(signal_index + 1)`` and
+    ``load_masked_bars`` masks fields to ``None`` without rescaling anything
+    (``app/services/price_masked_bars.py:174``). So equality with
+    ``price_daily.open`` at the fill bar is an INVARIANT, and an inequality is
+    proof the bar was overwritten after the verdict was recorded.
+
+    ⚠ The other half of "same corpus" is :func:`locate_fill_index`, which catches
+    the fill DATE leaving the series. This catches the date surviving while the
+    value under it moved. #2414 measured the second on the full ledger: 221 of
+    59,069 stored fill prices, every disagreement an exact corporate-action ratio
+    (``scripts/census_2414_decided_bar_revisions.py``).
+
+    ⚠ A MASKED open returns ``False``, deliberately. ``None`` is not evidence the
+    bar moved — it is evidence we cannot see it — and ``resolve_outcome`` already
+    owns that case with its own message. Claiming supersession there would assert
+    a cause nobody observed. Measured 0 of 59,069 on the dev corpus, so this is a
+    contract about which refusal applies rather than a live branch.
+    """
+    fill_open = series.rows[fill_index].get("open")
+    return fill_open is not None and fill_price != fill_open
+
+
 @dataclass(frozen=True)
 class PendingFill:
     """A stored fill with no outcome yet at the requested version pair."""

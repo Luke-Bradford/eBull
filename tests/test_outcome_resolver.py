@@ -487,6 +487,7 @@ def test_the_inherited_reason_codes_match_the_registrys_spelling() -> None:
         "window_truncated",
         "missing_bar_data",
         "unorderable_exit_levels",
+        "fill_price_superseded",
     }
     assert OUR_ADDITIONAL_REASONS | INHERITED_REASONS == UNRESOLVED_REASONS
     assert not OUR_ADDITIONAL_REASONS & NOT_EVALUABLE_REASONS

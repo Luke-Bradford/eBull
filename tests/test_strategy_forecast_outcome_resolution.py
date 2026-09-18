@@ -142,6 +142,22 @@ def test_scale_break_is_terminal_and_never_crosses_price_units() -> None:
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "series_break", None)
 
 
+def test_a_superseded_fill_price_is_terminal_without_aborting_the_batch() -> None:
+    """#2414. This path reads the same stored ``strategy_signals.fill_price`` as
+    the signal resolver, and sizes BOTH barriers as a percentage of it — so a bar
+    rewritten by a corporate action puts the whole bracket on the old scale.
+    Previously ``resolve_outcome`` raised and took the batch down with it."""
+    series = _series(
+        (Decimal("50"), Decimal("51"), Decimal("49")),
+        (Decimal("50"), Decimal("52"), Decimal("48")),
+    )
+
+    row = _resolve_forecast(_forecast(series), series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_price_superseded", None)
+
+
 def test_round_robin_wraps_without_repeating(monkeypatch: object) -> None:
     from pytest import MonkeyPatch
 
