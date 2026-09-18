@@ -17,6 +17,7 @@ Own module because the ``db`` marker is module-scoped: one DB test inside
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -25,6 +26,7 @@ from uuid import uuid4
 import psycopg
 import psycopg.rows
 import pytest
+from psycopg.pq import TransactionStatus
 
 from app.providers.broker import (
     BrokerOrderDetail,
@@ -516,6 +518,46 @@ def test_a_row_that_raises_unexpectedly_is_contained_and_the_batch_continues(
         "an uncontained row keeps its rotation key and re-occupies the head"
     )
     assert _order_row(ebull_test_conn, boom)["status"] == "pending", "an unexplained failure must not move the claim"
+
+
+def test_containment_survives_a_raise_that_left_a_failed_transaction(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The containment block rolls back BEFORE it stamps, and that is load-bearing.
+
+    ⚠ Written because the first version of this suite did not prove it: a raise
+    from ``lookup_order`` happens on an idle connection by design (broker I/O
+    never runs inside a transaction), so deleting the ``conn.rollback()`` left
+    every test green. A raise from a path that had already opened one is the
+    case the rollback exists for — without it ``_stamp_polled`` fails too, the
+    inner guard re-raises, and the batch this block protects aborts anyway.
+    """
+    _seed_instrument(ebull_test_conn)
+    first_rec = _seed_recommendation(ebull_test_conn)
+    second_rec = _seed_recommendation(ebull_test_conn)
+    boom = _seed_order(ebull_test_conn, recommendation_id=first_rec, last_polled_at=_NOW - timedelta(hours=2))
+    later = _seed_order(ebull_test_conn, recommendation_id=second_rec, last_polled_at=_NOW - timedelta(hours=1))
+
+    calls = {"n": 0}
+
+    def _first_call_poisons_then_raises(*_args: Any, **_kwargs: Any) -> BrokerOrderDetail:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            return _detail("Pending")
+        with contextlib.suppress(psycopg.Error):
+            ebull_test_conn.execute("SELECT 1 / 0")
+        assert ebull_test_conn.info.transaction_status == TransactionStatus.INERROR, (
+            "the probe did not poison the transaction, so it proves nothing"
+        )
+        raise RuntimeError("raised with a failed transaction open")
+
+    broker = MagicMock(spec=BrokerProvider)
+    broker.lookup_order.side_effect = _first_call_poisons_then_raises
+
+    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert [(r.order_id, r.verdict) for r in results] == [(boom, "poll_error"), (later, "still_pending")]
+    assert _order_row(ebull_test_conn, boom)["recommendation_last_polled_at"] == _NOW
 
 
 def test_the_backlog_rotates_and_does_not_starve_the_tail(
