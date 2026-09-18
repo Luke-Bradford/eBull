@@ -116,8 +116,16 @@ def _seed_order(
     ref: str | None = _REF,
     origin: str = "manual",
     last_polled_at: datetime | None = None,
-    broker_env: str | None = None,
+    broker_env: str | None = _ENV,
 ) -> int:
+    """Seed one order row.
+
+    ``broker_env`` defaults to this suite's environment because that is what a
+    real submitted order now carries (#3189 finding 4b) — the poller refuses a
+    NULL rather than assuming it is ours, so a NULL default would make every
+    test here a test of the environment gate. The tests that ARE about the gate
+    pass it explicitly.
+    """
     row = conn.execute(
         """
         INSERT INTO orders
@@ -621,25 +629,43 @@ def test_an_order_from_another_broker_environment_is_never_looked_up(
     ebull_test_conn.rollback()
 
 
-@pytest.mark.parametrize("row_env", [None, "demo"])
-def test_a_matching_or_unrecorded_environment_is_polled(
-    ebull_test_conn: psycopg.Connection[tuple], row_env: str | None
+def test_a_matching_environment_is_polled(
+    ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """What the environment gate must NOT reject.
-
-    NULL is every pre-existing row and every synthetic fill, which never
-    reached a broker at all — refusing those would wedge every outstanding
-    order the moment the column landed, which is the #2942 defect reintroduced
-    by its own fix.
-    """
+    """What the environment gate must NOT reject: its own environment."""
     _seed_instrument(ebull_test_conn)
     rec = _seed_recommendation(ebull_test_conn)
-    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, broker_env=row_env)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, broker_env="demo")
 
     results = _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Rejected")), env="demo", now=_NOW)
 
     assert [r.verdict for r in results] == ["terminalised_rejected"]
     assert _order_row(ebull_test_conn, order_id)["status"] == "rejected"
+
+
+def test_an_unrecorded_environment_fails_closed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A NULL environment is refused, not assumed to be ours (Codex ckpt-2, P1).
+
+    The first draft polled NULL rows on the ground that refusing them would
+    wedge outstanding orders. Measured instead of assumed: no current path
+    writes a pollable NULL row (the synthetic-fill branch resolves to ``filled``
+    or ``failed``, never ``pending``) and the dev corpus holds zero of them. So
+    the only NULL pollable row is one left by another deployment — exactly the
+    case where a colliding id would terminalise the wrong order — and it
+    surfaces as a degraded run needing an operator.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, broker_env=None)
+
+    broker = _broker(detail=_detail("Rejected"))
+    results = _reconcile(ebull_test_conn, broker=broker, env="demo", now=_NOW)
+
+    assert [r.verdict for r in results] == ["environment_mismatch"]
+    broker.lookup_order.assert_not_called()
+    assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
 
 
 def test_the_claim_insert_records_the_broker_environment(

@@ -2890,21 +2890,30 @@ def _poll_one_pending_order(
         # asked for. So the environment is compared BEFORE the lookup, and it
         # comes from the row rather than from the answer.
         #
-        # ⚠ NULL is pollable, as it was before this column existed: every
-        # pre-existing row and every synthetic fill carries NULL, and refusing
-        # them would wedge every outstanding order the moment the column landed.
+        # ⚠⚠ UNKNOWN FAILS CLOSED TOO (Codex checkpoint 2, P1). A NULL is not
+        # "probably ours": if the deployment ever moved between demo and real, a
+        # colliding id terminalises the wrong order and releases its claim,
+        # which is the whole failure this gate exists to stop. Refusing costs
+        # nothing it should not cost — no CURRENT path can write a pollable NULL
+        # row, because `_persist_order`'s synthetic-fill branch resolves to
+        # `filled` or `failed` and never to `pending`, and the dev corpus holds
+        # ZERO pollable rows with a NULL environment (measured, not assumed:
+        # `recommendation_id IS NOT NULL AND status='pending' AND
+        # broker_order_ref IS NOT NULL AND broker_environment IS NULL` = 0).
+        # A pre-existing row from another deployment therefore surfaces as a
+        # degraded run needing an operator, which is what it is.
         #
-        # ⚠ Stamped and NOT parked. "This process talks to another environment"
-        # is a property of the deployment, not of the row — a `real`-env run
-        # must find the row waiting, unparked, and resolve it.
+        # ⚠ Stamped and NOT parked. Which environment this PROCESS talks to is a
+        # property of the deployment, not of the row — a `real`-env run must find
+        # the row waiting, unparked, and resolve it.
         row_env = current["broker_environment"]
-        if row_env is not None and str(row_env) != env:
+        if row_env is None or str(row_env) != env:
             _stamp_polled(conn, order_id=order_id, now=now)
             logger.warning(
-                "reconcile_pending_recommendation_orders: order_id=%d was submitted to broker environment %r "
-                "and this process is configured for %r — not looked up",
+                "reconcile_pending_recommendation_orders: order_id=%d carries broker environment %s and this "
+                "process is configured for %r — not looked up",
                 order_id,
-                str(row_env),
+                "none recorded" if row_env is None else repr(str(row_env)),
                 env,
             )
             return PendingOrderPollResult(order_id, recommendation_id, "environment_mismatch")
