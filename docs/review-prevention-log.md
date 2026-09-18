@@ -8308,3 +8308,30 @@ wrong about the work queue, and the second half is invisible while the path is d
   `tests/test_2942_pending_order_poller_db.py::test_an_unbooked_fill_is_parked_so_it_cannot_poll_for_ever`
   and its two negatives (`::test_a_transient_failure_is_NOT_parked`,
   `::test_an_unsettled_partial_fill_is_NOT_parked`).
+
+## A comment saying a predicate is "shared" is not a shared predicate (2026-09-18, #2942, PR #3168 round 2)
+
+The round-1 fix for the unbounded-poll defect above added a park column and hoisted the
+poller's selection into one named constant, `_POLLABLE_ORDER_PREDICATE`, whose docstring
+said it was *"shared by the batch selection and by the scheduler's prerequisite count"*.
+It was not. `scheduler.py::_has_pending_recommendation_orders` still carried its own
+inlined copy of the SQL, written two commits earlier by mirroring the service by hand.
+
+So the park column landed in the selection and not in the gate, and the effect was to
+**reinstate the exact defect the same commit was fixing**: every parked row kept the
+prerequisite open, firing the job hourly for ever to select nothing. Worse than the
+original, because the gate now *looked* like a bound.
+
+- Prevention: a gate and the selection it guards must not be two texts. Have the gate CALL
+  the selection's own counter, and test the GATE — a helper agreeing with itself proves
+  nothing. ⚠ The tell is a docstring that asserts a relationship between two code sites
+  rather than establishing it: "mirrors", "shared by", "kept in sync with". Each of those
+  is a claim the next diff can falsify silently. Grep for the inlined copy before believing
+  the word.
+- ⚠ Two-hop drift is the common shape and it is why "I just changed one file" is not a
+  defence: the copy was faithful when it was written, and a later change to the ORIGINAL
+  broke it.
+- Enforced in: this log; `app/workers/scheduler.py::_has_pending_recommendation_orders`
+  (now calls `count_pending_recommendation_orders`, with the incident in its docstring);
+  `tests/test_2942_pending_order_poller_db.py::test_the_scheduler_prerequisite_closes_once_every_row_is_parked`
+  (exercises the scheduler function, not the service helper).

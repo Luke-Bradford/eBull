@@ -37,6 +37,7 @@ from app.services.order_client import (
     count_pending_recommendation_orders,
     reconcile_pending_recommendation_orders,
 )
+from app.workers.scheduler import _has_pending_recommendation_orders
 from tests.fixtures.ebull_test_db import test_database_url
 
 INSTRUMENT_ID = 991_942
@@ -465,6 +466,30 @@ def test_the_backlog_rotates_and_does_not_starve_the_tail(
 
     assert [r.order_id for r in first_pass] == [first]
     assert [r.order_id for r in second_pass] == [second]
+
+
+def test_the_scheduler_prerequisite_closes_once_every_row_is_parked(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR #3168 round 2. The prerequisite is the only thing standing between a
+    permanently-unselectable row and an hourly no-op fire, and it used to carry
+    its own inlined copy of the predicate — which drifted the moment the park
+    column landed in the service's copy and not in it.
+
+    Exercise the SCHEDULER function, not the service helper: the service helper
+    agreeing with itself proves nothing about the gate."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    _seed_order(ebull_test_conn, recommendation_id=rec)
+
+    assert _has_pending_recommendation_orders(ebull_test_conn)[0] is True
+    ebull_test_conn.commit()
+
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=_detail("Filled")), now=_NOW)
+
+    open_gate, reason = _has_pending_recommendation_orders(ebull_test_conn)
+    assert open_gate is False
+    assert "no pending recommendation orders" in reason
 
 
 def test_count_matches_what_the_poller_would_select(

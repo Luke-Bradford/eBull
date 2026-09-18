@@ -830,17 +830,22 @@ def _has_pending_recommendation_orders(conn: psycopg.Connection[Any]) -> Prerequ
     """True if a recommendation order is waiting on a broker verdict (#2942).
 
     Gates the poller so a dormant path spends no lane time and no share of the
-    eToro request budget. Mirrors the service's own selection predicate — a
-    pending row with no ``broker_order_ref`` is not pollable by order id and
-    must not make the job fire for nothing.
+    eToro request budget.
+
+    ⚠⚠ **Calls the service's own counter rather than mirroring its SQL**, unlike
+    the prerequisites above it. An inlined copy drifted within one PR (#3168
+    review): the park column landed in the service's predicate and not here, so
+    every parked row would have kept this gate open and fired the job hourly for
+    ever to select nothing — precisely the unbounded polling the park exists to
+    stop. A prerequisite that can disagree with the selection it guards is worse
+    than no prerequisite, because it looks like a bound.
+
+    Imported locally, matching every job body in this module: the scheduler must
+    stay importable without pulling the execution stack in at module load.
     """
-    if _exists(
-        conn,
-        psycopg.sql.SQL(
-            "SELECT EXISTS(SELECT 1 FROM orders WHERE recommendation_id IS NOT NULL "
-            "AND status = 'pending' AND broker_order_ref IS NOT NULL)"
-        ),
-    ):
+    from app.services.order_client import count_pending_recommendation_orders
+
+    if count_pending_recommendation_orders(conn) > 0:
         return (True, "")
     return (False, "no pending recommendation orders awaiting a broker verdict")
 
