@@ -89,7 +89,7 @@ INSERT_SOURCE: tuple[LiteralString, LiteralString] = ("price_daily_backdated_ins
 DIRECT_ARM_SQL = """
     SELECT COUNT(*)                                                          AS fired,
            COUNT(*) FILTER (WHERE p.open IS NULL)                            AS bar_gone,
-           COUNT(*) FILTER (WHERE p.open IS NOT NULL AND p.open =  s.fill_price) AS agrees,
+           COUNT(*) FILTER (WHERE p.open IS NOT NULL AND p.open = s.fill_price) AS agrees,
            COUNT(*) FILTER (WHERE p.open IS NOT NULL AND p.open <> s.fill_price) AS differs,
            COUNT(DISTINCT s.instrument_id) FILTER (WHERE p.open IS NOT NULL
                                                     AND p.open <> s.fill_price) AS instruments
@@ -132,7 +132,7 @@ DIRECT_ARM_SPAN_SQL = """
 #: The two parts are expected to disagree here; the size of the disagreement is the
 #: overcount, and printing it is the only honest way to read the arm.
 CROSS_CHECK_SQL = """
-    SELECT COUNT(*) FILTER (WHERE p.open =  s.fill_price) AS open_unchanged,
+    SELECT COUNT(*) FILTER (WHERE p.open = s.fill_price) AS open_unchanged,
            COUNT(*) FILTER (WHERE p.open <> s.fill_price) AS open_moved
     FROM strategy_signals s
     JOIN price_daily p

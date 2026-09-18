@@ -196,7 +196,7 @@ class TestCrossCheck:
     """The reconciliation that turns sql/387's field-blindness into a number."""
 
     def test_it_partitions_the_fill_arms_rows_by_whether_the_open_moved(self) -> None:
-        assert "p.open =  s.fill_price" in CROSS_CHECK_SQL
+        assert "p.open = s.fill_price" in CROSS_CHECK_SQL
         assert "p.open <> s.fill_price" in CROSS_CHECK_SQL
 
     def test_it_is_scoped_to_the_same_observable_window_as_the_arms(self) -> None:
