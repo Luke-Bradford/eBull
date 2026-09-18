@@ -42,6 +42,16 @@ number lying (prevention-log: "never hardcode a derived statistic").
     (``docs/review-prevention-log.md``, #2230 2026-08-20). The per-cluster figure is the one
     that decides.
 
+``--pipeline``
+    The same-Table-I-line test, and the one that re-homes the ticket. For every cluster the
+    exact-value key refuses, are its two values TWO DISCLOSURES or ONE line set read twice?
+    A joint Form 3/4 carries one Table I attributed to nobody, and our two ingest paths
+    invent different attributions for it — the XML parser gives every line to ``filers[0]``,
+    the DERA bulk path gives every line to every reporting owner. Answers whether the fold
+    anchor is implicated at all. Carries a deterministic mis-paired-accession control so the
+    lookup cannot pass by matching anything, and prices the blast radius of the fix the
+    finding implies.
+
 Usage (read-only, one REPEATABLE READ snapshot per mode):
 
     PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --edges --out /tmp/a2794.jsonl
@@ -49,6 +59,7 @@ Usage (read-only, one REPEATABLE READ snapshot per mode):
     PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --joint
     PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --balances
     PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --reach /tmp/a2794.jsonl
+    PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --pipeline
 
 Exits 1 on any per-instrument error, on an empty census, and on a summary whose input held
 no instruments — a census that measured nothing must not look clean.
@@ -67,7 +78,7 @@ import json
 import sys
 from collections import Counter, defaultdict
 from decimal import Decimal
-from typing import Any, LiteralString
+from typing import Any, Final, LiteralString
 
 import psycopg
 
@@ -155,6 +166,163 @@ REFUSED_CLUSTERS_SQL = f"""
 SELECT instrument_id, acc
   FROM cl
  WHERE distinct_values > 1
+"""
+
+# ``--pipeline`` — the same-Table-I-line test.
+#
+# The question it answers is prior to every fold-key question this ticket has asked: when two
+# members of one accession report different balances, are those two numbers TWO DISCLOSURES,
+# or ONE line set read twice by two ingest pipelines?
+#
+# The source rule says it cannot be the first. ``<nonDerivativeTable>`` is a SIBLING of
+# ``<reportingOwner>`` (sec-edgar skill §2.3), so a joint Form 3/4 carries ONE Table I and
+# attributes no line to any co-filer. Both pipelines therefore have to invent an attribution,
+# and they invent different ones:
+#
+#   * the XML parser gives every line to ``filers[0]``
+#     (``app/services/insider_transactions.py:449``) — one identity per accession;
+#   * the DERA bulk path writes every NONDERIV line to EVERY reporting owner
+#     (``sec_insider_dataset_ingest._stage_owners``, one staged row per owner) — N identities,
+#     each carrying a line that is not theirs.
+#
+# ``_INSIDER_DUAL_PIPELINE_DECOLLISION`` (#1805) removes the DERA copy only where the SAME
+# ``holder_cik`` also has a plain row, i.e. only for ``filers[0]``. Co-filers 2..N keep theirs.
+#
+# ⚠ Two arms exist so the test can fail rather than merely report:
+#
+#   * ``value_on_a_line_of_its_OWN_accession`` is the claim. It is meaningless alone — a large
+#     enough line set makes any value findable — so
+#   * ``…_of_a_BORROWED_accession`` re-runs the identical lookup against a deterministically
+#     mis-paired accession (each refused cluster borrows the NEXT one's lines, ordered by
+#     accession). A harness that matched anything would score both arms alike. The run FAILS
+#     if the control is not far below the claim, which is the prevention-log rule "a
+#     measurement that cannot detect its own failure is not evidence".
+#
+# ``series`` is reported because it bounds the fix, not the finding: an accession whose lines
+# span several ``(security_title, direct_indirect)`` groups holds several POSITIONS, which
+# Form 4 General Instruction 4(b)(v) permits a joint filing to report separately. So "the
+# members share one line set" does NOT license summing or folding them blind.
+PIPELINE_SQL = f"""
+{_JOINT_CLUSTER_CTE}
+, refused AS (SELECT instrument_id, acc FROM cl WHERE distinct_values > 1)
+, mem AS (
+  SELECT l.instrument_id, l.source_accession AS acc, l.holder_identity_key AS ident,
+         bool_or(l.table_i) AS has_xml, bool_or(NOT l.table_i) AS has_dera,
+         max(l.shares) AS shares
+    FROM live l
+    JOIN refused r ON r.instrument_id = l.instrument_id AND r.acc = l.source_accession
+   GROUP BY 1, 2, 3
+)
+, lines AS (
+  SELECT t.instrument_id, t.accession_number AS acc, t.post_transaction_shares AS v,
+         t.filer_cik, coalesce(t.security_title, '') AS sec,
+         coalesce(t.direct_indirect, '') AS di, t.txn_row_num AS ord, 'form4' AS form
+    FROM insider_transactions t
+    JOIN refused r ON r.instrument_id = t.instrument_id AND r.acc = t.accession_number
+   WHERE NOT t.is_derivative AND t.post_transaction_shares IS NOT NULL
+  UNION ALL
+  SELECT h.instrument_id, h.accession_number, h.shares, h.filer_cik,
+         coalesce(h.security_title, ''), coalesce(h.direct_indirect, ''), h.row_num, 'form3'
+    FROM insider_initial_holdings h
+    JOIN refused r ON r.instrument_id = h.instrument_id AND r.acc = h.accession_number
+   WHERE NOT h.is_derivative AND h.shares IS NOT NULL
+)
+, borrowed AS (
+  SELECT instrument_id, acc,
+         lead(instrument_id) OVER w AS other_iid,
+         lead(acc) OVER w AS other_acc
+    FROM refused
+  WINDOW w AS (ORDER BY acc, instrument_id)
+)
+, per_member AS (
+  SELECT m.instrument_id, m.acc, m.has_xml, m.shares,
+         EXISTS (SELECT 1 FROM lines x
+                  WHERE x.instrument_id = m.instrument_id AND x.acc = m.acc
+                    AND x.v = m.shares) AS on_own_line,
+         EXISTS (SELECT 1 FROM borrowed b
+                  JOIN lines x ON x.instrument_id = b.other_iid AND x.acc = b.other_acc
+                  WHERE b.instrument_id = m.instrument_id AND b.acc = m.acc
+                    AND x.v = m.shares) AS on_borrowed_line
+    FROM mem m
+)
+, per_cluster AS (
+  SELECT instrument_id, acc,
+         count(*) FILTER (WHERE has_xml) AS n_xml,
+         count(*) FILTER (WHERE NOT has_xml) AS n_dera,
+         count(DISTINCT shares) FILTER (WHERE NOT has_xml) AS dera_distinct,
+         max(shares) FILTER (WHERE has_xml) AS v_xml,
+         max(shares) FILTER (WHERE NOT has_xml) AS v_dera
+    FROM per_member GROUP BY 1, 2
+)
+, per_lines AS (
+  SELECT r.instrument_id, r.acc,
+         count(x.*) AS n_lines,
+         count(DISTINCT x.filer_cik) AS n_filer_cik,
+         -- ⚠ FILTER, not a bare count(DISTINCT): the LEFT JOIN emits a (NULL, NULL) row for a
+         -- cluster with no parsed lines, and ROW(NULL, NULL) is not NULL, so the unfiltered
+         -- form scores that cluster as "one series" — the one shape this arm must not claim.
+         count(DISTINCT (x.sec, x.di)) FILTER (WHERE x.v IS NOT NULL) AS n_series,
+         min(x.form) AS form,
+         (array_agg(x.v ORDER BY x.ord ASC))[1] AS first_line_v,
+         (array_agg(x.v ORDER BY x.ord DESC))[1] AS last_line_v
+    FROM refused r
+    LEFT JOIN lines x ON x.instrument_id = r.instrument_id AND x.acc = r.acc
+   GROUP BY 1, 2
+)
+SELECT
+  (SELECT count(*) FROM refused)                                         AS refused_clusters,
+  (SELECT count(*) FROM mem)                                             AS members,
+  (SELECT count(*) FROM mem WHERE has_xml AND NOT has_dera)              AS xml_only_members,
+  (SELECT count(*) FROM mem WHERE has_dera AND NOT has_xml)              AS dera_only_members,
+  (SELECT count(*) FROM mem WHERE has_xml AND has_dera)                  AS dual_pipeline_members,
+  (SELECT count(*) FROM per_member WHERE on_own_line)                    AS value_on_own_accession_line,
+  (SELECT count(*) FROM per_member WHERE on_borrowed_line)               AS control_value_on_borrowed_line,
+  (SELECT count(*) FROM per_cluster WHERE n_xml = 1)                     AS clusters_with_exactly_one_xml_member,
+  (SELECT count(*) FROM per_cluster WHERE dera_distinct = 1)             AS clusters_where_dera_members_agree,
+  (SELECT count(*) FROM per_cluster WHERE dera_distinct = 1
+                                      AND v_xml IS DISTINCT FROM v_dera) AS clusters_where_only_xml_differs,
+  (SELECT count(*) FROM per_lines WHERE n_lines = 0)                     AS clusters_with_no_parsed_lines,
+  (SELECT count(*) FROM per_lines WHERE n_filer_cik = 1)                 AS clusters_whose_lines_name_one_filer,
+  (SELECT count(*) FROM per_lines WHERE n_series = 1)                    AS clusters_spanning_one_series,
+  (SELECT count(*) FROM per_lines WHERE n_series > 1)                    AS clusters_spanning_several_series,
+  (SELECT count(*) FROM per_lines l JOIN per_cluster c USING (instrument_id, acc)
+     WHERE l.form = 'form3')                                             AS form3_clusters,
+  (SELECT count(*) FROM per_lines l JOIN per_cluster c USING (instrument_id, acc)
+     WHERE l.form = 'form3' AND c.v_dera = l.first_line_v)               AS form3_dera_took_the_first_line,
+  (SELECT count(*) FROM per_lines l JOIN per_cluster c USING (instrument_id, acc)
+     WHERE l.form = 'form4')                                             AS form4_clusters,
+  (SELECT count(*) FROM per_lines l JOIN per_cluster c USING (instrument_id, acc)
+     WHERE l.form = 'form4' AND c.v_dera = l.last_line_v)                AS form4_dera_took_the_last_line
+"""
+
+# Blast radius of the fix the finding implies, priced so the next session does not re-derive
+# it. Today's de-collision drops a DERA row only when the SAME ``holder_cik`` has a plain row
+# on that accession; the widening drops every DERA row on an accession that carries ANY plain
+# row, because the DERA fan-out attributes no line to any particular owner.
+#
+# ⚠ This is an UPPER BOUND on a CANDIDATE set, not a measurement of rendered double-counting:
+# the rollup applies cross-source dedup, family reconciliation and owner-once downstream. It
+# is priced here to show the change is NOT confined to the 157 refused clusters, which is the
+# reason it needs its own spec and a full-population A/B rather than a one-line edit.
+WIDENED_DECOLLISION_SQL = """
+SELECT count(*)                                                       AS live_insider_rows,
+       count(*) FILTER (WHERE dera)                                   AS dera_rows,
+       count(*) FILTER (WHERE dera AND any_plain_on_accession)        AS widening_would_drop,
+       count(DISTINCT instrument_id)
+         FILTER (WHERE dera AND any_plain_on_accession)               AS instruments_touched,
+       sum(shares) FILTER (WHERE dera AND any_plain_on_accession)     AS candidate_shares_removed
+  FROM (
+    SELECT oc.instrument_id, oc.shares,
+           (oc.source_document_id ~ ':(NDT|NDH):') AS dera,
+           EXISTS (SELECT 1 FROM ownership_insiders_current p
+                    WHERE p.instrument_id = oc.instrument_id
+                      AND p.source_accession = oc.source_accession
+                      AND p.source_document_id !~ ':(NDT|NDH):') AS any_plain_on_accession
+      FROM ownership_insiders_current oc
+     WHERE oc.source IN ('form3', 'form4')
+       AND oc.source_accession IS NOT NULL
+       AND btrim(oc.source_accession) <> ''
+  ) q
 """
 
 # The projection's own winner rule, spelled from ``ownership_observations.py`` so the census
@@ -665,6 +833,72 @@ def _cases(path: str, symbols: list[str]) -> int:
     return 1 if absent else 0
 
 
+# The control has to be beaten by a MARGIN, not merely exceeded: two numbers one apart would
+# satisfy ``>`` and prove nothing. 10x is a round threshold chosen by construction rather than
+# fitted — there is no published formulation for "a lookup control is far enough below its
+# claim" — and it is frozen here so a later run cannot quietly relax it. Measured on
+# 2026-09-18 the two arms are 661 and a small residual, so the margin is not marginal.
+_BORROWED_CONTROL_MAX_RATIO: Final[float] = 0.1
+
+
+def _pipeline() -> int:
+    """Are the two values in a refused cluster two disclosures, or one line set read twice?
+
+    Every figure is computed by :data:`PIPELINE_SQL` at run time. Three guards, each able to
+    fail for a different reason:
+
+    * the refused population is asserted against ``JOINT_SQL``'s own ``unequal_refused_today``
+      — the two queries agree only by sharing ``_JOINT_CLUSTER_CTE``, and a future edit could
+      break that silently (same guard :func:`_reach` already carries);
+    * the borrowed-accession control must sit far below the own-accession arm, or the lookup
+      is matching on line-set size rather than on identity;
+    * an empty population fails, because a census that measured nothing must not look clean.
+    """
+    with psycopg.connect(settings.database_url) as conn, snapshot_read(conn), conn.cursor() as cur:
+        cur.execute(PIPELINE_SQL, {"form4_cutoff": form4_retention_cutoff()})
+        row = cur.fetchone()
+        names = [d.name for d in cur.description or ()]
+        cur.execute(JOINT_SQL, {"form4_cutoff": form4_retention_cutoff()})
+        joint = cur.fetchone()
+        joint_names = [d.name for d in cur.description or ()]
+        cur.execute(WIDENED_DECOLLISION_SQL)
+        widened = cur.fetchone()
+        widened_names = [d.name for d in cur.description or ()]
+
+    if row is None or joint is None or widened is None:
+        print("FAIL: a census returned no row")
+        return 1
+    stats = dict(zip(names, row, strict=True))
+
+    print("Same-Table-I-line test over the clusters the exact-value anchor refuses:")
+    for name, value in stats.items():
+        print(f"  {name:38} {value}")
+    print("\nBlast radius if the de-collision widened from holder_cik-matched to accession-matched:")
+    for name, value in zip(widened_names, widened, strict=True):
+        print(f"  {name:38} {value}")
+
+    failures: list[str] = []
+    if not stats["refused_clusters"]:
+        failures.append("refused population is empty — nothing was measured")
+    expected = dict(zip(joint_names, joint, strict=True))["unequal_refused_today"]
+    if stats["refused_clusters"] != expected:
+        failures.append(
+            f"refused population {stats['refused_clusters']} disagrees with --joint's "
+            f"unequal_refused_today {expected} — the shared cluster CTE has drifted"
+        )
+    claim, control = stats["value_on_own_accession_line"], stats["control_value_on_borrowed_line"]
+    if not claim:
+        failures.append("no member value was found on a line of its own accession — evidence side is dark")
+    elif control > claim * _BORROWED_CONTROL_MAX_RATIO:
+        failures.append(
+            f"borrowed-accession control {control} is not far below the claim {claim} "
+            f"(ratio bound {_BORROWED_CONTROL_MAX_RATIO}) — the lookup discriminates nothing"
+        )
+    for message in failures:
+        print(f"FAIL: {message}")
+    return 1 if failures else 0
+
+
 def _scalar_census(sql: LiteralString, title: str, params: dict[str, Any] | None = None) -> int:
     """Run a one-row aggregate census and print it.
 
@@ -702,7 +936,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reach", metavar="CENSUS", help="does the naming signal reach the refused clusters?")
     ap.add_argument("--cases", nargs="+", metavar="SYMBOL", help="per-symbol readout (needs --from)")
     ap.add_argument("--from", dest="src", help="edge-census JSONL to read --cases from")
+    ap.add_argument("--pipeline", action="store_true", help="same-Table-I-line test on the refused clusters")
     args = ap.parse_args(argv)
+    if args.pipeline:
+        return _pipeline()
     if args.cases:
         if not args.src:
             ap.error("--cases requires --from <census.jsonl>")
@@ -741,7 +978,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.out:
             ap.error("--edges requires --out")
         return _edge_census(args.out)
-    ap.error("one of --edges / --summarise / --joint / --balances / --reach is required")
+    ap.error("one of --edges / --summarise / --joint / --balances / --reach / --pipeline is required")
     return 2
 
 
