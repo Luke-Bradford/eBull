@@ -996,11 +996,14 @@ def seed_unreferenced_credential(conn: psycopg.Connection[Any]) -> UUID:
         """,
         (other_operator_id,),
     )
+    # ⚠ Strict INSERT, unlike the rest of this seed. The id is fixed, so an
+    # `ON CONFLICT DO NOTHING` would hand a second caller in the same test a row
+    # the FIRST caller may already have revoked — a control that silently is not
+    # one. A duplicate call raises instead (review NITPICK on PR #3184).
     conn.execute(
         """
         INSERT INTO broker_credentials (id, operator_id, provider, label, environment, ciphertext, last_four)
         VALUES (%s, %s, 'etoro', 'api_key', 'demo', '\\x00'::bytea, '0000')
-        ON CONFLICT (id) DO NOTHING
         """,
         (credential_id, other_operator_id),
     )
