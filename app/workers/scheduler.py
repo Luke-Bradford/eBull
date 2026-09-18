@@ -1110,7 +1110,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # this job dispatches on the GENERAL executor and takes a general
         # semaphore permit. Measured, not read:
         # ``execution_lane_for("recommendation_order_reconcile")`` ->
-        # ``general_non_sec``, and ``test_the_poller_runs_on_the_general_lane``
+        # ``general_non_sec``, and ``test_an_etoro_source_buys_no_lane``
         # pins it, because a comment that was wrong once will be wrong again.
         #
         # ⚠ What the general lane costs, from ``execution_slot_wait_seconds``
