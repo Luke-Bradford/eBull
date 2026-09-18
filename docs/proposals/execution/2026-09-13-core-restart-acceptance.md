@@ -19,7 +19,7 @@ Reproduce:
 docker compose --profile test up -d postgres-test
 uv run pytest tests/test_2949_core_restart_recovery_db.py \
               tests/test_2949_core_close_recovery_db.py -v -o addopts=''
-# expect: 27 passed  (23 restart + 4 close, at round 4)
+# expect: 32 passed  (23 restart + 9 close, at round 5)
 ```
 
 ⚠ **Check the count, not the exit status.** `ebull_test_conn` *skips* when the test database is
@@ -30,8 +30,9 @@ the shell.
 file; #2962 and #2961's sessions added two more before round 2 started (the unattended
 lost-acceptance recovery and the stranded read-surface flag); round 2 added one matrix-5 test
 plus 3 in the close file (15); #2961's terminalisation fix then added 6 more to the restart file
-and #2979's added 1 to the close file (22); round 3 adds the three matrix-6 tests (25) and round 4
-the two matrix-5 ones (27). Round-1 figures quoted below are left as they were written.
+and #2979's added 1 to the close file (22); round 3 adds the three matrix-6 tests (25), round 4
+the two matrix-5 ones (27), and round 5 the five non-crash close failures (32). Round-1 figures
+quoted below are left as they were written.
 
 ## What the harness is
 
@@ -649,3 +650,59 @@ partial fills, still blocked on #2965's attended partial fill.
 
 **Still no green "ready" status.** Matrix items 5 and 6 are now complete; item 7 is not, and the
 two open blockers are unchanged.
+
+## Round 5 — the non-crash close failures
+
+A different axis from every round before it: **no `SIGKILL`, no restart, one live process
+throughout.** What varies is how the broker ANSWERS. These are what #2603's sell leg will meet far
+more often than a crash, and `manage_owned_position` already distinguishes four classes — nothing
+had driven any of them.
+
+| class | our state | position |
+| --- | --- | --- |
+| definite rejection | operation `rejected` / `broker_close_rejected`, order `rejected`, trade back to **`open`** | owned, immediately re-closable |
+| uncertain transport | operation `reconcile_required` / `broker_close_uncertain`, order `submitted`, trade `reconcile_required` | owned; whether the broker acted is undecidable from our records |
+| malformed acceptance (filled, wrong position id) | `reconcile_required` / `close_order_did_not_affect_exact_position`, order `rejected` | **not released** |
+| lookup outage | `pending` / `close_lookup_unavailable`, **nothing terminal written** | owned; finishes on a later pass |
+
+### ⚠⚠ The uncertain class is not milder than 7b — in one arm it IS 7b
+
+I wrote the uncertain scenario to assert that the capital reader keeps working, and **it does
+not — the test was wrong, not the code.** It is now run in BOTH arms of the ambiguity:
+
+- **taken** (double records the close, then raises): the broker's snapshot no longer carries the
+  position while our ownership row does, so `resolve_engine_capital_usage` raises
+  `engine_capital_ownership_unwitnessed` — 7b's wedge exactly.
+- **not taken** (raises before recording): the position is there, the witness join resolves, the
+  allocator holds.
+
+**Our side is identical across the two** — same operation status, same error code, same ownership,
+same order status. That is the whole justification for `reconcile_required`: the state is
+undecidable from our records alone, so nothing may be auto-released and nothing may be
+auto-retried. The pair is worth more than either test alone, and a single arm would have read as a
+statement about our state when it is a statement about what our state cannot tell.
+
+⚠ The exit-side #2965 question is answered in passing: it is `resolve_engine_capital_usage` that
+refuses on a witness mismatch, while `load_engine_capital_authority` returns normally in both arms.
+The entry-side defect — a pending claim making the AUTHORITY load raise — has no twin here.
+
+### Round 5's probes
+
+| probe | prediction | result |
+| --- | --- | --- |
+| force `uncertain = True` in the close failure branch | the rejection test fails | that one FAILED, nothing else |
+| force `uncertain = False` | both uncertain tests fail | exactly those two FAILED |
+| drop the `position_ids == (owned.broker_position_id,)` comparison | the malformed-acceptance test fails | that one FAILED, nothing else |
+| terminalise the operation on a lookup outage | the outage test fails | that one FAILED, nothing else |
+| unmodified control | all pass | 9 passed |
+
+### Still not covered after round 5
+
+A full rotation past `sql/373`'s hold (belongs with #2603's revalidation slice, `59ee2fc6`) ·
+matrix 7's rebalance SELL, still blocked by `core_close_side_cost_quote_unavailable` · partial
+fills, still blocked on #2965's attended partial fill · the EDIT (SL/TP) path's twin failure
+classes, which share `_terminal` with the close path and are not exercised here.
+
+**Still no green "ready" status.** Rounds 3-5 closed matrix items 5 and 6 and classified the
+non-crash exit failures. The two standing blockers are unchanged, and both need an attended
+session.
