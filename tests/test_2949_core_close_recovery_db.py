@@ -919,15 +919,23 @@ def test_a_non_close_operation_on_a_core_position_is_refused_not_interpreted(
     ebull_test_conn.commit()
     assert ownership is not None
 
-    ebull_test_conn.execute(
+    # Every NOT NULL column without a default is named here — measured against the
+    # test template, not assumed: `ownership_id`, `operation_type`, `trigger_code`,
+    # `request_id`, `status`. The other three NOT NULLs (`position_operation_id`,
+    # `created_at`, `updated_at`) carry defaults. A future NOT NULL column without
+    # one fails this INSERT loudly, which is the right direction.
+    seeded = ebull_test_conn.execute(
         """
         INSERT INTO strategy_position_operations (
             ownership_id, operation_type, trigger_code, request_id, status, desired_stop_rate
         ) VALUES (%s, 'fixed_exit_repair', 'entry_exit_gap', gen_random_uuid(), 'intent_persisted', 1)
+        RETURNING position_operation_id
         """,
         (int(ownership[0]),),
-    )
+    ).fetchone()
     ebull_test_conn.commit()
+    assert seeded is not None
+    seeded_operation_id = int(seeded[0])
 
     refused = _manage(ebull_test_conn, broker, coordinates)
     assert refused.state == "rejected"
@@ -947,8 +955,12 @@ def test_a_non_close_operation_on_a_core_position_is_refused_not_interpreted(
 
     # The refused row is terminal, so the next cycle is clean rather than stuck
     # on the same illegitimate operation.
+    # Keyed on the id this test seeded, not on "the newest row" — the assertion is
+    # about THAT operation, and an ordering-based fetch would quietly follow any
+    # row a future cycle happened to write.
     terminal = ebull_test_conn.execute(
-        "SELECT status, last_error_code FROM strategy_position_operations ORDER BY position_operation_id DESC LIMIT 1"
+        "SELECT status, last_error_code FROM strategy_position_operations WHERE position_operation_id=%s",
+        (seeded_operation_id,),
     ).fetchone()
     ebull_test_conn.commit()
     assert terminal is not None
