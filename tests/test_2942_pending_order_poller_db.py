@@ -490,6 +490,42 @@ def test_contended_rows_do_not_occupy_the_bounded_head_for_ever(
     assert [r.order_id for r in second_pass] == [free], "the contended row starved the tail"
 
 
+def test_the_rotation_key_never_moves_backward(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Overlapping pollers must not regress the key (#3189, Codex checkpoint 2).
+
+    Two pollers overlap by design — a boot catch-up racing the scheduled fire —
+    and each carries the ``now`` captured when its own batch began. So a run
+    holding the lock since ``T1`` can finish and stamp *after* a later run
+    stamped ``lock_busy`` at ``T2 > T1``. A plain assignment would move the key
+    backward and re-postpone every row stamped between the two, undoing exactly
+    the fairness the contention stamp was added to provide.
+
+    Driven through the poller rather than through ``_stamp_polled`` directly, so
+    it is the shipped call path that is pinned.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
+    broker = _broker(detail=_detail("Pending"))
+
+    later = _NOW + timedelta(minutes=5)
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=later)
+    assert _order_row(ebull_test_conn, order_id)["recommendation_last_polled_at"] == later
+    # ⚠ `_order_row` opens a read transaction and does not close it, and the
+    # poller refuses a non-idle connection. Other tests never hit this because
+    # they read only after their last call.
+    ebull_test_conn.rollback()
+
+    # The straggler: a poller that began earlier and is only now stamping.
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert _order_row(ebull_test_conn, order_id)["recommendation_last_polled_at"] == later, (
+        "a late stamp from an earlier batch moved the rotation key backward"
+    )
+
+
 def test_a_row_that_raises_unexpectedly_is_contained_and_the_batch_continues(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

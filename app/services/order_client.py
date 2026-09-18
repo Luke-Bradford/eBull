@@ -2453,6 +2453,17 @@ def _stamp_polled(
     key, and #2948 established that ordering a bounded backlog on a key that does
     not move for a non-terminal row is an absorbing state rather than a delay.
 
+    ⚠⚠ MONOTONIC (#3189, Codex checkpoint 2). The key only ever moves FORWARD.
+    Two pollers overlap by design — the module's own docstring names "a boot
+    catch-up racing the scheduled fire" — and each carries the ``now`` it
+    captured when its batch began. So a run that took the lock at ``T1`` can
+    finish and stamp *after* a later run stamped ``lock_busy`` at ``T2 > T1``; a
+    plain assignment would move the key BACKWARD and re-postpone every row
+    stamped between them, which is the fairness this whole slice exists to
+    provide. ``GREATEST`` ignores NULL arguments (verified on PG 17.9) rather
+    than propagating it like most functions, so the never-polled case still
+    takes ``now``.
+
     ``park_reason`` stops the asking. It is set only for a verdict that is a
     PERMANENT property of the row (``sql/395``), never for a transport failure —
     otherwise a blip would silently retire a live order from reconciliation.
@@ -2461,7 +2472,7 @@ def _stamp_polled(
     conn.execute(
         """
         UPDATE orders
-        SET recommendation_last_polled_at = %(now)s,
+        SET recommendation_last_polled_at = GREATEST(recommendation_last_polled_at, %(now)s),
             recommendation_poll_parked_reason = COALESCE(
                 recommendation_poll_parked_reason, %(park)s)
         WHERE order_id = %(oid)s
