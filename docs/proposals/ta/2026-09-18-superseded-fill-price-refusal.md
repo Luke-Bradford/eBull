@@ -236,3 +236,24 @@ string cannot break a closed frontend union.
 - The migration's CHECK membership equals `UNRESOLVED_REASONS`.
 - Dev-verify: `strategy_outcome_resolution` runs to `success` on the bumped version pair
   and the 358 re-resolutions drain.
+
+### Acceptance result (dev DB, 2026-09-18)
+
+`sql/396` applied; new pair `outcome-resolver-v1+1231a0239ea5` / `price-quarantine-v1+…`.
+Three ticks of `run_outcome_resolution`, no exception:
+
+| tick | selected | written | immature |
+| ---: | ---: | ---: | ---: |
+| 1 | 232 | 47 | 185 |
+| 2 | 215 | 14 | 201 |
+| 3 | 215 | 0 | 215 |
+
+**61 terminal outcomes written + 297 still pending = 358**, which is the predicted
+re-resolution set exactly. The 297 are immature forward windows, the normal steady state,
+retried daily.
+
+⚠ **`fill_price_superseded` count at the new pair: 0** — and that is the predicted result,
+not a failed verification. Every stale row sits at a superseded `strategy_version` and is
+therefore unselectable; the refusal is a guard on the path, and its discrimination is
+established by revert-probe rather than by a dev row. Recording the zero so nobody later
+reads it as "the code never fires".
