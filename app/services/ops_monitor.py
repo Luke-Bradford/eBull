@@ -582,6 +582,29 @@ def check_all_layers(
 # ---------------------------------------------------------------------------
 
 
+def _slot_wait_seconds() -> float | None:
+    """How long this fire waited for its execution slot, or ``None`` (#3189 f13).
+
+    ⚠⚠ Read HERE rather than threaded through callers, because the column's
+    contract is about WHERE the write happens, not about what any one caller
+    knows: ``_job_execution_slot`` is the outermost boundary, so a prerequisite
+    skip and a prelude-opt-out start have both already waited for admission by
+    the time they reach a ``job_runs`` writer. Passing it in would mean editing
+    16 call sites across 5 modules and getting every one of them right; reading
+    the contextvar means a new call site is correct by default.
+
+    ⚠ Deferred import, and the direction is why: ``app.jobs.runtime`` imports
+    this module at module scope, so importing it back at module scope is a
+    cycle. ``scheduler._tracked_job`` already resolves the same problem the same
+    way (``from app.jobs.runtime import consume_prelude_run_id`` inside the
+    function body), so this follows an established pattern rather than inventing
+    one.
+    """
+    from app.jobs.runtime import current_execution_slot_wait_seconds
+
+    return current_execution_slot_wait_seconds()
+
+
 def record_job_start(
     conn: psycopg.Connection[Any],
     job_name: str,
@@ -614,23 +637,26 @@ def record_job_start(
         if params_snapshot is None:
             cur.execute(
                 """
-                INSERT INTO job_runs (job_name, started_at, status)
-                VALUES (%(name)s, %(started)s, 'running')
+                INSERT INTO job_runs (job_name, started_at, status, execution_slot_wait_seconds)
+                VALUES (%(name)s, %(started)s, 'running', %(slot_wait)s)
                 RETURNING run_id
                 """,
-                {"name": job_name, "started": now},
+                {"name": job_name, "started": now, "slot_wait": _slot_wait_seconds()},
             )
         else:
             cur.execute(
                 """
-                INSERT INTO job_runs (job_name, started_at, status, params_snapshot)
-                VALUES (%(name)s, %(started)s, 'running', %(params)s)
+                INSERT INTO job_runs (
+                    job_name, started_at, status, params_snapshot, execution_slot_wait_seconds
+                )
+                VALUES (%(name)s, %(started)s, 'running', %(params)s, %(slot_wait)s)
                 RETURNING run_id
                 """,
                 {
                     "name": job_name,
                     "started": now,
                     "params": Jsonb(_jsonable_params(params_snapshot)),
+                    "slot_wait": _slot_wait_seconds(),
                 },
             )
         row = cur.fetchone()
@@ -883,7 +909,14 @@ def record_job_skip(
                        finished_at = %(ts)s,
                        row_count = 0,
                        error_msg = %(reason)s,
-                       params_snapshot = COALESCE(%(params)s, params_snapshot)
+                       params_snapshot = COALESCE(%(params)s, params_snapshot),
+                       -- ⚠ COALESCE on the STORED value first (#3189 f13). This
+                       -- row was opened by the prelude, which may already have
+                       -- written the admission it measured; a later read of the
+                       -- same contextvar must not overwrite it, and must not
+                       -- write NULL over it if the contextvar has since reset.
+                       execution_slot_wait_seconds = COALESCE(
+                           execution_slot_wait_seconds, %(slot_wait)s)
                  WHERE run_id = %(run_id)s
                    AND job_name = %(name)s
                    AND status = 'running'
@@ -895,6 +928,7 @@ def record_job_skip(
                     "run_id": run_id,
                     "name": job_name,
                     "params": (None if params_snapshot is None else Jsonb(_jsonable_params(params_snapshot))),
+                    "slot_wait": _slot_wait_seconds(),
                 },
             ).fetchone()
         if closed is not None:
@@ -903,19 +937,23 @@ def record_job_skip(
         if params_snapshot is None:
             row = conn.execute(
                 """
-                INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count, error_msg)
-                VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s)
+                INSERT INTO job_runs (
+                    job_name, started_at, finished_at, status, row_count, error_msg,
+                    execution_slot_wait_seconds
+                )
+                VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s, %(slot_wait)s)
                 RETURNING run_id
                 """,
-                {"name": job_name, "ts": now, "reason": reason},
+                {"name": job_name, "ts": now, "reason": reason, "slot_wait": _slot_wait_seconds()},
             ).fetchone()
         else:
             row = conn.execute(
                 """
                 INSERT INTO job_runs (
-                    job_name, started_at, finished_at, status, row_count, error_msg, params_snapshot
+                    job_name, started_at, finished_at, status, row_count, error_msg, params_snapshot,
+                    execution_slot_wait_seconds
                 )
-                VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s, %(params)s)
+                VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s, %(params)s, %(slot_wait)s)
                 RETURNING run_id
                 """,
                 {
@@ -923,6 +961,7 @@ def record_job_skip(
                     "ts": now,
                     "reason": reason,
                     "params": Jsonb(_jsonable_params(params_snapshot)),
+                    "slot_wait": _slot_wait_seconds(),
                 },
             ).fetchone()
         if row is None:

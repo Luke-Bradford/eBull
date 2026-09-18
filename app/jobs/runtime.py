@@ -1308,10 +1308,18 @@ def current_execution_slot_wait_seconds() -> float | None:
     """How long the current fire waited for its execution slot, or ``None``.
 
     Issue #3159 clause 2.  ``None`` means this call is NOT inside
-    ``_job_execution_slot`` — the three ``_PRELUDE_OPT_OUT_JOBS``, a
-    ``record_job_skip`` written outside the prelude, or a direct/bootstrap
-    invocation.  ``0.0`` means a slot was held and admission was immediate; the
-    two are different facts and the column keeps them apart.
+    ``_job_execution_slot`` — a direct or bootstrap invocation.  ``0.0`` means a
+    slot was held and admission was immediate; the two are different facts and
+    the column keeps them apart.
+
+    ⚠⚠ #3189 finding 13 made that contract TRUE. It previously also listed "the
+    three ``_PRELUDE_OPT_OUT_JOBS``" and "a ``record_job_skip`` written outside
+    the prelude" as ``None`` cases — but those fires DO hold a slot (the slot is
+    the outermost boundary; gate and prerequisite checks run inside it), so the
+    column was reading NULL for waits that had actually been incurred and the
+    telemetry was biased toward fires that ran. ``record_job_start`` and
+    ``record_job_skip`` now both persist it, so ``None`` again means what it
+    says.
 
     ⚠ Deliberately NOT a ``consume_*`` popper like its three neighbours above.
     The value's lifetime is the slot's — ``_job_execution_slot`` sets it and
