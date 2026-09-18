@@ -243,6 +243,86 @@ def test_a_filled_order_is_recorded_and_NOT_booked_and_keeps_the_claim(
     ebull_test_conn.rollback()
 
 
+def test_an_unbooked_fill_is_parked_so_it_cannot_poll_for_ever(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """PR #3168's WARNING. The order is terminal at the broker, so re-asking
+    hourly could only spend a shared eToro read and append another identical
+    audit row for ever. One poll, one audit row, then silence — with the claim
+    still held, which is what makes parking safe rather than a quiet release."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
+    broker = _broker(detail=_detail("Filled"))
+
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    second_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
+
+    assert second_pass == ()
+    assert broker.lookup_order.call_count == 1
+    assert _audit_count(ebull_test_conn, rec) == 1
+    assert count_pending_recommendation_orders(ebull_test_conn) == 0
+    ebull_test_conn.commit()
+    # Parked is NOT resolved: the claim is still held.
+    assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _seed_order(ebull_test_conn, recommendation_id=rec)
+    ebull_test_conn.rollback()
+
+
+def test_a_non_pollable_ref_is_parked_too(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A ref we cannot call ``lookup_order`` with is a permanent property of the
+    row. Left unparked it would burn a whole tick's selection slot for ever
+    without even reaching the broker."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    _seed_order(ebull_test_conn, recommendation_id=rec, ref="v1-echo")
+
+    broker = _broker(detail=_detail("Rejected"))
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+
+    assert reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW) == ()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [BrokerOrderNotFound("no such order"), BrokerOrderLookupError("transport blew up")],
+)
+def test_a_transient_failure_is_NOT_parked(ebull_test_conn: psycopg.Connection[tuple], error: Exception) -> None:
+    """The dangerous direction of the parking fix. A transport failure is not a
+    fact about the order — parking on it would silently retire a live order from
+    reconciliation, which is the same wedge this ticket is closing."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    _seed_order(ebull_test_conn, recommendation_id=rec)
+
+    broker = _broker(error=error)
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    second_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
+
+    assert len(second_pass) == 1
+    assert broker.lookup_order.call_count == 2
+
+
+def test_an_unsettled_partial_fill_is_NOT_parked(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2965's statuses can still progress to Filled, so the poller must keep
+    asking. Parking them would freeze the order at the one status nobody has
+    settled how to handle."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    _seed_order(ebull_test_conn, recommendation_id=rec)
+
+    broker = _broker(detail=_detail("PartiallyFilled"))
+    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    second_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
+
+    assert [r.verdict for r in second_pass] == ["unsafe_status"]
+
+
 @pytest.mark.parametrize(
     "error",
     [BrokerOrderNotFound("no such order"), BrokerOrderLookupError("transport blew up")],

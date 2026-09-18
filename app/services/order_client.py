@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Literal
+from typing import Any, Final, Literal, LiteralString
 from uuid import UUID, uuid4
 
 import psycopg
@@ -2366,10 +2366,28 @@ PendingOrderVerdict = Literal[
     "no_longer_pending",
 ]
 
-#: Verdicts that consumed an eToro request. The others resolved before the call.
-_POLL_VERDICTS_THAT_CALLED_THE_BROKER: frozenset[str] = frozenset(
-    {"terminalised_rejected", "still_pending", "filled_not_booked", "not_found", "lookup_error", "unsafe_status"}
-)
+#: Verdicts that describe a PERMANENT property of the row, so re-asking cannot
+#: change the answer. Parking them is what stops an unresolvable order polling
+#: the broker hourly for ever (PR #3168 WARNING). Deliberately NOT here:
+#: ``not_found`` and ``lookup_error`` (a transport failure is not a fact about
+#: the order) and ``unsafe_status`` (an unsettled partial fill can still
+#: progress to Filled). ⚠ Parked is not resolved — see ``sql/395``.
+_PARKING_POLL_VERDICTS: dict[str, str] = {
+    "filled_not_booked": "filled_unbooked",
+    "ref_not_pollable": "ref_not_pollable",
+}
+
+#: Which orders the poller is willing to ask about. ONE definition, shared by
+#: the batch selection and by the scheduler's prerequisite count — the two
+#: disagreeing means either the job fires for nothing or never fires while work
+#: waits, and ``test_count_matches_what_the_poller_would_select`` guards it.
+#: A static literal: nothing interpolates into it.
+_POLLABLE_ORDER_PREDICATE: Final[LiteralString] = """
+    recommendation_id IS NOT NULL
+    AND status = 'pending'
+    AND broker_order_ref IS NOT NULL
+    AND recommendation_poll_parked_reason IS NULL
+"""
 
 
 @dataclass(frozen=True)
@@ -2413,29 +2431,39 @@ def count_pending_recommendation_orders(conn: psycopg.Connection[Any]) -> int:
     test — every test here builds its own connection.
     """
     with conn.cursor(row_factory=psycopg.rows.scalar_row) as cur:
-        cur.execute(
-            """
-            SELECT count(*) FROM orders
-            WHERE recommendation_id IS NOT NULL
-              AND status = 'pending'
-              AND broker_order_ref IS NOT NULL
-            """
-        )
+        cur.execute(f"SELECT count(*) FROM orders WHERE {_POLLABLE_ORDER_PREDICATE}")  # noqa: S608
         count = cur.fetchone()
     return int(count or 0)
 
 
-def _stamp_polled(conn: psycopg.Connection[Any], *, order_id: int, now: datetime) -> None:
+def _stamp_polled(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    now: datetime,
+    park_reason: str | None = None,
+) -> None:
     """Record that we ASKED, and COMMIT.
 
-    ⚠ Written on every attempt path, including the ones that change nothing.
-    That is the point: ``recommendation_last_polled_at`` is the rotation key,
-    and #2948 established that ordering a bounded backlog on a key that does not
-    move for a non-terminal row is an absorbing state rather than a delay.
+    ⚠ ``recommendation_last_polled_at`` is written on every attempt path,
+    including the ones that change nothing. That is the point: it is the rotation
+    key, and #2948 established that ordering a bounded backlog on a key that does
+    not move for a non-terminal row is an absorbing state rather than a delay.
+
+    ``park_reason`` stops the asking. It is set only for a verdict that is a
+    PERMANENT property of the row (``sql/395``), never for a transport failure —
+    otherwise a blip would silently retire a live order from reconciliation.
+    Parking does not touch ``status``, so the submission claim stays held.
     """
     conn.execute(
-        "UPDATE orders SET recommendation_last_polled_at = %(now)s WHERE order_id = %(oid)s",
-        {"now": now, "oid": order_id},
+        """
+        UPDATE orders
+        SET recommendation_last_polled_at = %(now)s,
+            recommendation_poll_parked_reason = COALESCE(
+                recommendation_poll_parked_reason, %(park)s)
+        WHERE order_id = %(oid)s
+        """,
+        {"now": now, "oid": order_id, "park": park_reason},
     )
     conn.commit()
 
@@ -2535,10 +2563,21 @@ def _record_unbooked_fill(
     two things the status quo lacked: an ERROR log and a durable audit row.
     **Unblock for the booking slice: one attended pending->fill observation on a
     recommendation-origin order** — the same observation #2965 needs.
+
+    ⚠ Written ONCE, then parked. The order is terminal at the broker, so
+    re-asking every hour could only spend a shared eToro read and append another
+    identical audit row for ever (PR #3168 WARNING). ``sql/395``'s park is what
+    bounds it, and it deliberately leaves ``status='pending'`` — a terminal
+    status would release the claim on an order that demonstrably executed.
     """
     conn.execute(
-        "UPDATE orders SET recommendation_last_polled_at = %(now)s WHERE order_id = %(oid)s",
-        {"now": now, "oid": order_id},
+        """
+        UPDATE orders
+        SET recommendation_last_polled_at = %(now)s,
+            recommendation_poll_parked_reason = %(park)s
+        WHERE order_id = %(oid)s
+        """,
+        {"now": now, "oid": order_id, "park": _PARKING_POLL_VERDICTS["filled_not_booked"]},
     )
     _write_refusal_audit(
         conn,
@@ -2607,19 +2646,17 @@ def reconcile_pending_recommendation_orders(
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            # ⚠ #2948: the rotation key is load-bearing. Ordering a bounded
+            # backlog on keys that never move for a non-terminal row is an
+            # ABSORBING STATE, not a delay — once the first `limit` rows are
+            # stuck, the row at `limit + 1` is never visited again.
+            f"""
             SELECT order_id, recommendation_id, instrument_id, broker_order_ref
             FROM orders
-            WHERE recommendation_id IS NOT NULL
-              AND status = 'pending'
-              AND broker_order_ref IS NOT NULL
-            -- ⚠ #2948: the rotation key is load-bearing. Ordering a bounded
-            -- backlog on keys that never move for a non-terminal row is an
-            -- ABSORBING STATE, not a delay — once the first `limit` rows are
-            -- stuck, the row at `limit + 1` is never visited again.
+            WHERE {_POLLABLE_ORDER_PREDICATE}
             ORDER BY recommendation_last_polled_at ASC NULLS FIRST, order_id
             LIMIT %(limit)s
-            """,
+            """,  # noqa: S608
             {"limit": limit},
         )
         due = cur.fetchall()
@@ -2673,10 +2710,15 @@ def _poll_one_pending_order(
         # ``lookup_order`` raises ValueError on a non-positive-integer order id.
         # A recommendation order can carry a ref shape we cannot look up (a v1
         # submission echo, a demo synthetic id), and that is a permanent
-        # property of the row, not a transient failure — so it is stamped and
-        # reported rather than retried differently.
+        # property of the row, not a transient failure — so it is PARKED and
+        # reported rather than retried hourly for ever.
         if not ref.isdigit() or int(ref) <= 0:
-            _stamp_polled(conn, order_id=order_id, now=now)
+            _stamp_polled(
+                conn,
+                order_id=order_id,
+                now=now,
+                park_reason=_PARKING_POLL_VERDICTS["ref_not_pollable"],
+            )
             logger.warning(
                 "reconcile_pending_recommendation_orders: order_id=%d has non-pollable broker_order_ref=%r",
                 order_id,
