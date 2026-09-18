@@ -19,6 +19,12 @@ const sample: CalendarEvents = {
       week: [
         { date: "2026-06-29", day_type: "open", reason: null },
         { date: "2026-07-03", day_type: "closed", reason: "Independence Day" },
+        // half_day + not_modelled render the other two DAY_TYPE_LABEL entries. Without them
+        // the #3176 guard below cannot fire: a drift of an unrendered entry to "Open" would
+        // leave every assertion passing (measured — probing `not_modelled: "Open"` against the
+        // two-day fixture passed 2/2).
+        { date: "2026-07-24", day_type: "half_day", reason: null },
+        { date: "2026-07-25", day_type: "not_modelled", reason: null },
       ],
     },
   ],
@@ -50,9 +56,22 @@ describe("CalendarPage", () => {
       </MemoryRouter>,
     );
     await waitFor(() => expect(screen.getByText("US equity")).toBeInTheDocument());
-    // day-type labels render (open + closed in the week strip).
-    expect(screen.getAllByText("Open").length).toBeGreaterThan(0);
+    // Every DAY_TYPE_LABEL entry the fixture can render. These three carry the guard for
+    // their own entries: any of them drifting onto another word fails its own assertion.
+    expect(screen.getAllByText("Trading").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Closed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Half day").length).toBeGreaterThan(0);
+    // #3176. The week strip carries two vocabularies three lines apart — the instant one
+    // ("Closed now" / "Open · regular hours") and the day one — and they used to share the
+    // token "Open", so outside RTH the block contradicted itself about today.
+    //
+    // ⚠ This line's job is NOT the three entries above; each of those is already guarded by
+    // its own presence assertion, which fails FIRST on a drift (revert-probed: reverting
+    // `open` to "Open" fails at the `getAllByText("Trading")` line, not here). It catches the
+    // case no presence assertion covers — "Open" reappearing as a standalone token anywhere
+    // else in the strip, including the unlabelled `not_modelled` entry, which is why the
+    // fixture now renders one.
+    expect(screen.queryByText("Open")).toBeNull();
     // upcoming ex-dividend row.
     expect(screen.getByText("FOO")).toBeInTheDocument();
     expect(screen.getByText(/ex 2026-07-01/)).toBeInTheDocument();

@@ -42,8 +42,12 @@ const DAY_TYPE_STYLE: Record<MarketDayType, string> = {
   not_modelled: "bg-slate-50 text-slate-400 dark:bg-slate-800/50 dark:text-slate-500",
 };
 
+// DAY-scoped ("is this date a trading day"), rendered three lines from SESSION_LABEL's
+// instant-scoped state — so the two must not share a token. Both said "Open" before #3176,
+// making the strip read "Closed now / Fri 18 Sept / Open". Display only; `MarketDayType` is
+// unchanged.
 const DAY_TYPE_LABEL: Record<MarketDayType, string> = {
-  open: "Open",
+  open: "Trading",
   half_day: "Half day",
   closed: "Closed",
   not_modelled: "—",
