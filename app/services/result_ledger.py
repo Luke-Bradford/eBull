@@ -1429,6 +1429,55 @@ def _current_of_chain(
     return current[0]
 
 
+#: Isolation levels whose reads take a FRESH snapshot per statement, which is what
+#: a post-lock re-read needs. Postgres implements ``read uncommitted`` as
+#: ``read committed`` (no dirty reads) but reports the requested name back, so both
+#: strings appear here; ``repeatable read`` and ``serializable`` are the two that
+#: pin a transaction-wide snapshot and are deliberately absent.
+_PER_STATEMENT_SNAPSHOT_ISOLATIONS: Final[frozenset[str]] = frozenset({"read committed", "read uncommitted"})
+
+
+def _require_read_committed(conn: psycopg.Connection[tuple], caller: str, missed: str) -> None:
+    """Refuse a post-lock re-read that cannot see what committed while we waited.
+
+    ⚠⚠ Every ``_lock_trial`` caller whose correctness rests on RE-READING after
+    the lock needs this, and #3189 finding 9 found it applied at one door and
+    not the other. The argument is identical at both: the lock serialises the
+    orderings, and the loser then re-reads to find the winner's row — which
+    needs a FRESH SNAPSHOT PER STATEMENT. Under ``REPEATABLE READ`` the post-lock
+    read returns the PRE-lock snapshot, so the winner is invisible and the check
+    silently regresses to the race it exists to close.
+
+    ⚠ Not needed by ``freeze_preregistration``, which also takes the trial lock:
+    it WRITES under the lock rather than re-reading, and a conflicting concurrent
+    insert surfaces as a unique-index violation (or, under a stricter isolation,
+    a serialization failure) rather than as a stale-but-plausible answer. The
+    distinction is re-read versus write, not lock versus no lock.
+
+    ⚠ Checked, not assumed, and that is cheap insurance rather than a live bug:
+    psycopg and Postgres both default to READ COMMITTED, so this fires only for a
+    caller that deliberately changed it — which is exactly the caller who would
+    not think to re-derive this argument.
+
+    ⚠⚠ The accepted set is "levels with a PER-STATEMENT snapshot", which in
+    Postgres is TWO levels, not one (Codex checkpoint 2). ``READ UNCOMMITTED`` is
+    accepted and behaves exactly as ``READ COMMITTED`` — and
+    ``current_setting('transaction_isolation')`` reports it VERBATIM rather than
+    normalising it, which is precisely why a string equality check gets it
+    wrong. Measured on this cluster rather than recalled: inside one transaction,
+    a second statement saw another session's commit under ``READ UNCOMMITTED``
+    (0 -> 1) and did not under ``REPEATABLE READ`` (0 -> 0). Refusing it would
+    have been a false refusal — the narrowing-gate error, on a gate whose whole
+    job is to refuse.
+    """
+    isolation = conn.execute("SELECT current_setting('transaction_isolation')").fetchone()
+    if isolation is not None and str(isolation[0]).lower() not in _PER_STATEMENT_SNAPSHOT_ISOLATIONS:
+        raise RuntimeError(
+            f"{caller} needs READ COMMITTED and this transaction is {isolation[0]!r}: the post-lock "
+            f"re-read would return the pre-lock snapshot, so a losing racer would not see {missed}"
+        )
+
+
 def _lock_trial(conn: psycopg.Connection[tuple], strategy_id: str, strategy_version: str) -> None:
     """Serialise freeze, access and supersession for one trial. See ``_LOCK_TRIAL``."""
     conn.execute(_LOCK_TRIAL, {"trial": f"{strategy_id}/{strategy_version}"})
@@ -1469,13 +1518,7 @@ def supersede_preregistration(
     regresses to the race it exists to close, so the isolation level is checked
     rather than assumed.
     """
-    isolation = conn.execute("SELECT current_setting('transaction_isolation')").fetchone()
-    if isolation is not None and str(isolation[0]).lower() != "read committed":
-        raise RuntimeError(
-            f"supersede_preregistration needs READ COMMITTED and this transaction is {isolation[0]!r}: the "
-            "post-lock re-read would return the pre-lock snapshot, so a losing racer would not see the "
-            "supersession that beat it"
-        )
+    _require_read_committed(conn, "supersede_preregistration", "the supersession that beat it")
 
     _lock_trial(conn, successor.strategy_id, successor.strategy_version)
 
@@ -1610,6 +1653,28 @@ def _record_access_with_declaration(
     refuses, so an UNDECLARED look is refused exactly as before. The only
     behaviour that moves is the racing one, and it moves toward the truth.
     """
+    # ⚠⚠ The docstring above argues that "a supersession first makes this
+    # re-read and authorise against the new revision" — and that is only true
+    # under READ COMMITTED (#3189 finding 11). `supersede_preregistration` has
+    # enforced this since it was written; this door, which relies on the same
+    # re-read, did not. Under `REPEATABLE READ` the load below returns the
+    # pre-lock snapshot, so a supersession or a freeze that committed while we
+    # waited for the lock is invisible: the access would be authorised against
+    # a superseded declaration, or refused `preregistration_not_frozen` for a
+    # trial that demonstrably has one — the exact audit row #2617 moved this
+    # check under the lock to stop producing.
+    #
+    # ⚠ BEFORE the lock, deliberately (review NITPICK). Checking after would
+    # read the same value: Postgres refuses `SET TRANSACTION ISOLATION LEVEL`
+    # once a transaction has issued a query — verified, not assumed
+    # (`ActiveSqlTransaction: SET TRANSACTION ISOLATION LEVEL must be called
+    # before any query`) — so the level cannot move while we wait. Checking
+    # first means an unusable isolation costs no lock wait.
+    _require_read_committed(
+        conn,
+        "require_outcome_access",
+        "a declaration frozen or superseded while it waited for the lock",
+    )
     _lock_trial(conn, access.strategy_id, access.strategy_version)
     frozen = _refuse_incoherent_declaration(conn, access)
     if require_declaration and frozen is None:
@@ -2593,6 +2658,9 @@ __all__ = [
     "read_walk_forward_folds",
     "record_holdout_access",
     "require_outcome_access",
+    # #3189 finding 12 — public, imported by `scripts/evaluate_2582_schedule13d_outcomes.py`
+    # and by two test modules, and omitted here since it was added.
+    "require_outcome_access_with_declaration",
     "store_holdout_arm_pair",
     "store_holdout_result",
     "store_in_sample_arm_pair",
