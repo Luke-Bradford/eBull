@@ -799,6 +799,39 @@ _RESERVED_EXECUTOR_LANES: Final[tuple[str, ...]] = (
 #: non-reserved job shares.
 _DEFAULT_EXECUTOR_MAX_WORKERS: Final[int] = 10
 
+#: The producers whose freshness bounds gate a core submission, held off the general
+#: lane so unrelated work cannot starve them.  ``decide_core_preflight`` refuses on
+#: exactly three ages -- ``CORE_MAX_QUOTE_AGE_SECONDS`` (the two quote producers) and
+#: ``CORE_MAX_HALT_FEED_AGE_SECONDS`` (the halt feed) -- so membership here is that
+#: refusal surface, not a data-source family.
+#:
+#: ⚠ The lane's VALUE is still ``quote_observation_reserved``.  It is an in-process
+#: semaphore key and an APScheduler executor alias, and renaming it would churn a
+#: shared symbol for no behavioural gain; this frozenset carries the meaning instead.
+#:
+#: #3159 added ``strategy_halt_feed_refresh``, on the same argument #3118 made for
+#: ``core_candidate_quote_refresh`` and the same measurement that motivated it.  It is
+#: a 5-minutely producer whose own body takes 0.50 s on average (291 successes, 7 d)
+#: and whose bound tolerates NO lost fire -- yet on the general lane it shared ONE
+#: permit with 49 other jobs including ``sec_filing_documents_ingest`` (127 runs/7 d,
+#: mean 346 s, max 1,989 s) and ``ownership_observations_backfill`` (4,181 s).  Because
+#: ``_job_execution_slot``'s fallback acquire is an UNBOUNDED block that still owns the
+#: fire's executor thread and its APScheduler instance slot, a parked fire suppressed
+#: its own successors with ``max_instances_active``: 119 such skips in 7 days, 105 of
+#: them (88%) spanned by a concurrent general-lane run, driving in-session gaps to
+#: 1,572 s against a 450 s bound.  Reproduce both figures with::
+#:
+#:     scripts/measure_3159_halt_feed_lane.py
+#:
+#: ⚠ This does not make the wait impossible, it bounds it.  The lane's worst measured
+#: occupant is ``quotes_refresh`` at 85 s (122 runs, 7 d), against 150 s of slack above
+#: one cadence period (450 - 300).  ``test_the_quote_lane_cannot_starve_the_halt_feed``
+#: pins that relationship so a slower lane member fails a test rather than silently
+#: re-opening the halt gate.
+_CORE_PREFLIGHT_FRESHNESS_PRODUCERS: Final[frozenset[str]] = frozenset(
+    {JOB_QUOTES_REFRESH, JOB_CORE_CANDIDATE_QUOTE_REFRESH, JOB_STRATEGY_HALT_FEED_REFRESH}
+)
+
 
 def execution_lane_for(job_name: str) -> str:
     """Return the execution lane *job_name* runs on.
@@ -806,7 +839,8 @@ def execution_lane_for(job_name: str) -> str:
     Single source of truth for both admission layers: the connection-budget
     semaphore (``_job_execution_slot``) and the APScheduler executor a recurring
     fire is dispatched to (``_scheduler_executor_alias``).  Precedence is
-    SEC-source first, then the two reserved job names, then general.
+    SEC-source first, then the paper reservation, then
+    ``_CORE_PREFLIGHT_FRESHNESS_PRODUCERS``, then general.
     """
     try:
         source = source_for(job_name)
@@ -820,7 +854,7 @@ def execution_lane_for(job_name: str) -> str:
         return EXECUTION_LANE_SEC
     if job_name == JOB_STRATEGY_PAPER_CYCLE:
         return EXECUTION_LANE_PAPER
-    if job_name in (JOB_QUOTES_REFRESH, JOB_CORE_CANDIDATE_QUOTE_REFRESH):
+    if job_name in _CORE_PREFLIGHT_FRESHNESS_PRODUCERS:
         # #3118 — the five-minute core producer joins the quote lane rather than
         # taking one of its own.  Measured on dev 2026-09-16: the connection budget
         # has ZERO headroom (usable 27, demand 27), so a new lane would add

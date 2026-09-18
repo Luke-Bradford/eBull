@@ -2238,13 +2238,21 @@ class TestReservedLaneSchedulerExecutors:
         from app.workers.scheduler import (
             JOB_CORE_CANDIDATE_QUOTE_REFRESH,
             JOB_QUOTES_REFRESH,
+            JOB_STRATEGY_HALT_FEED_REFRESH,
             JOB_STRATEGY_PAPER_CYCLE,
             SCHEDULED_JOBS,
         )
 
         expected = {
             runtime.EXECUTION_LANE_PAPER: {JOB_STRATEGY_PAPER_CYCLE},
-            runtime.EXECUTION_LANE_QUOTE: {JOB_QUOTES_REFRESH, JOB_CORE_CANDIDATE_QUOTE_REFRESH},
+            runtime.EXECUTION_LANE_QUOTE: {
+                JOB_QUOTES_REFRESH,
+                JOB_CORE_CANDIDATE_QUOTE_REFRESH,
+                # #3159 — the third core-preflight freshness producer. Reviewed against
+                # PERMITS (unchanged at 1) and the connection budget (unchanged, because
+                # membership costs a dispatch thread and not a permit).
+                JOB_STRATEGY_HALT_FEED_REFRESH,
+            },
         }
         assert set(expected) == set(runtime._RESERVED_EXECUTOR_LANES), (
             "a reserved lane was added or removed without updating this allow list"
@@ -2270,6 +2278,56 @@ class TestReservedLaneSchedulerExecutors:
         # ⚠ And it did NOT buy that by taking the hourly job's reservation.
         assert runtime.execution_lane_for(JOB_QUOTES_REFRESH) == runtime.EXECUTION_LANE_QUOTE
         assert runtime.EXECUTION_LANE_PERMITS[runtime.EXECUTION_LANE_QUOTE] == 1
+
+    def test_the_halt_feed_producer_is_on_the_reserved_lane(self) -> None:
+        """#3159 — the halt feed is a core-preflight freshness producer like the quotes.
+
+        On the general lane its fire shared ONE permit with 49 other jobs, including
+        ``sec_filing_documents_ingest`` (mean 346 s, max 1,989 s over 7 days) and a
+        4,181 s ownership backfill.  ``_job_execution_slot``'s fallback acquire is an
+        unbounded block that still owns the fire's executor thread and its APScheduler
+        instance slot, so a parked fire suppressed its own successors with
+        ``max_instances_active`` — 119 times in 7 days, 105 of them spanned by a
+        concurrent general-lane run — and drove in-session feed age to 1,560 s against
+        a 450 s bound.  Reproduce with ``scripts/measure_3159_halt_feed_lane.py``.
+        """
+        from app.workers.scheduler import JOB_STRATEGY_HALT_FEED_REFRESH
+
+        assert runtime.execution_lane_for(JOB_STRATEGY_HALT_FEED_REFRESH) == runtime.EXECUTION_LANE_QUOTE
+        assert runtime._scheduler_executor_alias(JOB_STRATEGY_HALT_FEED_REFRESH) == runtime.EXECUTION_LANE_QUOTE
+        assert JOB_STRATEGY_HALT_FEED_REFRESH in runtime._CORE_PREFLIGHT_FRESHNESS_PRODUCERS
+
+    def test_the_halt_feed_bound_still_leaves_slack_for_one_lane_peer(self) -> None:
+        """The lane move BOUNDS the wait; it does not remove it.
+
+        Permits stay at 1, so a halt-feed fire that collides with a lane peer waits for
+        that peer's whole body before its own 0.50 s run.  The budget for that wait is
+        the slack between the bound and one cadence period, and the fix is only sound
+        while the slack exceeds the peer's runtime (worst measured: ``quotes_refresh``
+        at 85 s against 150 s of slack — ``scripts/measure_3159_halt_feed_lane.py``).
+
+        ⚠ This asserts the DERIVATION, not the peer's runtime, which no constant
+        declares.  Inputs that fail it: re-cadencing the job to at or above its bound,
+        lowering ``CORE_MAX_HALT_FEED_AGE_SECONDS`` below one period, or raising the
+        lane's permits so two bodies contend for the connection budget this lane was
+        sized against.  A peer that merely becomes SLOWER is caught by the measurement
+        script, not here, and that is stated rather than papered over.
+        """
+        from app.services.strategy_core_preflight import CORE_MAX_HALT_FEED_AGE_SECONDS
+        from app.workers.scheduler import JOB_STRATEGY_HALT_FEED_REFRESH, SCHEDULED_JOBS
+
+        job = next(j for j in SCHEDULED_JOBS if j.name == JOB_STRATEGY_HALT_FEED_REFRESH)
+        assert job.cadence.interval_minutes is not None
+        period_seconds = job.cadence.interval_minutes * 60
+        slack = CORE_MAX_HALT_FEED_AGE_SECONDS - period_seconds
+        assert slack > 0, (
+            f"the halt-feed bound ({CORE_MAX_HALT_FEED_AGE_SECONDS}s) is not above one cadence "
+            f"period ({period_seconds}s), so a healthy feed refuses in the tail of every cycle"
+        )
+        assert runtime.EXECUTION_LANE_PERMITS[runtime.EXECUTION_LANE_QUOTE] == 1, (
+            "the lane move assumed members SERIALISE on one permit; raising permits changes "
+            "the connection budget and must be reviewed against it (dev: usable 27, demand 27)"
+        )
 
     def test_the_core_quote_grace_cannot_reach_the_next_fire(self) -> None:
         """DERIVED from the interval, so a re-cadence cannot leave it overlapping.

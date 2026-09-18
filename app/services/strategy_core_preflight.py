@@ -172,6 +172,15 @@ CORE_MAX_QUOTE_AGE_SECONDS: Final = _freshness_bound(300, tolerated_missed_fires
 #: which is the opposite direction of harm from tightening a quote bound, and wants
 #: its own evidence and its own ticket.  Recorded rather than folded in.
 #:
+#: ⚠⚠ That ticket was #3159, and it left this constant BYTE-IDENTICAL on purpose.
+#: The gaps were a PRODUCER defect, not a bound defect: ``strategy_halt_feed_refresh``
+#: sat on the general execution lane sharing one permit with 49 other jobs, so a fire
+#: parked on an unbounded semaphore acquire and suppressed its own successors.  The
+#: fix moved the producer to the reserved lane (``_CORE_PREFLIGHT_FRESHNESS_PRODUCERS``);
+#: widening the halt gate was rejected, because a wider gate admits a trade this bound
+#: exists to refuse.  Reproduce the before/after with
+#: ``scripts/measure_3159_halt_feed_lane.py``.
+#:
 #: ⚠ Only meaningful INSIDE an open session, which is why the session check
 #: precedes it.  That job carries ``prerequisite=_strategy_halt_collection_due``
 #: and runs only from 09:00 ET to the close plus 15 minutes; outside that window
