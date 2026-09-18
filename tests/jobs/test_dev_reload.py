@@ -263,6 +263,40 @@ def test_live_job_fails_open_when_the_database_is_unreachable(monkeypatch: pytes
     assert dev_reload.live_job() is None
 
 
+def test_a_failed_probe_says_so_at_a_level_the_daemon_actually_logs(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fail-open must leave a record (#2274).
+
+    The daemon runs at INFO, so a DEBUG line is not written anywhere. That
+    made a failed probe and a genuinely idle queue produce identical
+    evidence — both are the *absence* of a DEFERRING line — and a reap that
+    followed could not be attributed to either.
+
+    Asserted on the level and on the consequence being named, not on the
+    whole sentence: the point is that an operator reading the log at INFO
+    sees that deferral was off, so a wording tweak must not fail this and a
+    drop back to DEBUG must.
+    """
+    import psycopg
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(psycopg, "connect", _boom)
+    with caplog.at_level(logging.INFO, logger=dev_reload.logger.name):
+        assert dev_reload.live_job() is None
+
+    probe_records = [r for r in caplog.records if "live-job probe failed" in r.getMessage()]
+    assert len(probe_records) == 1, "the failed probe must report itself exactly once per call"
+    (record,) = probe_records
+    assert record.levelno >= logging.WARNING, (
+        f"logged at {record.levelname}; the daemon runs at INFO, so anything below WARNING is silence"
+    )
+    assert "deferral is OFF" in record.getMessage(), "the log must name the consequence, not just the failure"
+    assert record.exc_info is not None, "the cause is the whole point of recording it"
+
+
 def test_live_job_names_the_blocking_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """'reload deferred' with no subject is a message an operator learns to
     ignore, so the blocker identifies itself."""
