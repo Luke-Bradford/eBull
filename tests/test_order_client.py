@@ -2501,3 +2501,27 @@ class TestContainedPollErrorsAreNotSilent:
 
         assert "poll_error" not in _PARKING_POLL_VERDICTS
         assert "lock_busy" not in _PARKING_POLL_VERDICTS
+
+    def test_an_identity_mismatch_is_an_error_not_an_outcome(self) -> None:
+        """#3189 finding 4 (Codex checkpoint 2). A broker answering about a
+        different order is work the job COULD NOT DO. On the outcome axis a run
+        in which every lookup broke the identity contract and resolved nothing
+        would still record ``success``.
+
+        ⚠ This asserts the SCHEDULER's own tuple, not a restatement of it — the
+        job body needs credentials, a broker and a database, so the constant is
+        named at module scope precisely so the wiring is reachable from here.
+        """
+        from app.services.job_progress import JobProgress, degradation_reason
+        from app.workers.scheduler import RECONCILE_ERROR_VERDICTS
+
+        assert "identity_mismatch" in RECONCILE_ERROR_VERDICTS
+        assert "poll_error" in RECONCILE_ERROR_VERDICTS
+        assert degradation_reason(JobProgress(candidates_seen=1, errors={"identity_mismatch": 1})) is not None
+
+    def test_an_identity_mismatch_is_never_parked(self) -> None:
+        """A wrong answer is a statement about the ANSWER. Parking it would stop
+        the poller re-asking once the broker started answering correctly."""
+        from app.services.order_client import _PARKING_POLL_VERDICTS
+
+        assert "identity_mismatch" not in _PARKING_POLL_VERDICTS

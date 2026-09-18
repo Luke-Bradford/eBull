@@ -2361,6 +2361,7 @@ PendingOrderVerdict = Literal[
     "not_found",
     "lookup_error",
     "unsafe_status",
+    "identity_mismatch",
     "ref_not_pollable",
     "lock_busy",
     "no_longer_pending",
@@ -2382,8 +2383,9 @@ _FILLED_NOT_BOOKED: Final[PendingOrderVerdict] = "filled_not_booked"
 #: change the answer. Parking them is what stops an unresolvable order polling
 #: the broker hourly for ever (PR #3168 WARNING). Deliberately NOT here:
 #: ``not_found`` and ``lookup_error`` (a transport failure is not a fact about
-#: the order) and ``unsafe_status`` (an unsettled partial fill can still
-#: progress to Filled). ⚠ Parked is not resolved — see ``sql/395``.
+#: the order), ``unsafe_status`` (an unsettled partial fill can still progress
+#: to Filled) and ``identity_mismatch`` (a statement about the ANSWER, not about
+#: the row — #3189 finding 4). ⚠ Parked is not resolved — see ``sql/395``.
 #: ⚠ ``poll_error`` and ``lock_busy`` are deliberately absent for the same
 #: reason: both are statements about THIS attempt, not about the row (#3189).
 _PARKING_POLL_VERDICTS: dict[str, str] = {
@@ -2891,6 +2893,50 @@ def _poll_one_pending_order(
                 exc,
             )
             return PendingOrderPollResult(order_id, recommendation_id, "lookup_error")
+
+        # ⚠⚠ THE RESPONSE MUST DESCRIBE THE ORDER WE ASKED ABOUT (#3189
+        # finding 4). Nothing in the classification below reads the identity of
+        # what came back, so a wrong or ambiguous broker answer resolves
+        # whichever local row happened to be polled — terminalising or parking
+        # an order on a status that belongs to a different one.
+        #
+        # The same contradiction is already refused one subsystem over, against
+        # the same eToro contract: `strategy_order_reconciliation.py` raises
+        # "broker order instrument differs from durable intent" and "broker
+        # order id differs from the previously reconciled id". This is that
+        # rule carried to the poller, which had neither.
+        #
+        # ⚠ It cannot fire on a well-formed response: `_parse_order_detail`
+        # raises unless `asset.instrumentId` is present and positive, and sets
+        # `broker_order_ref = str(orderId)`. Equality fires only when the broker
+        # genuinely answered about another order.
+        #
+        # ⚠ NOT parked, for the reason `not_found` and `unsafe_status` are not:
+        # it is a statement about the ANSWER, not a permanent property of the
+        # row, and a later correct response must still be readable.
+        #
+        # ⚠⚠ NUMERIC comparison, not textual (Codex checkpoint 2, round 2).
+        # `broker_order_ref` is a TEXT column and the pollability check above
+        # accepts any positive digit string, so a row carrying `"00123"` is
+        # looked up as `orderId=123` and answered with `broker_order_ref="123"`.
+        # A textual compare would call that a mismatch — refusing a response the
+        # broker got exactly right, for ever, and degrading every run while it
+        # did. This is the enumerate-what-a-narrowing-gate-REJECTS rule: the
+        # only rejection wanted here is a DIFFERENT order.
+        returned_ref = detail.broker_order_ref
+        ref_matches = returned_ref.isdigit() and int(returned_ref) == int(ref)
+        if not ref_matches or detail.instrument_id != instrument_id:
+            _stamp_polled(conn, order_id=order_id, now=now)
+            logger.error(
+                "reconcile_pending_recommendation_orders: order_id=%d asked the broker about ref=%s "
+                "instrument_id=%d and was answered about ref=%s instrument_id=%d — nothing advanced",
+                order_id,
+                ref,
+                instrument_id,
+                detail.broker_order_ref,
+                detail.instrument_id,
+            )
+            return PendingOrderPollResult(order_id, recommendation_id, "identity_mismatch", detail.broker_status)
 
         try:
             # The broker status vocabulary is fixed once, in the strategy

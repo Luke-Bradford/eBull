@@ -18,6 +18,7 @@ Own module because the ``db`` marker is module-scoped: one DB test inside
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -520,6 +521,71 @@ def test_an_unsettled_partial_fill_status_never_advances_the_order(
 
     assert [r.verdict for r in results] == ["unsafe_status"]
     assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("broker_order_ref", "99999999"), ("instrument_id", INSTRUMENT_ID + 1)],
+)
+def test_a_response_about_another_order_advances_nothing(
+    ebull_test_conn: psycopg.Connection[tuple], field: str, value: object
+) -> None:
+    """#3189 finding 4 — the response has to describe the order we asked about.
+
+    Nothing in the classification path reads the identity of what came back, so
+    a wrong or ambiguous broker answer would resolve whichever local row
+    happened to be polled. Both halves are parametrised because they fail
+    differently: a wrong ``instrument_id`` books against the wrong company, a
+    wrong ``broker_order_ref`` resolves the wrong order for the right one.
+
+    The verdict deliberately does NOT park — a statement about the answer is
+    not a permanent property of the row, and a later correct response must
+    still be readable. ``Rejected`` is the status used precisely because it is
+    the one that would otherwise release the claim.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
+
+    base = _detail("Rejected")
+    mismatched = replace(base, **{field: value})
+
+    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=mismatched), now=_NOW)
+
+    assert [(r.verdict, r.broker_status) for r in results] == [("identity_mismatch", "Rejected")]
+    row = _order_row(ebull_test_conn, order_id)
+    assert row["status"] == "pending", "the poller acted on a status belonging to another order"
+    assert row["recommendation_last_polled_at"] == _NOW, "an attempt path must still advance the rotation key"
+    assert _rec_status(ebull_test_conn, rec) == "execution_pending"
+    assert _parked_reason(ebull_test_conn, order_id) is None, "a wrong answer is not a fact about the row"
+    assert _audit_count(ebull_test_conn, rec) == 0
+    # The claim is still held: this INSERT must hit the partial index.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _seed_order(ebull_test_conn, recommendation_id=rec)
+    ebull_test_conn.rollback()
+
+
+def test_a_non_canonical_numeric_ref_is_not_an_identity_mismatch(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """What the identity guard must NOT reject (#3189 finding 4, Codex ckpt-2).
+
+    ``broker_order_ref`` is a TEXT column and the pollability check accepts any
+    positive digit string, so a row carrying a leading zero is looked up as the
+    integer and answered with the canonical string. A textual comparison would
+    call that a mismatch — refusing a response the broker got exactly right,
+    for ever, and degrading every run while it did.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, ref=f"000{_REF}")
+
+    results = reconcile_pending_recommendation_orders(
+        ebull_test_conn, broker=_broker(detail=_detail("Rejected")), now=_NOW
+    )
+
+    assert [r.verdict for r in results] == ["terminalised_rejected"]
+    assert _order_row(ebull_test_conn, order_id)["status"] == "rejected"
 
 
 def test_a_strategy_origin_order_is_never_selected(
