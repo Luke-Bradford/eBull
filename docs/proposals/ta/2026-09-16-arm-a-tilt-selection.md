@@ -286,8 +286,42 @@ SELECT d, count(DISTINCT instrument_id) FROM cd GROUP BY d HAVING count(DISTINCT
   prints `evidence_collecting` with `common_dates_observed: 4` and **no** candidate metric.
 - After a fifth such date and the following `00:00Z`, the same command emits the verdict.
 - `uv run pytest tests/test_2833_core_selection_verdict.py tests/test_2834_arm_a_selection_verdict.py`.
+- Once the verdict is transcribed (§10): `uv run pytest tests/test_2834_transcribed_arm_a_verdict.py`.
 
-## 10. Out of scope
+## 10. Result — the verdict opened, and it is `pass`
+
+The fifth common UTC date landed **2026-09-16**, the `completion_rule`'s `00:00Z` seal passed
+on **2026-09-17**, and the payload was transcribed on 2026-09-18T08:54Z at execution commit
+`e1a5bcee`. It is committed verbatim — the verifier's own stdout, byte for byte — at
+**`docs/proposals/ta/2026-09-18-arm-a-tilt-selection-result.json`**, and checked against this
+declaration by `tests/test_2834_transcribed_arm_a_verdict.py`.
+
+```
+outcome "pass" (verdict_mode per_candidate, so every candidate passed on its own refusals)
+window  2026-08-25, 2026-08-26, 2026-09-14, 2026-09-15, 2026-09-16   (23 calendar days, §2's hole)
+
+IUQA.L 15446 quality   p50  5.4157  p75  8.1158 bps  43 rows  PASS
+IUMO.L 15445 momentum  p50  9.4719  p75 14.3284 bps  43 rows  PASS
+R1VL.L 14465 value     p50 19.7502  p75 42.0021 bps  41 rows  PASS
+```
+
+Four things a reader needs with that number, all of them already established above:
+
+- ⚠ **`pass` is a COST-BAR verdict and nothing else** (§ title note). The venue pincer is
+  unchanged: all three are `uk_equity`, `SESSION_SUPPORTED_ASSET_CLASSES` is `{"us_equity"}`,
+  and LSE admission is person-gated on #2312. A tilt sleeve is still not submittable.
+- **R1VL.L clears by 8 bps of a 50 bps bar** — the whole margin of the arm sits in one
+  candidate, and it is the value leg. ⚠ That margin is charged **2× conservatively**: §4.1
+  inherits the FULL round-trip spread against a bar written for a one-off cost. Nothing here
+  re-reads it the friendlier way, and no reader should.
+- **2026-08-26 is the thin date §7 warned about and it consumed a slot without refusing
+  anyone.** It cannot be replaced by a later clean date — `common_dates[:5]` is permanent —
+  so this is the evidence, not a best-of window.
+- **The declaration is POST-HOC and §3 says so.** A `pass` here is a cost measurement with no
+  researcher degree of freedom left, not a preregistered result, and it charges no
+  trial-register budget.
+
+## 11. Out of scope
 
 ARM B (blocked on the vectorized weighting prototype), #2833's verdict, the
 `strategy_core_quote_observations` writer, any broker mutation, any capital allocation.
