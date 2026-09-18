@@ -114,6 +114,42 @@ DIRECT_ARM_RATIOS_SQL = """
     GROUP BY 1 ORDER BY 2 DESC
 """
 
+#: Part 1b — REACHABILITY, added for #2414 item (1).  A stale stored fill is only a
+#: wrong NUMBER if something reads it, and the answer differs by ``signal_kind``:
+#:
+#:   * ENTRY rows reach ``select_pending_fills`` (``outcome_ledger.py:241``) and
+#:     ``strategy_live_gate.py:436``, both of which filter ``signal_kind = 'entry'``.
+#:     The resolver refuses a superseded one (``fill_price_superseded``, sql/396).
+#:   * EXIT rows have no resolver path at all — but they ARE operator-visible.
+#:     ``app/api/strategies.py:3003`` selects ``s.fill_price`` and its WHERE is
+#:     ``verdict='fired' AND strategy_version = ANY(...)`` with **no signal_kind
+#:     filter**, and ``frontend/src/pages/StrategiesPage.tsx:937`` renders it.
+#:
+#: ⚠⚠ So "the exit side is inert" is TRUE only while no stale row sits at a version
+#: that endpoint renders, which is a property of the DATA and not of the code. That
+#: is the objective trigger, and this arm is what observes it: the moment
+#: ``stale_and_rendered`` goes non-zero, an operator is reading a price the corpus no
+#: longer holds. Measured 2026-09-18: entry 88 stale / 0 rendered, exit 133 / 0 —
+#: reproduced by THIS script (``python -m scripts.census_2414_decided_bar_revisions``),
+#: which is why the figure is written here and nowhere a reader would trust it more.
+#:
+#: ⚠ ``strategy_version`` is bound as a parameter, not interpolated: the version list
+#: comes from application code, so it is DATA as far as this query is concerned and
+#: the ``LiteralString`` guard above must keep meaning what it says.
+DIRECT_ARM_REACHABILITY_SQL = """
+    SELECT s.signal_kind,
+           COUNT(*)                                                             AS fired,
+           COUNT(*) FILTER (WHERE p.open IS NOT NULL AND p.open <> s.fill_price) AS stale,
+           COUNT(*) FILTER (WHERE p.open IS NOT NULL AND p.open <> s.fill_price
+                             AND s.strategy_version = ANY(%(versions)s))         AS stale_and_rendered
+    FROM strategy_signals s
+    LEFT JOIN price_daily p
+      ON p.instrument_id = s.instrument_id AND p.price_date = s.fill_bar_date
+    WHERE s.verdict = 'fired'
+    GROUP BY 1
+    ORDER BY 1
+"""
+
 DIRECT_ARM_SPAN_SQL = """
     SELECT MIN(s.signal_bar_date), MAX(s.signal_bar_date),
            MIN(s.created_at)::date, MAX(s.created_at)::date
@@ -281,6 +317,34 @@ def _report_direct_arm(cur: psycopg.Cursor) -> None:
     print("  corporate action; a few basis points is a late provider correction:")
     for ratio, n, insts in cur.execute(DIRECT_ARM_RATIOS_SQL).fetchall():
         print(f"    {str(ratio):>12}  {n:>6,} signal(s)  {insts:>4} instrument(s)")
+
+    _report_reachability(cur)
+
+
+def _report_reachability(cur: psycopg.Cursor) -> None:
+    """Who can actually READ a stale stored fill — #2414 item (1).
+
+    Split by ``signal_kind``, because the two sides have different consumers and
+    only one of them has a refusal. ``stale_and_rendered`` is the number that
+    matters: a stale row at a superseded ``strategy_version`` is unreachable, and
+    one at a live version is an operator reading a price the corpus no longer holds.
+    """
+    # Imported here, not at module scope: the arm is a reachability question about
+    # one endpoint, and the script's other arms must stay runnable if the API module
+    # ever grows an import this script does not need.
+    from app.api.strategies import _current_scan_versions
+
+    versions = list(_current_scan_versions().values())
+    print("\n  REACHABILITY by signal_kind (#2414 item 1). 'rendered' = sits at a")
+    print("  strategy_version the operator-visible signals endpoint returns")
+    print("  (app/api/strategies.py:3003 — WHERE has NO signal_kind filter):")
+    print(f"    scan versions in the filter: {len(versions)}")
+    print(f"    {'kind':<8} {'fired':>9} {'stale':>7} {'stale & RENDERED':>18}")
+    for kind, fired_n, stale_n, rendered in cur.execute(DIRECT_ARM_REACHABILITY_SQL, {"versions": versions}).fetchall():
+        flag = "  ⚠⚠ OPERATOR-VISIBLE" if rendered else ""
+        print(f"    {kind:<8} {fired_n:>9,} {stale_n:>7,} {rendered:>18,}{flag}")
+    print("    ⚠ entry-side staleness is refused by fill_price_superseded (sql/396);")
+    print("      the exit side has no resolver path, so 'rendered' is its only guard.")
 
 
 def _report_audit_source(
