@@ -2860,21 +2860,33 @@ def _poll_one_pending_order(
         # "rejected broker order unexpectedly has position executions". This is
         # that rule, carried to the poller, which had the unsafe half.
         #
-        # ⚠ `unsafe_status` rather than a new verdict: its meaning is already
-        # "never advance the order on a status we cannot read", and it is
-        # deliberately NOT in `_PARKING_POLL_VERDICTS`, so the poller keeps
-        # re-asking while the broker settles the partial. Parking it would
-        # freeze a live order at exactly the moment it is mid-fill.
+        # ⚠⚠ It resolves to `filled_not_booked`, and stamping alone is NOT
+        # enough (Codex checkpoint 2, P1). A bare `_stamp_polled` leaves the row
+        # selectable, so the contradiction spends a broker read every hour —
+        # and, worse, a LATER `Rejected` that omitted the executions would reach
+        # `_terminalise_rejected_order` and release the claim despite the
+        # earlier proof of an economic execution. The observation has to be
+        # durable, not just this attempt.
+        #
+        # `_record_unbooked_fill` is that mechanism and it already exists:
+        # it parks (`sql/395`), which removes the row from
+        # `_POLLABLE_ORDER_PREDICATE` so a later omission can never terminalise
+        # it; it deliberately leaves `status='pending'`, so the claim stays
+        # held; and it writes a `decision_audit` row naming the broker status,
+        # which is what keeps the trade path auditable. Reusing it also means
+        # the executions are not the only record that something happened.
+        #
+        # The verdict is the honest one: positions exist and we have not booked
+        # them, whatever word the status carried.
         if verdict == "terminalised_rejected" and detail.position_executions:
-            _stamp_polled(conn, order_id=order_id, now=now)
             logger.error(
                 "reconcile_pending_recommendation_orders: order_id=%d broker_status=%r is rejected but carries "
-                "%d position execution(s); claim stays held and the order is NOT terminalised",
+                "%d position execution(s); parking with the claim held rather than terminalising",
                 order_id,
                 detail.broker_status,
                 len(detail.position_executions),
             )
-            return PendingOrderPollResult(order_id, recommendation_id, "unsafe_status", detail.broker_status)
+            verdict = "filled_not_booked"
 
         if verdict == "terminalised_rejected":
             _terminalise_rejected_order(

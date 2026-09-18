@@ -140,6 +140,12 @@ def _order_row(conn: psycopg.Connection[Any], order_id: int) -> dict[str, Any]:
     return row
 
 
+def _parked_reason(conn: psycopg.Connection[Any], order_id: int) -> str | None:
+    row = conn.execute("SELECT recommendation_poll_parked_reason FROM orders WHERE order_id=%s", (order_id,)).fetchone()
+    assert row is not None
+    return None if row[0] is None else str(row[0])
+
+
 def _rec_status(conn: psycopg.Connection[Any], recommendation_id: int) -> str:
     row = conn.execute(
         "SELECT status FROM trade_recommendations WHERE recommendation_id=%s", (recommendation_id,)
@@ -227,16 +233,24 @@ def test_a_rejected_status_carrying_executions_keeps_the_claim(
 
     results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=contradictory), now=_NOW)
 
-    assert [(r.verdict, r.broker_status) for r in results] == [("unsafe_status", "Rejected")]
+    assert [(r.verdict, r.broker_status) for r in results] == [("filled_not_booked", "Rejected")]
     row = _order_row(ebull_test_conn, order_id)
     assert row["status"] == "pending", "the order was terminalised on the status word alone"
     assert row["recommendation_last_polled_at"] == _NOW
     assert _rec_status(ebull_test_conn, rec) == "execution_pending"
-    assert _audit_count(ebull_test_conn, rec) == 0
+    # The observation is DURABLE, not just this attempt: parked, so a later
+    # `Rejected` that omitted the executions can never reach terminalisation.
+    assert _parked_reason(ebull_test_conn, order_id) == "filled_unbooked"
+    assert _audit_count(ebull_test_conn, rec) == 1, "the contradiction left no auditable record"
     # The claim really is still held: this INSERT must hit the partial index.
     with pytest.raises(psycopg.errors.UniqueViolation):
         _seed_order(ebull_test_conn, recommendation_id=rec)
     ebull_test_conn.rollback()
+
+    # And it is no longer selectable, so the contradiction cannot burn a broker
+    # read every hour.
+    assert reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=_detail("Rejected"))) == ()
+    assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
 
 
 @pytest.mark.parametrize("broker_status", ["Rejected", "Failed", "Cancelled", "Canceled", "Expired"])
