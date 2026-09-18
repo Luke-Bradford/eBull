@@ -4111,7 +4111,7 @@ class _RestatementCandidate:
     edgar_url: str | None
 
 
-def _restatement_sort_key(c: _RestatementCandidate) -> tuple[date, Decimal, str, str]:
+def _restatement_sort_key(c: _RestatementCandidate) -> tuple[date, Decimal, str, SourceTag]:
     """Which of an owner's 13D/G filings the overlay publishes. Largest first under
     ``max`` / ``reverse=True``; total over the fields a :class:`DroppedSource` has.
 
