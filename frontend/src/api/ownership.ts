@@ -42,7 +42,12 @@ export type OwnershipSliceCategory =
   | "etfs"
   | "def14a_unmatched"
   | "funds"
-  | "esop";
+  | "esop"
+  // #2215 memo overlay. A >5% 13D/G filer who also files Form 3/4, DEF 14A or a
+  // 13F loses the cross-channel MAX and is rendered under THAT category, which
+  // made the ``blockholders`` wedge simply absent — indistinguishable from "no
+  // 13D/G filer holds >5%".
+  | "blockholders_restated";
 
 /**
  * Tags whether a slice contributes to the pie wedges that sum to
@@ -58,11 +63,16 @@ export type OwnershipSliceCategory =
  *     multiple owners (control groups, parent/sub, spouse attribution,
  *     "all officers as a group"); overlapping, not additive. The real
  *     holders are already counted via 13D/G, 13F, Form 4.
+ *   * ``cross_channel_restatement`` (#2215) — shares a PIE-WEDGE slice of this
+ *     same rollup already counts once, restated under the channel that lost the
+ *     Rule 13d-3 cross-channel MAX. Unlike ``proxy_disclosure`` the owner IS
+ *     matched and IS rendered; the overlay says WHERE.
  */
 export type OwnershipDenominatorBasis =
   | "pie_wedge"
   | "institution_subset"
-  | "proxy_disclosure";
+  | "proxy_disclosure"
+  | "cross_channel_restatement";
 
 export type OwnershipCoverageState =
   | "no_data"

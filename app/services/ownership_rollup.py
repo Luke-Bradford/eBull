@@ -66,7 +66,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-SliceCategory = Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"]
+SliceCategory = Literal[
+    "insiders",
+    "blockholders",
+    "institutions",
+    "etfs",
+    "def14a_unmatched",
+    "funds",
+    "esop",
+    # #2215. NOT a seventh kind of holder: the 13D/G channel of an owner whose
+    # cross-channel MAX was won by another source, so their >5% beneficial
+    # position is rendered under ``insiders`` / ``institutions`` / ``etfs``
+    # instead. Without it the ``blockholders`` category is simply absent, and
+    # "no 13D/G filer holds >5%" is indistinguishable from "one does, but their
+    # 13F won the dedup" — opposite conclusions from an identical rendering.
+    "blockholders_restated",
+]
 SourceTag = Literal["form4", "form3", "13d", "13g", "def14a", "13f", "nport"]
 CoverageState = Literal["no_data", "red", "unknown_universe", "amber", "green"]
 
@@ -92,7 +107,19 @@ CoverageState = Literal["no_data", "red", "unknown_universe", "amber", "green"]
 #     NOT additive. The real holders are already counted + de-duplicated
 #     via 13D/G, 13F, Form 4; the proxy is a cross-check, not a wedge
 #     (reverses #1627's additive treatment — see data-engineer I14/I16).
-DenominatorBasis = Literal["pie_wedge", "institution_subset", "proxy_disclosure"]
+DenominatorBasis = Literal[
+    "pie_wedge",
+    "institution_subset",
+    "proxy_disclosure",
+    # #2215. The slice restates shares that a PIE-WEDGE slice of this same
+    # rollup already counts once, under the channel that lost the Rule 13d-3
+    # cross-channel MAX in :func:`_reconcile_owner_once`. Distinct from
+    # ``institution_subset`` (finer-grained detail INSIDE one slice's aggregate)
+    # and from ``proxy_disclosure`` (a separate Item 403 disclosure of holders
+    # we could not match): here the owner IS matched and IS rendered — just in
+    # another category.
+    "cross_channel_restatement",
+]
 
 # Why an ``OwnershipRollup.no_data`` payload carries no usable denominator.
 # ``absent`` — no shares-outstanding row on file at all.
@@ -2056,6 +2083,11 @@ _SLICE_LABELS: dict[SliceCategory, str] = {
     "def14a_unmatched": "Proxy-only (DEF 14A)",
     "funds": "Mutual funds (N-PORT)",
     "esop": "Employee benefit plans (ESOP)",
+    # #2215. Named for WHY it is separate, following ``def14a_unmatched``:
+    # these >5% filings are counted, just not here. "(counted elsewhere)" is the
+    # whole point of the row — a label like "Blockholders (memo)" would read as
+    # a second, uncounted stake.
+    "blockholders_restated": "Blockholders counted elsewhere (13D/G)",
 }
 
 
@@ -3788,6 +3820,23 @@ def _bucket_into_slices(
             continue
         _add(_build_slice(category, holders, outstanding))
 
+    # #2215. Every slice appended so far is a pie wedge, and that is the exact
+    # scope the restatement overlay needs (see the function docstring). Filter on
+    # the basis anyway rather than on position, so inserting a memo overlay above
+    # this line cannot silently widen it.
+    restated = _blockholder_restatement_holders(
+        [s for s in slices if s.denominator_basis == "pie_wedge"]
+    )
+    if restated:
+        _add(
+            _build_slice(
+                "blockholders_restated",
+                restated,
+                outstanding,
+                denominator_basis="cross_channel_restatement",
+            )
+        )
+
     if unmatched_def14a:
         unmatched_holders = [
             Holder(
@@ -3961,6 +4010,78 @@ def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
                 merged_dropped.append(d)
         out.append(replace(primary, shares=total, lots=lots, dropped_sources=tuple(merged_dropped)))
     return out
+
+
+#: The two ``SourceTag`` values whose owners land in the ``blockholders`` slice.
+_BLOCKHOLDER_SOURCES: frozenset[SourceTag] = frozenset({"13d", "13g"})
+
+
+def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[Holder]:
+    """The 13D/G channels that :func:`_reconcile_owner_once` folded elsewhere (#2215).
+
+    A >5% beneficial owner who ALSO files Form 3/4, DEF 14A or a 13F loses the
+    Rule 13d-3 cross-channel MAX and is classified into that other category, so
+    their 13D/G figure survives only as a :class:`DroppedSource` on the winning
+    row and the ``blockholders`` category is omitted from ``slices`` entirely.
+    An operator then cannot distinguish *"no 13D/G filer holds >5%"* from
+    *"one does, but their 13F won the dedup"*. This returns one holder per such
+    owner so the absence becomes legible as a non-additive memo overlay.
+
+    **The arithmetic is not touched.** These shares are already counted once,
+    under the winning channel, in a pie wedge; the overlay carries
+    ``denominator_basis="cross_channel_restatement"`` so every additive path
+    (residual, concentration, :class:`SanityChecks`,
+    :func:`count_additive_institutional_holders`, the CSV sum invariant) filters
+    it out — they all branch on the basis, not on a category list.
+
+    ⚠ ``blockholders`` itself is EXCLUDED from the scan. An owner inside that
+    wedge can also carry a dropped ``13d``/``13g`` entry, but that is a
+    within-channel supersession (:func:`_dedup_by_priority` collapsing a 13G
+    behind the same owner's 13D) which the surviving blockholder row already
+    represents. Including it would show one stake twice in one panel.
+
+    ⚠ Where an owner has BOTH a dropped ``13d`` and a dropped ``13g``, the MAX
+    is taken, never the sum: a 13D and a 13G from one filer are overlapping
+    restatements of the same block, not additive holdings (prevention-log
+    "One beneficial owner, counted once — MAX overlapping, SUM additive";
+    #1640/#1889). Summing would double one invisible position.
+
+    ⚠ Every field comes from the DROPPED entry, not from the surviving holder
+    it hung on: a 13G figure stamped with the survivor's 13F accession would be
+    a false provenance link, and the survivor's ``as_of_date`` would corrupt the
+    slice's as-of coherence envelope (#1647 part 1), which is derived from
+    holder as-of dates in :func:`_build_slice`.
+
+    Scanning pie slices is exhaustive rather than convenient:
+    :func:`_reconcile_owner_once` emits only ``insiders`` / ``blockholders`` /
+    ``institutions`` / ``etfs``, all pie wedges, so no dropped 13D/G entry can
+    exist on a memo-overlay holder. It is the same scope
+    :func:`build_rollup_csv`'s ``__dropped:`` loop already uses.
+    """
+    restated: list[Holder] = []
+    for slice_ in pie_slices:
+        if slice_.category == "blockholders":
+            continue
+        for holder in slice_.holders:
+            dropped = [d for d in holder.dropped_sources if d.source in _BLOCKHOLDER_SOURCES]
+            if not dropped:
+                continue
+            best = max(dropped, key=lambda d: d.shares)
+            restated.append(
+                Holder(
+                    filer_cik=holder.filer_cik,
+                    filer_name=holder.filer_name,
+                    shares=best.shares,
+                    pct_outstanding=Decimal(0),  # recomputed by _build_slice
+                    winning_source=best.source,
+                    winning_accession=best.accession_number,
+                    winning_edgar_url=best.edgar_url,
+                    as_of_date=best.as_of_date,
+                    filer_type=None,
+                    dropped_sources=(),  # this row IS the dropped entry
+                )
+            )
+    return restated
 
 
 def _build_slice(
@@ -5556,6 +5677,17 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     before ``__residual__``) rather than moving to the trailing memo
     block — only the category token changed, so a consumer keying on
     the prefix needs no positional rework.
+
+    ⚠ **The folded 13D/G channel appears at TWO granularities (#2215), and
+    neither enters the sum above.** ``__dropped:13d__`` / ``__dropped:13g__``
+    rows are emitted per *dropped filing entry* at that channel's owner
+    subtotal; the ``__memo:blockholders_restated__`` rows are emitted per
+    *owner* at ``max(13d, 13g)`` — the figure the card renders. For an owner
+    with one dropped blockholder channel these are the same number under two
+    prefixes; with both, ``__dropped:`` emits two rows and the memo one.
+    Summing memo rows ACROSS prefixes would therefore double-count. Both are
+    kept because each carries something the other does not: the per-filing
+    audit trail (#1640) and the per-owner card figure (#2215).
 
     Header always emitted so an automation pipe can be branchless on
     empty rollups (no_data state, pre-ingest instruments).

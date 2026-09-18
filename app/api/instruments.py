@@ -4857,7 +4857,18 @@ class _HolderModel(BaseModel):
 
 
 class _SliceModel(BaseModel):
-    category: Literal["insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"]
+    category: Literal[
+        "insiders",
+        "blockholders",
+        "institutions",
+        "etfs",
+        "def14a_unmatched",
+        "funds",
+        "esop",
+        # #2215 memo overlay — the 13D/G channel of an owner rendered under
+        # another category because that channel lost the cross-channel MAX.
+        "blockholders_restated",
+    ]
     label: str
     total_shares: Decimal
     pct_outstanding: Decimal
@@ -4869,7 +4880,12 @@ class _SliceModel(BaseModel):
     # ``proxy_disclosure`` (DEF 14A, #1659 — Rule 13d-3 deemed/overlapping
     # beneficial ownership, not additive) are memo overlays. Frontend filters
     # on this to decide whether to render in the pie vs as a memo panel.
-    denominator_basis: Literal["pie_wedge", "institution_subset", "proxy_disclosure"] = "pie_wedge"
+    # ``cross_channel_restatement`` (#2215) is the third overlay basis: shares a
+    # PIE-WEDGE slice of this same rollup already counts once, restated under the
+    # channel that lost the Rule 13d-3 MAX.
+    denominator_basis: Literal[
+        "pie_wedge", "institution_subset", "proxy_disclosure", "cross_channel_restatement"
+    ] = "pie_wedge"
     # As-of coherence envelope (#1647 part 1). The as-of span of this slice's
     # deduped holders (incl. collapsed-family members) so a machine consumer
     # sees the figure sums across quarters. NULL-as_of-only slice → None/0/False.
@@ -5673,7 +5689,20 @@ def get_instrument_exec_compensation(
 # residual either), not a holders slice. Treated as a valid filter value
 # below: it scopes the CSV to the treasury memo + residual rows only.
 _ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
-    {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"},
+    {
+        "insiders",
+        "blockholders",
+        "institutions",
+        "etfs",
+        "def14a_unmatched",
+        "funds",
+        "esop",
+        # #2215. Must be listed or ``?category=blockholders_restated`` 400s while
+        # those rows sit in the unfiltered export — the same
+        # filter-does-not-know-about-a-category defect prevention-log #1845
+        # records for the DEF 14A fold.
+        "blockholders_restated",
+    },
 )
 _ROLLUP_CSV_CATEGORIES: frozenset[str] = _ROLLUP_CSV_SLICE_CATEGORIES | {"treasury"}
 
