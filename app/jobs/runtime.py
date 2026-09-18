@@ -932,6 +932,7 @@ def _job_execution_slot(job_name: str) -> Iterator[None]:
     lane = execution_lane_for(job_name)
     slots = _EXECUTION_SLOTS_BY_LANE[lane]
 
+    waited_seconds = 0.0
     acquired = slots.acquire(blocking=False)
     if not acquired:
         thread_id = threading.get_ident()
@@ -950,15 +951,37 @@ def _job_execution_slot(job_name: str) -> Iterator[None]:
         finally:
             with _EXECUTION_SLOT_WAITS_LOCK:
                 _EXECUTION_SLOT_WAITS.pop(thread_id, None)
+            waited_seconds = max(0.0, time.monotonic() - wait.started_monotonic)
         logger.info(
             "job %r acquired %s execution capacity after %.3fs",
             job_name,
             lane,
-            time.monotonic() - wait.started_monotonic,
+            waited_seconds,
         )
+    # #3159 clause 2 — publish the wait for the prelude's ``job_runs`` INSERT.
+    #
+    # The reset is what makes ``None`` mean "no slot is held". APScheduler's
+    # ThreadPoolExecutor reuses worker threads and a ContextVar's value lives in
+    # the thread's top-level context, so without the reset every read taken on
+    # that thread AFTER this fire returns the previous fire's figure — and the
+    # column's NULL, which reports its own coverage, would be unreachable for any
+    # reader outside a slot. Pinned by
+    # ``test_an_immediate_admission_publishes_a_zero_wait_not_none``.
+    #
+    # ⚠ It is NOT what stops one fire's wait being attributed to the next fire on
+    # the same thread: the ``set`` below is unconditional, so a later slot entry
+    # always overwrites. Revert-probed — deleting the reset fails the assertion
+    # above and does NOT fail the leak test, which the first version of this
+    # comment claimed it would.
+    #
+    # Token-based reset (rather than ``set(None)``) matches the idiom
+    # ``_run_scheduled_body`` already uses for ``_params_snapshot_var`` and keeps
+    # a nested slot entry from clearing its caller's value.
+    wait_token = _execution_slot_wait_seconds.set(waited_seconds)
     try:
         yield
     finally:
+        _execution_slot_wait_seconds.reset(wait_token)
         if acquired:
             slots.release()
 
@@ -1235,6 +1258,17 @@ _invoker_request_context: contextvars.ContextVar[tuple[int | None, str | None]] 
 )
 
 
+# #3159 clause 2 — carries the execution-slot wait into the prelude's
+# ``INSERT INTO job_runs``. ``_job_execution_slot`` is the outermost boundary of
+# every runtime entry path, so the wait happens BEFORE any connection exists and
+# cannot write itself down: you cannot open a connection to record that you are
+# waiting for permission to open a connection. Set for the duration of the slot
+# and reset with its token on exit.
+_execution_slot_wait_seconds: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "_execution_slot_wait_seconds", default=None
+)
+
+
 def consume_prelude_run_id() -> int | None:
     """Pop the prelude-allocated ``job_runs.run_id`` for this invoker.
 
@@ -1268,6 +1302,23 @@ def consume_params_snapshot() -> Mapping[str, Any] | None:
     if snapshot is not None:
         _params_snapshot_var.set(None)
     return snapshot
+
+
+def current_execution_slot_wait_seconds() -> float | None:
+    """How long the current fire waited for its execution slot, or ``None``.
+
+    Issue #3159 clause 2.  ``None`` means this call is NOT inside
+    ``_job_execution_slot`` — the three ``_PRELUDE_OPT_OUT_JOBS``, a
+    ``record_job_skip`` written outside the prelude, or a direct/bootstrap
+    invocation.  ``0.0`` means a slot was held and admission was immediate; the
+    two are different facts and the column keeps them apart.
+
+    ⚠ Deliberately NOT a ``consume_*`` popper like its three neighbours above.
+    The value's lifetime is the slot's — ``_job_execution_slot`` sets it and
+    resets its token — so a reader that cleared it would silently zero any
+    second reader added later, and would defeat the reset token's own purpose.
+    """
+    return _execution_slot_wait_seconds.get()
 
 
 def consume_invoker_request_context() -> tuple[int | None, str | None]:
@@ -1400,6 +1451,11 @@ def _run_prelude(
                 snapshot_json = (
                     Jsonb(to_jsonsafe_params(dict(params_snapshot))) if params_snapshot is not None else None
                 )
+                # #3159 clause 2 — the semaphore wait that preceded this
+                # ``started_at``. ``None`` on the paths that hold no slot; the
+                # column is nullable with no default so those stay
+                # distinguishable from an immediate admission (0.000).
+                slot_wait_seconds = current_execution_slot_wait_seconds()
                 if fence_held:
                     # When a sibling holds the fence, surface the holder
                     # in the audit row so the operator can see WHY this
@@ -1416,47 +1472,50 @@ def _run_prelude(
                             """
                             INSERT INTO job_runs (
                                 job_name, started_at, finished_at, status, row_count,
-                                error_msg, linked_request_id
+                                error_msg, linked_request_id, execution_slot_wait_seconds
                             ) VALUES (
-                                %s, now(), now(), 'skipped', 0, %s, %s
+                                %s, now(), now(), 'skipped', 0, %s, %s, %s
                             )
                             RETURNING run_id
                             """,
-                            (job_name, error_msg, linked_request_id),
+                            (job_name, error_msg, linked_request_id, slot_wait_seconds),
                         )
                     else:
                         cur.execute(
                             """
                             INSERT INTO job_runs (
                                 job_name, started_at, finished_at, status, row_count,
-                                error_msg, linked_request_id, params_snapshot
+                                error_msg, linked_request_id, params_snapshot,
+                                execution_slot_wait_seconds
                             ) VALUES (
-                                %s, now(), now(), 'skipped', 0, %s, %s, %s
+                                %s, now(), now(), 'skipped', 0, %s, %s, %s, %s
                             )
                             RETURNING run_id
                             """,
-                            (job_name, error_msg, linked_request_id, snapshot_json),
+                            (job_name, error_msg, linked_request_id, snapshot_json, slot_wait_seconds),
                         )
                 else:
                     if snapshot_json is None:
                         cur.execute(
                             """
                             INSERT INTO job_runs (
-                                job_name, started_at, status, linked_request_id
-                            ) VALUES (%s, now(), 'running', %s)
+                                job_name, started_at, status, linked_request_id,
+                                execution_slot_wait_seconds
+                            ) VALUES (%s, now(), 'running', %s, %s)
                             RETURNING run_id
                             """,
-                            (job_name, linked_request_id),
+                            (job_name, linked_request_id, slot_wait_seconds),
                         )
                     else:
                         cur.execute(
                             """
                             INSERT INTO job_runs (
-                                job_name, started_at, status, linked_request_id, params_snapshot
-                            ) VALUES (%s, now(), 'running', %s, %s)
+                                job_name, started_at, status, linked_request_id, params_snapshot,
+                                execution_slot_wait_seconds
+                            ) VALUES (%s, now(), 'running', %s, %s, %s)
                             RETURNING run_id
                             """,
-                            (job_name, linked_request_id, snapshot_json),
+                            (job_name, linked_request_id, snapshot_json, slot_wait_seconds),
                         )
                 row = cur.fetchone()
                 if row is None:

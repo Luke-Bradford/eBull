@@ -313,3 +313,92 @@ def test_invoker_can_use_telemetry_aggregator_against_pre_allocated_run(
     assert row is not None
     assert row[0] == 2
     assert row[1] == 2
+
+
+# ---------------------------------------------------------------------------
+# #3159 clause 2 — the execution-slot wait reaches the row
+# ---------------------------------------------------------------------------
+#
+# ``_job_execution_slot`` is the outermost boundary of every runtime entry path,
+# so ``job_runs.started_at`` is stamped INSIDE it and a fire that parked on the
+# lane semaphore for 19 minutes used to be byte-identical to one admitted
+# instantly. These exercise all four of the prelude's INSERT branches
+# (fence-held x params-snapshot) plus the no-slot case, because the column's
+# NULL is load-bearing: it means "not written from inside a slot", which is a
+# different fact from 0.000 ("a slot was held, admission was immediate").
+
+
+def _read_slot_wait(conn: psycopg.Connection[tuple], *, job_name: str) -> object:
+    row = conn.execute(
+        """
+        SELECT execution_slot_wait_seconds
+          FROM job_runs
+         WHERE job_name = %s
+         ORDER BY started_at DESC
+         LIMIT 1
+        """,
+        (job_name,),
+    ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+@pytest.mark.parametrize("params", [None, {"limit": 5}], ids=["no_snapshot", "with_snapshot"])
+def test_prelude_running_row_carries_the_execution_slot_wait(
+    ebull_test_conn: psycopg.Connection[tuple],
+    params: dict[str, int] | None,
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+    job_name = f"fence_test_slot_wait_running_{'snap' if params else 'bare'}"
+
+    with jobs_runtime._job_execution_slot(job_name):
+        jobs_runtime.run_with_prelude(test_database_url(), job_name, lambda _p=None: None, params=params)
+
+    ebull_test_conn.rollback()
+    assert _read_slot_wait(ebull_test_conn, job_name=job_name) == 0
+
+
+@pytest.mark.parametrize("params", [None, {"limit": 5}], ids=["no_snapshot", "with_snapshot"])
+def test_prelude_fence_skipped_row_carries_the_execution_slot_wait(
+    ebull_test_conn: psycopg.Connection[tuple],
+    params: dict[str, int] | None,
+) -> None:
+    _ensure_kill_switch_off(ebull_test_conn)
+    job_name = f"fence_test_slot_wait_skipped_{'snap' if params else 'bare'}"
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status)
+        VALUES ('manual_job', %s, %s, 'full_wash', 'pending')
+        """,
+        (job_name, job_name),
+    )
+    ebull_test_conn.commit()
+
+    with jobs_runtime._job_execution_slot(job_name):
+        invoked = jobs_runtime.run_with_prelude(test_database_url(), job_name, lambda _p=None: None, params=params)
+    assert invoked is False
+
+    ebull_test_conn.rollback()
+    _, status, _ = _read_latest_job_run(ebull_test_conn, job_name=job_name)
+    assert status == "skipped"
+    assert _read_slot_wait(ebull_test_conn, job_name=job_name) == 0
+
+
+def test_prelude_outside_a_slot_leaves_the_wait_null(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A row written with no slot held records NULL, not 0.
+
+    The ``_PRELUDE_OPT_OUT_JOBS``, bootstrap stage invokers and direct calls all
+    land here; conflating them with an immediate admission would make the column
+    unable to report its own coverage.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+
+    jobs_runtime.run_with_prelude(test_database_url(), "fence_test_slot_wait_absent", lambda _p=None: None)
+
+    ebull_test_conn.rollback()
+    assert _read_slot_wait(ebull_test_conn, job_name="fence_test_slot_wait_absent") is None

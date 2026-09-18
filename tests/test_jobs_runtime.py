@@ -350,6 +350,118 @@ class TestConnectionBudgetExecutionGate:
                     thread.join(timeout=1.0)
         assert entered[4].is_set()
 
+    def test_an_immediate_admission_publishes_a_zero_wait_not_none(self) -> None:
+        """#3159 clause 2 — 0.0 and None are DIFFERENT facts.
+
+        Leaving the non-blocking acquire unpublished would collapse "admitted
+        instantly" into "this row was never written from inside a slot", and the
+        ``job_runs`` column would be unable to distinguish its own absence.
+        """
+        from app.jobs.runtime import _job_execution_slot, current_execution_slot_wait_seconds
+
+        assert current_execution_slot_wait_seconds() is None
+        with _job_execution_slot("pg_size_sample"):
+            assert current_execution_slot_wait_seconds() == 0.0
+        assert current_execution_slot_wait_seconds() is None
+
+    def test_a_blocked_admission_publishes_the_wait_it_spent(self) -> None:
+        """#3159 clause 2 — the wait is readable INSIDE the slot, where the
+        prelude runs. ``started_at`` is stamped after this point, so this is the
+        only place the figure exists."""
+        from app.jobs.runtime import _job_execution_slot, current_execution_slot_wait_seconds
+
+        holder_in = threading.Event()
+        release = threading.Event()
+        waiter_in = threading.Event()
+        observed: list[float | None] = []
+
+        def holder() -> None:
+            with _job_execution_slot("thesis_refresh"):
+                observed.append(current_execution_slot_wait_seconds())
+                holder_in.set()
+                release.wait(timeout=5.0)
+
+        def waiter() -> None:
+            with _job_execution_slot("pg_size_sample"):
+                observed.append(current_execution_slot_wait_seconds())
+                waiter_in.set()
+
+        threads = [
+            threading.Thread(target=holder, daemon=True),
+            threading.Thread(target=waiter, daemon=True),
+        ]
+        try:
+            threads[0].start()
+            assert holder_in.wait(timeout=2.0), "holder never entered the general slot"
+            threads[1].start()
+            assert not waiter_in.wait(timeout=0.3), "the waiter bypassed the one-slot general budget"
+            release.set()
+            assert waiter_in.wait(timeout=2.0), "the waiter never acquired after the holder released"
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(timeout=2.0)
+
+        assert observed[0] == 0.0, "the holder was admitted immediately and must read 0.0"
+        waited = observed[1]
+        assert waited is not None
+        assert waited >= 0.3, f"the waiter blocked for >=0.3s but published {waited}"
+
+    def test_a_wait_does_not_leak_into_the_next_slot_entry(self) -> None:
+        """#3159 clause 2 — the pooled-thread case.
+
+        APScheduler's ``ThreadPoolExecutor`` reuses worker threads, so two fires
+        share one thread's ContextVar context. The second must report its OWN
+        admission, not the first's starvation.
+
+        ⚠ What this discriminates, measured by revert-probe rather than assumed:
+        a fast path that publishes ``None`` instead of ``0.0``, and a constant
+        published in place of the measurement. It does NOT discriminate a missing
+        ``reset`` — the ``set`` in ``_job_execution_slot`` is unconditional, so a
+        later entry always overwrites. The reset is pinned by
+        ``test_an_immediate_admission_publishes_a_zero_wait_not_none`` instead.
+        """
+        from app.jobs.runtime import _job_execution_slot, current_execution_slot_wait_seconds
+
+        holder_in = threading.Event()
+        release = threading.Event()
+        done = threading.Event()
+        observed: list[float | None] = []
+
+        def holder() -> None:
+            with _job_execution_slot("thesis_refresh"):
+                holder_in.set()
+                release.wait(timeout=5.0)
+
+        def reused_worker() -> None:
+            # First fire on this thread blocks behind the holder.
+            with _job_execution_slot("pg_size_sample"):
+                observed.append(current_execution_slot_wait_seconds())
+            # Second fire on the SAME thread is admitted immediately.
+            with _job_execution_slot("pg_size_sample"):
+                observed.append(current_execution_slot_wait_seconds())
+            done.set()
+
+        threads = [
+            threading.Thread(target=holder, daemon=True),
+            threading.Thread(target=reused_worker, daemon=True),
+        ]
+        try:
+            threads[0].start()
+            assert holder_in.wait(timeout=2.0)
+            threads[1].start()
+            assert not done.wait(timeout=0.3)
+            release.set()
+            assert done.wait(timeout=2.0)
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(timeout=2.0)
+
+        first, second = observed
+        assert first is not None and first >= 0.3, f"the first fire waited but published {first}"
+        assert second == 0.0, f"the second fire was admitted immediately but inherited {second}"
+
     def test_scheduled_gate_precedes_check_connection(
         self,
         monkeypatch: pytest.MonkeyPatch,
