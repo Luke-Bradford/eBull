@@ -128,8 +128,21 @@ The column is `NULL` on:
   their layers. The layer's NULL is correct: it holds no slot of its own.
 - ~~`record_job_skip` rows written outside the prelude~~ — **COVERED as of #3189 finding 13.**
   This section deferred them ("out of scope, named here so it is a decision"), and the post-deploy
-  census showed the deferral was larger than it read: since the column landed, **21 of 23 skipped
-  rows carried no wait** while 283 of 312 successes did. A skipped fire has already paid the
+  census showed the deferral was larger than it read: since the column landed, skipped rows almost
+  never carried a wait while successes almost always did. Reproduce it (the cutoff is this
+  column's own deploy — before it, every row is NULL by construction, which is why the window
+  matters more than the numbers):
+
+  ```sql
+  -- as of 2026-09-18 19:0xZ this returned skipped 21 NULL / 2 non-NULL,
+  -- success 29 NULL / 283 non-NULL
+  SELECT status, execution_slot_wait_seconds IS NOT NULL AS has_wait, count(*)
+    FROM job_runs
+   WHERE started_at > timestamptz '2026-09-18 16:10:00+00'
+   GROUP BY 1, 2 ORDER BY 1, 2;
+  ```
+
+  A skipped fire has already paid the
   admission wait — `_job_execution_slot` is the outermost boundary, so parameter validation, the
   bootstrap gate and the per-job prerequisite all run inside it — so the NULL was not "no slot",
   it was "a writer that did not record". `record_job_skip` and `record_job_start` now both

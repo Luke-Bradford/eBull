@@ -589,9 +589,9 @@ def _slot_wait_seconds(job_name: str) -> float | None:
     contract is about WHERE the write happens, not about what any one caller
     knows: ``_job_execution_slot`` is the outermost boundary, so a prerequisite
     skip and a prelude-opt-out start have both already waited for admission by
-    the time they reach a ``job_runs`` writer. Passing it in would mean editing
-    16 call sites across 5 modules and getting every one of them right; reading
-    the contextvar means a new call site is correct by default.
+    the time they reach a ``job_runs`` writer. Threading it through every caller
+    would mean getting each one right; reading the contextvar means a new call
+    site is correct by default.
 
     ⚠ Deferred import, and the direction is why: ``app.jobs.runtime`` imports
     this module at module scope, so importing it back at module scope is a
