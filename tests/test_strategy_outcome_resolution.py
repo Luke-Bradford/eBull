@@ -214,6 +214,44 @@ def test_a_fill_bar_whose_open_no_longer_loads_is_terminal() -> None:
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_open_absent", None)
 
 
+def test_an_unorderable_bracket_outranks_a_masked_fill_open() -> None:
+    """Precedence, pinned (#3189 finding 10, Codex checkpoint 2).
+
+    A fill whose open is masked AND whose bracket cannot be reconstructed
+    records `unorderable_exit_levels` TODAY — it is a resolved row, not a crash.
+    The new `fill_bar_open_absent` check therefore has to sit after the levels
+    branch: placed earlier it relabels that row, which breaks the invariant the
+    whole change rests on (only rows that previously CRASHED may move).
+    """
+    dates = (date(2026, 8, 1), date(2026, 8, 2), date(2026, 8, 3))
+    rows = (
+        {"open": Decimal("100"), "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+        {"open": None, "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+        {"open": Decimal("100"), "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+    )
+    series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
+    entry = cast(
+        StrategyEntry,
+        SimpleNamespace(
+            strategy_id="test-level",
+            exit_levels=lambda _series, *, signal_index, entry_price, universe: "unorderable_exit_levels",
+        ),
+    )
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=dates[0],
+        fill_bar_date=dates[1],
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    row = _resolve_fill(entry, fill, series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert row.reason == "unorderable_exit_levels"
+
+
 def test_a_genuine_contract_breach_still_raises() -> None:
     """What the new containment must NOT swallow.
 

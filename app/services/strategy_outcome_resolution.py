@@ -207,17 +207,6 @@ def _resolve_fill(
             ),
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
         )
-    # ⚠ The fill bar survives but its open does not load — `load_masked_bars`
-    # nulls an open that is NULL or <= 0 (`price_masked_bars.py:220`).
-    # `fill_price_is_superseded` deliberately returns False here ("None is not
-    # evidence the bar moved"), so without this the flow reaches
-    # `resolve_outcome`, which raises "bar N has no open, so it cannot be a fill
-    # bar" — correct, and a batch-aborting way to say it (#3189 finding 10).
-    #
-    # ⚠ AFTER the supersession test, so a bar that both moved and vanished keeps
-    # the more specific reason.
-    if series.rows[fill_index].get("open") is None:
-        return _unresolved_row(fill.signal_id, "fill_bar_open_absent")
     levels = entry.exit_levels(
         signal_segment,
         signal_index=local_signal_index,
@@ -235,6 +224,21 @@ def _resolve_fill(
             ),
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
         )
+    # ⚠ The fill bar survives but its open does not load — `load_masked_bars`
+    # nulls an open that is NULL or <= 0 (`price_masked_bars.py:220`).
+    # `fill_price_is_superseded` deliberately returns False here ("None is not
+    # evidence the bar moved"), so without this the flow reaches
+    # `resolve_outcome`, which raises "bar N has no open, so it cannot be a fill
+    # bar" — correct, and a batch-aborting way to say it (#3189 finding 10).
+    #
+    # ⚠⚠ IMMEDIATELY BEFORE `resolve_outcome`, and after BOTH the supersession
+    # test and the levels branch (Codex checkpoint 2). Placed any earlier it
+    # relabels a row that resolves today: a fill whose open is masked AND whose
+    # bracket is unreconstructible records `unorderable_exit_levels` now, and
+    # must keep doing so. The invariant this whole change rests on is that only
+    # rows that previously CRASHED can move.
+    if series.rows[fill_index].get("open") is None:
+        return _unresolved_row(fill.signal_id, "fill_bar_open_absent")
     outcome = resolve_outcome(
         series=series,
         fill_index=fill_index,

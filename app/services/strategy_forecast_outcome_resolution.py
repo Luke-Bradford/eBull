@@ -200,16 +200,20 @@ def _resolve_forecast(
                 reason="fill_price_superseded",
             ),
         )
-    # ⚠ The fill bar survives but its open does not load. `resolve_outcome`
-    # would raise; here it is one recorded refusal (#3189 finding 10).
-    if series.rows[fill_index].get("open") is None:
-        return _unresolved_forecast_row(forecast.forecast_id, "fill_bar_open_absent")
     hundred = Decimal("100")
     levels = ExitLevels(
         take_profit=forecast.fill_price * (Decimal("1") + forecast.target_barrier_pct / hundred),
         stop_loss=forecast.fill_price * (Decimal("1") - forecast.stop_barrier_pct / hundred),
         max_hold_bars=forecast.horizon_market_days,
     )
+    # ⚠ The fill bar survives but its open does not load. `resolve_outcome`
+    # would raise; here it is one recorded refusal (#3189 finding 10). Placed
+    # immediately before the resolver and after the bracket is built, matching
+    # the signal resolver: nothing that reaches a terminal state today may be
+    # relabelled, and an unbuildable bracket is a contract breach that stays
+    # loud.
+    if series.rows[fill_index].get("open") is None:
+        return _unresolved_forecast_row(forecast.forecast_id, "fill_bar_open_absent")
     outcome = resolve_outcome(
         series=series,
         fill_index=fill_index,
