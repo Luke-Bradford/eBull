@@ -134,6 +134,11 @@ The column is `NULL` on:
   derivable — the lane peer whose `[started_at, finished_at]` spans `started_at - wait` — so
   storing a peer name would duplicate a join, and it would be wrong whenever the permit changed
   hands mid-wait.
+- It does not measure the whole gap before `started_at`, only the semaphore half.
+  `_fire_scheduled_with_lane_retry` re-tries the source-level `JobLock` across a ~1.75 s window
+  (~10 s for daily-or-coarser cadences, #1710) *inside* the slot, and the prelude's fence query runs
+  there too. A row reading `0.000` had an immediate **semaphore** admission, not necessarily an
+  immediate start. Named as a bound rather than left to be rediscovered.
 - It does not retro-fill clause 1's before-figure. The column has no history;
   `scripts/measure_3159_halt_feed_lane.py` keeps its proxy walk for that, and after one US session
   the same figure becomes a direct read of this column.

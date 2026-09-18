@@ -40,8 +40,20 @@
 -- do so precisely in the pathological-wait case the column exists to observe.
 -- 12 digits cannot be reached by any wall-clock this process can survive.
 --
+-- ⚠ WHAT IT DOES NOT MEASURE.  This is the SEMAPHORE wait only.  A second
+-- invisible interval remains between admission and `started_at`:
+-- `_fire_scheduled_with_lane_retry` re-tries the source-level `JobLock` acquire
+-- across a ~1.75 s window (~10 s for daily-or-coarser cadences, #1710) inside the
+-- slot, and the prelude's own fence query runs there too.  So a row reading
+-- 0.000 had an immediate SEMAPHORE admission, not necessarily an immediate start.
+-- Named here so the gap is a known bound rather than a later surprise.
+--
 -- No index.  Every consumer is a bounded-window scan already filtered on
 -- `started_at`.
+--
+-- ADD COLUMN with no default is metadata-only on PG11+, so no table rewrite; the
+-- brief ACCESS EXCLUSIVE lock applied instantly on dev (13,054 rows in the last
+-- 7 days alone).
 ALTER TABLE job_runs
     ADD COLUMN IF NOT EXISTS execution_slot_wait_seconds numeric(12,3);
 
