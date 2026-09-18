@@ -42,8 +42,17 @@ const DAY_TYPE_STYLE: Record<MarketDayType, string> = {
   not_modelled: "bg-slate-50 text-slate-400 dark:bg-slate-800/50 dark:text-slate-500",
 };
 
+// DAY-scoped vocabulary: "is this date a trading day", which is a different question from
+// SESSION_LABEL's instant-scoped "what is the market doing right now". The two render three
+// lines apart in the same block, so they must not share a token — before #3176 both said
+// "Open", and outside RTH the strip read as "Closed now / Fri 18 Sept / Open" about one day.
+// Both statements were true; the word was doing two jobs. "Open" stays with the instant
+// vocabulary (SESSION_LABEL.rth) because that is the reading the highlighted today-cell
+// pushes a reader toward. Design-system rule: meaning lives in the TEXT, so a label that
+// does not say which question it answers is a bug.
+// ⚠ Display only — the API's `MarketDayType` values are untouched.
 const DAY_TYPE_LABEL: Record<MarketDayType, string> = {
-  open: "Open",
+  open: "Trading",
   half_day: "Half day",
   closed: "Closed",
   not_modelled: "—",

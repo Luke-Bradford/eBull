@@ -51,8 +51,15 @@ describe("CalendarPage", () => {
     );
     await waitFor(() => expect(screen.getByText("US equity")).toBeInTheDocument());
     // day-type labels render (open + closed in the week strip).
-    expect(screen.getAllByText("Open").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Trading").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Closed").length).toBeGreaterThan(0);
+    // #3176 regression guard. The week strip carries two vocabularies three lines apart —
+    // the instant one ("Closed now" / "Open · regular hours") and the day one — and they
+    // used to share the token "Open", so outside RTH the block contradicted itself about
+    // today. A bare "Open" text node means the day cell has drifted back onto the instant
+    // word. Asserting the absence is the whole point: the previous assertion was
+    // `getAllByText("Open")`, which this bug PASSED.
+    expect(screen.queryByText("Open")).toBeNull();
     // upcoming ex-dividend row.
     expect(screen.getByText("FOO")).toBeInTheDocument();
     expect(screen.getByText(/ex 2026-07-01/)).toBeInTheDocument();
