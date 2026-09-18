@@ -6,6 +6,7 @@ use settings.database_url — the test DB. Pure-logic paths use mocks.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator, Mapping
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ from app.services.sync_orchestrator.types import (
     ExecutionPlan,
     LayerOutcome,
     LayerPlan,
+    RefreshResult,
 )
 from tests.fixtures.ebull_test_db import test_database_url
 
@@ -30,6 +32,16 @@ def settings_use_test_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     url = test_database_url()
     monkeypatch.setattr(settings, "database_url", url)
     yield url
+
+
+def _ok() -> RefreshResult:
+    return RefreshResult(
+        outcome=LayerOutcome.SUCCESS,
+        row_count=0,
+        items_processed=0,
+        items_total=None,
+        detail="",
+    )
 
 
 def _lp(
@@ -457,3 +469,120 @@ class TestPR4aGateCheckConnReuse:
             assert c is c2  # same conn, still usable
         finally:
             holder.close()
+
+
+class TestShutdownStopsTheWalk:
+    """#2274 M1 — the orphaned rows are born mid-walk, not at dispatch.
+
+    Measured, 2026-09-18 08:45: the boot catch-up walk started at 08:45:22.9,
+    ``fx_rates_refresh`` ran 08:45:23.071 → .219, SIGTERM landed at
+    08:45:23.203, and ``daily_candle_refresh`` opened its ``job_runs`` row at
+    08:45:23.267 — 64 ms after the signal, inside a walk that had been
+    dispatched legitimately. No check at the dispatch boundary can see that.
+    """
+
+    def test_a_layer_does_not_start_once_the_process_is_stopping(self, monkeypatch) -> None:
+        from app.jobs import runtime as jobs_runtime
+
+        stop = threading.Event()
+        monkeypatch.setattr(jobs_runtime, "_process_stop_event", stop)
+
+        started: list[str] = []
+        skipped: list[tuple[str, str]] = []
+
+        def first_adapter(**kwargs):
+            started.append("fx_rates")
+            # Stands in for the SIGTERM that landed while this layer ran.
+            stop.set()
+            return [("fx_rates", _ok())]
+
+        def second_adapter(**kwargs):
+            started.append("candles")
+            return [("candles", _ok())]
+
+        from dataclasses import replace
+
+        from app.services.sync_orchestrator import registry
+
+        monkeypatch.setitem(registry.LAYERS, "fx_rates", replace(registry.LAYERS["fx_rates"], refresh=first_adapter))
+        monkeypatch.setitem(registry.LAYERS, "candles", replace(registry.LAYERS["candles"], refresh=second_adapter))
+
+        for writer in ("_record_layer_started", "_record_layer_failed", "_record_layer_result"):
+            monkeypatch.setattr(executor, writer, MagicMock())
+        monkeypatch.setattr(
+            executor,
+            "_record_layer_skipped",
+            lambda _run, layer, reason: skipped.append((layer, reason)),
+        )
+        monkeypatch.setattr(executor, "_make_progress_callback", lambda *a, **kw: lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor, "_check_cancel_signal", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_credential_health_blocks", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_layer_initialization_blocks", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_build_upstream_outcomes", lambda *a, **kw: {})
+
+        plan = ExecutionPlan(
+            layers_to_refresh=(_lp("fx_rates_refresh", ("fx_rates",)), _lp("daily_candle_refresh", ("candles",))),
+            layers_skipped=(),
+            estimated_duration=None,
+        )
+        outcomes: dict[str, LayerOutcome] = {}
+        executor._run_layers_loop(sync_run_id=1, plan=plan, outcomes=outcomes, abort_if_stopping=True)
+
+        assert started == ["fx_rates"], "the second layer started after the stop signal"
+        # ⚠ The first layer must have genuinely SUCCEEDED. An adapter that
+        # raised would also leave ``started == ["fx_rates"]`` — the assertion
+        # below is what stops this passing for the wrong reason.
+        assert outcomes["fx_rates"] is LayerOutcome.SUCCESS
+        assert outcomes["candles"] is LayerOutcome.PREREQ_SKIP
+        # ⚠ Its own reason, not the operator-cancel text and not the crash text.
+        assert skipped == [("candles", executor._SHUTDOWN_SKIP_REASON)]
+
+    def test_a_queued_request_is_not_abandoned_on_shutdown(self, monkeypatch) -> None:
+        """#2274 M1's scope boundary (Codex ckpt-2 round 6 P1).
+
+        ``run_sync`` passes ``abort_if_stopping=linked_request_id is None``.
+        Abandoning a listener-dispatched request's layers returns a partial run
+        normally, and the queue lifecycle then calls ``mark_request_completed``
+        — acknowledging work that never happened, which boot recovery cannot
+        replay. A scheduled fire has no such record and simply runs again.
+        """
+        from app.jobs import runtime as jobs_runtime
+
+        stop = threading.Event()
+        stop.set()
+        monkeypatch.setattr(jobs_runtime, "_process_stop_event", stop)
+
+        started: list[str] = []
+
+        def adapter(**kwargs):
+            started.append("candles")
+            return [("candles", _ok())]
+
+        from dataclasses import replace
+
+        from app.services.sync_orchestrator import registry
+
+        monkeypatch.setitem(registry.LAYERS, "candles", replace(registry.LAYERS["candles"], refresh=adapter))
+        for writer in (
+            "_record_layer_started",
+            "_record_layer_failed",
+            "_record_layer_result",
+            "_record_layer_skipped",
+        ):
+            monkeypatch.setattr(executor, writer, MagicMock())
+        monkeypatch.setattr(executor, "_make_progress_callback", lambda *a, **kw: lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor, "_check_cancel_signal", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_credential_health_blocks", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_layer_initialization_blocks", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_build_upstream_outcomes", lambda *a, **kw: {})
+
+        plan = ExecutionPlan(
+            layers_to_refresh=(_lp("daily_candle_refresh", ("candles",)),),
+            layers_skipped=(),
+            estimated_duration=None,
+        )
+        outcomes: dict[str, LayerOutcome] = {}
+        executor._run_layers_loop(sync_run_id=1, plan=plan, outcomes=outcomes, abort_if_stopping=False)
+
+        assert started == ["candles"]
+        assert outcomes["candles"] is LayerOutcome.SUCCESS

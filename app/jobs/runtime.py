@@ -260,6 +260,34 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Process stop signal (#2274 M1)
+# ---------------------------------------------------------------------------
+#
+# "This process has been told to stop" is genuinely process-global — the one
+# SIGTERM handler in ``app.jobs.__main__.serve`` owns it — so it lives at
+# module scope rather than being threaded through every admission layer.
+# ``_run_prelude`` is a module function called from three paths; plumbing an
+# Event through all of them to reach the one INSERT that matters would be the
+# larger change, not the smaller one.
+#
+# ``None`` means "no signal is wired", which is NOT the same as "not stopping
+# yet": the in-process API runtime and the unit tests install no handler of
+# their own and must keep the pre-#2274 behaviour.
+_process_stop_event: threading.Event | None = None
+
+
+def set_process_stop_event(event: threading.Event | None) -> None:
+    """Register the owning process's stop signal. ``serve`` calls this once."""
+    global _process_stop_event
+    _process_stop_event = event
+
+
+def process_is_stopping() -> bool:
+    """True once this process has been signalled to stop (#2274 M1)."""
+    return _process_stop_event is not None and _process_stop_event.is_set()
+
+
+# ---------------------------------------------------------------------------
 # Job invoker registry
 # ---------------------------------------------------------------------------
 #
@@ -1371,6 +1399,15 @@ def consume_invoker_request_context() -> tuple[int | None, str | None]:
     return ctx
 
 
+class _ProcessStoppingAbort(Exception):
+    """Internal: unwind the prelude transaction when the process is stopping.
+
+    Raised INSIDE ``conn.transaction()`` on purpose — that rolls the
+    ``job_runs`` INSERT back, so a fire abandoned at shutdown leaves nothing
+    for the next boot's orphan reaper to find. Never escapes ``_run_prelude``.
+    """
+
+
 def _run_prelude(
     database_url: str,
     job_name: str,
@@ -1378,6 +1415,7 @@ def _run_prelude(
     bypass_fence_check: bool = False,
     linked_request_id: int | None = None,
     params_snapshot: Mapping[str, Any] | None = None,
+    abort_if_stopping: bool = False,
 ) -> int | None:
     """One-tx prelude: acquire lock, check fence, write job_runs INSERT.
 
@@ -1386,6 +1424,17 @@ def _run_prelude(
     when the fence rejects the run — the caller MUST NOT invoke the
     underlying job in that case (the ``status='skipped'`` row is already
     committed for audit).
+
+    ``abort_if_stopping`` (#2274 M1) also returns ``None`` when this process
+    has been signalled to stop, with NO row written. ⚠ It defaults to False
+    and the SCHEDULED path is the only caller that sets it, because ``None``
+    is otherwise the fence verdict: ``_run_manual_bounded`` reads it as
+    "full-wash in progress" and marks the durable ``pending_job_requests``
+    row ``rejected``, which boot recovery does not replay — a deploy would
+    silently discard an operator's queued request (Codex ckpt-2 round 4 P1).
+    A manual fire that IS orphaned by a deploy already self-heals: its
+    request stays ``claimed`` and boot recovery replays it. A scheduled fire
+    has no such record, which is why it is the one that needs this.
 
     Process_id == job_name for scheduled jobs. The advisory-lock key is
     ``hashtext(process_id)::bigint`` so the same key is acquired by every
@@ -1433,6 +1482,26 @@ def _run_prelude(
             # start the body against the just-reset shared scheduler
             # source.
             _acquire_shared_source_locks(conn, process_id=process_id)
+
+            # ⚠ #2274 M1, the TERMINAL check (Codex ckpt-2 round 3 P1). The
+            # three above it are early exits; this is the one that holds the
+            # invariant, because it is the last point before the row exists.
+            # Everything between the caller's check and here BLOCKS — opening
+            # the connection (this box's cluster runs at its usable
+            # ``max_connections`` ceiling and has refused with "too many
+            # clients"), ``acquire_prelude_lock``, and the shared-source
+            # advisory locks — so a stop signal can arrive in any of them and
+            # the row would then be INSERTed into a process that is 2 seconds
+            # from exit, to be reaped as an orphan at the next boot.
+            #
+            # Returning ``None`` reuses the fence contract the caller already
+            # honours: ``run_with_prelude`` returns False and never invokes.
+            # Nothing is written — unlike the fence skip, there is no audit
+            # value in a row recording that a fire did not happen while the
+            # process was dying, and writing one needs the connection we are
+            # about to lose.
+            if abort_if_stopping and process_is_stopping():
+                raise _ProcessStoppingAbort
 
             with conn.cursor() as cur:
                 if not bypass_fence_check:
@@ -1551,6 +1620,13 @@ def _run_prelude(
                 if row is None:
                     raise RuntimeError("prelude: job_runs INSERT returned no row")
                 run_id = int(row[0])
+                # ⚠ The LAST word (Codex ckpt-2 round 4 P1). The fence SELECT
+                # and this INSERT both run after the check above, so a stop
+                # signal can still land between them. Raising here rolls the
+                # row back inside the open transaction — the row never
+                # existed, rather than existing and needing to be reaped.
+                if abort_if_stopping and process_is_stopping():
+                    raise _ProcessStoppingAbort
     if fence_held:
         logger.info(
             "prelude: skipping %r — %s (job_runs.run_id=%d committed)",
@@ -1570,6 +1646,7 @@ def run_with_prelude(
     bypass_fence_check: bool = False,
     linked_request_id: int | None = None,
     params: Mapping[str, Any] | None = None,
+    abort_if_stopping: bool = False,
 ) -> bool:
     """Run ``invoker`` after the lock+fence prelude.
 
@@ -1606,13 +1683,27 @@ def run_with_prelude(
     ``None``.
     """
     effective_params: Mapping[str, Any] = params if params is not None else {}
-    run_id = _run_prelude(
-        database_url,
-        job_name,
-        bypass_fence_check=bypass_fence_check,
-        linked_request_id=linked_request_id,
-        params_snapshot=effective_params,
-    )
+    try:
+        run_id = _run_prelude(
+            database_url,
+            job_name,
+            bypass_fence_check=bypass_fence_check,
+            linked_request_id=linked_request_id,
+            params_snapshot=effective_params,
+            abort_if_stopping=abort_if_stopping,
+        )
+    except _ProcessStoppingAbort:
+        # #2274 M1. Raised inside the prelude transaction, so any row it had
+        # already INSERTed is rolled back — there is nothing to reap and
+        # nothing to finalise. Caught HERE rather than inside the prelude
+        # because the prelude's body is one tx block and the unwind IS the
+        # mechanism; letting it escape would surface at the caller's generic
+        # ``except Exception`` as a scheduled-fire failure.
+        logger.info(
+            "prelude for %r abandoned: the process was signalled to stop. No job_runs row written.",
+            job_name,
+        )
+        return False
     if run_id is None:
         return False  # fence held; skipped row already committed
     token = _prelude_run_id.set(run_id)
@@ -2651,6 +2742,21 @@ class JobRuntime:
             # full-wash holder), so the default ``bypass_fence_check=False``
             # applies. Self-tracked invokers opt out of the prelude.
             def _run_scheduled_body() -> None:
+                # ⚠ The LAST of the three admission layers (Codex ckpt-2 round 2
+                # P1). The execution semaphore and the source-level ``JobLock``
+                # are independent admissions (prevention log, "a source lock is
+                # not an execution permit"), and between the slot re-check above
+                # and this line sit the gate/prereq connection I/O and
+                # ``_fire_scheduled_with_lane_retry``'s ~1.75 s backoff window
+                # (~10 s for daily-or-coarser cadences, #1710). A lock that frees
+                # inside the drain would otherwise start the body after SIGTERM
+                # and recreate the orphan this whole change exists to remove.
+                if process_is_stopping():
+                    logger.info(
+                        "fire of %r acquired its source lane after the stop signal; not started.",
+                        job_name,
+                    )
+                    return
                 if job_name in _PRELUDE_OPT_OUT_JOBS:
                     # Set both contextvars so the opt-out invoker's
                     # ``_tracked_job`` (if any) reuses the snapshot.
@@ -2660,7 +2766,15 @@ class JobRuntime:
                     finally:
                         _params_snapshot_var.reset(snap_token)
                 else:
-                    run_with_prelude(database_url, job_name, invoker, params=params)
+                    # ``abort_if_stopping`` is set on the SCHEDULED path only —
+                    # see ``_run_prelude`` for why the manual path must not.
+                    run_with_prelude(
+                        database_url,
+                        job_name,
+                        invoker,
+                        params=params,
+                        abort_if_stopping=True,
+                    )
 
             try:
                 # #1538 — retry the source-level lane acquire on transient
@@ -2703,12 +2817,63 @@ class JobRuntime:
                 )
 
         def wrapped() -> None:
+            # #2274 M1 — refuse to START a fire once this process has been told
+            # to stop.  The deploy idiom fires a DOUBLE reload (an ``app/**``
+            # edit, then ``touch app/__init__.py``), so the second SIGTERM lands
+            # on the new child 1.5-3.5 s old, mid boot catch-up.  Without this
+            # the fire proceeds, ``run_with_prelude`` writes a ``job_runs`` row,
+            # the child exits ~2 s later (``sync_executor.shutdown(wait=False,
+            # cancel_futures=True)`` does not wait for it), and the next boot's
+            # ``reap_orphaned_job_runs`` transitions the row to ``failure``.
+            #
+            # ⚠ The check is HERE and not in ``_catch_up``.  The jobs whose rows
+            # are reaped this way are mostly orchestrator LAYER jobs
+            # (``daily_portfolio_sync``, ``daily_candle_refresh``,
+            # ``fx_rates_refresh``) — they are not in ``SCHEDULED_JOBS`` at all,
+            # so they have no ``catch_up_on_boot`` flag to test; they run
+            # beneath a dispatched orchestrator and write their own rows via
+            # ``_tracked_job``.  This closure is the one object BOTH dispatch
+            # paths funnel through — ``_catch_up`` submits it and ``start()``
+            # registers it with APScheduler — so refusing the orchestrator here
+            # also stops every layer beneath it.  The population that motivated
+            # it is on #2274 with the query that reproduces it.
+            #
+            # ⚠ ``extend_while_live`` cannot cover this by construction — it
+            # engages only when the 180 s drain budget EXPIRES, and these
+            # children exit in ~2 s.
+            #
+            # No ``job_runs`` row is written: the pool is closing, and the
+            # alternative to a lost fire here is a row that dies anyway and
+            # reads as a failure. The job simply stays overdue, which is the
+            # state the next boot's catch-up is built to resolve.
+            if process_is_stopping():
+                logger.info(
+                    "fire of %r not started: this process is shutting down. The job stays "
+                    "overdue and the next boot's catch-up re-fires it; starting it here "
+                    "would write a job_runs row the drain kills and the next boot reaps.",
+                    job_name,
+                )
+                return
             # The execution budget is the outermost boundary: parameter-error
             # audit writes, gate/prerequisite checks, advisory locks, the job
             # body, and terminal writes all occur only after a slot is held.
             # Catch-up reuses this wrapper, so it has the same bound as the
             # regular APScheduler path.
             with _job_execution_slot(job_name):
+                # ⚠ Re-checked AFTER admission, not only before (Codex ckpt-2 P1).
+                # The general lane's acquire is unbounded and its measured waits
+                # run to many minutes, so a fire can pass the check above, park
+                # on the permit, and be admitted inside the drain window — which
+                # is the same race one level down. Setting the event does not
+                # wake a parked acquire, so the re-check is the only thing that
+                # sees it.
+                if process_is_stopping():
+                    logger.info(
+                        "fire of %r admitted to its execution slot after the stop signal; "
+                        "not started. Same reason as above — the row would not survive the drain.",
+                        job_name,
+                    )
+                    return
                 run_bounded()
 
         return wrapped

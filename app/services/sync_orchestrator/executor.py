@@ -81,6 +81,10 @@ _ORCHESTRATOR_FENCE_PROCESS_IDS: tuple[str, ...] = (
 
 logger = logging.getLogger(__name__)
 
+#: #2274 M1 — why a layer never started. Truthful and distinct from both the
+#: operator-cancel reason and the crash text ``_fail_unfinished_layers`` uses.
+_SHUTDOWN_SKIP_REASON: Final = "not started: the jobs process was signalled to stop"
+
 
 # ---------------------------------------------------------------------------
 # Public entry points (spec §2.1)
@@ -126,7 +130,13 @@ def run_sync(
         linked_request_id=linked_request_id,
         bypass_fence_check=bypass_fence_check,
     )
-    outcomes = _safe_run_and_finalize(sync_run_id, plan)
+    # #2274 M1 — only a run with NO durable queue request may abandon its
+    # remaining layers on shutdown. See ``_run_layers_loop``'s gate #0.
+    outcomes = _safe_run_and_finalize(
+        sync_run_id,
+        plan,
+        abort_if_stopping=linked_request_id is None,
+    )
     return SyncResult(sync_run_id=sync_run_id, outcomes=outcomes)
 
 
@@ -283,6 +293,8 @@ def _insert_layer_progress_rows(
 def _safe_run_and_finalize(
     sync_run_id: int,
     plan: ExecutionPlan,
+    *,
+    abort_if_stopping: bool = False,
 ) -> dict[str, LayerOutcome]:
     """Crash-guarded layer loop + finalize. Used by BOTH entry points.
 
@@ -304,7 +316,7 @@ def _safe_run_and_finalize(
     outcomes: dict[str, LayerOutcome] = {}
     cancelled = False
     try:
-        _run_layers_loop(sync_run_id, plan, outcomes)
+        _run_layers_loop(sync_run_id, plan, outcomes, abort_if_stopping=abort_if_stopping)
     except SyncCancelled:
         logger.info("sync run %s cancelled by operator", sync_run_id)
         cancelled = True
@@ -433,6 +445,8 @@ def _run_layers_loop(
     sync_run_id: int,
     plan: ExecutionPlan,
     outcomes: dict[str, LayerOutcome],
+    *,
+    abort_if_stopping: bool = False,
 ) -> None:
     """Walk layers in topological order, mutating `outcomes` in place.
 
@@ -443,6 +457,9 @@ def _run_layers_loop(
     4. Invoke adapter; validate returned emit set matches plan.emits
     5. Write per-emit sync_layer_progress result row
     """
+    # Both deferred: ``app.jobs.runtime`` imports the scheduler, whose layer
+    # adapters import back into this package.
+    from app.jobs.runtime import process_is_stopping
     from app.services.sync_orchestrator.registry import LAYERS
 
     # PR4a (#1472): ONE run-scoped autocommit conn for every per-layer read
@@ -463,6 +480,32 @@ def _run_layers_loop(
             # Worst-case observation latency = duration of the longest
             # in-flight layer. Acceptable v1.
             _check_cancel_signal(sync_run_id, gate_conn=gate_conn)
+
+            # Pre-flight gate #0 — process shutdown (#2274 M1).
+            #
+            # This is where the reaped rows actually come from, measured rather
+            # than assumed. The 2026-09-18 08:45 cluster: the walk started at
+            # 08:45:22.9, ``fx_rates_refresh`` ran 08:45:23.071→.219, SIGTERM
+            # landed at 08:45:23.203, and ``daily_candle_refresh`` opened its
+            # ``job_runs`` row at 08:45:23.267 — 64 ms after the signal, from
+            # INSIDE a walk that was dispatched legitimately. A stop check at
+            # the dispatch boundary cannot see that; only this one can.
+            #
+            # ⚠ Recorded as a SKIP with its own reason, not routed through
+            # ``SyncCancelled``. The cancel branch writes "cancelled by
+            # operator" and expects the checkpoint to have already set
+            # ``sync_runs.status='cancelled'``; borrowing it would put a false
+            # claim in an audit row. This is the same shape as the two
+            # pre-flight gates below, which is the truthful idiom already here.
+            # ⚠ ``abort_if_stopping`` is False for a listener-dispatched
+            # request (Codex ckpt-2 round 6 P1). Abandoning ITS layers returns
+            # a partial run normally, and the queue lifecycle then calls
+            # ``mark_request_completed`` — acknowledging work that did not
+            # happen, which boot recovery cannot replay. A scheduled fire has
+            # no such record to damage, and simply runs again at its cadence.
+            if abort_if_stopping and process_is_stopping():
+                _skip_layer_for_shutdown(sync_run_id, layer_plan, outcomes)
+                continue
 
             upstream_outcomes = _build_upstream_outcomes(layer_plan, outcomes, gate_conn=gate_conn)
 
@@ -496,6 +539,16 @@ def _run_layers_loop(
                 for emit in layer_plan.emits:
                     _record_layer_skipped(sync_run_id, emit, blocking_failure)
                     outcomes[emit] = LayerOutcome.DEP_SKIPPED
+                continue
+
+            # ⚠ Re-checked here, after the preflight reads and immediately
+            # before the layer opens its ``job_runs`` row (Codex ckpt-2 round 6
+            # P1). ``_build_upstream_outcomes`` and the two gates above are DB
+            # I/O and can span a SIGTERM. The gate at the top of the iteration
+            # is NOT redundant with this one: it exists so a stopping process
+            # does not attempt that I/O at all, against a pool that is closing.
+            if abort_if_stopping and process_is_stopping():
+                _skip_layer_for_shutdown(sync_run_id, layer_plan, outcomes)
                 continue
 
             for emit in layer_plan.emits:
@@ -1178,6 +1231,17 @@ def _record_layer_failed(
                 ),
             )
     _touch_run_heartbeat(sync_run_id)
+
+
+def _skip_layer_for_shutdown(
+    sync_run_id: int,
+    layer_plan: LayerPlan,
+    outcomes: dict[str, LayerOutcome],
+) -> None:
+    """Record every emit of a layer that never started because of shutdown."""
+    for emit in layer_plan.emits:
+        _record_layer_skipped(sync_run_id, emit, _SHUTDOWN_SKIP_REASON)
+        outcomes[emit] = LayerOutcome.PREREQ_SKIP
 
 
 def _record_layer_skipped(

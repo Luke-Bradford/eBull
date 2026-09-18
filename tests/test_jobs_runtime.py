@@ -138,6 +138,19 @@ def _make_runtime(invokers: dict[str, object]) -> JobRuntime:
     )
 
 
+def _patch_prelude_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The subset of ``patched_runtime`` that a case installing its own
+    execution slot still needs: the stub URL never reaches a real DB."""
+    monkeypatch.setattr("app.jobs.runtime.JobLock", _FakeLock)
+    monkeypatch.setattr(
+        "app.jobs.runtime.run_with_prelude",
+        lambda _url, _name, invoker, **_kw: invoker(_kw.get("params") or {}) or True,
+    )
+    monkeypatch.setattr("app.jobs.runtime.check_bootstrap_state_gate", lambda _conn, **_kw: (True, ""))
+    monkeypatch.setattr("app.jobs.runtime.materialise_scheduled_params", lambda _name: {})
+    monkeypatch.setattr("app.jobs.runtime.validate_job_params", lambda _name, params, **_kw: dict(params))
+
+
 def _is_zero_arg(fn: object) -> bool:
     """Return True when the callable's positional arity is zero.
 
@@ -614,6 +627,137 @@ class TestScheduledFireWrapper:
 
         wrapped = rt._wrap_invoker("boom_job", _adapt_zero_arg(boom))
         wrapped()  # must not raise
+
+
+class TestNoDispatchWhileDraining:
+    """#2274 M1 — a fire must not START after the process is told to stop.
+
+    The deploy idiom fires a double reload, so the second SIGTERM lands on a
+    child that is 1.5-3.5 s old and still in boot catch-up.  A fire begun then
+    writes a ``job_runs`` row, dies in the ~2 s drain, and is transitioned to
+    ``failure`` by the next boot's orphan reaper.
+
+    Four admission layers sit between dispatch and the row, and each one
+    BLOCKS, so each gets its own case below.  The prelude layer — the terminal
+    one, which is what actually holds the invariant — is DB-backed and lives in
+    ``tests/test_jobs_runtime_fence.py``.
+    """
+
+    @staticmethod
+    def _arm(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+        """Wire a process stop signal for the duration of one test."""
+        stop = threading.Event()
+        monkeypatch.setattr(runtime, "_process_stop_event", stop)
+        return stop
+
+    def test_a_fire_dispatched_after_the_stop_signal_does_not_start(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        invocations: list[int] = []
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        stop = self._arm(monkeypatch)
+        rt = _make_runtime({"j": invoker})
+        wrapped = rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))
+
+        # Control FIRST, on the same wrapper: without it a broken wrapper that
+        # never runs anything would pass the assertion below for free.
+        wrapped()
+        assert invocations == [1]
+
+        stop.set()
+        wrapped()
+        assert invocations == [1], "the fire ran after the stop signal"
+
+    def test_the_refusal_precedes_the_execution_slot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Discriminates the fix's PLACEMENT, not just its effect.  A check
+        # inside ``run_bounded`` would still park the fire on the lane
+        # semaphore first, which is the one resource a draining child is
+        # least able to give back.
+        entered: list[str] = []
+
+        @contextmanager
+        def counting_slot(job_name: str) -> Iterator[None]:
+            entered.append(job_name)
+            yield
+
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", counting_slot)
+        _patch_prelude_stubs(monkeypatch)
+
+        self._arm(monkeypatch).set()
+        rt = _make_runtime({"j": lambda: None})
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(lambda: None))()
+
+        assert entered == [], "the refused fire still acquired an execution slot"
+
+    def test_a_stop_signal_arriving_during_the_slot_wait_still_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Codex ckpt-2 P1.  The general lane's acquire is unbounded and its
+        # measured waits run to many minutes, so a fire can pass the pre-slot
+        # check, park on the permit, and be admitted inside the drain window.
+        # Setting the event does not wake a parked acquire — only a re-check
+        # after admission sees it.
+        invocations: list[int] = []
+        stop = self._arm(monkeypatch)
+
+        @contextmanager
+        def slot_that_frees_during_the_drain(_job_name: str) -> Iterator[None]:
+            # Stands in for a permit that frees only after SIGTERM arrives.
+            stop.set()
+            yield
+
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", slot_that_frees_during_the_drain)
+        _patch_prelude_stubs(monkeypatch)
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        rt = _make_runtime({"j": invoker})
+        assert not stop.is_set(), "the pre-slot check must be the one that passes here"
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))()
+
+        assert invocations == [], "the fire ran after being admitted during the drain"
+
+    def test_a_stop_signal_arriving_during_the_lane_retry_still_refuses(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Codex ckpt-2 round 2 P1.  The source-level JobLock is a SECOND,
+        # independent admission layer, and its retry window sits after the
+        # execution-slot re-check.  A lane that frees inside the drain would
+        # otherwise start the body after SIGTERM.
+        invocations: list[int] = []
+        stop = self._arm(monkeypatch)
+
+        def lane_that_frees_during_the_drain(_url: str, _job_name: str, body: object, **_kw: object) -> None:
+            stop.set()
+            assert callable(body)
+            body()
+
+        monkeypatch.setattr(
+            "app.jobs.runtime._fire_scheduled_with_lane_retry",
+            lane_that_frees_during_the_drain,
+        )
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        rt = _make_runtime({"j": invoker})
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))()
+
+        assert invocations == [], "the body ran after the lane freed inside the drain"
+
+    def test_no_registered_stop_signal_is_not_a_stopping_process(self, patched_runtime: None) -> None:
+        # The in-process API runtime and the unit tests register no signal.
+        # ``None`` must read as "not wired", never as "stopping" — the failure
+        # in that direction wedges every job in the API process silently.
+        assert runtime._process_stop_event is None
+        assert runtime.process_is_stopping() is False
+
+        invocations: list[int] = []
+        rt = _make_runtime({"j": lambda: invocations.append(1)})
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(lambda: invocations.append(1)))()
+        assert invocations == [1]
 
 
 class TestStartWiring:

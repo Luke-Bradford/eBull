@@ -74,7 +74,7 @@ from app.jobs.credential_health_listener import (
 from app.jobs.heartbeat import HeartbeatWriter, heartbeat_loop
 from app.jobs.listener import ListenerState, listener_loop
 from app.jobs.locks import JOBS_PROCESS_LOCK_KEY
-from app.jobs.runtime import JobRuntime, execution_slot_wait_snapshot
+from app.jobs.runtime import JobRuntime, execution_slot_wait_snapshot, set_process_stop_event
 from app.jobs.supervisor import supervise
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
@@ -1019,6 +1019,13 @@ def serve(stop_event: threading.Event | None = None) -> int:
     # connection per fire instead of opening two fresh raw psycopg.connect()
     # at every cadence boundary (the SCRAM-auth connection herd that wedged
     # SEC discovery, #1474). Pool is reused, not a new one (settled #719).
+    # #2274 M1 — publish this process's stop signal to the job runtime, which
+    # refuses to START a fire once it is set. The double reload the deploy
+    # idiom fires lands on the new child mid boot catch-up, and a fire begun
+    # then dies in the ~2 s drain and is reaped as an orphan at the next boot.
+    # Registered BEFORE the runtime is constructed so no fire can be dispatched
+    # against an unset signal.
+    set_process_stop_event(stop_event)
     runtime = JobRuntime(pool=pool)
     heartbeat = HeartbeatWriter(
         settings.database_url,

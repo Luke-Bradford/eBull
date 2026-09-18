@@ -11,6 +11,8 @@ needing an APScheduler boot.
 
 from __future__ import annotations
 
+import threading
+
 import psycopg
 import pytest
 
@@ -402,3 +404,77 @@ def test_prelude_outside_a_slot_leaves_the_wait_null(
 
     ebull_test_conn.rollback()
     assert _read_slot_wait(ebull_test_conn, job_name="fence_test_slot_wait_absent") is None
+
+
+def test_a_process_signalled_to_stop_writes_no_prelude_row(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2274 M1's terminal check — the one that holds the invariant.
+
+    Everything between the caller's stop check and the INSERT blocks (the
+    connect, ``acquire_prelude_lock``, the shared-source advisory locks), so a
+    SIGTERM arriving in that window would otherwise open a ``running`` row in a
+    process about to exit — precisely the row the next boot reaps as an orphan.
+
+    The assertion is that NO row exists, not that a skipped one does: a fire
+    that never happened while the process was dying has no audit value, and
+    writing the row needs the connection that is about to be lost.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+    job_name = "fence_test_process_stopping"
+    invocations: list[int] = []
+
+    stop = threading.Event()
+    stop.set()
+    monkeypatch.setattr(jobs_runtime, "_process_stop_event", stop)
+
+    invoked = jobs_runtime.run_with_prelude(
+        test_database_url(),
+        job_name,
+        lambda _p=None: invocations.append(1),
+        abort_if_stopping=True,
+    )
+
+    assert invoked is False
+    assert invocations == []
+    ebull_test_conn.rollback()
+    row = ebull_test_conn.execute(
+        "SELECT count(*) FROM job_runs WHERE job_name = %s",
+        (job_name,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 0, "a job_runs row was opened in a process that had been told to stop"
+
+
+def test_a_stopping_process_does_not_abort_the_manual_path(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2274 M1's scope boundary, pinned (Codex ckpt-2 round 4 P1).
+
+    ``abort_if_stopping`` defaults to False and the manual path must leave it
+    there. ``run_with_prelude`` returning False is read by
+    ``_run_manual_bounded`` as the FENCE verdict, and it marks the durable
+    ``pending_job_requests`` row ``rejected`` — which boot recovery does not
+    replay. Aborting the manual path on shutdown would make a routine deploy
+    silently discard an operator's queued request. An orphaned manual run
+    already self-heals: its request stays ``claimed`` and is replayed.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.commit()
+    job_name = "fence_test_process_stopping_manual"
+    invocations: list[int] = []
+
+    stop = threading.Event()
+    stop.set()
+    monkeypatch.setattr(jobs_runtime, "_process_stop_event", stop)
+
+    invoked = jobs_runtime.run_with_prelude(test_database_url(), job_name, lambda _p=None: invocations.append(1))
+
+    assert invoked is True
+    assert invocations == [1]
+    ebull_test_conn.rollback()
+    _, status, _ = _read_latest_job_run(ebull_test_conn, job_name=job_name)
+    assert status == "running"
