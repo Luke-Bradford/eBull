@@ -1920,6 +1920,18 @@ def execute_order(
     if is_live:
         if broker is None:
             raise ValueError("enable_live_trading is True but no broker provider supplied")
+        # #3189 finding 4b (Codex checkpoint 2). REQUIRED on the live path, and
+        # refused HERE — before the claim, before any broker I/O. The poller
+        # fails closed on an unrecorded environment, so a live submission that
+        # omitted it would create an order the poller can never reconcile:
+        # `environment_mismatch` on every attempt, claim held for ever. A
+        # keyword default keeps the ~50 demo-path call sites untouched, which is
+        # why the live path has to assert what the signature cannot.
+        if broker_env is None:
+            raise ValueError(
+                "enable_live_trading is True but no broker_env supplied — a live order whose "
+                "environment is not recorded can never be reconciled by the pending-order poller"
+            )
         # #2942 half 2. The evidence lock. Session-scoped and held across the
         # claim commit, the marker commit and the provider call, so a row still
         # reading 'claim_committed' while this key is free is one whose submitter
