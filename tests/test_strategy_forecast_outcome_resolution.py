@@ -158,6 +158,45 @@ def test_a_superseded_fill_price_is_terminal_without_aborting_the_batch() -> Non
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_price_superseded", None)
 
 
+def test_a_fill_date_the_corpus_lost_is_terminal_without_aborting_the_batch() -> None:
+    """#3189 finding 10, forecast side. `locate_fill_index` raised and the raise
+    escaped the batch loop before its cursor advanced, starving this forecast and
+    every later one in the tick."""
+    series = _series(
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+    )
+    forecast = PendingForecast(
+        forecast_id=7,
+        instrument_id=42,
+        fill_bar_date=date(2099, 1, 1),  # not in the loaded series
+        fill_price=Decimal("100"),
+        target_barrier_pct=Decimal("10"),
+        stop_barrier_pct=Decimal("5"),
+        horizon_market_days=2,
+    )
+
+    row = _resolve_forecast(forecast, series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_absent", None)
+
+
+def test_a_fill_bar_whose_open_no_longer_loads_is_terminal() -> None:
+    """The date survives, the open does not — `load_masked_bars` nulls an open
+    that is NULL or <= 0. `resolve_outcome` would raise; it is now recorded."""
+    series = _series(
+        (None, Decimal("101"), Decimal("99")),
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+    )
+
+    row = _resolve_forecast(_forecast(series), series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_open_absent", None)
+
+
 def test_round_robin_wraps_without_repeating(monkeypatch: object) -> None:
     from pytest import MonkeyPatch
 

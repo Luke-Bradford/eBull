@@ -85,6 +85,14 @@ UnresolvedReason = Literal[
     "missing_bar_data",
     "unorderable_exit_levels",
     "fill_price_superseded",
+    # #3189 finding 10. The three remaining ways a stored fill met a corpus that
+    # had moved and RAISED instead of recording — which aborted the batch before
+    # its cursor advanced, so the same head raised on every later tick.
+    # `signal_bar_absent` is unreachable from the forecast path (it locates no
+    # signal index) and is absent from that ledger's CHECK by design (sql/399).
+    "fill_bar_absent",
+    "signal_bar_absent",
+    "fill_bar_open_absent",
 ]
 
 #: ⚠ One member in v1, and it is not decoration. S5 (#2245) established that a
@@ -104,7 +112,19 @@ RESOLUTION_METHODS: frozenset[str] = frozenset(get_args(ResolutionMethod))
 #: silently land on our side of the line. Same construction as
 #: ``strategy_registry.OUR_ADDITIONAL_REASON_CODES``.
 OUR_ADDITIONAL_REASONS: frozenset[str] = frozenset(
-    {"window_truncated", "missing_bar_data", "unorderable_exit_levels", "fill_price_superseded"}
+    {
+        "window_truncated",
+        "missing_bar_data",
+        "unorderable_exit_levels",
+        "fill_price_superseded",
+        # #3189 finding 10. Ours, and the explicit-subtraction design is what
+        # caught it: added to the Literal alone they would have landed in
+        # INHERITED_REASONS, which is asserted to be a subset of the parent
+        # registry's NOT_EVALUABLE_REASONS and would have failed there instead.
+        "fill_bar_absent",
+        "signal_bar_absent",
+        "fill_bar_open_absent",
+    }
 )
 INHERITED_REASONS: frozenset[str] = UNRESOLVED_REASONS - OUR_ADDITIONAL_REASONS
 

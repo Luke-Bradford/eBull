@@ -153,6 +153,23 @@ def _masked_reasons(rows: Sequence[Mapping[str, object]]) -> dict[int, Unresolve
     }
 
 
+def _unresolved_forecast_row(forecast_id: int, reason: UnresolvedReason) -> ForecastOutcomeRow:
+    """One recorded refusal, so a corpus disagreement cannot abort the batch.
+
+    ⚠ `signal_bar_absent` has no counterpart here and `sql/399` deliberately
+    omits it from this ledger's CHECK: the forecast path locates no signal index.
+    """
+    return ForecastOutcomeRow.from_outcome(
+        forecast_id,
+        Outcome(
+            outcome="unresolved",
+            resolution_method="daily_bar",
+            rule_set_version=PATH_RULE_SET_VERSION,
+            reason=reason,
+        ),
+    )
+
+
 def _resolve_forecast(
     forecast: PendingForecast,
     *,
@@ -161,7 +178,13 @@ def _resolve_forecast(
     masked_bar_reasons: Mapping[int, UnresolvedReason] | None = None,
 ) -> ForecastOutcomeRow | None:
     """Return one terminal observation, or ``None`` until the horizon matures."""
-    fill_index = locate_fill_index(series, forecast.fill_bar_date)
+    # ⚠⚠ Recorded, not raised (#3189 finding 10) — see the signal resolver's
+    # `_resolve_fill` for the full reasoning. Same guard intent (no silent
+    # re-read of a rebuilt corpus), same batch-wedge blast radius if it escapes.
+    try:
+        fill_index = locate_fill_index(series, forecast.fill_bar_date)
+    except ValueError:
+        return _unresolved_forecast_row(forecast.forecast_id, "fill_bar_absent")
     # ⚠⚠ This path reads the SAME stored `strategy_signals.fill_price` as the
     # signal resolver, so it carries the same defect (#2414) — and one step
     # worse: the bracket below is a PERCENTAGE OF that price, so a superseded
@@ -177,6 +200,10 @@ def _resolve_forecast(
                 reason="fill_price_superseded",
             ),
         )
+    # ⚠ The fill bar survives but its open does not load. `resolve_outcome`
+    # would raise; here it is one recorded refusal (#3189 finding 10).
+    if series.rows[fill_index].get("open") is None:
+        return _unresolved_forecast_row(forecast.forecast_id, "fill_bar_open_absent")
     hundred = Decimal("100")
     levels = ExitLevels(
         take_profit=forecast.fill_price * (Decimal("1") + forecast.target_barrier_pct / hundred),
