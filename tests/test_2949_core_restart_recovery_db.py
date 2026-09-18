@@ -28,9 +28,10 @@ backlog genuinely over the batch cap, which #2962 made non-vacuous for the core
 arm); item 7's position-closure half lives in
 ``tests/test_2949_core_close_recovery_db.py`` because the EXIT lifecycle is a
 different transaction, a different recovery reader and a different broker verb.
-What is still NOT run — item 6's credential rotation and mandate revocation,
-item 7's rebalance SELL (blocked by ``core_close_side_cost_quote_unavailable``),
-and partial fills — is recorded in
+Round 3 added item 6's mandate revocation and credential rotation.  What is
+still NOT run — item 5's outage and contention halves, item 7's rebalance SELL
+(blocked by ``core_close_side_cost_quote_unavailable``), and partial fills
+(blocked on #2965's attended partial fill) — is recorded in
 ``docs/proposals/execution/2026-09-13-core-restart-acceptance.md``; a silently
 dropped scenario reads as a covered one.
 """
@@ -69,9 +70,11 @@ from tests.fixtures.core_restart import (
     USER_CREDENTIAL_ID,
     FileBackedFakeBroker,
     core_state_report,
+    revoke_core_mandate,
     run_engine_until_fault,
     seed_core_execution_world,
     seed_non_core_strategy_order,
+    seed_unreferenced_credential,
     select_core_instrument,
 )
 from tests.fixtures.ebull_test_db import test_database_url
@@ -88,11 +91,12 @@ def core_world(
     Committed rather than left in the fixture's transaction because the child is
     a different process: anything uncommitted here is invisible to it.
 
-    ``SELECTED_CORE_INSTRUMENT_ID`` is ``None`` on ``main`` while #2833's
-    five-trading-day verdict runs, so the executor refuses every call without
-    this.  That is a property of the DECLARATION, not of the recovery machinery
-    under test.  The parent patches it through ``monkeypatch`` so the module
-    constant is restored; the child sets it in its own process and dies.
+    ⚠ #2833's verdict has since opened (``110b4981``: ``pass``, 3417 SPY.RTH), so
+    ``SELECTED_CORE_INSTRUMENT_ID`` is no longer ``None`` on ``main`` — see
+    ``select_core_instrument``.  The patch stays so this harness measures the
+    recovery machinery and not whatever the DECLARATION currently says.  The parent
+    patches through ``monkeypatch`` so the module constant is restored; the child
+    sets it in its own process and dies.
     """
     from app.services import strategy_core_selection
 
@@ -1071,3 +1075,154 @@ def test_scenario_6_kill_switch_refuses_a_clean_re_entry_after_a_crash(
     assert refused.reason_code == "core_kill_switch_active_or_missing"
     assert broker.read()["mutation_calls"] == 0
     assert core_state_report(ebull_test_conn)["strategy_orders"] == 0
+
+
+def test_scenario_6_mandate_revocation_between_phases_stops_entry_not_reconciliation(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Revoking the mandate must not strand an order it can no longer authorise.
+
+    The kill-switch twin above establishes the invariant for a stop; this is the
+    other half of matrix item 6, not run in rounds 1 or 2. The mandate is revoked
+    AFTER the broker accepted and BEFORE recovery, which is the sequence an
+    operator disabling the sleeve during an incident actually produces.
+
+    ``resume_core_submission`` never loads the mandate — it reads the durable
+    authority and goes straight to ``_reconcile_core_authority``
+    (``strategy_core_executor.py:387-392``) — so the invariant holds by
+    construction rather than by a check. Asserted anyway, because "by
+    construction" is a property of today's call graph: a mandate read added to
+    the resume path would turn a revocation into unaccounted broker exposure, and
+    nothing else in the suite would notice.
+    """
+    process = run_engine_until_fault(database_url=test_database_url(), workdir=core_world, fault="after_broker_accept")
+    assert process.returncode == SIGKILL_RETURNCODE
+
+    revoke_core_mandate(ebull_test_conn)
+
+    broker = _restarted_engine_broker(core_world)
+    authority = load_core_resume_authority(ebull_test_conn)
+    assert authority is not None
+    resumed = resume_core_submission(ebull_test_conn, broker=_provider(broker), authority=authority)
+    # On the broker's own counter, as in the kill-switch twin: the point is that
+    # the lookup HAPPENED with no enabled mandate, not that a verdict said so.
+    assert broker.read()["lookup_calls"] == 1
+    assert resumed.state == "held"
+    assert resumed.reason_code == "core_order_reconciled"
+    assert core_state_report(ebull_test_conn)["active_ownership"] == 1
+    assert broker.read()["mutation_calls"] == 1
+
+
+def test_scenario_6_mandate_revocation_refuses_a_clean_re_entry_after_a_crash(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """No new exposure without an enabled mandate — but the refusal is a RAISE.
+
+    ⚠⚠ The asymmetry is the finding, and it is recorded in the acceptance report
+    rather than fixed here. The kill switch returns an audited
+    ``refused``/``core_kill_switch_active_or_missing`` verdict; a revoked mandate
+    raises ``StrategyCoreExecutionError`` at ``strategy_core_executor.py:596``,
+    before any decision row is written. Both fail closed, so nothing is unsafe —
+    but only one of them leaves an operator-visible reason for why the sleeve
+    stopped, and an incident reader looking for the revocation they just made
+    will not find it in the decision audit.
+
+    Run on ``before_authority_commit`` for the same reason the kill-switch twin
+    is: every other fault leaves the allocator's ``hold`` or the gate's
+    ``core_trade_in_flight`` binding first, so the assertion would pass without
+    the mandate ever being consulted.
+
+    ⚠ The revoked revision KEEPS its ``core_instrument_id`` (see
+    ``revoke_core_mandate``). The gate puts three conditions behind one message,
+    so a revocation that also nulled the instrument would leave this test unable
+    to tell which one fired — and a revert-probe deleting ``not mandate.enabled``
+    passed until the instrument was retained.
+    """
+    process = run_engine_until_fault(
+        database_url=test_database_url(), workdir=core_world, fault="before_authority_commit"
+    )
+    assert process.returncode == SIGKILL_RETURNCODE
+    assert core_state_report(ebull_test_conn)["core_trades"] == 0
+
+    revoke_core_mandate(ebull_test_conn)
+
+    broker = _restarted_engine_broker(core_world)
+    with pytest.raises(StrategyCoreExecutionError, match="an enabled core mandate is required"):
+        _execute(ebull_test_conn, broker)
+    assert broker.read()["mutation_calls"] == 0
+    report = core_state_report(ebull_test_conn)
+    assert report["strategy_orders"] == 0
+    assert report["intents"] == 0
+
+
+def test_scenario_6_credential_rotation_is_refused_until_the_core_order_resolves(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """A rotation that outran reconciliation would orphan the only account that
+    can look the order up.
+
+    Round 2 recorded credential rotation as needing "a second credential pair in
+    the seed". That is true of simulating a full rotation; it is NOT true of the
+    invariant, which is guarded in the database:
+    ``prevent_unresolved_core_credential_removal`` (``sql/373``) refuses to revoke
+    either credential named on the eligibility proof of a core order whose
+    reconciliation state is not yet ``resolved``/``rejected``. An unresolved core
+    order is exactly what a crash after broker acceptance leaves, so the process
+    boundary is what makes this reachable at all.
+
+    Three arms, and the third is the one that makes the first mean anything:
+
+    1. revoking the proof's api_key while unresolved → refused, ``23503``;
+    2. an unreferenced credential → revoked freely in the same state, so the
+       trigger is discriminating and not a blanket refusal;
+    3. after reconciliation resolves, the same revocation succeeds — the guard is
+       a hold until terminal, not a permanent pin.
+
+    ⚠ The hold covers the WHOLE rotation, not half of it.
+    ``broker_credentials_unique_active`` (``sql/019``) forbids a second active
+    credential on the same ``(operator, provider, label, environment)``, so
+    revoke-then-insert is the only order available and ``sql/373`` blocks its
+    first step. That is why arm 2's control has to belong to a second operator.
+    """
+    process = run_engine_until_fault(database_url=test_database_url(), workdir=core_world, fault="after_broker_accept")
+    assert process.returncode == SIGKILL_RETURNCODE
+    assert core_state_report(ebull_test_conn)["reconciliation_states"] == ["unresolved"]
+
+    control_credential_id = seed_unreferenced_credential(ebull_test_conn)
+
+    # 1 — the proof's own credential is pinned while the order is unresolved.
+    with pytest.raises(psycopg.errors.ForeignKeyViolation, match="required by an unresolved core order"):
+        ebull_test_conn.execute(
+            "UPDATE broker_credentials SET revoked_at=now() WHERE id=%s",
+            (API_CREDENTIAL_ID,),
+        )
+    ebull_test_conn.rollback()
+
+    # 2 — the positive control. Without this the test would pass against a
+    # trigger that refused every revocation, which is a worse defect than the
+    # one being guarded against.
+    ebull_test_conn.execute(
+        "UPDATE broker_credentials SET revoked_at=now() WHERE id=%s",
+        (control_credential_id,),
+    )
+    ebull_test_conn.commit()
+
+    # 3 — resolve, then the hold lifts.
+    broker = _restarted_engine_broker(core_world)
+    authority = load_core_resume_authority(ebull_test_conn)
+    assert authority is not None
+    resumed = resume_core_submission(ebull_test_conn, broker=_provider(broker), authority=authority)
+    assert resumed.reason_code == "core_order_reconciled"
+    assert core_state_report(ebull_test_conn)["reconciliation_states"] == ["resolved"]
+
+    ebull_test_conn.execute(
+        "UPDATE broker_credentials SET revoked_at=now() WHERE id IN (%s, %s)",
+        (API_CREDENTIAL_ID, USER_CREDENTIAL_ID),
+    )
+    ebull_test_conn.commit()
+    revoked = ebull_test_conn.execute("SELECT count(*) FROM broker_credentials WHERE revoked_at IS NOT NULL").fetchone()
+    ebull_test_conn.commit()
+    assert revoked is not None and int(revoked[0]) == 3
