@@ -118,6 +118,14 @@ The column is `NULL` on:
   `orchestrator_full_sync` / `orchestrator_high_frequency_sync`, which write `sync_runs`, not
   `job_runs`. ⚠ `orchestrator_high_frequency_sync` carries 76 of the 567 skips, so its wait stays
   invisible after this change.
+- ⚠⚠ **And every LAYER JOB those two dispatch, which the first version of this section did not
+  say.** Found by the post-deploy census rather than by reading the code: `daily_portfolio_sync` is
+  an orchestrator layer adapter (`app/services/sync_orchestrator/adapters.py:231`,
+  `registry.py:331`), so the HF sync holds the slot and the layer writes its own `job_runs` row
+  through `_tracked_job` → `record_job_start`. The third bullet below (the `record_job_start`
+  fallback) does cover it, and the shipped `COMMENT ON COLUMN` is therefore accurate — but *"the
+  three `_PRELUDE_OPT_OUT_JOBS"* read as a three-row population when it is three dispatchers plus
+  their layers. The layer's NULL is correct: it holds no slot of its own.
 - `record_job_skip` rows written outside the prelude — the registry-default param-validation abort
   and `_record_lane_busy_skip`. Both are inside the slot, so both *could* carry it; neither is a
   run whose own `started_at` clause 1 reads, and covering them means widening
@@ -161,6 +169,36 @@ Met by 3 pure tests (`tests/test_jobs_runtime.py::TestConnectionBudgetExecutionG
 | P1 — delete the ContextVar `reset` | 1 (`…publishes_a_zero_wait_not_none`) |
 | P2 — fast path publishes `None` instead of `0.0` | 3 |
 | P3 — publish a constant `0.0` in place of the measurement | 2 |
+
+## Dev-verify — the class showed up on the first cycle
+
+Merged `6222e143`; `~/Dev/eBull` re-detached at `origin/main` and the jobs child respawned
+**22107 → 95101**, 5 s after the touch (asserted on the child of the inner supervisor `61634`, not
+the first `pgrep` hit — the outer supervisor never respawns itself).
+
+The very first post-deploy cycle recorded a real wait:
+
+| job | `execution_slot_wait_seconds` | fired |
+| --- | ---: | --- |
+| `sec_manifest_worker` | **5.882** | 04:50:05Z |
+| `jobs_retry_sweeper` | **5.846** | 04:50:05Z |
+
+Two general-lane jobs serialising on the one permit at the same fire. Before this column both rows
+read as ordinary on-time runs — `finished_at - started_at` never contained those 5.9 s.
+⚠ `jobs_retry_sweeper` is one of the three jobs whose `max_instances_active` skips its own body
+could not explain (74 skips, max body 0.20 s), so the first observation lands on the population the
+premise was built from.
+
+Coverage since respawn — 9 rows: **6 stamped** (2 with a positive wait, worst 5.882), **3 NULL**,
+all three accounted for:
+
+| NULL row | why |
+| --- | --- |
+| `daily_portfolio_sync` `success` | orchestrator layer job — holds no slot of its own (see above) |
+| `strategy_halt_feed_refresh` `skipped` | prerequisite skip via `record_job_skip`, outside the halt-safety window |
+| `strategy_intraday_harvest` `skipped` | prerequisite skip via `record_job_skip`, outside the bar-collection window |
+
+No `sec_rebuild`: no parser version bump, no stored value changed.
 
 ## Codex checkpoints
 
