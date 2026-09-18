@@ -19,7 +19,7 @@ Reproduce:
 docker compose --profile test up -d postgres-test
 uv run pytest tests/test_2949_core_restart_recovery_db.py \
               tests/test_2949_core_close_recovery_db.py -v -o addopts=''
-# expect: 25 passed  (21 restart + 4 close, at round 3)
+# expect: 27 passed  (23 restart + 4 close, at round 4)
 ```
 
 ⚠ **Check the count, not the exit status.** `ebull_test_conn` *skips* when the test database is
@@ -30,8 +30,8 @@ the shell.
 file; #2962 and #2961's sessions added two more before round 2 started (the unattended
 lost-acceptance recovery and the stranded read-surface flag); round 2 added one matrix-5 test
 plus 3 in the close file (15); #2961's terminalisation fix then added 6 more to the restart file
-and #2979's added 1 to the close file (22); round 3 adds the three matrix-6 tests (25). Round-1
-figures quoted below are left as they were written.
+and #2979's added 1 to the close file (22); round 3 adds the three matrix-6 tests (25) and round 4
+the two matrix-5 ones (27). Round-1 figures quoted below are left as they were written.
 
 ## What the harness is
 
@@ -586,3 +586,66 @@ all. Confirmed by probe: disabling the trigger fails arm 1.
 
 **Still no green "ready" status.** Round 3 closes matrix item 6 and records one auditability
 asymmetry; it removes no blocker.
+
+## Round 4 — matrix 5's two remaining halves
+
+Both were deferred for time in earlier rounds, not blocked.
+
+### 5b — the outage half
+
+`test_scenario_5_an_outage_backlog_drains_after_the_cooldown_not_after_the_broker_returns`. The
+broker double gains an `unreachable` switch whose `lookup_order` raises `BrokerOrderLookupError`
+— the transport class, which `reconcile_strategy_order` maps to `error` / `broker_lookup_error`
+(`:988-994`). Deliberately **not** `BrokerOrderNotFound`: that is a statement *about* an order and
+drives a different state. An outage is the absence of an answer, not an answer.
+
+The arc: three due rows (one core, two alpha) → outage → every row `error`, and the double's own
+`lookup_calls` counter shows the reconciler did reach out → an immediate second cycle returns
+**empty** because the cooldown bites → the broker comes back and the cycle is **still empty** →
+`last_attempt_at` backdated past the cap, and the backlog drains.
+
+⚠⚠ **The middle step is the finding, and it is easy to state backwards: recovery is gated on the
+cooldown elapsing, not on the broker returning.** That is correct — nothing tells us the broker is
+healthy except a successful poll, and polling to find out is the hammering the cooldown exists to
+stop — but an operator watching a restored broker and an idle backlog needs it written down. At
+the default constants the wait is up to `RECONCILIATION_RETRY_CAP_SECONDS` (3,450 s ≈ 57 min).
+
+⚠ Each empty return is asserted against a live count of still-due rows. An empty
+`reconcile_backlog` is the same value whether the backlog is empty or every row is cooling, so
+without that count the scenario would pass against a backlog that had simply resolved everything.
+Time is advanced by backdating `last_attempt_at`, not by shrinking `retry_base_seconds` — a
+smaller base would exercise a parameter no caller uses and would not show the DEFAULT cooldown
+ever releasing.
+
+### 5c — the all-busy contention shape, and a named ambiguity
+
+`test_scenario_5_an_all_busy_batch_returns_empty_and_keeps_every_rows_place`. Round 1's report
+recorded this and nothing had driven it: with `b` busy rows the declared bound degrades to
+`ceil(due / (limit - b))`, and **an all-busy batch returns empty, which is indistinguishable from
+an empty backlog at the call site** — `skipped_busy` is logged and is not in the return value.
+Both rows' locks are held on a second connection; the call returns `()` with two rows
+demonstrably still due, and returns both the moment the locks are released.
+
+The half with teeth is the second: `StrategyReconciliationBusy` is caught and `last_attempt_at` is
+deliberately left **unchanged**, so a row skipped for somebody else's lock keeps its place at the
+FRONT of the next rotation. Asserted on the stored timestamps — under
+`ORDER BY last_attempt_at ASC NULLS FIRST` a contended row whose clock was advanced would silently
+lose its turn to every row behind it, and nothing else in the suite would notice.
+
+### Round 4's probes
+
+| probe | prediction | result |
+| --- | --- | --- |
+| neutralise the cooldown clause in the selection SQL (`TRUE OR …`) | 5b fails | 5b FAILED, nothing else |
+| advance `last_attempt_at` in the `StrategyReconciliationBusy` branch | 5c fails | 5c FAILED, nothing else |
+| unmodified control | all pass | 23 passed |
+
+### Still not covered after round 4
+
+A full rotation past `sql/373`'s hold (belongs with #2603's revalidation slice, `59ee2fc6`) ·
+non-crash close failures (definite rejection, uncertain transport, malformed acceptance, lookup
+outage) · matrix 7's rebalance SELL, still blocked by `core_close_side_cost_quote_unavailable` ·
+partial fills, still blocked on #2965's attended partial fill.
+
+**Still no green "ready" status.** Matrix items 5 and 6 are now complete; item 7 is not, and the
+two open blockers are unchanged.

@@ -176,6 +176,14 @@ class FileBackedFakeBroker:
         self.state_path = Path(state_path)
         self.fault = fault
         self.fill_status = fill_status
+        #: Matrix 5's OUTAGE half (round 3). When set, ``lookup_order`` raises
+        #: ``BrokerOrderLookupError`` — the transport class, which
+        #: ``reconcile_strategy_order`` maps to ``error`` /
+        #: ``broker_lookup_error`` (``strategy_order_reconciliation.py:988-994``).
+        #: ⚠ Deliberately NOT ``BrokerOrderNotFound``: that is a statement ABOUT
+        #: an order ("the broker does not have this one") and it drives a
+        #: different state. An outage is the absence of an answer, not an answer.
+        self.unreachable = False
         if not self.state_path.exists():
             self._write(
                 {
@@ -336,6 +344,12 @@ class FileBackedFakeBroker:
         state = self.read()
         state["lookup_calls"] = int(state.get("lookup_calls", 0)) + 1
         self._write(state)
+        if self.unreachable:
+            # Counted BEFORE raising: an outage is a call that was made and got
+            # no answer. A double that skipped the counter would make "did the
+            # reconciler keep trying during the outage?" unanswerable, which is
+            # half of what the outage scenario measures.
+            raise BrokerOrderLookupError("broker unreachable")
         for record in state["orders"]:
             if order_id is not None and record["broker_order_ref"] != order_id:
                 continue

@@ -28,10 +28,11 @@ backlog genuinely over the batch cap, which #2962 made non-vacuous for the core
 arm); item 7's position-closure half lives in
 ``tests/test_2949_core_close_recovery_db.py`` because the EXIT lifecycle is a
 different transaction, a different recovery reader and a different broker verb.
-Round 3 added item 6's mandate revocation and credential rotation.  What is
-still NOT run — item 5's outage and contention halves, item 7's rebalance SELL
-(blocked by ``core_close_side_cost_quote_unavailable``), and partial fills
-(blocked on #2965's attended partial fill) — is recorded in
+Round 3 added item 6's mandate revocation and credential rotation, and round 4
+item 5's outage and contention halves.  What is still NOT run — item 7's
+rebalance SELL (blocked by ``core_close_side_cost_quote_unavailable``), partial
+fills (blocked on #2965's attended partial fill) and non-crash close failures —
+is recorded in
 ``docs/proposals/execution/2026-09-13-core-restart-acceptance.md``; a silently
 dropped scenario reads as a covered one.
 """
@@ -57,10 +58,12 @@ from app.services.strategy_core_executor import (
 )
 from app.services.strategy_core_submission_gate import CORE_SUBMISSION_ADVISORY_LOCK
 from app.services.strategy_order_reconciliation import (
+    RECONCILIATION_RETRY_CAP_SECONDS,
     StrategyReconciliationBusy,
     enforce_reconciliation_slo,
     reconcile_backlog,
     terminalise_unsubmitted_core_entry,
+    try_reconciliation_order_lock,
 )
 from tests.fixtures.core_restart import (
     API_CREDENTIAL_ID,
@@ -952,6 +955,163 @@ def test_scenario_5_a_core_row_behind_the_batch_cap_is_reached_within_the_declar
     report = core_state_report(ebull_test_conn)
     assert report["active_ownership"] == 1
     assert broker.read()["mutation_calls"] == 1
+
+
+def test_scenario_5_an_outage_backlog_drains_after_the_cooldown_not_after_the_broker_returns(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Matrix item 5's OUTAGE half (round 4), the clause round 2 left unrun.
+
+    A backlog accumulated while the broker was unreachable, then drained. This
+    exercises the cooldown arithmetic rather than the rotation, which is why it
+    is a separate scenario from the over-cap half above.
+
+    The property that matters is the one in the middle, and it is easy to state
+    backwards: **recovery is gated on the cooldown elapsing, NOT on the broker
+    coming back.** A failed poll earns an exponential backoff, so the rows stay
+    out of selection for `RECONCILIATION_RETRY_BASE_SECONDS`-scaled time even
+    after the broker is healthy again. That is correct — nothing tells us the
+    broker returned except a successful poll, and polling to find out is the
+    hammering the cooldown exists to stop — but an operator watching a restored
+    broker and an idle backlog needs it written down.
+
+    ⚠ NON-VACUITY, twice. An empty `reconcile_backlog` is the same value whether
+    the backlog is empty or every row is cooling down, so each empty return is
+    asserted against a live count of still-due rows. Without that the scenario
+    would pass against a backlog that had simply resolved everything.
+
+    ⚠ Time is advanced by backdating `last_attempt_at` rather than by sleeping or
+    by shrinking `retry_base_seconds`. Sleeping 300s is not an option; passing a
+    smaller base would exercise a parameter no caller uses and would not prove
+    the DEFAULT cooldown ever releases.
+    """
+    broker = _restarted_engine_broker(core_world)
+    competitors = 2
+    for ordinal in range(competitors):
+        _, request_id = seed_non_core_strategy_order(ebull_test_conn, ordinal=ordinal, amount="1")
+        broker.seed_accepted_order(reference_id=str(request_id), amount="1", status="Pending")
+
+    process = run_engine_until_fault(database_url=test_database_url(), workdir=core_world, fault="none")
+    assert process.returncode == 0, process.stderr
+    core_order_id = json.loads((core_world / "result.json").read_text())["order_id"]
+
+    def still_due() -> int:
+        row = ebull_test_conn.execute(
+            "SELECT count(*) FROM strategy_order_reconciliation_state WHERE state NOT IN ('resolved','rejected')"
+        ).fetchone()
+        ebull_test_conn.commit()
+        assert row is not None
+        return int(row[0])
+
+    assert still_due() == competitors + 1
+
+    # -- the outage ---------------------------------------------------------
+    broker.unreachable = True
+    lookups_before = broker.read()["lookup_calls"]
+    during_outage = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=10)
+    assert {result.order_id for result in during_outage} == set(_attempt_counts(ebull_test_conn))
+    assert {result.state for result in during_outage} == {"error"}
+    assert {result.error_code for result in during_outage} == {"broker_lookup_error"}
+    # The reconciler DID reach out — an outage is a call with no answer, and a
+    # scenario that never called would assert nothing about the outage.
+    assert broker.read()["lookup_calls"] == lookups_before + competitors + 1
+    assert still_due() == competitors + 1
+
+    # -- the cooldown bites, while the broker is still down ------------------
+    assert reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=10) == ()
+    assert still_due() == competitors + 1
+
+    # -- the broker returns, and NOTHING happens yet -------------------------
+    broker.unreachable = False
+    assert reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=10) == ()
+    assert still_due() == competitors + 1
+
+    # -- the cooldown elapses, and the backlog drains ------------------------
+    ebull_test_conn.execute(
+        "UPDATE strategy_order_reconciliation_state "
+        "SET last_attempt_at = last_attempt_at - make_interval(secs => %s) "
+        "WHERE state NOT IN ('resolved','rejected')",
+        (RECONCILIATION_RETRY_CAP_SECONDS + 1,),
+    )
+    ebull_test_conn.commit()
+    drained = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=10)
+    assert {result.order_id for result in drained} == set(_attempt_counts(ebull_test_conn))
+    # The core row resolves; the competitors are Pending on the double, which is
+    # a progress state and stays in the rotation. Neither is still `error`, which
+    # is the whole claim: the cooldown is a DELAY, not an absorbing state.
+    states = {result.order_id: result.state for result in drained}
+    assert states[core_order_id] == "resolved"
+    assert set(states.values()) == {"resolved", "pending"}
+    assert core_state_report(ebull_test_conn)["active_ownership"] == 1
+    assert broker.read()["mutation_calls"] == 1
+
+
+def test_scenario_5_an_all_busy_batch_returns_empty_and_keeps_every_rows_place(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Matrix item 5's CONTENTION shape (round 4), and a named ambiguity.
+
+    Round 1's report recorded the gap and nothing exercised it: with ``b`` busy
+    rows the declared selection bound degrades to ``ceil(due / (limit - b))``,
+    *"and an all-busy batch returns empty — which is indistinguishable from an
+    empty backlog unless it is said"* (`strategy_order_reconciliation.py:1145`).
+    ``skipped_busy`` is logged and is **not** in the return value, so a caller
+    cannot tell the two apart. This pins that, rather than leaving it as a
+    comment nobody has driven.
+
+    The second half is the one with teeth. ``StrategyReconciliationBusy`` is
+    caught and ``last_attempt_at`` is deliberately left alone, so a row skipped
+    for somebody else's lock keeps its place at the FRONT of the next rotation
+    instead of being pushed to the back. Asserted on the stored timestamps —
+    under `ORDER BY last_attempt_at ASC NULLS FIRST` a contended row that had its
+    clock advanced would silently lose its turn to every row behind it.
+    """
+    broker = _restarted_engine_broker(core_world)
+    alpha_order_id, _ = seed_non_core_strategy_order(ebull_test_conn, ordinal=0, amount="1")
+
+    process = run_engine_until_fault(database_url=test_database_url(), workdir=core_world, fault="none")
+    assert process.returncode == 0, process.stderr
+    core_order_id = json.loads((core_world / "result.json").read_text())["order_id"]
+
+    def attempt_clocks() -> dict[int, Any]:
+        rows = ebull_test_conn.execute(
+            "SELECT order_id, last_attempt_at FROM strategy_order_reconciliation_state ORDER BY order_id"
+        ).fetchall()
+        ebull_test_conn.commit()
+        return {int(order_id): clock for order_id, clock in rows}
+
+    before = attempt_clocks()
+
+    # A second connection stands in for the attended resume or the submitter
+    # mid-flight that the busy path exists for. Two connections taking the same
+    # order's lock is ordinary server-side contention, not the one-session
+    # double-acquire the helper's own guard refuses.
+    holder = psycopg.connect(test_database_url())
+    try:
+        with (
+            try_reconciliation_order_lock(holder, core_order_id),
+            try_reconciliation_order_lock(holder, alpha_order_id),
+        ):
+            all_busy = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=10)
+            # ⚠ The documented ambiguity, asserted as an equality rather than
+            # described: this is the same value an EMPTY backlog returns, while
+            # two rows are demonstrably still due.
+            assert all_busy == ()
+            due = ebull_test_conn.execute(
+                "SELECT count(*) FROM strategy_order_reconciliation_state WHERE state NOT IN ('resolved','rejected')"
+            ).fetchone()
+            ebull_test_conn.commit()
+            assert due is not None and int(due[0]) == 2
+            assert attempt_clocks() == before, "a contended row must keep its place, not be pushed back"
+    finally:
+        holder.close()
+
+    # Released — the same call now selects both, so the empty return above was
+    # contention and not a backlog that had quietly emptied itself.
+    after_release = reconcile_backlog(ebull_test_conn, broker=_provider(broker), limit=10)
+    assert {result.order_id for result in after_release} == {core_order_id, alpha_order_id}
 
 
 # ---------------------------------------------------------------------------
