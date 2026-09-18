@@ -5375,6 +5375,12 @@ def execute_approved_orders() -> None:
                             recommendation_id=rec_id,
                             decision_id=decision_id,
                             broker=broker,
+                            # #3189 finding 4b: recorded on the durable intent
+                            # row so the poller can prove which environment's
+                            # id namespace the broker ref belongs to. `None`
+                            # when no broker was opened, which is also the
+                            # branch that never writes an intent row.
+                            broker_env=settings.etoro_env if broker is not None else None,
                         )
                         conn.commit()
                     if result.outcome == "filled":
@@ -6366,7 +6372,7 @@ def recommendation_order_reconcile() -> None:
     with _tracked_job(JOB_RECOMMENDATION_ORDER_RECONCILE) as tracker:
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as broker:
             with connect_job() as conn:
-                results = reconcile_pending_recommendation_orders(conn, broker=broker)
+                results = reconcile_pending_recommendation_orders(conn, broker=broker, env=settings.etoro_env)
         tracker.row_count = len(results)
         verdicts: dict[str, int] = {}
         for result in results:
