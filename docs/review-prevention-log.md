@@ -8376,3 +8376,54 @@ original, because the gate now *looked* like a bound.
   direct arm and leads; part 2's audit arms are scoped to what part 1 cannot see);
   `docs/proposals/ta/2026-09-18-decided-bar-revision-census.md`;
   `tests/test_2414_decided_bar_revision_census.py::TestDirectArm::test_it_carries_no_floor_because_it_needs_no_telemetry`.
+
+### A correct per-item refusal that RAISES inside a batch loop is a permanent wedge
+- First seen in: #2489 (2026-08-10, `sql/296` — "one unorderable S-4 bracket must not
+  abort the evidence or forward outcome batch"). Second seen in: #2414 (2026-09-18,
+  `5095717e`), same file, same loop, different cause — which is what makes it a class.
+- Symptom: `resolve_outcome` raises `ValueError` when a stored `fill_price` disagrees with
+  the bar it was copied from. The guard is CORRECT — a silent re-read would reinterpret a
+  recorded decision — but `_resolve_fill` calls it bare inside three nested loops in
+  `run_outcome_resolution`. The raise therefore aborts the current strategy **before** its
+  `conn.transaction()` commits the cursor, aborts every alphabetically later strategy in
+  the same tick, and the next tick re-selects the identical batch. It presents as a
+  transient job failure (`job_runs.status = 'failure'`, `row_count = NULL`) and is actually
+  a stall that never self-clears. Observed once already, 2026-08-15, from a sibling cause.
+- ⚠ Why it survives review: the raise reads as deliberate, because it *is* deliberate. The
+  undecided half is the **catch**, and an absent catch looks identical to a considered one.
+- Prevention: when you find a correct-looking `raise` in shared per-item logic, **read its
+  callers before concluding the behaviour is right** — specifically, whether the caller is
+  a batch with a cursor, and whether the cursor advances before or after the raise. Fix
+  shape is a **closed refusal code recorded as a terminal row**, never a catch-all
+  `except ValueError` (message-matching is exactly what #2489's commit title, *"classify
+  exit refusals without message matching"*, rejected). Grep `sql/` first: the vocabulary
+  has usually been widened before and the prior migration's header states the rule.
+  ⚠ Then **enumerate the other raises in the same unguarded region and measure each on the
+  full population**, so "out of scope" is a stated zero rather than an omission — #2414
+  found three neighbours at 0 rows each, plus a fourth that had actually fired.
+- Enforced in: this log; `sql/396_strategy_outcomes_fill_price_superseded.sql` (header
+  records both live constraint memberships); `app/services/outcome_ledger.py::fill_price_is_superseded`;
+  `tests/test_strategy_outcome_resolution.py::test_a_superseded_fill_price_is_terminal_without_aborting_the_batch`
+  and `::test_a_superseded_fill_price_never_reaches_the_exit_levels_factory`;
+  `docs/proposals/ta/2026-09-18-superseded-fill-price-refusal.md`.
+
+### A source-hash version constant names every path that shares the code
+- First seen in: #2414 (2026-09-18). Not a review finding — the second affected path was
+  found by asking the question, and would otherwise have shipped unguarded.
+- Symptom: `RULE_SET_VERSION = f"{RULE_SET_ID}+{_code_hash()}"` hashes the module's own
+  source, so adding one member to a `Literal` re-versions every stored outcome. Sizing that
+  is routine. What is NOT routine is that `strategy_forecast_outcome_resolution` embeds the
+  same hash (`RESOLVER_VERSION = f"…+path-{PATH_RULE_SET_VERSION}"`) — it reads the same
+  stored `strategy_signals.fill_price` and sizes **both** barriers as a percentage of it,
+  so it carried the identical defect and was not in the spec's first draft.
+- Prevention: before editing any source-hashed module (`outcome_resolver`,
+  `indicator_series`, `price_quarantine`, `price_structure`, each `s*_identity`),
+  `rg -n '<VERSION_CONST>' app/` — **every importer is a path that shares the behaviour you
+  are about to change.** Then (a) size the re-resolution at the CURRENT selector keys, not
+  the whole table; (b) confirm the neighbouring identity does not also move (had
+  `strategy_version` moved here, the 358 current-version signals would have become 0 and
+  the ledger would have stranded silently); (c) check for a frozen `EXPECTED_IDENTITY`
+  pinning the literal hash — `scripts/audit_2745_in_sample_run.py:78` must be left stale on
+  purpose, because it audits what was actually run and updating it falsifies the record.
+- Enforced in: this log; `docs/proposals/ta/2026-09-18-superseded-fill-price-refusal.md`
+  ("The rule-set bump is real and is sized").
