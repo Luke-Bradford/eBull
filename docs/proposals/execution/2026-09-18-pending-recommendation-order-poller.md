@@ -72,6 +72,14 @@ meaning.
 | `BrokerOrderLookupError` (transport / shape) | stamp, leave | held |
 | partial-fill states (#2965) / unknown status → `StrategyReconciliationError` | stamp, record, leave | held |
 
+⚠ **Two of those verdicts are PARKED, added after review (PR #3168's WARNING).** `filled`
+and a non-pollable ref describe a permanent property of the row, so re-asking hourly could
+only spend budget and append another identical audit row for ever. `sql/395`'s
+`recommendation_poll_parked_reason` stops the asking **without** touching `orders.status`:
+a terminal status falls outside the claim index and would release the claim — on an order
+that demonstrably executed. Transient verdicts (`not_found`, `lookup_error`) and an
+unsettled partial fill are deliberately NOT parked.
+
 Only one row in that table releases the claim, and it is the row where the broker has told us the
 order has ceased to exist. **Every other outcome fails closed**, which is the same direction half 1
 and slice A chose.
