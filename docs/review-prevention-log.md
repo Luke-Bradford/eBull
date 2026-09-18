@@ -8427,3 +8427,28 @@ original, because the gate now *looked* like a bound.
   purpose, because it audits what was actually run and updating it falsifies the record.
 - Enforced in: this log; `docs/proposals/ta/2026-09-18-superseded-fill-price-refusal.md`
   ("The rule-set bump is real and is sized").
+
+### A revert-probe can refute the RATIONALE while the code stays right
+- First seen in: #3159 clause 2 (2026-09-18). Not a review finding — the bot returned a
+  clean APPROVE with no findings, and the probe had already caught it.
+- Symptom: three places (a code comment, a test docstring, a spec section) asserted that the
+  ContextVar `reset` in `_job_execution_slot` is what stops one fire's wait being attributed
+  to the next fire on the same pooled thread. Deleting the `reset` failed
+  `test_an_immediate_admission_publishes_a_zero_wait_not_none` and did **not** fail the leak
+  test the claim named — because the `set` is unconditional, so a later slot entry always
+  overwrites and no cross-fire leak is reachable. The reset is still load-bearing, for a
+  different reason (it is what keeps `None` meaning "no slot is held" for a read taken after
+  the fire). So the code was correct, the tests passed, the reviewer approved, and three
+  comments were wrong in the same direction.
+- Prevention: a revert-probe's question is not *"does something fail?"* — it is **"does the
+  test I named for this claim fail?"** Record the probe→test mapping, one row per claim, and
+  when a probe fails a DIFFERENT test than predicted, the prediction is the defect: fix the
+  sentence, do not re-file the probe. ⚠ This is the failure mode a passing suite and an
+  approving reviewer cannot catch, because nothing executes a comment. Corollary: when a
+  claim survives because something ELSE supplies the property (here: an unconditional `set`),
+  say which mechanism actually supplies it, in the place the claim used to be.
+- Enforced in: this log; `app/jobs/runtime.py::_job_execution_slot` (the comment now states
+  what the probe measured and what it did not);
+  `tests/test_jobs_runtime.py::TestConnectionBudgetExecutionGate::test_a_wait_does_not_leak_into_the_next_slot_entry`
+  (docstring names its own discriminating power);
+  `docs/proposals/infra/2026-09-18-durable-execution-slot-wait.md` (probe→failure-count table).
