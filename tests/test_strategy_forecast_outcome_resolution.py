@@ -36,6 +36,17 @@ def _series(*ranges: tuple[Decimal | None, Decimal | None, Decimal | None]) -> B
     return BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
 
 
+#: The raw corpus says the date is GONE — the only evidence that separates a
+#: deleted bar from one the fail-closed loader cannot see (#3189 finding 10).
+def _BAR_DELETED(_day: date) -> bool:  # noqa: N802 - reads as a constant at call sites
+    return False
+
+
+def _BAR_PRESENT(_day: date) -> bool:  # noqa: N802 - reads as a constant at call sites
+    """Still in the raw corpus, so the loader's silence is about visibility."""
+    return True
+
+
 def _forecast(series: BarSeries, *, horizon: int = 2) -> PendingForecast:
     return PendingForecast(
         forecast_id=7,
@@ -156,6 +167,72 @@ def test_a_superseded_fill_price_is_terminal_without_aborting_the_batch() -> Non
 
     assert row is not None
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_price_superseded", None)
+
+
+def test_a_fill_date_the_corpus_lost_is_terminal_without_aborting_the_batch() -> None:
+    """#3189 finding 10, forecast side. `locate_fill_index` raised and the raise
+    escaped the batch loop before its cursor advanced, starving this forecast and
+    every later one in the tick."""
+    series = _series(
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+    )
+    # A date the loader SPANS but does not hold: the corpus itself moved.
+    gapped = BarSeries(
+        dates=(date(2026, 8, 1), date(2026, 8, 3)),
+        rows=series.rows[:2],
+    )
+    forecast = PendingForecast(
+        forecast_id=7,
+        instrument_id=42,
+        fill_bar_date=date(2026, 8, 2),
+        fill_price=Decimal("100"),
+        target_barrier_pct=Decimal("10"),
+        stop_barrier_pct=Decimal("5"),
+        horizon_market_days=2,
+    )
+
+    row = _resolve_forecast(forecast, series=gapped, unresolved_breaks=(), raw_bar_exists=_BAR_DELETED)
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_absent", None)
+
+
+def test_a_fill_bar_the_raw_corpus_still_holds_stays_pending() -> None:
+    """Fail-closed loading is not a corpus change (Codex ckpt-2, P1) — see
+    `outcome_ledger.bar_was_deleted`. Outcomes are immutable, so a terminal row
+    written during an incomplete quarantine refresh could never be corrected at
+    that version pair."""
+    series = _series(
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+    )
+    forecast = PendingForecast(
+        forecast_id=7,
+        instrument_id=42,
+        fill_bar_date=date(2099, 1, 1),  # beyond anything the loader returned
+        fill_price=Decimal("100"),
+        target_barrier_pct=Decimal("10"),
+        stop_barrier_pct=Decimal("5"),
+        horizon_market_days=2,
+    )
+
+    assert _resolve_forecast(forecast, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_PRESENT) is None
+
+
+def test_a_fill_bar_whose_open_no_longer_loads_is_terminal() -> None:
+    """The date survives, the open does not — `load_masked_bars` nulls an open
+    that is NULL or <= 0. `resolve_outcome` would raise; it is now recorded."""
+    series = _series(
+        (None, Decimal("101"), Decimal("99")),
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+        (Decimal("100"), Decimal("101"), Decimal("99")),
+    )
+
+    row = _resolve_forecast(_forecast(series), series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_open_absent", None)
 
 
 def test_round_robin_wraps_without_repeating(monkeypatch: object) -> None:

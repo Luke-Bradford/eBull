@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Final
@@ -26,8 +26,10 @@ from app.services.indicator_series import BarSeries
 from app.services.outcome_ledger import (
     OutcomeRow,
     PendingFill,
+    bar_was_deleted,
     fill_price_is_superseded,
     locate_fill_index,
+    raw_bar_probe,
     select_pending_fills,
     store_outcomes,
 )
@@ -104,12 +106,32 @@ def _locate_signal_index(series_dates: Sequence[date], signal_bar_date: date) ->
         ) from None
 
 
+def _unresolved_row(signal_id: int, reason: UnresolvedReason) -> OutcomeRow:
+    """One recorded refusal, so a corpus disagreement cannot abort the batch.
+
+    Every caller is a condition that RAISED before #3189 finding 10, so this
+    can only change rows that previously crashed — no row that resolves today is
+    relabelled.
+    """
+    return OutcomeRow.from_outcome(
+        signal_id,
+        Outcome(
+            outcome="unresolved",
+            resolution_method="daily_bar",
+            rule_set_version=OUTCOME_RULE_SET_VERSION,
+            reason=reason,
+        ),
+        input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+    )
+
+
 def _resolve_fill(
     entry: StrategyEntry,
     fill: PendingFill,
     *,
     series: BarSeries,
     unresolved_breaks: Sequence[date],
+    raw_bar_exists: Callable[[date], bool] | None = None,
     masked_bar_reasons: Mapping[int, UnresolvedReason] | None = None,
 ) -> OutcomeRow | None:
     """Return a terminal row, or ``None`` while the forward window is immature."""
@@ -120,8 +142,34 @@ def _resolve_fill(
             f"signal {fill.signal_id} carries universe {fill.universe!r}, expected current scan universe "
             f"{SCAN_UNIVERSE!r}"
         )
-    signal_index = _locate_signal_index(series.dates, fill.signal_bar_date)
-    fill_index = locate_fill_index(series, fill.fill_bar_date)
+    # ⚠⚠ A STORED DATE THE CORPUS NO LONGER HOLDS IS RECORDED, NOT RAISED
+    # (#3189 finding 10). Both locators are guards against silently re-reading
+    # "whatever bar sits at that position now" after a rebuild, and that intent
+    # is kept — an `unresolved` row NAMES the disagreement rather than
+    # reinterpreting it. What changes is only the blast radius: a raise here
+    # escapes three nested loops and aborts the strategy BEFORE its cursor is
+    # written, so the next tick re-selects the same fills and raises again,
+    # while every alphabetically later strategy in the tick never runs. Same
+    # treatment sql/396 gave the sibling case, and the same wedge shape as
+    # #3189 finding 7 in the order poller.
+    #
+    # ⚠ `except ValueError` is safe to keep this narrow because each locator
+    # raises exactly one ValueError and does nothing else; it is deliberately
+    # NOT wrapped around the resolver below, whose ValueErrors are genuine
+    # contract breaches (an unorderable bracket, a non-positive entry) that must
+    # stay loud.
+    try:
+        signal_index = _locate_signal_index(series.dates, fill.signal_bar_date)
+    except ValueError:
+        if not bar_was_deleted(raw_bar_exists, fill.signal_bar_date):
+            return None
+        return _unresolved_row(fill.signal_id, "signal_bar_absent")
+    try:
+        fill_index = locate_fill_index(series, fill.fill_bar_date)
+    except ValueError:
+        if not bar_was_deleted(raw_bar_exists, fill.fill_bar_date):
+            return None
+        return _unresolved_row(fill.signal_id, "fill_bar_absent")
     signal_scale_segment_end = segment_end_index(
         series,
         fill_index=signal_index,
@@ -183,6 +231,21 @@ def _resolve_fill(
             ),
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
         )
+    # ⚠ The fill bar survives but its open does not load — `load_masked_bars`
+    # nulls an open that is NULL or <= 0 (`price_masked_bars.py:220`).
+    # `fill_price_is_superseded` deliberately returns False here ("None is not
+    # evidence the bar moved"), so without this the flow reaches
+    # `resolve_outcome`, which raises "bar N has no open, so it cannot be a fill
+    # bar" — correct, and a batch-aborting way to say it (#3189 finding 10).
+    #
+    # ⚠⚠ IMMEDIATELY BEFORE `resolve_outcome`, and after BOTH the supersession
+    # test and the levels branch (Codex checkpoint 2). Placed any earlier it
+    # relabels a row that resolves today: a fill whose open is masked AND whose
+    # bracket is unreconstructible records `unorderable_exit_levels` now, and
+    # must keep doing so. The invariant this whole change rests on is that only
+    # rows that previously CRASHED can move.
+    if series.rows[fill_index].get("open") is None:
+        return _unresolved_row(fill.signal_id, "fill_bar_open_absent")
     outcome = resolve_outcome(
         series=series,
         fill_index=fill_index,
@@ -325,12 +388,14 @@ def run_outcome_resolution(
         for instrument_id, instrument_fills in sorted(by_instrument.items()):
             series = load_masked_bars(conn, instrument_id).series
             masked_bar_reasons = _masked_reasons(series.rows)
+            raw_bar_exists = raw_bar_probe(conn, instrument_id)
             for fill in instrument_fills:
                 row = _resolve_fill(
                     entry,
                     fill,
                     series=series,
                     unresolved_breaks=breaks.get(instrument_id, ()),
+                    raw_bar_exists=raw_bar_exists,
                     masked_bar_reasons=masked_bar_reasons,
                 )
                 if row is None:

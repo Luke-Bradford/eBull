@@ -195,6 +195,16 @@ INVENTORY: tuple[Occurrence, ...] = (
         "#2066 overlap read: stored closes compared to freshly fetched ones on the SAME dates",
     ),
     Occurrence(
+        "app/services/outcome_ledger.py",
+        175,
+        "raw_bar_probe existence check",
+        "METADATA",
+        (),
+        "#3189 finding 10: EXISTS for one (instrument, date). It answers whether a stored "
+        "fill's bar was DELETED or is merely invisible to the fail-closed masked loader, and "
+        "the answer decides record-vs-defer. No price is read and no arithmetic is done.",
+    ),
+    Occurrence(
         "app/services/market_data.py",
         273,
         "load_day_changes bar_count",

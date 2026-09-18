@@ -32,6 +32,20 @@ def _series(*ranges: tuple[Decimal | None, Decimal | None]) -> BarSeries:
     return BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
 
 
+#: The raw corpus says the date is GONE. ⚠ That is the only evidence that
+#: distinguishes a deleted bar from one this process cannot see: the loader is
+#: fail-closed, so its silence proves nothing (#3189 finding 10).
+def _BAR_DELETED(_day: date) -> bool:  # noqa: N802 - reads as a constant at call sites
+    return False
+
+
+def _BAR_PRESENT(_day: date) -> bool:  # noqa: N802 - reads as a constant at call sites
+    """The raw corpus still holds it, so the loader's silence is about
+    VISIBILITY — an unevaluated instrument, a stale quarantine version — and
+    nothing may be recorded."""
+    return True
+
+
 def _entry(*, max_hold_bars: int = 2) -> StrategyEntry:
     levels = ExitLevels(
         take_profit=Decimal("110"),
@@ -140,6 +154,241 @@ def test_unorderable_exit_levels_are_terminal_without_aborting_the_batch() -> No
     )
 
 
+def test_a_fill_date_the_corpus_lost_is_terminal_without_aborting_the_batch() -> None:
+    """#3189 finding 10 — `locate_fill_index` raised, and the raise escaped three
+    nested loops to abort the strategy BEFORE its cursor was written. The guard's
+    intent survives: the row NAMES the disagreement instead of re-reading
+    whatever bar now sits at that position."""
+    series = _gapped_series()
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=series.dates[0],
+        # Inside the loaded span, and gone from it — the corpus moved.
+        fill_bar_date=date(2026, 8, 2),
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_DELETED)
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_absent", None)
+
+
+def test_a_signal_date_the_corpus_lost_is_terminal_without_aborting_the_batch() -> None:
+    """The other locator, and a DISTINCT reason: which half of the stored pair
+    disagreed with the corpus is the whole operator-facing content of the row."""
+    series = _gapped_series()
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=date(2026, 8, 2),  # inside the loaded span, gone from it
+        fill_bar_date=series.dates[1],
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_DELETED)
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "signal_bar_absent", None)
+
+
+@pytest.mark.parametrize("field", ["fill_bar_date", "signal_bar_date"])
+def test_a_bar_the_raw_corpus_still_holds_stays_pending(field: str) -> None:
+    """What the new terminal rows must NOT claim (Codex checkpoint 2, P1).
+
+    ``load_masked_bars`` is fail-closed at the INSTRUMENT level: no
+    ``price_quarantine_coverage`` row at the current ``rule_set_version``
+    returns ZERO bars. Recording there would be far worse than the wedge it
+    replaces — outcomes are immutable and the selection anti-joins on the
+    version pair, so a corpus resolved during an incomplete quarantine refresh
+    would be permanently mislabelled at exactly the version pair the refresh
+    was producing. The raw bar still exists, so nothing is written and the fill
+    is retried.
+    """
+    series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
+    dates = {"signal_bar_date": series.dates[0], "fill_bar_date": series.dates[1]}
+    dates[field] = date(2099, 1, 1)  # beyond anything the loader returned
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=dates["signal_bar_date"],
+        fill_bar_date=dates["fill_bar_date"],
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    assert _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_PRESENT) is None
+
+
+def test_a_deleted_boundary_bar_is_recorded_not_deferred() -> None:
+    """Codex checkpoint 2, rounds 3-4 — the case every PROXY gets wrong.
+
+    When a rebuild deletes the FIRST bar, the returned span starts after the
+    stored date; and once the quarantine refresh recomputes its bounds from the
+    shortened series, the coverage window does the same. Both proxies then read
+    a deleted bar as an invisible one and defer it for ever, consuming a
+    round-robin slot on every tick. Asking the raw corpus has no boundary: the
+    bar is gone, so the disagreement is recorded.
+    """
+    series = _gapped_series()  # 08-01, 08-03, 08-04
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=date(2026, 7, 15),  # before the first returned bar
+        fill_bar_date=series.dates[1],
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_DELETED)
+
+    assert row is not None
+    assert row.reason == "signal_bar_absent"
+
+
+def test_a_caller_that_cannot_answer_never_records() -> None:
+    """``raw_bar_exists=None`` means nobody asked the corpus, and the default is
+    therefore to write NOTHING — fail-closed, because the expensive mistake is
+    the one that records an immutable row at the version pair a refresh was
+    still producing."""
+    series = _gapped_series()
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=series.dates[0],
+        fill_bar_date=date(2026, 8, 2),
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    assert _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=None) is None
+
+
+def _gapped_series() -> BarSeries:
+    """Three bars with 2026-08-02 missing from the middle.
+
+    The gap is the point: a date the loader SPANS but does not hold is the only
+    shape that proves the corpus itself moved, as opposed to a corpus this
+    process cannot currently see.
+    """
+    dates = (date(2026, 8, 1), date(2026, 8, 3), date(2026, 8, 4))
+    rows = tuple(
+        {
+            "open": Decimal("100"),
+            "high": Decimal("105"),
+            "low": Decimal("95"),
+            "close": Decimal("100"),
+            "volume": Decimal("1000"),
+        }
+        for _ in dates
+    )
+    return BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
+
+
+def test_a_fill_bar_whose_open_no_longer_loads_is_terminal() -> None:
+    """The third raise: the date survives, the open does not.
+
+    `load_masked_bars` nulls an open that is NULL or <= 0, and
+    `fill_price_is_superseded` deliberately returns False for it ("None is not
+    evidence the bar moved"), so the flow used to reach `resolve_outcome` and
+    raise "bar N has no open, so it cannot be a fill bar" — correct, and a
+    batch-aborting way to say it.
+
+    Built by hand rather than through `_series`, which hardcodes a positive open
+    on every bar; that is exactly why no existing test covered this.
+    """
+    dates = (date(2026, 8, 1), date(2026, 8, 2), date(2026, 8, 3))
+    rows = (
+        {"open": Decimal("100"), "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+        {"open": None, "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+        {"open": Decimal("100"), "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+    )
+    series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=dates[0],
+        fill_bar_date=dates[1],
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_open_absent", None)
+
+
+def test_an_unorderable_bracket_outranks_a_masked_fill_open() -> None:
+    """Precedence, pinned (#3189 finding 10, Codex checkpoint 2).
+
+    A fill whose open is masked AND whose bracket cannot be reconstructed
+    records `unorderable_exit_levels` TODAY — it is a resolved row, not a crash.
+    The new `fill_bar_open_absent` check therefore has to sit after the levels
+    branch: placed earlier it relabels that row, which breaks the invariant the
+    whole change rests on (only rows that previously CRASHED may move).
+    """
+    dates = (date(2026, 8, 1), date(2026, 8, 2), date(2026, 8, 3))
+    rows = (
+        {"open": Decimal("100"), "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+        {"open": None, "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+        {"open": Decimal("100"), "high": Decimal("105"), "low": Decimal("95"), "close": Decimal("100")},
+    )
+    series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
+    entry = cast(
+        StrategyEntry,
+        SimpleNamespace(
+            strategy_id="test-level",
+            exit_levels=lambda _series, *, signal_index, entry_price, universe: "unorderable_exit_levels",
+        ),
+    )
+    fill = PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=dates[0],
+        fill_bar_date=dates[1],
+        fill_price=Decimal("100"),
+        universe="survivor_only",
+    )
+
+    row = _resolve_fill(entry, fill, series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert row.reason == "unorderable_exit_levels"
+
+
+def test_a_genuine_contract_breach_still_raises() -> None:
+    """What the new containment must NOT swallow.
+
+    The `except ValueError` is deliberately narrow — around each locator only.
+    `resolve_outcome`'s own ValueErrors mean a bracket that cannot be traded or
+    an entry price that divides by zero: deploy-time breaches that are identical
+    for every row of that strategy, so a recorded per-row refusal would write
+    thousands of junk rows and hide a bug that should be loud.
+    """
+    series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
+    entry = cast(
+        StrategyEntry,
+        SimpleNamespace(
+            strategy_id="test-level",
+            exit_levels=lambda *_args, **_kwargs: ExitLevels(
+                take_profit=Decimal("110"),
+                # Orderable as a bracket (ExitLevels refuses stop >= target on
+                # construction) but not against the entry of 100, which is what
+                # `resolve_outcome` checks.
+                stop_loss=Decimal("105"),
+                max_hold_bars=2,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="is not below the entry"):
+        _resolve_fill(entry, _fill(series), series=series, unresolved_breaks=())
+
+
 def _superseded_fill(series: BarSeries) -> PendingFill:
     """The stored fill, priced from a bar that has since been rewritten.
 
@@ -204,8 +453,16 @@ def test_a_series_break_still_outranks_a_superseded_fill_price() -> None:
 
 
 def test_a_masked_open_is_not_reported_as_a_superseded_fill_price() -> None:
-    """``None`` is not evidence the bar moved. The masked case keeps
-    ``resolve_outcome``'s own refusal rather than borrowing this one."""
+    """``None`` is not evidence the bar moved, so the masked case must not
+    borrow ``fill_price_superseded``.
+
+    ⚠ NARROWED, not flipped (#3189 finding 10). This asserted
+    ``pytest.raises(ValueError, match="cannot be a fill bar")`` — it pinned the
+    subject (which refusal applies) to the MECHANISM of the day (a raise), and
+    that mechanism is the batch wedge: the raise escapes three nested loops and
+    aborts the strategy before its cursor is written. The subject is unchanged
+    and still asserted: the reason is its own, and specifically not the
+    supersession code."""
     series = BarSeries(
         dates=(date(2026, 8, 1), date(2026, 8, 2)),
         rows=(
@@ -226,8 +483,11 @@ def test_a_masked_open_is_not_reported_as_a_superseded_fill_price() -> None:
         ),  # type: ignore[arg-type]
     )
 
-    with pytest.raises(ValueError, match="cannot be a fill bar"):
-        _resolve_fill(_entry(), _superseded_fill(series), series=series, unresolved_breaks=())
+    row = _resolve_fill(_entry(), _superseded_fill(series), series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert row.reason == "fill_bar_open_absent"
+    assert row.reason != "fill_price_superseded"
 
 
 def test_precomputed_masked_reasons_are_reused_for_an_instrument(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -35,7 +35,10 @@ _MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "256_strategy_outcome
 #: ⚠ The LATEST reason migration, not the first. Each one drops and recreates the
 #: whole CHECK, so only the newest describes the live constraint — pinning an
 #: older file would assert a union that no longer exists.
-_REASON_MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "396_strategy_outcomes_fill_price_superseded.sql"
+#: ⚠ The LATEST migration that restates both reason unions, not the first. Each
+#: one DROPs and re-ADDs the whole CHECK, so only the newest describes the live
+#: constraint (#3189 finding 10 moved this from sql/396).
+_REASON_MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "399_strategy_outcomes_absent_bar_refusals.sql"
 
 _VERSIONS = {"rule_set_version": "outcome-resolver-v1+abc123", "input_rule_set_version": "price-quarantine-v1+def456"}
 
@@ -303,8 +306,15 @@ class TestMigrationVocabularyContract:
         assert unions[0] == set(UNRESOLVED_REASONS)
 
     def test_the_forecast_ledger_keeps_its_deliberately_smaller_union(self) -> None:
-        """``window_truncated`` is not storable on the forecast path — an immature
-        horizon returns ``None`` and is retried rather than written (sql/315). The
-        subtraction is the contract, so the two vocabularies cannot silently drift
-        into one."""
-        assert self._reason_unions()[1] == set(UNRESOLVED_REASONS) - {"window_truncated"}
+        """Two members are not storable on the forecast path, and the SUBTRACTION
+        is the contract — it is what stops the two vocabularies drifting into one.
+
+        ``window_truncated``: an immature horizon returns ``None`` and is retried
+        rather than written (sql/315).
+        ``signal_bar_absent``: that path locates no signal index at all (#3189
+        finding 10), so the writer cannot produce it.
+        """
+        assert self._reason_unions()[1] == set(UNRESOLVED_REASONS) - {
+            "window_truncated",
+            "signal_bar_absent",
+        }

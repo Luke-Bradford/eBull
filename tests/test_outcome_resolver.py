@@ -488,6 +488,11 @@ def test_the_inherited_reason_codes_match_the_registrys_spelling() -> None:
         "missing_bar_data",
         "unorderable_exit_levels",
         "fill_price_superseded",
+        # #3189 finding 10 — a stored date or open the corpus no longer holds is
+        # RECORDED rather than raised, so it cannot abort the batch.
+        "fill_bar_absent",
+        "signal_bar_absent",
+        "fill_bar_open_absent",
     }
     assert OUR_ADDITIONAL_REASONS | INHERITED_REASONS == UNRESOLVED_REASONS
     assert not OUR_ADDITIONAL_REASONS & NOT_EVALUABLE_REASONS

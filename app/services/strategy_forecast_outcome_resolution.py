@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -21,7 +21,12 @@ from typing import Any, Final
 import psycopg
 
 from app.services.indicator_series import BarSeries
-from app.services.outcome_ledger import fill_price_is_superseded, locate_fill_index
+from app.services.outcome_ledger import (
+    bar_was_deleted,
+    fill_price_is_superseded,
+    locate_fill_index,
+    raw_bar_probe,
+)
 from app.services.outcome_resolver import RULE_SET_VERSION as PATH_RULE_SET_VERSION
 from app.services.outcome_resolver import ExitLevels, Outcome, UnresolvedReason, resolve_outcome
 from app.services.price_masked_bars import MASKED_REASON, QUARANTINE_RULE_SET_VERSION, load_masked_bars
@@ -153,15 +158,47 @@ def _masked_reasons(rows: Sequence[Mapping[str, object]]) -> dict[int, Unresolve
     }
 
 
+def _unresolved_forecast_row(forecast_id: int, reason: UnresolvedReason) -> ForecastOutcomeRow:
+    """One recorded refusal, so a corpus disagreement cannot abort the batch.
+
+    ⚠ `signal_bar_absent` has no counterpart here and `sql/399` deliberately
+    omits it from this ledger's CHECK: the forecast path locates no signal index.
+    """
+    return ForecastOutcomeRow.from_outcome(
+        forecast_id,
+        Outcome(
+            outcome="unresolved",
+            resolution_method="daily_bar",
+            rule_set_version=PATH_RULE_SET_VERSION,
+            reason=reason,
+        ),
+    )
+
+
 def _resolve_forecast(
     forecast: PendingForecast,
     *,
     series: BarSeries,
     unresolved_breaks: Sequence[date],
+    raw_bar_exists: Callable[[date], bool] | None = None,
     masked_bar_reasons: Mapping[int, UnresolvedReason] | None = None,
 ) -> ForecastOutcomeRow | None:
     """Return one terminal observation, or ``None`` until the horizon matures."""
-    fill_index = locate_fill_index(series, forecast.fill_bar_date)
+    # ⚠⚠ Recorded, not raised (#3189 finding 10) — see the signal resolver's
+    # `_resolve_fill` for the full reasoning. Same guard intent (no silent
+    # re-read of a rebuilt corpus), same batch-wedge blast radius if it escapes.
+    try:
+        fill_index = locate_fill_index(series, forecast.fill_bar_date)
+    except ValueError:
+        # ⚠⚠ A date the loader could not find is DELETED only if the raw corpus
+        # no longer holds it; `load_masked_bars` is fail-closed at the instrument
+        # level, so its silence is not evidence (Codex ckpt-2). Unknown or still
+        # present => pending, retried once the corpus is visible again. See
+        # `bar_was_deleted` for why neither the returned span nor the coverage
+        # window can stand in for this.
+        if not bar_was_deleted(raw_bar_exists, forecast.fill_bar_date):
+            return None
+        return _unresolved_forecast_row(forecast.forecast_id, "fill_bar_absent")
     # ⚠⚠ This path reads the SAME stored `strategy_signals.fill_price` as the
     # signal resolver, so it carries the same defect (#2414) — and one step
     # worse: the bracket below is a PERCENTAGE OF that price, so a superseded
@@ -183,6 +220,14 @@ def _resolve_forecast(
         stop_loss=forecast.fill_price * (Decimal("1") - forecast.stop_barrier_pct / hundred),
         max_hold_bars=forecast.horizon_market_days,
     )
+    # ⚠ The fill bar survives but its open does not load. `resolve_outcome`
+    # would raise; here it is one recorded refusal (#3189 finding 10). Placed
+    # immediately before the resolver and after the bracket is built, matching
+    # the signal resolver: nothing that reaches a terminal state today may be
+    # relabelled, and an unbuildable bracket is a contract breach that stays
+    # loud.
+    if series.rows[fill_index].get("open") is None:
+        return _unresolved_forecast_row(forecast.forecast_id, "fill_bar_open_absent")
     outcome = resolve_outcome(
         series=series,
         fill_index=fill_index,
@@ -294,11 +339,13 @@ def run_forecast_outcome_resolution(
     for instrument_id, instrument_forecasts in sorted(by_instrument.items()):
         series = load_masked_bars(conn, instrument_id).series
         masked = _masked_reasons(series.rows)
+        raw_bar_exists = raw_bar_probe(conn, instrument_id)
         for forecast in instrument_forecasts:
             row = _resolve_forecast(
                 forecast,
                 series=series,
                 unresolved_breaks=breaks.get(instrument_id, ()),
+                raw_bar_exists=raw_bar_exists,
                 masked_bar_reasons=masked,
             )
             if row is None:
