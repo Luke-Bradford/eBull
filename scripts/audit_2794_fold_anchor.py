@@ -27,12 +27,28 @@ number lying (prevention-log: "never hardcode a derived statistic").
     ``ownership_observations.py:341``) against another observation from the SAME filing at a
     DIFFERENT value. Answers: what is the ticket's worked case actually made of?
 
+``--reach``
+    Joins the two above. For every cluster the exact-value key REFUSES, does a usable naming
+    edge exist BETWEEN ITS OWN MEMBERS? Answers the one question the previous round left
+    open: the naming signal is real and large, but nothing established that it lands on the
+    cases this ticket is about.
+
+    ⚠ The ticket's recorded next step is phrased instrument-level ("intersect the 154
+    unique-unequal-edge instruments with the 146 refused-cluster instruments"). That figure
+    is computed here too, and it is an UPPER BOUND, not the answer: an instrument may carry
+    its naming edge on one accession and its refused cluster on another, and the
+    instrument-level join counts that as a hit. Same defect shape as the prevention-log
+    entry "instrument-level set arithmetic answering an identity-level question"
+    (``docs/review-prevention-log.md``, #2230 2026-08-20). The per-cluster figure is the one
+    that decides.
+
 Usage (read-only, one REPEATABLE READ snapshot per mode):
 
     PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --edges --out /tmp/a2794.jsonl
     PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --summarise /tmp/a2794.jsonl
     PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --joint
     PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --balances
+    PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --reach /tmp/a2794.jsonl
 
 Exits 1 on any per-instrument error, on an empty census, and on a summary whose input held
 no instruments — a census that measured nothing must not look clean.
@@ -83,7 +99,12 @@ HOLDERS_SQL = f"{_LIVE_INSIDER_ROWS} ORDER BY oc.instrument_id"
 # One unit of account per (accession, identity) — a holder's several ``ownership_nature``
 # rows are ONE cluster member, not several. Codex checkpoint 1 caught the first draft
 # quoting a row-level cluster count beside identity-level shares, which does not reconcile.
-JOINT_SQL = f"""
+#
+# The cluster definition is ONE string shared by ``JOINT_SQL`` and ``REFUSED_CLUSTERS_SQL``
+# rather than two copies of the same CTEs. A copy would let ``--reach``'s denominator drift
+# from the census's ``unequal_refused_today`` silently, and a reach rate is only readable
+# against the population the census reports.
+_JOINT_CLUSTER_CTE = f"""
 WITH live AS ({_LIVE_INSIDER_ROWS}),
 per_ident AS (
   SELECT instrument_id, source_accession AS acc, holder_identity_key AS ident,
@@ -101,6 +122,10 @@ cl AS (
          max(shares) AS mx, sum(shares) AS sm
     FROM per_ident GROUP BY 1, 2 HAVING count(*) >= 2
 )
+"""
+
+JOINT_SQL = f"""
+{_JOINT_CLUSTER_CTE}
 SELECT count(*) AS joint_accession_clusters,
        count(*) FILTER (WHERE distinct_values = 1) AS equal_value_folds_today,
        count(*) FILTER (WHERE distinct_values > 1) AS unequal_refused_today,
@@ -113,6 +138,17 @@ SELECT count(*) AS joint_accession_clusters,
        sum(sm - mx) FILTER (WHERE distinct_values > 1 AND n_direct >= 2) AS refused_multi_direct_shares,
        count(*) FILTER (WHERE distinct_values > 1 AND n_direct_table_i <= 1) AS chain_shape_table_i_gated
   FROM cl
+"""
+
+# The same clusters, one row each, restricted to the ones the exact-value key refuses today.
+# ``count(*)`` over this MUST equal ``JOINT_SQL``'s ``unequal_refused_today`` — asserted at
+# run time in :func:`_reach` rather than trusted, because the two queries are only identical
+# by sharing ``_JOINT_CLUSTER_CTE`` and a future edit could break that without a test noticing.
+REFUSED_CLUSTERS_SQL = f"""
+{_JOINT_CLUSTER_CTE}
+SELECT instrument_id, acc
+  FROM cl
+ WHERE distinct_values > 1
 """
 
 # The projection's own winner rule, spelled from ``ownership_observations.py:321-341`` so the
@@ -307,6 +343,41 @@ def _edge_census(out_path: str) -> int:
     return 1 if errors else 0
 
 
+def _resolve_speaking_lines(edges: list[dict[str, Any]], counts: Counter[str]) -> list[tuple[str, dict[str, Any]]]:
+    """Group ``edges`` into speaking lines and apply both ambiguity guards.
+
+    Returns one ``(speaker, representative edge)`` per line that names exactly one target
+    identity holding exactly one balance. Lines that fail either guard are counted into
+    ``counts`` and dropped.
+
+    Shared by :func:`_summarise` and :func:`_reach` deliberately. A second copy of these two
+    guards would let the reach pass count a cluster as "reached" under a looser rule than the
+    one that decides whether the edge is USABLE, which is the whole question.
+    """
+    by_speaker: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for e in edges:
+        # Keyed on the SPEAKING LINE, which is (identity, accession, amount). Dropping the
+        # accession pooled a holder's lines from different filings into one "speaker"
+        # (Codex checkpoint 1, PR #3147).
+        by_speaker[(e["speaker"], e["speaker_accession"], e["speaker_shares"])].append(e)
+    resolved: list[tuple[str, dict[str, Any]]] = []
+    for (speaker, _acc, _s), es in by_speaker.items():
+        counts["speaker_lines"] += 1
+        # A control-chain footnote names every tier, so a text naming >=2 members is not
+        # evidence about one of them (``_named_record_holder`` fails closed on the same shape).
+        if len({e["target"] for e in es}) != 1:
+            counts["dropped_multi_named"] += 1
+            continue
+        # One target IDENTITY can still hold several balances (its direct and indirect rows).
+        # Picking es[0] made the verdict depend on row order in the file — 199 of 253 such
+        # groups could flip (Codex checkpoint 1, PR #3147).
+        if len({e["target_shares"] for e in es}) != 1:
+            counts["dropped_target_multi_balance"] += 1
+            continue
+        resolved.append((speaker, es[0]))
+    return resolved
+
+
 def _summarise(paths: list[str]) -> int:
     counts: Counter[str] = Counter()
     instruments_with_edge: set[int] = set()
@@ -331,10 +402,6 @@ def _summarise(paths: list[str]) -> int:
                     return 1
                 seen_instruments.add(iid)
                 counts["rows"] += rec["rows"]
-                # The uniqueness guard, per SPEAKING LINE: a control-chain footnote names
-                # every tier, so a text naming ≥2 members is not evidence about one of them
-                # (``_named_record_holder`` fails closed on the same shape).
-                by_speaker: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
                 for e in rec["edges"]:
                     counts["edges"] += 1
                     instruments_with_edge.add(iid)
@@ -343,24 +410,7 @@ def _summarise(paths: list[str]) -> int:
                         counts["edges_same_accession"] += 1
                     if not e["distinct_cik"]:
                         counts["edges_same_cik"] += 1
-                    # Keyed on the SPEAKING LINE, which is (identity, accession, amount).
-                    # Dropping the accession pooled a holder's lines from different filings
-                    # into one "speaker" (Codex checkpoint 1).
-                    by_speaker[(e["speaker"], e["speaker_accession"], e["speaker_shares"])].append(e)
-                for (speaker, _acc, _s), es in by_speaker.items():
-                    counts["speaker_lines"] += 1
-                    if len({e["target"] for e in es}) != 1:
-                        counts["dropped_multi_named"] += 1
-                        continue
-                    # One target IDENTITY can still hold several balances (its direct and
-                    # indirect rows). Picking es[0] made the equal/less/greater verdict
-                    # depend on row order in the file — 199 of 253 such groups could flip
-                    # (Codex checkpoint 1). Ambiguity is now counted, not silently resolved.
-                    target_values = {e["target_shares"] for e in es}
-                    if len(target_values) != 1:
-                        counts["dropped_target_multi_balance"] += 1
-                        continue
-                    e = es[0]
+                for speaker, e in _resolve_speaking_lines(rec["edges"], counts):
                     if e["equal_value"]:
                         counts["unique_equal"] += 1
                     elif Decimal(e["speaker_shares"]) < Decimal(e["target_shares"]):
@@ -400,6 +450,145 @@ def _summarise(paths: list[str]) -> int:
     ]
     for label, value in rows:
         print(f"{label:36} {value}")
+    return 1 if errors else 0
+
+
+def _reach(path: str) -> int:
+    """Does a usable naming edge exist between the members of a cluster the anchor refuses?
+
+    The refused set is read from :data:`REFUSED_CLUSTERS_SQL`, which shares its cluster
+    definition with the ``--joint`` census by construction, and the identity is asserted at
+    run time against ``JOINT_SQL``'s own ``unequal_refused_today``.
+
+    An edge counts as being INSIDE a cluster when both endpoints file under that cluster's
+    accession at that instrument. That is membership by construction rather than by
+    inference: the cluster is every identity with a live row under ``(instrument, accession)``
+    and the edge census is built from the same ``_LIVE_INSIDER_ROWS`` population, so an edge
+    whose speaker and target both carry that accession connects two members. ``_edges`` drops
+    self-edges, so the two are always distinct identities.
+
+    Three nested populations are reported, and the gaps between them are the finding:
+
+    * **raw** — any same-accession edge at all, before the ambiguity guards. Separates "no
+      signal" from "ambiguous signal", which are different verdicts with different fixes.
+    * **resolved** — the edge survives both guards, so it names one member unambiguously.
+    * **resolved and UNEQUAL** — the decisive one. The anchor already buckets equal-value
+      members together, so an equal-value edge inside a refused cluster merges nothing the
+      exact-value key does not already merge. Only an edge spanning two different values can
+      collapse the buckets the refusal creates.
+
+    ⚠ The membership question is DIRECTION-FREE and ``--summarise``'s 154 is not, so the two
+    are not the same quantity and are not printed as though they were. ``_summarise`` counts
+    only the ``speaker < target`` branch, because its output is an upper bound on REMOVABLE
+    shares — who folds into whom. Whether two identities belong to one control group does not
+    depend on which of them reports the larger balance, so the reach rows report either
+    direction and then split out the fold direction, so the comparison against 154 is made on
+    the same rule rather than across two.
+    """
+    counts: Counter[str] = Counter()
+    with psycopg.connect(settings.database_url) as conn, snapshot_read(conn), conn.cursor() as cur:
+        cur.execute(REFUSED_CLUSTERS_SQL, {"form4_cutoff": form4_retention_cutoff()})
+        refused = {(int(row[0]), str(row[1])) for row in cur.fetchall()}
+        cur.execute(JOINT_SQL, {"form4_cutoff": form4_retention_cutoff()})
+        joint = cur.fetchone()
+        names = [d.name for d in cur.description or ()]
+    if not refused:
+        print("FAIL: refused-cluster population is empty — nothing was measured", flush=True)
+        return 1
+    # The two queries are identical only because they share ``_JOINT_CLUSTER_CTE``. Asserting
+    # it makes a future edit that breaks the sharing fail loudly instead of quietly reporting
+    # a reach rate against a denominator the census never published.
+    census_refused = dict(zip(names, joint or (), strict=False)).get("unequal_refused_today")
+    if census_refused != len(refused):
+        print(f"FAIL: refused clusters {len(refused)} != census unequal_refused_today {census_refused}", flush=True)
+        return 1
+
+    refused_instruments = {iid for iid, _acc in refused}
+    raw: set[tuple[int, str]] = set()
+    resolved_clusters: set[tuple[int, str]] = set()
+    unequal_clusters: set[tuple[int, str]] = set()
+    fold_direction_clusters: set[tuple[int, str]] = set()
+    instruments_unique_unequal: set[int] = set()
+    seen: set[int] = set()
+    errors = 0
+    expected = 0
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            rec = json.loads(line)
+            if "manifest" in rec:
+                expected += int(rec["manifest"]["instruments"])
+                continue
+            if rec.get("error"):
+                errors += 1
+                continue
+            iid = int(rec["instrument_id"])
+            seen.add(iid)
+            edges = rec["edges"]
+            for e in edges:
+                if e["same_accession"] and (iid, e["speaker_accession"]) in refused:
+                    raw.add((iid, e["speaker_accession"]))
+            for _speaker, e in _resolve_speaking_lines(edges, counts):
+                # The fold direction: a smaller speaker naming a larger target is the edge
+                # that would fold the speaker into the block. This is the SAME branch
+                # ``_summarise`` counts into ``instruments_unique_unequal``, so the coarse
+                # figure below reconciles with the published 154.
+                folds = not e["equal_value"] and Decimal(e["speaker_shares"]) < Decimal(e["target_shares"])
+                if folds:
+                    instruments_unique_unequal.add(iid)
+                if not e["same_accession"]:
+                    continue
+                key = (iid, e["speaker_accession"])
+                if key not in refused:
+                    continue
+                resolved_clusters.add(key)
+                if not e["equal_value"]:
+                    unequal_clusters.add(key)
+                if folds:
+                    fold_direction_clusters.add(key)
+    if not seen:
+        print("FAIL: reach pass read no instruments", flush=True)
+        return 1
+    if expected and len(seen) + errors != expected:
+        print(
+            f"FAIL: manifest expected {expected} instruments, read {len(seen)} + {errors} errors — input truncated",
+            flush=True,
+        )
+        return 1
+
+    # ⚠ Separates "the filers said nothing" from "they spoke and named nobody in the cluster".
+    # Without it, a reach rate near zero is equally consistent with a BLIND HARNESS — a census
+    # that never read the evidence would report the same 0, and a check that cannot fail for
+    # the right reason is not evidence (prevention-log: "a measurement that cannot detect its
+    # own failure"). This reads the same ``_read_record_holder_evidence`` the rollup itself
+    # consumes, so a silent evidence-side regression shows up here as a collapse to zero.
+    speaks = 0
+    with psycopg.connect(settings.database_url) as conn, snapshot_read(conn):
+        for _iid, acc in sorted(refused):
+            with conn.transaction():
+                if orl._read_record_holder_evidence(conn, [acc]):
+                    speaks += 1
+
+    coarse = instruments_unique_unequal & refused_instruments
+    cluster_instruments = {iid for iid, _acc in unequal_clusters}
+    fold_instruments = {iid for iid, _acc in fold_direction_clusters}
+    rows: list[tuple[str, Any]] = [
+        ("refused clusters (denominator)", len(refused)),
+        ("  whose accession states ANY nature", speaks),
+        ("  with any same-acc edge (raw)", len(raw)),
+        ("  with a RESOLVED same-acc edge", len(resolved_clusters)),
+        ("  ... and it is UNEQUAL-value", len(unequal_clusters)),
+        ("      of which speaker < target", len(fold_direction_clusters)),
+        ("refused instruments", len(refused_instruments)),
+        ("  reached, either direction", len(cluster_instruments)),
+        ("  reached, fold direction only", len(fold_instruments)),
+        ("instruments, unique unequal edge", len(instruments_unique_unequal)),
+        ("coarse instrument-level intersection", len(coarse)),
+        ("  NOT reached per-cluster (overstated)", len(coarse - fold_instruments)),
+        ("harness errors", errors),
+    ]
+    print("Does the naming signal reach the clusters the exact-value key refuses?")
+    for label, value in rows:
+        print(f"{label:38} {value}")
     return 1 if errors else 0
 
 
@@ -475,6 +664,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--summarise", nargs="+", help="summarise one or more edge-census JSONL files")
     ap.add_argument("--joint", action="store_true", help="joint-accession cluster census")
     ap.add_argument("--balances", action="store_true", help="lexical-tie-break balance census")
+    ap.add_argument("--reach", metavar="CENSUS", help="does the naming signal reach the refused clusters?")
     ap.add_argument("--cases", nargs="+", metavar="SYMBOL", help="per-symbol readout (needs --from)")
     ap.add_argument("--from", dest="src", help="edge-census JSONL to read --cases from")
     args = ap.parse_args(argv)
@@ -482,6 +672,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.src:
             ap.error("--cases requires --from <census.jsonl>")
         return _cases(args.src, args.cases)
+    if args.reach:
+        return _reach(args.reach)
     if args.summarise:
         return _summarise(args.summarise)
     if args.joint:
@@ -496,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.out:
             ap.error("--edges requires --out")
         return _edge_census(args.out)
-    ap.error("one of --edges / --summarise / --joint / --balances is required")
+    ap.error("one of --edges / --summarise / --joint / --balances / --reach is required")
     return 2
 
 
