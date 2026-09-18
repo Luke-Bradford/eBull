@@ -161,6 +161,35 @@ class OutcomeRow:
         )
 
 
+def bar_should_exist(coverage: tuple[date, date] | None, day: date) -> bool:
+    """Does the evaluated corpus CLAIM to cover ``day``?
+
+    ⚠⚠ The discriminator between a corpus that changed and a corpus we cannot
+    see (#3189 finding 10, Codex checkpoint 2). ``load_masked_bars`` is
+    fail-closed at the INSTRUMENT level: an instrument with no
+    ``price_quarantine_coverage`` row, or one evaluated at a stale
+    ``rule_set_version``, returns ZERO bars — so bars that still exist in
+    ``price_daily`` are simply absent here.
+
+    Recording a terminal row in that state would be far worse than the wedge it
+    replaces: outcomes are immutable and the selection anti-joins on
+    ``(rule_set_version, input_rule_set_version)``, so a whole corpus resolved
+    during an incomplete quarantine refresh would be permanently mislabelled at
+    the very version pair the refresh was producing. So an uncovered date leaves
+    the fill pending and is retried once coverage lands.
+
+    ⚠⚠ COVERAGE bounds, not the returned rows' own span (Codex checkpoint 2,
+    round 3). A rebuild that deleted the FIRST or LAST bar moves the returned
+    span past the stored date, which reads identically to coverage that never
+    reached it — and the two demand opposite handling. Asking coverage
+    separates them: inside coverage and absent from the rows means the bar was
+    genuinely deleted (record it); outside coverage, or no coverage row at the
+    current ``rule_set_version``, means this process cannot see that part of the
+    corpus (wait).
+    """
+    return coverage is not None and coverage[0] <= day <= coverage[1]
+
+
 def locate_fill_index(series: BarSeries, fill_bar_date: date) -> int:
     """Find the index of a STORED fill date in ``series``.
 

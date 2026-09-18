@@ -36,6 +36,11 @@ def _series(*ranges: tuple[Decimal | None, Decimal | None, Decimal | None]) -> B
     return BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
 
 
+#: An evaluated coverage window bracketing every date these tests use — what
+#: says "a bar SHOULD exist here", as opposed to what came back (#3189 f10).
+_COVERAGE = (date(2026, 7, 1), date(2026, 9, 1))
+
+
 def _forecast(series: BarSeries, *, horizon: int = 2) -> PendingForecast:
     return PendingForecast(
         forecast_id=7,
@@ -181,13 +186,13 @@ def test_a_fill_date_the_corpus_lost_is_terminal_without_aborting_the_batch() ->
         horizon_market_days=2,
     )
 
-    row = _resolve_forecast(forecast, series=gapped, unresolved_breaks=())
+    row = _resolve_forecast(forecast, series=gapped, unresolved_breaks=(), coverage=_COVERAGE)
 
     assert row is not None
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_absent", None)
 
 
-def test_a_fill_date_outside_the_loaded_span_stays_pending() -> None:
+def test_a_fill_date_the_corpus_does_not_claim_to_cover_stays_pending() -> None:
     """Fail-closed coverage is not a corpus change (Codex ckpt-2, P1) — see the
     signal resolver's `_inside_loaded_span`. Outcomes are immutable, so a
     terminal row written during an incomplete quarantine refresh could never be
@@ -206,7 +211,7 @@ def test_a_fill_date_outside_the_loaded_span_stays_pending() -> None:
         horizon_market_days=2,
     )
 
-    assert _resolve_forecast(forecast, series=series, unresolved_breaks=()) is None
+    assert _resolve_forecast(forecast, series=series, unresolved_breaks=(), coverage=_COVERAGE) is None
 
 
 def test_a_fill_bar_whose_open_no_longer_loads_is_terminal() -> None:
