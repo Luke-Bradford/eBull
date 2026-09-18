@@ -81,6 +81,27 @@ def test_a_start_inside_a_slot_records_the_wait_it_incurred(
     assert _slot_wait(ebull_test_conn, run_id) == 0.0
 
 
+def test_a_layer_job_does_not_inherit_its_orchestrators_admission(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The nested case (#3189 finding 13, Codex checkpoint 2).
+
+    The sync orchestrators hold their own slot and dispatch LAYER jobs that
+    write their own `job_runs` rows through `_tracked_job` -> `record_job_start`.
+    Reading the ambient contextvar would stamp the orchestrator's admission onto
+    every layer beneath it — false per-job lane telemetry, and the opposite of
+    what `docs/proposals/infra/2026-09-18-durable-execution-slot-wait.md`
+    settled: *"The layer's NULL is correct: it holds no slot of its own."*
+
+    So the owner's NAME travels with the figure and a mismatch reads `None`.
+    """
+    ebull_test_conn.autocommit = True
+    with _job_execution_slot("orchestrator_high_frequency_sync"):
+        layer_id = record_job_start(ebull_test_conn, JOB)
+
+    assert _slot_wait(ebull_test_conn, layer_id) is None
+
+
 def test_outside_a_slot_the_column_still_means_what_it_says(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:

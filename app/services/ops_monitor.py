@@ -582,7 +582,7 @@ def check_all_layers(
 # ---------------------------------------------------------------------------
 
 
-def _slot_wait_seconds() -> float | None:
+def _slot_wait_seconds(job_name: str) -> float | None:
     """How long this fire waited for its execution slot, or ``None`` (#3189 f13).
 
     ⚠⚠ Read HERE rather than threaded through callers, because the column's
@@ -602,7 +602,7 @@ def _slot_wait_seconds() -> float | None:
     """
     from app.jobs.runtime import current_execution_slot_wait_seconds
 
-    return current_execution_slot_wait_seconds()
+    return current_execution_slot_wait_seconds(job_name)
 
 
 def record_job_start(
@@ -641,7 +641,7 @@ def record_job_start(
                 VALUES (%(name)s, %(started)s, 'running', %(slot_wait)s)
                 RETURNING run_id
                 """,
-                {"name": job_name, "started": now, "slot_wait": _slot_wait_seconds()},
+                {"name": job_name, "started": now, "slot_wait": _slot_wait_seconds(job_name)},
             )
         else:
             cur.execute(
@@ -656,7 +656,7 @@ def record_job_start(
                     "name": job_name,
                     "started": now,
                     "params": Jsonb(_jsonable_params(params_snapshot)),
-                    "slot_wait": _slot_wait_seconds(),
+                    "slot_wait": _slot_wait_seconds(job_name),
                 },
             )
         row = cur.fetchone()
@@ -928,7 +928,7 @@ def record_job_skip(
                     "run_id": run_id,
                     "name": job_name,
                     "params": (None if params_snapshot is None else Jsonb(_jsonable_params(params_snapshot))),
-                    "slot_wait": _slot_wait_seconds(),
+                    "slot_wait": _slot_wait_seconds(job_name),
                 },
             ).fetchone()
         if closed is not None:
@@ -944,7 +944,7 @@ def record_job_skip(
                 VALUES (%(name)s, %(ts)s, %(ts)s, 'skipped', 0, %(reason)s, %(slot_wait)s)
                 RETURNING run_id
                 """,
-                {"name": job_name, "ts": now, "reason": reason, "slot_wait": _slot_wait_seconds()},
+                {"name": job_name, "ts": now, "reason": reason, "slot_wait": _slot_wait_seconds(job_name)},
             ).fetchone()
         else:
             row = conn.execute(
@@ -961,7 +961,7 @@ def record_job_skip(
                     "ts": now,
                     "reason": reason,
                     "params": Jsonb(_jsonable_params(params_snapshot)),
-                    "slot_wait": _slot_wait_seconds(),
+                    "slot_wait": _slot_wait_seconds(job_name),
                 },
             ).fetchone()
         if row is None:

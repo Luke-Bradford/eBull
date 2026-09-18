@@ -977,7 +977,17 @@ def _job_execution_slot(job_name: str) -> Iterator[None]:
     # Token-based reset (rather than ``set(None)``) matches the idiom
     # ``_run_scheduled_body`` already uses for ``_params_snapshot_var`` and keeps
     # a nested slot entry from clearing its caller's value.
-    wait_token = _execution_slot_wait_seconds.set(waited_seconds)
+    #
+    # ⚠⚠ The OWNER's name travels with the figure (#3189 finding 13). A slot can
+    # enclose another job's ``job_runs`` write: the sync orchestrators hold their
+    # slot and dispatch LAYER jobs that write their own rows through
+    # ``_tracked_job`` -> ``record_job_start``. A bare float would attribute the
+    # orchestrator's admission to every layer beneath it, and
+    # ``docs/proposals/infra/2026-09-18-durable-execution-slot-wait.md`` settled
+    # the opposite: *"The layer's NULL is correct: it holds no slot of its own."*
+    # Readers name the job they are writing for, so that attribution is not
+    # expressible rather than merely discouraged.
+    wait_token = _execution_slot_wait_seconds.set((job_name, waited_seconds))
     try:
         yield
     finally:
@@ -1264,7 +1274,9 @@ _invoker_request_context: contextvars.ContextVar[tuple[int | None, str | None]] 
 # cannot write itself down: you cannot open a connection to record that you are
 # waiting for permission to open a connection. Set for the duration of the slot
 # and reset with its token on exit.
-_execution_slot_wait_seconds: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+#: ``(owning job_name, seconds waited)`` for the innermost slot currently held,
+#: or ``None``. The NAME is half the value — see ``_job_execution_slot``.
+_execution_slot_wait_seconds: contextvars.ContextVar[tuple[str, float] | None] = contextvars.ContextVar(
     "_execution_slot_wait_seconds", default=None
 )
 
@@ -1304,8 +1316,8 @@ def consume_params_snapshot() -> Mapping[str, Any] | None:
     return snapshot
 
 
-def current_execution_slot_wait_seconds() -> float | None:
-    """How long the current fire waited for its execution slot, or ``None``.
+def current_execution_slot_wait_seconds(job_name: str) -> float | None:
+    """How long ``job_name``'s own fire waited for its execution slot, or ``None``.
 
     Issue #3159 clause 2.  ``None`` means this call is NOT inside
     ``_job_execution_slot`` — a direct or bootstrap invocation.  ``0.0`` means a
@@ -1321,12 +1333,22 @@ def current_execution_slot_wait_seconds() -> float | None:
     ``record_job_skip`` now both persist it, so ``None`` again means what it
     says.
 
+    ⚠⚠ ``job_name`` is REQUIRED, and it is the guard rather than a convenience
+    (#3189 finding 13). A slot can enclose ANOTHER job's ``job_runs`` write — the
+    sync orchestrators hold theirs and dispatch layer jobs that write their own
+    rows — and reading the ambient figure would stamp the orchestrator's
+    admission onto every layer. The proposal doc settles it: *"The layer's NULL
+    is correct: it holds no slot of its own."* A mismatch returns ``None``.
+
     ⚠ Deliberately NOT a ``consume_*`` popper like its three neighbours above.
     The value's lifetime is the slot's — ``_job_execution_slot`` sets it and
     resets its token — so a reader that cleared it would silently zero any
     second reader added later, and would defeat the reset token's own purpose.
     """
-    return _execution_slot_wait_seconds.get()
+    held = _execution_slot_wait_seconds.get()
+    if held is None or held[0] != job_name:
+        return None
+    return held[1]
 
 
 def consume_invoker_request_context() -> tuple[int | None, str | None]:
@@ -1463,7 +1485,7 @@ def _run_prelude(
                 # ``started_at``. ``None`` on the paths that hold no slot; the
                 # column is nullable with no default so those stay
                 # distinguishable from an immediate admission (0.000).
-                slot_wait_seconds = current_execution_slot_wait_seconds()
+                slot_wait_seconds = current_execution_slot_wait_seconds(job_name)
                 if fence_held:
                     # When a sibling holds the fence, surface the holder
                     # in the audit row so the operator can see WHY this

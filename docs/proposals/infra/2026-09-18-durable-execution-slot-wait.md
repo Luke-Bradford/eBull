@@ -126,13 +126,20 @@ The column is `NULL` on:
   fallback) does cover it, and the shipped `COMMENT ON COLUMN` is therefore accurate — but *"the
   three `_PRELUDE_OPT_OUT_JOBS"* read as a three-row population when it is three dispatchers plus
   their layers. The layer's NULL is correct: it holds no slot of its own.
-- `record_job_skip` rows written outside the prelude — the registry-default param-validation abort
-  and `_record_lane_busy_skip`. Both are inside the slot, so both *could* carry it; neither is a
-  run whose own `started_at` clause 1 reads, and covering them means widening
-  `ops_monitor.record_job_skip`'s signature. Out of scope, named here so it is a decision rather
-  than an omission.
+- ~~`record_job_skip` rows written outside the prelude~~ — **COVERED as of #3189 finding 13.**
+  This section deferred them ("out of scope, named here so it is a decision"), and the post-deploy
+  census showed the deferral was larger than it read: since the column landed, **21 of 23 skipped
+  rows carried no wait** while 283 of 312 successes did. A skipped fire has already paid the
+  admission wait — `_job_execution_slot` is the outermost boundary, so parameter validation, the
+  bootstrap gate and the per-job prerequisite all run inside it — so the NULL was not "no slot",
+  it was "a writer that did not record". `record_job_skip` and `record_job_start` now both
+  persist it, without widening any signature: they read the contextvar.
 - `_tracked_job`'s `record_job_start` fallback (bootstrap stage invokers, direct test calls) —
-  those paths hold no slot, so there is no wait to record.
+  those paths hold no slot, so there is no wait to record. ⚠ Still NULL after #3189 finding 13,
+  and now BY CONSTRUCTION rather than by omission: the contextvar carries the OWNING job's name
+  alongside the figure, and a reader that names a different job gets `None`. That is what keeps
+  the layer-job bullet above true — the orchestrator's admission cannot leak onto the layer rows
+  it dispatches.
 
 ### What this does NOT do
 
