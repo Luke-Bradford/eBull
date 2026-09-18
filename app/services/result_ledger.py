@@ -1576,8 +1576,44 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
     and an access attributed to a revision that did not authorise it is worse
     than no attribution at all.
     """
+    return _record_access_with_declaration(conn, access, require_declaration=False)[0]
+
+
+def _record_access_with_declaration(
+    conn: psycopg.Connection[tuple], access: HoldoutAccess, *, require_declaration: bool
+) -> tuple[int, FrozenPreregistration | None]:
+    """The one body behind both access doors. Returns ``(access_id, declaration)``.
+
+    ⚠ #2617 — ONE LOAD, NOT THREE. ``record_holdout_access`` and
+    ``require_outcome_access`` differ in exactly one predicate (whether a trial
+    with NO declaration may pass), so the load, the lock and the INSERT are
+    shared and the predicate is the flag. Returning the declaration is what lets
+    a caller that needs its ``declaration_id`` — C-4's gate does — stop loading
+    it again.
+
+    ⚠⚠ WHAT THIS MUST NOT BECOME. The rejected shape is a caller PASSING IN an
+    already-loaded declaration: #2599's Codex checkpoint 1 killed that design
+    because *"a caller can construct a favourable declaration after
+    seeing/reading outcomes"*. Every load here is from the table, by trial
+    identity, under the lock. Handing the row OUT is safe in a way taking one IN
+    is not — the value returned is the one this call enforced against.
+
+    ⚠⚠ ``require_declaration`` IS CHECKED UNDER THE TRIAL LOCK, and #2617 moved
+    it there. It used to run in ``require_outcome_access`` BEFORE
+    ``_lock_trial``, which that docstring defended as a snapshot-relative
+    observation — *"the audit is of the attempt, not of the trial"*. That
+    reading was honest but the placement was not free: ``freeze_preregistration``
+    takes the SAME lock (line 1327), so a freeze committing between the check and
+    the lock produced a ``preregistration_not_frozen`` audit row for a trial that
+    demonstrably had one. Under the lock the two orderings are serialised, and
+    the change cannot admit the case that matters — ``frozen is None`` still
+    refuses, so an UNDECLARED look is refused exactly as before. The only
+    behaviour that moves is the racing one, and it moves toward the truth.
+    """
     _lock_trial(conn, access.strategy_id, access.strategy_version)
     frozen = _refuse_incoherent_declaration(conn, access)
+    if require_declaration and frozen is None:
+        _refuse_access(conn, access, ("preregistration_not_frozen",))
     row = conn.execute(
         _RECORD_ACCESS,
         {
@@ -1592,7 +1628,7 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
     ).fetchone()
     if row is None:  # pragma: no cover - RETURNING on a successful INSERT always yields a row
         raise RuntimeError("access record INSERT returned no access_id")
-    return int(row[0])
+    return int(row[0]), frozen
 
 
 def _refuse_declared_stamp_substitution(conn: psycopg.Connection[tuple], result: StrategyResult) -> None:
@@ -1649,16 +1685,43 @@ def require_outcome_access(conn: psycopg.Connection[tuple], access: HoldoutAcces
     a second path needs its own gate, and
     ``tests/test_sealed_outcome_scripts_are_gated.py`` is what notices a new one.
 
-    ⚠ #2611 — THE REFUSAL IS NOW RECORDED (``sql/340``), on its own connection so
-    it survives the caller's rollback. ⚠ What it records is a SNAPSHOT-RELATIVE
-    observation: this check runs before the trial lock is taken, so a concurrent
-    freeze that commits a moment later leaves a
-    ``preregistration_not_frozen`` row that is nonetheless a true statement about
-    what this look saw. The audit is of the attempt, not of the trial.
+    ⚠ #2611 — THE REFUSAL IS RECORDED (``sql/340``), on its own connection so it
+    survives the caller's rollback.
+
+    ⚠⚠ CORRECTED BY #2617, AND THE OLD NOTE IS WRONG RATHER THAN MERELY STALE.
+    It read: *"this check runs before the trial lock is taken, so a concurrent
+    freeze that commits a moment later leaves a ``preregistration_not_frozen``
+    row that is nonetheless a true statement about what this look saw. The audit
+    is of the attempt, not of the trial."* The observation was true and the
+    conclusion did not follow — ``freeze_preregistration`` takes the SAME trial
+    lock, so running the check under it removes the race rather than
+    reinterpreting it. The check now lives in
+    ``_record_access_with_declaration``, after ``_lock_trial``. An undeclared
+    trial is refused exactly as before; what no longer happens is an audited
+    refusal of a trial that already had a declaration.
     """
-    if load_preregistration(conn, access.strategy_id, access.strategy_version) is None:
-        _refuse_access(conn, access, ("preregistration_not_frozen",))
-    return record_holdout_access(conn, access)
+    return require_outcome_access_with_declaration(conn, access)[0]
+
+
+def require_outcome_access_with_declaration(
+    conn: psycopg.Connection[tuple], access: HoldoutAccess
+) -> tuple[int, FrozenPreregistration]:
+    """:func:`require_outcome_access`, also returning the declaration it enforced.
+
+    ⚠ #2617 — FOR A CALLER THAT NEEDS THE ``declaration_id``. C-4's gate
+    (``scripts/evaluate_2582_schedule13d_outcomes.require_outcome_gate``) puts it
+    in its ``OutcomeGate`` and used to load the row itself, first, and refuse on
+    it without auditing — a third load, and a refusal path outside ``sql/340``.
+    The id returned here is the one the access row was written against, so the
+    gate's record and the ledger's cannot name different revisions.
+
+    ⚠ The return is non-optional because ``_refuse_access`` never returns: with
+    ``require_declaration=True`` a ``None`` declaration has already raised.
+    """
+    access_id, frozen = _record_access_with_declaration(conn, access, require_declaration=True)
+    if frozen is None:  # pragma: no cover - _refuse_access is NoReturn on the None branch
+        raise RuntimeError("require_declaration=True returned without a declaration")
+    return access_id, frozen
 
 
 def verify_outcome_access_provenance(
