@@ -181,14 +181,34 @@ def _margin(
     return min(_relative(close, slow), _relative(fast, slow))
 
 
+#: How many failing bars are printed. Past this the run still COUNTS every one —
+#: a truncated sample with an honest total, never a silently capped total.
+_SAMPLE_LIMIT = 20
+
+
 class _Tally:
+    """Counts, plus a bounded sample of the failures.
+
+    ⚠ The count and the sample are separate fields ON PURPOSE. This script used to
+    keep one list and append ``""`` past the cap so that ``len()`` stayed the
+    total, which grows an unbounded list of empty strings over a corpus-sized
+    failure — flagged by the review bot on PR #2322, ported here from S-3's
+    verifier (#2330). A counter says the same thing in 8 bytes.
+    """
+
     def __init__(self) -> None:
         self.series = 0
         self.bars = 0
-        self.mismatches: list[str] = []
+        self.mismatch_count = 0
+        self.mismatch_sample: list[str] = []
         self.ties = 0
         self.max_tie_margin = 0.0
         self.min_real_margin = float("inf")
+
+    def record(self, message: str) -> None:
+        self.mismatch_count += 1
+        if len(self.mismatch_sample) < _SAMPLE_LIMIT:
+            self.mismatch_sample.append(message)
 
 
 def _compare(
@@ -218,10 +238,7 @@ def _compare(
                 tally.max_tie_margin = max(tally.max_tie_margin, margin)
                 continue
             tally.min_real_margin = min(tally.min_real_margin, margin)
-            if len(tally.mismatches) < 20:
-                tally.mismatches.append(f"{key} {dates[i]} {kind}: python={got} sql={want} margin={margin:.3e}")
-            else:  # keep counting past the printed sample
-                tally.mismatches.append("")
+            tally.record(f"{key} {dates[i]} {kind}: python={got} sql={want} margin={margin:.3e}")
 
 
 def equivalence() -> int:
@@ -247,7 +264,7 @@ def equivalence() -> int:
                         if tally.series % 500 == 0:
                             print(
                                 f"  {tally.series} series, {tally.bars} bars, "
-                                f"{len(tally.mismatches)} mismatches, {tally.ties} ties "
+                                f"{tally.mismatch_count} mismatches, {tally.ties} ties "
                                 f"({time.monotonic() - started:.0f}s)",
                                 flush=True,
                             )
@@ -259,7 +276,7 @@ def equivalence() -> int:
             if current is not None:
                 _compare(current, dates, rows, fast_sql, slow_sql, tally)
 
-        real = len(tally.mismatches)
+        real = tally.mismatch_count
         print(f"  series            {tally.series}")
         print(f"  bars              {tally.bars}")
         print(f"  verdicts compared {2 * tally.bars}")
@@ -267,7 +284,7 @@ def equivalence() -> int:
         print(f"  ties (< {TIE_TOLERANCE:g})   {tally.ties}   max margin {tally.max_tie_margin:.3e}")
         if real:
             print(f"  smallest real margin {tally.min_real_margin:.3e}")
-            for problem in [m for m in tally.mismatches if m][:20]:
+            for problem in tally.mismatch_sample:
                 print("   ", problem)
             failures += 1
         print(f"  elapsed           {time.monotonic() - started:.1f}s", flush=True)
