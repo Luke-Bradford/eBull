@@ -260,6 +260,34 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Process stop signal (#2274 M1)
+# ---------------------------------------------------------------------------
+#
+# "This process has been told to stop" is genuinely process-global — the one
+# SIGTERM handler in ``app.jobs.__main__.serve`` owns it — so it lives at
+# module scope rather than being threaded through every admission layer.
+# ``_run_prelude`` is a module function called from three paths; plumbing an
+# Event through all of them to reach the one INSERT that matters would be the
+# larger change, not the smaller one.
+#
+# ``None`` means "no signal is wired", which is NOT the same as "not stopping
+# yet": the in-process API runtime and the unit tests install no handler of
+# their own and must keep the pre-#2274 behaviour.
+_process_stop_event: threading.Event | None = None
+
+
+def set_process_stop_event(event: threading.Event | None) -> None:
+    """Register the owning process's stop signal. ``serve`` calls this once."""
+    global _process_stop_event
+    _process_stop_event = event
+
+
+def process_is_stopping() -> bool:
+    """True once this process has been signalled to stop (#2274 M1)."""
+    return _process_stop_event is not None and _process_stop_event.is_set()
+
+
+# ---------------------------------------------------------------------------
 # Job invoker registry
 # ---------------------------------------------------------------------------
 #
@@ -1434,6 +1462,31 @@ def _run_prelude(
             # source.
             _acquire_shared_source_locks(conn, process_id=process_id)
 
+            # ⚠ #2274 M1, the TERMINAL check (Codex ckpt-2 round 3 P1). The
+            # three above it are early exits; this is the one that holds the
+            # invariant, because it is the last point before the row exists.
+            # Everything between the caller's check and here BLOCKS — opening
+            # the connection (this box's cluster runs at its usable
+            # ``max_connections`` ceiling and has refused with "too many
+            # clients"), ``acquire_prelude_lock``, and the shared-source
+            # advisory locks — so a stop signal can arrive in any of them and
+            # the row would then be INSERTed into a process that is 2 seconds
+            # from exit, to be reaped as an orphan at the next boot.
+            #
+            # Returning ``None`` reuses the fence contract the caller already
+            # honours: ``run_with_prelude`` returns False and never invokes.
+            # Nothing is written — unlike the fence skip, there is no audit
+            # value in a row recording that a fire did not happen while the
+            # process was dying, and writing one needs the connection we are
+            # about to lose.
+            if process_is_stopping():
+                logger.info(
+                    "prelude for %r abandoned: the process was signalled to stop while the "
+                    "prelude was acquiring its locks. No job_runs row written.",
+                    job_name,
+                )
+                return None
+
             with conn.cursor() as cur:
                 if not bypass_fence_check:
                     fence_candidates: list[str] = [process_id]
@@ -1702,16 +1755,8 @@ class JobRuntime:
         invokers: dict[str, JobInvoker] | None = None,
         pool: ConnectionPool[psycopg.Connection[Any]] | None = None,
         background_pool: BackgroundConnectionPool | None = None,
-        stop_event: threading.Event | None = None,
     ) -> None:
         self._database_url = database_url or settings.database_url
-        # #2274 M1 — the owning process's stop signal, set by ``serve``'s
-        # SIGTERM/SIGINT handler.  ``wrapped()`` reads it and refuses to
-        # START a fire once it is set; see the comment there for why the
-        # check sits at that closure and not in ``_catch_up``.  ``None``
-        # for the in-process API runtime and unit tests, which have no
-        # signal handler of their own — those keep today's behaviour.
-        self._stop_event: threading.Event | None = stop_event
         # #1472 PR4b — the jobs-process bounded background pool
         # (``__main__.serve`` owns its lifetime and passes it here). PR4b is
         # pure infrastructure: the pool exists + is lifecycle-managed + budget-
@@ -1825,16 +1870,6 @@ class JobRuntime:
         self._job_registry: dict[str, ScheduledJob] = {
             job.name: job for job in SCHEDULED_JOBS if job.name in self._invokers
         }
-
-    def _stopping(self) -> bool:
-        """True once the owning process has been told to stop (#2274 M1).
-
-        ``None`` — the in-process API runtime and unit tests, which install no
-        signal handler of their own — is NOT stopping; those keep the
-        pre-#2274 behaviour rather than inheriting a permanently-unset event
-        that a later reader could mistake for a live signal.
-        """
-        return self._stop_event is not None and self._stop_event.is_set()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -2678,7 +2713,7 @@ class JobRuntime:
                 # (~10 s for daily-or-coarser cadences, #1710). A lock that frees
                 # inside the drain would otherwise start the body after SIGTERM
                 # and recreate the orphan this whole change exists to remove.
-                if self._stopping():
+                if process_is_stopping():
                     logger.info(
                         "fire of %r acquired its source lane after the stop signal; not started.",
                         job_name,
@@ -2765,7 +2800,7 @@ class JobRuntime:
             # alternative to a lost fire here is a row that dies anyway and
             # reads as a failure. The job simply stays overdue, which is the
             # state the next boot's catch-up is built to resolve.
-            if self._stopping():
+            if process_is_stopping():
                 logger.info(
                     "fire of %r not started: this process is shutting down. The job stays "
                     "overdue and the next boot's catch-up re-fires it; starting it here "
@@ -2786,7 +2821,7 @@ class JobRuntime:
                 # is the same race one level down. Setting the event does not
                 # wake a parked acquire, so the re-check is the only thing that
                 # sees it.
-                if self._stopping():
+                if process_is_stopping():
                     logger.info(
                         "fire of %r admitted to its execution slot after the stop signal; "
                         "not started. Same reason as above — the row would not survive the drain.",

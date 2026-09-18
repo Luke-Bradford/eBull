@@ -118,7 +118,7 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _make_runtime(invokers: dict[str, object], *, stop_event: threading.Event | None = None) -> JobRuntime:
+def _make_runtime(invokers: dict[str, object]) -> JobRuntime:
     # The mypy/pyright complaint about object vs Callable is silenced
     # by the cast at construction; the test invokers are all callables.
     # PR1b-2 (#1064) widened the JobInvoker contract to accept a params
@@ -135,8 +135,20 @@ def _make_runtime(invokers: dict[str, object], *, stop_event: threading.Event | 
     return JobRuntime(
         database_url="postgresql://stub/stub",
         invokers=adapted,  # type: ignore[arg-type]
-        stop_event=stop_event,
     )
+
+
+def _patch_prelude_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The subset of ``patched_runtime`` that a case installing its own
+    execution slot still needs: the stub URL never reaches a real DB."""
+    monkeypatch.setattr("app.jobs.runtime.JobLock", _FakeLock)
+    monkeypatch.setattr(
+        "app.jobs.runtime.run_with_prelude",
+        lambda _url, _name, invoker, **_kw: invoker(_kw.get("params") or {}) or True,
+    )
+    monkeypatch.setattr("app.jobs.runtime.check_bootstrap_state_gate", lambda _conn, **_kw: (True, ""))
+    monkeypatch.setattr("app.jobs.runtime.materialise_scheduled_params", lambda _name: {})
+    monkeypatch.setattr("app.jobs.runtime.validate_job_params", lambda _name, params, **_kw: dict(params))
 
 
 def _is_zero_arg(fn: object) -> bool:
@@ -624,16 +636,30 @@ class TestNoDispatchWhileDraining:
     child that is 1.5-3.5 s old and still in boot catch-up.  A fire begun then
     writes a ``job_runs`` row, dies in the ~2 s drain, and is transitioned to
     ``failure`` by the next boot's orphan reaper.
+
+    Four admission layers sit between dispatch and the row, and each one
+    BLOCKS, so each gets its own case below.  The prelude layer — the terminal
+    one, which is what actually holds the invariant — is DB-backed and lives in
+    ``tests/test_jobs_runtime_fence.py``.
     """
 
-    def test_a_fire_dispatched_after_the_stop_signal_does_not_start(self, patched_runtime: None) -> None:
+    @staticmethod
+    def _arm(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+        """Wire a process stop signal for the duration of one test."""
+        stop = threading.Event()
+        monkeypatch.setattr(runtime, "_process_stop_event", stop)
+        return stop
+
+    def test_a_fire_dispatched_after_the_stop_signal_does_not_start(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         invocations: list[int] = []
 
         def invoker() -> None:
             invocations.append(1)
 
-        stop = threading.Event()
-        rt = _make_runtime({"j": invoker}, stop_event=stop)
+        stop = self._arm(monkeypatch)
+        rt = _make_runtime({"j": invoker})
         wrapped = rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))
 
         # Control FIRST, on the same wrapper: without it a broken wrapper that
@@ -658,53 +684,36 @@ class TestNoDispatchWhileDraining:
             yield
 
         monkeypatch.setattr("app.jobs.runtime._job_execution_slot", counting_slot)
-        monkeypatch.setattr("app.jobs.runtime.JobLock", _FakeLock)
-        monkeypatch.setattr(
-            "app.jobs.runtime.run_with_prelude",
-            lambda _url, _name, invoker, **_kw: invoker(_kw.get("params") or {}) or True,
-        )
-        monkeypatch.setattr("app.jobs.runtime.check_bootstrap_state_gate", lambda _conn, **_kw: (True, ""))
-        monkeypatch.setattr("app.jobs.runtime.materialise_scheduled_params", lambda _name: {})
-        monkeypatch.setattr("app.jobs.runtime.validate_job_params", lambda _name, params, **_kw: dict(params))
+        _patch_prelude_stubs(monkeypatch)
 
-        stop = threading.Event()
-        stop.set()
-        rt = _make_runtime({"j": lambda: None}, stop_event=stop)
+        self._arm(monkeypatch).set()
+        rt = _make_runtime({"j": lambda: None})
         rt._wrap_invoker("j", runtime._adapt_zero_arg(lambda: None))()
 
         assert entered == [], "the refused fire still acquired an execution slot"
 
-    def test_a_stop_signal_arriving_during_the_slot_wait_still_refuses(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_stop_signal_arriving_during_the_slot_wait_still_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Codex ckpt-2 P1.  The general lane's acquire is unbounded and its
         # measured waits run to many minutes, so a fire can pass the pre-slot
         # check, park on the permit, and be admitted inside the drain window.
         # Setting the event does not wake a parked acquire — only a re-check
         # after admission sees it.
         invocations: list[int] = []
-        stop = threading.Event()
+        stop = self._arm(monkeypatch)
 
         @contextmanager
-        def slot_that_blocks_until_shutdown(_job_name: str) -> Iterator[None]:
+        def slot_that_frees_during_the_drain(_job_name: str) -> Iterator[None]:
             # Stands in for a permit that frees only after SIGTERM arrives.
             stop.set()
             yield
 
-        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", slot_that_blocks_until_shutdown)
-        monkeypatch.setattr("app.jobs.runtime.JobLock", _FakeLock)
-        monkeypatch.setattr(
-            "app.jobs.runtime.run_with_prelude",
-            lambda _url, _name, invoker, **_kw: invoker(_kw.get("params") or {}) or True,
-        )
-        monkeypatch.setattr("app.jobs.runtime.check_bootstrap_state_gate", lambda _conn, **_kw: (True, ""))
-        monkeypatch.setattr("app.jobs.runtime.materialise_scheduled_params", lambda _name: {})
-        monkeypatch.setattr("app.jobs.runtime.validate_job_params", lambda _name, params, **_kw: dict(params))
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", slot_that_frees_during_the_drain)
+        _patch_prelude_stubs(monkeypatch)
 
         def invoker() -> None:
             invocations.append(1)
 
-        rt = _make_runtime({"j": invoker}, stop_event=stop)
+        rt = _make_runtime({"j": invoker})
         assert not stop.is_set(), "the pre-slot check must be the one that passes here"
         rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))()
 
@@ -718,11 +727,9 @@ class TestNoDispatchWhileDraining:
         # execution-slot re-check.  A lane that frees inside the drain would
         # otherwise start the body after SIGTERM.
         invocations: list[int] = []
-        stop = threading.Event()
+        stop = self._arm(monkeypatch)
 
-        def lane_that_frees_during_the_drain(
-            _url: str, _job_name: str, body: object, **_kw: object
-        ) -> None:
+        def lane_that_frees_during_the_drain(_url: str, _job_name: str, body: object, **_kw: object) -> None:
             stop.set()
             assert callable(body)
             body()
@@ -735,23 +742,21 @@ class TestNoDispatchWhileDraining:
         def invoker() -> None:
             invocations.append(1)
 
-        rt = _make_runtime({"j": invoker}, stop_event=stop)
+        rt = _make_runtime({"j": invoker})
         rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))()
 
         assert invocations == [], "the body ran after the lane freed inside the drain"
 
-    def test_a_runtime_with_no_stop_event_still_fires(self, patched_runtime: None) -> None:
-        # The in-process API runtime and the unit tests construct JobRuntime
-        # without a stop event; they must keep today's behaviour rather than
-        # inherit a permanently-unset one that could be misread as "stopping".
+    def test_no_registered_stop_signal_is_not_a_stopping_process(self, patched_runtime: None) -> None:
+        # The in-process API runtime and the unit tests register no signal.
+        # ``None`` must read as "not wired", never as "stopping" — the failure
+        # in that direction wedges every job in the API process silently.
+        assert runtime._process_stop_event is None
+        assert runtime.process_is_stopping() is False
+
         invocations: list[int] = []
-
-        def invoker() -> None:
-            invocations.append(1)
-
-        rt = _make_runtime({"j": invoker})
-        assert rt._stop_event is None
-        rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))()
+        rt = _make_runtime({"j": lambda: invocations.append(1)})
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(lambda: invocations.append(1)))()
         assert invocations == [1]
 
 
