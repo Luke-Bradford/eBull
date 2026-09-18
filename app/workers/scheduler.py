@@ -473,14 +473,28 @@ JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 JOB_RECOMMENDATION_ORDER_RECONCILE = "recommendation_order_reconcile"
 #: Poll verdicts that are work the job COULD NOT DO, not outcomes it produced —
 #: so they belong on ``JobProgress.errors``, whose non-zero value degrades the
-#: run (#3189). ``poll_error`` is an unpredicted exception the batch contained;
-#: ``identity_mismatch`` is the broker answering about a different order, a
-#: violation of the contract the whole path rests on. On the outcome axis a run
-#: where EVERY lookup broke that contract would still record ``success``, which
-#: is the #2218 shape. Named here rather than inline so the wiring is assertable
-#: without credentials, a broker and a database
+#: run (#3189). On the outcome axis a run in which EVERY row hit one of these
+#: and nothing resolved would still record ``success``, which is the #2218
+#: shape. Named here rather than inline so the wiring is assertable without
+#: credentials, a broker and a database
 #: (``tests/test_order_client.py::TestContainedPollErrorsAreNotSilent``).
-RECONCILE_ERROR_VERDICTS: Final[tuple[str, ...]] = ("poll_error", "identity_mismatch")
+#:
+#:   poll_error          -- an unpredicted exception the batch contained.
+#:   identity_mismatch   -- the broker answered about a DIFFERENT order, a
+#:                          violation of the contract the whole path rests on.
+#:   environment_mismatch-- the row was submitted to another broker environment,
+#:                          so this process refuses to look it up. ⚠ It is an
+#:                          ERROR and not an expected refusal (Codex ckpt-2, P1):
+#:                          the row still holds a submission claim and nothing
+#:                          will resolve it while the deployment points
+#:                          elsewhere, so "correctly declined" and "silently
+#:                          stalled" are the same state and the operator has to
+#:                          see it.
+RECONCILE_ERROR_VERDICTS: Final[tuple[str, ...]] = (
+    "poll_error",
+    "identity_mismatch",
+    "environment_mismatch",
+)
 # #2603 item 3 step 3b-3 — observe the core sleeve and store one rebalance
 # verdict. Produces submission-gate INPUT, never authority: nothing invokes
 # the gate, and the only provider call is informational.

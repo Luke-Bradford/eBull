@@ -2517,6 +2517,11 @@ class TestContainedPollErrorsAreNotSilent:
 
         assert "identity_mismatch" in RECONCILE_ERROR_VERDICTS
         assert "poll_error" in RECONCILE_ERROR_VERDICTS
+        # #3189 finding 4b: a row held back by the environment gate still holds
+        # its submission claim and nothing will resolve it while the deployment
+        # points elsewhere, so a correct refusal and a silent stall are the same
+        # state.
+        assert "environment_mismatch" in RECONCILE_ERROR_VERDICTS
         assert degradation_reason(JobProgress(candidates_seen=1, errors={"identity_mismatch": 1})) is not None
 
     def test_an_identity_mismatch_is_never_parked(self) -> None:
