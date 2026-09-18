@@ -28,9 +28,10 @@ backlog genuinely over the batch cap, which #2962 made non-vacuous for the core
 arm); item 7's position-closure half lives in
 ``tests/test_2949_core_close_recovery_db.py`` because the EXIT lifecycle is a
 different transaction, a different recovery reader and a different broker verb.
-What is still NOT run — item 6's credential rotation and mandate revocation,
-item 7's rebalance SELL (blocked by ``core_close_side_cost_quote_unavailable``),
-and partial fills — is recorded in
+Round 3 added item 6's mandate revocation and credential rotation.  What is
+still NOT run — item 5's outage and contention halves, item 7's rebalance SELL
+(blocked by ``core_close_side_cost_quote_unavailable``), and partial fills
+(blocked on #2965's attended partial fill) — is recorded in
 ``docs/proposals/execution/2026-09-13-core-restart-acceptance.md``; a silently
 dropped scenario reads as a covered one.
 """
@@ -1222,8 +1223,6 @@ def test_scenario_6_credential_rotation_is_refused_until_the_core_order_resolves
         (API_CREDENTIAL_ID, USER_CREDENTIAL_ID),
     )
     ebull_test_conn.commit()
-    revoked = ebull_test_conn.execute(
-        "SELECT count(*) FROM broker_credentials WHERE revoked_at IS NOT NULL"
-    ).fetchone()
+    revoked = ebull_test_conn.execute("SELECT count(*) FROM broker_credentials WHERE revoked_at IS NOT NULL").fetchone()
     ebull_test_conn.commit()
     assert revoked is not None and int(revoked[0]) == 3

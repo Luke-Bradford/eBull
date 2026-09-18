@@ -19,18 +19,19 @@ Reproduce:
 docker compose --profile test up -d postgres-test
 uv run pytest tests/test_2949_core_restart_recovery_db.py \
               tests/test_2949_core_close_recovery_db.py -v -o addopts=''
-# expect: 15 passed
+# expect: 25 passed  (21 restart + 4 close, at round 3)
 ```
 
 ⚠ **Check the count, not the exit status.** `ebull_test_conn` *skips* when the test database is
 unreachable, so a run with no Postgres exits `0` with skips and looks identical to a pass at
 the shell.
 
-⚠ **The 15 is not 9 + 6.** Round 1 shipped 9 tests in the restart file; #2962 and #2961's sessions
-added two more to it before round 2 started (the unattended lost-acceptance recovery and the
-stranded read-surface flag). Round 2 adds one matrix-5 test to that file, taking it to 12, plus 3
-in the close file. Quoting "9" as round 1's figure below is left as it was written; the current
-total is 15.
+⚠ **The count is not the sum of what each round added.** Round 1 shipped 9 tests in the restart
+file; #2962 and #2961's sessions added two more before round 2 started (the unattended
+lost-acceptance recovery and the stranded read-surface flag); round 2 added one matrix-5 test
+plus 3 in the close file (15); #2961's terminalisation fix then added 6 more to the restart file
+and #2979's added 1 to the close file (22); round 3 adds the three matrix-6 tests (25). Round-1
+figures quoted below are left as they were written.
 
 ## What the harness is
 
@@ -70,6 +71,12 @@ facts recorded under G-3 below.
 `SELECTED_CORE_INSTRUMENT_ID` is `None` on `main` while #2833's five-trading-day verdict runs, so
 the harness publishes a selection in its own process. That is a property of the declaration, not
 of the recovery machinery, and the parent restores the constant via `monkeypatch`.
+
+⚠ **Round 3 update to the paragraph above:** #2833's verdict opened on 2026-09-18 (`110b4981`:
+`pass`, 3417 SPY.RTH), so the constant is no longer `None` and it now equals the harness's own
+`CORE_INSTRUMENT_ID` by coincidence of the candidate set. The patch stays for the reason it was
+written — the harness must measure the recovery machinery, not whatever the declaration currently
+says — but it is no longer what makes these tests runnable at all.
 
 ## Scenario outcomes
 
@@ -484,3 +491,98 @@ Round 1's limits all still bind. These are specific to this round.
 
 **No green "ready" status.** Round 2 moved the exit lifecycle from untested to classified and
 found one new wedge; it removed none.
+
+## Round 3 — matrix 6, and the two entry conditions that closed on other PRs
+
+Entry conditions 1 and 2 were both met before this round started, and **both were accepted on
+the PRs that fixed them** rather than here:
+
+| entry condition | landed | acceptance |
+| --- | --- | --- |
+| #2961 — terminalise an authority the broker never received | `971a7883` | `test_scenario_2c_…`, plus the after-marker, live-submitter, nested-resume, terminal-durability and marker-contract controls, all in this module |
+| #2979 — account for a close the broker executed | `a555fe2b` | `test_scenario_7d_…` in the close module |
+
+So round 3's own work is **matrix item 6**, which rounds 1 and 2 both recorded as not run.
+
+### 6c — mandate revoked between broker acceptance and recovery
+
+`test_scenario_6_mandate_revocation_between_phases_stops_entry_not_reconciliation`. The twin of
+the kill-switch half, and the same invariant: **a stop must not strand an order it can no longer
+authorise.** Revoked after the broker accepted, before recovery. Reconciliation still reaches the
+broker (`lookup_calls == 1`), resolves, records exactly one ownership, and leaves broker
+mutations at 1.
+
+It holds **by construction**, not by a check — `resume_core_submission` never loads the mandate
+(`strategy_core_executor.py:387-392`). Asserted anyway, because "by construction" is a property
+of today's call graph: a mandate read added to the resume path would convert a revocation into
+unaccounted broker exposure and nothing else in the suite would notice. The revert-probe confirms
+it — inserting a mandate check into `resume_core_submission` fails this test.
+
+### 6d — a revoked mandate refuses a clean re-entry, and the refusal is a RAISE
+
+`test_scenario_6_mandate_revocation_refuses_a_clean_re_entry_after_a_crash`. No new exposure: 0
+mutations, 0 orders, 0 intents.
+
+⚠⚠ **The asymmetry is the finding.** The kill switch returns an audited
+`refused` / `core_kill_switch_active_or_missing` verdict. A revoked mandate raises
+`StrategyCoreExecutionError("an enabled core mandate is required")` at
+`strategy_core_executor.py:596`, before any decision row is written. Both fail closed, so nothing
+is unsafe — but only one leaves an operator-visible reason for why the sleeve stopped, and an
+incident reader looking for the revocation they just made will not find it in the decision audit.
+Recorded, not fixed: writing an audited refusal is a behaviour change to the executor and belongs
+to #2603's surface, not to an acceptance round.
+
+### ⚠⚠ 6d's first version could not tell the two halves apart, and only the probe said so
+
+The gate is `mandate is None or not mandate.enabled or mandate.core_instrument_id is None` —
+**three conditions behind one message.** The first `revoke_core_mandate` helper wrote
+`enabled=FALSE` *and* `core_instrument_id=NULL`, so the refusal fired on either half and the test
+could not distinguish them. A revert-probe that deleted `not mandate.enabled` from the gate
+**still passed**.
+
+It is also not what the writer does: `validate_core_mandate` refuses only `enabled AND instrument
+IS NULL` and otherwise passes the caller's instrument through
+(`strategy_core_mandate.py:239-242`), so "turn the sleeve off, keep the configuration" is the
+likelier operator revocation. The helper now retains the instrument, and the same probe fails.
+
+### 6e — credential rotation is held until the core order resolves
+
+`test_scenario_6_credential_rotation_is_refused_until_the_core_order_resolves`.
+
+Round 2 deferred this as needing "a second credential pair in the seed". That is true of
+simulating a full rotation and **false of the invariant**, which is guarded in the database:
+`prevent_unresolved_core_credential_removal` (`sql/373`) refuses to revoke either credential
+named on the eligibility proof of a core order whose reconciliation state is not
+`resolved`/`rejected`. A crash after broker acceptance is exactly what leaves one, so the process
+boundary is what makes the guard reachable.
+
+Three arms:
+
+1. revoking the proof's `api_key` while unresolved → refused, `23503`, message *"credential is
+   required by an unresolved core order"*;
+2. an unreferenced credential → revoked freely in the same state. **The control is not optional**
+   — without it a trigger that refused every revocation would pass identically, and that is a
+   worse defect than the one being guarded;
+3. after reconciliation resolves, the same revocation succeeds. The guard is a hold until
+   terminal, not a permanent pin.
+
+⚠ **The hold covers the whole rotation, not half of it.** `broker_credentials_unique_active`
+(`sql/019`) is unique on `(operator_id, provider, label, environment) WHERE revoked_at IS NULL`,
+so an operator cannot pre-insert the replacement and swap: revoke-then-insert is the only
+available order and `sql/373` blocks its first step. That is also why arm 2's control has to
+belong to a second operator — the harness operator cannot hold a second active demo `api_key` at
+all. Confirmed by probe: disabling the trigger fails arm 1.
+
+### What round 3 does NOT cover
+
+| item | status |
+| --- | --- |
+| Matrix 6 — a full rotation (revoke, insert replacement, re-prove eligibility, resume) | **not run.** The invariant above says it cannot start while unresolved; what happens to an eligibility proof pointing at revoked credentials *after* resolution is a different question and belongs with #2603's revalidation slice |
+| Matrix 5 — outage half (backlog accrued while the broker was unreachable, then drained) | **still not run** — cooldown arithmetic, a separate scenario from the rotation shape |
+| Matrix 5 — contention | **still not run** |
+| Matrix 7 — rebalance SELL | **still blocked** by `core_close_side_cost_quote_unavailable` |
+| Partial fills | **still blocked** — #2965 needs an attended partial fill, which is `loop-ineligible` |
+| Non-crash close failures | **still not run** — definite rejection, uncertain transport, malformed acceptance, lookup outage |
+
+**Still no green "ready" status.** Round 3 closes matrix item 6 and records one auditability
+asymmetry; it removes no blocker.
