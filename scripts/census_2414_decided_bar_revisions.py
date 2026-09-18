@@ -64,6 +64,7 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import LiteralString
 
 import psycopg
 from psycopg import IsolationLevel
@@ -71,8 +72,13 @@ from psycopg import IsolationLevel
 from app.config import settings
 
 #: The two append-only audit relations, with the stamp each one dates its events by.
-REVISION_SOURCE = ("price_daily_revision", "revised_at")
-INSERT_SOURCE = ("price_daily_backdated_insert", "inserted_at")
+#: ⚠ ``LiteralString``, and so is every SQL fragment below. psycopg types ``execute``
+#: to accept only ``LiteralString``, which is the type system enforcing that a query
+#: assembled from parts was assembled from CODE and never from data. These queries are
+#: built with f-strings, so that guard is the thing standing between this script and an
+#: injection if a fragment ever came from a caller — keep the annotations.
+REVISION_SOURCE: tuple[LiteralString, LiteralString] = ("price_daily_revision", "revised_at")
+INSERT_SOURCE: tuple[LiteralString, LiteralString] = ("price_daily_backdated_insert", "inserted_at")
 
 #: Part 1. ⚠ Compared against the RAW ``price_daily.open``, not the masked value:
 #: the question is whether the stored BAR moved, and a bar that became masked after
@@ -153,8 +159,8 @@ class Arm:
     left to a reader who would sum the columns.
     """
 
-    key: str
-    date_predicate: str
+    key: LiteralString
+    date_predicate: LiteralString
     fired_only: bool
     claim: str
 
@@ -183,7 +189,7 @@ ARMS: Sequence[Arm] = (
 )
 
 
-def arm_sql(arm: Arm, *, table: str, stamp: str, by_cause: bool) -> str:
+def arm_sql(arm: Arm, *, table: LiteralString, stamp: LiteralString, by_cause: bool) -> LiteralString:
     """The arm's count over one audit relation, on the caller's snapshot.
 
     ⚠ ``COUNT(DISTINCT s.signal_id)``, never pairs: ``_record_bar_revisions``
@@ -194,8 +200,8 @@ def arm_sql(arm: Arm, *, table: str, stamp: str, by_cause: bool) -> str:
     bars overwritten BEFORE the verdict was stored — which the scan read in their
     corrected form, and which are not staleness at all.
     """
-    cause = "e.cause," if by_cause else ""
-    group = "GROUP BY e.cause ORDER BY 2 DESC" if by_cause else ""
+    cause: LiteralString = "e.cause," if by_cause else ""
+    group: LiteralString = "GROUP BY e.cause ORDER BY 2 DESC" if by_cause else ""
     return f"""
         SELECT {cause} COUNT(DISTINCT s.signal_id)
         FROM strategy_signals s
@@ -209,9 +215,9 @@ def arm_sql(arm: Arm, *, table: str, stamp: str, by_cause: bool) -> str:
     """
 
 
-def union_sql(*, table: str, stamp: str) -> str:
+def union_sql(*, table: LiteralString, stamp: LiteralString) -> LiteralString:
     """Signals matching ANY arm — the number a reader would otherwise get by summing."""
-    clauses = " OR ".join(f"({arm.date_predicate}{_fired_clause(arm)})" for arm in ARMS)
+    clauses: LiteralString = " OR ".join(f"({arm.date_predicate}{_fired_clause(arm)})" for arm in ARMS)
     return f"""
         SELECT COUNT(DISTINCT s.signal_id)
         FROM strategy_signals s
@@ -222,7 +228,7 @@ def union_sql(*, table: str, stamp: str) -> str:
     """
 
 
-def _fired_clause(arm: Arm) -> str:
+def _fired_clause(arm: Arm) -> LiteralString:
     return " AND s.verdict = 'fired'" if arm.fired_only else ""
 
 
@@ -240,7 +246,7 @@ def observable_split(total: int, before_floor: int) -> tuple[int, int]:
     return total - before_floor, before_floor
 
 
-def _scalar(cur: psycopg.Cursor, sql: str, params: dict[str, object] | None = None) -> int:
+def _scalar(cur: psycopg.Cursor, sql: LiteralString, params: dict[str, object] | None = None) -> int:
     row = cur.execute(sql, params or {}).fetchone()
     return 0 if row is None or row[0] is None else int(row[0])
 
@@ -277,13 +283,15 @@ def _report_direct_arm(cur: psycopg.Cursor) -> None:
         print(f"    {str(ratio):>12}  {n:>6,} signal(s)  {insts:>4} instrument(s)")
 
 
-def _report_audit_source(cur: psycopg.Cursor, *, table: str, stamp: str, total_signals: int) -> None:
+def _report_audit_source(
+    cur: psycopg.Cursor, *, table: LiteralString, stamp: LiteralString, total_signals: int
+) -> None:
     print(f"\n{'=' * 78}\nPART 2 — AUDIT: {table}\n{'=' * 78}")
 
     events = _scalar(cur, f"SELECT COUNT(*) FROM {table}")
     if events == 0:
         observable, unmeasurable = observable_split(total_signals, total_signals)
-        print(f"  0 rows — no floor exists, so NOTHING is observable through this relation.")
+        print("  0 rows — no floor exists, so NOTHING is observable through this relation.")
         print(f"  observable {observable:,} / unmeasurable {unmeasurable:,}. Arms not reported.")
         return
 
@@ -303,9 +311,7 @@ def _report_audit_source(cur: psycopg.Cursor, *, table: str, stamp: str, total_s
     ).fetchall():
         print(f"    {cause:<20} {n:>7,}  {insts:>6,}  {dates:>6,}  {lo} .. {hi}")
 
-    before = _scalar(
-        cur, "SELECT COUNT(*) FROM strategy_signals WHERE created_at < %(floor)s", {"floor": floor}
-    )
+    before = _scalar(cur, "SELECT COUNT(*) FROM strategy_signals WHERE created_at < %(floor)s", {"floor": floor})
     observable, unmeasurable = observable_split(total_signals, before)
     print(f"\n  DENOMINATOR — signals written at or after the floor : {observable:,}")
     print(f"  UNMEASURABLE — signals written before it            : {unmeasurable:,}")

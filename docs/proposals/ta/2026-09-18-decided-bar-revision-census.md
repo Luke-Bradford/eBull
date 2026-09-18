@@ -107,7 +107,60 @@ measurement.
 
 Every arm runs against the whole of both tables. No sampling, no `LIMIT`.
 
-## What the current data already shows (reproduced by the script, not hardcoded)
+## ⚠⚠ The result, and it inverted this spec's own hypothesis
+
+Run 2026-09-18 against the dev corpus. Every figure below is printed by the script; none
+is hardcoded anywhere.
+
+**Part 1 — 221 of 59,069 stored fill prices (0.374%), across 27 instruments, no longer
+match the bar they were copied from.** And the magnitudes are not noise: **every single
+disagreement is an exact corporate-action ratio.**
+
+| ratio (current open / stored fill) | signals | instruments |
+| ---: | ---: | ---: |
+| 0.5000 | 57 | 4 |
+| 10.0000 | 39 | 4 |
+| 0.6667 | 36 | 2 |
+| 5.0000 | 24 | 2 |
+| 15.0000 | 21 | 3 |
+| 50.0000 | 17 | 2 |
+| 80.0000 | 8 | 1 |
+| …9 more, all exact (9, 12, 20, 25, 30, 100, 125) | 19 | — |
+
+APH: stored `169.990000`, current open `84.995000` — exactly 2:1. `0.6667` is 3:2.
+The large integers are reverse splits (LGVN, CXAI, NRDY, SFWL, GOSS). ⚠ `price_adjustments`
+holds **0 rows**, so no adjustment layer explains this: the read path is
+`price_daily` → `load_masked_bars` (masks to `None`, rescales nothing) → `resolve_fills`,
+and equality is the invariant.
+
+So #2414 is neither academic nor marginal: **a fifth of a percent of the stored track
+record is wrong by a median factor of 4×**, concentrated in mid-August scans, and the
+ledger's unique key cannot express the correction.
+
+**The hypothesis this spec opened with was wrong, and its own instrument says so.**
+The draft called severity "bimodal — `incremental` harmless, `adjustment_heal`
+dangerous". On the observable window the audit arms found **0 decision-bar hits, 0
+prefix hits, and 4 fill-bar hits — all `incremental`**, while `adjustment_heal` hit
+nothing at all (its two instruments' signals predate the telemetry floor).
+
+**And all 4 of those `incremental` hits are OVERCOUNTS.** The reconciliation checks each
+one's stored price against the current open: MET.US, QCOM, CHRW and OXY all still agree
+exactly. The revisions moved some other OHLCV field — a same-day close/high/low/volume
+settle — on a bar whose OPEN never changed. That is sql/387's field-blindness overcount,
+measured at **4 of 4** rather than left as a caveat.
+
+Two consequences for whoever picks up the supersession half:
+
+1. **The obvious join would have reported zero.** `signal_bar_date >= price_date` excludes
+   the fill bar by construction (`fill_bar_date > signal_bar_date` is a CHECK), and the
+   fill bar is where every real hit lives. sql/387's header names this as its third
+   undercount; this is that undercount observed.
+2. **The fill bar is structurally the most exposed bar in the ledger.** The scan decides on
+   bar `t` and prices the fill at `open(t+1)`, so every fresh verdict's stored price sits on
+   the frontier-adjacent bar — precisely the bar the next day's `incremental` pass rewrites.
+   That is a property of the design, not an accident of this window.
+
+## Background figures on the audit relations (reproduced by the script, not hardcoded)
 
 Stated here as the motivation; the script recomputes all of it, per the repo's ban on
 hand-written derived statistics.
@@ -117,15 +170,9 @@ hand-written derived statistics.
   `adjustment_heal` 382 across **2** instruments — MPU (198 bars, 2025-11-19 → 2026-09-15)
   and NCT.US (184 bars, 2025-12-22 → 2026-09-16), i.e. **whole-history rewrites**, age p50
   140 days, max 301. `force_backfill` 6 single bars.
-- **Severity looks bimodal**, and that is the design-relevant hypothesis the script tests:
-  `incremental` is frontier-adjacent (2 distinct `price_date`s, age p50 1 day) and so can
-  overlap the decided set only at its newest edge — ⚠ *not* "never", since the ledger's
-  latest `signal_bar_date` is 2026-09-15 and one of those two dates is 2026-09-15;
-  `adjustment_heal` rewrites ten months of one instrument in a single transaction. The
-  per-cause split is printed so the shape is read, not asserted.
-
-⚠ These figures are from one read of a 1.5-day telemetry window and are **not** a rate. They
-are here to motivate the arms; the script is the measurement.
+⚠ These figures are from one read of a 1.5-day telemetry window and are **not** a rate.
+They bound what part 2 can currently see — 183 observable signals against 58,886
+unmeasurable — which is exactly why part 1 exists and leads.
 
 ## Why this is not the supersession fix, and what it is for
 
@@ -138,9 +185,17 @@ supersede-and-record path. **Neither is chosen here**, deliberately:
   state: a row marked stale would still feed paper execution and the live gate, while the
   column asserts it does not.
 - The rate that decides whether that cost is proportionate is the number this script exists
-  to produce, and it does not exist yet.
+  to produce, and it did not exist when the work started.
 
 So the ordering is the ticket's own: measure, then choose. This lands the measurement.
+
+⚠ **What the measurement now says about that choice**, stated for the next session rather
+than acted on here: 221 rows is small enough to repair and large enough to matter, the
+damage is concentrated in 27 instruments, and the corrections are exact known ratios — so
+the supersession design has a much easier job than "detect arbitrary staleness". It needs to
+express *"this verdict's stored fill price was superseded by a corporate action"*, which is
+a narrower claim than the general read-set problem sql/387 and sql/386 both ran into. That
+is a design input, not a design.
 
 ## Reuse
 

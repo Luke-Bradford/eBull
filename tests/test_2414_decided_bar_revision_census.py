@@ -10,6 +10,8 @@ Spec: ``docs/proposals/ta/2026-09-18-decided-bar-revision-census.md``.
 
 from __future__ import annotations
 
+from typing import LiteralString
+
 import pytest
 
 from scripts.census_2414_decided_bar_revisions import (
@@ -25,10 +27,13 @@ from scripts.census_2414_decided_bar_revisions import (
     union_sql,
 )
 
-_SOURCES = (REVISION_SOURCE, INSERT_SOURCE)
+#: ⚠ ``LiteralString`` throughout, mirroring the script: psycopg's ``execute`` only
+#: accepts ``LiteralString``, so widening these annotations to ``str`` here would let a
+#: future non-literal fragment through the tests and fail at the call site instead.
+_SOURCES: tuple[tuple[LiteralString, LiteralString], ...] = (REVISION_SOURCE, INSERT_SOURCE)
 
 
-def _arm(key: str) -> Arm:
+def _arm(key: LiteralString) -> Arm:
     return next(a for a in ARMS if a.key == key)
 
 
@@ -101,7 +106,7 @@ class TestArmSql:
     @pytest.mark.parametrize("arm", ARMS, ids=[a.key for a in ARMS])
     @pytest.mark.parametrize("source", _SOURCES, ids=[s[0] for s in _SOURCES])
     def test_every_arm_compares_the_event_stamp_against_the_signals_write_time(
-        self, arm: Arm, source: tuple[str, str]
+        self, arm: Arm, source: tuple[LiteralString, LiteralString]
     ) -> None:
         # Without this the arm counts bars overwritten BEFORE the verdict was
         # stored — which the scan read in their corrected form.
@@ -114,9 +119,7 @@ class TestArmSql:
         # signal can match through several rows.
         table, stamp = REVISION_SOURCE
         for by_cause in (False, True):
-            assert "COUNT(DISTINCT s.signal_id)" in arm_sql(
-                arm, table=table, stamp=stamp, by_cause=by_cause
-            )
+            assert "COUNT(DISTINCT s.signal_id)" in arm_sql(arm, table=table, stamp=stamp, by_cause=by_cause)
 
     @pytest.mark.parametrize("arm", ARMS, ids=[a.key for a in ARMS])
     def test_every_arm_is_floor_gated(self, arm: Arm) -> None:
@@ -153,7 +156,7 @@ class TestArmSql:
         assert "(e.price_date = s.fill_bar_date AND s.verdict = 'fired')" in rendered
 
     @pytest.mark.parametrize("source", _SOURCES, ids=[s[0] for s in _SOURCES])
-    def test_arms_read_only_the_named_audit_relation(self, source: tuple[str, str]) -> None:
+    def test_arms_read_only_the_named_audit_relation(self, source: tuple[LiteralString, LiteralString]) -> None:
         table, stamp = source
         other = next(t for t, _ in _SOURCES if t != table)
         rendered = arm_sql(_arm("decision_bar"), table=table, stamp=stamp, by_cause=False)
