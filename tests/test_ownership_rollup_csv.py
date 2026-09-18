@@ -217,6 +217,40 @@ def test_build_csv_row_per_holder_across_slices() -> None:
     assert lines[5].startswith(",Public / unattributed,__residual__,6500000,")
 
 
+def test_dropped_row_names_the_filer_not_the_representative() -> None:
+    """#3189 finding 15. A group collapse (#1764 / #1652 / #1645) appends a co-filer's
+    row to a representative under Rule 13d-5(b)(1) / 16a-1(a)(2). The CSV is an AUDIT
+    artefact, so naming the representative beside another person's accession is a false
+    provenance link there for the same reason it is in the #2215 overlay."""
+    rep = _holder(
+        cik="0000000009",
+        name="Rep Fund",
+        shares="1000000",
+        pct="0.1000",
+        source="form4",
+        accession="0000111-26-000001",
+        as_of=date(2026, 1, 21),
+        dropped=(
+            DroppedSource(
+                source="13d",  # type: ignore[arg-type]
+                accession_number="0000222-26-000009",
+                shares=Decimal("1000000"),
+                as_of_date=date(2026, 1, 29),
+                edgar_url="https://sec.gov/member",
+                filer_cik="0000000001",
+                filer_name="Co-Filer LLC",
+            ),
+        ),
+    )
+    csv = build_rollup_csv(
+        _rollup(slices=(_slice("insiders", (rep,)),), treasury=None, residual_shares="0"),
+    )
+
+    dropped = [ln for ln in csv.splitlines() if "__dropped:13d__" in ln]
+    assert len(dropped) == 1
+    assert dropped[0].startswith("0000000001,Co-Filer LLC,__dropped:13d__,")
+
+
 def test_build_csv_emits_dropped_source_memo_rows() -> None:
     """#1640: a deduped owner's losing filings (e.g. Cohen's 13D behind his
     Form 4) are ``dropped_sources``. They surface as ``__dropped:<source>__``
@@ -238,6 +272,11 @@ def test_build_csv_emits_dropped_source_memo_rows() -> None:
                 shares=Decimal("36847842"),
                 as_of_date=date(2026, 1, 29),
                 edgar_url="https://sec.gov/13d",
+                # Cohen's own 13D behind his Form 4 — the same-identity case, so the
+                # CSV row names him either way. The FOREIGN case is asserted separately
+                # in ``test_dropped_row_names_the_filer_not_the_representative``.
+                filer_cik="0001767470",
+                filer_name="Cohen Ryan",
             ),
         ),
     )

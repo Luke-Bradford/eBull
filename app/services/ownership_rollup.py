@@ -137,13 +137,33 @@ class DroppedSource:
     """Provenance for a losing source in the dedup race. Surfaces in
     the provenance footer so the operator can see "Form 4 won; the
     13D/A you'd expect to see also reports 36.85M for the same
-    filer". One row per losing source per holder."""
+    filer". One row per losing source per holder.
+
+    ⚠ ``filer_cik`` / ``filer_name`` are the identity that FILED this entry,
+    which is NOT always the holder it hangs on (#3189 finding 15). Four passes
+    append another identity's rows to a representative — the same-accession
+    collapse (#1764), the Section-16 control group (#1652/#2230), the 13D/G
+    group collapse (#1645) and the institutional family (#1644/#1649) — all
+    correct arithmetic under Rule 13d-5(b)(1) / 16a-1(a)(2), all of them ONE
+    block counted once. Before these fields existed, every consumer that
+    published a dropped entry stamped the representative's name on another
+    person's accession. Compare with :func:`_identity_key`, the same key the
+    reconciliation passes group by; never assume ``rep.filer_cik``.
+
+    ⚠ One granularity seam is pre-existing and deliberate: for a collapsed
+    institutional FAMILY the identity is the family HOLDER's own pair — which is
+    ``(winning constituent's filer_cik, family display_name)``, because the pass
+    has no separate family CIK and a family is ONE unit of account (I16) — while
+    ``accession_number`` cites the constituent whose filing the figure was read
+    from, and ``shares`` is the family channel total rather than that row's."""
 
     source: SourceTag
     accession_number: str
     shares: Decimal
     as_of_date: date | None
     edgar_url: str | None  # Provenance link to the SEC archive index
+    filer_cik: str | None  # Identity that filed THIS entry — see the ⚠ above
+    filer_name: str
 
 
 @dataclass(frozen=True)
@@ -2062,6 +2082,11 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                         shares=loser.shares,
                         as_of_date=loser.as_of_date,
                         edgar_url=edgar_archive_url(loser.accession_number),
+                        # Same identity as the winner by construction — the group key
+                        # IS ``_identity_key`` — but taken from the loser so the field
+                        # always means "who filed THIS entry" (#3189 finding 15).
+                        filer_cik=loser.filer_cik,
+                        filer_name=loser.filer_name,
                     )
                     for loser in losers
                 ),
@@ -2159,6 +2184,8 @@ def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
                         shares=loser.shares,
                         as_of_date=loser.as_of_date,
                         edgar_url=edgar_archive_url(loser.accession_number),
+                        filer_cik=loser.filer_cik,
+                        filer_name=loser.filer_name,
                     )
                     for loser in losers
                 ),
@@ -2200,8 +2227,18 @@ _ADDITIVE_NATURES: Final[frozenset[str]] = frozenset({"direct", "indirect"})
 def _argmax_source(sources: Iterable[SourceTag], src_total: dict[SourceTag, Decimal]) -> SourceTag:
     """Source carrying the owner's largest total; tie-break to the
     higher-priority (lower ``_PRIORITY_RANK``) source so form4 beats 13d
-    on equal shares."""
-    return max(sources, key=lambda s: (src_total[s], -_PRIORITY_RANK[s]))
+    on equal shares.
+
+    ⚠ The trailing ``s`` is what makes this DETERMINISTIC (#3189 finding 16).
+    ``13d`` and ``13g`` share ``_PRIORITY_RANK`` 3 deliberately, and ``sources``
+    is built from ``set(by_source)`` — ``str`` hashing is salted per process, so
+    without a total key the owner's ``figure_src`` (and hence which filings even
+    become ``dropped_sources``) varied between two renders of identical data. No
+    published rule chooses between a 13D and a 13G at equal shares, so this is
+    fixed BY CONSTRUCTION: lexicographically larger wins, matching the direction
+    :func:`_dedup_by_priority` already uses for ``accession_number``.
+    """
+    return max(sources, key=lambda s: (src_total[s], -_PRIORITY_RANK[s], s))
 
 
 def _source_rows_and_total(source: SourceTag, rows: list[Holder]) -> tuple[list[Holder], Decimal]:
@@ -2254,9 +2291,13 @@ def _fold_overlap_into(rep: Holder, folded: list[Holder]) -> Holder:
     distinct lots on ONE accession (a folded ``direct`` + ``indirect`` when the
     overlap row wins) are BOTH preserved, not collapsed to one (Codex ckpt-2)."""
     dropped = list(rep.dropped_sources)
-    seen = {(d.source, d.accession_number, d.shares) for d in dropped}
+    # ⚠ The identity is part of the key (#3189 finding 15): a FOREIGN entry sharing
+    # ``(source, accession, shares)`` — a co-filer on one joint accession is the
+    # commonest case — would otherwise suppress this holder's own entry, and the two
+    # are different facts.
+    seen = {(d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares) for d in dropped}
     for h in folded:
-        key = (h.winning_source, h.winning_accession, h.shares)
+        key = (h.filer_cik, h.filer_name, h.winning_source, h.winning_accession, h.shares)
         if key in seen:
             continue
         seen.add(key)
@@ -2267,6 +2308,8 @@ def _fold_overlap_into(rep: Holder, folded: list[Holder]) -> Holder:
                 shares=h.shares,
                 as_of_date=h.as_of_date,
                 edgar_url=h.winning_edgar_url,
+                filer_cik=h.filer_cik,
+                filer_name=h.filer_name,
             )
         )
     return replace(rep, dropped_sources=tuple(dropped))
@@ -2409,7 +2452,11 @@ def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Hol
         if losing_sources:
             primary_idx = max(range(len(keep)), key=lambda i: keep[i].shares)
             dropped = list(keep[primary_idx].dropped_sources)
-            seen = {(d.source, d.accession_number) for d in dropped}
+            # Identity in the key for the same reason as :func:`_fold_overlap_into`
+            # (#3189 finding 15) — every row in this group shares one identity key, but
+            # ``dropped`` is seeded from entries an upstream group collapse may have
+            # contributed under a DIFFERENT filer.
+            seen = {(d.filer_cik, d.filer_name, d.source, d.accession_number) for d in dropped}
             for s in losing_sources:
                 rep = max(by_source[s], key=lambda h: h.shares)  # link target for the channel
                 # Stamp the dropped entry with the rep row's OWN source, not the
@@ -2419,7 +2466,7 @@ def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Hol
                 # every un-merged bucket ``rep.winning_source == s`` so this is a
                 # no-op there.
                 rep_source = rep.winning_source
-                key = (rep_source, rep.winning_accession)
+                key = (rep.filer_cik, rep.filer_name, rep_source, rep.winning_accession)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -2430,6 +2477,10 @@ def _reconcile_owner_once(holders: list[Holder]) -> dict[SliceCategory, list[Hol
                         shares=src_total[s],  # the channel's owner subtotal, not one row
                         as_of_date=rep.as_of_date,
                         edgar_url=rep.winning_edgar_url,
+                        # The whole group shares one ``_identity_key`` (that is what
+                        # ``groups`` is keyed on), so this is the owner's own channel.
+                        filer_cik=rep.filer_cik,
+                        filer_name=rep.filer_name,
                     )
                 )
             keep[primary_idx] = replace(keep[primary_idx], dropped_sources=tuple(dropped))
@@ -2647,7 +2698,27 @@ def _reconcile_institutional_families(
         for src, fig, acc, url, loser_as_of, emit_dropped in losers:
             if emit_dropped:
                 dropped.append(
-                    DroppedSource(source=src, accession_number=acc, shares=fig, as_of_date=loser_as_of, edgar_url=url)
+                    DroppedSource(
+                        source=src,
+                        accession_number=acc,
+                        shares=fig,
+                        as_of_date=loser_as_of,
+                        edgar_url=url,
+                        # ⚠ Precisely: this is the FAMILY HOLDER's own identity pair —
+                        # the same ``(win_cik, fam.display_name)`` stamped on
+                        # ``family_holder`` below. There is NO separate family CIK;
+                        # ``win_cik`` is the WINNING CONSTITUENT's ``filer_cik``, which
+                        # this pass already uses as the family's identity because a family
+                        # is ONE unit of account (I16). That is deliberate and not what
+                        # this entry asserts about authorship: matching the holder is what
+                        # keeps the #2215 overlay reading a folded family 13G as that
+                        # holder's OWN channel rather than a foreign one. The constituent
+                        # whose filing supplied ``acc`` / ``url`` can differ, and ``fig``
+                        # is the family channel total rather than that row's ``shares`` —
+                        # the granularity seam recorded on :class:`DroppedSource`.
+                        filer_cik=win_cik,
+                        filer_name=fam.display_name,
+                    )
                 )
             corrections.append(
                 CorrectionApplied(
@@ -2755,6 +2826,11 @@ def _collapse_blockholder_group(cluster: list[Holder]) -> tuple[Holder, Correcti
                 shares=loser.shares,
                 as_of_date=loser.as_of_date,
                 edgar_url=loser.winning_edgar_url,
+                # A DIFFERENT identity from ``rep`` — the group members are distinct
+                # CIKs deemed to own one block (Rule 13d-5(b)(1) / 16a-1(a)(2)). This
+                # is the case #3189 finding 15 was about.
+                filer_cik=loser.filer_cik,
+                filer_name=loser.filer_name,
             )
         )
     collapsed = replace(rep, dropped_sources=tuple(dropped))
@@ -3470,6 +3546,11 @@ def _collapse_insider_control_group(
                 shares=loser.shares,
                 as_of_date=loser.as_of_date,
                 edgar_url=loser.winning_edgar_url,
+                # A DIFFERENT identity from ``rep`` — the group members are distinct
+                # CIKs deemed to own one block (Rule 13d-5(b)(1) / 16a-1(a)(2)). This
+                # is the case #3189 finding 15 was about.
+                filer_cik=loser.filer_cik,
+                filer_name=loser.filer_name,
             )
         )
     collapsed = replace(rep, dropped_sources=tuple(dropped))
@@ -3998,10 +4079,10 @@ def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
         # otherwise keep only the primary's (Codex ckpt-2 MED). De-dup on
         # (source, accession, shares), preserving the primary's entries first.
         merged_dropped = list(primary.dropped_sources)
-        seen = {(d.source, d.accession_number, d.shares) for d in merged_dropped}
+        seen = {(d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares) for d in merged_dropped}
         for h in rows_desc[1:]:
             for d in h.dropped_sources:
-                dkey = (d.source, d.accession_number, d.shares)
+                dkey = (d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares)
                 if dkey in seen:
                     continue
                 seen.add(dkey)
@@ -4014,72 +4095,218 @@ def _collapse_owner_lots(holders: list[Holder]) -> list[Holder]:
 _BLOCKHOLDER_SOURCES: frozenset[SourceTag] = frozenset({"13d", "13g"})
 
 
+@dataclass(frozen=True)
+class _RestatementCandidate:
+    """One 13D/G filing that is rendered somewhere other than the ``blockholders``
+    wedge — either as a surviving row's winning channel, or as a
+    :class:`DroppedSource` on one. Internal to
+    :func:`_blockholder_restatement_holders`."""
+
+    filer_cik: str | None
+    filer_name: str
+    source: SourceTag
+    accession_number: str
+    shares: Decimal
+    as_of_date: date | None
+    edgar_url: str | None
+
+
+def _restatement_sort_key(c: _RestatementCandidate) -> tuple[date, Decimal, str, SourceTag]:
+    """Which of an owner's 13D/G filings the overlay publishes. Largest first under
+    ``max`` / ``reverse=True``; total over the fields a :class:`DroppedSource` has.
+
+    **``as_of_date`` leads, and that ordering is the fix for #3189 finding 14b.**
+    A later filing SUPERSEDES an earlier one by the same person (Rule 13d-2), whatever
+    direction the revision went, and ``_dedup_within_source`` already
+    implements exactly that — it keeps the latest and ships the retired originals as
+    ``dropped_sources``, still tagged ``13d``/``13g``. Selecting on shares first
+    republishes a figure the amendment retired.
+
+    ⚠⚠ It is deliberately NOT partitioned by source tag, and Codex checkpoint 2 caught
+    the version that was. ``_dedup_within_source`` receives the 13D and 13G rows in ONE
+    pool (its one call site inside :func:`get_ownership_rollup`, ``_dedup_within_source(
+    block_candidates)``, where ``block_candidates`` is every ``13d``/``13g`` candidate)
+    and groups them on ``_identity_key`` + ``ownership_nature``, NOT on
+    source — so a filer who moved from a 13D to a 13G has a single amendment chain
+    upstream, and treating the tags as independent chains resurrects the superseded
+    13D's figure while the pie carries the 13G's.
+
+    ``shares`` comes SECOND, which is where the overlapping-restatement regime lives: two
+    filings of the same vintage for one owner are the same block through two lenses, so
+    MAX, never SUM (prevention-log "One beneficial owner, counted once — MAX overlapping,
+    SUM additive"; #1640/#1889).
+
+    ``accession_number`` then ``source`` are the determinism pins (#3189 finding 16),
+    reusing :func:`_dedup_by_priority`'s accession-desc direction and substituting
+    ``source`` for its final ``source_row_id``, which a ``DroppedSource`` does not carry.
+    ``source`` is needed because ``13d`` and ``13g`` share ``_PRIORITY_RANK`` 3
+    deliberately, so rank cannot separate them, and ``accession_number`` is
+    ``str(row["source_accession"] or "")`` upstream — empty accessions occur. No
+    published rule chooses between a 13D and a 13G otherwise equal; this is fixed BY
+    CONSTRUCTION, lexicographically larger winning. ``edgar_url`` needs no key — it is
+    ``edgar_archive_url(accession)``, a function of a key already present."""
+    return (c.as_of_date or date.min, c.shares, c.accession_number, c.source)
+
+
 def _blockholder_restatement_holders(pie_slices: list[OwnershipSlice]) -> list[Holder]:
-    """The 13D/G channels that :func:`_reconcile_owner_once` folded elsewhere (#2215).
+    """The 13D/G filings rendered OUTSIDE the ``blockholders`` wedge (#2215).
 
-    A >5% beneficial owner who ALSO files Form 3/4, DEF 14A or a 13F loses the
-    Rule 13d-3 cross-channel MAX and is classified into that other category, so
-    their 13D/G figure survives only as a :class:`DroppedSource` on the winning
-    row and the ``blockholders`` category is omitted from ``slices`` entirely.
-    An operator then cannot distinguish *"no 13D/G filer holds >5%"* from
-    *"one does, but their 13F won the dedup"*. This returns one holder per such
-    owner so the absence becomes legible as a non-additive memo overlay.
+    A >5% beneficial owner who ALSO files Form 3/4, DEF 14A or a 13F is classified
+    into that other category by :func:`_reconcile_owner_once` — one owner, counted
+    once, by most-specific ROLE (Rule 13d-3; I14) — so the ``blockholders`` category
+    can be omitted from ``slices`` entirely. An operator then cannot distinguish
+    *"no 13D/G filer holds >5%"* from *"one does, but they are counted elsewhere"*.
+    This returns one holder per such filer so the absence becomes legible as a
+    non-additive memo overlay.
 
-    **The arithmetic is not touched.** These shares are already counted once,
-    under the winning channel, in a pie wedge; the overlay carries
-    ``denominator_basis="cross_channel_restatement"`` so every additive path
+    **The arithmetic is not touched.** These shares are already counted once, under
+    the winning channel, in a pie wedge; the overlay carries
+    ``denominator_basis="cross_channel_restatement"`` and every additive consumer
     (residual, concentration, :class:`SanityChecks`,
-    :func:`count_additive_institutional_holders`, the CSV sum invariant) filters
-    it out — they all branch on the basis, not on a category list.
+    :func:`count_additive_institutional_holders`, the CSV sum invariant) branches on
+    the basis. ⚠ The sunburst is the documented exception — a category ALLOW-LIST,
+    not basis-driven (#2215) — and nothing here adds a category.
 
-    ⚠ ``blockholders`` itself is EXCLUDED from the scan. An owner inside that
-    wedge can also carry a dropped ``13d``/``13g`` entry, but that is a
-    within-channel supersession (:func:`_dedup_by_priority` collapsing a 13G
-    behind the same owner's 13D) which the surviving blockholder row already
-    represents. Including it would show one stake twice in one panel.
+    TWO candidate routes, not one (#3189 finding 14). The original helper inspected
+    ``dropped_sources`` only, which can answer for a 13D/G channel that LOST and
+    nothing else. But :func:`_reconcile_owner_once` branches on ``"13f" in present``,
+    not on "13f won": when the owner's 13D/G subtotal is the LARGER one, ``figure_src``
+    becomes ``13d``/``13g`` while the category stays ``institutions`` / ``etfs`` (and
+    an insider whose 13D beats their Form 4 lands in ``insiders`` the same way). The
+    surviving row is then the 13D/G filing itself, carrying no dropped blockholder
+    entry, and the old scan emitted nothing for the case #2215 exists to cover.
 
-    ⚠ Where an owner has BOTH a dropped ``13d`` and a dropped ``13g``, the MAX
-    is taken, never the sum: a 13D and a 13G from one filer are overlapping
-    restatements of the same block, not additive holdings (prevention-log
-    "One beneficial owner, counted once — MAX overlapping, SUM additive";
-    #1640/#1889). Summing would double one invisible position.
+    TWO SELECTION REGIMES, applied in order per identity — they are different rules
+    and collapsing them into one shares comparison is what shipped #3189 finding 14b:
 
-    ⚠ Every field comes from the DROPPED entry, not from the surviving holder
-    it hung on: a 13G figure stamped with the survivor's 13F accession would be
-    a false provenance link, and the survivor's ``as_of_date`` would corrupt the
-    slice's as-of coherence envelope (#1647 part 1), which is derived from
-    holder as-of dates in :func:`_build_slice`.
+    1. **Within one source tag, the latest SUPERSEDES** (Rule 13d-2).
+       :func:`_dedup_within_source` ships the superseded originals of an amendment
+       chain as ``dropped_sources``, still tagged ``13d``/``13g``, so a filer who
+       reported 100 on a 13D and then 60 on the 13D/A that replaced it has both here.
+       A shares-only MAX publishes 100 — a figure the amendment retired.
+    2. **Across ``13d`` and ``13g``, MAX** — a 13D and a 13G from one filer are
+       overlapping restatements of one block, never additive (prevention-log "One
+       beneficial owner, counted once — MAX overlapping, SUM additive"; #1640/#1889).
+
+    ⚠⚠ **Identity comes from the FILING, not from the holder it hangs on** (#3189
+    finding 15). Four passes append another identity's rows to a representative — the
+    same-accession collapse (#1764), the Section-16 control group (#1652/#2230), the
+    13D/G group collapse (#1645) and the institutional family (#1644/#1649) — all
+    correct arithmetic under Rule 13d-5(b)(1) / 16a-1(a)(2). Stamping the rep's name
+    on a co-filer's accession published a clickable EDGAR link naming someone else
+    (1,861 of 6,917 overlay rows, 1,348 instruments, on the 2026-09-18 dev corpus).
+    Dropping those entries instead is NOT the fix and was killed at checkpoint 1: where
+    a same-accession collapse consumed co-filer B's 13D into representative A and A
+    wins on Form 4, B's filing is the only 13D/G evidence there is, so filtering it
+    re-opens #2215 for that case.
+
+    ⚠⚠ **ONE ROW PER SURVIVING HOLDER, not one per identity found**, and Codex
+    checkpoint 2 caught the version that emitted per identity. Every 13D/G filing hanging
+    off one surviving holder describes ONE block — that is *why* the collapses folded
+    them onto that holder, each member being deemed to own the whole group's securities
+    (Rule 13d-5(b)(1) / 16a-1(a)(2)). Emitting each member separately renders a
+    two-member 10M group as two 10M rows and a 20M slice total against a pie carrying one
+    10M block. So the cardinality is the one #2215 shipped; all that changes is WHICH
+    NAME goes on the row.
+
+    ⚠ The result is then de-duplicated GLOBALLY on ``(identity, accession)``: the same
+    filing reached by two representatives is one filing, hence one row.
+
+    ⚠ ``blockholders`` itself is EXCLUDED from the scan — an owner inside that wedge is
+    already rendered as a blockholder, and re-listing them would show one stake twice in
+    one panel.
+
+    ⚠ Known residual, stated rather than silently accepted: where a group's block is
+    rendered in the ``blockholders`` wedge under member B while member A's own 13G
+    restating the same block lands in ``institutions``, A still emits a row. A did file
+    that 13G, so the row is true; what it cannot say is that B's wedge row is the same
+    block. Detecting that needs group membership this overlay does not carry.
+
+    ⚠⚠ **The overlay MIRRORS the pie; it does not police it.** The A/B measured 15
+    instruments (19 rows) where two or more overlay rows carry the identical share count
+    — HSAI lists Kai Sun, Shaoqing Xiang and Yifan Li at 27,163,892 each. Checked rather
+    than assumed: every one of those is a DISTINCT surviving pie holder whose own
+    ``winning_source`` is 13D/G, and the ``insiders`` wedge already carries all three at
+    that figure. Whether a deemed block should have been collapsed there is
+    :func:`_reconcile_13d_groups` / :func:`_reconcile_insider_control_groups`' question
+    (#1645/#1652) and is equally visible in the pie. Suppressing the route where a
+    ``blockholders`` wedge happens to render would NOT fix it and would hide the #2215
+    census's ``rendered_partial`` state — a wedge that is present and understated,
+    which HSAI is: its wedge shows three names, none of them the three largest 13D
+    filers.
 
     Scanning pie slices is exhaustive rather than convenient:
     :func:`_reconcile_owner_once` emits only ``insiders`` / ``blockholders`` /
-    ``institutions`` / ``etfs``, all pie wedges, so no dropped 13D/G entry can
-    exist on a memo-overlay holder. It is the same scope
-    :func:`build_rollup_csv`'s ``__dropped:`` loop already uses.
+    ``institutions`` / ``etfs``, all pie wedges, so no 13D/G filing can reach a
+    memo-overlay holder. It is the same scope :func:`build_rollup_csv`'s ``__dropped:``
+    loop already uses.
     """
-    restated: list[Holder] = []
+    per_holder: list[_RestatementCandidate] = []
     for slice_ in pie_slices:
         if slice_.category == "blockholders":
             continue
         for holder in slice_.holders:
-            dropped = [d for d in holder.dropped_sources if d.source in _BLOCKHOLDER_SOURCES]
-            if not dropped:
-                continue
-            best = max(dropped, key=lambda d: d.shares)
-            restated.append(
-                Holder(
-                    filer_cik=holder.filer_cik,
-                    filer_name=holder.filer_name,
-                    shares=best.shares,
-                    pct_outstanding=Decimal(0),  # recomputed by _build_slice
-                    winning_source=best.source,
-                    winning_accession=best.accession_number,
-                    winning_edgar_url=best.edgar_url,
-                    as_of_date=best.as_of_date,
-                    filer_type=None,
-                    dropped_sources=(),  # this row IS the dropped entry
+            candidates: list[_RestatementCandidate] = []
+            # Route 1 — the survivor IS the 13D/G filing (#3189 finding 14).
+            if holder.winning_source in _BLOCKHOLDER_SOURCES:
+                candidates.append(
+                    _RestatementCandidate(
+                        filer_cik=holder.filer_cik,
+                        filer_name=holder.filer_name,
+                        source=holder.winning_source,
+                        accession_number=holder.winning_accession,
+                        shares=holder.shares,
+                        as_of_date=holder.as_of_date,
+                        edgar_url=holder.winning_edgar_url,
+                    )
                 )
+            # Route 2 — the 13D/G channel lost the cross-channel MAX, or was folded onto
+            # this holder by a group collapse. Identity comes from the ENTRY (finding 15).
+            candidates.extend(
+                _RestatementCandidate(
+                    filer_cik=d.filer_cik,
+                    filer_name=d.filer_name,
+                    source=d.source,
+                    accession_number=d.accession_number,
+                    shares=d.shares,
+                    as_of_date=d.as_of_date,
+                    edgar_url=d.edgar_url,
+                )
+                for d in holder.dropped_sources
+                if d.source in _BLOCKHOLDER_SOURCES
             )
-    return restated
+            if candidates:
+                # ONE block per surviving holder, so ONE row — see the ⚠⚠ above.
+                per_holder.append(max(candidates, key=_restatement_sort_key))
+
+    # Two representatives can carry the SAME filing (one accession reached by two
+    # collapses). That is one filing, so one row; ``accession`` is in the key rather
+    # than identity alone because one filer legitimately has several live filings
+    # across the scanned slices only when they are genuinely different documents.
+    best_by_filing: dict[tuple[str, str], _RestatementCandidate] = {}
+    for candidate in per_holder:
+        key = (_identity_key(candidate.filer_cik, candidate.filer_name), candidate.accession_number)
+        incumbent = best_by_filing.get(key)
+        if incumbent is None or _restatement_sort_key(candidate) > _restatement_sort_key(incumbent):
+            best_by_filing[key] = candidate
+
+    return [
+        Holder(
+            filer_cik=c.filer_cik,
+            filer_name=c.filer_name,
+            shares=c.shares,
+            pct_outstanding=Decimal(0),  # recomputed by _build_slice
+            winning_source=c.source,
+            winning_accession=c.accession_number,
+            winning_edgar_url=c.edgar_url,
+            as_of_date=c.as_of_date,
+            filer_type=None,
+            dropped_sources=(),  # this row IS the restated filing
+        )
+        # Sorted so the rendered order is a property of the data, not of dict insertion
+        # order, which inherits the slice/set ordering this fix exists to remove.
+        for c in sorted(best_by_filing.values(), key=_restatement_sort_key, reverse=True)
+    ]
 
 
 def _build_slice(
@@ -5775,13 +6002,17 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     # from any SUM(shares) reconciliation (the sum invariant holds over the
     # pie-wedge rows + residual; treasury is a memo row, #2217), but visible so an operator can see
     # the full filing trail behind a deduped owner.
+    # ⚠ The identity columns come from the DROPPED ENTRY, not from the holder it hangs
+    # on (#3189 finding 15): a group collapse appends a co-filer's row to a
+    # representative, and naming the representative on that accession is a false
+    # provenance link in an audit artefact. Same field, same defect as the #2215 overlay.
     for slc in pie_slices:
         for holder in slc.holders:
             for dropped in holder.dropped_sources:
                 writer.writerow(
                     [
-                        _csv_safe(holder.filer_cik or ""),
-                        _csv_safe(holder.filer_name),
+                        _csv_safe(dropped.filer_cik or ""),
+                        _csv_safe(dropped.filer_name),
                         f"__dropped:{dropped.source}__",
                         str(dropped.shares),
                         "",

@@ -626,7 +626,17 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
             : isEsop
               ? "ESOP / employee-benefit-plan holdings disclosed in DEF 14A (Rule 13d-3, SEC Item 403) — a proxy cross-check, not added to the pie. "
               : isRestated
-                ? "these filers report a >5% position on Schedule 13D/G, and it is already counted above under Insiders, Institutions or ETFs — that channel reported the larger figure for the same owner, so it won the Rule 13d-3 dedup. Listed here so an absent Blockholders wedge is not read as “no 5% filer”. "
+                ? // #3189 finding 14, plus a copy defect Codex raised at checkpoint 1
+                  // (its own numbering, not a #3189 finding). The previous wording
+                  // asserted the LOSING direction (“that channel reported the larger
+                  // figure … so it won the dedup”), which is false whenever the 13D/G
+                  // figure is the one that won — 3,862 holders on the 2026-09-18 dev
+                  // corpus — and it also asserted “>5%”, which neither helper filters
+                  // on (a 13G can report a reduced position, and the same-accession
+                  // collapse admits any positive magnitude). States the invariant
+                  // instead of one direction of it: one owner is counted once, under
+                  // their most-specific role.
+                  "these filers report a position on Schedule 13D/G, and it is already counted above in the pie — one beneficial owner is counted once under their most-specific role (Rule 13d-3), whichever channel reported the larger figure. Listed here so an absent Blockholders wedge is not read as “no 13D/G filer”. "
                 : "non-additive overlay. "}
         Does not contribute to the pie or residual math.
       </p>
