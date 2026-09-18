@@ -46,6 +46,13 @@ as each other, because no observation available to us distinguishes those two.
 Resolving ``submitting`` is #2979's remaining half, blocked on the same
 ``orders:lookup?referenceId=`` coverage question as #2961, #2965 and #2942 half 2.
 
+**Round 5 adds the NON-CRASH close failures**, which are a different axis
+entirely: no ``SIGKILL``, no restart, one live process throughout, and what
+varies is how the broker ANSWERS.  Four classes —  definite rejection, uncertain
+transport (run in BOTH arms of its ambiguity), malformed acceptance naming
+another position, and a lookup outage.  They are what #2603's sell leg will meet
+far more often than a crash.
+
 ⚠ No broker mutation.  The double is file-backed, the database is a disposable
 per-worker one, no credential is decrypted and no eToro adapter is imported.
 """
