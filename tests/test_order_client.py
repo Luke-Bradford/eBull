@@ -2458,3 +2458,46 @@ class TestPendingOrderVerdict:
         stop the order rather than fall through to a default."""
         with pytest.raises(ValueError, match="unmapped reconciliation state"):
             pending_order_verdict(state)
+
+
+class TestContainedPollErrorsAreNotSilent:
+    """#3189 — per-row containment must not trade a loud failure for a silent success.
+
+    Before containment, one unexpected raise failed the whole run. Containing it
+    keeps every other order resolvable, but a contained error that reported
+    ``success`` would be the #2218 shape: a job that did not do its work while
+    status-based monitoring stays green.
+
+    ⚠ What these pin is the CONTRACT the scheduler wires to, not the wiring
+    itself — the job body needs credentials, a broker and a database. The
+    plausible regression they catch is `poll_error` being moved onto the
+    `outcomes` axis, where it would stop degrading the run.
+    """
+
+    def test_a_contained_poll_error_degrades_the_run(self) -> None:
+        from app.services.job_progress import JobProgress, degradation_reason
+
+        progress = JobProgress(
+            candidates_seen=2,
+            outcomes={"still_pending": 1},
+            errors={"poll_error": 1},
+        )
+        assert degradation_reason(progress) is not None
+
+    def test_a_clean_batch_does_not_degrade_the_run(self) -> None:
+        from app.services.job_progress import JobProgress, degradation_reason
+
+        progress = JobProgress(
+            candidates_seen=2,
+            outcomes={"still_pending": 2},
+            errors={"poll_error": 0},
+        )
+        assert degradation_reason(progress) is None
+
+    def test_poll_error_is_never_parked(self) -> None:
+        """Parking stops the asking, and is only for a PERMANENT property of the
+        row. An unpredicted exception is a statement about one attempt."""
+        from app.services.order_client import _PARKING_POLL_VERDICTS
+
+        assert "poll_error" not in _PARKING_POLL_VERDICTS
+        assert "lock_busy" not in _PARKING_POLL_VERDICTS
