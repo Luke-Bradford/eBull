@@ -486,12 +486,34 @@ def _reach(path: str) -> int:
     the same rule rather than across two.
     """
     counts: Counter[str] = Counter()
+    # Every DB-derived figure in this report is taken on ONE connection inside ONE
+    # ``snapshot_read``, so the refused set, the census cross-check and the evidence-presence
+    # arm cannot be read against three different states of the corpus. An earlier draft
+    # computed the last of these on a second, separately-opened connection — a genuinely
+    # different snapshot, and the one real cross-snapshot hazard here (review NITPICK on
+    # PR #3177).
     with psycopg.connect(settings.database_url) as conn, snapshot_read(conn), conn.cursor() as cur:
         cur.execute(REFUSED_CLUSTERS_SQL, {"form4_cutoff": form4_retention_cutoff()})
         refused = {(int(row[0]), str(row[1])) for row in cur.fetchall()}
         cur.execute(JOINT_SQL, {"form4_cutoff": form4_retention_cutoff()})
         joint = cur.fetchone()
         names = [d.name for d in cur.description or ()]
+        # ⚠ Separates "the filers said nothing" from "they spoke and named nobody in the
+        # cluster". Without it, a reach rate near zero is equally consistent with a BLIND
+        # HARNESS — a census that never read the evidence would report the same 0, and a
+        # check that cannot fail for the right reason is not evidence (prevention-log: "a
+        # measurement that cannot detect its own failure"). This reads the same
+        # ``_read_record_holder_evidence`` the rollup itself consumes, so a silent
+        # evidence-side regression shows up here as a collapse to zero.
+        #
+        # One call over every refused accession rather than 157 calls of one: the reader is
+        # normally handed one instrument's accessions, but its three queries are
+        # ``accession_number``-leading either way, and holding a REPEATABLE READ connection
+        # open for 471 round trips is the wrong thing to do on a cluster already at its
+        # usable ``max_connections`` ceiling.
+        evidence = orl._read_record_holder_evidence(conn, sorted({acc for _iid, acc in refused}))
+        spoken = {acc for acc, _shares in evidence}
+        speaks = sum(1 for _iid, acc in refused if acc in spoken)
     if not refused:
         print("FAIL: refused-cluster population is empty — nothing was measured", flush=True)
         return 1
@@ -554,19 +576,6 @@ def _reach(path: str) -> int:
             flush=True,
         )
         return 1
-
-    # ⚠ Separates "the filers said nothing" from "they spoke and named nobody in the cluster".
-    # Without it, a reach rate near zero is equally consistent with a BLIND HARNESS — a census
-    # that never read the evidence would report the same 0, and a check that cannot fail for
-    # the right reason is not evidence (prevention-log: "a measurement that cannot detect its
-    # own failure"). This reads the same ``_read_record_holder_evidence`` the rollup itself
-    # consumes, so a silent evidence-side regression shows up here as a collapse to zero.
-    speaks = 0
-    with psycopg.connect(settings.database_url) as conn, snapshot_read(conn):
-        for _iid, acc in sorted(refused):
-            with conn.transaction():
-                if orl._read_record_holder_evidence(conn, [acc]):
-                    speaks += 1
 
     coarse = instruments_unique_unequal & refused_instruments
     cluster_instruments = {iid for iid, _acc in unequal_clusters}
