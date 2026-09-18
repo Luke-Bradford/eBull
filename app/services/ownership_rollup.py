@@ -151,9 +151,11 @@ class DroppedSource:
     reconciliation passes group by; never assume ``rep.filer_cik``.
 
     ⚠ One granularity seam is pre-existing and deliberate: for a collapsed
-    institutional FAMILY the identity is the family (the unit of account under
-    I16) while ``accession_number`` cites the constituent whose filing the
-    figure was read from, and ``shares`` is the family channel total."""
+    institutional FAMILY the identity is the family HOLDER's own pair — which is
+    ``(winning constituent's filer_cik, family display_name)``, because the pass
+    has no separate family CIK and a family is ONE unit of account (I16) — while
+    ``accession_number`` cites the constituent whose filing the figure was read
+    from, and ``shares`` is the family channel total rather than that row's."""
 
     source: SourceTag
     accession_number: str
@@ -2702,11 +2704,18 @@ def _reconcile_institutional_families(
                         shares=fig,
                         as_of_date=loser_as_of,
                         edgar_url=url,
-                        # The FAMILY is the identity, not the constituent whose accession
-                        # supplied the link: a family is ONE unit of account (I16) and
-                        # ``fig`` is the family channel total, not ``r.shares``. Matching
-                        # the family holder's own identity is what keeps the #2215 overlay
-                        # treating a folded family 13G as the family's own channel.
+                        # ⚠ Precisely: this is the FAMILY HOLDER's own identity pair —
+                        # the same ``(win_cik, fam.display_name)`` stamped on
+                        # ``family_holder`` below. There is NO separate family CIK;
+                        # ``win_cik`` is the WINNING CONSTITUENT's ``filer_cik``, which
+                        # this pass already uses as the family's identity because a family
+                        # is ONE unit of account (I16). That is deliberate and not what
+                        # this entry asserts about authorship: matching the holder is what
+                        # keeps the #2215 overlay reading a folded family 13G as that
+                        # holder's OWN channel rather than a foreign one. The constituent
+                        # whose filing supplied ``acc`` / ``url`` can differ, and ``fig``
+                        # is the family channel total rather than that row's ``shares`` —
+                        # the granularity seam recorded on :class:`DroppedSource`.
                         filer_cik=win_cik,
                         filer_name=fam.display_name,
                     )
