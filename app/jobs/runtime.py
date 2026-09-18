@@ -1826,6 +1826,16 @@ class JobRuntime:
             job.name: job for job in SCHEDULED_JOBS if job.name in self._invokers
         }
 
+    def _stopping(self) -> bool:
+        """True once the owning process has been told to stop (#2274 M1).
+
+        ``None`` — the in-process API runtime and unit tests, which install no
+        signal handler of their own — is NOT stopping; those keep the
+        pre-#2274 behaviour rather than inheriting a permanently-unset event
+        that a later reader could mistake for a live signal.
+        """
+        return self._stop_event is not None and self._stop_event.is_set()
+
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
@@ -2720,16 +2730,17 @@ class JobRuntime:
             # cancel_futures=True)`` does not wait for it), and the next boot's
             # ``reap_orphaned_job_runs`` transitions the row to ``failure``.
             #
-            # ⚠ The check is HERE and not in ``_catch_up``.  Measured over 30
-            # days, 14 of 56 orphan reaps have ``finished_at - started_at`` under
-            # 15 s (the shape), and only ONE of those jobs is in the
-            # ``catch_up_on_boot`` set — the rest are orchestrator LAYER jobs
+            # ⚠ The check is HERE and not in ``_catch_up``.  The jobs whose rows
+            # are reaped this way are mostly orchestrator LAYER jobs
             # (``daily_portfolio_sync``, ``daily_candle_refresh``,
-            # ``fx_rates_refresh``) dispatched by ``orchestrator_high_frequency_sync``
-            # and writing their own rows via ``_tracked_job``.  This closure is
-            # the one object BOTH paths funnel through: ``_catch_up`` submits it
-            # and ``start()`` registers it with APScheduler, so refusing the
-            # orchestrator here also stops every layer beneath it.
+            # ``fx_rates_refresh``) — they are not in ``SCHEDULED_JOBS`` at all,
+            # so they have no ``catch_up_on_boot`` flag to test; they run
+            # beneath a dispatched orchestrator and write their own rows via
+            # ``_tracked_job``.  This closure is the one object BOTH dispatch
+            # paths funnel through — ``_catch_up`` submits it and ``start()``
+            # registers it with APScheduler — so refusing the orchestrator here
+            # also stops every layer beneath it.  The population that motivated
+            # it is on #2274 with the query that reproduces it.
             #
             # ⚠ ``extend_while_live`` cannot cover this by construction — it
             # engages only when the 180 s drain budget EXPIRES, and these
@@ -2739,7 +2750,7 @@ class JobRuntime:
             # alternative to a lost fire here is a row that dies anyway and
             # reads as a failure. The job simply stays overdue, which is the
             # state the next boot's catch-up is built to resolve.
-            if self._stop_event is not None and self._stop_event.is_set():
+            if self._stopping():
                 logger.info(
                     "fire of %r not started: this process is shutting down. The job stays "
                     "overdue and the next boot's catch-up re-fires it; starting it here "
@@ -2753,6 +2764,20 @@ class JobRuntime:
             # Catch-up reuses this wrapper, so it has the same bound as the
             # regular APScheduler path.
             with _job_execution_slot(job_name):
+                # ⚠ Re-checked AFTER admission, not only before (Codex ckpt-2 P1).
+                # The general lane's acquire is unbounded and its measured waits
+                # run to many minutes, so a fire can pass the check above, park
+                # on the permit, and be admitted inside the drain window — which
+                # is the same race one level down. Setting the event does not
+                # wake a parked acquire, so the re-check is the only thing that
+                # sees it.
+                if self._stopping():
+                    logger.info(
+                        "fire of %r admitted to its execution slot after the stop signal; "
+                        "not started. Same reason as above — the row would not survive the drain.",
+                        job_name,
+                    )
+                    return
                 run_bounded()
 
         return wrapped

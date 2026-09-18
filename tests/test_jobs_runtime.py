@@ -674,6 +674,42 @@ class TestNoDispatchWhileDraining:
 
         assert entered == [], "the refused fire still acquired an execution slot"
 
+    def test_a_stop_signal_arriving_during_the_slot_wait_still_refuses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Codex ckpt-2 P1.  The general lane's acquire is unbounded and its
+        # measured waits run to many minutes, so a fire can pass the pre-slot
+        # check, park on the permit, and be admitted inside the drain window.
+        # Setting the event does not wake a parked acquire — only a re-check
+        # after admission sees it.
+        invocations: list[int] = []
+        stop = threading.Event()
+
+        @contextmanager
+        def slot_that_blocks_until_shutdown(_job_name: str) -> Iterator[None]:
+            # Stands in for a permit that frees only after SIGTERM arrives.
+            stop.set()
+            yield
+
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", slot_that_blocks_until_shutdown)
+        monkeypatch.setattr("app.jobs.runtime.JobLock", _FakeLock)
+        monkeypatch.setattr(
+            "app.jobs.runtime.run_with_prelude",
+            lambda _url, _name, invoker, **_kw: invoker(_kw.get("params") or {}) or True,
+        )
+        monkeypatch.setattr("app.jobs.runtime.check_bootstrap_state_gate", lambda _conn, **_kw: (True, ""))
+        monkeypatch.setattr("app.jobs.runtime.materialise_scheduled_params", lambda _name: {})
+        monkeypatch.setattr("app.jobs.runtime.validate_job_params", lambda _name, params, **_kw: dict(params))
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        rt = _make_runtime({"j": invoker}, stop_event=stop)
+        assert not stop.is_set(), "the pre-slot check must be the one that passes here"
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))()
+
+        assert invocations == [], "the fire ran after being admitted during the drain"
+
     def test_a_runtime_with_no_stop_event_still_fires(self, patched_runtime: None) -> None:
         # The in-process API runtime and the unit tests construct JobRuntime
         # without a stop event; they must keep today's behaviour rather than
