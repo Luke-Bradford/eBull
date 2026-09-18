@@ -147,6 +147,20 @@ The column is `NULL` on:
   bootstrap gate and the per-job prerequisite all run inside it — so the NULL was not "no slot",
   it was "a writer that did not record". `record_job_skip` and `record_job_start` now both
   persist it, without widening any signature: they read the contextvar.
+- ⚠⚠ **Three SKIP classes stay NULL after #3189 finding 13, and all three are correct** — read
+  post-deploy on dev rather than inferred, because the first reading of the live rows looked like
+  the fix had not worked:
+  - `max_instances_active` — recorded by `_on_job_max_instances`, an APScheduler event listener
+    running on the SCHEDULER thread. The fire was never dispatched, so no slot was ever taken.
+    This is the largest skip class by volume.
+  - **catch-up prerequisite skips** — `_catch_up` evaluates every overdue job's prerequisite on
+    the boot thread and splits into fire-list vs skip-list BEFORE anything enters a slot; only the
+    fire-list reaches `wrapped()`. A boot-time skip therefore holds no slot either.
+  - misfire skips (`_on_job_missed`) — the executor's callback thread, after the body did not run.
+
+  What finding 13 actually covers is the **scheduled-dispatch** gate and prerequisite skips, which
+  run inside `run_bounded()` and therefore inside the slot. Stated because the difference is
+  invisible from the column alone: three of these classes and the covered one all read `skipped`.
 - `_tracked_job`'s `record_job_start` fallback (bootstrap stage invokers, direct test calls) —
   those paths hold no slot, so there is no wait to record. ⚠ Still NULL after #3189 finding 13,
   and now BY CONSTRUCTION rather than by omission: the contextvar carries the OWNING job's name
