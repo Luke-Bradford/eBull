@@ -710,6 +710,36 @@ class TestNoDispatchWhileDraining:
 
         assert invocations == [], "the fire ran after being admitted during the drain"
 
+    def test_a_stop_signal_arriving_during_the_lane_retry_still_refuses(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Codex ckpt-2 round 2 P1.  The source-level JobLock is a SECOND,
+        # independent admission layer, and its retry window sits after the
+        # execution-slot re-check.  A lane that frees inside the drain would
+        # otherwise start the body after SIGTERM.
+        invocations: list[int] = []
+        stop = threading.Event()
+
+        def lane_that_frees_during_the_drain(
+            _url: str, _job_name: str, body: object, **_kw: object
+        ) -> None:
+            stop.set()
+            assert callable(body)
+            body()
+
+        monkeypatch.setattr(
+            "app.jobs.runtime._fire_scheduled_with_lane_retry",
+            lane_that_frees_during_the_drain,
+        )
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        rt = _make_runtime({"j": invoker}, stop_event=stop)
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))()
+
+        assert invocations == [], "the body ran after the lane freed inside the drain"
+
     def test_a_runtime_with_no_stop_event_still_fires(self, patched_runtime: None) -> None:
         # The in-process API runtime and the unit tests construct JobRuntime
         # without a stop event; they must keep today's behaviour rather than

@@ -2669,6 +2669,21 @@ class JobRuntime:
             # full-wash holder), so the default ``bypass_fence_check=False``
             # applies. Self-tracked invokers opt out of the prelude.
             def _run_scheduled_body() -> None:
+                # ⚠ The LAST of the three admission layers (Codex ckpt-2 round 2
+                # P1). The execution semaphore and the source-level ``JobLock``
+                # are independent admissions (prevention log, "a source lock is
+                # not an execution permit"), and between the slot re-check above
+                # and this line sit the gate/prereq connection I/O and
+                # ``_fire_scheduled_with_lane_retry``'s ~1.75 s backoff window
+                # (~10 s for daily-or-coarser cadences, #1710). A lock that frees
+                # inside the drain would otherwise start the body after SIGTERM
+                # and recreate the orphan this whole change exists to remove.
+                if self._stopping():
+                    logger.info(
+                        "fire of %r acquired its source lane after the stop signal; not started.",
+                        job_name,
+                    )
+                    return
                 if job_name in _PRELUDE_OPT_OUT_JOBS:
                     # Set both contextvars so the opt-out invoker's
                     # ``_tracked_job`` (if any) reuses the snapshot.
