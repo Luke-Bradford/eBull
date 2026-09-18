@@ -377,9 +377,7 @@ def test_prelude_fence_skipped_row_carries_the_execution_slot_wait(
     ebull_test_conn.commit()
 
     with jobs_runtime._job_execution_slot(job_name):
-        invoked = jobs_runtime.run_with_prelude(
-            test_database_url(), job_name, lambda _p=None: None, params=params
-        )
+        invoked = jobs_runtime.run_with_prelude(test_database_url(), job_name, lambda _p=None: None, params=params)
     assert invoked is False
 
     ebull_test_conn.rollback()

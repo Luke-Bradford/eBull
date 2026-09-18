@@ -92,10 +92,18 @@ trap, one level up.
   `0.0` on the non-blocking acquire) and publishes it on a new ContextVar
   `_execution_slot_wait_seconds` for the duration of the `yield`, resetting with the token in
   `finally`.
-  ⚠ **The reset is not tidiness, it is correctness.** APScheduler's `ThreadPoolExecutor` reuses
-  worker threads, and a ContextVar's value lives in the thread's top-level context; without the
-  reset a fire that waited 19 minutes would leak that 19 minutes onto the next, instantly-admitted
-  fire on the same thread. A test pins this.
+  ⚠ **The reset is what makes `None` mean "no slot is held".** APScheduler's `ThreadPoolExecutor`
+  reuses worker threads and a ContextVar's value lives in the thread's top-level context, so
+  without it every read taken on that thread after the fire returns the previous fire's figure and
+  the column's NULL — the value that reports its own coverage — is unreachable for any reader
+  outside a slot.
+  ⚠⚠ **It is NOT what stops one fire's wait being attributed to the next fire on the same thread,
+  and the first draft of this spec said it was.** The `set` is unconditional, so a later slot entry
+  always overwrites. Revert-probe P1 (delete the reset) fails
+  `test_an_immediate_admission_publishes_a_zero_wait_not_none` and does **not** fail the leak test
+  the claim named. Both tests are kept; each now states what it actually discriminates.
+  The token form (rather than `set(None)`) matches the idiom `_run_scheduled_body` already uses for
+  `_params_snapshot_var` and keeps a nested entry from clearing its caller's value.
 - `current_execution_slot_wait_seconds()` reads it. Deliberately **not** a `consume_*` popper like
   its three neighbours: the value's lifetime is the slot's, not the reader's, and the slot owns
   both ends of it. A popping reader would also silently zero the second reader if one is ever
@@ -138,6 +146,16 @@ The column is `NULL` on:
 3. The prelude persists it on both the `running` and the fence-`skipped` INSERT branch, with and
    without a params snapshot.
 4. A `job_runs` row written outside the prelude keeps `NULL`.
+
+Met by 3 pure tests (`tests/test_jobs_runtime.py::TestConnectionBudgetExecutionGate`) + 5 DB tests
+(`tests/test_jobs_runtime_fence.py`). Control green first: 10 collected / exit 0 on the pure class,
+5 on the DB additions. Revert-probes against that control:
+
+| probe | fails |
+| --- | --- |
+| P1 — delete the ContextVar `reset` | 1 (`…publishes_a_zero_wait_not_none`) |
+| P2 — fast path publishes `None` instead of `0.0` | 3 |
+| P3 — publish a constant `0.0` in place of the measurement | 2 |
 
 ## Codex checkpoints
 

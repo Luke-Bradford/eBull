@@ -959,11 +959,24 @@ def _job_execution_slot(job_name: str) -> Iterator[None]:
             waited_seconds,
         )
     # #3159 clause 2 — publish the wait for the prelude's ``job_runs`` INSERT.
-    # The reset token is load-bearing, not tidiness: APScheduler's
+    #
+    # The reset is what makes ``None`` mean "no slot is held". APScheduler's
     # ThreadPoolExecutor reuses worker threads and a ContextVar's value lives in
-    # the thread's top-level context, so without it a fire that waited 19 minutes
-    # would leak that figure onto the next instantly-admitted fire on the same
-    # thread (``test_a_wait_does_not_leak_into_the_next_slot_entry``).
+    # the thread's top-level context, so without the reset every read taken on
+    # that thread AFTER this fire returns the previous fire's figure — and the
+    # column's NULL, which reports its own coverage, would be unreachable for any
+    # reader outside a slot. Pinned by
+    # ``test_an_immediate_admission_publishes_a_zero_wait_not_none``.
+    #
+    # ⚠ It is NOT what stops one fire's wait being attributed to the next fire on
+    # the same thread: the ``set`` below is unconditional, so a later slot entry
+    # always overwrites. Revert-probed — deleting the reset fails the assertion
+    # above and does NOT fail the leak test, which the first version of this
+    # comment claimed it would.
+    #
+    # Token-based reset (rather than ``set(None)``) matches the idiom
+    # ``_run_scheduled_body`` already uses for ``_params_snapshot_var`` and keeps
+    # a nested slot entry from clearing its caller's value.
     wait_token = _execution_slot_wait_seconds.set(waited_seconds)
     try:
         yield

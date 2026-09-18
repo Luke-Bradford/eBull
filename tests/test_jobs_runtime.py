@@ -408,14 +408,18 @@ class TestConnectionBudgetExecutionGate:
         assert waited >= 0.3, f"the waiter blocked for >=0.3s but published {waited}"
 
     def test_a_wait_does_not_leak_into_the_next_slot_entry(self) -> None:
-        """#3159 clause 2 — the pooled-thread case, and the reason the reset uses
-        the ContextVar token.
+        """#3159 clause 2 — the pooled-thread case.
 
-        APScheduler's ``ThreadPoolExecutor`` reuses worker threads and a
-        ContextVar's value lives in the thread's top-level context. A fire that
-        waited must not leave that figure behind for the next, instantly-admitted
-        fire on the SAME thread — which would attribute one job's starvation to
-        another job's healthy run.
+        APScheduler's ``ThreadPoolExecutor`` reuses worker threads, so two fires
+        share one thread's ContextVar context. The second must report its OWN
+        admission, not the first's starvation.
+
+        ⚠ What this discriminates, measured by revert-probe rather than assumed:
+        a fast path that publishes ``None`` instead of ``0.0``, and a constant
+        published in place of the measurement. It does NOT discriminate a missing
+        ``reset`` — the ``set`` in ``_job_execution_slot`` is unconditional, so a
+        later entry always overwrites. The reset is pinned by
+        ``test_an_immediate_admission_publishes_a_zero_wait_not_none`` instead.
         """
         from app.jobs.runtime import _job_execution_slot, current_execution_slot_wait_seconds
 
