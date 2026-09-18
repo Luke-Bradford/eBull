@@ -152,6 +152,59 @@ then moves it for an unrelated reason.
 - The counter is bucketed `(closeYear, assetType)`. Compare **per bucket**; a delta of 0,
   >1, or negative is a recordable outcome, not an error.
 
+## P5 — a SCHEDULED job now acts on this session's own order (new 2026-09-18, #2942 slice B)
+
+`recommendation_order_reconcile` shipped in `c5890a60`: hourly at :07, lane `etoro`,
+`catch_up_on_boot=True`, gated on `_has_pending_recommendation_orders`. **It did not exist
+when this protocol was written, and it changes the session.**
+
+If the step-1 BUY (or the step-4 EXIT) is acknowledged **`pending`** rather than filled,
+that row is exactly what the job selects. Within the hour, unattended, it will call
+`lookup_order` and may:
+
+- **terminalise** the order — `orders.status='rejected'`, recommendation →
+  `execution_failed`, an audit row, and **the submission claim released** — if the broker
+  reports a rejected status; or
+- **park** it (`orders.recommendation_poll_parked_reason='filled_unbooked'`) if the broker
+  reports it FILLED, because slice B deliberately does not book a late fill. The claim
+  stays held.
+
+⚠⚠ **So a state the operator did not create can appear between steps.** That is correct
+behaviour, not a fault, but a session that does not expect it will read it as one — and
+step 6's "any unresolved order claim" check will report a claim that a background job
+released twenty minutes earlier. **Record the wall-clock of every step**; a `:07` boundary
+crossed between two observations is the explanation.
+
+⚠ It cannot corrupt an observation in flight. The job takes the same
+per-recommendation `RECOMMENDATION_SUBMISSION_ADVISORY_LOCK` the submitter holds, and skips
+rather than waits. It makes **no** broker mutation — `lookup_order` only — so it cannot
+place, close or edit anything.
+
+### The free half: this is slice C's evidence, at zero extra mutation
+
+#2942 slice C (booking a late fill) is blocked on *one attended pending→fill observation on
+a recommendation-origin order*, and a `pending` acknowledgement here supplies it without a
+single extra broker call. **Do not chase it** — the same judgement this protocol already
+applies to #2965's partial fill: an in-session market order in a liquid instrument fills
+whole, and picking the instrument or the hour to force a `pending` would be choosing the
+experiment over the mandate. Take it if it happens.
+
+If it does happen, capture, in this order:
+
+1. `orders` for that `order_id` — `status`, `recommendation_last_polled_at`,
+   `recommendation_poll_parked_reason`, `raw_payload_json`;
+2. the `decision_audit` row the job wrote (`evidence_json.refusal` is
+   `pending_order_filled_not_booked` or `broker_rejected_pending_order`), which carries the
+   **verbatim broker detail** — that payload is what slice C has to learn to book;
+3. `trade_recommendations.status` for the recommendation;
+4. whether `fills` / `positions` / `cash_ledger` moved. They must **not** have: slice B
+   books nothing, and a change there is a defect, not a success.
+
+⚠ A `pending` BUY that later fills leaves the position **owned at the broker and unbooked
+locally** until slice C ships. Step 6's residual check must catch it — this is the one way
+this session can end with exposure the ledger does not know about, and it is now a live
+possibility rather than a hypothetical.
+
 ## Source rule — the endpoints, and what is undocumented about them
 
 | what | where | documented? |
@@ -323,6 +376,8 @@ mystery.
 | step 5.1 raw close body (+ 5.2 completion) | **#3007** | the shape, and whether any acknowledgement ever completes the lifecycle |
 | step 5.2 repeated close-order read | **#2979** | whether a broker-executed close is acknowledgeable by order id after the fact |
 | step 5.4 per-bucket counter delta + presence of the specific close in history | **#2993** | P4, with its limits |
+| a `pending` acknowledgement on the step-1 BUY or step-4 EXIT, then the job's audit row | **#2942 slice C** | P5 — opportunistic, do not chase. The verbatim broker detail in `decision_audit` is what a late-fill booker has to consume. |
+| the job's own `job_runs` row for `recommendation_order_reconcile` during the session | **#2942 slice B** | its first live poll against a real pending order; `row_count` counts polls, not terminalisations |
 
 ## What this session does NOT settle
 
@@ -337,6 +392,13 @@ mystery.
   order is still working"; and the immutability contract #2965 turns on covers
   `openingData.units` / `avgPrice` / `executionTime` / `fees`, so a poll pair must be
   compared on those fields, not on ids alone.
+- **Slice C is not settled by observing the park.** The session can supply the broker's
+  verbatim FILLED detail; it cannot supply the missing **exit lot** for an EXIT, which is
+  the other half of why slice B refuses to book. If the `pending` row is the step-4 EXIT
+  rather than the step-1 BUY, record the lot `_load_exit_lot` selected at step 3 alongside
+  it — that pairing is the only thing that makes an EXIT bookable later, and it exists
+  nowhere in the schema today.
+
 - **v1 evidence does not validate the v2 core writer.** #2961 and #2979 are core-path
   tickets; what this session gives them is the *endpoint's* behaviour, not their writer's.
   Any transfer to the core path is an explicit assumption and must be written as one.
