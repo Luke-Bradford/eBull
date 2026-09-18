@@ -73,7 +73,15 @@ def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
     than skip, which is the intended direction — a commit this artefact names and the
     checkout cannot resolve is not a provenance claim anyone can act on.
     """
-    return subprocess.run(["git", "-C", str(_REPO_ROOT), *args], capture_output=True, check=False)
+    return subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), *args],
+        capture_output=True,
+        check=False,
+        # Bounded so a git that blocks — a credential or submodule prompt on somebody
+        # else's checkout — surfaces as a failed test rather than a stalled suite. These
+        # are three object-store reads; they take milliseconds or they are wedged.
+        timeout=30,
+    )
 
 
 def test_the_payload_is_an_OPENED_verdict_and_not_a_readiness_report() -> None:
