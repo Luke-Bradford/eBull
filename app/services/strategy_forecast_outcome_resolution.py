@@ -21,7 +21,7 @@ from typing import Any, Final
 import psycopg
 
 from app.services.indicator_series import BarSeries
-from app.services.outcome_ledger import locate_fill_index
+from app.services.outcome_ledger import fill_price_is_superseded, locate_fill_index
 from app.services.outcome_resolver import RULE_SET_VERSION as PATH_RULE_SET_VERSION
 from app.services.outcome_resolver import ExitLevels, Outcome, UnresolvedReason, resolve_outcome
 from app.services.price_masked_bars import MASKED_REASON, QUARANTINE_RULE_SET_VERSION, load_masked_bars
@@ -162,6 +162,21 @@ def _resolve_forecast(
 ) -> ForecastOutcomeRow | None:
     """Return one terminal observation, or ``None`` until the horizon matures."""
     fill_index = locate_fill_index(series, forecast.fill_bar_date)
+    # ⚠⚠ This path reads the SAME stored `strategy_signals.fill_price` as the
+    # signal resolver, so it carries the same defect (#2414) — and one step
+    # worse: the bracket below is a PERCENTAGE OF that price, so a superseded
+    # fill silently puts both barriers on the old scale before `resolve_outcome`
+    # rejects the pair. Refuse first, with the same closed code.
+    if fill_price_is_superseded(series, fill_index=fill_index, fill_price=forecast.fill_price):
+        return ForecastOutcomeRow.from_outcome(
+            forecast.forecast_id,
+            Outcome(
+                outcome="unresolved",
+                resolution_method="daily_bar",
+                rule_set_version=PATH_RULE_SET_VERSION,
+                reason="fill_price_superseded",
+            ),
+        )
     hundred = Decimal("100")
     levels = ExitLevels(
         take_profit=forecast.fill_price * (Decimal("1") + forecast.target_barrier_pct / hundred),

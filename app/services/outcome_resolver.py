@@ -75,15 +75,16 @@ OutcomeClass = Literal["tp_hit", "sl_hit", "expired", "ambiguous", "unresolved"]
 #: ⚠ CLOSED vocabulary, for criterion 9's "measure what you reject": free text
 #: cannot be counted. ``series_break`` and ``quarantined_bar`` are criterion 8's
 #: own names and are pinned against ``strategy_registry`` by test.
-#: ``window_truncated``, ``missing_bar_data`` and ``unorderable_exit_levels``
-#: are OURS and are flagged as additions rather than smuggled in — see the
-#: spec's §3.4.
+#: ``window_truncated``, ``missing_bar_data``, ``unorderable_exit_levels`` and
+#: ``fill_price_superseded`` are OURS and are flagged as additions rather than
+#: smuggled in — see the spec's §3.4.
 UnresolvedReason = Literal[
     "window_truncated",
     "series_break",
     "quarantined_bar",
     "missing_bar_data",
     "unorderable_exit_levels",
+    "fill_price_superseded",
 ]
 
 #: ⚠ One member in v1, and it is not decoration. S5 (#2245) established that a
@@ -102,7 +103,9 @@ RESOLUTION_METHODS: frozenset[str] = frozenset(get_args(ResolutionMethod))
 #: Ours, kept as an explicit subtraction so adopting a parent code later cannot
 #: silently land on our side of the line. Same construction as
 #: ``strategy_registry.OUR_ADDITIONAL_REASON_CODES``.
-OUR_ADDITIONAL_REASONS: frozenset[str] = frozenset({"window_truncated", "missing_bar_data", "unorderable_exit_levels"})
+OUR_ADDITIONAL_REASONS: frozenset[str] = frozenset(
+    {"window_truncated", "missing_bar_data", "unorderable_exit_levels", "fill_price_superseded"}
+)
 INHERITED_REASONS: frozenset[str] = UNRESOLVED_REASONS - OUR_ADDITIONAL_REASONS
 
 #: Outcomes that book a trade. The other two — ``ambiguous`` and ``unresolved``

@@ -140,6 +140,96 @@ def test_unorderable_exit_levels_are_terminal_without_aborting_the_batch() -> No
     )
 
 
+def _superseded_fill(series: BarSeries) -> PendingFill:
+    """The stored fill, priced from a bar that has since been rewritten.
+
+    ``_series`` builds every bar with ``open = 100``; a 2:1 split rewrites that
+    history to 50 while the ledger keeps its copy of 100. This is the measured
+    shape — #2414 found all 221 real disagreements to be exact corporate-action
+    ratios, 2:1 the most common.
+    """
+    return PendingFill(
+        signal_id=7,
+        instrument_id=42,
+        signal_bar_date=series.dates[0],
+        fill_bar_date=series.dates[1],
+        fill_price=Decimal("200"),
+        universe="survivor_only",
+    )
+
+
+def test_a_superseded_fill_price_is_terminal_without_aborting_the_batch() -> None:
+    series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
+
+    row = _resolve_fill(_entry(), _superseded_fill(series), series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_price_superseded", None)
+
+
+def test_a_superseded_fill_price_never_reaches_the_exit_levels_factory() -> None:
+    """The factory derives a bracket from the stored entry AND the reloaded
+    series, so on a rescaled series it can hand ``resolve_outcome`` levels that
+    are unorderable against the entry — a raise, not a refusal. The guard must
+    sit in front of it, not behind."""
+    series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
+    entry = cast(
+        StrategyEntry,
+        SimpleNamespace(
+            strategy_id="test-level",
+            exit_levels=lambda *_args, **_kwargs: pytest.fail("the levels factory saw a superseded fill"),
+        ),
+    )
+
+    row = _resolve_fill(entry, _superseded_fill(series), series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert row.reason == "fill_price_superseded"
+
+
+def test_a_series_break_still_outranks_a_superseded_fill_price() -> None:
+    """Placement is AFTER the break test on purpose: no row that resolves today
+    may be relabelled by this change."""
+    series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
+
+    row = _resolve_fill(
+        _entry(),
+        _superseded_fill(series),
+        series=series,
+        unresolved_breaks=(series.dates[1],),
+    )
+
+    assert row is not None
+    assert row.reason == "series_break"
+
+
+def test_a_masked_open_is_not_reported_as_a_superseded_fill_price() -> None:
+    """``None`` is not evidence the bar moved. The masked case keeps
+    ``resolve_outcome``'s own refusal rather than borrowing this one."""
+    series = BarSeries(
+        dates=(date(2026, 8, 1), date(2026, 8, 2)),
+        rows=(
+            {
+                "open": Decimal("100"),
+                "high": Decimal("105"),
+                "low": Decimal("95"),
+                "close": Decimal("100"),
+                "volume": Decimal("1000"),
+            },
+            {
+                "open": None,
+                "high": Decimal("105"),
+                "low": Decimal("95"),
+                "close": Decimal("100"),
+                "volume": Decimal("1000"),
+            },
+        ),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError, match="cannot be a fill bar"):
+        _resolve_fill(_entry(), _superseded_fill(series), series=series, unresolved_breaks=())
+
+
 def test_precomputed_masked_reasons_are_reused_for_an_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
     series = _series((Decimal("105"), Decimal("95")), (None, Decimal("95")))
     monkeypatch.setattr(
