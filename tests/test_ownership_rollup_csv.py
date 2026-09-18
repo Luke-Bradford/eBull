@@ -15,6 +15,7 @@ attachment``, 404 on unknown symbol.
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -891,3 +892,41 @@ def test_build_csv_omits_per_class_memo_row_when_absent() -> None:
     """No per-class denominator → no memo row."""
     csv = build_rollup_csv(_rollup(symbol="AAPL", per_class=None))
     assert "__per_class_denominator__" not in csv
+
+
+def test_the_published_category_list_names_every_accepted_category() -> None:
+    """#3189 finding 17 — the OpenAPI description must not drift from the filter.
+
+    It had: the ``?category=`` description listed eight categories while
+    ``_ROLLUP_CSV_SLICE_CATEGORIES`` accepted nine, so
+    ``blockholders_restated`` was undocumented in the published schema from the
+    day #2215 added it — a consumer reading the contract could not know the
+    value existed, while the endpoint happily served it.
+
+    The description is now DERIVED from the accepted set, so this asserts the
+    derivation is complete rather than re-listing the vocabulary a third time
+    (which is the defect, not the fix — #2218's closed-vocabulary-in-N-places).
+    """
+    from app.api.instruments import (
+        _ROLLUP_CSV_CATEGORIES,
+        _ROLLUP_CSV_CATEGORY_DOC,
+        _ROLLUP_CSV_SLICE_CATEGORY_ORDER,
+    )
+
+    documented = {token.strip() for token in _ROLLUP_CSV_CATEGORY_DOC.split("|")}
+    assert documented == _ROLLUP_CSV_CATEGORIES
+    # Ordered, not a set: a frozenset would make the published wording vary
+    # between processes, which is a diffable artefact changing for no reason.
+    assert len(_ROLLUP_CSV_SLICE_CATEGORY_ORDER) == len(set(_ROLLUP_CSV_SLICE_CATEGORY_ORDER))
+
+
+def test_the_endpoints_openapi_schema_carries_the_full_vocabulary() -> None:
+    """The assertion above is about the constant; this one is about what the
+    server actually publishes, which is the thing a consumer reads."""
+    from app.api.instruments import _ROLLUP_CSV_CATEGORIES, get_instrument_ownership_rollup_csv
+
+    signature = inspect.signature(get_instrument_ownership_rollup_csv)
+    description = signature.parameters["category"].default.description
+
+    for category in _ROLLUP_CSV_CATEGORIES:
+        assert category in description, f"{category} is accepted but undocumented"
