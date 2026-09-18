@@ -128,6 +128,13 @@ const SLICE_TO_TABLE_CATEGORY: Record<
   def14a_unmatched: "def14a",
   funds: null,
   esop: null,
+  // #2215. ``null`` (the funds/esop treatment, not the def14a one) deliberately:
+  // the L1 overlay already names these filers and the CSV carries every one, so
+  // the operator can see WHO without a second filer-table category — which would
+  // additionally need a CategoryKey, a label, an order entry, and sunburst leaf-key
+  // compatibility (an L1 wedge click resolves rows by that key). Stated on #2215
+  // as a follow-up rather than silently omitted.
+  blockholders_restated: null,
 };
 
 export function OwnershipPage(): JSX.Element {

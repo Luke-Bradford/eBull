@@ -610,6 +610,7 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
   const isFunds = slice.category === "funds";
   const isProxy = slice.category === "def14a_unmatched";
   const isEsop = slice.category === "esop";
+  const isRestated = slice.category === "blockholders_restated";
   const unit = isFunds ? "fund series" : "holders";
   return (
     <div
@@ -624,7 +625,9 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
             ? "DEF 14A beneficial ownership (Rule 13d-3): the same shares may be listed under multiple owners (control groups, parent/sub, “all officers as a group”), so it is shown as a cross-check, not added to the pie. The real holders are counted via 13D/G, 13F and Form 4. "
             : isEsop
               ? "ESOP / employee-benefit-plan holdings disclosed in DEF 14A (Rule 13d-3, SEC Item 403) — a proxy cross-check, not added to the pie. "
-              : "non-additive overlay. "}
+              : isRestated
+                ? "these filers report a >5% position on Schedule 13D/G, and it is already counted above under Insiders, Institutions or ETFs — that channel reported the larger figure for the same owner, so it won the Rule 13d-3 dedup. Listed here so an absent Blockholders wedge is not read as “no 5% filer”. "
+                : "non-additive overlay. "}
         Does not contribute to the pie or residual math.
       </p>
       <table className="w-full">
