@@ -89,9 +89,10 @@ def classify(rollup: OwnershipRollup) -> dict[str, Any]:
     """
     wedge = next((s for s in rollup.slices if s.category == "blockholders"), None)
     folded_owners = 0
+    overlay_filers = 0
     folded_shares = Decimal(0)
     for slice_ in rollup.slices:
-        if slice_.category == "blockholders":
+        if slice_.category in {"blockholders", "blockholders_restated"}:
             continue
         for holder in slice_.holders:
             dropped = [d for d in holder.dropped_sources if d.source in BLOCKHOLDER_SOURCES]
@@ -100,7 +101,17 @@ def classify(rollup: OwnershipRollup) -> dict[str, Any]:
                 # Largest of the owner's dropped blockholder channels: 13d and
                 # 13g for one owner are the same stake restated, so summing them
                 # would double the magnitude of a single invisible position.
-                folded_shares += max(d.shares for d in dropped)
+                best = max(d.shares for d in dropped)
+                folded_shares += best
+                # ⚠ ``folded_owners`` is an UPPER BOUND on what the #2215 overlay
+                # renders. ``_build_slice`` drops zero-share holders (#1916
+                # Finding A) and a folded channel can legitimately be 0.0000 — GME
+                # carries a 0-share Vanguard 13G behind a real Cohen 13D, so its
+                # 2 folded owners render as 1 overlay row. Both are reported
+                # because they answer different questions: how many owners are
+                # invisible, and how many the fix makes visible.
+                if best > 0:
+                    overlay_filers += 1
 
     if wedge is not None:
         state = "rendered_partial" if folded_owners else "rendered_complete"
@@ -112,7 +123,12 @@ def classify(rollup: OwnershipRollup) -> dict[str, Any]:
         "wedge_filers": wedge.filer_count if wedge else 0,
         "wedge_shares": str(wedge.total_shares) if wedge else "0",
         "folded_owners": folded_owners,
+        "overlay_filers": overlay_filers,
         "folded_shares": str(folded_shares),
+        # Splits ``absent_upstream``: an instrument with no usable denominator
+        # renders NO slices at all, so its empty blockholders wedge is not a
+        # dedup artefact and no note of any wording would be true of it.
+        "renders_nothing": not rollup.slices,
     }
 
 
@@ -130,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     states: Counter[str] = Counter()
     folded_owner_total = 0
+    overlay_filer_total = 0
+    instruments_gaining_an_overlay = 0
+    renders_nothing_total = 0
     folded_shares_total = Decimal(0)
     rows: list[dict[str, Any]] = []
 
@@ -158,10 +177,11 @@ def main(argv: list[str] | None = None) -> int:
                 verdict = classify(rollup)
                 states[verdict["state"]] += 1
                 folded_owner_total += verdict["folded_owners"]
+                overlay_filer_total += verdict["overlay_filers"]
+                instruments_gaining_an_overlay += 1 if verdict["overlay_filers"] else 0
+                renders_nothing_total += 1 if verdict["renders_nothing"] else 0
                 folded_shares_total += Decimal(verdict["folded_shares"])
-                rows.append(
-                    {"instrument_id": instrument_id, "symbol": symbol, "stored_rows": stored_rows, **verdict}
-                )
+                rows.append({"instrument_id": instrument_id, "symbol": symbol, "stored_rows": stored_rows, **verdict})
             if index % 100 == 0:
                 elapsed = time.monotonic() - started
                 print(
@@ -175,7 +195,10 @@ def main(argv: list[str] | None = None) -> int:
         pct = (count / total * 100) if total else 0.0
         print(f"  {state:20s} {count:6d}  {pct:6.2f}%", flush=True)
     print(f"\n  owners whose 13D/G channel is folded out of the wedge: {folded_owner_total}", flush=True)
-    print(f"  their dropped-channel shares (NOT an ownership figure): {folded_shares_total}", flush=True)
+    print(f"  ... of those, non-zero and therefore RENDERED by the overlay: {overlay_filer_total}", flush=True)
+    print(f"  instruments that gain a blockholders_restated overlay: {instruments_gaining_an_overlay}", flush=True)
+    print(f"  instruments rendering NO slices at all (no usable denominator): {renders_nothing_total}", flush=True)
+    print(f"  dropped-channel shares (NOT an ownership figure): {folded_shares_total}", flush=True)
     print(f"  elapsed: {time.monotonic() - started:.0f}s", flush=True)
 
     if args.json:

@@ -4883,9 +4883,9 @@ class _SliceModel(BaseModel):
     # ``cross_channel_restatement`` (#2215) is the third overlay basis: shares a
     # PIE-WEDGE slice of this same rollup already counts once, restated under the
     # channel that lost the Rule 13d-3 MAX.
-    denominator_basis: Literal[
-        "pie_wedge", "institution_subset", "proxy_disclosure", "cross_channel_restatement"
-    ] = "pie_wedge"
+    denominator_basis: Literal["pie_wedge", "institution_subset", "proxy_disclosure", "cross_channel_restatement"] = (
+        "pie_wedge"
+    )
     # As-of coherence envelope (#1647 part 1). The as-of span of this slice's
     # deduped holders (incl. collapsed-family members) so a machine consumer
     # sees the figure sums across quarters. NULL-as_of-only slice → None/0/False.

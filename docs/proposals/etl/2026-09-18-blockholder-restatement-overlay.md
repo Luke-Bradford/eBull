@@ -88,7 +88,41 @@ fold that did not happen on that instrument. The overlay is emitted **only when
 there is a folded channel**, so it is silent in exactly the case where it would
 be untrue.
 
-Figures: filled in from the completed run before this proposal is acted on.
+**Full population, 4,961 instruments, 0 failures:**
+
+```
+rendered_complete   798   16.09%
+rendered_partial   1495   30.14%
+absent_folded      1555   31.34%
+absent_upstream    1113   22.43%
+no_rollup             0    0.00%
+
+owners whose 13D/G channel is folded out of the wedge : 7633
+  ... non-zero, and therefore rendered by the overlay : 6917
+instruments that gain a blockholders_restated overlay : 2955
+instruments rendering NO slices at all (no denominator):  921
+```
+
+**3,050 of 4,961 (61.5%) render a misleading blockholders state today** —
+`absent_folded` plus `rendered_partial`. The second of those is not in the
+ticket and is nearly as large as the one that is.
+
+⚠ **The golden panel is not representative and must not be generalised from.**
+All five panel names are `absent_folded`, but that state is only 31.3% of the
+population; the panel is large-cap-biased, which is exactly the cohort where a
+13F beats a 13G.
+
+⚠ **2,955, not 3,050, is the number of instruments the fix changes.** 95 have a
+folded 13D/G channel whose value is `0.0000`, which `_build_slice` drops (#1916
+Finding A) — GME is one: a 0-share Vanguard 13G behind a real Cohen 13D, so its
+2 folded owners render as 1 overlay row. The census reports both figures because
+they answer different questions; neither is a substitute for the other.
+
+⚠ **`absent_upstream` is not one thing.** 921 of its 1,113 instruments render
+**no slices at all** (no usable `shares_outstanding`), so their empty
+blockholders wedge is not a dedup artefact and no note of any wording would be
+true of them. The remaining ~192 have a working rollup whose 13D/G rows were
+removed before reconciliation.
 
 ## The change
 
@@ -154,6 +188,16 @@ Codex at #1659's checkpoint 1. Verified in code, not taken from docstrings:
 | L1 panel table | routed to `OverlaySection` automatically | `OwnershipPanel.tsx:558-561` (`_denominatorBasis(s) !== "pie_wedge"`) |
 | CSV export | emitted under the `__memo:<category>__` prefix, outside the documented sum invariant | `build_rollup_csv`, `pie_slices` / `memo_slices` split |
 | CSV `?category=` filter | identity map, so the new category scopes correctly | `rollup_csv_slice_filter` |
+
+⚠ **One consumer is NOT basis-driven and the difference matters.**
+`rollupToSunburstInputs` (`OwnershipPanel.tsx:199-220`) builds the chart from an
+explicit **category allow-list** (`flattenHolders("institutions", …)` etc.), so
+the new overlay is excluded because it is *absent from a list*, not because a
+basis check rejects it. Same outcome, different mechanism — and a future
+category added to that list leaks into the pie with nothing to stop it. Pinned
+by `OwnershipPanel.test.ts` ("never flattens restated blockholders into the
+chart"), revert-probed: adding one `flattenHolders("blockholders_restated", …)`
+line fails that test and only that test.
 
 What is **not** basis-driven and must be edited by hand:
 

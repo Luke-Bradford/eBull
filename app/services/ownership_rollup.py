@@ -3824,9 +3824,7 @@ def _bucket_into_slices(
     # scope the restatement overlay needs (see the function docstring). Filter on
     # the basis anyway rather than on position, so inserting a memo overlay above
     # this line cannot silently widen it.
-    restated = _blockholder_restatement_holders(
-        [s for s in slices if s.denominator_basis == "pie_wedge"]
-    )
+    restated = _blockholder_restatement_holders([s for s in slices if s.denominator_basis == "pie_wedge"])
     if restated:
         _add(
             _build_slice(

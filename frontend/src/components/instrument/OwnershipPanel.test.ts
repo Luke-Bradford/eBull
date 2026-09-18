@@ -412,6 +412,76 @@ describe("rollupToSunburstInputs — funds overlay is non-additive (#1627)", () 
   });
 });
 
+describe("rollupToSunburstInputs — blockholders_restated overlay is non-additive (#2215)", () => {
+  /**
+   * ``blockholders_restated`` carries the 13D/G channel of an owner whose
+   * position is ALREADY counted in a pie wedge — the same owner, the same
+   * shares, under the channel that won the Rule 13d-3 cross-channel MAX. A leak
+   * into the chart would therefore double-count one stake against itself, which
+   * is precisely the #1640 defect the fold exists to prevent. Here the overlay
+   * (30M) equals the institutions wedge it was folded into, so a leak would show
+   * the pie at exactly 2x the truth.
+   */
+  it("never flattens restated blockholders into the chart or any category total", () => {
+    const inputs = rollupToSunburstInputs(
+      _baseRollup({
+        shares_outstanding: "100000000",
+        slices: [
+          {
+            category: "institutions",
+            label: "Institutions",
+            total_shares: "30000000",
+            pct_outstanding: "0.3",
+            filer_count: 1,
+            dominant_source: "13f",
+            holders: [
+              {
+                filer_cik: "0000102909",
+                filer_name: "The Vanguard Group",
+                shares: "30000000",
+                pct_outstanding: "0.3",
+                winning_source: "13f",
+                winning_accession: "13F-010",
+                winning_edgar_url: null,
+                as_of_date: "2025-12-31",
+                filer_type: "INV",
+                dropped_sources: [],
+              },
+            ],
+          },
+          {
+            category: "blockholders_restated",
+            label: "Blockholders counted elsewhere (13D/G)",
+            total_shares: "30000000",
+            pct_outstanding: "0.3",
+            filer_count: 1,
+            dominant_source: "13g",
+            denominator_basis: "cross_channel_restatement",
+            holders: [
+              {
+                filer_cik: "0000102909",
+                filer_name: "The Vanguard Group",
+                shares: "30000000",
+                pct_outstanding: "0.3",
+                winning_source: "13g",
+                winning_accession: "13G-001",
+                winning_edgar_url: null,
+                as_of_date: "2026-04-30",
+                filer_type: null,
+                dropped_sources: [],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(inputs).not.toBeNull();
+    expect(inputs!.holders).toHaveLength(1);
+    expect(inputs!.institutions_total).toBe(30_000_000);
+    expect(inputs!.blockholders_total).toBeNull();
+  });
+});
+
 describe("rollupToSunburstInputs — source_url threading (#921)", () => {
   it("maps winning_edgar_url onto the holder's source_url", () => {
     const inputs = rollupToSunburstInputs(
