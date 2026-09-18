@@ -205,6 +205,8 @@ class FileBackedFakeBroker:
         self.close_lookup_unreachable = False
         #: The close reports ``filled`` against a DIFFERENT position id —
         #: malformed acceptance, which must never release our ownership.
+        #: ⚠ Applies to a FILLED close only: a pending one carries no
+        #: ``position_ids`` for this to override.
         self.close_reports_position_id: int | None = None
         if not self.state_path.exists():
             self._write(
@@ -547,18 +549,25 @@ class FileBackedFakeBroker:
             if persist_response is not None:
                 persist_response({"orderId": order_id})
             filled = record["status"] in _FILLED_BROKER_STATES
-            # Malformed acceptance: a filled close that names a position we do
-            # not own. `manage_owned_position` compares `position_ids` against
-            # the exact owned id, so this is the shape that must NOT release
-            # ownership however filled the close looks.
-            reported_position_id = (
-                record["position_id"] if self.close_reports_position_id is None else self.close_reports_position_id
-            )
+            # ⚠ Inside the `filled` branch on purpose. A pending close carries NO
+            # `position_ids` at all, so `close_reports_position_id` is meaningless
+            # there and computing it outside would suggest otherwise (review
+            # NITPICK on PR #3186).
+            position_ids: tuple[int, ...] = ()
+            if filled:
+                # Malformed acceptance: a filled close that names a position we
+                # do not own. `manage_owned_position` compares `position_ids`
+                # against the exact owned id, so this is the shape that must NOT
+                # release ownership however filled the close looks.
+                reported = (
+                    record["position_id"] if self.close_reports_position_id is None else self.close_reports_position_id
+                )
+                position_ids = (int(reported),)
             return BrokerCloseOrderDetail(
                 broker_order_ref=order_id,
                 status="filled" if filled else "pending",
                 broker_status=str(record["status"]),
-                position_ids=(int(reported_position_id),) if filled else (),
+                position_ids=position_ids,
                 reference_id=UUID(str(record["reference_id"])),
                 raw_payload={},
             )
