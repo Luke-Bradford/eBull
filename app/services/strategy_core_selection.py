@@ -46,9 +46,32 @@ _RECOGNISED_OUTCOMES: Final = frozenset({"pass", "cash"})
 # STATED, never inferred from "an evidence ref exists but an instrument id does not" --
 # that encoding makes a genuine mis-edit indistinguishable from a declared cash verdict,
 # which is #3037's defect turned inside out.
-SELECTED_CORE_OUTCOME: Final[CoreSelectionOutcome | None] = None
-SELECTED_CORE_INSTRUMENT_ID: Final[int | None] = None
-SELECTED_CORE_EVIDENCE_REF: Final[str | None] = None
+#
+# TRANSCRIBED 2026-09-18 from the sealed verdict, which opened at its declared boundary
+# (`2026-09-18T00:00:00Z`) on the fifth common date (2026-09-17).  The payload these three
+# values come from is committed verbatim at ``SELECTED_CORE_EVIDENCE_REF`` and is checked
+# against them by ``tests/test_2833_transcribed_verdict.py`` -- so a typo here fails a
+# test rather than quietly selecting a different instrument.
+#
+#   outcome "pass", selected 3417 SPY.RTH, p75 0.3937 bps against a 60 bps bar
+#   CSPX.L  3434  p75 1.7991  PASS (not selected)
+#   IUSA.L  3075  p75 2.6660  FAIL (refusal: fx_unmodelled)
+#
+# ⚠ SPY.RTH is the only candidate `us_equity`, which is the only member of
+# ``SESSION_SUPPORTED_ASSET_CLASSES``.  A `pass` on either LSE name would have been
+# refused by the venue rule below at transcription time, by design.  It was not.
+#
+# ⚠ ``SELECTED_CORE_EVIDENCE_REF`` is an OPAQUE audit string to every production
+# reader, not a path anything resolves.  ``classify_core_selection`` asks only that it
+# be non-empty, and the API carries it through as ``str | None`` -- no service, job or
+# frontend opens it (`rg evidence_ref app/ frontend/src`).  The ONLY resolver is
+# ``tests/test_2833_transcribed_verdict.py``, which joins it to the repo root so a path
+# typo fails a test.  A repo-relative path is chosen because it is the most useful thing
+# to print beside a verdict; if a production reader ever needs the CONTENTS, give it one
+# base and say so here rather than letting two callers pick their own.
+SELECTED_CORE_OUTCOME: Final[CoreSelectionOutcome | None] = "pass"
+SELECTED_CORE_INSTRUMENT_ID: Final[int | None] = 3417
+SELECTED_CORE_EVIDENCE_REF: Final[str | None] = "docs/proposals/ta/2026-09-18-core-selection-result.json"
 
 CoreSelectionState = Literal["evidence_collecting", "awaiting_verdict", "ready", "cash", "unavailable"]
 
