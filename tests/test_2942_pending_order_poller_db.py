@@ -565,6 +565,29 @@ def test_a_response_about_another_order_advances_nothing(
     ebull_test_conn.rollback()
 
 
+def test_a_non_canonical_numeric_ref_is_not_an_identity_mismatch(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """What the identity guard must NOT reject (#3189 finding 4, Codex ckpt-2).
+
+    ``broker_order_ref`` is a TEXT column and the pollability check accepts any
+    positive digit string, so a row carrying a leading zero is looked up as the
+    integer and answered with the canonical string. A textual comparison would
+    call that a mismatch — refusing a response the broker got exactly right,
+    for ever, and degrading every run while it did.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, ref=f"000{_REF}")
+
+    results = reconcile_pending_recommendation_orders(
+        ebull_test_conn, broker=_broker(detail=_detail("Rejected")), now=_NOW
+    )
+
+    assert [r.verdict for r in results] == ["terminalised_rejected"]
+    assert _order_row(ebull_test_conn, order_id)["status"] == "rejected"
+
+
 def test_a_strategy_origin_order_is_never_selected(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

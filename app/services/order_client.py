@@ -2914,7 +2914,18 @@ def _poll_one_pending_order(
         # ⚠ NOT parked, for the reason `not_found` and `unsafe_status` are not:
         # it is a statement about the ANSWER, not a permanent property of the
         # row, and a later correct response must still be readable.
-        if detail.broker_order_ref != ref or detail.instrument_id != instrument_id:
+        #
+        # ⚠⚠ NUMERIC comparison, not textual (Codex checkpoint 2, round 2).
+        # `broker_order_ref` is a TEXT column and the pollability check above
+        # accepts any positive digit string, so a row carrying `"00123"` is
+        # looked up as `orderId=123` and answered with `broker_order_ref="123"`.
+        # A textual compare would call that a mismatch — refusing a response the
+        # broker got exactly right, for ever, and degrading every run while it
+        # did. This is the enumerate-what-a-narrowing-gate-REJECTS rule: the
+        # only rejection wanted here is a DIFFERENT order.
+        returned_ref = detail.broker_order_ref
+        ref_matches = returned_ref.isdigit() and int(returned_ref) == int(ref)
+        if not ref_matches or detail.instrument_id != instrument_id:
             _stamp_polled(conn, order_id=order_id, now=now)
             logger.error(
                 "reconcile_pending_recommendation_orders: order_id=%d asked the broker about ref=%s "
