@@ -179,11 +179,15 @@ SELECT instrument_id, acc
 # attributes no line to any co-filer. Both pipelines therefore have to invent an attribution,
 # and they invent different ones:
 #
-#   * the XML parser gives every line to ``filers[0]``
-#     (``app/services/insider_transactions.py:449``) — one identity per accession;
+#   * the XML parser gives every line to ``filers[0]`` — ``default_filer_cik =
+#     filers[0].filer_cik`` at ``app/services/insider_transactions.py:552``, ``:653`` and
+#     ``:1156``, threaded into ``_extract_transactions`` (``:871``) and ``_extract_holdings``
+#     (``:1196``) — one identity per accession. ⚠ The sec-edgar skill §2.3 and the prevention
+#     log both cite ``:449`` for this, which is now a comment line; parked on #2403 with the
+#     other ``.claude/**`` edits this worktree cannot write.
 #   * the DERA bulk path writes every NONDERIV line to EVERY reporting owner
-#     (``sec_insider_dataset_ingest._stage_owners``, one staged row per owner) — N identities,
-#     each carrying a line that is not theirs.
+#     (``sec_insider_dataset_ingest.py:472::_stage_owners``, one staged row per owner) — N
+#     identities, each carrying a line that is not theirs.
 #
 # ``_INSIDER_DUAL_PIPELINE_DECOLLISION`` (#1805) removes the DERA copy only where the SAME
 # ``holder_cik`` also has a plain row, i.e. only for ``filers[0]``. Co-filers 2..N keep theirs.
