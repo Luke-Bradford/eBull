@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -21,7 +21,12 @@ from typing import Any, Final
 import psycopg
 
 from app.services.indicator_series import BarSeries
-from app.services.outcome_ledger import bar_should_exist, fill_price_is_superseded, locate_fill_index
+from app.services.outcome_ledger import (
+    bar_was_deleted,
+    fill_price_is_superseded,
+    locate_fill_index,
+    raw_bar_probe,
+)
 from app.services.outcome_resolver import RULE_SET_VERSION as PATH_RULE_SET_VERSION
 from app.services.outcome_resolver import ExitLevels, Outcome, UnresolvedReason, resolve_outcome
 from app.services.price_masked_bars import MASKED_REASON, QUARANTINE_RULE_SET_VERSION, load_masked_bars
@@ -175,7 +180,7 @@ def _resolve_forecast(
     *,
     series: BarSeries,
     unresolved_breaks: Sequence[date],
-    coverage: tuple[date, date] | None = None,
+    raw_bar_exists: Callable[[date], bool] | None = None,
     masked_bar_reasons: Mapping[int, UnresolvedReason] | None = None,
 ) -> ForecastOutcomeRow | None:
     """Return one terminal observation, or ``None`` until the horizon matures."""
@@ -185,13 +190,13 @@ def _resolve_forecast(
     try:
         fill_index = locate_fill_index(series, forecast.fill_bar_date)
     except ValueError:
-        # ⚠⚠ An UNCOVERED date means the corpus is not visible here, not that it
-        # moved — `load_masked_bars` is fail-closed at the instrument level
-        # (Codex ckpt-2). Pending, so it retries once coverage lands. Coverage
-        # bounds rather than the returned rows' span, because a rebuild that
-        # deleted a boundary bar looks identical in the latter; see the signal
-        # resolver's `_should_have_a_bar` for the full argument.
-        if not bar_should_exist(coverage, forecast.fill_bar_date):
+        # ⚠⚠ A date the loader could not find is DELETED only if the raw corpus
+        # no longer holds it; `load_masked_bars` is fail-closed at the instrument
+        # level, so its silence is not evidence (Codex ckpt-2). Unknown or still
+        # present => pending, retried once the corpus is visible again. See
+        # `bar_was_deleted` for why neither the returned span nor the coverage
+        # window can stand in for this.
+        if not bar_was_deleted(raw_bar_exists, forecast.fill_bar_date):
             return None
         return _unresolved_forecast_row(forecast.forecast_id, "fill_bar_absent")
     # ⚠⚠ This path reads the SAME stored `strategy_signals.fill_price` as the
@@ -332,15 +337,15 @@ def run_forecast_outcome_resolution(
     rows: list[ForecastOutcomeRow] = []
     immature = 0
     for instrument_id, instrument_forecasts in sorted(by_instrument.items()):
-        loaded = load_masked_bars(conn, instrument_id)
-        series = loaded.series
+        series = load_masked_bars(conn, instrument_id).series
         masked = _masked_reasons(series.rows)
+        raw_bar_exists = raw_bar_probe(conn, instrument_id)
         for forecast in instrument_forecasts:
             row = _resolve_forecast(
                 forecast,
                 series=series,
                 unresolved_breaks=breaks.get(instrument_id, ()),
-                coverage=loaded.coverage,
+                raw_bar_exists=raw_bar_exists,
                 masked_bar_reasons=masked,
             )
             if row is None:

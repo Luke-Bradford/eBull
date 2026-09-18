@@ -71,16 +71,7 @@ _LOAD_SQL = """
            d.close,
            d.volume,
            COALESCE(q.range_usable, TRUE)  AS range_usable,
-           COALESCE(q.return_usable, TRUE) AS return_usable,
-           -- ⚠ The COVERAGE window, not the returned rows' own span (#3189
-           -- finding 10). A caller asking "should this instrument have a bar on
-           -- date X" cannot answer it from the rows: a corpus rebuild that
-           -- deleted the FIRST bar moves the returned span past X, which is
-           -- indistinguishable from coverage that never reached X — and the two
-           -- demand opposite handling (record the disagreement vs wait for the
-           -- refresh).
-           cov.first_bar,
-           cov.last_bar
+           COALESCE(q.return_usable, TRUE) AS return_usable
     FROM price_daily d
     JOIN price_quarantine_coverage cov
       ON cov.instrument_id = d.instrument_id
@@ -167,14 +158,6 @@ class MaskedBars:
     #: Bars carrying EITHER verdict. ⚠ Not the sum of the two: they overlap, and
     #: a share-of-bars figure needs a bar count as its numerator.
     bars_masked: int
-    #: The evaluated COVERAGE window, or ``None`` when this instrument has no
-    #: coverage row at the current ``rule_set_version`` (#3189 finding 10).
-    #:
-    #: ⚠ Deliberately distinct from ``series.dates[0] … [-1]``. Coverage answers
-    #: "should a bar exist here", the returned span answers "did one come back",
-    #: and a rebuild that deleted a boundary bar is the case where they differ —
-    #: which is precisely the case a caller must not read as missing coverage.
-    coverage: tuple[date, date] | None = None
 
     def __len__(self) -> int:
         return len(self.series)
@@ -217,9 +200,7 @@ def load_masked_bars(conn: psycopg.Connection[Any], instrument_id: int) -> Maske
     range_masked = 0
     return_masked = 0
     bars_masked = 0
-    coverage: tuple[date, date] | None = None
-    for bar_date, open_, high, low, close, volume, range_usable, return_usable, first_bar, last_bar in rows:
-        coverage = (first_bar, last_bar)
+    for bar_date, open_, high, low, close, volume, range_usable, return_usable in rows:
         if not range_usable:
             range_masked += 1
         if not return_usable:
@@ -250,7 +231,6 @@ def load_masked_bars(conn: psycopg.Connection[Any], instrument_id: int) -> Maske
         range_masked=range_masked,
         return_masked=return_masked,
         bars_masked=bars_masked,
-        coverage=coverage,
     )
 
 

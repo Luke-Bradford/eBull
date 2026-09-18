@@ -30,7 +30,7 @@ input_rule_set_version)`` PAIR. Two versions coexist by design, so an unpinned
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -161,33 +161,56 @@ class OutcomeRow:
         )
 
 
-def bar_should_exist(coverage: tuple[date, date] | None, day: date) -> bool:
-    """Does the evaluated corpus CLAIM to cover ``day``?
+def raw_bar_probe(conn: psycopg.Connection[tuple], instrument_id: int) -> Callable[[date], bool]:
+    """Does ``price_daily`` still hold a bar for this instrument on a date?
 
-    ⚠⚠ The discriminator between a corpus that changed and a corpus we cannot
-    see (#3189 finding 10, Codex checkpoint 2). ``load_masked_bars`` is
-    fail-closed at the INSTRUMENT level: an instrument with no
-    ``price_quarantine_coverage`` row, or one evaluated at a stale
-    ``rule_set_version``, returns ZERO bars — so bars that still exist in
-    ``price_daily`` are simply absent here.
-
-    Recording a terminal row in that state would be far worse than the wedge it
-    replaces: outcomes are immutable and the selection anti-joins on
-    ``(rule_set_version, input_rule_set_version)``, so a whole corpus resolved
-    during an incomplete quarantine refresh would be permanently mislabelled at
-    the very version pair the refresh was producing. So an uncovered date leaves
-    the fill pending and is retried once coverage lands.
-
-    ⚠⚠ COVERAGE bounds, not the returned rows' own span (Codex checkpoint 2,
-    round 3). A rebuild that deleted the FIRST or LAST bar moves the returned
-    span past the stored date, which reads identically to coverage that never
-    reached it — and the two demand opposite handling. Asking coverage
-    separates them: inside coverage and absent from the rows means the bar was
-    genuinely deleted (record it); outside coverage, or no coverage row at the
-    current ``rule_set_version``, means this process cannot see that part of the
-    corpus (wait).
+    The question `load_masked_bars` cannot answer: it is fail-closed, so a bar
+    it omits may be deleted OR merely unevaluated (#3189 finding 10). Asked of
+    the raw table, and ONLY on the exception path — an ordinary tick never runs
+    it, so the per-fill round trip is not on the hot path.
     """
-    return coverage is not None and coverage[0] <= day <= coverage[1]
+
+    def _exists(day: date) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM price_daily WHERE instrument_id = %s AND price_date = %s",
+            (instrument_id, day),
+        ).fetchone()
+        return row is not None
+
+    return _exists
+
+
+def bar_was_deleted(raw_bar_exists: Callable[[date], bool] | None, day: date) -> bool:
+    """Is ``day`` GONE from the corpus, as opposed to invisible to this process?
+
+    ⚠⚠ The discriminator that decides whether a stored date the loader could not
+    find becomes a terminal ``unresolved`` row or stays pending (#3189 finding
+    10, Codex checkpoint 2). Getting it wrong in either direction is expensive:
+
+    * Recording when the bar is merely INVISIBLE is the worse error.
+      ``load_masked_bars`` is fail-closed at the INSTRUMENT level — no
+      ``price_quarantine_coverage`` row at the current ``rule_set_version``
+      returns ZERO bars — and outcomes are immutable while the selection
+      anti-joins on ``(rule_set_version, input_rule_set_version)``. A corpus
+      resolved during an incomplete quarantine refresh would be permanently
+      mislabelled at exactly the version pair the refresh was producing.
+    * Deferring when the bar is genuinely GONE re-creates a starvation shape:
+      the fill is re-selected every tick, consumes a round-robin slot and never
+      resolves.
+
+    ⚠ So the question is put to the RAW corpus, not to a proxy. Two proxies were
+    tried and both fail at a boundary: the returned series' own span moves past
+    a deleted first bar, and the coverage window does the same once the
+    quarantine refresh recomputes its bounds from the shortened series. Only
+    ``price_daily`` itself distinguishes "deleted" from "not loaded".
+
+    ⚠ ``None`` means the caller cannot answer, and then nothing is recorded —
+    fail-closed, because the expensive error is the one that writes.
+
+    ⚠ Called ONLY on the exception path, so the per-fill lookup it implies costs
+    nothing in the ordinary case.
+    """
+    return raw_bar_exists is not None and not raw_bar_exists(day)
 
 
 def locate_fill_index(series: BarSeries, fill_bar_date: date) -> int:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Final
@@ -26,9 +26,10 @@ from app.services.indicator_series import BarSeries
 from app.services.outcome_ledger import (
     OutcomeRow,
     PendingFill,
-    bar_should_exist,
+    bar_was_deleted,
     fill_price_is_superseded,
     locate_fill_index,
+    raw_bar_probe,
     select_pending_fills,
     store_outcomes,
 )
@@ -130,7 +131,7 @@ def _resolve_fill(
     *,
     series: BarSeries,
     unresolved_breaks: Sequence[date],
-    coverage: tuple[date, date] | None = None,
+    raw_bar_exists: Callable[[date], bool] | None = None,
     masked_bar_reasons: Mapping[int, UnresolvedReason] | None = None,
 ) -> OutcomeRow | None:
     """Return a terminal row, or ``None`` while the forward window is immature."""
@@ -160,13 +161,13 @@ def _resolve_fill(
     try:
         signal_index = _locate_signal_index(series.dates, fill.signal_bar_date)
     except ValueError:
-        if not bar_should_exist(coverage, fill.signal_bar_date):
+        if not bar_was_deleted(raw_bar_exists, fill.signal_bar_date):
             return None
         return _unresolved_row(fill.signal_id, "signal_bar_absent")
     try:
         fill_index = locate_fill_index(series, fill.fill_bar_date)
     except ValueError:
-        if not bar_should_exist(coverage, fill.fill_bar_date):
+        if not bar_was_deleted(raw_bar_exists, fill.fill_bar_date):
             return None
         return _unresolved_row(fill.signal_id, "fill_bar_absent")
     signal_scale_segment_end = segment_end_index(
@@ -385,16 +386,16 @@ def run_outcome_resolution(
         rows: list[OutcomeRow] = []
         immature = 0
         for instrument_id, instrument_fills in sorted(by_instrument.items()):
-            masked = load_masked_bars(conn, instrument_id)
-            series = masked.series
+            series = load_masked_bars(conn, instrument_id).series
             masked_bar_reasons = _masked_reasons(series.rows)
+            raw_bar_exists = raw_bar_probe(conn, instrument_id)
             for fill in instrument_fills:
                 row = _resolve_fill(
                     entry,
                     fill,
                     series=series,
                     unresolved_breaks=breaks.get(instrument_id, ()),
-                    coverage=masked.coverage,
+                    raw_bar_exists=raw_bar_exists,
                     masked_bar_reasons=masked_bar_reasons,
                 )
                 if row is None:

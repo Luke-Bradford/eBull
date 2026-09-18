@@ -32,10 +32,18 @@ def _series(*ranges: tuple[Decimal | None, Decimal | None]) -> BarSeries:
     return BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
 
 
-#: An evaluated coverage window wide enough to bracket every date these tests
-#: use. ⚠ Coverage is what says "a bar SHOULD exist here"; the returned rows say
-#: what came back, and #3189 finding 10 turns on the difference.
-_COVERAGE = (date(2026, 7, 1), date(2026, 9, 1))
+#: The raw corpus says the date is GONE. ⚠ That is the only evidence that
+#: distinguishes a deleted bar from one this process cannot see: the loader is
+#: fail-closed, so its silence proves nothing (#3189 finding 10).
+def _BAR_DELETED(_day: date) -> bool:  # noqa: N802 - reads as a constant at call sites
+    return False
+
+
+def _BAR_PRESENT(_day: date) -> bool:  # noqa: N802 - reads as a constant at call sites
+    """The raw corpus still holds it, so the loader's silence is about
+    VISIBILITY — an unevaluated instrument, a stale quarantine version — and
+    nothing may be recorded."""
+    return True
 
 
 def _entry(*, max_hold_bars: int = 2) -> StrategyEntry:
@@ -162,7 +170,7 @@ def test_a_fill_date_the_corpus_lost_is_terminal_without_aborting_the_batch() ->
         universe="survivor_only",
     )
 
-    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), coverage=_COVERAGE)
+    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_DELETED)
 
     assert row is not None
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "fill_bar_absent", None)
@@ -181,24 +189,24 @@ def test_a_signal_date_the_corpus_lost_is_terminal_without_aborting_the_batch() 
         universe="survivor_only",
     )
 
-    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), coverage=_COVERAGE)
+    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_DELETED)
 
     assert row is not None
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "signal_bar_absent", None)
 
 
 @pytest.mark.parametrize("field", ["fill_bar_date", "signal_bar_date"])
-def test_a_date_the_corpus_does_not_claim_to_cover_stays_pending(field: str) -> None:
+def test_a_bar_the_raw_corpus_still_holds_stays_pending(field: str) -> None:
     """What the new terminal rows must NOT claim (Codex checkpoint 2, P1).
 
     ``load_masked_bars`` is fail-closed at the INSTRUMENT level: no
-    ``price_quarantine_coverage`` row, or one at a stale ``rule_set_version``,
-    returns ZERO bars, and a partially-covered instrument returns a narrower
-    span. Recording a terminal row there would be far worse than the wedge it
+    ``price_quarantine_coverage`` row at the current ``rule_set_version``
+    returns ZERO bars. Recording there would be far worse than the wedge it
     replaces — outcomes are immutable and the selection anti-joins on the
     version pair, so a corpus resolved during an incomplete quarantine refresh
     would be permanently mislabelled at exactly the version pair the refresh
-    was producing. Outside the span it stays pending and is retried.
+    was producing. The raw bar still exists, so nothing is written and the fill
+    is retried.
     """
     series = _series((Decimal("105"), Decimal("95")), (Decimal("105"), Decimal("95")))
     dates = {"signal_bar_date": series.dates[0], "fill_bar_date": series.dates[1]}
@@ -212,18 +220,18 @@ def test_a_date_the_corpus_does_not_claim_to_cover_stays_pending(field: str) -> 
         universe="survivor_only",
     )
 
-    assert _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), coverage=_COVERAGE) is None
+    assert _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_PRESENT) is None
 
 
 def test_a_deleted_boundary_bar_is_recorded_not_deferred() -> None:
-    """Codex checkpoint 2, round 3 — the case a returned-span test gets wrong.
+    """Codex checkpoint 2, rounds 3-4 — the case every PROXY gets wrong.
 
     When a rebuild deletes the FIRST bar, the returned span starts after the
-    stored date, which reads exactly like coverage that never reached it. They
-    demand opposite handling, so the question is put to COVERAGE: it still
-    brackets the date, so the bar was genuinely deleted and the disagreement is
-    recorded rather than deferred for ever while consuming a round-robin slot
-    on every tick.
+    stored date; and once the quarantine refresh recomputes its bounds from the
+    shortened series, the coverage window does the same. Both proxies then read
+    a deleted bar as an invisible one and defer it for ever, consuming a
+    round-robin slot on every tick. Asking the raw corpus has no boundary: the
+    bar is gone, so the disagreement is recorded.
     """
     series = _gapped_series()  # 08-01, 08-03, 08-04
     fill = PendingFill(
@@ -235,17 +243,17 @@ def test_a_deleted_boundary_bar_is_recorded_not_deferred() -> None:
         universe="survivor_only",
     )
 
-    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), coverage=_COVERAGE)
+    row = _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=_BAR_DELETED)
 
     assert row is not None
     assert row.reason == "signal_bar_absent"
 
 
-def test_an_instrument_with_no_coverage_row_never_records() -> None:
-    """The fail-closed case in its purest form: no coverage at the current
-    ``rule_set_version`` means zero bars come back for every instrument, so a
-    whole corpus would otherwise be resolved terminal and immutably wrong at the
-    version pair the refresh was still producing."""
+def test_a_caller_that_cannot_answer_never_records() -> None:
+    """``raw_bar_exists=None`` means nobody asked the corpus, and the default is
+    therefore to write NOTHING — fail-closed, because the expensive mistake is
+    the one that records an immutable row at the version pair a refresh was
+    still producing."""
     series = _gapped_series()
     fill = PendingFill(
         signal_id=7,
@@ -256,7 +264,7 @@ def test_an_instrument_with_no_coverage_row_never_records() -> None:
         universe="survivor_only",
     )
 
-    assert _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), coverage=None) is None
+    assert _resolve_fill(_entry(), fill, series=series, unresolved_breaks=(), raw_bar_exists=None) is None
 
 
 def _gapped_series() -> BarSeries:
