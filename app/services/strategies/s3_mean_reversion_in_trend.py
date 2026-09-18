@@ -50,8 +50,18 @@ a pure per-bar verdict function has none — the same reason S-1's exit leg is
 stateless. It is NOT dropped: ``MAX_HOLD_BARS`` is declared below and carried
 inside ``S3_PARAMS``, so criterion 11 hashes it into the strategy identity and it
 cannot drift away from this rule unnoticed. It is *enforced* by whoever pairs
-entries with exits — ``outcome_resolver.ExitLevels.max_hold_bars`` (phase 4a) is
-the existing field for it, and phase 5 is what calls it.
+entries with exits, and since phase 5 that is ``position_builder`` close source
+**C3**: ``strategy_manifest._s3_exit_regime`` passes ``MAX_HOLD_BARS`` into
+``ExitRegime.max_hold_bars``, and ``_build_positions`` closes at ``entry fill
+index + max_hold_bars``, at that bar's OPEN.
+
+⚠⚠ NOT ``outcome_resolver.ExitLevels.max_hold_bars``, which is what this
+docstring claimed until #2348. That object cannot be constructed for S-3 at all:
+it requires ``stop_loss > 0`` and S-3 declares neither a stop nor a target, so in
+the resolver's own words it *"never constructs this class (S-3's recorded
+shape)"*. Prose is not executed, so the claim that binds is
+``tests/test_position_builder.py::TestMaxHoldClose``, which pins C3 on S-3's
+exact regime shape (``signal_pair=True``, ``level_based=False``, a max hold).
 
 ⚠ THE ``rsi_14 > 50`` LEG IS STATELESS, DELIBERATELY, exactly as S-1's is.
 It fires on every such bar whether or not an entry is open, because the ledger
@@ -111,7 +121,10 @@ TREND_PERIOD = 200
 
 #: The other half of §4's exit, in bars from the fill. ⚠ Declared here and
 #: hashed into the identity, but NOT evaluated by ``s3_signals`` — see the module
-#: docstring. Its consumer is ``outcome_resolver.ExitLevels.max_hold_bars``.
+#: docstring. Its consumer is ``position_builder`` close source C3, reached via
+#: ``strategy_manifest._s3_exit_regime``. ⚠ It is NOT
+#: ``outcome_resolver.ExitLevels.max_hold_bars``, which S-3 cannot construct
+#: (#2348).
 MAX_HOLD_BARS = 10
 
 #: ⚠ §4 says *"Params: 3"* and this dict carries FIVE entries. The discrepancy is

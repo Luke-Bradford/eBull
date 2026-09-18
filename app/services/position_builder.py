@@ -333,9 +333,10 @@ class ExitRegime:
     ⚠⚠ S-3 carries ``max_hold_bars`` here and NOT ``level_based``, which is the
     correction spec §3 makes to the catalogue's own prose: S-3 has no stop and
     no target — its exit is ``rsi_14 > 50`` — so ``ExitLevels`` cannot be
-    constructed for it and its ``MAX_HOLD_BARS = 10`` is today enforceable by
-    nothing (#2348). Max-hold expiry is therefore a close source owned HERE, not
-    exclusively by the resolver.
+    constructed for it, and its ``MAX_HOLD_BARS = 10`` would be enforceable by
+    nothing without C3 (#2348). Max-hold expiry is therefore a close source owned
+    HERE, not exclusively by the resolver — ``strategy_manifest._s3_exit_regime``
+    is the wiring, ``TestMaxHoldClose`` is the anchor.
 
     ⚠ S-1 declares no close source but ``signal_pair``, and that is not an
     omission: §4 gives it no holding bound. Spec §5.3 flags the consequence for
