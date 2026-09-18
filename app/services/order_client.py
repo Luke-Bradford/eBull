@@ -2688,6 +2688,11 @@ def reconcile_pending_recommendation_orders(
         # here.
         try:
             results.append(_poll_one_pending_order(conn, broker=broker, row=row, now=at))
+        # ⚠ `Exception`, and it must NEVER widen to `BaseException`. Breadth is
+        # the point here — the whole value is catching what nobody predicted —
+        # but `KeyboardInterrupt` and `SystemExit` are a shutdown in progress,
+        # and containing those would keep polling the broker through a SIGTERM
+        # drain instead of letting the batch stop.
         except Exception:
             order_id = int(row["order_id"])
             # ⚠ No rollback here, and that is checked rather than assumed. A
