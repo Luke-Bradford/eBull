@@ -1116,10 +1116,18 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # ⚠ What the general lane costs, from ``execution_slot_wait_seconds``
         # (#3159 clause 2), 7 days to 2026-09-18: lanemates waited up to 1032.7 s
         # (`sec_manifest_worker`), 939.9 s (`strategy_intraday_harvest`) and
-        # 734.3 s (`jobs_retry_sweeper`) for admission. This job has no recorded
-        # wait of its own — 36 of 36 fires were prerequisite SKIPS, which return
-        # before the slot — so the exposure is a property of the lane, shown by
-        # its lanemates. ⚠ Suppression is NOT among the costs: ``max_instances=1``
+        # 734.3 s (`jobs_retry_sweeper`) for admission. This job had no recorded
+        # wait of its own, because 36 of 36 fires were prerequisite SKIPS.
+        #
+        # ⚠⚠ CORRECTED (#3189 finding 13). This comment first said skips "return
+        # before the slot". They do not: `_job_execution_slot` is the OUTERMOST
+        # boundary, so a skip has already waited for admission — it simply did
+        # not record what it waited, until finding 13 made both `job_runs`
+        # writers persist it. The figures above are therefore biased toward
+        # fires that RAN, and this job's own exposure is understated by exactly
+        # the skips. Re-measure before quoting them again.
+        #
+        # ⚠ Suppression is NOT among the costs: ``max_instances=1``
         # only drops a fire if a wait exceeds the hourly interval, and the
         # largest observed anywhere on the lane is 29% of it.
         #

@@ -359,10 +359,15 @@ class TestConnectionBudgetExecutionGate:
         """
         from app.jobs.runtime import _job_execution_slot, current_execution_slot_wait_seconds
 
-        assert current_execution_slot_wait_seconds() is None
+        assert current_execution_slot_wait_seconds("pg_size_sample") is None
         with _job_execution_slot("pg_size_sample"):
-            assert current_execution_slot_wait_seconds() == 0.0
-        assert current_execution_slot_wait_seconds() is None
+            assert current_execution_slot_wait_seconds("pg_size_sample") == 0.0
+            # ⚠ #3189 finding 13 — the figure belongs to the job that took the
+            # slot, and a nested write for ANOTHER job must not inherit it. The
+            # sync orchestrators make this a live path, not a hypothetical: they
+            # hold their slot and dispatch layer jobs that write their own rows.
+            assert current_execution_slot_wait_seconds("daily_portfolio_sync") is None
+        assert current_execution_slot_wait_seconds("pg_size_sample") is None
 
     def test_a_blocked_admission_publishes_the_wait_it_spent(self) -> None:
         """#3159 clause 2 — the wait is readable INSIDE the slot, where the
@@ -377,13 +382,13 @@ class TestConnectionBudgetExecutionGate:
 
         def holder() -> None:
             with _job_execution_slot("thesis_refresh"):
-                observed.append(current_execution_slot_wait_seconds())
+                observed.append(current_execution_slot_wait_seconds("thesis_refresh"))
                 holder_in.set()
                 release.wait(timeout=5.0)
 
         def waiter() -> None:
             with _job_execution_slot("pg_size_sample"):
-                observed.append(current_execution_slot_wait_seconds())
+                observed.append(current_execution_slot_wait_seconds("pg_size_sample"))
                 waiter_in.set()
 
         threads = [
@@ -436,10 +441,10 @@ class TestConnectionBudgetExecutionGate:
         def reused_worker() -> None:
             # First fire on this thread blocks behind the holder.
             with _job_execution_slot("pg_size_sample"):
-                observed.append(current_execution_slot_wait_seconds())
+                observed.append(current_execution_slot_wait_seconds("pg_size_sample"))
             # Second fire on the SAME thread is admitted immediately.
             with _job_execution_slot("pg_size_sample"):
-                observed.append(current_execution_slot_wait_seconds())
+                observed.append(current_execution_slot_wait_seconds("pg_size_sample"))
             done.set()
 
         threads = [

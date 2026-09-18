@@ -16,7 +16,8 @@ from typing import Any
 
 import psycopg
 
-from app.services.ops_monitor import reap_orphaned_job_runs, record_job_skip
+from app.jobs.runtime import _job_execution_slot
+from app.services.ops_monitor import reap_orphaned_job_runs, record_job_skip, record_job_start
 
 JOB = "test_2972_prereq_skip"
 
@@ -37,6 +38,104 @@ def _rows(conn: psycopg.Connection[Any]) -> list[tuple[Any, ...]]:
         "FROM job_runs WHERE job_name=%s ORDER BY run_id",
         (JOB,),
     ).fetchall()
+
+
+def _slot_wait(conn: psycopg.Connection[Any], run_id: int) -> float | None:
+    row = conn.execute("SELECT execution_slot_wait_seconds FROM job_runs WHERE run_id=%s", (run_id,)).fetchone()
+    assert row is not None
+    return None if row[0] is None else float(row[0])
+
+
+def test_a_skip_inside_a_slot_records_the_wait_it_incurred(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#3189 finding 13 — a skipped fire waited for admission like any other.
+
+    ``_job_execution_slot`` is the OUTERMOST boundary: parameter validation,
+    the bootstrap gate and the per-job prerequisite all run inside it. So a
+    skip has already paid the admission wait, and writing NULL made the
+    column's own contract false — ``None`` is supposed to mean "not written
+    inside a slot" — and biased the telemetry toward fires that RAN.
+
+    ⚠ ``0.0``, not "truthy": an uncontended slot admits immediately, and
+    0.0-vs-None is exactly the distinction #3159 clause 2 built the column to
+    keep. Asserting `is not None` would pass on a branch that wrote NULL for
+    contended waits too, so the assertion is on the VALUE.
+    """
+    ebull_test_conn.autocommit = True
+    with _job_execution_slot(JOB):
+        run_id = record_job_skip(ebull_test_conn, JOB, "prerequisite not met")
+
+    assert _slot_wait(ebull_test_conn, run_id) == 0.0
+
+
+def test_a_start_inside_a_slot_records_the_wait_it_incurred(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The other writer: ``_tracked_job``'s fallback when no prelude row exists,
+    which is the ``_PRELUDE_OPT_OUT_JOBS`` path."""
+    ebull_test_conn.autocommit = True
+    with _job_execution_slot(JOB):
+        run_id = record_job_start(ebull_test_conn, JOB)
+
+    assert _slot_wait(ebull_test_conn, run_id) == 0.0
+
+
+def test_a_layer_job_does_not_inherit_its_orchestrators_admission(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The nested case (#3189 finding 13, Codex checkpoint 2).
+
+    The sync orchestrators hold their own slot and dispatch LAYER jobs that
+    write their own `job_runs` rows through `_tracked_job` -> `record_job_start`.
+    Reading the ambient contextvar would stamp the orchestrator's admission onto
+    every layer beneath it — false per-job lane telemetry, and the opposite of
+    what `docs/proposals/infra/2026-09-18-durable-execution-slot-wait.md`
+    settled: *"The layer's NULL is correct: it holds no slot of its own."*
+
+    So the owner's NAME travels with the figure and a mismatch reads `None`.
+    """
+    ebull_test_conn.autocommit = True
+    with _job_execution_slot("orchestrator_high_frequency_sync"):
+        layer_id = record_job_start(ebull_test_conn, JOB)
+
+    assert _slot_wait(ebull_test_conn, layer_id) is None
+
+
+def test_outside_a_slot_the_column_still_means_what_it_says(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """What the change must NOT do: invent a wait for a direct or bootstrap
+    invocation, which genuinely holds no slot. ``None`` keeps meaning "not
+    written inside a slot" — that is the contract finding 13 restores, not one
+    it replaces."""
+    ebull_test_conn.autocommit = True
+    skip_id = record_job_skip(ebull_test_conn, JOB, "prerequisite not met")
+    start_id = record_job_start(ebull_test_conn, JOB)
+
+    assert _slot_wait(ebull_test_conn, skip_id) is None
+    assert _slot_wait(ebull_test_conn, start_id) is None
+
+
+def test_a_prelude_row_keeps_the_admission_it_measured(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2972's UPDATE branch must not overwrite a recorded wait.
+
+    The prelude opens the row and writes the admission it measured; a later
+    skip re-reads the same contextvar, so the write is COALESCEd onto the
+    STORED value. Seeded at 12.5 here — a figure no contextvar read could
+    produce inside this test — so an overwrite is visible rather than
+    coincidentally equal.
+    """
+    ebull_test_conn.autocommit = True
+    run_id = _open_prelude_row(ebull_test_conn, started_at=datetime.now(UTC))
+    ebull_test_conn.execute("UPDATE job_runs SET execution_slot_wait_seconds = 12.5 WHERE run_id = %s", (run_id,))
+
+    with _job_execution_slot(JOB):
+        record_job_skip(ebull_test_conn, JOB, "prerequisite not met", run_id=run_id)
+
+    assert _slot_wait(ebull_test_conn, run_id) == 12.5
 
 
 def test_a_skip_with_a_prelude_id_closes_that_row_and_adds_no_second_one(
