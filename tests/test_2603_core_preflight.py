@@ -259,10 +259,18 @@ def test_the_halt_information_age_ceiling_is_the_composition_of_both_bounds() ->
 
     Asserted on both halves, not just the total: a test of the sum alone passes
     while one half grows and the other shrinks.
+
+    ⚠ What this does NOT prove, stated because a revert-probe refuted the
+    claim: replacing the computed constant with a literal `750` keeps this
+    green, because 450 + 300 IS 750 today. No test can distinguish those two
+    without reloading the module under a patched input, which would rebind the
+    dataclasses every other test here imports. What it guarantees instead is
+    the property that actually failed before: neither half can move without a
+    red test pointing at the ceiling.
     """
     assert CORE_MAX_HALT_FEED_AGE_SECONDS == 450
     assert MAX_SOURCE_LAG == timedelta(minutes=5)
-    assert CORE_MAX_HALT_SOURCE_AGE_SECONDS == CORE_MAX_HALT_FEED_AGE_SECONDS + 300
+    assert CORE_MAX_HALT_SOURCE_AGE_SECONDS == (CORE_MAX_HALT_FEED_AGE_SECONDS + int(MAX_SOURCE_LAG.total_seconds()))
     assert CORE_MAX_HALT_SOURCE_AGE_SECONDS == 750
 
 
