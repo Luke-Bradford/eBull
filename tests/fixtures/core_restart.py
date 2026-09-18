@@ -715,11 +715,13 @@ def seed_core_execution_world(conn: psycopg.Connection[Any]) -> None:
 def select_core_instrument() -> None:
     """Publish #2833's selection for the duration of this process.
 
-    ``SELECTED_CORE_INSTRUMENT_ID`` is ``None`` on ``main`` — the five-trading-day
-    cost verdict is still running — so ``require_selected_core_instrument`` refuses
-    every call and the executor cannot be exercised at all without this.  That is a
-    property of the DECLARATION, not of the machinery this harness measures, so it
-    is patched rather than worked around.
+    ⚠ Written when ``SELECTED_CORE_INSTRUMENT_ID`` was ``None`` on ``main`` and the
+    executor could not be exercised at all without this.  The verdict has since
+    opened (``110b4981``, 2026-09-18: ``pass``, 3417 SPY.RTH) and the constant now
+    matches ``CORE_INSTRUMENT_ID`` by coincidence of the candidate set, so the patch
+    no longer decides whether these tests can run.  It stays because the harness must
+    not inherit a DECLARATION's state: a later verdict, a re-transcription or a
+    ``cash`` outcome would otherwise silently change what this measures.
     """
     from app.services import strategy_core_selection
 
@@ -924,6 +926,76 @@ def core_state_report(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         "orders_with_broker_ref": int(row[8]),
         "requested_amount_total": Decimal(str(row[9])),
     }
+
+
+def revoke_core_mandate(conn: psycopg.Connection[Any]) -> None:
+    """Append a DISABLED mandate revision, and COMMIT (matrix 6, round 3).
+
+    The events table is append-only, so revocation is revision 2 with
+    ``enabled=FALSE`` — never an UPDATE of revision 1. ``core_instrument_id`` is
+    dropped with it because ``strategy_core_mandate_enabled_has_instrument`` is
+    one-directional: a disabled revision may carry no instrument, and leaving one
+    in would understate what revocation actually removes.
+
+    Raw INSERT rather than the mandate writer for the reason the whole seed is
+    raw: the harness measures what survives a crash, so setup must not depend on
+    the code under test running to completion.
+    """
+    conn.execute(
+        """
+        INSERT INTO strategy_core_mandate_events (
+            revision, enabled, base_currency, core_instrument_id, core_target_pct,
+            liquidity_reserve_pct, rebalance_band_pct, min_rebalance_amount,
+            policy_version, changed_by, reason, mode
+        ) VALUES (2, FALSE, 'USD', NULL, 60, 5, 5, 25, %s, 'core-restart-harness',
+                  '#2949 matrix 6 — mandate revoked between phases', %s)
+        """,
+        (CORE_MANDATE_POLICY_VERSION, CORE_MANDATE_MODE),
+    )
+    conn.commit()
+
+
+def seed_unreferenced_credential(conn: psycopg.Connection[Any]) -> UUID:
+    """One broker credential no eligibility proof points at, and COMMIT.
+
+    The negative control for ``prevent_unresolved_core_credential_removal``
+    (``sql/373``). Asserting only that revoking the PROOF's credential raises
+    proves nothing on its own — a trigger that refused every revocation
+    unconditionally would pass identically, and would be a far worse defect than
+    the one the guard exists to prevent.
+
+    ⚠ It belongs to a SECOND operator, and that is forced rather than chosen:
+    ``broker_credentials_unique_active`` (``sql/019``) is unique on
+    ``(operator_id, provider, label, environment) WHERE revoked_at IS NULL``, so
+    this operator cannot hold a second active ``api_key`` for demo at all. Which
+    is itself worth knowing — it means a rotation is necessarily
+    revoke-then-insert, so ``sql/373``'s hold on the revoke blocks the whole
+    rotation and not merely half of it.
+
+    Undecryptable ciphertext for the same reason the seeded pair is (see
+    :func:`seed_core_execution_world`): nothing here decrypts, and a plausible
+    fake would let a future change that does pass silently.
+    """
+    other_operator_id = UUID("2c1f9f7a-9d51-4f83-9b3f-0e0a4cf8a2d4")
+    credential_id = UUID("6f2c6a2d-0f2e-4a6f-9a59-1a3f0c3d5b71")
+    conn.execute(
+        """
+        INSERT INTO operators (operator_id, username, password_hash)
+        VALUES (%s, 'core-restart-harness-control', 'x')
+        ON CONFLICT (operator_id) DO NOTHING
+        """,
+        (other_operator_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO broker_credentials (id, operator_id, provider, label, environment, ciphertext, last_four)
+        VALUES (%s, %s, 'etoro', 'api_key', 'demo', '\\x00'::bytea, '0000')
+        ON CONFLICT (id) DO NOTHING
+        """,
+        (credential_id, other_operator_id),
+    )
+    conn.commit()
+    return credential_id
 
 
 def core_ownership_coordinates(conn: psycopg.Connection[Any]) -> tuple[int, int]:
