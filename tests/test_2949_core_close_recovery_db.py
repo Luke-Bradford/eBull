@@ -604,3 +604,277 @@ def test_scenario_7d_close_intent_before_the_marker_is_provably_unsubmitted(
     reopened = close_state_report(ebull_test_conn)
     assert reopened["close_operations"] == 2
     assert reopened["close_statuses"] == ["rejected", "submitted"]
+
+
+# ---------------------------------------------------------------------------
+# Round 5 — the NON-CRASH close failures
+#
+# A different axis from every scenario above: no SIGKILL, no restart, one live
+# process the whole way through.  What varies is how the broker ANSWERS, and the
+# four classes below are the ones `manage_owned_position` actually distinguishes.
+# They matter because they are what #2603's sell leg will meet in production far
+# more often than a crash.
+# ---------------------------------------------------------------------------
+
+
+def _close(conn: psycopg.Connection[Any], broker: FileBackedFakeBroker, coordinates: tuple[int, int]) -> Any:
+    """Ask for a close in-process, the way the attended route does."""
+    strategy_trade_id, broker_position_id = coordinates
+    return manage_owned_position(
+        conn,
+        broker=_provider(broker),
+        strategy_trade_id=strategy_trade_id,
+        broker_position_id=broker_position_id,
+        close_reason="operator_close",
+        now=CLOCK,
+    )
+
+
+def test_a_definitely_rejected_close_costs_the_request_and_leaves_the_position_owned(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Classification: SAFELY STOPPED, and immediately re-requestable.
+
+    A definite rejection is the one close failure where we know the broker did
+    NOT act, so the safe state is the one we started in: position owned, trade
+    back to ``open``, and the next request free to try again. Anything that left
+    the trade in a reconcile state would make a routine refusal — insufficient
+    margin, a closed venue — look like a lost close and pull it into the same
+    manual queue as 7b.
+
+    ⚠ The double raises BEFORE recording the close, which is what "definite"
+    means. The counter assertions are the evidence: ``close_calls == 0``.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    broker = _restarted_engine_broker(core_world)
+    broker.close_failure = "rejected"
+
+    rejected = _close(ebull_test_conn, broker, coordinates)
+    assert rejected.state == "rejected"
+    assert rejected.reason_code == "broker_close_rejected"
+    assert broker.read()["close_calls"] == 0
+    assert broker.read()["closes"] == []
+
+    report = close_state_report(ebull_test_conn)
+    assert report["close_statuses"] == ["rejected"]
+    assert report["close_error_codes"] == ["broker_close_rejected"]
+    assert report["active_ownership"] == 1
+    assert report["released_ownership"] == 0
+    # Back to `open`, NOT `reconcile_required` -- the difference from every
+    # uncertain-or-lost case in this module.
+    assert report["trade_statuses"] == ["open"]
+    assert report["exit_order_statuses"] == ["rejected"]
+
+    # Accounting is intact and the allocator still runs.
+    held = _execute_core(ebull_test_conn, broker)
+    assert held.state == "held"
+    assert held.reason_code == "core_hold"
+
+    # And the next request goes through, once.
+    broker.close_failure = None
+    accepted = _close(ebull_test_conn, broker, coordinates)
+    assert accepted.state == "submitted"
+    assert accepted.reason_code == "broker_close_accepted"
+    assert broker.read()["close_calls"] == 1
+    assert close_state_report(ebull_test_conn)["close_statuses"] == ["rejected", "submitted"]
+
+
+def test_an_uncertain_close_holds_the_position_and_does_not_break_the_capital_reader(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Classification: SAFELY STOPPED, awaiting reconciliation.
+
+    The dangerous class: the broker MAY have closed the position and our side
+    does not know.
+
+    ⚠⚠ **I set out to assert that the capital reader keeps working here, and it
+    does not — the test was wrong, not the code.** The scenario is run in BOTH
+    arms of the ambiguity, which is what makes the real property visible:
+
+    - **taken** — the double records the close, then raises. The broker's
+      snapshot no longer carries the position while our ownership row does, so
+      ``resolve_engine_capital_usage`` raises
+      ``engine_capital_ownership_unwitnessed``. **That is 7b's wedge exactly.**
+      `broker_close_uncertain` is therefore NOT a milder state than a lost
+      acceptance: when the ambiguity resolves "the broker did act", it IS one.
+    - **not taken** — the double raises before recording. The position is still
+      there, the reader works, and the allocator holds.
+
+    OUR side is byte-identical across the two — same operation status, same error
+    code, same ownership, same order status — and that is the whole justification
+    for `reconcile_required`: the state is genuinely undecidable from our records
+    alone, so nothing may be auto-released and nothing may be auto-retried.
+
+    ⚠ The exit-side #2965 question is answered in passing and separately: it is
+    ``resolve_engine_capital_usage`` that refuses, on a witness mismatch, and
+    ``load_engine_capital_authority`` returns normally in both arms. The
+    entry-side defect (a pending claim making the AUTHORITY load raise) has no
+    twin here.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    _, broker_position_id = coordinates
+    broker = _restarted_engine_broker(core_world)
+    broker.close_failure = "uncertain"
+
+    uncertain = _close(ebull_test_conn, broker, coordinates)
+    assert uncertain.state == "reconcile_required"
+    assert uncertain.reason_code == "broker_close_uncertain"
+    # The broker DID take it -- that is what makes this uncertain rather than
+    # rejected, and a double that discarded it would make the scenario vacuous.
+    assert broker.read()["close_calls"] == 1
+
+    taken_report = close_state_report(ebull_test_conn)
+    assert taken_report["close_statuses"] == ["reconcile_required"]
+    assert taken_report["close_error_codes"] == ["broker_close_uncertain"]
+    assert taken_report["active_ownership"] == 1
+    assert taken_report["released_ownership"] == 0
+    assert taken_report["trade_statuses"] == ["reconcile_required"]
+    # `submitted`, not `rejected`: the order may exist at the broker.
+    assert taken_report["exit_order_statuses"] == ["submitted"]
+
+    # The authority load is fine; it is the WITNESS join that refuses.
+    authority = load_engine_capital_authority(ebull_test_conn)
+    assert authority is not None
+    assert broker_position_id in authority.core_active_position_ids
+    with pytest.raises(EngineCapitalObservationError) as raised:
+        resolve_engine_capital_usage(
+            authority,
+            _provider(broker).get_account_risk_snapshot(),
+            core_instrument_id=CORE_INSTRUMENT_ID,
+        )
+    assert raised.value.reason_code == "engine_capital_ownership_unwitnessed"
+    ebull_test_conn.rollback()
+
+
+def test_an_uncertain_close_the_broker_never_took_leaves_the_sleeve_fully_working(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """The other arm of the same ambiguity — see the test above for why it exists.
+
+    The broker did NOT take the close. Our records say exactly what they say in
+    the taken arm, and the sleeve is entirely healthy underneath: the position is
+    there, the witness join resolves, and the allocator holds.
+
+    Two identical states, two different worlds. That is the argument for
+    ``reconcile_required`` rather than an automatic retry or an automatic
+    release, and it is why the pair is worth more than either test alone.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    broker = _restarted_engine_broker(core_world)
+    broker.close_failure = "uncertain_not_taken"
+
+    uncertain = _close(ebull_test_conn, broker, coordinates)
+    assert uncertain.state == "reconcile_required"
+    assert uncertain.reason_code == "broker_close_uncertain"
+    assert broker.read()["close_calls"] == 0, "this arm is the one where the broker did not act"
+
+    report = close_state_report(ebull_test_conn)
+    assert report["close_statuses"] == ["reconcile_required"]
+    assert report["close_error_codes"] == ["broker_close_uncertain"]
+    assert report["active_ownership"] == 1
+    assert report["released_ownership"] == 0
+    assert report["trade_statuses"] == ["reconcile_required"]
+    assert report["exit_order_statuses"] == ["submitted"]
+
+    # ... and here the witness join resolves, which is the whole difference.
+    authority = load_engine_capital_authority(ebull_test_conn)
+    assert authority is not None
+    usage = resolve_engine_capital_usage(
+        authority,
+        _provider(broker).get_account_risk_snapshot(),
+        core_instrument_id=CORE_INSTRUMENT_ID,
+    )
+    assert usage is not None
+    # The authority read opened a transaction; the executor requires an idle
+    # connection, as every other caller in this module does.
+    ebull_test_conn.commit()
+    held = _execute_core(ebull_test_conn, broker)
+    assert held.state == "held"
+
+
+def test_a_close_that_names_another_position_never_releases_our_ownership(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Malformed acceptance: ``filled``, and against the wrong position.
+
+    ``manage_owned_position`` compares the reported ``position_ids`` against the
+    exact owned id (`strategy_position_manager.py:604-605`), so a close that
+    looks entirely successful but names something else must NOT release
+    ownership. This is the assertion that stops a broker-side id mix-up from
+    silently deleting our record of a position we still hold.
+
+    ⚠ Driven through the RESUME path, not the submission path, because the
+    comparison lives there: the close is accepted normally, and the lookup on the
+    next scheduled pass is what reports the wrong id.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    _, broker_position_id = coordinates
+    broker = _restarted_engine_broker(core_world)
+
+    accepted = _close(ebull_test_conn, broker, coordinates)
+    assert accepted.state == "submitted"
+    assert accepted.reason_code == "broker_close_accepted"
+
+    broker.close_reports_position_id = broker_position_id + 99_000
+    resumed = _manage(ebull_test_conn, broker, coordinates)
+    assert resumed.state == "reconcile_required"
+    assert resumed.reason_code == "close_order_did_not_affect_exact_position"
+
+    report = close_state_report(ebull_test_conn)
+    assert report["active_ownership"] == 1, "a close naming another position must not release ours"
+    assert report["released_ownership"] == 0
+    assert report["release_reasons"] == []
+    assert report["trade_statuses"] == ["reconcile_required"]
+    assert report["exit_order_statuses"] == ["rejected"]
+
+
+def test_a_close_lookup_outage_is_a_delay_and_not_a_terminal_state(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """The exit-side twin of matrix 5b, and the property is the same one.
+
+    An accepted close whose lookup cannot be reached must stay ``pending`` and
+    write nothing terminal — a resume that guessed here would either release a
+    position that is still open or strand one that is closed. When the lookup
+    comes back, the same scheduled pass finishes the close with no second broker
+    mutation.
+
+    ⚠ Asserted on the double's own ``close_lookup_calls`` counter: an outage is a
+    call that got no answer, and a scenario where the lookup was never attempted
+    would prove nothing about outages.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    broker = _restarted_engine_broker(core_world)
+
+    accepted = _close(ebull_test_conn, broker, coordinates)
+    assert accepted.state == "submitted"
+
+    broker.close_lookup_unreachable = True
+    lookups_before = broker.read().get("close_lookup_calls", 0)
+    stalled = _manage(ebull_test_conn, broker, coordinates)
+    assert stalled.state == "pending"
+    assert stalled.reason_code == "close_lookup_unavailable"
+    assert broker.read()["close_lookup_calls"] == lookups_before + 1
+
+    during = close_state_report(ebull_test_conn)
+    assert during["close_statuses"] == ["submitted"], "an outage must not terminalise the operation"
+    assert during["active_ownership"] == 1
+    assert during["released_ownership"] == 0
+
+    # The lookup returns; the same pass finishes the close, and the broker sees
+    # no second close.
+    broker.close_lookup_unreachable = False
+    finished = _manage(ebull_test_conn, broker, coordinates)
+    # `applied`, the operation's terminal state, as in 7c -- the trade is what
+    # becomes `closed`, and the report below is where that is asserted.
+    assert finished.state == "applied"
+    after = close_state_report(ebull_test_conn)
+    assert after["active_ownership"] == 0
+    assert after["released_ownership"] == 1
+    assert after["release_reasons"] == ["operator_close"]
+    assert broker.read()["close_calls"] == 1

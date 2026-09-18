@@ -55,6 +55,7 @@ from app.providers.broker import (
     BrokerPositionCloseSubmission,
     BrokerPositionExecution,
     BrokerPositionMutationError,
+    BrokerPositionMutationUncertain,
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
 )
@@ -184,6 +185,27 @@ class FileBackedFakeBroker:
         #: an order ("the broker does not have this one") and it drives a
         #: different state. An outage is the absence of an answer, not an answer.
         self.unreachable = False
+        #: Round 5 — the EXIT-side NON-CRASH failure classes. Every one of these
+        #: is a broker that answers badly while our process stays alive, which is
+        #: a different axis from the fault points: no ``SIGKILL``, no restart.
+        #:
+        #: ``"rejected"``   -> ``BrokerPositionMutationError``, raised BEFORE the
+        #:                     close is recorded. A definite rejection means the
+        #:                     broker did not act.
+        #: ``"uncertain"``  -> ``BrokerPositionMutationUncertain``, raised AFTER
+        #:                     it is recorded — the broker DID act.
+        #: ``"uncertain_not_taken"`` -> the same exception, raised BEFORE. The
+        #:                     broker did not act.
+        #: ⚠ The last two are the two arms of one ambiguity and exist as a pair:
+        #: our side records them identically, and only the broker differs. A
+        #: single arm would have made the scenario look like a statement about
+        #: our state when it is a statement about what our state cannot tell.
+        self.close_failure: str | None = None
+        #: ``get_demo_close_order`` raises instead of answering (lookup outage).
+        self.close_lookup_unreachable = False
+        #: The close reports ``filled`` against a DIFFERENT position id —
+        #: malformed acceptance, which must never release our ownership.
+        self.close_reports_position_id: int | None = None
         if not self.state_path.exists():
             self._write(
                 {
@@ -465,6 +487,13 @@ class FileBackedFakeBroker:
             # The engine dies holding a durable close intent the broker never
             # received. The position is untouched; only our own state moved.
             _kill_self()
+        if self.close_failure == "rejected":
+            raise BrokerPositionMutationError("broker refused the close")
+        if self.close_failure == "uncertain_not_taken":
+            # The OTHER arm of the ambiguity: uncertain to us, and the broker
+            # genuinely did not act. Same exception, opposite world — which is
+            # what makes the pair of scenarios worth running.
+            raise BrokerPositionMutationUncertain("the close may have reached the broker")
         state = self.read()
         sequence = len(state.get("closes", [])) + 1
         raw = {"positionId": position_id, "instrumentId": instrument_id}
@@ -482,6 +511,10 @@ class FileBackedFakeBroker:
             if int(record["position_id"]) == position_id:
                 record["closed"] = True
         self._write(state)
+        if self.close_failure == "uncertain":
+            # Recorded first, on purpose: the broker HAS the close and our side
+            # is the one that does not know.
+            raise BrokerPositionMutationUncertain("the close may have reached the broker")
         if self.fault == "after_close_accept":
             # The close is durable at the broker and its identity never reaches
             # us. ⚠ Killed BEFORE `persist_response`, which is the tightest this
@@ -505,17 +538,27 @@ class FileBackedFakeBroker:
         state = self.read()
         state["close_lookup_calls"] = int(state.get("close_lookup_calls", 0)) + 1
         self._write(state)
+        if self.close_lookup_unreachable:
+            # Counted before raising, as on the entry side: the call happened.
+            raise BrokerPositionMutationError("close lookup unavailable")
         for record in state.get("closes", []):
             if record["broker_order_ref"] != order_id:
                 continue
             if persist_response is not None:
                 persist_response({"orderId": order_id})
             filled = record["status"] in _FILLED_BROKER_STATES
+            # Malformed acceptance: a filled close that names a position we do
+            # not own. `manage_owned_position` compares `position_ids` against
+            # the exact owned id, so this is the shape that must NOT release
+            # ownership however filled the close looks.
+            reported_position_id = (
+                record["position_id"] if self.close_reports_position_id is None else self.close_reports_position_id
+            )
             return BrokerCloseOrderDetail(
                 broker_order_ref=order_id,
                 status="filled" if filled else "pending",
                 broker_status=str(record["status"]),
-                position_ids=(int(record["position_id"]),) if filled else (),
+                position_ids=(int(reported_position_id),) if filled else (),
                 reference_id=UUID(str(record["reference_id"])),
                 raw_payload={},
             )
