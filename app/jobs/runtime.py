@@ -1702,8 +1702,16 @@ class JobRuntime:
         invokers: dict[str, JobInvoker] | None = None,
         pool: ConnectionPool[psycopg.Connection[Any]] | None = None,
         background_pool: BackgroundConnectionPool | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self._database_url = database_url or settings.database_url
+        # #2274 M1 — the owning process's stop signal, set by ``serve``'s
+        # SIGTERM/SIGINT handler.  ``wrapped()`` reads it and refuses to
+        # START a fire once it is set; see the comment there for why the
+        # check sits at that closure and not in ``_catch_up``.  ``None``
+        # for the in-process API runtime and unit tests, which have no
+        # signal handler of their own — those keep today's behaviour.
+        self._stop_event: threading.Event | None = stop_event
         # #1472 PR4b — the jobs-process bounded background pool
         # (``__main__.serve`` owns its lifetime and passes it here). PR4b is
         # pure infrastructure: the pool exists + is lifecycle-managed + budget-
@@ -2703,6 +2711,42 @@ class JobRuntime:
                 )
 
         def wrapped() -> None:
+            # #2274 M1 — refuse to START a fire once this process has been told
+            # to stop.  The deploy idiom fires a DOUBLE reload (an ``app/**``
+            # edit, then ``touch app/__init__.py``), so the second SIGTERM lands
+            # on the new child 1.5-3.5 s old, mid boot catch-up.  Without this
+            # the fire proceeds, ``run_with_prelude`` writes a ``job_runs`` row,
+            # the child exits ~2 s later (``sync_executor.shutdown(wait=False,
+            # cancel_futures=True)`` does not wait for it), and the next boot's
+            # ``reap_orphaned_job_runs`` transitions the row to ``failure``.
+            #
+            # ⚠ The check is HERE and not in ``_catch_up``.  Measured over 30
+            # days, 14 of 56 orphan reaps have ``finished_at - started_at`` under
+            # 15 s (the shape), and only ONE of those jobs is in the
+            # ``catch_up_on_boot`` set — the rest are orchestrator LAYER jobs
+            # (``daily_portfolio_sync``, ``daily_candle_refresh``,
+            # ``fx_rates_refresh``) dispatched by ``orchestrator_high_frequency_sync``
+            # and writing their own rows via ``_tracked_job``.  This closure is
+            # the one object BOTH paths funnel through: ``_catch_up`` submits it
+            # and ``start()`` registers it with APScheduler, so refusing the
+            # orchestrator here also stops every layer beneath it.
+            #
+            # ⚠ ``extend_while_live`` cannot cover this by construction — it
+            # engages only when the 180 s drain budget EXPIRES, and these
+            # children exit in ~2 s.
+            #
+            # No ``job_runs`` row is written: the pool is closing, and the
+            # alternative to a lost fire here is a row that dies anyway and
+            # reads as a failure. The job simply stays overdue, which is the
+            # state the next boot's catch-up is built to resolve.
+            if self._stop_event is not None and self._stop_event.is_set():
+                logger.info(
+                    "fire of %r not started: this process is shutting down. The job stays "
+                    "overdue and the next boot's catch-up re-fires it; starting it here "
+                    "would write a job_runs row the drain kills and the next boot reaps.",
+                    job_name,
+                )
+                return
             # The execution budget is the outermost boundary: parameter-error
             # audit writes, gate/prerequisite checks, advisory locks, the job
             # body, and terminal writes all occur only after a slot is held.

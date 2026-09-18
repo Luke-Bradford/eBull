@@ -1019,7 +1019,11 @@ def serve(stop_event: threading.Event | None = None) -> int:
     # connection per fire instead of opening two fresh raw psycopg.connect()
     # at every cadence boundary (the SCRAM-auth connection herd that wedged
     # SEC discovery, #1474). Pool is reused, not a new one (settled #719).
-    runtime = JobRuntime(pool=pool)
+    # #2274 M1 — the runtime reads this to refuse STARTING a fire after
+    # SIGTERM. The double reload the deploy idiom fires lands on the new
+    # child mid boot catch-up, and a fire begun then dies in the ~2 s drain
+    # and is reaped as an orphan at the next boot.
+    runtime = JobRuntime(pool=pool, stop_event=stop_event)
     heartbeat = HeartbeatWriter(
         settings.database_url,
         pid=os.getpid(),

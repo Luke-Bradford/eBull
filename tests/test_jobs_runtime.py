@@ -118,7 +118,7 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _make_runtime(invokers: dict[str, object]) -> JobRuntime:
+def _make_runtime(invokers: dict[str, object], *, stop_event: threading.Event | None = None) -> JobRuntime:
     # The mypy/pyright complaint about object vs Callable is silenced
     # by the cast at construction; the test invokers are all callables.
     # PR1b-2 (#1064) widened the JobInvoker contract to accept a params
@@ -135,6 +135,7 @@ def _make_runtime(invokers: dict[str, object]) -> JobRuntime:
     return JobRuntime(
         database_url="postgresql://stub/stub",
         invokers=adapted,  # type: ignore[arg-type]
+        stop_event=stop_event,
     )
 
 
@@ -614,6 +615,78 @@ class TestScheduledFireWrapper:
 
         wrapped = rt._wrap_invoker("boom_job", _adapt_zero_arg(boom))
         wrapped()  # must not raise
+
+
+class TestNoDispatchWhileDraining:
+    """#2274 M1 — a fire must not START after the process is told to stop.
+
+    The deploy idiom fires a double reload, so the second SIGTERM lands on a
+    child that is 1.5-3.5 s old and still in boot catch-up.  A fire begun then
+    writes a ``job_runs`` row, dies in the ~2 s drain, and is transitioned to
+    ``failure`` by the next boot's orphan reaper.
+    """
+
+    def test_a_fire_dispatched_after_the_stop_signal_does_not_start(self, patched_runtime: None) -> None:
+        invocations: list[int] = []
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        stop = threading.Event()
+        rt = _make_runtime({"j": invoker}, stop_event=stop)
+        wrapped = rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))
+
+        # Control FIRST, on the same wrapper: without it a broken wrapper that
+        # never runs anything would pass the assertion below for free.
+        wrapped()
+        assert invocations == [1]
+
+        stop.set()
+        wrapped()
+        assert invocations == [1], "the fire ran after the stop signal"
+
+    def test_the_refusal_precedes_the_execution_slot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Discriminates the fix's PLACEMENT, not just its effect.  A check
+        # inside ``run_bounded`` would still park the fire on the lane
+        # semaphore first, which is the one resource a draining child is
+        # least able to give back.
+        entered: list[str] = []
+
+        @contextmanager
+        def counting_slot(job_name: str) -> Iterator[None]:
+            entered.append(job_name)
+            yield
+
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", counting_slot)
+        monkeypatch.setattr("app.jobs.runtime.JobLock", _FakeLock)
+        monkeypatch.setattr(
+            "app.jobs.runtime.run_with_prelude",
+            lambda _url, _name, invoker, **_kw: invoker(_kw.get("params") or {}) or True,
+        )
+        monkeypatch.setattr("app.jobs.runtime.check_bootstrap_state_gate", lambda _conn, **_kw: (True, ""))
+        monkeypatch.setattr("app.jobs.runtime.materialise_scheduled_params", lambda _name: {})
+        monkeypatch.setattr("app.jobs.runtime.validate_job_params", lambda _name, params, **_kw: dict(params))
+
+        stop = threading.Event()
+        stop.set()
+        rt = _make_runtime({"j": lambda: None}, stop_event=stop)
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(lambda: None))()
+
+        assert entered == [], "the refused fire still acquired an execution slot"
+
+    def test_a_runtime_with_no_stop_event_still_fires(self, patched_runtime: None) -> None:
+        # The in-process API runtime and the unit tests construct JobRuntime
+        # without a stop event; they must keep today's behaviour rather than
+        # inherit a permanently-unset one that could be misread as "stopping".
+        invocations: list[int] = []
+
+        def invoker() -> None:
+            invocations.append(1)
+
+        rt = _make_runtime({"j": invoker})
+        assert rt._stop_event is None
+        rt._wrap_invoker("j", runtime._adapt_zero_arg(invoker))()
+        assert invocations == [1]
 
 
 class TestStartWiring:
