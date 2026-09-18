@@ -34,6 +34,16 @@ def settings_use_test_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     yield url
 
 
+def _ok() -> RefreshResult:
+    return RefreshResult(
+        outcome=LayerOutcome.SUCCESS,
+        row_count=0,
+        items_processed=0,
+        items_total=None,
+        detail="",
+    )
+
+
 def _lp(
     name: str,
     emits: tuple[str, ...],
@@ -484,11 +494,11 @@ class TestShutdownStopsTheWalk:
             started.append("fx_rates")
             # Stands in for the SIGTERM that landed while this layer ran.
             stop.set()
-            return [RefreshResult(layer="fx_rates", items_processed=0)]
+            return [("fx_rates", _ok())]
 
         def second_adapter(**kwargs):
             started.append("candles")
-            return [RefreshResult(layer="candles", items_processed=0)]
+            return [("candles", _ok())]
 
         from dataclasses import replace
 
@@ -516,9 +526,63 @@ class TestShutdownStopsTheWalk:
             estimated_duration=None,
         )
         outcomes: dict[str, LayerOutcome] = {}
-        executor._run_layers_loop(sync_run_id=1, plan=plan, outcomes=outcomes)
+        executor._run_layers_loop(sync_run_id=1, plan=plan, outcomes=outcomes, abort_if_stopping=True)
 
         assert started == ["fx_rates"], "the second layer started after the stop signal"
+        # ⚠ The first layer must have genuinely SUCCEEDED. An adapter that
+        # raised would also leave ``started == ["fx_rates"]`` — the assertion
+        # below is what stops this passing for the wrong reason.
+        assert outcomes["fx_rates"] is LayerOutcome.SUCCESS
         assert outcomes["candles"] is LayerOutcome.PREREQ_SKIP
         # ⚠ Its own reason, not the operator-cancel text and not the crash text.
         assert skipped == [("candles", executor._SHUTDOWN_SKIP_REASON)]
+
+    def test_a_queued_request_is_not_abandoned_on_shutdown(self, monkeypatch) -> None:
+        """#2274 M1's scope boundary (Codex ckpt-2 round 6 P1).
+
+        ``run_sync`` passes ``abort_if_stopping=linked_request_id is None``.
+        Abandoning a listener-dispatched request's layers returns a partial run
+        normally, and the queue lifecycle then calls ``mark_request_completed``
+        — acknowledging work that never happened, which boot recovery cannot
+        replay. A scheduled fire has no such record and simply runs again.
+        """
+        from app.jobs import runtime as jobs_runtime
+
+        stop = threading.Event()
+        stop.set()
+        monkeypatch.setattr(jobs_runtime, "_process_stop_event", stop)
+
+        started: list[str] = []
+
+        def adapter(**kwargs):
+            started.append("candles")
+            return [("candles", _ok())]
+
+        from dataclasses import replace
+
+        from app.services.sync_orchestrator import registry
+
+        monkeypatch.setitem(registry.LAYERS, "candles", replace(registry.LAYERS["candles"], refresh=adapter))
+        for writer in (
+            "_record_layer_started",
+            "_record_layer_failed",
+            "_record_layer_result",
+            "_record_layer_skipped",
+        ):
+            monkeypatch.setattr(executor, writer, MagicMock())
+        monkeypatch.setattr(executor, "_make_progress_callback", lambda *a, **kw: lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor, "_check_cancel_signal", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_credential_health_blocks", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_layer_initialization_blocks", lambda *a, **kw: None)
+        monkeypatch.setattr(executor, "_build_upstream_outcomes", lambda *a, **kw: {})
+
+        plan = ExecutionPlan(
+            layers_to_refresh=(_lp("daily_candle_refresh", ("candles",)),),
+            layers_skipped=(),
+            estimated_duration=None,
+        )
+        outcomes: dict[str, LayerOutcome] = {}
+        executor._run_layers_loop(sync_run_id=1, plan=plan, outcomes=outcomes, abort_if_stopping=False)
+
+        assert started == ["candles"]
+        assert outcomes["candles"] is LayerOutcome.SUCCESS
