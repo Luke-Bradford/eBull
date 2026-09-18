@@ -262,6 +262,8 @@ def test_existing_dropped_sources_preserved() -> None:
             shares=Decimal(_BLOCK),
             as_of_date=_P,
             edgar_url=None,
+            filer_cik="0000000009",
+            filer_name="Rep",
         ),
     )
     survivors = [

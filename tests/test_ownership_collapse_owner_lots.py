@@ -109,7 +109,15 @@ def test_representative_keeps_max_row_provenance() -> None:
     from app.services.ownership_rollup import DroppedSource
 
     dropped = (
-        DroppedSource(source="13f", accession_number="acc-13f", shares=Decimal("9"), as_of_date=None, edgar_url=None),
+        DroppedSource(
+            source="13f",
+            accession_number="acc-13f",
+            shares=Decimal("9"),
+            as_of_date=None,
+            edgar_url=None,
+            filer_cik="1",
+            filer_name="Owner",
+        ),
     )
     rows = _collapse_owner_lots(
         [
@@ -141,10 +149,26 @@ def test_non_primary_lot_dropped_sources_are_merged() -> None:
     from app.services.ownership_rollup import DroppedSource
 
     primary_drop = (
-        DroppedSource(source="13f", accession_number="p", shares=Decimal("9"), as_of_date=None, edgar_url=None),
+        DroppedSource(
+            source="13f",
+            accession_number="p",
+            shares=Decimal("9"),
+            as_of_date=None,
+            edgar_url=None,
+            filer_cik="1",
+            filer_name="Owner",
+        ),
     )
     secondary_drop = (
-        DroppedSource(source="form4", accession_number="s", shares=Decimal("2"), as_of_date=None, edgar_url=None),
+        DroppedSource(
+            source="form4",
+            accession_number="s",
+            shares=Decimal("2"),
+            as_of_date=None,
+            edgar_url=None,
+            filer_cik="1",
+            filer_name="Owner",
+        ),
     )
     rows = _collapse_owner_lots(
         [

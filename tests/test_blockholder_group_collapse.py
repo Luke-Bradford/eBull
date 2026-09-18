@@ -311,6 +311,8 @@ def test_existing_dropped_sources_preserved() -> None:
                 shares=Decimal("7000000"),
                 as_of_date=date(2024, 6, 30),
                 edgar_url="https://sec.gov/prior",
+                filer_cik="0001714217",
+                filer_name="Orion",
             ),
         ),
     )
