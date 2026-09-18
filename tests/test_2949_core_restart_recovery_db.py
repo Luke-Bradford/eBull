@@ -28,10 +28,11 @@ backlog genuinely over the batch cap, which #2962 made non-vacuous for the core
 arm); item 7's position-closure half lives in
 ``tests/test_2949_core_close_recovery_db.py`` because the EXIT lifecycle is a
 different transaction, a different recovery reader and a different broker verb.
-Round 3 added item 6's mandate revocation and credential rotation.  What is
-still NOT run — item 5's outage and contention halves, item 7's rebalance SELL
-(blocked by ``core_close_side_cost_quote_unavailable``), and partial fills
-(blocked on #2965's attended partial fill) — is recorded in
+Round 3 added item 6's mandate revocation and credential rotation, and round 4
+item 5's outage and contention halves.  What is still NOT run — item 7's
+rebalance SELL (blocked by ``core_close_side_cost_quote_unavailable``), partial
+fills (blocked on #2965's attended partial fill) and non-crash close failures —
+is recorded in
 ``docs/proposals/execution/2026-09-13-core-restart-acceptance.md``; a silently
 dropped scenario reads as a covered one.
 """
@@ -1099,8 +1100,7 @@ def test_scenario_5_an_all_busy_batch_returns_empty_and_keeps_every_rows_place(
             # two rows are demonstrably still due.
             assert all_busy == ()
             due = ebull_test_conn.execute(
-                "SELECT count(*) FROM strategy_order_reconciliation_state "
-                "WHERE state NOT IN ('resolved','rejected')"
+                "SELECT count(*) FROM strategy_order_reconciliation_state WHERE state NOT IN ('resolved','rejected')"
             ).fetchone()
             ebull_test_conn.commit()
             assert due is not None and int(due[0]) == 2
