@@ -3,6 +3,11 @@
 **Status:** proposal · **Issue:** #3189 (findings 14, 15, 16) · **Builds on:** #2215
 (`docs/proposals/etl/2026-09-18-blockholder-restatement-overlay.md`)
 
+⚠ Every `` (`:NNNN`) `` in this document is a line number **as of 2026-09-18** and will
+go stale. The SYMBOL beside it is the authoritative reference — grep for that, not the
+number. (The same citations were removed from the code itself, where a stale number is
+read as current truth; review NITPICK on PR #3207.)
+
 One 20-line helper — `app/services/ownership_rollup.py::_blockholder_restatement_holders`
 (`:4017`) — carries all three. They are one slice because they share the helper, the
 scan and the population. **Codex checkpoint 1 surfaced a fourth defect in the same

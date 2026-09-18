@@ -4117,14 +4117,16 @@ def _restatement_sort_key(c: _RestatementCandidate) -> tuple[date, Decimal, str,
 
     **``as_of_date`` leads, and that ordering is the fix for #3189 finding 14b.**
     A later filing SUPERSEDES an earlier one by the same person (Rule 13d-2), whatever
-    direction the revision went, and ``_dedup_within_source`` (`:2093`) already
+    direction the revision went, and ``_dedup_within_source`` already
     implements exactly that — it keeps the latest and ships the retired originals as
     ``dropped_sources``, still tagged ``13d``/``13g``. Selecting on shares first
     republishes a figure the amendment retired.
 
     ⚠⚠ It is deliberately NOT partitioned by source tag, and Codex checkpoint 2 caught
     the version that was. ``_dedup_within_source`` receives the 13D and 13G rows in ONE
-    pool (`:5597`) and groups them on ``_identity_key`` + ``ownership_nature``, NOT on
+    pool (its one call site inside :func:`get_ownership_rollup`, ``_dedup_within_source(
+    block_candidates)``, where ``block_candidates`` is every ``13d``/``13g`` candidate)
+    and groups them on ``_identity_key`` + ``ownership_nature``, NOT on
     source — so a filer who moved from a 13D to a 13G has a single amendment chain
     upstream, and treating the tags as independent chains resurrects the superseded
     13D's figure while the pie carries the 13G's.
