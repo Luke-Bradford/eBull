@@ -885,3 +885,84 @@ def test_a_close_lookup_outage_is_a_delay_and_not_a_terminal_state(
     assert after["released_ownership"] == 1
     assert after["release_reasons"] == ["operator_close"]
     assert broker.read()["close_calls"] == 1
+
+
+def test_a_non_close_operation_on_a_core_position_is_refused_not_interpreted(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """Round 6 — the core exemption itself, which had no test anywhere.
+
+    ``manage_owned_position`` refuses any non-``close`` operation on a core
+    position: ``owned.is_core and operation["operation_type"] != "close"`` →
+    ``core_mandate_position_exempt`` (`strategy_position_manager.py:500-514`).
+    The guard exists because such a row *cannot legitimately exist* — nothing
+    writes a stop repair or a ratchet on the core arm — and the code's stated
+    choice is to stop the cycle for that position rather than interpret it.
+
+    ⚠ Which is exactly why it needs a test and cannot get one from ordinary use:
+    the only way to reach it is to seed the illegitimate row, which is what this
+    does. Left untested, a refactor that dropped the clause would surface as a
+    core position being edited on the strength of a row nobody meant to write.
+
+    ⚠ ``fixed_exit_repair``, not ``'edit'``: `sql/289`'s CHECK admits only
+    ``fixed_exit_repair``/``stop_ratchet``/``close``, so "the edit path" is those
+    first two. `rg` over `tests/` finds no coverage of `broker_edit_rejected` or
+    `broker_edit_uncertain` either; those belong to the ALPHA arm, are
+    unreachable from this core world by this very guard, and stay out of scope.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    broker = _restarted_engine_broker(core_world)
+    ownership = ebull_test_conn.execute(
+        "SELECT ownership_id FROM strategy_position_ownership WHERE status='active'"
+    ).fetchone()
+    ebull_test_conn.commit()
+    assert ownership is not None
+
+    # Every NOT NULL column without a default is named here — measured against the
+    # test template, not assumed: `ownership_id`, `operation_type`, `trigger_code`,
+    # `request_id`, `status`. The other three NOT NULLs (`position_operation_id`,
+    # `created_at`, `updated_at`) carry defaults. A future NOT NULL column without
+    # one fails this INSERT loudly, which is the right direction.
+    seeded = ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_operations (
+            ownership_id, operation_type, trigger_code, request_id, status, desired_stop_rate
+        ) VALUES (%s, 'fixed_exit_repair', 'entry_exit_gap', gen_random_uuid(), 'intent_persisted', 1)
+        RETURNING position_operation_id
+        """,
+        (int(ownership[0]),),
+    ).fetchone()
+    ebull_test_conn.commit()
+    assert seeded is not None
+    seeded_operation_id = int(seeded[0])
+
+    refused = _manage(ebull_test_conn, broker, coordinates)
+    assert refused.state == "rejected"
+    assert refused.reason_code == "core_mandate_position_exempt"
+
+    report = close_state_report(ebull_test_conn)
+    # Untouched: the guard stops the cycle, it does not act on the position.
+    assert report["active_ownership"] == 1
+    assert report["released_ownership"] == 0
+    assert report["trade_statuses"] == ["open"]
+    assert report["close_operations"] == 0
+    # And no broker verb of any kind was entered on the strength of that row.
+    state = broker.read()
+    assert state["close_calls"] == 0
+    assert state.get("close_lookup_calls", 0) == 0
+    assert state["mutation_calls"] == 1, "the entry that established the position, and nothing since"
+
+    # The refused row is terminal, so the next cycle is clean rather than stuck
+    # on the same illegitimate operation.
+    # Keyed on the id this test seeded, not on "the newest row" — the assertion is
+    # about THAT operation, and an ordering-based fetch would quietly follow any
+    # row a future cycle happened to write.
+    terminal = ebull_test_conn.execute(
+        "SELECT status, last_error_code FROM strategy_position_operations WHERE position_operation_id=%s",
+        (seeded_operation_id,),
+    ).fetchone()
+    ebull_test_conn.commit()
+    assert terminal is not None
+    assert terminal[0] == "rejected"
+    assert terminal[1] == "core_mandate_position_exempt"

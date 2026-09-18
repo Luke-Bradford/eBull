@@ -19,7 +19,7 @@ Reproduce:
 docker compose --profile test up -d postgres-test
 uv run pytest tests/test_2949_core_restart_recovery_db.py \
               tests/test_2949_core_close_recovery_db.py -v -o addopts=''
-# expect: 32 passed  (23 restart + 9 close, at round 5)
+# expect: 33 passed  (23 restart + 10 close, at round 6)
 ```
 
 ⚠ **Check the count, not the exit status.** `ebull_test_conn` *skips* when the test database is
@@ -31,8 +31,8 @@ file; #2962 and #2961's sessions added two more before round 2 started (the unat
 lost-acceptance recovery and the stranded read-surface flag); round 2 added one matrix-5 test
 plus 3 in the close file (15); #2961's terminalisation fix then added 6 more to the restart file
 and #2979's added 1 to the close file (22); round 3 adds the three matrix-6 tests (25), round 4
-the two matrix-5 ones (27), and round 5 the five non-crash close failures (32). Round-1 figures
-quoted below are left as they were written.
+the two matrix-5 ones (27), round 5 the five non-crash close failures (32), and round 6
+the core-exemption guard (33). Round-1 figures quoted below are left as they were written.
 
 ## What the harness is
 
@@ -706,3 +706,30 @@ classes, which share `_terminal` with the close path and are not exercised here.
 **Still no green "ready" status.** Rounds 3-5 closed matrix items 5 and 6 and classified the
 non-crash exit failures. The two standing blockers are unchanged, and both need an attended
 session.
+
+## Round 6 — the core exemption guard, and a corrected next step
+
+Round 5's not-covered list called the EDIT (SL/TP) failure classes *"cheap, and the obvious round
+6"*. **Checked before starting, and that was wrong.** `manage_owned_position` refuses any
+non-`close` operation on a core position — `owned.is_core and operation["operation_type"] !=
+"close"` → `core_mandate_position_exempt` (`strategy_position_manager.py:500-514`) — so the edit
+path is **structurally unreachable from this core world** and would need an alpha-arm fixture.
+
+The gap is real and larger than that line implied: `rg` over `tests/` finds **no coverage of
+`broker_edit_rejected`, `broker_edit_uncertain` or `core_mandate_position_exempt`**. The first two
+belong to the alpha arm and stay out of scope.
+
+The third is in scope and is now covered.
+`test_a_non_close_operation_on_a_core_position_is_refused_not_interpreted` seeds the illegitimate
+row — a `fixed_exit_repair` at `intent_persisted` against the core ownership — and asserts the
+cycle refuses it: `rejected` / `core_mandate_position_exempt`, position untouched, trade still
+`open`, zero close calls, zero close lookups, and the entry's single mutation unchanged. The
+refused row is terminal, so the next cycle is clean rather than stuck on it.
+
+⚠ This is the one guard in the module that ordinary use can never reach, because it exists to
+refuse a row nothing writes. That is exactly why it needed a seeded test: left uncovered, a
+refactor dropping the clause would surface as a core position being edited on the strength of a
+row nobody meant to write. Probe: neutralising the clause fails this test and nothing else.
+
+⚠ `fixed_exit_repair`, not `'edit'` — `sql/289`'s CHECK admits only
+`fixed_exit_repair`/`stop_ratchet`/`close`, so "the edit path" is those first two.
