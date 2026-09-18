@@ -2918,14 +2918,18 @@ def _poll_one_pending_order(
         # ⚠ Stamped and NOT parked. Which environment this PROCESS talks to is a
         # property of the deployment, not of the row — a `real`-env run must find
         # the row waiting, unparked, and resolve it.
-        row_env = current["broker_environment"]
-        if row_env is None or str(row_env) != env:
+        # Annotated rather than cast (review NITPICK, PR #3198): the column is
+        # TEXT, so psycopg hands back `str | None` and a `str(...)` around the
+        # comparison was doing nothing. The annotation says the same thing the
+        # cast was gesturing at, and pyright checks it.
+        row_env: str | None = current["broker_environment"]
+        if row_env is None or row_env != env:
             _stamp_polled(conn, order_id=order_id, now=now)
             logger.warning(
                 "reconcile_pending_recommendation_orders: order_id=%d carries broker environment %s and this "
                 "process is configured for %r — not looked up",
                 order_id,
-                "none recorded" if row_env is None else repr(str(row_env)),
+                "none recorded" if row_env is None else repr(row_env),
                 env,
             )
             return PendingOrderPollResult(order_id, recommendation_id, "environment_mismatch")
