@@ -2367,6 +2367,17 @@ PendingOrderVerdict = Literal[
     "poll_error",
 ]
 
+#: The two verdicts this module BRANCHES on, named once (review NITPICK, PR #3193).
+#:
+#: ⚠ The stated risk was drift on a rename; the measured one is sharper.
+#: `verdict` is a ``PendingOrderVerdict``, so pyright rejects a misspelled
+#: ASSIGNMENT (`verdict = "filled_not_bookd"` → 1 error) but is SILENT on a
+#: misspelled COMPARISON (`verdict == "terminalised_rejectd"` → 0 errors), which
+#: is an always-false branch that no gate catches. Comparing against a typed
+#: constant makes the typo a name error instead (measured: reportUndefinedVariable).
+_TERMINALISED_REJECTED: Final[PendingOrderVerdict] = "terminalised_rejected"
+_FILLED_NOT_BOOKED: Final[PendingOrderVerdict] = "filled_not_booked"
+
 #: Verdicts that describe a PERMANENT property of the row, so re-asking cannot
 #: change the answer. Parking them is what stops an unresolvable order polling
 #: the broker hourly for ever (PR #3168 WARNING). Deliberately NOT here:
@@ -2878,7 +2889,7 @@ def _poll_one_pending_order(
         #
         # The verdict is the honest one: positions exist and we have not booked
         # them, whatever word the status carried.
-        if verdict == "terminalised_rejected" and detail.position_executions:
+        if verdict == _TERMINALISED_REJECTED and detail.position_executions:
             logger.error(
                 "reconcile_pending_recommendation_orders: order_id=%d broker_status=%r is rejected but carries "
                 "%d position execution(s); parking with the claim held rather than terminalising",
@@ -2886,9 +2897,9 @@ def _poll_one_pending_order(
                 detail.broker_status,
                 len(detail.position_executions),
             )
-            verdict = "filled_not_booked"
+            verdict = _FILLED_NOT_BOOKED
 
-        if verdict == "terminalised_rejected":
+        if verdict == _TERMINALISED_REJECTED:
             _terminalise_rejected_order(
                 conn,
                 order_id=order_id,
@@ -2898,7 +2909,7 @@ def _poll_one_pending_order(
                 raw_payload=detail.raw_payload,
                 now=now,
             )
-        elif verdict == "filled_not_booked":
+        elif verdict == _FILLED_NOT_BOOKED:
             _record_unbooked_fill(
                 conn,
                 order_id=order_id,
