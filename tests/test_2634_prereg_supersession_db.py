@@ -161,6 +161,34 @@ def test_a_post_lock_re_read_refuses_an_isolation_it_cannot_trust(
         ebull_test_conn.isolation_level = None
 
 
+def test_read_uncommitted_is_accepted_because_postgres_makes_it_read_committed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """What the isolation gate must NOT refuse (Codex checkpoint 2).
+
+    Postgres implements READ UNCOMMITTED as READ COMMITTED — no dirty reads,
+    and a fresh snapshot per statement, which is the only property the post-lock
+    re-read needs. It reports the requested name back VERBATIM, though, so a
+    string equality check on "read committed" refuses it.
+
+    Measured on the cluster rather than recalled: inside one transaction a
+    second statement saw another session's commit under READ UNCOMMITTED
+    (0 -> 1) and did not under REPEATABLE READ (0 -> 0).
+    """
+    with ebull_test_conn.transaction():
+        freeze_preregistration(ebull_test_conn, _declaration())
+
+    ebull_test_conn.rollback()
+    ebull_test_conn.isolation_level = psycopg.IsolationLevel.READ_UNCOMMITTED
+    try:
+        with ebull_test_conn.transaction():
+            access_id = record_holdout_access(ebull_test_conn, _access())
+        assert access_id > 0
+    finally:
+        ebull_test_conn.rollback()
+        ebull_test_conn.isolation_level = None
+
+
 def test_a_stranded_trial_can_look_at_its_outcomes_again_after_a_supersession(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

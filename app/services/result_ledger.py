@@ -1429,6 +1429,14 @@ def _current_of_chain(
     return current[0]
 
 
+#: Isolation levels whose reads take a FRESH snapshot per statement, which is what
+#: a post-lock re-read needs. Postgres implements ``read uncommitted`` as
+#: ``read committed`` (no dirty reads) but reports the requested name back, so both
+#: strings appear here; ``repeatable read`` and ``serializable`` are the two that
+#: pin a transaction-wide snapshot and are deliberately absent.
+_PER_STATEMENT_SNAPSHOT_ISOLATIONS: Final[frozenset[str]] = frozenset({"read committed", "read uncommitted"})
+
+
 def _require_read_committed(conn: psycopg.Connection[tuple], caller: str, missed: str) -> None:
     """Refuse a post-lock re-read that cannot see what committed while we waited.
 
@@ -1450,9 +1458,20 @@ def _require_read_committed(conn: psycopg.Connection[tuple], caller: str, missed
     psycopg and Postgres both default to READ COMMITTED, so this fires only for a
     caller that deliberately changed it — which is exactly the caller who would
     not think to re-derive this argument.
+
+    ⚠⚠ The accepted set is "levels with a PER-STATEMENT snapshot", which in
+    Postgres is TWO levels, not one (Codex checkpoint 2). ``READ UNCOMMITTED`` is
+    accepted and behaves exactly as ``READ COMMITTED`` — and
+    ``current_setting('transaction_isolation')`` reports it VERBATIM rather than
+    normalising it, which is precisely why a string equality check gets it
+    wrong. Measured on this cluster rather than recalled: inside one transaction,
+    a second statement saw another session's commit under ``READ UNCOMMITTED``
+    (0 -> 1) and did not under ``REPEATABLE READ`` (0 -> 0). Refusing it would
+    have been a false refusal — the narrowing-gate error, on a gate whose whole
+    job is to refuse.
     """
     isolation = conn.execute("SELECT current_setting('transaction_isolation')").fetchone()
-    if isolation is not None and str(isolation[0]).lower() != "read committed":
+    if isolation is not None and str(isolation[0]).lower() not in _PER_STATEMENT_SNAPSHOT_ISOLATIONS:
         raise RuntimeError(
             f"{caller} needs READ COMMITTED and this transaction is {isolation[0]!r}: the post-lock "
             f"re-read would return the pre-lock snapshot, so a losing racer would not see {missed}"
