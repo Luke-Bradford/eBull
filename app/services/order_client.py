@@ -2679,13 +2679,16 @@ def reconcile_pending_recommendation_orders(
             results.append(_poll_one_pending_order(conn, broker=broker, row=row, now=at))
         except Exception:
             order_id = int(row["order_id"])
-            # ⚠ The raise may have left a failed transaction open, and
-            # `_stamp_polled` would then fail too and re-raise into the batch
-            # this block exists to protect. Roll back first; the poller's own
-            # writes all commit individually, so this discards nothing that
-            # was meant to survive.
+            # ⚠ No rollback here, and that is checked rather than assumed. A
+            # raise that left a failed transaction would make `_stamp_polled`
+            # fail too — but every path in `_poll_one_pending_order` runs inside
+            # `_recommendation_submission_try_lock`, whose `finally` already
+            # rolls back on the way out precisely so the unlock cannot run
+            # inside a transaction. A defensive `conn.rollback()` was written
+            # here first and REMOVED: a revert-probe deleting it could not be
+            # made to fail, because the connection is already clean by the time
+            # this block runs.
             try:
-                conn.rollback()
                 _stamp_polled(conn, order_id=order_id, now=at)
             except Exception:
                 # A stamp that cannot be written means the connection is gone,

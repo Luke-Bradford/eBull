@@ -523,14 +523,16 @@ def test_a_row_that_raises_unexpectedly_is_contained_and_the_batch_continues(
 def test_containment_survives_a_raise_that_left_a_failed_transaction(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """The containment block rolls back BEFORE it stamps, and that is load-bearing.
+    """Containment still stamps when the raise poisoned the transaction first.
 
-    ⚠ Written because the first version of this suite did not prove it: a raise
-    from ``lookup_order`` happens on an idle connection by design (broker I/O
-    never runs inside a transaction), so deleting the ``conn.rollback()`` left
-    every test green. A raise from a path that had already opened one is the
-    case the rollback exists for — without it ``_stamp_polled`` fails too, the
-    inner guard re-raises, and the batch this block protects aborts anyway.
+    ⚠ This test exists because of what it FAILED to prove. It was written to
+    make a defensive ``conn.rollback()`` in the containment block load-bearing,
+    and it could not: a revert-probe deleting that rollback stayed green, because
+    ``_recommendation_submission_try_lock``'s own ``finally`` has already rolled
+    back by the time the exception reaches the batch loop. The rollback was
+    removed rather than kept as unexercised insurance; what remains worth
+    pinning is that a poisoned transaction does not defeat the stamp, whichever
+    layer cleans it up.
     """
     _seed_instrument(ebull_test_conn)
     first_rec = _seed_recommendation(ebull_test_conn)
@@ -538,7 +540,7 @@ def test_containment_survives_a_raise_that_left_a_failed_transaction(
     boom = _seed_order(ebull_test_conn, recommendation_id=first_rec, last_polled_at=_NOW - timedelta(hours=2))
     later = _seed_order(ebull_test_conn, recommendation_id=second_rec, last_polled_at=_NOW - timedelta(hours=1))
 
-    calls = {"n": 0}
+    calls: dict[str, Any] = {"n": 0, "poisoned": False}
 
     def _first_call_poisons_then_raises(*_args: Any, **_kwargs: Any) -> BrokerOrderDetail:
         calls["n"] += 1
@@ -546,9 +548,11 @@ def test_containment_survives_a_raise_that_left_a_failed_transaction(
             return _detail("Pending")
         with contextlib.suppress(psycopg.Error):
             ebull_test_conn.execute("SELECT 1 / 0")
-        assert ebull_test_conn.info.transaction_status == TransactionStatus.INERROR, (
-            "the probe did not poison the transaction, so it proves nothing"
-        )
+        # ⚠ RECORDED, not asserted here. An assertion inside the region under
+        # containment is structurally unable to fail the test — the guard would
+        # be caught and reported as `poll_error` like any other raise. Checked
+        # after the call instead.
+        calls["poisoned"] = ebull_test_conn.info.transaction_status == TransactionStatus.INERROR
         raise RuntimeError("raised with a failed transaction open")
 
     broker = MagicMock(spec=BrokerProvider)
@@ -556,6 +560,7 @@ def test_containment_survives_a_raise_that_left_a_failed_transaction(
 
     results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
 
+    assert calls["poisoned"] is True, "the probe never poisoned the transaction, so it proves nothing"
     assert [(r.order_id, r.verdict) for r in results] == [(boom, "poll_error"), (later, "still_pending")]
     assert _order_row(ebull_test_conn, boom)["recommendation_last_polled_at"] == _NOW
 
