@@ -138,6 +138,7 @@ from app.workers.scheduler import (
     JOB_PRICE_QUARANTINE_REFRESH,
     JOB_QUOTES_REFRESH,
     JOB_RAW_DATA_RETENTION_SWEEP,
+    JOB_RECOMMENDATION_ORDER_RECONCILE,
     JOB_RESEARCH_PRICE_QUARANTINE_REFRESH,
     JOB_RETRY_DEFERRED,
     JOB_RETRY_SWEEPER,
@@ -220,6 +221,7 @@ from app.workers.scheduler import (
     price_quarantine_refresh,
     quotes_refresh,
     raw_data_retention_sweep,
+    recommendation_order_reconcile,
     research_price_quarantine_refresh,
     retry_deferred_recommendations_job,
     risk_metrics_refresh,
@@ -369,6 +371,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     JOB_MORNING_CANDIDATE_REVIEW: _adapt_zero_arg(morning_candidate_review),
     JOB_FUNDAMENTALS_SYNC: _adapt_zero_arg(fundamentals_sync),
     JOB_DAILY_TAX_RECONCILIATION: _adapt_zero_arg(daily_tax_reconciliation),
+    JOB_RECOMMENDATION_ORDER_RECONCILE: _adapt_zero_arg(recommendation_order_reconcile),
     JOB_RETRY_DEFERRED: _adapt_zero_arg(retry_deferred_recommendations_job),
     JOB_MONITOR_POSITIONS: _adapt_zero_arg(monitor_positions_job),
     # #1919 PR-B — hourly scheduled + Admin "Run now". The body carries its

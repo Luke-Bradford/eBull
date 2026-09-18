@@ -74,6 +74,7 @@ from app.services.order_client import (
     _update_position_buy,
     describe_exit_completion,
     execute_order,
+    pending_order_verdict,
 )
 from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt
 
@@ -2429,3 +2430,31 @@ class TestExitLotMirrorDeduction:
         execute_order(conn, recommendation_id=42, decision_id=10, broker=None)
 
         assert self._mirror_update_params(conn) is None
+
+
+class TestPendingOrderVerdict:
+    """#2942 slice B — the verdict table, asserted without a DB or a broker.
+
+    This mapping is the whole safety argument of the poller: exactly one
+    reconciliation state may release a submission claim. Keeping it pure means
+    the table can be read off the test rather than inferred from a fixture.
+    """
+
+    def test_only_a_broker_rejection_terminalises(self) -> None:
+        assert pending_order_verdict("rejected") == "terminalised_rejected"
+
+    def test_a_pending_state_leaves_the_order_alone(self) -> None:
+        assert pending_order_verdict("pending") == "still_pending"
+
+    def test_a_fill_is_recognised_but_not_booked(self) -> None:
+        """``resolved`` means the broker filled it. The poller records the fact
+        and keeps the claim: booking a late fill needs the submission-time exit
+        lot and an attended observation to verify."""
+        assert pending_order_verdict("resolved") == "filled_not_booked"
+
+    @pytest.mark.parametrize("state", ["not_found", "ambiguous", "error", "unresolved", ""])
+    def test_an_unmapped_state_raises_rather_than_guessing(self, state: str) -> None:
+        """The advancing verdict releases a claim, so a state nobody mapped must
+        stop the order rather than fall through to a default."""
+        with pytest.raises(ValueError, match="unmapped reconciliation state"):
+            pending_order_verdict(state)

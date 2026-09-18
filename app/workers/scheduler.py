@@ -465,6 +465,12 @@ JOB_AQR_REFERENCE_REFRESH = "aqr_reference_refresh"
 JOB_FRED_REFERENCE_REFRESH = "fred_reference_refresh"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
+# #2942 half 2 slice B — ask the broker about recommendation orders stuck at
+# `pending`. Until this consumer existed nothing looked at such a row again,
+# while `idx_orders_recommendation_open_attempt` kept the recommendation
+# unsubmittable for ever. Informational (`lookup_order`); mutates no broker
+# state and must never reach a method that does.
+JOB_RECOMMENDATION_ORDER_RECONCILE = "recommendation_order_reconcile"
 # #2603 item 3 step 3b-3 — observe the core sleeve and store one rebalance
 # verdict. Produces submission-gate INPUT, never authority: nothing invokes
 # the gate, and the only provider call is informational.
@@ -820,6 +826,30 @@ def _has_actionable_recommendations(conn: psycopg.Connection[Any]) -> Prerequisi
     return (False, "no proposed or approved recommendations")
 
 
+def _has_pending_recommendation_orders(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """True if a recommendation order is waiting on a broker verdict (#2942).
+
+    Gates the poller so a dormant path spends no lane time and no share of the
+    eToro request budget.
+
+    ⚠⚠ **Calls the service's own counter rather than mirroring its SQL**, unlike
+    the prerequisites above it. An inlined copy drifted within one PR (#3168
+    review): the park column landed in the service's predicate and not here, so
+    every parked row would have kept this gate open and fired the job hourly for
+    ever to select nothing — precisely the unbounded polling the park exists to
+    stop. A prerequisite that can disagree with the selection it guards is worse
+    than no prerequisite, because it looks like a bound.
+
+    Imported locally, matching every job body in this module: the scheduler must
+    stay importable without pulling the execution stack in at module load.
+    """
+    from app.services.order_client import count_pending_recommendation_orders
+
+    if count_pending_recommendation_orders(conn) > 0:
+        return (True, "")
+    return (False, "no pending recommendation orders awaiting a broker verdict")
+
+
 def _has_deferred_recommendations(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     """True if at least one timing_deferred BUY/ADD recommendation exists."""
     if _exists(
@@ -1043,6 +1073,34 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # Do not fire on cold boot — order execution must only happen at
         # the scheduled time, not as a surprise catch-up hours later.
         catch_up_on_boot=False,
+    ),
+    ScheduledJob(
+        name=JOB_RECOMMENDATION_ORDER_RECONCILE,
+        display_name="Reconcile pending recommendation orders (#2942)",
+        # Lane ``etoro``: the only external call is an informational eToro read
+        # and ``etoro`` is the lane that owns that budget. Joining an existing
+        # lane buys a dispatch thread, not a connection permit (#3159) — and
+        # this box's cluster is at its usable ``max_connections`` ceiling.
+        source="etoro",
+        description=(
+            "Hourly — ask the broker about recommendation orders stuck at "
+            "'pending' and release the submission claim on any the broker has "
+            "rejected. Read-only at the broker; books no fill."
+        ),
+        # ⚠ Hourly at :07, NOT every 5 minutes. A 5-minute job on a shared lane
+        # takes the 5-min-aligned slots from its lanemates (#1526/#1527, the
+        # race already written on this lane's core_rebalance_observation), and
+        # :07 collides with no current etoro lanemate (execute_approved_orders
+        # 06:30, core_rebalance_observation 22:45). The cost is stated rather
+        # than hidden: worst-case one hour to notice an asynchronous rejection.
+        cadence=Cadence.hourly(minute=7),
+        # Bootstrap-gated as well as work-gated: the poller reads broker
+        # credentials, and a pre-bootstrap fire would burn a credential read
+        # to discover there is nothing to reconcile.
+        prerequisite=_all_of(_bootstrap_complete, _has_pending_recommendation_orders),
+        # A restart is exactly when a pending order deserves a look, and the
+        # job mutates no broker state.
+        catch_up_on_boot=True,
     ),
     ScheduledJob(
         name=JOB_RETRY_DEFERRED,
@@ -6271,6 +6329,41 @@ def strategy_paper_cycle() -> None:
             f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
             f"halt_source_pub_at={halt_snapshot.source_pub_at.isoformat()}"
         )
+
+
+def recommendation_order_reconcile() -> None:
+    """Ask the broker about recommendation orders stuck at ``pending`` (#2942).
+
+    ⚠ Deliberately NOT demo-gated, unlike ``strategy_paper_cycle``. Every call
+    this makes is an informational ``lookup_order`` read, and the order it is
+    asking about was placed on ``settings.etoro_env`` — so refusing to look at a
+    live-environment order would leave exactly the row that matters most wedged.
+    It mutates no broker state and must never reach a method that does.
+
+    ⚠ The job's completed unit of work is the POLL, so ``row_count`` counts
+    orders polled, not orders terminalised. #3111 measured what the intuitive
+    choice costs: bucketing a poller's outcome on discoveries degraded 98.9% of
+    healthy runs.
+    """
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.order_client import reconcile_pending_recommendation_orders
+
+    creds = _load_etoro_credentials(JOB_RECOMMENDATION_ORDER_RECONCILE)
+    if creds is None:
+        _record_prereq_skip(JOB_RECOMMENDATION_ORDER_RECONCILE, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_RECOMMENDATION_ORDER_RECONCILE) as tracker:
+        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as broker:
+            with connect_job() as conn:
+                results = reconcile_pending_recommendation_orders(conn, broker=broker)
+        tracker.row_count = len(results)
+        verdicts: dict[str, int] = {}
+        for result in results:
+            verdicts[result.verdict] = verdicts.get(result.verdict, 0) + 1
+        breakdown = " ".join(f"{name}={count}" for name, count in sorted(verdicts.items())) or "no_due_orders"
+        tracker.note = f"polled={len(results)} {breakdown}"
+        logger.info("recommendation_order_reconcile: %s", tracker.note)
 
 
 def core_rebalance_observation() -> None:

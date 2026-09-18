@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Literal
+from typing import Any, Final, Literal, LiteralString
 from uuid import UUID, uuid4
 
 import psycopg
@@ -40,6 +40,8 @@ from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from app.providers.broker import (
+    BrokerOrderLookupError,
+    BrokerOrderNotFound,
     BrokerOrderResult,
     BrokerOrderSubmissionUncertain,
     BrokerProvider,
@@ -50,6 +52,10 @@ from app.services.execution_guard import decide_submission_controls, load_kill_s
 from app.services.quote_marks import directional_fill_price, positive_decimal_or_none
 from app.services.return_attribution import compute_attribution, persist_attribution
 from app.services.runtime_config import RuntimeConfig, get_runtime_config
+from app.services.strategy_order_reconciliation import (
+    StrategyReconciliationError,
+    classify_broker_order_status,
+)
 from app.services.trade_events import enqueue_post_trade_sync
 from app.services.transaction_cost import (
     estimate_cost,
@@ -2339,3 +2345,450 @@ def execute_order(
         fill_id=fill_id,
         explanation=explanation,
     )
+
+
+# ---------------------------------------------------------------------------
+# Pending-order reconciliation (#2942 half 2, slice B)
+# ---------------------------------------------------------------------------
+
+#: Verdicts the poller can reach for one pending recommendation order. Exactly
+#: one of them releases the claim — ``terminalised_rejected``, where the broker
+#: has told us the order has ceased to exist. Everything else fails closed.
+PendingOrderVerdict = Literal[
+    "terminalised_rejected",
+    "still_pending",
+    "filled_not_booked",
+    "not_found",
+    "lookup_error",
+    "unsafe_status",
+    "ref_not_pollable",
+    "lock_busy",
+    "no_longer_pending",
+]
+
+#: Verdicts that describe a PERMANENT property of the row, so re-asking cannot
+#: change the answer. Parking them is what stops an unresolvable order polling
+#: the broker hourly for ever (PR #3168 WARNING). Deliberately NOT here:
+#: ``not_found`` and ``lookup_error`` (a transport failure is not a fact about
+#: the order) and ``unsafe_status`` (an unsettled partial fill can still
+#: progress to Filled). ⚠ Parked is not resolved — see ``sql/395``.
+_PARKING_POLL_VERDICTS: dict[str, str] = {
+    "filled_not_booked": "filled_unbooked",
+    "ref_not_pollable": "ref_not_pollable",
+}
+
+#: Which orders the poller is willing to ask about. ONE definition, shared by
+#: the batch selection and by the scheduler's prerequisite count — the two
+#: disagreeing means either the job fires for nothing or never fires while work
+#: waits, and ``test_count_matches_what_the_poller_would_select`` guards it.
+#: A static literal: nothing interpolates into it.
+_POLLABLE_ORDER_PREDICATE: Final[LiteralString] = """
+    recommendation_id IS NOT NULL
+    AND status = 'pending'
+    AND broker_order_ref IS NOT NULL
+    AND recommendation_poll_parked_reason IS NULL
+"""
+
+
+@dataclass(frozen=True)
+class PendingOrderPollResult:
+    """One poll of one pending recommendation order."""
+
+    order_id: int
+    recommendation_id: int
+    verdict: PendingOrderVerdict
+    broker_status: str | None = None
+
+
+def pending_order_verdict(reconciliation_state: str) -> PendingOrderVerdict:
+    """Map a reconciliation state to what this poller does about it.
+
+    Pure, so the whole verdict table can be asserted without a database or a
+    broker. Raises rather than guessing: an unmapped state must never advance an
+    order, because the only advancing verdict releases a submission claim.
+    """
+    if reconciliation_state == "rejected":
+        return "terminalised_rejected"
+    if reconciliation_state == "pending":
+        return "still_pending"
+    if reconciliation_state == "resolved":
+        # The broker filled it. We deliberately do NOT book the fill here —
+        # see ``_record_unbooked_fill`` for why, and what would unblock it.
+        return "filled_not_booked"
+    raise ValueError(f"unmapped reconciliation state: {reconciliation_state}")
+
+
+def count_pending_recommendation_orders(conn: psycopg.Connection[Any]) -> int:
+    """How many recommendation orders are waiting on a broker verdict.
+
+    The scheduler's prerequisite reads this so a dormant path spends no lane
+    time and no share of the eToro request budget.
+
+    ⚠ Its own ``scalar_row`` cursor, not ``conn.execute(...).fetchone()[0]``.
+    Callers hand over whatever connection they already hold and this repo's
+    read paths routinely set ``row_factory=dict_row``, under which ``row[0]``
+    raises ``KeyError: 0``. Caught by running it against the dev DB, not by a
+    test — every test here builds its own connection.
+    """
+    with conn.cursor(row_factory=psycopg.rows.scalar_row) as cur:
+        cur.execute(f"SELECT count(*) FROM orders WHERE {_POLLABLE_ORDER_PREDICATE}")  # noqa: S608
+        count = cur.fetchone()
+    return int(count or 0)
+
+
+def _stamp_polled(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    now: datetime,
+    park_reason: str | None = None,
+) -> None:
+    """Record that we ASKED, and COMMIT.
+
+    ⚠ ``recommendation_last_polled_at`` is written on every attempt path,
+    including the ones that change nothing. That is the point: it is the rotation
+    key, and #2948 established that ordering a bounded backlog on a key that does
+    not move for a non-terminal row is an absorbing state rather than a delay.
+
+    ``park_reason`` stops the asking. It is set only for a verdict that is a
+    PERMANENT property of the row (``sql/395``), never for a transport failure —
+    otherwise a blip would silently retire a live order from reconciliation.
+    Parking does not touch ``status``, so the submission claim stays held.
+    """
+    conn.execute(
+        """
+        UPDATE orders
+        SET recommendation_last_polled_at = %(now)s,
+            recommendation_poll_parked_reason = COALESCE(
+                recommendation_poll_parked_reason, %(park)s)
+        WHERE order_id = %(oid)s
+        """,
+        {"now": now, "oid": order_id, "park": park_reason},
+    )
+    conn.commit()
+
+
+def _terminalise_rejected_order(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    instrument_id: int,
+    recommendation_id: int,
+    broker_status: str,
+    raw_payload: dict[str, Any],
+    now: datetime,
+) -> None:
+    """Release the claim on an order the broker says has ceased to exist.
+
+    ``rejected`` is outside ``idx_orders_recommendation_open_attempt``'s
+    predicate, so writing it lifts the claim and the recommendation becomes
+    proposable again. The recommendation goes to ``execution_failed``: an
+    attempt was made and the broker refused it, which is a different fact from
+    ``approved`` (never attempted) and from ``execution_pending`` (outstanding).
+
+    No fill, position or cash write happens — by construction there is nothing
+    to book, which is exactly why this is the one verdict safe to terminalise
+    unattended.
+
+    The UPDATEs are left outstanding for ``_write_refusal_audit``'s commit, the
+    pattern that helper documents: the resolved status and its audit row are one
+    event and must become visible together or not at all.
+    """
+    conn.execute(
+        """
+        UPDATE orders
+        SET status = 'rejected',
+            raw_payload_json = %(payload)s,
+            recommendation_last_polled_at = %(now)s
+        WHERE order_id = %(oid)s
+        """,
+        {"oid": order_id, "payload": Jsonb(raw_payload), "now": now},
+    )
+    conn.execute(
+        "UPDATE trade_recommendations SET status = 'execution_failed' WHERE recommendation_id = %(rid)s",
+        {"rid": recommendation_id},
+    )
+    _write_refusal_audit(
+        conn,
+        instrument_id=instrument_id,
+        recommendation_id=recommendation_id,
+        explanation=(
+            f"Pending order resolved by the broker as {broker_status} — order_id={order_id} "
+            f"terminalised and the submission claim released"
+        ),
+        evidence={
+            "refusal": "broker_rejected_pending_order",
+            "order_id": order_id,
+            "broker_status": broker_status,
+            "response": raw_payload,
+        },
+        now=now,
+    )
+    logger.warning(
+        "reconcile_pending_recommendation_orders: recommendation_id=%d order_id=%d rejected by broker (%s)",
+        recommendation_id,
+        order_id,
+        broker_status,
+    )
+
+
+def _record_unbooked_fill(
+    conn: psycopg.Connection[Any],
+    *,
+    order_id: int,
+    instrument_id: int,
+    recommendation_id: int,
+    broker_status: str,
+    raw_payload: dict[str, Any],
+    now: datetime,
+) -> None:
+    """Record that the broker filled an order our books have not booked.
+
+    ⛔ **Deliberately does not book the fill, and the claim stays held.**
+    Booking a late fill is ``_persist_fill`` -> ``_update_position_buy`` /
+    ``_update_position_exit`` -> ``_persist_broker_position`` ->
+    ``_deduct_closed_exit_lot`` -> ``_record_cash_ledger`` -> attribution ->
+    ``enqueue_post_trade_sync``, plus estimated-cost recording — a path that
+    closes over ``order_params``, ``quote_data`` and ``exit_lot``, locals that
+    exist only at submission time. Two blockers, neither a preference:
+
+    * **EXIT has no persisted lot.** ``_load_exit_lot`` resolves it at
+      submission and nothing stores which lot was closed, so re-selecting at
+      poll time is exactly the instrument/time/FIFO guess for broker ownership
+      that #2942 forbids.
+    * **It cannot be dev-verified.** Producing a real pending->filled
+      recommendation order needs an attended demo session.
+
+    So this leaves the status quo (claim held, nothing double-submits) plus the
+    two things the status quo lacked: an ERROR log and a durable audit row.
+    **Unblock for the booking slice: one attended pending->fill observation on a
+    recommendation-origin order** — the same observation #2965 needs.
+
+    ⚠ Written ONCE, then parked. The order is terminal at the broker, so
+    re-asking every hour could only spend a shared eToro read and append another
+    identical audit row for ever (PR #3168 WARNING). ``sql/395``'s park is what
+    bounds it, and it deliberately leaves ``status='pending'`` — a terminal
+    status would release the claim on an order that demonstrably executed.
+    """
+    conn.execute(
+        """
+        UPDATE orders
+        SET recommendation_last_polled_at = %(now)s,
+            recommendation_poll_parked_reason = %(park)s
+        WHERE order_id = %(oid)s
+        """,
+        {"now": now, "oid": order_id, "park": _PARKING_POLL_VERDICTS["filled_not_booked"]},
+    )
+    _write_refusal_audit(
+        conn,
+        instrument_id=instrument_id,
+        recommendation_id=recommendation_id,
+        explanation=(
+            f"Broker reports order_id={order_id} as {broker_status} but the fill is NOT booked — "
+            f"late-fill booking is not implemented (#2942 slice C); the submission claim stays held"
+        ),
+        evidence={
+            "refusal": "pending_order_filled_not_booked",
+            "order_id": order_id,
+            "broker_status": broker_status,
+            "response": raw_payload,
+        },
+        now=now,
+    )
+    logger.error(
+        "reconcile_pending_recommendation_orders: recommendation_id=%d order_id=%d is %s at the broker "
+        "and is NOT booked locally — fills/positions/cash are behind the broker for this instrument",
+        recommendation_id,
+        order_id,
+        broker_status,
+    )
+
+
+def reconcile_pending_recommendation_orders(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    limit: int = 20,
+    now: datetime | None = None,
+) -> tuple[PendingOrderPollResult, ...]:
+    """Ask the broker about recommendation orders stuck at ``pending`` (#2942).
+
+    ``execute_order`` writes ``orders.status='pending'`` when the broker
+    acknowledges without filling, and until this consumer existed nothing looked
+    at that row again — while the claim index kept the recommendation
+    unsubmittable for ever, including when the broker rejected the order
+    asynchronously a second later.
+
+    ⚠⚠ **``lookup_order``, never ``get_order_status``.** The latter catches
+    ``HTTPStatusError``, ``httpx.HTTPError`` and ``ValueError`` and returns
+    ``status='failed'`` for all three, so it cannot distinguish "the broker
+    rejected this order" from "the network dropped". Terminalising on that would
+    release the claim on a live order after one blip and permit the second
+    economic order this ticket exists to prevent. ``lookup_order`` raises.
+
+    ⚠ ``status='uncertain'`` is NOT reachable from here and that is structural,
+    not an omission: ``broker_order_ref`` is written only by
+    ``_update_order_with_broker_result`` on the successful-response path, so a
+    parked uncertain row carries no broker order id — and demo
+    ``orders:lookup?referenceId=`` 404s even for an order that filled (#2961,
+    measured 2026-09-17).
+
+    No broker state is mutated: every call is a read, so
+    ``refuse_broker_mutation_if_unattended`` is not reached and must not be.
+    """
+    if limit < 1 or limit > 100:
+        raise ValueError("limit must be between 1 and 100")
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        # Broker I/O must never run inside a DB transaction, and
+        # ``_recommendation_submission_try_lock`` commits on acquire.
+        raise RuntimeError("pending-order reconciliation requires an idle connection")
+    at = now or _utcnow()
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            # ⚠ #2948: the rotation key is load-bearing. Ordering a bounded
+            # backlog on keys that never move for a non-terminal row is an
+            # ABSORBING STATE, not a delay — once the first `limit` rows are
+            # stuck, the row at `limit + 1` is never visited again.
+            f"""
+            SELECT order_id, recommendation_id, instrument_id, broker_order_ref
+            FROM orders
+            WHERE {_POLLABLE_ORDER_PREDICATE}
+            ORDER BY recommendation_last_polled_at ASC NULLS FIRST, order_id
+            LIMIT %(limit)s
+            """,  # noqa: S608
+            {"limit": limit},
+        )
+        due = cur.fetchall()
+    conn.commit()
+
+    results: list[PendingOrderPollResult] = []
+    for row in due:
+        results.append(_poll_one_pending_order(conn, broker=broker, row=row, now=at))
+    return tuple(results)
+
+
+def _poll_one_pending_order(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    row: dict[str, Any],
+    now: datetime,
+) -> PendingOrderPollResult:
+    """Poll and resolve exactly one order, under this recommendation's key.
+
+    The lock is the SAME per-recommendation key ``execute_order`` holds across
+    its claim, marker and provider call. Reusing it rather than minting a second
+    one keeps one lock discipline over this recommendation's whole lifecycle,
+    and it is per-recommendation so a wedged row cannot starve the others
+    (#2961's blast-radius finding).
+
+    ⚠ The row is re-read UNDER the lock. It was selected before it, and a
+    concurrent poller (a boot catch-up racing the scheduled fire) may already
+    have resolved it — re-polling a settled order would spend request budget to
+    learn nothing, and acting on the stale status would be worse.
+    """
+    order_id = int(row["order_id"])
+    recommendation_id = int(row["recommendation_id"])
+    instrument_id = int(row["instrument_id"])
+
+    with _recommendation_submission_try_lock(conn, recommendation_id) as acquired:
+        if not acquired:
+            return PendingOrderPollResult(order_id, recommendation_id, "lock_busy")
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT status, broker_order_ref FROM orders WHERE order_id = %(oid)s",
+                {"oid": order_id},
+            )
+            current = cur.fetchone()
+        conn.commit()
+        if current is None or current["status"] != "pending" or current["broker_order_ref"] is None:
+            return PendingOrderPollResult(order_id, recommendation_id, "no_longer_pending")
+
+        ref = str(current["broker_order_ref"])
+        # ``lookup_order`` raises ValueError on a non-positive-integer order id.
+        # A recommendation order can carry a ref shape we cannot look up (a v1
+        # submission echo, a demo synthetic id), and that is a permanent
+        # property of the row, not a transient failure — so it is PARKED and
+        # reported rather than retried hourly for ever.
+        if not ref.isdigit() or int(ref) <= 0:
+            _stamp_polled(
+                conn,
+                order_id=order_id,
+                now=now,
+                park_reason=_PARKING_POLL_VERDICTS["ref_not_pollable"],
+            )
+            logger.warning(
+                "reconcile_pending_recommendation_orders: order_id=%d has non-pollable broker_order_ref=%r",
+                order_id,
+                ref,
+            )
+            return PendingOrderPollResult(order_id, recommendation_id, "ref_not_pollable")
+
+        try:
+            detail = broker.lookup_order(order_id=ref)
+        except BrokerOrderNotFound:
+            # ⚠ NOT terminalised. A 404 on an id the broker itself issued is
+            # unexplained, and the safe reading of an unexplained answer is that
+            # the order may still exist. Releasing the claim here would be the
+            # #2942 defect reintroduced by its own fix.
+            _stamp_polled(conn, order_id=order_id, now=now)
+            logger.warning(
+                "reconcile_pending_recommendation_orders: order_id=%d ref=%s not found at the broker; claim stays held",
+                order_id,
+                ref,
+            )
+            return PendingOrderPollResult(order_id, recommendation_id, "not_found")
+        except BrokerOrderLookupError as exc:
+            _stamp_polled(conn, order_id=order_id, now=now)
+            logger.warning(
+                "reconcile_pending_recommendation_orders: order_id=%d lookup failed — %s",
+                order_id,
+                exc,
+            )
+            return PendingOrderPollResult(order_id, recommendation_id, "lookup_error")
+
+        try:
+            # The broker status vocabulary is fixed once, in the strategy
+            # reconciler, against the same eToro order contract (#2451/#2965).
+            # Imported rather than restated: a second copy is a magic-string
+            # duplicate of a typed counterpart, and the two would drift.
+            state, _order_status = classify_broker_order_status(detail.broker_status)
+            verdict = pending_order_verdict(state)
+        except (StrategyReconciliationError, ValueError) as exc:
+            # An unsettled partial fill (#2965) or a status outside the
+            # documented vocabulary. Never advance the order on a status we
+            # cannot read.
+            _stamp_polled(conn, order_id=order_id, now=now)
+            logger.error(
+                "reconcile_pending_recommendation_orders: order_id=%d broker_status=%r cannot be acted on — %s",
+                order_id,
+                detail.broker_status,
+                exc,
+            )
+            return PendingOrderPollResult(order_id, recommendation_id, "unsafe_status", detail.broker_status)
+
+        if verdict == "terminalised_rejected":
+            _terminalise_rejected_order(
+                conn,
+                order_id=order_id,
+                instrument_id=instrument_id,
+                recommendation_id=recommendation_id,
+                broker_status=detail.broker_status,
+                raw_payload=detail.raw_payload,
+                now=now,
+            )
+        elif verdict == "filled_not_booked":
+            _record_unbooked_fill(
+                conn,
+                order_id=order_id,
+                instrument_id=instrument_id,
+                recommendation_id=recommendation_id,
+                broker_status=detail.broker_status,
+                raw_payload=detail.raw_payload,
+                now=now,
+            )
+        else:
+            _stamp_polled(conn, order_id=order_id, now=now)
+        return PendingOrderPollResult(order_id, recommendation_id, verdict, detail.broker_status)
