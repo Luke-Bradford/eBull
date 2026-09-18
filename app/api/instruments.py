@@ -29,7 +29,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Literal, LiteralString, get_args
+from typing import Final, Literal, LiteralString, get_args
 
 import httpx
 import psycopg
@@ -5688,23 +5688,32 @@ def get_instrument_exec_compensation(
 # never inside the denominator, and since #2217 not deducted from the
 # residual either), not a holders slice. Treated as a valid filter value
 # below: it scopes the CSV to the treasury memo + residual rows only.
-_ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "insiders",
-        "blockholders",
-        "institutions",
-        "etfs",
-        "def14a_unmatched",
-        "funds",
-        "esop",
-        # #2215. Must be listed or ``?category=blockholders_restated`` 400s while
-        # those rows sit in the unfiltered export — the same
-        # filter-does-not-know-about-a-category defect prevention-log #1845
-        # records for the DEF 14A fold.
-        "blockholders_restated",
-    },
+#: ⚠ ORDERED, and the order is load-bearing: the ``?category=`` description
+#: below is DERIVED from this rather than restated, and a frozenset would make
+#: the published wording vary between processes. #3189 finding 17 is what a
+#: restated copy costs — the description listed eight categories while the
+#: filter accepted nine, so ``blockholders_restated`` was undocumented in the
+#: OpenAPI schema from the day #2215 added it.
+_ROLLUP_CSV_SLICE_CATEGORY_ORDER: Final[tuple[str, ...]] = (
+    "insiders",
+    "blockholders",
+    "institutions",
+    "etfs",
+    "def14a_unmatched",
+    "funds",
+    "esop",
+    # #2215. Must be listed or ``?category=blockholders_restated`` 400s while
+    # those rows sit in the unfiltered export — the same
+    # filter-does-not-know-about-a-category defect prevention-log #1845
+    # records for the DEF 14A fold.
+    "blockholders_restated",
 )
+_ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(_ROLLUP_CSV_SLICE_CATEGORY_ORDER)
 _ROLLUP_CSV_CATEGORIES: frozenset[str] = _ROLLUP_CSV_SLICE_CATEGORIES | {"treasury"}
+
+#: The accepted vocabulary as the OpenAPI schema publishes it. ``treasury`` is
+#: appended last because it is the one value that keeps NO slice.
+_ROLLUP_CSV_CATEGORY_DOC: Final[str] = " | ".join((*_ROLLUP_CSV_SLICE_CATEGORY_ORDER, "treasury"))
 
 
 def rollup_csv_slice_filter(category: str) -> frozenset[str]:
@@ -5736,8 +5745,7 @@ def get_instrument_ownership_rollup_csv(
     category: str | None = Query(
         default=None,
         description=(
-            "Optional category filter: insiders | blockholders | institutions "
-            "| etfs | def14a_unmatched | funds | esop | treasury. Slice "
+            f"Optional category filter: {_ROLLUP_CSV_CATEGORY_DOC}. Slice "
             "categories scope the export to that slice's holders; ``treasury`` "
             "drops all slice holders and emits only the treasury + residual "
             "memo rows. Without ``category``, every slice is exported. See the "
