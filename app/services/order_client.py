@@ -2845,6 +2845,37 @@ def _poll_one_pending_order(
             )
             return PendingOrderPollResult(order_id, recommendation_id, "unsafe_status", detail.broker_status)
 
+        # ⚠⚠ A REJECTED ORDER THAT CARRIES POSITION EXECUTIONS IS A
+        # CONTRADICTION, AND THIS IS THE ONE VERDICT THAT RELEASES THE CLAIM
+        # (#3189 finding 3). `classify_broker_order_status` reads the status
+        # word only; the detail can still name executions the broker actually
+        # made. Terminalising on the word alone would leave a partial execution
+        # unbooked AND lift the submission claim, so a second economic order
+        # for the same recommendation becomes possible — the #2942 defect
+        # reintroduced through a different door.
+        #
+        # The same contradiction is already refused one subsystem over, against
+        # the same eToro contract (#2451/#2965):
+        # `strategy_order_reconciliation.py` raises
+        # "rejected broker order unexpectedly has position executions". This is
+        # that rule, carried to the poller, which had the unsafe half.
+        #
+        # ⚠ `unsafe_status` rather than a new verdict: its meaning is already
+        # "never advance the order on a status we cannot read", and it is
+        # deliberately NOT in `_PARKING_POLL_VERDICTS`, so the poller keeps
+        # re-asking while the broker settles the partial. Parking it would
+        # freeze a live order at exactly the moment it is mid-fill.
+        if verdict == "terminalised_rejected" and detail.position_executions:
+            _stamp_polled(conn, order_id=order_id, now=now)
+            logger.error(
+                "reconcile_pending_recommendation_orders: order_id=%d broker_status=%r is rejected but carries "
+                "%d position execution(s); claim stays held and the order is NOT terminalised",
+                order_id,
+                detail.broker_status,
+                len(detail.position_executions),
+            )
+            return PendingOrderPollResult(order_id, recommendation_id, "unsafe_status", detail.broker_status)
+
         if verdict == "terminalised_rejected":
             _terminalise_rejected_order(
                 conn,
