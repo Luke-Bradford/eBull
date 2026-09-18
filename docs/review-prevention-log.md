@@ -8452,3 +8452,76 @@ original, because the gate now *looked* like a bound.
   `tests/test_jobs_runtime.py::TestConnectionBudgetExecutionGate::test_a_wait_does_not_leak_into_the_next_slot_entry`
   (docstring names its own discriminating power);
   `docs/proposals/infra/2026-09-18-durable-execution-slot-wait.md` (probe→failure-count table).
+
+## A recorded NEXT STEP carries a granularity, and it is not always the granularity of the question it settles (#2794, 2026-09-18)
+
+- First seen in: #2794's handoff, which named its own next step as one join — *"intersect the
+  154 unique-unequal-edge instruments with the 146 refused-cluster instruments — the one
+  number that decides whether the naming signal reaches the cases this ticket is actually
+  about."* Both sets are real, both counts are correct, and the join is trivial to run.
+- Symptom: run as written it answers a different question. The sets are keyed on
+  **instrument**; the thing being decided is whether a naming edge exists between the members
+  of a **cluster** — an `(instrument, accession)` pair. An instrument can carry its naming edge
+  on one accession and its refused cluster on another, and the instrument-level join scores
+  that as a hit. Measured on the full population: the coarse intersection is **21**, of which
+  **11** are not reached at cluster level. **52% overstatement**, and it would have been
+  reported as the number that decides the ticket's direction.
+- Root cause: a next step gets written down at the granularity of whatever was most recently
+  *measured*, not the granularity of the question. Both censuses here happened to report an
+  instrument count, so "intersect them" was the sentence that came to hand. Nothing in the
+  handoff is wrong — it is under-specified in a way that is invisible unless you re-derive
+  what the join has to prove.
+- ⚠ The tell is a next step phrased as a **set intersection between two previously-published
+  counts**. That shape is attractive precisely because both numbers already exist, which is
+  also why nobody re-checks what they are counts *of*.
+- Prevention: before running an inherited "intersect A with B", write one sentence naming the
+  unit the DECISION is about (row? identity? cluster? instrument?), then check both sets are
+  keyed on that unit. If they are not, compute the fine-grained version and report the coarse
+  one beside it, explicitly labelled an upper bound — the gap between them is itself evidence,
+  and suppressing it hides that the handoff was under-specified. This is the handoff-shaped
+  sibling of the existing entry *"when an invariant starts firing on an expected case … restate
+  it at the granularity of the thing it is protecting"* (#2230, 2026-08-20), which covers A/B
+  invariants; this one covers a recorded next step, which nothing executes and no gate reads.
+- Enforced in: this log; `scripts/audit_2794_fold_anchor.py::_reach` (its docstring states why
+  the instrument-level figure is an upper bound, and the report prints both with the
+  overstatement on its own line).
+
+## ⚠ #2385's re-spelled-sort-key entry has a LIVE instance, because its own prevention step was not run when the key gained a component (#2794/#3146, 2026-09-18)
+
+- First seen in: `scripts/audit_2794_fold_anchor.py::BALANCES_SQL`, a census whose `ranked` CTE
+  hand-copies the `ownership_insiders_current` winner ordering *"spelled from
+  `ownership_observations.py` so the census asks the same question the MERGE answers"*.
+- Symptom: #3146 (PR #3148) added a component to exactly that key — production now orders by
+  `_INSIDER_WINNER_ORDER_TAIL` (`ownership_observations.py:299`): accession prefix ASC, then the
+  `:NDT:` surrogate key as a **numeric DESC**, and only then `source_document_id ASC`. The copy
+  still ends at the bare lexical key. So the census measures a rule production no longer uses,
+  its label (*"keys decided by the projection's lexical tie-break"*) no longer describes the
+  quantity — after #3146 the lexical key is the THIRD tie-break, reached only when the prefix
+  ties and the NDT numeric ties or is NULL on both sides — and its `winner` join to the live row
+  silently narrows the population to keys where the old and new rules agree. It still prints a
+  confident **13,787**.
+- ⚠⚠ The number is unchanged across the fix, which is the trap: a figure that does not move
+  reads as *stable*, not as *disconnected*. Nothing fails, and re-running it "to check" returns
+  the same answer as confidently as before.
+- Root cause: the existing entry *"A test that re-spells a shared sort key INLINE is a copy, and
+  a copy drifts when the key gains a component"* (#2385, 2026-08-07) already states the rule and
+  its prevention step is *"grep a new sort/priority key for inline re-spellings before changing
+  it"*. That grep was not run when #3146 changed the key. The entry was right and unused.
+- ⚠ Note production did the right thing — it extracted `_INSIDER_WINNER_ORDER_TAIL` as a named
+  `Final[str]` and three other consumers import it (`backfill_3146_insiders_current.py`,
+  `audit_3146_insider_line_order.py`, the writer-pattern shell gate). Extracting a constant does
+  not retire the grep: it only protects the callers that already import it, and the copy that
+  drifts is by definition the one that does not.
+- Prevention: when a shared ordering/priority key gains a component, grep the key's DISTINCTIVE
+  TOKENS (here `period_end DESC, filed_at DESC`) across `scripts/` and `tests/`, not just the
+  constant's name — a hand copy does not contain the constant's name, so grepping the name finds
+  every site except the broken ones. ⚠ Verify that claim on this case rather than taking it:
+  `rg -ln '_INSIDER_WINNER_ORDER_TAIL' scripts/ tests/` returns this file **today only because
+  the flag comment added above names the constant**; before that comment existed — i.e. at the
+  moment the drift happened — the name-grep returned the four importing consumers and not the
+  broken copy, while the token-grep returned the copy. Flag a census whose rule has drifted
+  rather than half-fixing it: re-pointing the ORDER BY at the live constant while the surrounding
+  claim still describes the old tie-break makes a stale question look current.
+- Enforced in: this log; `scripts/audit_2794_fold_anchor.py` (`BALANCES_SQL`'s header states the
+  drift and what re-speccing requires; `--balances` prints a STALE banner above the figure so it
+  cannot be read off a terminal without the caveat).
