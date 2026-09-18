@@ -66,6 +66,7 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.db.snapshot import snapshot_read
 from app.services.ownership_rollup import OwnershipRollup, get_ownership_rollup
 
 #: The two ``SourceTag`` values that land an owner in the blockholders slice.
@@ -161,7 +162,14 @@ def main(argv: list[str] | None = None) -> int:
 
         for index, (instrument_id, symbol, stored_rows) in enumerate(population, start=1):
             try:
-                rollup = get_ownership_rollup(conn, symbol, instrument_id)
+                # #2789: ``get_ownership_rollup`` issues many separate reads and
+                # opens no transaction of its own, so a concurrent ownership
+                # refresh produces a TORN render that raises nothing. Un-snapshotted,
+                # a tear would have been recorded here as a legitimate classification.
+                # Per instrument, not around the whole loop: one snapshot spanning a
+                # ~10-minute scan would pin an old xmin against the dev cluster.
+                with snapshot_read(conn):
+                    rollup = get_ownership_rollup(conn, symbol, instrument_id)
             except Exception as exc:  # noqa: BLE001 - a census records failures, it does not abort on them
                 states["no_rollup"] += 1
                 rows.append(
