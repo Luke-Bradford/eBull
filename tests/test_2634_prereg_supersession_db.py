@@ -119,6 +119,48 @@ def _access(**overrides: object) -> HoldoutAccess:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("door", "caller"),
+    [
+        (record_holdout_access, "require_outcome_access"),
+        (None, "supersede_preregistration"),
+    ],
+)
+def test_a_post_lock_re_read_refuses_an_isolation_it_cannot_trust(
+    ebull_test_conn: psycopg.Connection[tuple],
+    door: object,
+    caller: str,
+) -> None:
+    """#3189 findings 9/11 — both post-lock re-readers require READ COMMITTED.
+
+    The lock serialises the orderings and the loser then RE-READS to find the
+    winner's row, which needs a fresh snapshot per statement. Under
+    ``REPEATABLE READ`` that read returns the PRE-lock snapshot: a supersession
+    or freeze that committed while we waited is invisible, so the access would
+    be authorised against a superseded declaration — or refused
+    ``preregistration_not_frozen`` for a trial that demonstrably has one, the
+    exact audit row #2617 moved the check under the lock to stop producing.
+
+    ``supersede_preregistration`` enforced this from the start; the access door
+    relied on the same re-read and did not. Both are parametrised here so the
+    pair cannot drift apart again.
+    """
+    with ebull_test_conn.transaction():
+        _freeze_stranded(ebull_test_conn)
+
+    ebull_test_conn.rollback()
+    ebull_test_conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+    try:
+        with pytest.raises(RuntimeError, match=f"{caller} needs READ COMMITTED"), ebull_test_conn.transaction():
+            if door is None:
+                supersede_preregistration(ebull_test_conn, _declaration(), _supersession())
+            else:
+                record_holdout_access(ebull_test_conn, _access())
+    finally:
+        ebull_test_conn.rollback()
+        ebull_test_conn.isolation_level = None
+
+
 def test_a_stranded_trial_can_look_at_its_outcomes_again_after_a_supersession(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
