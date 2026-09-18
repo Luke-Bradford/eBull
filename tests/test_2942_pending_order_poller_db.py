@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import psycopg
+import psycopg.rows
 import pytest
 
 from app.providers.broker import (

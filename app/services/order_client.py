@@ -2405,16 +2405,24 @@ def count_pending_recommendation_orders(conn: psycopg.Connection[Any]) -> int:
 
     The scheduler's prerequisite reads this so a dormant path spends no lane
     time and no share of the eToro request budget.
+
+    ⚠ Its own ``scalar_row`` cursor, not ``conn.execute(...).fetchone()[0]``.
+    Callers hand over whatever connection they already hold and this repo's
+    read paths routinely set ``row_factory=dict_row``, under which ``row[0]``
+    raises ``KeyError: 0``. Caught by running it against the dev DB, not by a
+    test — every test here builds its own connection.
     """
-    row = conn.execute(
-        """
-        SELECT count(*) FROM orders
-        WHERE recommendation_id IS NOT NULL
-          AND status = 'pending'
-          AND broker_order_ref IS NOT NULL
-        """
-    ).fetchone()
-    return int(row[0]) if row is not None else 0
+    with conn.cursor(row_factory=psycopg.rows.scalar_row) as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM orders
+            WHERE recommendation_id IS NOT NULL
+              AND status = 'pending'
+              AND broker_order_ref IS NOT NULL
+            """
+        )
+        count = cur.fetchone()
+    return int(count or 0)
 
 
 def _stamp_polled(conn: psycopg.Connection[Any], *, order_id: int, now: datetime) -> None:
