@@ -2333,6 +2333,42 @@ class TestReservedLaneSchedulerExecutors:
             assert members, f"{lane} has no registered job — a reserved lane with no member is dead capacity"
             assert executors[lane]._pool._max_workers >= len(members), f"{lane} has {members}"
 
+    def test_an_etoro_source_buys_no_lane(self) -> None:
+        """#3189 finding 9 — ``source`` and the execution lane are different budgets.
+
+        ``source="etoro"`` buys a share of the eToro REQUEST budget
+        (``app/jobs/sources.py``). It buys nothing from ``execution_lane_for``,
+        which knows ``sec_rate``, the paper cycle and the core-preflight
+        producers and nothing else — so every ``etoro``-sourced job dispatches
+        on the GENERAL executor and takes a general semaphore permit.
+
+        A comment on ``recommendation_order_reconcile`` claimed the opposite
+        ("joining an existing lane buys a dispatch thread"), which is how a
+        reader ends up believing the hourly claim release is insulated from
+        general-lane contention. It is not: lanemates waited up to 1032.7 s for
+        admission in the 7 days to 2026-09-18. Asserted rather than commented,
+        because this repo has already been here — "a comment saying a predicate
+        is shared is not a shared predicate" (#2942, PR #3168 round 2).
+        """
+        from app.jobs.sources import source_for
+        from app.workers.scheduler import (
+            JOB_CORE_REBALANCE_OBSERVATION,
+            JOB_EXECUTE_APPROVED_ORDERS,
+            JOB_RECOMMENDATION_ORDER_RECONCILE,
+        )
+
+        for name in (
+            JOB_RECOMMENDATION_ORDER_RECONCILE,
+            JOB_EXECUTE_APPROVED_ORDERS,
+            JOB_CORE_REBALANCE_OBSERVATION,
+        ):
+            assert source_for(name) == "etoro"
+            assert runtime.execution_lane_for(name) == runtime.EXECUTION_LANE_GENERAL, (
+                f"{name} is sourced 'etoro' and must still run on the general lane — "
+                "if it moved, the connection budget was re-reviewed and this test's "
+                "premise (and the comment beside `source=`) needs rewriting"
+            )
+
     def test_reserved_lane_membership_is_an_explicit_allow_list(self) -> None:
         """⚠ The pool now GROWS to fit its members, so membership must be the reviewed act.
 

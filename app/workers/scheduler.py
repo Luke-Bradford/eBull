@@ -1101,10 +1101,34 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_RECOMMENDATION_ORDER_RECONCILE,
         display_name="Reconcile pending recommendation orders (#2942)",
-        # Lane ``etoro``: the only external call is an informational eToro read
-        # and ``etoro`` is the lane that owns that budget. Joining an existing
-        # lane buys a dispatch thread, not a connection permit (#3159) — and
-        # this box's cluster is at its usable ``max_connections`` ceiling.
+        # ⚠⚠ ``source`` IS NOT A LANE (#3189 finding 9). This comment used to
+        # read "joining an existing lane buys a dispatch thread", and that
+        # conflates two budgets. ``source`` buys a share of the eToro REQUEST
+        # budget (``app/jobs/sources.py``); the EXECUTION lane is decided
+        # separately by ``execution_lane_for``, which knows ``sec_rate``, the
+        # paper cycle and the core-preflight producers — and nothing else. So
+        # this job dispatches on the GENERAL executor and takes a general
+        # semaphore permit. Measured, not read:
+        # ``execution_lane_for("recommendation_order_reconcile")`` ->
+        # ``general_non_sec``, and ``test_the_poller_runs_on_the_general_lane``
+        # pins it, because a comment that was wrong once will be wrong again.
+        #
+        # ⚠ What the general lane costs, from ``execution_slot_wait_seconds``
+        # (#3159 clause 2), 7 days to 2026-09-18: lanemates waited up to 1032.7 s
+        # (`sec_manifest_worker`), 939.9 s (`strategy_intraday_harvest`) and
+        # 734.3 s (`jobs_retry_sweeper`) for admission. This job has no recorded
+        # wait of its own — 36 of 36 fires were prerequisite SKIPS, which return
+        # before the slot — so the exposure is a property of the lane, shown by
+        # its lanemates. ⚠ Suppression is NOT among the costs: ``max_instances=1``
+        # only drops a fire if a wait exceeds the hourly interval, and the
+        # largest observed anywhere on the lane is 29% of it.
+        #
+        # ⚠ A reserved lane is barred by a measurement, not a preference: the
+        # cluster is at its usable ``max_connections`` ceiling (usable 27, demand
+        # 27, dev 2026-09-16), so a new lane costs
+        # ``1 permit x JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION = 2`` and fails
+        # boot — the same reason #3118 put the core quote producer on an
+        # existing lane.
         source="etoro",
         description=(
             "Hourly — ask the broker about recommendation orders stuck at "
