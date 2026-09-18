@@ -1663,6 +1663,13 @@ def _record_access_with_declaration(
     # a superseded declaration, or refused `preregistration_not_frozen` for a
     # trial that demonstrably has one — the exact audit row #2617 moved this
     # check under the lock to stop producing.
+    #
+    # ⚠ BEFORE the lock, deliberately (review NITPICK). Checking after would
+    # read the same value: Postgres refuses `SET TRANSACTION ISOLATION LEVEL`
+    # once a transaction has issued a query — verified, not assumed
+    # (`ActiveSqlTransaction: SET TRANSACTION ISOLATION LEVEL must be called
+    # before any query`) — so the level cannot move while we wait. Checking
+    # first means an unusable isolation costs no lock wait.
     _require_read_committed(
         conn,
         "require_outcome_access",
