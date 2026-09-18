@@ -60,6 +60,15 @@ _RECOGNISED_OUTCOMES: Final = frozenset({"pass", "cash"})
 # ⚠ SPY.RTH is the only candidate `us_equity`, which is the only member of
 # ``SESSION_SUPPORTED_ASSET_CLASSES``.  A `pass` on either LSE name would have been
 # refused by the venue rule below at transcription time, by design.  It was not.
+#
+# ⚠ ``SELECTED_CORE_EVIDENCE_REF`` is an OPAQUE audit string to every production
+# reader, not a path anything resolves.  ``classify_core_selection`` asks only that it
+# be non-empty, and the API carries it through as ``str | None`` -- no service, job or
+# frontend opens it (`rg evidence_ref app/ frontend/src`).  The ONLY resolver is
+# ``tests/test_2833_transcribed_verdict.py``, which joins it to the repo root so a path
+# typo fails a test.  A repo-relative path is chosen because it is the most useful thing
+# to print beside a verdict; if a production reader ever needs the CONTENTS, give it one
+# base and say so here rather than letting two callers pick their own.
 SELECTED_CORE_OUTCOME: Final[CoreSelectionOutcome | None] = "pass"
 SELECTED_CORE_INSTRUMENT_ID: Final[int | None] = 3417
 SELECTED_CORE_EVIDENCE_REF: Final[str | None] = "docs/proposals/ta/2026-09-18-core-selection-result.json"
