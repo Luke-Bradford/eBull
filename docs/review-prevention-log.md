@@ -8278,3 +8278,33 @@ is the lucky direction.
 - Enforced in: this log; `app/services/order_client.py::terminalise_unsubmitted_recommendation_attempt`
   (docstring records why it has no idle precondition) and
   `::_recommendation_submission_try_lock` (comment states what the rollback can discard).
+
+## A verdict that records but does not resolve re-selects for ever (2026-09-18, #2942, PR #3168)
+
+The pending recommendation-order poller has a deliberate gap: when the broker reports a
+`Filled` order it records the fact and refuses to book the fill, because booking a late
+fill needs the submission-time exit lot and an attended observation to verify. That
+refusal is right. What was wrong is that it left `orders.status='pending'`, which is the
+poller's own selection predicate — so the order re-selected on every hourly fire, spending
+a shared eToro read and appending another identical `decision_audit` row, for ever. The
+review bot caught it; no test would have, because every test polls once.
+
+The trap is that the safe-looking half and the unbounded half are the SAME decision. "Leave
+it alone until someone builds the rest" is correct about the economic writes and silently
+wrong about the work queue, and the second half is invisible while the path is dormant.
+
+- Prevention: whenever a queue consumer has an outcome that is neither "resolved" nor "retry
+  later", ask *what re-selects this row next tick, and what stops it*. Bound it explicitly —
+  a park flag, a max attempt count, an age cut — and bound ONLY the outcomes that are a
+  permanent property of the row. A transient failure (transport error, 404, a status whose
+  handling is merely unsettled) must keep retrying: parking on one silently retires a live
+  row from reconciliation, which is usually the very defect the consumer exists to fix.
+- ⚠ The park must not be spelled as a terminal STATUS when the status carries a lock or a
+  claim. Here `'filled'`/`'rejected'` fall outside `idx_orders_recommendation_open_attempt`'s
+  predicate, so writing either to bound the polling would have released the submission claim
+  — the duplicate-order defect #2942 exists to prevent, on an order that demonstrably
+  executed. A separate nullable column keeps "stop asking" and "stop holding" independent.
+- Enforced in: this log; `sql/395_recommendation_poll_parked_reason.sql`;
+  `tests/test_2942_pending_order_poller_db.py::test_an_unbooked_fill_is_parked_so_it_cannot_poll_for_ever`
+  and its two negatives (`::test_a_transient_failure_is_NOT_parked`,
+  `::test_an_unsettled_partial_fill_is_NOT_parked`).
