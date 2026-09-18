@@ -238,22 +238,85 @@ Transaction(s)", column 6 is "Ownership Form: Direct (D) or Indirect (I)", and c
 `.claude/**` is write-refused from a loop worktree (#2403), so the skill correction is posted
 on the ticket for a session with permission.
 
+## 5. The refusals are not a disagreement between filers (2026-09-18)
+
+`PYTHONPATH=. uv run python -m scripts.audit_2794_fold_anchor --pipeline`, full population,
+exit 0. Every figure below is printed by that mode; none is written by hand.
+
+```
+refused_clusters                       157
+members                                668
+xml_only_members                       157      <- exactly one per cluster
+dera_only_members                      511
+dual_pipeline_members                    0
+value_on_own_accession_line            661 / 668
+control_value_on_borrowed_line          20      <- deterministic mis-paired accession
+clusters_with_exactly_one_xml_member   157
+clusters_where_dera_members_agree      157
+clusters_where_only_xml_differs        157
+clusters_whose_lines_name_one_filer    156 / 156
+clusters_spanning_one_series            79      · several_series 77 · no lines 1
+form3_dera_took_the_first_line         116 / 117
+form4_dera_took_the_last_line           37 / 39
+```
+
+**Source rule.** `<nonDerivativeTable>` is a SIBLING of `<reportingOwner>`
+(`.claude/skills/data-sources/sec-edgar.md` §2.3), so a joint Form 3/4 carries ONE Table I and
+attributes no line to any co-filer. Neither pipeline can therefore read an attribution; both
+invent one, and they invent different ones:
+
+- the XML parser gives every line to `filers[0]` — `default_filer_cik = filers[0].filer_cik`
+  at `app/services/insider_transactions.py:552`, `:653` and `:1156`, threaded into
+  `_extract_transactions` (`:871`) and `_extract_holdings` (`:1196`) — **one** identity per
+  accession. ⚠ The skill and prevention log both cite `insider_transactions.py:449` for this;
+  that line number is stale (it is now a comment), and the three real sites are above.
+- the DERA bulk path stages one row per reporting owner for **every** NONDERIV line
+  (`app/services/sec_insider_dataset_ingest.py:472::_stage_owners`, called at `:702`) — N
+  identities, each carrying a line that is not theirs.
+
+`_INSIDER_DUAL_PIPELINE_DECOLLISION` (#1805, `ownership_observations.py:254`) removes the DERA
+copy only where the same `holder_cik` also has a plain row — i.e. only for `filers[0]`.
+Co-filers 2..N keep theirs, all at the one value the DERA winner rule picked.
+
+**So the anchor is innocent of all 157.** The two values in a refused cluster are one line set
+read twice, and the DERA side is unanimous by construction. The "binary disagreement" shape
+(157/157 at exactly two values, 0 with ≥3) that looked like a property of the filings is a
+property of having exactly two pipelines. This is why three fold-key replacements in a row
+measured negative: the fold gate was never the surface.
+
+⚠ **The value split is a deterministic consequence of each side's own ordering rule, not
+noise.** #3146 excludes `:NDH:` from its Form 3 ordering, so the DERA tail falls to
+`source_document_id ASC` = lowest holding surrogate key = the FIRST line (116/117); on Form 4
+the `:NDT:` numeric DESC key takes the LAST line (37/39). The XML path picks the greatest
+`(txn_date, txn_row_num)` **within a `direct_indirect` group**, which is a different scope.
+
+⚠ **This does NOT license folding the members.** 77 of 156 clusters span more than one
+`(security_title, direct_indirect)` series, and Form 4 General Instruction 4(b)(v) permits a
+joint filing to report separately owned securities. Same line set ≠ same position.
+
+⚠ **The implied fix is not one line.** Widening the de-collision from `holder_cik`-matched to
+accession-matched would drop **4,978 rows across 1,039 instruments** (`--pipeline` prints it),
+far beyond the 157 — a corpus-rung change needing its own spec, a full-population A/B and
+DoD clauses 8-12, not an edit.
+
 ## Where #2794 stands
 
-**Open, anchor-dependence unfixed.** What a next attempt now knows and need not re-derive:
+**Open, and re-homed by §5: the defect is dual-pipeline attribution, not the fold anchor.**
+What a next attempt now knows and need not re-derive:
 
+- §5 is the head of the ticket. A fourth fold-key candidate is wasted work — the anchor does
+  not produce these refusals.
+- The fix surface is `_INSIDER_DUAL_PIPELINE_DECOLLISION` + `_stage_owners`, and its blast
+  radius is priced (4,978 rows / 1,039 instruments), so it is corpus-rung from the start.
+- The open question the fix must answer is NOT "which value does a folded block carry" — that
+  question presupposed two disclosures and there are not two. It is **what cardinality the
+  insider layer should carry for an unattributable joint Table I**: one row per filing (the
+  XML shape) or one per reporting owner (the DERA shape). That is the #2215 model question
+  arriving from a second direction.
 - The #2408 naming chain does not COVER these clusters (§1) — measured, with the coverage
   caveat stated.
 - `IPAR` is a #3146 symptom, and #3146's fix is predicted to restore that fold with no change
-  to the anchor (§2). **Re-measure the remaining six cases after #3146 lands before treating
-  any of them as fold defects.**
+  to the anchor (§2). All seven of the ticket's named cases have since left the refused set.
 - Accession-only bucketing plus a chain-shape refusal gate is refuted by an executed
   counterexample (§3.3); a tolerance on the value match remains refused (#2785).
 - A provenance-gated upper bound needs a positive floor on the same set (§4).
-
-The model-level option — Section 16 is overlapping by design under Rule 16a-1(a)(2), which is
-#1659's criterion for demoting a source out of an additive aggregate — remains open but
-changes what the ownership card MEANS and belongs to #2215. ⚠ It is not the ONLY option left:
-parser attribution (both reporting owners on a joint Table I), balance sequencing (#3146) and
-relationship extraction are all still unexplored, and §1 bounded coverage rather than
-existence.
