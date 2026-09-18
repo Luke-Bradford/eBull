@@ -473,14 +473,28 @@ JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 JOB_RECOMMENDATION_ORDER_RECONCILE = "recommendation_order_reconcile"
 #: Poll verdicts that are work the job COULD NOT DO, not outcomes it produced —
 #: so they belong on ``JobProgress.errors``, whose non-zero value degrades the
-#: run (#3189). ``poll_error`` is an unpredicted exception the batch contained;
-#: ``identity_mismatch`` is the broker answering about a different order, a
-#: violation of the contract the whole path rests on. On the outcome axis a run
-#: where EVERY lookup broke that contract would still record ``success``, which
-#: is the #2218 shape. Named here rather than inline so the wiring is assertable
-#: without credentials, a broker and a database
+#: run (#3189). On the outcome axis a run in which EVERY row hit one of these
+#: and nothing resolved would still record ``success``, which is the #2218
+#: shape. Named here rather than inline so the wiring is assertable without
+#: credentials, a broker and a database
 #: (``tests/test_order_client.py::TestContainedPollErrorsAreNotSilent``).
-RECONCILE_ERROR_VERDICTS: Final[tuple[str, ...]] = ("poll_error", "identity_mismatch")
+#:
+#:   poll_error          -- an unpredicted exception the batch contained.
+#:   identity_mismatch   -- the broker answered about a DIFFERENT order, a
+#:                          violation of the contract the whole path rests on.
+#:   environment_mismatch-- the row was submitted to another broker environment,
+#:                          so this process refuses to look it up. ⚠ It is an
+#:                          ERROR and not an expected refusal (Codex ckpt-2, P1):
+#:                          the row still holds a submission claim and nothing
+#:                          will resolve it while the deployment points
+#:                          elsewhere, so "correctly declined" and "silently
+#:                          stalled" are the same state and the operator has to
+#:                          see it.
+RECONCILE_ERROR_VERDICTS: Final[tuple[str, ...]] = (
+    "poll_error",
+    "identity_mismatch",
+    "environment_mismatch",
+)
 # #2603 item 3 step 3b-3 — observe the core sleeve and store one rebalance
 # verdict. Produces submission-gate INPUT, never authority: nothing invokes
 # the gate, and the only provider call is informational.
@@ -5375,6 +5389,12 @@ def execute_approved_orders() -> None:
                             recommendation_id=rec_id,
                             decision_id=decision_id,
                             broker=broker,
+                            # #3189 finding 4b: recorded on the durable intent
+                            # row so the poller can prove which environment's
+                            # id namespace the broker ref belongs to. `None`
+                            # when no broker was opened, which is also the
+                            # branch that never writes an intent row.
+                            broker_env=settings.etoro_env if broker is not None else None,
                         )
                         conn.commit()
                     if result.outcome == "filled":
@@ -6366,7 +6386,7 @@ def recommendation_order_reconcile() -> None:
     with _tracked_job(JOB_RECOMMENDATION_ORDER_RECONCILE) as tracker:
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as broker:
             with connect_job() as conn:
-                results = reconcile_pending_recommendation_orders(conn, broker=broker)
+                results = reconcile_pending_recommendation_orders(conn, broker=broker, env=settings.etoro_env)
         tracker.row_count = len(results)
         verdicts: dict[str, int] = {}
         for result in results:

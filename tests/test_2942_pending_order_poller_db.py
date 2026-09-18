@@ -39,6 +39,7 @@ from app.providers.broker import (
 )
 from app.services.order_client import (
     RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS,
+    _persist_submitted_intent,
     count_pending_recommendation_orders,
     reconcile_pending_recommendation_orders,
 )
@@ -48,6 +49,22 @@ from tests.fixtures.ebull_test_db import test_database_url
 INSTRUMENT_ID = 991_942
 _NOW = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
 _REF = "13902598"
+
+
+_ENV = "demo"
+
+
+def _reconcile(conn: psycopg.Connection[Any], **kwargs: Any) -> tuple[Any, ...]:
+    """``reconcile_pending_recommendation_orders`` with this suite's environment.
+
+    ``env`` is REQUIRED on the service (#3189 finding 4b) — a poller that
+    guessed which broker environment it was talking to is the defect the
+    parameter exists to remove. Every test here seeds rows for one environment,
+    so defaulting it once keeps each test's own subject visible; the tests that
+    are ABOUT the environment pass it explicitly.
+    """
+    kwargs.setdefault("env", _ENV)
+    return reconcile_pending_recommendation_orders(conn, **kwargs)
 
 
 def _detail(broker_status: str, *, ref: str = _REF) -> BrokerOrderDetail:
@@ -99,18 +116,27 @@ def _seed_order(
     ref: str | None = _REF,
     origin: str = "manual",
     last_polled_at: datetime | None = None,
+    broker_env: str | None = _ENV,
 ) -> int:
+    """Seed one order row.
+
+    ``broker_env`` defaults to this suite's environment because that is what a
+    real submitted order now carries (#3189 finding 4b) — the poller refuses a
+    NULL rather than assuming it is ours, so a NULL default would make every
+    test here a test of the environment gate. The tests that ARE about the gate
+    pass it explicitly.
+    """
     row = conn.execute(
         """
         INSERT INTO orders
             (instrument_id, recommendation_id, action, order_type, status,
              broker_order_ref, raw_payload_json, created_at, execution_origin,
              recommendation_request_id, recommendation_submission_phase,
-             recommendation_last_polled_at)
+             recommendation_last_polled_at, broker_environment)
         VALUES
             (%(iid)s, %(rid)s, 'BUY', 'market', %(status)s,
              %(ref)s, '{}'::jsonb, %(now)s, %(origin)s,
-             %(req)s, 'broker_verb_entered', %(polled)s)
+             %(req)s, 'broker_verb_entered', %(polled)s, %(benv)s)
         RETURNING order_id
         """,
         {
@@ -123,10 +149,21 @@ def _seed_order(
             # The request-id CHECK admits it only alongside a recommendation.
             "req": uuid4() if recommendation_id is not None else None,
             "polled": last_polled_at,
+            "benv": broker_env,
         },
     ).fetchone()
     assert row is not None
     conn.commit()
+    return int(row[0])
+
+
+def _seed_decision(conn: psycopg.Connection[Any]) -> int:
+    row = conn.execute(
+        "INSERT INTO decision_audit (decision_time, instrument_id, stage, pass_fail, explanation) "
+        "VALUES (%s,%s,'execution','PASS','poller test') RETURNING decision_id",
+        (_NOW, INSTRUMENT_ID),
+    ).fetchone()
+    assert row is not None
     return int(row[0])
 
 
@@ -176,9 +213,7 @@ def test_a_broker_rejection_terminalises_and_lifts_the_claim(
     rec = _seed_recommendation(ebull_test_conn)
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
 
-    results = reconcile_pending_recommendation_orders(
-        ebull_test_conn, broker=_broker(detail=_detail("Rejected")), now=_NOW
-    )
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Rejected")), now=_NOW)
 
     assert [r.verdict for r in results] == ["terminalised_rejected"]
     assert _order_row(ebull_test_conn, order_id)["status"] == "rejected"
@@ -232,7 +267,7 @@ def test_a_rejected_status_carrying_executions_keeps_the_claim(
         raw_payload=detail.raw_payload,
     )
 
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=contradictory), now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=contradictory), now=_NOW)
 
     assert [(r.verdict, r.broker_status) for r in results] == [("filled_not_booked", "Rejected")]
     row = _order_row(ebull_test_conn, order_id)
@@ -250,7 +285,7 @@ def test_a_rejected_status_carrying_executions_keeps_the_claim(
 
     # And it is no longer selectable, so the contradiction cannot burn a broker
     # read every hour.
-    assert reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=_detail("Rejected"))) == ()
+    assert _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Rejected"))) == ()
     assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
 
 
@@ -283,7 +318,7 @@ def test_an_order_settled_during_the_broker_round_trip_is_not_regressed(
     broker = MagicMock(spec=BrokerProvider)
     broker.lookup_order.side_effect = _settled_elsewhere_mid_lookup
 
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
     assert [(r.verdict, r.broker_status) for r in results] == [("no_longer_pending", "Rejected")]
     assert _order_row(ebull_test_conn, order_id)["status"] == "filled", (
@@ -326,7 +361,7 @@ def test_a_recommendation_that_moved_blocks_the_claim_release(
     broker = MagicMock(spec=BrokerProvider)
     broker.lookup_order.side_effect = _recommendation_moved_mid_lookup
 
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
     assert [r.verdict for r in results] == ["poll_error"]
     row = _order_row(ebull_test_conn, order_id)
@@ -351,7 +386,7 @@ def test_every_documented_rejection_status_terminalises(
     rec = _seed_recommendation(ebull_test_conn)
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
 
-    reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=_detail(broker_status)), now=_NOW)
+    _reconcile(ebull_test_conn, broker=_broker(detail=_detail(broker_status)), now=_NOW)
 
     assert _order_row(ebull_test_conn, order_id)["status"] == "rejected"
 
@@ -364,9 +399,7 @@ def test_a_still_pending_order_is_stamped_and_otherwise_untouched(
     rec = _seed_recommendation(ebull_test_conn)
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
 
-    results = reconcile_pending_recommendation_orders(
-        ebull_test_conn, broker=_broker(detail=_detail("Pending")), now=_NOW
-    )
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Pending")), now=_NOW)
 
     assert [r.verdict for r in results] == ["still_pending"]
     row = _order_row(ebull_test_conn, order_id)
@@ -389,9 +422,7 @@ def test_a_filled_order_is_recorded_and_NOT_booked_and_keeps_the_claim(
     rec = _seed_recommendation(ebull_test_conn)
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
 
-    results = reconcile_pending_recommendation_orders(
-        ebull_test_conn, broker=_broker(detail=_detail("Filled")), now=_NOW
-    )
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Filled")), now=_NOW)
 
     assert [r.verdict for r in results] == ["filled_not_booked"]
     assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
@@ -418,8 +449,8 @@ def test_an_unbooked_fill_is_parked_so_it_cannot_poll_for_ever(
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
     broker = _broker(detail=_detail("Filled"))
 
-    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
-    second_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
+    _reconcile(ebull_test_conn, broker=broker, now=_NOW)
+    second_pass = _reconcile(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
 
     assert second_pass == ()
     assert broker.lookup_order.call_count == 1
@@ -444,9 +475,9 @@ def test_a_non_pollable_ref_is_parked_too(
     _seed_order(ebull_test_conn, recommendation_id=rec, ref="v1-echo")
 
     broker = _broker(detail=_detail("Rejected"))
-    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
-    assert reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW) == ()
+    assert _reconcile(ebull_test_conn, broker=broker, now=_NOW) == ()
 
 
 @pytest.mark.parametrize(
@@ -462,8 +493,8 @@ def test_a_transient_failure_is_NOT_parked(ebull_test_conn: psycopg.Connection[t
     _seed_order(ebull_test_conn, recommendation_id=rec)
 
     broker = _broker(error=error)
-    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
-    second_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
+    _reconcile(ebull_test_conn, broker=broker, now=_NOW)
+    second_pass = _reconcile(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
 
     assert len(second_pass) == 1
     assert broker.lookup_order.call_count == 2
@@ -480,8 +511,8 @@ def test_an_unsettled_partial_fill_is_NOT_parked(
     _seed_order(ebull_test_conn, recommendation_id=rec)
 
     broker = _broker(detail=_detail("PartiallyFilled"))
-    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
-    second_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
+    _reconcile(ebull_test_conn, broker=broker, now=_NOW)
+    second_pass = _reconcile(ebull_test_conn, broker=broker, now=_NOW + timedelta(hours=1))
 
     assert [r.verdict for r in second_pass] == ["unsafe_status"]
 
@@ -498,7 +529,7 @@ def test_a_failed_lookup_never_terminalises(ebull_test_conn: psycopg.Connection[
     rec = _seed_recommendation(ebull_test_conn)
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
 
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(error=error), now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=_broker(error=error), now=_NOW)
 
     assert results[0].verdict in ("not_found", "lookup_error")
     row = _order_row(ebull_test_conn, order_id)
@@ -515,9 +546,7 @@ def test_an_unsettled_partial_fill_status_never_advances_the_order(
     rec = _seed_recommendation(ebull_test_conn)
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec)
 
-    results = reconcile_pending_recommendation_orders(
-        ebull_test_conn, broker=_broker(detail=_detail("PartiallyFilled")), now=_NOW
-    )
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=_detail("PartiallyFilled")), now=_NOW)
 
     assert [r.verdict for r in results] == ["unsafe_status"]
     assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
@@ -550,7 +579,7 @@ def test_a_response_about_another_order_advances_nothing(
     base = _detail("Rejected")
     mismatched = replace(base, **{field: value})
 
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=mismatched), now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=mismatched), now=_NOW)
 
     assert [(r.verdict, r.broker_status) for r in results] == [("identity_mismatch", "Rejected")]
     row = _order_row(ebull_test_conn, order_id)
@@ -563,6 +592,113 @@ def test_a_response_about_another_order_advances_nothing(
     with pytest.raises(psycopg.errors.UniqueViolation):
         _seed_order(ebull_test_conn, recommendation_id=rec)
     ebull_test_conn.rollback()
+
+
+def test_an_order_from_another_broker_environment_is_never_looked_up(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#3189 finding 4b — broker order ids are namespaced per environment.
+
+    This job is deliberately not demo-gated, so a demo-configured process can
+    select a row submitted to ``real``. Looking that id up on the demo API does
+    not merely fail: it can return a real, well-formed DEMO order carrying the
+    same id, and the identity guard then PASSES because the id is the one we
+    asked for. So the refusal has to happen before the lookup, from the row.
+
+    ``Rejected`` is the detail deliberately: if the broker were reached, the
+    claim would be released.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, broker_env="real")
+
+    broker = _broker(detail=_detail("Rejected"))
+    results = _reconcile(ebull_test_conn, broker=broker, env="demo", now=_NOW)
+
+    assert [r.verdict for r in results] == ["environment_mismatch"]
+    broker.lookup_order.assert_not_called()
+    row = _order_row(ebull_test_conn, order_id)
+    assert row["status"] == "pending"
+    assert row["recommendation_last_polled_at"] == _NOW, "an attempt path must still advance the rotation key"
+    assert _parked_reason(ebull_test_conn, order_id) is None, (
+        "the deployment's environment is not a property of the row"
+    )
+    # The claim is still held: this INSERT must hit the partial index.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _seed_order(ebull_test_conn, recommendation_id=rec)
+    ebull_test_conn.rollback()
+
+
+def test_a_matching_environment_is_polled(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """What the environment gate must NOT reject: its own environment."""
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, broker_env="demo")
+
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Rejected")), env="demo", now=_NOW)
+
+    assert [r.verdict for r in results] == ["terminalised_rejected"]
+    assert _order_row(ebull_test_conn, order_id)["status"] == "rejected"
+
+
+def test_an_unrecorded_environment_fails_closed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A NULL environment is refused, not assumed to be ours (Codex ckpt-2, P1).
+
+    The first draft polled NULL rows on the ground that refusing them would
+    wedge outstanding orders. Measured instead of assumed: no current path
+    writes a pollable NULL row (the synthetic-fill branch resolves to ``filled``
+    or ``failed``, never ``pending``) and the dev corpus holds zero of them. So
+    the only NULL pollable row is one left by another deployment — exactly the
+    case where a colliding id would terminalise the wrong order — and it
+    surfaces as a degraded run needing an operator.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    order_id = _seed_order(ebull_test_conn, recommendation_id=rec, broker_env=None)
+
+    broker = _broker(detail=_detail("Rejected"))
+    results = _reconcile(ebull_test_conn, broker=broker, env="demo", now=_NOW)
+
+    assert [r.verdict for r in results] == ["environment_mismatch"]
+    broker.lookup_order.assert_not_called()
+    assert _order_row(ebull_test_conn, order_id)["status"] == "pending"
+
+
+def test_the_claim_insert_records_the_broker_environment(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The producing end, against the real column (#3189 finding 4b).
+
+    Every other test here seeds `orders` directly, so none of them can tell
+    whether the intent INSERT records the environment at all — the same blind
+    spot `test_the_claim_insert_stamps_claim_committed_and_the_marker_moves_it`
+    exists for in the marker suite. Without this, the gate above could pass
+    while the writer stored NULL for every live order.
+    """
+    _seed_instrument(ebull_test_conn)
+    rec = _seed_recommendation(ebull_test_conn)
+    decision_id = _seed_decision(ebull_test_conn)
+
+    order_id, _request_id = _persist_submitted_intent(
+        ebull_test_conn,
+        instrument_id=INSTRUMENT_ID,
+        recommendation_id=rec,
+        decision_id=decision_id,
+        action="BUY",
+        requested_amount=None,
+        requested_units=None,
+        broker_env="real",
+        now=_NOW,
+    )
+    ebull_test_conn.commit()
+
+    stored = ebull_test_conn.execute("SELECT broker_environment FROM orders WHERE order_id=%s", (order_id,)).fetchone()
+    assert stored is not None
+    assert stored[0] == "real"
 
 
 def test_a_non_canonical_numeric_ref_is_not_an_identity_mismatch(
@@ -580,9 +716,7 @@ def test_a_non_canonical_numeric_ref_is_not_an_identity_mismatch(
     rec = _seed_recommendation(ebull_test_conn)
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec, ref=f"000{_REF}")
 
-    results = reconcile_pending_recommendation_orders(
-        ebull_test_conn, broker=_broker(detail=_detail("Rejected")), now=_NOW
-    )
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Rejected")), now=_NOW)
 
     assert [r.verdict for r in results] == ["terminalised_rejected"]
     assert _order_row(ebull_test_conn, order_id)["status"] == "rejected"
@@ -598,7 +732,7 @@ def test_a_strategy_origin_order_is_never_selected(
     _seed_order(ebull_test_conn, recommendation_id=None, origin="strategy")
 
     broker = _broker(detail=_detail("Rejected"))
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
     assert results == ()
     broker.lookup_order.assert_not_called()
@@ -614,7 +748,7 @@ def test_only_pending_rows_are_selected(ebull_test_conn: psycopg.Connection[tupl
     _seed_order(ebull_test_conn, recommendation_id=rec, status=status)
 
     broker = _broker(detail=_detail("Rejected"))
-    assert reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW) == ()
+    assert _reconcile(ebull_test_conn, broker=broker, now=_NOW) == ()
     broker.lookup_order.assert_not_called()
 
 
@@ -628,7 +762,7 @@ def test_a_pending_row_without_a_broker_ref_is_not_selected(
     _seed_order(ebull_test_conn, recommendation_id=rec, ref=None)
 
     broker = _broker(detail=_detail("Rejected"))
-    assert reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW) == ()
+    assert _reconcile(ebull_test_conn, broker=broker, now=_NOW) == ()
     assert count_pending_recommendation_orders(ebull_test_conn) == 0
     broker.lookup_order.assert_not_called()
 
@@ -644,7 +778,7 @@ def test_a_non_numeric_broker_ref_is_reported_not_raised(
     order_id = _seed_order(ebull_test_conn, recommendation_id=rec, ref="v1-echo")
 
     broker = _broker(detail=_detail("Rejected"))
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
     assert [r.verdict for r in results] == ["ref_not_pollable"]
     broker.lookup_order.assert_not_called()
@@ -675,7 +809,7 @@ def test_an_order_whose_recommendation_key_is_held_elsewhere_is_skipped(
     with psycopg.connect(test_database_url()) as holder:
         holder.execute("SELECT pg_advisory_lock(%s, %s)", (RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS, rec))
         holder.commit()
-        results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+        results = _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
     assert [r.verdict for r in results] == ["lock_busy"]
     broker.lookup_order.assert_not_called()
@@ -706,10 +840,8 @@ def test_contended_rows_do_not_occupy_the_bounded_head_for_ever(
     with psycopg.connect(test_database_url()) as holder:
         holder.execute("SELECT pg_advisory_lock(%s, %s)", (RECOMMENDATION_SUBMISSION_ADVISORY_LOCK_NS, held_rec))
         holder.commit()
-        first_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, limit=1, now=_NOW)
-        second_pass = reconcile_pending_recommendation_orders(
-            ebull_test_conn, broker=broker, limit=1, now=_NOW + timedelta(minutes=1)
-        )
+        first_pass = _reconcile(ebull_test_conn, broker=broker, limit=1, now=_NOW)
+        second_pass = _reconcile(ebull_test_conn, broker=broker, limit=1, now=_NOW + timedelta(minutes=1))
 
     assert [(r.order_id, r.verdict) for r in first_pass] == [(held, "lock_busy")]
     assert [r.order_id for r in second_pass] == [free], "the contended row starved the tail"
@@ -736,7 +868,7 @@ def test_the_rotation_key_never_moves_backward(
     broker = _broker(detail=_detail("Pending"))
 
     later = _NOW + timedelta(minutes=5)
-    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=later)
+    _reconcile(ebull_test_conn, broker=broker, now=later)
     assert _order_row(ebull_test_conn, order_id)["recommendation_last_polled_at"] == later
     # ⚠ `_order_row` opens a read transaction and does not close it, and the
     # poller refuses a non-idle connection. Other tests never hit this because
@@ -744,7 +876,7 @@ def test_the_rotation_key_never_moves_backward(
     ebull_test_conn.rollback()
 
     # The straggler: a poller that began earlier and is only now stamping.
-    reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
     assert _order_row(ebull_test_conn, order_id)["recommendation_last_polled_at"] == later, (
         "a late stamp from an earlier batch moved the rotation key backward"
@@ -772,7 +904,7 @@ def test_a_row_that_raises_unexpectedly_is_contained_and_the_batch_continues(
     broker = MagicMock(spec=BrokerProvider)
     broker.lookup_order.side_effect = [RuntimeError("something nobody predicted"), _detail("Pending")]
 
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
     assert [(r.order_id, r.verdict) for r in results] == [(boom, "poll_error"), (later, "still_pending")]
     assert _order_row(ebull_test_conn, boom)["recommendation_last_polled_at"] == _NOW, (
@@ -819,7 +951,7 @@ def test_containment_survives_a_raise_that_left_a_failed_transaction(
     broker = MagicMock(spec=BrokerProvider)
     broker.lookup_order.side_effect = _first_call_poisons_then_raises
 
-    results = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, now=_NOW)
+    results = _reconcile(ebull_test_conn, broker=broker, now=_NOW)
 
     assert calls["poisoned"] is True, "the probe never poisoned the transaction, so it proves nothing"
     assert [(r.order_id, r.verdict) for r in results] == [(boom, "poll_error"), (later, "still_pending")]
@@ -839,10 +971,8 @@ def test_the_backlog_rotates_and_does_not_starve_the_tail(
     second = _seed_order(ebull_test_conn, recommendation_id=second_rec, last_polled_at=_NOW - timedelta(hours=1))
 
     broker = _broker(detail=_detail("Pending"))
-    first_pass = reconcile_pending_recommendation_orders(ebull_test_conn, broker=broker, limit=1, now=_NOW)
-    second_pass = reconcile_pending_recommendation_orders(
-        ebull_test_conn, broker=broker, limit=1, now=_NOW + timedelta(minutes=1)
-    )
+    first_pass = _reconcile(ebull_test_conn, broker=broker, limit=1, now=_NOW)
+    second_pass = _reconcile(ebull_test_conn, broker=broker, limit=1, now=_NOW + timedelta(minutes=1))
 
     assert [r.order_id for r in first_pass] == [first]
     assert [r.order_id for r in second_pass] == [second]
@@ -865,7 +995,7 @@ def test_the_scheduler_prerequisite_closes_once_every_row_is_parked(
     assert _has_pending_recommendation_orders(ebull_test_conn)[0] is True
     ebull_test_conn.commit()
 
-    reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=_detail("Filled")), now=_NOW)
+    _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Filled")), now=_NOW)
 
     open_gate, reason = _has_pending_recommendation_orders(ebull_test_conn)
     assert open_gate is False
@@ -885,9 +1015,7 @@ def test_count_matches_what_the_poller_would_select(
 
     assert count_pending_recommendation_orders(ebull_test_conn) == 1
     ebull_test_conn.commit()  # the count opened a transaction; the poller needs an idle conn
-    results = reconcile_pending_recommendation_orders(
-        ebull_test_conn, broker=_broker(detail=_detail("Pending")), now=_NOW
-    )
+    results = _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Pending")), now=_NOW)
     assert len(results) == 1
 
 
@@ -901,4 +1029,4 @@ def test_reconciliation_refuses_a_connection_inside_a_transaction(
     ebull_test_conn.execute("SELECT 1")  # opens a transaction under psycopg3
 
     with pytest.raises(RuntimeError, match="idle connection"):
-        reconcile_pending_recommendation_orders(ebull_test_conn, broker=_broker(detail=_detail("Pending")), now=_NOW)
+        _reconcile(ebull_test_conn, broker=_broker(detail=_detail("Pending")), now=_NOW)

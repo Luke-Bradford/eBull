@@ -160,6 +160,21 @@ def _stub_post_trade_enqueue() -> Iterator[MagicMock]:
         yield stub
 
 
+_BROKER_ENV = "demo"
+
+
+def _execute(conn: Any, **kwargs: Any) -> Any:
+    """``execute_order`` with this suite's broker environment.
+
+    The live path REFUSES a submission whose broker environment is not recorded
+    (#3189 finding 4b): the poller fails closed on an unrecorded environment, so
+    such an order could never be reconciled. Defaulting it once here keeps each
+    test's own subject visible; the test that is ABOUT the refusal omits it.
+    """
+    kwargs.setdefault("broker_env", _BROKER_ENV)
+    return execute_order(conn, **kwargs)
+
+
 def _make_cursor(rows: list[dict[str, Any]]) -> MagicMock:
     cur = MagicMock()
     cur.fetchall.return_value = rows
@@ -564,7 +579,7 @@ class TestSyntheticFillSpreadCost:
         conn = _make_conn(cursors)
 
         with patch("app.services.order_client._utcnow", return_value=_NOW):
-            execute_order(conn, recommendation_id=42, decision_id=10)
+            _execute(conn, recommendation_id=42, decision_id=10)
 
         # gross = filled_price (ask=100.20) * units (suggested_size=5% of 10_000 / 100.20)
         # Match cash_ledger inserts via positional OR keyword query
@@ -694,7 +709,7 @@ class TestExecuteOrderDemoMode:
             _fill_returning_cursor(fill_id=3),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -724,7 +739,7 @@ class TestExecuteOrderDemoMode:
             _make_cursor([{"current_units": 0}]),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -753,7 +768,7 @@ class TestExecuteOrderDemoMode:
             _order_returning_cursor(order_id=11),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -781,7 +796,7 @@ class TestExecuteOrderDemoMode:
             _make_cursor([]),  # cost fallback: no quote either → s_bps=None, no record
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -822,7 +837,7 @@ class TestExecuteOrderDemoMode:
             _cost_record_write_cursor(),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(conn, recommendation_id=42, decision_id=10)
+        result = _execute(conn, recommendation_id=42, decision_id=10)
         assert result.fill_id is None
         assert result.outcome == "failed"
         sql_calls = [str(c.args[0]) for c in conn.execute.call_args_list]
@@ -843,7 +858,7 @@ class TestExecuteOrderDemoMode:
             _fill_returning_cursor(fill_id=1),
         ]
         conn = _make_conn(cursors)
-        execute_order(
+        _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -867,7 +882,7 @@ class TestExecuteOrderDemoMode:
             _fill_returning_cursor(fill_id=3),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -906,7 +921,7 @@ class TestExecuteOrderDemoMode:
             _make_cursor([{"current_units": 0}]),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -929,7 +944,7 @@ class TestExecuteOrderDemoMode:
             _fill_returning_cursor(fill_id=1),
         ]
         conn = _make_conn(cursors)
-        execute_order(
+        _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -962,7 +977,7 @@ class TestPostTradeEnqueue:
             _cost_record_write_cursor(),
             _fill_returning_cursor(fill_id=3),
         ]
-        result = execute_order(_make_conn(cursors), recommendation_id=42, decision_id=10)
+        result = _execute(_make_conn(cursors), recommendation_id=42, decision_id=10)
         assert result.outcome == "filled"
         _stub_post_trade_enqueue.assert_called_once()
         assert _stub_post_trade_enqueue.call_args.kwargs["requested_by"] == "execute_order"
@@ -976,7 +991,7 @@ class TestPostTradeEnqueue:
             _make_cursor([]),  # no quote
             _order_returning_cursor(order_id=11),
         ]
-        result = execute_order(_make_conn(cursors), recommendation_id=42, decision_id=10)
+        result = _execute(_make_conn(cursors), recommendation_id=42, decision_id=10)
         assert result.outcome == "failed"
         _stub_post_trade_enqueue.assert_not_called()
 
@@ -989,6 +1004,31 @@ class TestExecuteOrderLiveMode:
             "app.services.order_client.get_runtime_config",
             lambda _conn: _RUNTIME_LIVE,
         )
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_a_live_submission_without_a_broker_environment_is_refused(self, _mock_now: MagicMock) -> None:
+        """#3189 finding 4b (Codex ckpt-2). The poller fails closed on an
+        unrecorded environment, so a live order that omitted one could never be
+        reconciled — `environment_mismatch` on every attempt, claim held for
+        ever. The keyword default that keeps the demo call sites untouched is
+        exactly what makes this assertion necessary.
+
+        Refused BEFORE the claim and before any broker I/O: the cursor list
+        stops at the recommendation and the cash read, and the broker is never
+        touched.
+        """
+        broker = MagicMock()
+        conn = _make_conn(
+            [
+                _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+                _cash_cursor(balance=10_000.0),
+            ]
+        )
+
+        with pytest.raises(ValueError, match="no broker_env supplied"):
+            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+
+        broker.place_order.assert_not_called()
 
     @patch("app.services.order_client._utcnow", return_value=_NOW)
     def test_live_buy_calls_broker_place_order(self, _mock_now: MagicMock) -> None:
@@ -1016,7 +1056,7 @@ class TestExecuteOrderLiveMode:
             _fill_returning_cursor(fill_id=6),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -1053,7 +1093,7 @@ class TestExecuteOrderLiveMode:
             _fill_returning_cursor(fill_id=6),
         ]
         conn = _make_conn(cursors)
-        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
         # Verify the cost record INSERT was called
         cost_insert_cursor.__enter__.return_value.execute.assert_called_once()
         sql = cost_insert_cursor.__enter__.return_value.execute.call_args[0][0]
@@ -1091,7 +1131,7 @@ class TestExecuteOrderLiveMode:
             _fill_returning_cursor(fill_id=6),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        result = _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
         # Fill must succeed despite cost recording failure.
         assert result.outcome == "filled"
         assert result.fill_id == 6
@@ -1126,7 +1166,7 @@ class TestExecuteOrderLiveMode:
             _make_cursor([{"current_units": 0}]),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -1154,7 +1194,7 @@ class TestExecuteOrderLiveMode:
             _order_returning_cursor(order_id=12),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -1229,7 +1269,7 @@ class TestExecuteOrderLiveMode:
         conn.execute.side_effect = _execute_tag
 
         with pytest.raises(RuntimeError, match="simulated broker crash"):
-            execute_order(
+            _execute(
                 conn,
                 recommendation_id=42,
                 decision_id=10,
@@ -1293,7 +1333,7 @@ class TestExecuteOrderLiveMode:
         conn = _make_conn(cursors)
 
         with pytest.raises(RuntimeError, match="expected to update exactly 1 orders row"):
-            execute_order(
+            _execute(
                 conn,
                 recommendation_id=42,
                 decision_id=10,
@@ -1308,7 +1348,7 @@ class TestExecuteOrderLiveMode:
         ]
         conn = _make_conn(cursors)
         with pytest.raises(ValueError, match="no broker provider supplied"):
-            execute_order(
+            _execute(
                 conn,
                 recommendation_id=42,
                 decision_id=10,
@@ -1356,7 +1396,7 @@ class TestExecuteOrderFailures:
             _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -1401,7 +1441,7 @@ class TestExecuteOrderFailures:
             _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -1415,7 +1455,7 @@ class TestExecuteOrderFailures:
     def test_recommendation_not_found_raises(self) -> None:
         conn = _make_conn([_make_cursor([])])
         with pytest.raises(ValueError, match="not found"):
-            execute_order(
+            _execute(
                 conn,
                 recommendation_id=999,
                 decision_id=10,
@@ -1424,7 +1464,7 @@ class TestExecuteOrderFailures:
     def test_recommendation_not_approved_raises(self) -> None:
         conn = _make_conn([_rec_cursor(status="proposed")])
         with pytest.raises(ValueError, match="expected 'approved'"):
-            execute_order(
+            _execute(
                 conn,
                 recommendation_id=42,
                 decision_id=10,
@@ -1453,7 +1493,7 @@ class TestExecuteOrderFailures:
             _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
-        result = execute_order(
+        result = _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -1486,7 +1526,7 @@ class TestExecuteOrderFailures:
             _make_cursor([]),  # record_estimated_cost INSERT
         ]
         conn = _make_conn(cursors)
-        execute_order(
+        _execute(
             conn,
             recommendation_id=42,
             decision_id=10,
@@ -1519,7 +1559,7 @@ class TestExecuteOrderRuntimeConfigCorrupt:
         ]
         conn = _make_conn(cursors)
         with pytest.raises(RuntimeConfigCorrupt):
-            execute_order(conn, recommendation_id=42, decision_id=10)
+            _execute(conn, recommendation_id=42, decision_id=10)
 
         # No order should have been persisted, no audit row written.
         conn.transaction.assert_not_called()
@@ -1562,7 +1602,7 @@ class TestSubmissionControls:
         conn = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
 
         with pytest.raises(SubmissionControlsRevokedError) as exc:
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         assert exc.value.failed_rules == ["kill_switch"]
         assert "operator halt" in str(exc.value)
@@ -1585,7 +1625,7 @@ class TestSubmissionControls:
         conn = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
 
         with pytest.raises(SubmissionControlsRevokedError):
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=MagicMock())
+            _execute(conn, recommendation_id=42, decision_id=10, broker=MagicMock())
 
         audits = _audit_insert_calls(conn)
         assert len(audits) == 1
@@ -1606,7 +1646,7 @@ class TestSubmissionControls:
         conn = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
 
         with pytest.raises(SubmissionControlsRevokedError) as exc:
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         assert exc.value.failed_rules == ["auto_trading"]
         broker.place_order.assert_not_called()
@@ -1619,7 +1659,7 @@ class TestSubmissionControls:
         conn = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
 
         with pytest.raises(SubmissionControlsRevokedError) as exc:
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=MagicMock())
+            _execute(conn, recommendation_id=42, decision_id=10, broker=MagicMock())
 
         assert exc.value.failed_rules == ["kill_switch_config_corrupt"]
 
@@ -1641,7 +1681,7 @@ class TestSubmissionControls:
         )
 
         with pytest.raises(SubmissionControlsRevokedError):
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         broker.close_position.assert_not_called()
 
@@ -1675,13 +1715,13 @@ class TestSubmissionControls:
                 _fill_returning_cursor(fill_id=3),
             ]
         )
-        assert execute_order(first, recommendation_id=42, decision_id=10).outcome == "filled"
+        assert _execute(first, recommendation_id=42, decision_id=10).outcome == "filled"
 
         kill_switch_active["value"] = True
 
         second = _make_conn([_rec_cursor(action="BUY"), _cash_cursor(balance=10_000.0)])
         with pytest.raises(SubmissionControlsRevokedError):
-            execute_order(second, recommendation_id=43, decision_id=11)
+            _execute(second, recommendation_id=43, decision_id=11)
 
         assert _audit_insert_calls(second)
 
@@ -1877,7 +1917,7 @@ class TestSubmissionClaim:
         conn = _make_conn(cursors)
 
         with pytest.raises(PriorSubmissionUnresolvedError) as excinfo:
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         assert excinfo.value.order_id == 11
         # The whole point: no second submission.
@@ -1912,7 +1952,7 @@ class TestSubmissionClaim:
         conn = _make_conn(cursors)
 
         with pytest.raises(psycopg.errors.UniqueViolation):
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         broker.place_order.assert_not_called()
 
@@ -1944,7 +1984,7 @@ class TestSubmissionClaim:
         ]
         conn = _make_conn(cursors)
 
-        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         sent = broker.place_order.call_args.kwargs["request_id"]
         persisted = intent_cursor.execute.call_args.args[1]["request_id"]
@@ -1979,7 +2019,7 @@ class TestUncertainSubmission:
         conn = _make_conn(cursors)
 
         with pytest.raises(BrokerSubmissionUncertainError) as excinfo:
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         assert excinfo.value.order_id == 11
         statements = [str(call.args[0]) for call in conn.execute.call_args_list]
@@ -2020,7 +2060,7 @@ class TestUncertainSubmission:
         conn = _make_conn(cursors)
 
         with pytest.raises(UnattendedExecutionRefused):
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+            _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         joined = " ".join(str(call.args[0]) for call in conn.execute.call_args_list)
         # 'refused' is outside the claim index predicate, so the claim lifts.
@@ -2114,7 +2154,7 @@ class TestExitLotSelection:
         )
         cursors = self._multi_lot_exit_cursors()
         conn = _make_conn(cursors)
-        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         intent_params = cursors[3].execute.call_args.args[1]
         assert intent_params["units"] == Decimal("1000")
@@ -2140,7 +2180,7 @@ class TestExitLotSelection:
             raw_payload={},
         )
         conn = _make_conn(self._multi_lot_exit_cursors())
-        result = execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        result = _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         assert "POSITION NOT FULLY EXITED" in result.explanation
         assert "500" in result.explanation
@@ -2169,7 +2209,7 @@ class TestExitLotSelection:
             _make_cursor([{"current_units": 0}]),
         ]
         conn = _make_conn(cursors)
-        result = execute_order(conn, recommendation_id=42, decision_id=10)
+        result = _execute(conn, recommendation_id=42, decision_id=10)
 
         assert "POSITION NOT FULLY EXITED" not in result.explanation
         audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c.args[0])]
@@ -2247,7 +2287,7 @@ class TestExitLotUnitsPrecision:
             raw_payload={},
         )
         conn = _make_conn(self._exit_cursors(lot_units))
-        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -2327,7 +2367,7 @@ class TestExitPositionRowcountGuard:
         conn.execute.return_value.rowcount = 0
 
         with pytest.raises(RuntimeError, match="expected to update exactly 1 positions row"):
-            execute_order(conn, recommendation_id=42, decision_id=10, broker=self._live_exit(monkeypatch))
+            _execute(conn, recommendation_id=42, decision_id=10, broker=self._live_exit(monkeypatch))
 
     @patch("app.services.order_client._maybe_trigger_attribution")
     @patch("app.services.order_client._utcnow", return_value=_NOW)
@@ -2336,7 +2376,7 @@ class TestExitPositionRowcountGuard:
     ) -> None:
         """Pins that the guard is a rowcount check and not a blanket refusal."""
         conn = _make_conn(self._cursors())
-        result = execute_order(conn, recommendation_id=42, decision_id=10, broker=self._live_exit(monkeypatch))
+        result = _execute(conn, recommendation_id=42, decision_id=10, broker=self._live_exit(monkeypatch))
         assert result.outcome == "filled"
 
 
@@ -2397,7 +2437,7 @@ class TestExitLotMirrorDeduction:
                 _make_cursor([{"current_units": 500}]),
             ]
         )
-        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        _execute(conn, recommendation_id=42, decision_id=10, broker=broker)
 
         params = self._mirror_update_params(conn)
         assert params is not None, "the closed lot was never deducted from broker_positions"
@@ -2427,7 +2467,7 @@ class TestExitLotMirrorDeduction:
                 _make_cursor([{"current_units": 0}]),
             ]
         )
-        execute_order(conn, recommendation_id=42, decision_id=10, broker=None)
+        _execute(conn, recommendation_id=42, decision_id=10, broker=None)
 
         assert self._mirror_update_params(conn) is None
 
@@ -2517,6 +2557,11 @@ class TestContainedPollErrorsAreNotSilent:
 
         assert "identity_mismatch" in RECONCILE_ERROR_VERDICTS
         assert "poll_error" in RECONCILE_ERROR_VERDICTS
+        # #3189 finding 4b: a row held back by the environment gate still holds
+        # its submission claim and nothing will resolve it while the deployment
+        # points elsewhere, so a correct refusal and a silent stall are the same
+        # state.
+        assert "environment_mismatch" in RECONCILE_ERROR_VERDICTS
         assert degradation_reason(JobProgress(candidates_seen=1, errors={"identity_mismatch": 1})) is not None
 
     def test_an_identity_mismatch_is_never_parked(self) -> None:

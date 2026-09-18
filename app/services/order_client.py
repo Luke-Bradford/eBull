@@ -471,6 +471,7 @@ def _persist_submitted_intent(
     action: str,
     requested_amount: Decimal | None,
     requested_units: Decimal | None,
+    broker_env: str | None,
     now: datetime,
 ) -> tuple[int, UUID]:
     """Insert a durable order-intent row BEFORE the broker call (#243).
@@ -496,6 +497,11 @@ def _persist_submitted_intent(
     before the provider call. The separation is the whole mechanism — folding
     the marker into this transaction would make every committed row read as
     "may have reached the broker" and prove nothing.
+
+    #3189 finding 4(b): ``broker_env`` is recorded HERE and not from the
+    response, because the environment is a property of the ATTEMPT — it has to
+    survive the crash this row exists to survive. ``None`` writes NULL, which
+    the poller reads as "not recorded" and polls exactly as it does today.
     """
     request_id = uuid4()
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -505,12 +511,14 @@ def _persist_submitted_intent(
                 (instrument_id, recommendation_id, decision_id,
                  action, order_type, requested_amount, requested_units,
                  status, broker_order_ref, raw_payload_json, created_at,
-                 recommendation_request_id, recommendation_submission_phase)
+                 recommendation_request_id, recommendation_submission_phase,
+                 broker_environment)
             VALUES
                 (%(iid)s, %(rid)s, %(did)s,
                  %(action)s, %(otype)s, %(amt)s, %(units)s,
                  'submitted', NULL, %(payload)s, %(now)s,
-                 %(request_id)s, 'claim_committed')
+                 %(request_id)s, 'claim_committed',
+                 %(broker_env)s)
             RETURNING order_id
             """,
             {
@@ -524,6 +532,7 @@ def _persist_submitted_intent(
                 "payload": Jsonb(_SUBMITTED_INTENT_PAYLOAD),
                 "now": now,
                 "request_id": request_id,
+                "broker_env": broker_env,
             },
         )
         row = cur.fetchone()
@@ -1392,6 +1401,7 @@ def _claim_submission(
     action: str,
     requested_amount: Decimal | None,
     requested_units: Decimal | None,
+    broker_env: str | None,
     now: datetime,
 ) -> tuple[int, UUID]:
     """Take the single submission claim for this recommendation (#2942).
@@ -1415,6 +1425,7 @@ def _claim_submission(
             action=action,
             requested_amount=requested_amount,
             requested_units=requested_units,
+            broker_env=broker_env,
             now=now,
         )
     except psycopg.errors.UniqueViolation as exc:
@@ -1793,6 +1804,7 @@ def execute_order(
     recommendation_id: int,
     decision_id: int,
     broker: BrokerProvider | None = None,
+    broker_env: str | None = None,
 ) -> ExecuteResult:
     """
     Execute a guard-approved order.
@@ -1822,6 +1834,18 @@ def execute_order(
     uses a fresh per-order pool connection, which satisfies this.
     Do not call ``execute_order`` inside a caller-owned outer
     transaction.
+
+    ``broker_env`` is the eToro environment ``broker`` was constructed with. It
+    is recorded on the durable intent row (#3189 finding 4b) so the pending-order
+    poller can prove an order belongs to the environment it is talking to —
+    broker order ids are namespaced per environment, so a demo lookup of a live
+    id can return a well-formed demo order and the identity guard never fires.
+
+    ⚠ ``None`` is a real value, not a missing argument: it means no broker
+    environment was recorded, which is exactly what a synthetic fill and every
+    pre-existing row are. The poller polls those as it does today. It is
+    therefore defaulted rather than required — but the live caller passes it,
+    and a live row written without it is the only way this can go quietly wrong.
 
     Raises ValueError if:
       - recommendation_id does not exist
@@ -1896,6 +1920,18 @@ def execute_order(
     if is_live:
         if broker is None:
             raise ValueError("enable_live_trading is True but no broker provider supplied")
+        # #3189 finding 4b (Codex checkpoint 2). REQUIRED on the live path, and
+        # refused HERE — before the claim, before any broker I/O. The poller
+        # fails closed on an unrecorded environment, so a live submission that
+        # omitted it would create an order the poller can never reconcile:
+        # `environment_mismatch` on every attempt, claim held for ever. A
+        # keyword default keeps the ~50 demo-path call sites untouched, which is
+        # why the live path has to assert what the signature cannot.
+        if broker_env is None:
+            raise ValueError(
+                "enable_live_trading is True but no broker_env supplied — a live order whose "
+                "environment is not recorded can never be reconciled by the pending-order poller"
+            )
         # #2942 half 2. The evidence lock. Session-scoped and held across the
         # claim commit, the marker commit and the provider call, so a row still
         # reading 'claim_committed' while this key is free is one whose submitter
@@ -1984,6 +2020,7 @@ def execute_order(
                         action=action,
                         requested_amount=requested_amount,
                         requested_units=requested_units,
+                        broker_env=broker_env,
                         now=now,
                     )
                     # #2942 half 2: its OWN commit, immediately before the verb.
@@ -2029,6 +2066,7 @@ def execute_order(
                     action=action,
                     requested_amount=requested_amount,
                     requested_units=requested_units,
+                    broker_env=broker_env,
                     now=now,
                 )
                 # #2942 half 2: its OWN commit, immediately before the verb.
@@ -2362,6 +2400,7 @@ PendingOrderVerdict = Literal[
     "lookup_error",
     "unsafe_status",
     "identity_mismatch",
+    "environment_mismatch",
     "ref_not_pollable",
     "lock_busy",
     "no_longer_pending",
@@ -2691,6 +2730,7 @@ def reconcile_pending_recommendation_orders(
     conn: psycopg.Connection[Any],
     *,
     broker: BrokerProvider,
+    env: str,
     limit: int = 20,
     now: datetime | None = None,
 ) -> tuple[PendingOrderPollResult, ...]:
@@ -2756,7 +2796,7 @@ def reconcile_pending_recommendation_orders(
         # catches the ones nobody predicted, which is the only kind that gets
         # here.
         try:
-            results.append(_poll_one_pending_order(conn, broker=broker, row=row, now=at))
+            results.append(_poll_one_pending_order(conn, broker=broker, env=env, row=row, now=at))
         # ⚠ `Exception`, and it must NEVER widen to `BaseException`. Breadth is
         # the point here — the whole value is catching what nobody predicted —
         # but `KeyboardInterrupt` and `SystemExit` are a shutdown in progress,
@@ -2798,6 +2838,7 @@ def _poll_one_pending_order(
     conn: psycopg.Connection[Any],
     *,
     broker: BrokerProvider,
+    env: str,
     row: dict[str, Any],
     now: datetime,
 ) -> PendingOrderPollResult:
@@ -2843,13 +2884,55 @@ def _poll_one_pending_order(
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT status, broker_order_ref FROM orders WHERE order_id = %(oid)s",
+                "SELECT status, broker_order_ref, broker_environment FROM orders WHERE order_id = %(oid)s",
                 {"oid": order_id},
             )
             current = cur.fetchone()
         conn.commit()
         if current is None or current["status"] != "pending" or current["broker_order_ref"] is None:
             return PendingOrderPollResult(order_id, recommendation_id, "no_longer_pending")
+
+        # ⚠⚠ BROKER ORDER IDS ARE NAMESPACED PER ENVIRONMENT (#3189 finding 4b).
+        # This job is deliberately not demo-gated — refusing to look at a
+        # live-environment order would leave exactly the row that matters most
+        # wedged — so a demo-configured run can reach a row submitted to `real`.
+        # Looking that id up on the demo API does not merely fail: it can return
+        # a real, well-formed DEMO order that happens to carry the same id, and
+        # the identity guard below then passes because the id is the one we
+        # asked for. So the environment is compared BEFORE the lookup, and it
+        # comes from the row rather than from the answer.
+        #
+        # ⚠⚠ UNKNOWN FAILS CLOSED TOO (Codex checkpoint 2, P1). A NULL is not
+        # "probably ours": if the deployment ever moved between demo and real, a
+        # colliding id terminalises the wrong order and releases its claim,
+        # which is the whole failure this gate exists to stop. Refusing costs
+        # nothing it should not cost — no CURRENT path can write a pollable NULL
+        # row, because `_persist_order`'s synthetic-fill branch resolves to
+        # `filled` or `failed` and never to `pending`, and the dev corpus holds
+        # ZERO pollable rows with a NULL environment (measured, not assumed:
+        # `recommendation_id IS NOT NULL AND status='pending' AND
+        # broker_order_ref IS NOT NULL AND broker_environment IS NULL` = 0).
+        # A pre-existing row from another deployment therefore surfaces as a
+        # degraded run needing an operator, which is what it is.
+        #
+        # ⚠ Stamped and NOT parked. Which environment this PROCESS talks to is a
+        # property of the deployment, not of the row — a `real`-env run must find
+        # the row waiting, unparked, and resolve it.
+        # Annotated rather than cast (review NITPICK, PR #3198): the column is
+        # TEXT, so psycopg hands back `str | None` and a `str(...)` around the
+        # comparison was doing nothing. The annotation says the same thing the
+        # cast was gesturing at, and pyright checks it.
+        row_env: str | None = current["broker_environment"]
+        if row_env is None or row_env != env:
+            _stamp_polled(conn, order_id=order_id, now=now)
+            logger.warning(
+                "reconcile_pending_recommendation_orders: order_id=%d carries broker environment %s and this "
+                "process is configured for %r — not looked up",
+                order_id,
+                "none recorded" if row_env is None else repr(row_env),
+                env,
+            )
+            return PendingOrderPollResult(order_id, recommendation_id, "environment_mismatch")
 
         ref = str(current["broker_order_ref"])
         # ``lookup_order`` raises ValueError on a non-positive-integer order id.

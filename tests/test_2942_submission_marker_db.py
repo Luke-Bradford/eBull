@@ -375,6 +375,7 @@ def test_the_claim_insert_stamps_claim_committed_and_the_marker_moves_it(
         action="BUY",
         requested_amount=None,
         requested_units=None,
+        broker_env="demo",
         now=_NOW,
     )
     ebull_test_conn.commit()
