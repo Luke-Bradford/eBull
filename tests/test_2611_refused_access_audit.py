@@ -43,6 +43,10 @@ _ACCESS_PATH_FUNCTIONS = frozenset(
         "_refuse_incoherent_declaration",
         "record_holdout_access",
         "require_outcome_access",
+        # #2617 — the shared body both doors now delegate to, and the variant
+        # that hands C-4's gate the declaration it enforced against.
+        "_record_access_with_declaration",
+        "require_outcome_access_with_declaration",
     }
 )
 
@@ -154,6 +158,36 @@ class TestTheRefusalExitIsAChokepoint:
         tree = ast.parse(_MODULE_PATH.read_text())
         defined = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
         assert _ACCESS_PATH_FUNCTIONS <= defined
+
+    def test_the_set_covers_every_function_that_can_refuse_an_access(self) -> None:
+        """⚠⚠ #2617 — THE SET IS NOW SELF-MAINTAINING IN THE DIRECTION THAT BITES.
+
+        The guard above is a hand-written list, and #2617 split the access body
+        into a new function — which would have dropped straight out of it with
+        every existing test still green. That is the *"a check that passes may be
+        structurally unable to fail"* shape, arriving by refactor rather than by
+        someone forgetting.
+
+        ``_refuse_access`` is the audited exit, so any function that calls it can
+        refuse an access and belongs in the list. Deriving the required set from
+        the AST means a fifth door cannot be added without either listing it or
+        failing here.
+        """
+        tree = ast.parse(_MODULE_PATH.read_text())
+        callers = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and any(
+                isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "_refuse_access"
+                for inner in ast.walk(node)
+            )
+        }
+        assert callers, "no caller of _refuse_access found — the AST walk is not matching, so this guard is dark"
+        assert callers <= _ACCESS_PATH_FUNCTIONS, (
+            f"{sorted(callers - _ACCESS_PATH_FUNCTIONS)} can refuse an outcome access but are not covered by "
+            "_ACCESS_PATH_FUNCTIONS, so a direct PreregDeclarationRefused raise inside them would go unnoticed"
+        )
 
 
 class TestTheAuditConninfoComesFromTheCaller:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import psycopg
 import pytest
 
+from app.services import result_ledger
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration, Supersession
 from app.services.result_ledger import (
     HoldoutAccess,
@@ -28,6 +29,7 @@ from app.services.result_ledger import (
     read_access_refusals,
     record_holdout_access,
     require_outcome_access,
+    require_outcome_access_with_declaration,
     supersede_preregistration,
 )
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION
@@ -69,6 +71,26 @@ def _freeze_stranded(conn: psycopg.Connection[tuple]) -> int:
     the state a policy bump leaves behind rather than a path any writer takes.
     Same construction as ``tests/test_2634_prereg_supersession_db.py``.
     """
+    return _insert_declaration(conn, _STALE_POLICY)
+
+
+def _freeze_coherent(conn: psycopg.Connection[tuple]) -> int:
+    """Freeze a declaration the access door will ACCEPT.
+
+    ⚠ Also through the statement, and for a DIFFERENT reason from
+    ``_freeze_stranded`` — one worth stating so the next reader does not "fix" it
+    by calling ``freeze_preregistration``. That function additionally enforces
+    #2829's register join: a declaration may only be frozen for a trial that
+    ``app/services/trial_register.py`` already counts in criterion 6's M. This
+    module's ``S-2611`` is a fixture identity and deliberately has no register
+    entry — adding one to satisfy a test would inflate the M that every deflated
+    Sharpe in the repo is computed against, which is a far worse trade than
+    inserting the row directly here.
+    """
+    return _insert_declaration(conn, STRUCTURAL_REFUSAL_POLICY_VERSION)
+
+
+def _insert_declaration(conn: psycopg.Connection[tuple], policy_version: str) -> int:
     row = conn.execute(
         """
         INSERT INTO strategy_preregistration_declarations (
@@ -87,10 +109,10 @@ def _freeze_stranded(conn: psycopg.Connection[tuple]) -> int:
         {
             "strategy_id": _STRATEGY_ID,
             "strategy_version": _STRATEGY_VERSION,
-            "policy": _STALE_POLICY,
+            "policy": policy_version,
             "refusals": list(_INELIGIBLE),
             "actor": _ACTOR,
-            "digest": _declaration(structural_refusal_policy_version=_STALE_POLICY).sha256,
+            "digest": _declaration(structural_refusal_policy_version=policy_version).sha256,
         },
     ).fetchone()
     assert row is not None
@@ -229,3 +251,79 @@ def test_the_relation_refuses_a_refusal_that_names_no_reason(
                 (_STRATEGY_ID, _STRATEGY_VERSION, _ACTOR, refusals),
             )
         assert violation.value.diag.constraint_name == "strategy_holdout_access_refusals_names_a_reason"
+
+
+def test_the_strict_door_returns_the_declaration_its_access_row_names(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2617 — one load, and the caller's copy is the one that was enforced.
+
+    ⚠⚠ THE PROPERTY IS AGREEMENT, NOT PRESENCE. C-4's gate puts a
+    ``declaration_id`` in its signed ``OutcomeGate`` while the ledger writes one
+    into ``strategy_holdout_accesses``. Before #2617 those were two separate
+    loads, so under a concurrent supersession the artifact could name a revision
+    the access row did not — an attribution disagreement that nothing would
+    notice, because each side is internally consistent. Asserting they are equal
+    is what makes the single load load-bearing rather than merely tidy.
+    """
+    with ebull_test_conn.transaction():
+        declaration_id = _freeze_coherent(ebull_test_conn)
+
+    with ebull_test_conn.transaction():
+        access_id, frozen = require_outcome_access_with_declaration(ebull_test_conn, _access())
+
+    assert frozen.declaration_id == declaration_id
+    row = ebull_test_conn.execute(
+        "SELECT declaration_id FROM strategy_holdout_accesses WHERE access_id = %s",
+        (access_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == declaration_id
+
+    # ⚠ And it is a real look: the refusal path wrote nothing.
+    assert read_access_refusals(ebull_test_conn, _STRATEGY_ID, _STRATEGY_VERSION) == ()
+
+    # ⚠ Counted straight off the relation, NOT through ``holdout_access_counts``.
+    # That helper counts ``access_kind = 'evaluate'`` only, so on this `read` it
+    # returns 0 whether or not a row exists — an assertion against it here would
+    # have been structurally unable to fail.
+    written = ebull_test_conn.execute(
+        "SELECT count(*) FROM strategy_holdout_accesses WHERE strategy_id = %s AND strategy_version = %s",
+        (_STRATEGY_ID, _STRATEGY_VERSION),
+    ).fetchone()
+    assert written is not None
+    assert written[0] == 1
+
+
+def test_the_strict_door_loads_the_declaration_once(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2617's actual claim, made falsifiable.
+
+    ⚠ THE TEST ABOVE CANNOT SEE THIS. It asserts that the gate's copy and the
+    access row name the same revision — which they also do under three loads, in
+    one transaction, with nothing racing. Agreement is the property that matters
+    in production; the load count is the property the ticket claims, and the two
+    need different tests. Counting is the only way to pin the second.
+
+    ⚠ Patched on the MODULE, because ``_declaration_refusal_codes`` resolves
+    ``load_preregistration`` as a global — a patch on the imported name in this
+    file would count nothing and pass.
+    """
+    with ebull_test_conn.transaction():
+        _freeze_coherent(ebull_test_conn)
+
+    real = result_ledger.load_preregistration
+    calls = 0
+
+    def counting_load(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(result_ledger, "load_preregistration", counting_load)
+    with ebull_test_conn.transaction():
+        result_ledger.require_outcome_access_with_declaration(ebull_test_conn, _access())
+
+    assert calls == 1, f"the strict door loaded the declaration {calls} times; #2617 collapsed it to one"

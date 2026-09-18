@@ -26,9 +26,7 @@ from app.services.market_calendar import us_market_status
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.result_ledger import (
     HoldoutAccess,
-    PreregDeclarationRefused,
-    load_preregistration,
-    require_outcome_access,
+    require_outcome_access_with_declaration,
     verify_outcome_access_provenance,
 )
 from app.services.trial_register import TRIAL_REGISTER
@@ -751,8 +749,8 @@ def require_outcome_gate(
     ``scripts/freeze_2582_schedule13d_declaration.py``, run separately and
     earlier.
 
-    ⚠ THE CALLER OWNS THE COMMIT. ``require_outcome_access`` writes in this
-    transaction and does not commit it. The caller must ``conn.commit()`` before
+    ⚠ THE CALLER OWNS THE COMMIT. ``require_outcome_access_with_declaration``
+    writes in this transaction and does not commit it. The caller must ``conn.commit()`` before
     evaluating — not only so the look stays logged if the evaluation dies, but
     because ``evaluate_historical_falsification`` opens with
     ``SET TRANSACTION ISOLATION LEVEL ... READ ONLY``, which is only valid as the
@@ -761,15 +759,19 @@ def require_outcome_gate(
     """
 
     digest = require_outcome_gate_preconditions(acknowledgement=acknowledgement, contract_path=contract_path)
-    frozen = load_preregistration(conn, STRATEGY_ID, STRATEGY_VERSION)
-    if frozen is None:
-        raise PreregDeclarationRefused(STRATEGY_ID, STRATEGY_VERSION, ("preregistration_not_frozen",))
     # ⚠ `read`, with a NULL result_version, and not `evaluate`. sql/264's
     # `strategy_holdout_accesses_evaluate_names_a_result` requires an `evaluate`
     # to name the result row it authorises, and C-4 never writes one — so
     # `evaluate` here would either be refused or would stand for a row that
     # never arrives. A `read` is what this is: the withheld side being LOOKED AT.
-    access_id = require_outcome_access(
+    #
+    # ⚠ #2617 — THE MISSING-DECLARATION REFUSAL IS THE LEDGER'S, NOT THIS
+    # FUNCTION'S. This used to `load_preregistration` first and raise
+    # `PreregDeclarationRefused` here on `None`. That raise wrote no sql/340
+    # audit row — #2611's chokepoint is `result_ledger._refuse_access`, and a
+    # script-side raise is outside the AST guard that keeps it one. The check
+    # below is the same check, audited, and under the trial lock.
+    access_id, frozen = require_outcome_access_with_declaration(
         conn,
         HoldoutAccess(
             strategy_id=STRATEGY_ID,

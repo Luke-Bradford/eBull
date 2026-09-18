@@ -49,9 +49,20 @@ from typing import Final
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 #: Any of these being CALLED means the script consults #2599's declaration.
-_GATE_CALLS: Final[frozenset[str]] = frozenset(
+#: The ledger's strict door, in both its spellings. ⚠ #2617 added the second:
+#: same refusal, same audit, same lock — it additionally RETURNS the declaration
+#: it enforced against, so a caller needing the `declaration_id` stops loading it
+#: a second time. Named separately because two tests below want *this* pair and
+#: not `require_outcome_gate`, which is a script's own wrapper.
+_STRICT_ACCESS_CALLS: Final[frozenset[str]] = frozenset(
     {
         "require_outcome_access",
+        "require_outcome_access_with_declaration",
+    }
+)
+
+_GATE_CALLS: Final[frozenset[str]] = _STRICT_ACCESS_CALLS | frozenset(
+    {
         "require_outcome_gate",
         "verify_outcome_access_provenance",
     }
@@ -367,7 +378,12 @@ def test_c4_is_gated_rather_than_allowlisted() -> None:
 
     assert "evaluate_2582_schedule13d_outcomes.py" not in _PRE_CUTOFF_UNGATED
     called = _called_names((_SCRIPTS / "evaluate_2582_schedule13d_outcomes.py").read_text())
-    assert "require_outcome_access" in called
+    # ⚠ Asserted against the STRICT pair rather than one spelling: #2617 moved
+    # C-4 onto `require_outcome_access_with_declaration`, and a test pinned to a
+    # single name turns a rename of the door into a failure that reads "C-4 is
+    # ungated" — the opposite of what happened. Deliberately NOT `_GATE_CALLS`,
+    # which also admits `require_outcome_gate`, the script's own wrapper.
+    assert called & _STRICT_ACCESS_CALLS, f"C-4 calls none of the strict doors {sorted(_STRICT_ACCESS_CALLS)}"
     assert "verify_outcome_access_provenance" in called
 
 
