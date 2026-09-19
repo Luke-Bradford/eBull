@@ -8978,3 +8978,46 @@ original, because the gate now *looked* like a bound.
   cross-source status table, which records D/I as confirmed and nature as 18.5% discordant);
   `docs/specs/ownership/2026-09-19-3227-ndh-line-grain-columns.md` § "A tie that was algebra,
   not evidence".
+
+
+## A rule fixed in ONE reader is not fixed — enumerate every reader of the table (#3232, 2026-09-19)
+
+- Symptom: #3146 established the rule that decides which Table I line becomes an insider's
+  balance — Form 4 General Instruction 4(a)(i), the filing's LAST line — and fixed it in
+  `refresh_insiders_current` and `refresh_insiders_current_batch`. It did not fix
+  `ownership_history._insiders_history`, the reader behind the operator's insider CHART,
+  which kept the old `source_document_id ASC` tie-break for a year. The ownership card and
+  the ownership chart could therefore name different lines of the SAME filing.
+- Scale, measured after the fact:
+  `PYTHONPATH=. uv run python -m scripts.audit_3232_insider_history_line_order --ab --gain`
+  reports **693,492 of 2,616,746** per-holder chart buckets picking a different line, and
+  **680,027** of those carrying a different share VALUE, over **3,748** instruments. Concrete:
+  AAPL's CFO, accession `0002050912-25-000008`, 2025-10-16 — the chart said 12,464 shares
+  where the filing's own final line says 8,765, a 42% overstatement.
+- Root cause of the miss: the #3146 ticket was framed around the SYMPTOM'S LOCATION
+  ("`_current` picks the wrong line") rather than around the RULE ("this is how a Table I
+  line is chosen, wherever it is chosen"). A fix scoped to a location stops at that
+  location's edge, and nothing in the ticket ever asked who else applies the rule.
+- ⚠ The enumeration is one grep and it is cheap. For a projection rule, list every reader of
+  the table before closing:
+  `rg -n "FROM ownership_insiders_observations" app/` — then, for each hit, check whether its
+  `ORDER BY` carries the shared tail or restates a tie-break of its own. #3232 found exactly
+  one straggler this way, and the same grep would have found it in #3146.
+- Prevention, structural not procedural: the rule lives in ONE constant
+  (`ownership_observations.INSIDER_WINNER_ORDER_TAIL`) that every reader imports, and the
+  chokepoint lint `scripts/check_ownership_refresh_writer_pattern.sh` invariant H expands it
+  BY NAME before comparing the effective `ORDER BY` — so a copy that drifts is caught. ⚠ That
+  by-name expansion is also why renaming the constant red the lint, which is the guard
+  working: a lint that pinned the placeholder literal would pin nothing.
+- ⚠ Second lesson from the same ticket, about the WRITE-UP rather than the code. I filed the
+  issue leading with the string-vs-numeric hazard (`:NDT:1000` sorting before `:NDT:999`).
+  True about string ordering, and its live population is **zero** — `--gain` reports
+  `differing_sk_width=0`. The whole live defect was first-line-vs-last-line
+  (`moved_to_later_line=693,492/693,492`). A hazard that is real in the abstract is not
+  automatically the defect in front of you; **measure which of the two mechanisms your
+  population actually exercises before leading with either**, or the next reader inherits the
+  wrong mental model and writes a test that pins nothing. Corrected on-issue rather than
+  silently edited, and the surviving regression test is labelled a cast GUARD, not evidence.
+- Enforced in: this entry; `.claude/skills/data-sources/sec-edgar.md` §2.3;
+  `tests/test_3232_insider_history_line_order.py`;
+  `scripts/audit_3232_insider_history_line_order.py`.
