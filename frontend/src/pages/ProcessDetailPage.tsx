@@ -12,7 +12,7 @@
  */
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
@@ -672,15 +672,22 @@ function tabTitle(tab: TabKey): string {
  * drill-in"). Until now nothing rendered it: `STALE_REASON_LABEL` was
  * exported, unit-tested and dead.
  *
- * ⚠⚠ The chips carry NO `Badge` tone, and that is load-bearing rather than a
+ * ⚠⚠ These are muted TEXT, not pills, and that is load-bearing rather than a
  * style choice. A reason surviving in the payload does not mean the backend
  * thinks it is an alarm: `compute_verdict` returns neutral `paused` for a
  * halted row still carrying `schedule_missed` / `watermark_gap`, and
- * `self_healing` calms a reason whose retry is already in flight. Painting
- * every reason amber would undo that suppression and put two disagreeing
- * signals on one page — the exact defect this change removes. The verdict pill
- * stays the only toned health claim here; these are the inputs it was computed
- * from, stated as such.
+ * `self_healing` calms a reason whose retry is already in flight. Giving them
+ * pill weight would undo that suppression and put two competing signals on one
+ * page — the exact defect this change removes. The verdict pill stays the only
+ * toned health claim here; these are the inputs it was computed from, stated
+ * as such.
+ *
+ * Shape copied from `ProcessRow::RecentReaps`, which solves the identical
+ * problem (a fact that must be visible without reading as a second status) the
+ * same way: slate, lowercase, no border, no pill geometry. ⚠ A bordered chip
+ * here would also re-declare Badge's geometry, which `check-hand-rolled-pills`
+ * exists to stop — it happened not to fire only because the text-size class
+ * sat on the parent line.
  *
  * ⚠ Order is the payload's own array order, NOT a re-derived precedence — the
  * backend's ordering constants govern which reason wins the headline, and
@@ -710,16 +717,17 @@ function HealthDetail({ row }: { row: ProcessRowResponse }) {
           data-testid="stale-reasons"
           className="flex flex-wrap items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400"
         >
-          <span className="uppercase tracking-wide">reported</span>
-          {row.stale_reasons.map((reason) => (
-            <span
-              key={reason}
-              data-testid="stale-reason-chip"
-              data-reason={reason}
-              className="rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-700"
-            >
-              {STALE_REASON_LABEL[reason]}
-            </span>
+          <span>reported:</span>
+          {row.stale_reasons.map((reason, i) => (
+            <Fragment key={reason}>
+              {/* Separator is a SIBLING, not part of the labelled span: the
+                  span's text is exactly the reason label, so a test reading it
+                  reads the operator-facing copy and nothing else. */}
+              {i > 0 ? <span aria-hidden="true">·</span> : null}
+              <span data-testid="stale-reason-chip" data-reason={reason}>
+                {STALE_REASON_LABEL[reason]}
+              </span>
+            </Fragment>
           ))}
         </div>
       ) : null}

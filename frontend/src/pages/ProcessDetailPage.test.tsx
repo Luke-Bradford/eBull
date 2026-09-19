@@ -1363,6 +1363,11 @@ describe("ProcessDetailPage — health verdict (#2274)", () => {
     // Tailwind is how `eightKSeverity.ts` shipped light-only chips past the
     // dark gate.
     expect(chip.className).not.toMatch(/\bbg-/);
+    // ...and no pill GEOMETRY either. The same rule `ProcessRow::RecentReaps`
+    // follows: a fact that must not read as a second status is muted text, not
+    // a bordered chip. `check-hand-rolled-pills` guards the class pattern; this
+    // guards the intent at the one place it is rendered.
+    expect(chip.className).not.toMatch(/\bborder\b/);
     // And the verdict pill stays the only toned health claim on the page.
     expect(screen.getAllByTestId("status-pill")).toHaveLength(1);
   });

@@ -146,15 +146,21 @@ production consumer and the two surfaces still share their wording. No tone: a
 second toned pill beside the verdict re-creates the two-cells-that-disagree
 defect `RecentReaps`' docstring already names.
 
-**4. `stale_reasons` get chips — MUTED, and framed as diagnostics, not alarms.**
-`STALE_REASON_LABEL` finally gets its renderer, rendering **every** reason in
-payload order.
-⚠⚠ The chips must not re-alarm what the backend deliberately calmed
-(ckpt-1 #17). `compute_verdict:217-219` returns neutral `paused` for a halted row
-that still carries `schedule_missed` / `watermark_gap`, and `self_healing`
-suppresses a reason whose retry is in flight. So the chips are slate/lowercase
-with no `Badge` tone, under a caption naming them as reported-not-adjudicated.
-The verdict pill remains the only toned health claim on the page.
+**4. `stale_reasons` are rendered as MUTED TEXT — diagnostics, not alarms, and
+not pills.** `STALE_REASON_LABEL` finally gets its renderer, rendering **every**
+reason in payload order under a `reported:` caption.
+⚠⚠ They must not re-alarm what the backend deliberately calmed (ckpt-1 #17).
+`compute_verdict:217-219` returns neutral `paused` for a halted row that still
+carries `schedule_missed` / `watermark_gap`, and `self_healing` suppresses a
+reason whose retry is in flight. The verdict pill stays the only toned health
+claim on the page.
+⚠ Shape is copied from `ProcessRow::RecentReaps`, which solves the identical
+problem the same way: slate, lowercase, **no border, no pill geometry**. Rev 2
+of this spec said "chips" and the implementation first drew bordered ones —
+which re-declares `Badge`'s geometry. `frontend/scripts/check-hand-rolled-pills`
+did **not** fire on them, because it needs padding + `text-[10px]` + `border` on
+one line and the text size sat on the parent. A textual gate passing is not
+evidence the design is right; the precedent in `RecentReaps` is.
 ⚠ Chip order is the payload's own array order. It is **not** derived from
 `_WEDGE_HEADLINE_ORDER`, which applies only inside `compute_verdict`'s
 `status == "disabled"` branch; the general headline pick uses `_REASON_ORDER`
@@ -202,7 +208,8 @@ simultaneous `mid_flight_stuck` + `runtime_ceiling` (ckpt-1 #19). See below.
 4. A row whose `status` deliberately diverges from its `health_verdict`
    (`status='idle'`, `health_verdict='attention'`) shows the verdict in the
    header **and** `idle` as `Process state` — both, not one.
-5. Every `stale_reason` renders a chip, in payload order, with no `Badge` tone;
+5. Every `stale_reason` renders in payload order as muted text with no `Badge`
+   tone and no pill geometry (no border);
    a row with `stale_reasons: []` renders no chip container.
 6. A `paused` row carrying `schedule_missed` renders the neutral `paused` pill
    and the chip — the chip does not repaint the row as an alarm.
