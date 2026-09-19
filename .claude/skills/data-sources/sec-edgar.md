@@ -402,6 +402,71 @@ reading `insider_transactions` would miss ~91% of the population.
 snapshot per class and ownership form, not a sequence, and no ordinal has been established
 for `NONDERIV_HOLDING_SK`.
 
+#### ⚠⚠ …and being out of the ORDER rule is why they hit an AGGREGATION defect (#3227)
+
+`ownership_insiders_current` is keyed `(instrument_id, holder_identity_key,
+ownership_nature)`. The sentence above is the reason that key cannot hold a Table I: a
+simultaneous snapshot **per class and ownership form** has more than one line per holder, and
+the `DISTINCT ON` keeps exactly one.
+
+**Source rule.** Form 3 Table I (SEC 1473, 03-26) prints the reminder *"Report on a separate
+line for each class of securities beneficially owned directly or indirectly."* Form 3 General
+Instruction **5(b)(iii)** and Form 4 General Instruction **4(b)(iii)** carry the separation
+requirement word for word: *"Report [transactions in] securities beneficially owned directly
+on a separate line from those beneficially owned indirectly. **Report different forms of
+indirect ownership on separate lines.** The nature of indirect ownership shall be stated as
+specifically as possible; for example, 'By Self as Trustee for X,' 'By Spouse,' 'By X Trust,'
+'By Y Corporation,' etc."* So the line grain is **(class) x (direct | each form of indirect)** —
+neither axis is in the key, because on a `:NDH:` row `ownership_nature` is the DERA
+*relationship* flag (see the overloaded-column block above).
+
+⚠ **`:NDH:` is HOLDINGS, not "Form 3".** A Form 4 or 5 carries holding lines too, and on the
+reachable population they are the MAJORITY. Cite whichever form's instruction applies; both say
+the same thing here.
+
+```bash
+PYTHONPATH=. uv run python -m scripts.census_3227_insider_holding_line_collapse
+```
+
+Dev 2026-09-19 — **3,087** `_current` rows over **999** instruments (`form4` 1,645 / `form3`
+1,442) discard a Table I line; the survivor is not the largest line **1,140** times.
+Deduplicated to the filing, **6,193** distinct Table I lines are touched and **4,033** never
+reach `_current`; the raw 6,562 dropped OBSERVATION rows is larger because the owner fan-out
+and the #1117 share-class instrument fan-out both replicate a line.
+
+⚠ The `single_filer` **1,789** / `joint_filing` **1,298** split is where attribution is
+*cheapest*, NOT where it is possible, and its instrument counts (728 / 324) **overlap on 53** —
+they are not a partition and must never be added.
+
+⚠⚠ **Do NOT "just sum the lines."** Three independent reasons:
+
+1. **The class axis.** CNH accession `0001193125-25-198794` reports 366,927,900 common AND
+   366,927,900 special voting shares. Summing is wrong for ONE reporting person, before
+   attribution is considered — and it is the GOOGL/GOOG trap wearing a Section 16 hat.
+2. **Instruction 5(b)(iv) / 4(b)(iv)** — an indirect amount may be the person's proportionate
+   interest **or**, at the reporting person's option, the entity's entire holding.
+3. **The owner fan-out.** `_stage_owners` writes every Table I line against every reporting
+   owner on the accession, so CNH's two lines become four observation rows. ⚠ This inflates
+   ROW counts across groups; it does NOT explain equal siblings *within* one group, because the
+   group key already fixes the holder. Getting that backwards is the #3227 prevention entry.
+
+⚠ **`NONDERIV_HOLDING.tsv` publishes the discriminators the correct key needs** —
+`SECURITY_TITLE`, `DIRECT_INDIRECT_OWNERSHIP`, `NATURE_OF_OWNERSHIP` — and
+`sec_insider_dataset_ingest` reads **none** of them (`:725-830` takes
+`SHRS_OWND_FOLWNG_TRANS` and `NONDERIV_HOLDING_SK` only). Any fix needs those columns carried
+through the write path first, so it needs a holdings re-ingest before the aggregation rule can
+even be expressed.
+
+⚠⚠ **The XML path has the same defect one layer earlier.**
+`insider_form3_ingest._record_form3_observations_for_filing` derives *"one
+``ownership_insiders_observations`` row per ``(filer_cik, direct_indirect)``"* — so it collapses
+the CLASS axis before the observations table ever sees it, and
+`insider_transactions._record_insider_observations` does the same for Form 4. Switching the
+dual-pipeline de-collision to prefer XML is therefore **not** a repair; both pipelines need it.
+
+⚠ A tie-break fix ("prefer a valued line over a NULL one") was measured and its population is
+**zero** — only 11 `_current` `:NDH:` rows have NULL shares and none has a valued sibling.
+
 ### 2.4 Schedule 13D / 13G — beneficial ownership
 
 XML mandate **since 2024-12-18**. Current EDGAR XML technical spec revision is **2.2** (2026-03-16) — verify against `https://www.sec.gov/edgar/filer-information/current-edgar-technical-specifications` before relying on the schema. Pre-mandate filings are HTML/text — no `primary_doc.xml` exists; legacy coverage is lower-fidelity unless you write a parallel HTML extractor.
