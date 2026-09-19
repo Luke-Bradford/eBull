@@ -403,6 +403,25 @@ class ScheduledJob:
     # time. Admit a job because a late run is better than no run, never because
     # the late run reconstructs the missed one.
     rearm_on_lost_fire: bool = False
+    # #3220 — refuse a fire the EXECUTION SLOT admitted too late, for a job whose
+    # contract is that it runs at its scheduled time. The predicate is the exact
+    # inverse of the two fields above, and the same one: a job that is idempotent,
+    # side-effect-bounded and indifferent to its own fire time must NOT set this;
+    # a job whose lateness is a defect must.
+    #
+    # ⚠⚠ It closes a hole that ``misfire_grace_time`` cannot see. APScheduler tests
+    # the grace in ``run_job``, i.e. BEFORE the wrapper runs, and the wrapper's
+    # outermost statement is an unbounded ``_job_execution_slot`` acquire — so a
+    # fire can pass the one-second grace, park on the general permit for the 990 -
+    # 1410s waits measured on 2026-09-18, and then submit orders. Nothing rechecked
+    # its age. Granting every lane its own dispatch pool (#3220) makes that
+    # admission MORE likely, which is why the check lands in the same change.
+    #
+    # The bound is not a new constant: it is this job's own effective
+    # ``misfire_grace_time`` — ``misfire_grace_seconds`` when set, else the
+    # scheduler-wide default — applied a second time, to the delay the slot added.
+    # Enforced by ``tests/test_jobs_runtime.py``, not by memory.
+    refuse_late_admission: bool = False
 
 
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
@@ -1132,6 +1151,15 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # Do not fire on cold boot — order execution must only happen at
         # the scheduled time, not as a surprise catch-up hours later.
         catch_up_on_boot=False,
+        # #3220 — and the same sentence binds the OTHER way a late run arrives.
+        # `catch_up_on_boot=False` closes the boot path and `rearm_on_lost_fire`
+        # is left False for the same reason, but neither reaches a fire that was
+        # dispatched on time and then waited on the general permit. This job is on
+        # `general_non_sec` (50 members, 1 permit), where admissions of 990-1410s
+        # were measured on 2026-09-18. Its own two recorded admissions both waited
+        # 0.000s, so the refusal costs nothing observed and bounds the case that
+        # submits orders hours late.
+        refuse_late_admission=True,
     ),
     ScheduledJob(
         name=JOB_RECOMMENDATION_ORDER_RECONCILE,
@@ -1376,6 +1404,15 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # and mutates no broker state, so running it late is a strictly better
         # outcome than not running it.
         misfire_grace_seconds=4 * 60 * 60,
+        # #3220 (Codex ckpt-2 P2) — and the 02:30 ceiling above is only a ceiling if
+        # something enforces it AFTER admission. APScheduler tests the 4h grace in
+        # ``run_job``, before the wrapper; this job is on ``general_non_sec`` (50
+        # members, 1 permit), so it can pass that test at 22:30 and then park on the
+        # permit past 03:00 — resolving a LATER ``snapshot_date`` and missing the
+        # session permanently, which is exactly the 2026-08-12 / 08-20 gap the grace
+        # was added to close. The refusal uses this same 4h figure, so the sentence
+        # above is now load-bearing in both directions rather than only one.
+        refuse_late_admission=True,
         prerequisite=_bootstrap_complete,
         catch_up_on_boot=False,
     ),

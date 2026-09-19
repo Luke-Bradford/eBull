@@ -102,10 +102,15 @@ def test_the_split_adds_no_execution_permit() -> None:
     A new *source* lane is not a new *execution* lane: ``execution_lane_for``
     branches on ``sec_rate`` / the paper job / the core-preflight producers and
     otherwise falls through to general, and ``build_scheduler_executors``
-    enumerates the fixed reserved lanes rather than ``Lane`` literals. Pinned
-    because the failure mode would be a boot-time ``ConnectionBudgetExceeded``,
-    not a test failure anywhere near this change.
+    enumerates ``EXECUTION_LANE_PERMITS``'s keys rather than ``Lane`` literals.
+    Pinned because the failure mode would be a boot-time
+    ``ConnectionBudgetExceeded``, not a test failure anywhere near this change.
+
+    ⚠ The executor assertion changed with #3220 and the PROPERTY did not. It read
+    ``== "default"`` while general shared that pool; general now has a pool of its
+    own, so the same "no new execution lane" claim is written as "still on the
+    general lane". A dispatch POOL costs threads; only a PERMIT costs connections.
     """
     for job_name, _lane in _CORE_LANES:
         assert execution_lane_for(job_name) == EXECUTION_LANE_GENERAL
-        assert _scheduler_executor_alias(job_name) == "default"
+        assert _scheduler_executor_alias(job_name) == EXECUTION_LANE_GENERAL

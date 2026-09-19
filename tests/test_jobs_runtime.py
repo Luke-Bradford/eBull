@@ -2542,8 +2542,8 @@ class TestReservedLaneSchedulerExecutors:
 
     def test_reserved_lane_runs_while_every_default_worker_is_parked(self) -> None:
         """The exact shape that failed at 03:23 — and it must now pass."""
-        for lane in runtime._RESERVED_EXECUTOR_LANES:
-            assert self._fires_with_default_pool_parked(lane), f"{lane} starved by the default pool"
+        for lane in runtime._DISPATCH_POOL_LANES:
+            assert self._fires_with_pool_parked("default", lane), f"{lane} starved by the default pool"
 
     def test_default_lane_is_starved_by_the_same_setup(self) -> None:
         """Control arm: proves the harness reproduces the bug it claims to fix.
@@ -2551,11 +2551,33 @@ class TestReservedLaneSchedulerExecutors:
         Without this, a test that passes for an unrelated reason (the pool never
         actually filled, the hogs returned early) reads as a green reservation.
         """
-        assert not self._fires_with_default_pool_parked("default")
+        assert not self._fires_with_pool_parked("default", "default")
+
+    def test_a_sec_fire_survives_a_fully_parked_general_pool(self) -> None:
+        """#3220's regression, reproducing the 2026-09-18 04:23:00,792 log line.
+
+        ``sec_atom_fast_lane`` is on ``sec_rate``, which had 4 free permits at the
+        time, and it still lost its 03:15 fire — dequeued 480.8 s late in the same
+        millisecond ``orchestrator_full_sync`` released a ``default`` worker, because
+        every one of those ten workers was parked on the single ``general_non_sec``
+        permit. Both lanes are now their own pool, so filling one cannot reach the
+        other.
+        """
+        assert self._fires_with_pool_parked(runtime.EXECUTION_LANE_GENERAL, runtime.EXECUTION_LANE_SEC), (
+            "a general-lane pool jam still reaches the sec lane"
+        )
+
+    def test_the_general_pool_jam_is_real(self) -> None:
+        """Control arm for the above — the same jam DOES block another general fire.
+
+        Without it, ``test_a_sec_fire_survives_a_fully_parked_general_pool`` passes
+        whenever the harness fails to fill the pool at all.
+        """
+        assert not self._fires_with_pool_parked(runtime.EXECUTION_LANE_GENERAL, runtime.EXECUTION_LANE_GENERAL)
 
     @staticmethod
-    def _fires_with_default_pool_parked(executor_alias: str) -> bool:
-        """Fill every ``default`` worker, then fire one job on *executor_alias*."""
+    def _fires_with_pool_parked(jammed_alias: str, probe_alias: str) -> bool:
+        """Fill every worker of *jammed_alias*, then fire one job on *probe_alias*."""
         from apscheduler.schedulers.background import BackgroundScheduler
 
         release = threading.Event()
@@ -2566,33 +2588,36 @@ class TestReservedLaneSchedulerExecutors:
             parked.release()
             release.wait(timeout=30)
 
+        executors = runtime.build_scheduler_executors()
+        workers = executors[jammed_alias]._pool._max_workers
         scheduler = BackgroundScheduler(
             timezone="UTC",
-            executors=runtime.build_scheduler_executors(),
+            executors=executors,
             job_defaults={"coalesce": True, "misfire_grace_time": 1, "max_instances": 1},
         )
         scheduler.start()
         try:
             now = datetime.now(UTC)
-            # One hog per default worker, plus two that must queue behind them.
-            for index in range(runtime._DEFAULT_EXECUTOR_MAX_WORKERS + 2):
+            # One hog per worker of the jammed pool, plus two that must queue behind
+            # them — the queue is what carried the misfire in the production case.
+            for index in range(workers + 2):
                 scheduler.add_job(
                     hog,
                     "date",
                     run_date=now,
                     id=f"hog-{index}",
-                    executor="default",
+                    executor=jammed_alias,
                     misfire_grace_time=3600,
                 )
-            for _ in range(runtime._DEFAULT_EXECUTOR_MAX_WORKERS):
-                assert parked.acquire(timeout=10), "default pool never filled — harness is not reproducing"
+            for _ in range(workers):
+                assert parked.acquire(timeout=30), f"{jammed_alias} pool never filled — harness is not reproducing"
 
             scheduler.add_job(
                 ran.set,
                 "date",
                 run_date=datetime.now(UTC),
                 id="probe",
-                executor=executor_alias,
+                executor=probe_alias,
                 misfire_grace_time=3600,
             )
             return ran.wait(timeout=3)
@@ -2616,7 +2641,7 @@ class TestReservedLaneSchedulerExecutors:
     def test_reserved_pool_is_at_least_its_lane_permits(self) -> None:
         """A pool smaller than the semaphore would re-create the starvation inside the lane."""
         executors = runtime.build_scheduler_executors()
-        for lane in runtime._RESERVED_EXECUTOR_LANES:
+        for lane in runtime._DISPATCH_POOL_LANES:
             permits = runtime.EXECUTION_LANE_PERMITS[lane]
             assert executors[lane]._pool._max_workers >= permits, lane
 
@@ -2638,7 +2663,7 @@ class TestReservedLaneSchedulerExecutors:
         from app.workers.scheduler import SCHEDULED_JOBS
 
         executors = runtime.build_scheduler_executors()
-        for lane in runtime._RESERVED_EXECUTOR_LANES:
+        for lane in runtime._DISPATCH_POOL_LANES:
             members = [j.name for j in SCHEDULED_JOBS if runtime.execution_lane_for(j.name) == lane]
             assert members, f"{lane} has no registered job — a reserved lane with no member is dead capacity"
             assert executors[lane]._pool._max_workers >= len(members), f"{lane} has {members}"
@@ -2732,8 +2757,8 @@ class TestReservedLaneSchedulerExecutors:
                 JOB_STRATEGY_HALT_FEED_REFRESH,
             },
         }
-        assert set(expected) == set(runtime._RESERVED_EXECUTOR_LANES), (
-            "a reserved lane was added or removed without updating this allow list"
+        assert set(expected) == set(runtime._RESTRICTED_LANES), (
+            "a restricted lane was added or removed without updating this allow list"
         )
         for lane, names in expected.items():
             actual = {j.name for j in SCHEDULED_JOBS if runtime.execution_lane_for(j.name) == lane}
@@ -2838,14 +2863,33 @@ class TestReservedLaneSchedulerExecutors:
         library_default = inspect.signature(APSchedulerThreadPoolExecutor.__init__).parameters["max_workers"].default
         assert runtime._DEFAULT_EXECUTOR_MAX_WORKERS == library_default
 
-    def test_non_reserved_lanes_stay_on_the_default_executor(self) -> None:
-        """sec_rate and general keep today's pool — this PR does not re-shape them."""
+    def test_no_registered_job_dispatches_on_the_shared_default_pool(self) -> None:
+        """#3220 inverts #2985's ``test_non_reserved_lanes_stay_on_the_default_executor``.
+
+        That test pinned ``sec_rate`` and ``general_non_sec`` to ``default`` and said
+        so explicitly — *"this PR does not re-shape them"*. Re-shaping them IS this
+        change, so the assertion is inverted rather than deleted: a job silently
+        falling back to the shared pool is the defect, and 61 of 65 doing it is what
+        cost ``sec_atom_fast_lane`` its fire while its own lane was idle.
+
+        ``default`` still exists — APScheduler's ``add_job`` defaults to it — it just
+        has no registered member.
+        """
         from app.workers.scheduler import SCHEDULED_JOBS
 
+        assert SCHEDULED_JOBS, "no registered jobs — this assertion would be vacuous"
         for job in SCHEDULED_JOBS:
-            lane = runtime.execution_lane_for(job.name)
-            if lane in (runtime.EXECUTION_LANE_SEC, runtime.EXECUTION_LANE_GENERAL):
-                assert runtime._scheduler_executor_alias(job.name) == "default", job.name
+            assert runtime._scheduler_executor_alias(job.name) != "default", job.name
+
+    def test_every_lane_with_a_permit_has_a_dispatch_pool(self) -> None:
+        """The two constants are derived from each other and must not drift apart.
+
+        A lane present in ``EXECUTION_LANE_PERMITS`` but absent from
+        ``_DISPATCH_POOL_LANES`` would silently route its members back onto the
+        shared pool — the state this ticket fixes, re-entered by omission.
+        """
+        assert set(runtime._DISPATCH_POOL_LANES) == set(runtime.EXECUTION_LANE_PERMITS)
+        assert set(runtime._RESTRICTED_LANES) <= set(runtime._DISPATCH_POOL_LANES)
 
     def test_execution_lane_precedence_and_unknown_name_fallback(self) -> None:
         """SEC source wins over the reserved job names; an unregistered name → general."""
@@ -2909,3 +2953,237 @@ class TestReservedLaneSchedulerExecutors:
         assert defaults["coalesce"] is True
         assert defaults["max_instances"] == 1
         assert defaults["misfire_grace_time"] == 1
+
+
+class TestLateAdmissionRefusal:
+    """#3220 — the second way a fire arrives late, and the one grace cannot see.
+
+    APScheduler tests ``misfire_grace_time`` inside ``run_job``, i.e. BEFORE the
+    wrapper runs, and the wrapper's outermost statement is an unbounded
+    ``_job_execution_slot`` acquire. Admissions of 990-1410 s were measured on the
+    general lane on 2026-09-18, so a fire can pass the one-second grace and then
+    submit orders 23 minutes later with nothing rechecking its age.
+
+    ⚠ Every arm pins ``now`` to the job's own slot. Reading the wall clock would
+    make the result depend on the hour the suite runs, which for a daily job is a
+    24-hour swing across the very boundary under test.
+    """
+
+    ORDER_SLOT = datetime(2026, 9, 19, 6, 30, tzinfo=UTC)
+    EOD_SLOT = datetime(2026, 9, 18, 22, 30, tzinfo=UTC)
+
+    @staticmethod
+    @contextmanager
+    def _slot_wait(job_name: str, seconds: float) -> Iterator[None]:
+        """Publish the wait the way ``_job_execution_slot`` does."""
+        token = runtime._execution_slot_wait_seconds.set((job_name, seconds))
+        try:
+            yield
+        finally:
+            runtime._execution_slot_wait_seconds.reset(token)
+
+    def _verdict(self, job_name: str, slot: datetime, *, waited: float, dispatch_late: float = 0.0):
+        """Run the check for a fire dispatched ``dispatch_late`` after ``slot`` that
+        then waited ``waited`` seconds for admission."""
+        with self._slot_wait(job_name, waited):
+            return runtime.late_admission_seconds(job_name, now=slot + timedelta(seconds=dispatch_late + waited))
+
+    def test_a_job_that_has_not_opted_in_is_never_refused(self) -> None:
+        """The default must stay "run it" — most general-lane jobs park for minutes
+        and running late is the better outcome for them."""
+        from app.workers.scheduler import JOB_SEC_MANIFEST_WORKER
+
+        with self._slot_wait(JOB_SEC_MANIFEST_WORKER, 1_410.0):
+            assert runtime.late_admission_seconds(JOB_SEC_MANIFEST_WORKER) is None
+
+    def test_the_order_job_is_refused_past_its_own_grace(self) -> None:
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+        assert self._verdict(JOB_EXECUTE_APPROVED_ORDERS, self.ORDER_SLOT, waited=1_380.6) == pytest.approx(1_380.6)
+
+    def test_an_immediate_or_within_grace_admission_is_not_refused(self) -> None:
+        """Both boundary arms. ``0.0`` is the only admission this job has ever
+        actually recorded, so refusing it would refuse the observed case."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+        grace = runtime.effective_misfire_grace_seconds(JOB_EXECUTE_APPROVED_ORDERS)
+        for waited in (0.0, float(grace)):
+            assert self._verdict(JOB_EXECUTE_APPROVED_ORDERS, self.ORDER_SLOT, waited=waited) is None, waited
+
+    def test_an_unknown_wait_is_not_refused(self) -> None:
+        """``None`` means no slot of this job's own — a direct or bootstrap
+        invocation, or another job's enclosing slot. Refusing on an unknown wait
+        would refuse the fires we know least about."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+        assert runtime.current_execution_slot_wait_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None
+        assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS, now=self.ORDER_SLOT) is None
+
+    def test_another_jobs_slot_does_not_supply_the_wait(self) -> None:
+        """#3189 finding 13 — a slot can enclose another job's work, and the
+        orchestrator's admission must not be attributed to the layer beneath it."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS, JOB_ORCHESTRATOR_FULL_SYNC
+
+        with self._slot_wait(JOB_ORCHESTRATOR_FULL_SYNC, 1_380.6):
+            assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS, now=self.ORDER_SLOT) is None
+
+    def test_dispatch_lateness_and_admission_wait_compose(self) -> None:
+        """⚠⚠ Codex ckpt-2 round 3 — the defect this class was first written with.
+
+        The two sources add up, and bounding them separately does not bound the sum.
+        A 22:30 EOD fire dispatched at 02:20 is inside its 4 h grace, and a further
+        20-minute wait is inside it too — but admission at 02:40 is past the 02:30
+        ceiling the grace exists to express, and a longer one crosses the 03:00
+        sweep and resolves a LATER snapshot_date.
+        """
+        from app.workers.scheduler import JOB_PORTFOLIO_EOD_SNAPSHOT
+
+        grace = runtime.effective_misfire_grace_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT)
+        dispatch_late = grace - 600.0  # 03:50 after the 22:30 slot — inside the grace
+        waited = 1_200.0  # also inside the grace on its own
+        assert dispatch_late <= grace and waited <= grace
+        assert self._verdict(
+            JOB_PORTFOLIO_EOD_SNAPSHOT, self.EOD_SLOT, waited=waited, dispatch_late=dispatch_late
+        ) == pytest.approx(dispatch_late + waited)
+
+    def test_the_eod_snapshots_ceiling_is_enforced_after_admission(self) -> None:
+        """The 4 h grace is a CEILING chosen by construction — due 22:30, next
+        frontier-advancing sweep at 03:00. Enforced only at dispatch it bounds
+        nothing, because the wait comes after it."""
+        from app.workers.scheduler import JOB_PORTFOLIO_EOD_SNAPSHOT
+
+        grace = runtime.effective_misfire_grace_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT)
+        assert grace == 4 * 60 * 60
+        assert self._verdict(JOB_PORTFOLIO_EOD_SNAPSHOT, self.EOD_SLOT, waited=float(grace)) is None
+        assert self._verdict(JOB_PORTFOLIO_EOD_SNAPSHOT, self.EOD_SLOT, waited=grace + 1.0) == pytest.approx(
+            grace + 1.0
+        )
+
+    def test_a_fire_more_than_one_period_late_is_still_refused(self) -> None:
+        """``previous_scheduled_run`` would return a NEWER slot and read as barely
+        late, which is why the check takes ``max(wait, now - slot)``."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+        waited = 25 * 60 * 60.0  # more than the daily period
+        assert self._verdict(JOB_EXECUTE_APPROVED_ORDERS, self.ORDER_SLOT, waited=waited) == pytest.approx(waited)
+
+    def test_refuse_late_admission_is_an_explicit_allow_list(self) -> None:
+        """Adding a name here is a deliberate act — the same shape as the
+        ``rearm_on_lost_fire`` and restricted-lane allow lists. A job that refuses a
+        late admission LOSES that fire, so the field is not a safe default.
+
+        ⚠ Deliberately NOT every job carrying a ``misfire_grace_seconds``. The two
+        quote producers set one because their fire must not be admitted while its
+        successor is due, and they sit on the quote lane where the longest admission
+        measured is 13.1 s — refusing them would trade a bounded wait for the lost
+        observation bucket #2934 exists to prevent.
+        """
+        from app.workers.scheduler import (
+            JOB_EXECUTE_APPROVED_ORDERS,
+            JOB_PORTFOLIO_EOD_SNAPSHOT,
+            SCHEDULED_JOBS,
+        )
+
+        assert {j.name for j in SCHEDULED_JOBS if j.refuse_late_admission} == {
+            JOB_EXECUTE_APPROVED_ORDERS,
+            JOB_PORTFOLIO_EOD_SNAPSHOT,
+        }
+
+    def test_a_refusing_job_must_have_an_exactly_periodic_cadence(self) -> None:
+        """``previous_scheduled_run`` returns ``None`` for monthly/yearly, which
+        degrades the check to the wait-only bound. Safe, but it would silently stop
+        enforcing the deadline the opt-in was added for."""
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        for job in SCHEDULED_JOBS:
+            if job.refuse_late_admission:
+                assert job.cadence.kind in runtime._EXACTLY_PERIODIC_CADENCE_KINDS, job.name
+
+    def test_the_two_opt_ins_are_never_set_together(self) -> None:
+        """They are inverse predicates, and the code path makes it concrete: the
+        refusal writes its skip through ``_record_lane_busy_skip``, which ARMS the
+        row when ``rearm_on_lost_fire`` is set — so a job asserting both would
+        re-dispatch the very fire it just refused, later still."""
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        both = [j.name for j in SCHEDULED_JOBS if j.rearm_on_lost_fire and j.refuse_late_admission]
+        assert not both, both
+
+    def test_the_grace_used_is_the_jobs_own_and_falls_back_to_the_scheduler_default(self) -> None:
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS, JOB_QUOTES_REFRESH, SCHEDULED_JOBS
+
+        quotes = next(j for j in SCHEDULED_JOBS if j.name == JOB_QUOTES_REFRESH)
+        assert quotes.misfire_grace_seconds is not None
+        assert runtime.effective_misfire_grace_seconds(JOB_QUOTES_REFRESH) == quotes.misfire_grace_seconds
+
+        orders = next(j for j in SCHEDULED_JOBS if j.name == JOB_EXECUTE_APPROVED_ORDERS)
+        assert orders.misfire_grace_seconds is None
+        assert (
+            runtime.effective_misfire_grace_seconds(JOB_EXECUTE_APPROVED_ORDERS)
+            == runtime.SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+        )
+        assert runtime.effective_misfire_grace_seconds("no-such-job-3220") == (
+            runtime.SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+        )
+
+    def test_the_named_default_is_the_one_the_scheduler_configures(self) -> None:
+        """Otherwise the check could bound against a grace APScheduler never applied."""
+        runtime_obj = JobRuntime(invokers={}, database_url="postgresql://stub/stub")
+        assert (
+            runtime_obj._scheduler._job_defaults["misfire_grace_time"]
+            == runtime.SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+        )
+
+
+class TestPreviousScheduledRun:
+    """#3220 — derived from ``compute_next_run`` rather than a second calendar."""
+
+    @pytest.mark.parametrize(
+        ("cadence", "at", "expected"),
+        [
+            (
+                Cadence.daily(hour=22, minute=30),
+                datetime(2026, 9, 19, 2, 40, tzinfo=UTC),
+                datetime(2026, 9, 18, 22, 30, tzinfo=UTC),
+            ),
+            (
+                Cadence.daily(hour=22, minute=30),
+                datetime(2026, 9, 18, 23, 0, tzinfo=UTC),
+                datetime(2026, 9, 18, 22, 30, tzinfo=UTC),
+            ),
+            (
+                Cadence.hourly(minute=23),
+                datetime(2026, 9, 18, 4, 5, tzinfo=UTC),
+                datetime(2026, 9, 18, 3, 23, tzinfo=UTC),
+            ),
+            (
+                Cadence.every_n_minutes(interval=5),
+                datetime(2026, 9, 18, 3, 17, 42, tzinfo=UTC),
+                datetime(2026, 9, 18, 3, 15, tzinfo=UTC),
+            ),
+            (
+                Cadence.weekly(weekday=6, hour=7, minute=0),
+                datetime(2026, 9, 18, 12, 0, tzinfo=UTC),  # Friday
+                datetime(2026, 9, 13, 7, 0, tzinfo=UTC),  # the preceding Sunday
+            ),
+        ],
+    )
+    def test_it_returns_the_slot_at_or_before(self, cadence: Cadence, at: datetime, expected: datetime) -> None:
+        assert runtime.previous_scheduled_run(cadence, at) == expected
+
+    def test_a_time_exactly_on_a_slot_returns_that_slot(self) -> None:
+        """The fire being checked IS that slot's fire, so the answer must be itself
+        and the computed lateness must be zero rather than a whole period."""
+        cadence = Cadence.daily(hour=6, minute=30)
+        at = datetime(2026, 9, 19, 6, 30, tzinfo=UTC)
+        assert runtime.previous_scheduled_run(cadence, at) == at
+
+    @pytest.mark.parametrize(
+        "cadence",
+        [Cadence.monthly(day=1, hour=3), Cadence.yearly(month=1, day=2, hour=4)],
+    )
+    def test_lower_bound_cadences_refuse_to_answer(self, cadence: Cadence) -> None:
+        """Their ``_CADENCE_MIN_GAP_SECONDS`` entry is a lower bound, so stepping
+        back by it does not land in the previous period — returning the wrong slot
+        would be worse than returning none."""
+        assert runtime.previous_scheduled_run(cadence, datetime(2026, 9, 18, 12, 0, tzinfo=UTC)) is None
