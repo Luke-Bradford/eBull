@@ -365,6 +365,8 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
         all_quotes: list[Quote] = []
         failed_chunks = 0
+        rows_returned = 0
+        rows_usable = 0
         # Retained so an all-chunks-failed batch can re-raise the real cause
         # (and keep its FailureCategory) instead of returning a silent [].
         last_exc: Exception | None = None
@@ -410,7 +412,21 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 last_exc = exc
                 continue
             raw = response.json()
-            all_quotes.extend(_normalise_rates(raw))
+            chunk_quotes = _normalise_rates(raw)
+            # #2312 review round 1 (WARNING) --- an AGGREGATE tell beside the
+            # per-row ones.  ``_normalise_rate`` logs one WARNING per dropped row,
+            # which at scale is N lines and no number, and eToro's contract permits
+            # ``date`` to be null, so contract drift would arrive as a BULK event.
+            # This counts it.  The durable half already exists downstream:
+            # ``refresh_market_data`` increments ``quotes_skipped`` for every
+            # requested instrument that came back without a usable quote and
+            # ``quotes_refresh`` logs it every tick, with ``job_runs.row_count``
+            # carrying ``quotes_updated`` --- so a bulk drop is queryable as a
+            # collapse in that count, not only greppable.  What was missing, and is
+            # added here, is the CAUSE being separable from a failed chunk.
+            rows_returned += len(raw.get("rates") or []) if isinstance(raw, dict) else 0
+            rows_usable += len(chunk_quotes)
+            all_quotes.extend(chunk_quotes)
 
         if last_exc is not None and failed_chunks == total_chunks:
             # EVERY chunk failed — that is an outage, not "these instruments
@@ -439,6 +455,14 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 failed_chunks,
                 total_chunks,
                 len(all_quotes),
+            )
+
+        if rows_usable < rows_returned:
+            logger.warning(
+                "Rates fetch: %d of %d returned row(s) were unusable and dropped "
+                "(missing identity, bid/ask or date — per-row reasons logged above)",
+                rows_returned - rows_usable,
+                rows_returned,
             )
 
         return all_quotes
@@ -621,6 +645,33 @@ def _normalise_intraday_candles(raw: object) -> list[IntradayBar]:
     return bars
 
 
+def _parse_etoro_timestamp(raw: object) -> datetime:
+    """Parse one eToro ISO-8601 stamp and normalise it to UTC.
+
+    Raises ``ValueError`` when the value cannot be parsed. Both callers treat
+    that as "skip this row"; the helper does not decide that for them.
+
+    ⚠ eToro stamps SEVEN fractional digits --- ``2026-09-18T19:59:52.1245303Z``,
+    observed live 2026-09-19. ``fromisoformat`` accepts that on the pinned
+    interpreter and did NOT on older ones, which is why the failure branch is
+    live rather than defensive: a parse regression is a bulk event, not a
+    per-row one. ``test_seven_digit_fractional_seconds_parsed`` pins the format.
+
+    ⚠ The UTC coercion is load-bearing. ``fromisoformat`` returns a NAIVE
+    datetime for an offset-less string, and a naive value on ``quotes.quoted_at``
+    is corrupt in two directions: written to a ``timestamptz`` it is
+    re-interpreted in the session's ``TimeZone``, and compared in-process against
+    an aware ``now`` it raises ``TypeError``. Every observed rates payload
+    carries ``Z`` (1,745 of 1,745), so it is unreachable today.
+
+    Extracted in #2312's review round 1: the parse-plus-coerce was written out
+    twice in this module and the two copies had already drifted --- the candle
+    one coerced, the rates one did not.
+    """
+    parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
 def _normalise_intraday_candle(item: Mapping[str, object]) -> IntradayBar | None:
     """Map a single eToro intraday candle dict to an IntradayBar.
 
@@ -639,15 +690,7 @@ def _normalise_intraday_candle(item: Mapping[str, object]) -> IntradayBar | None
         return None
 
     try:
-        # eToro uses ISO timestamps with optional `Z` suffix; .fromisoformat
-        # handles `2026-04-27T14:30:00+00:00` natively and accepts the
-        # `Z` form on Python 3.11+. Coerce to UTC.
-        ts_text = str(raw_date).replace("Z", "+00:00")
-        ts = datetime.fromisoformat(ts_text)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        else:
-            ts = ts.astimezone(UTC)
+        ts = _parse_etoro_timestamp(raw_date)
         return IntradayBar(
             timestamp=ts,
             open=Decimal(str(raw_open)),
@@ -738,23 +781,7 @@ def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
         logger.warning("Skipping rate missing date for instrument %s: %s", instrument_id, item)
         return None
     try:
-        # ⚠ eToro stamps SEVEN fractional digits ("2026-09-18T19:59:52.1245303Z"),
-        # which ``fromisoformat`` accepts on the pinned interpreter and did not on
-        # older ones.  That is why this branch is live rather than defensive: a
-        # parse regression would empty ``quotes`` wholesale instead of silently
-        # poisoning every timestamp in it, and the WARNING below is the tell that
-        # does not exist today.  ``test_seven_digit_fractional_seconds_parsed``
-        # pins the observed format.
-        quoted_at = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
-        # ⚠ SECOND, SMALLER CHANGE, named rather than folded in silently: coerce
-        # to UTC exactly as ``_normalise_intraday_candle`` does 60 lines above.
-        # ``fromisoformat`` returns a NAIVE datetime for an offset-less string, and
-        # a naive value on this column is corrupt in two directions --- written to
-        # a ``timestamptz`` it is re-interpreted in the session's TimeZone, and
-        # compared in-process against an aware ``now`` it raises TypeError.  Every
-        # observed payload carries ``Z`` (1,745 of 1,745), so this is unreachable
-        # today and is normalisation, not a new gate.
-        quoted_at = quoted_at.replace(tzinfo=UTC) if quoted_at.tzinfo is None else quoted_at.astimezone(UTC)
+        quoted_at = _parse_etoro_timestamp(raw_ts)
     except ValueError:
         logger.warning(
             "Skipping rate with unparseable date %r for instrument %s",

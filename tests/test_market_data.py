@@ -6,6 +6,7 @@ No network calls, no database — all tests use in-memory fixtures.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -564,6 +565,45 @@ class TestGetQuotesChunking:
             provider._http.get.assert_called_once()
             url_arg = provider._http.get.call_args.args[0]
             assert "instrumentIds=1001,1002,1003" in url_arg
+
+    def test_unusable_rows_are_counted_once_for_the_batch(self, caplog: pytest.LogCaptureFixture) -> None:
+        """#2312 review round 1 — a bulk drop must produce a NUMBER, not N lines.
+
+        eToro's contract permits `date` to be null, so contract drift arrives as
+        a bulk event. The per-row WARNINGs alone are greppable but uncountable.
+        """
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        undated = {k: v for k, v in FIXTURE_RATE.items() if k != "date"}
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"rates": [undated, FIXTURE_RATE_2]}
+        mock_resp.raise_for_status = MagicMock()
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()  # noqa: SLF001
+            provider._http.get.return_value = mock_resp  # noqa: SLF001
+            with caplog.at_level(logging.WARNING, logger="app.providers.implementations.etoro"):
+                quotes = provider.get_quotes([1001, 1002])
+
+        assert [q.instrument_id for q in quotes] == [1002]
+        assert any("1 of 2 returned row(s) were unusable" in r.getMessage() for r in caplog.records)
+
+    def test_no_unusable_row_log_when_every_row_is_usable(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The aggregate line must not fire on a clean batch — a warning that is
+        always present is not a signal."""
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"rates": [FIXTURE_RATE, FIXTURE_RATE_2]}
+        mock_resp.raise_for_status = MagicMock()
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()  # noqa: SLF001
+            provider._http.get.return_value = mock_resp  # noqa: SLF001
+            with caplog.at_level(logging.WARNING, logger="app.providers.implementations.etoro"):
+                provider.get_quotes([1001, 1002])
+
+        assert not any("were unusable" in r.getMessage() for r in caplog.records)
 
     def test_chunking_at_51_ids(self) -> None:
         """51 IDs should produce exactly 2 HTTP requests (50 + 1)."""
