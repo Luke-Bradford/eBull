@@ -365,6 +365,8 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
         all_quotes: list[Quote] = []
         failed_chunks = 0
+        entries_returned = 0
+        entries_accepted = 0
         # Retained so an all-chunks-failed batch can re-raise the real cause
         # (and keep its FailureCategory) instead of returning a silent [].
         last_exc: Exception | None = None
@@ -410,7 +412,24 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 last_exc = exc
                 continue
             raw = response.json()
-            all_quotes.extend(_normalise_rates(raw))
+            chunk_quotes = _normalise_rates(raw)
+            # #2312 review round 1 (WARNING) --- an AGGREGATE tell beside the
+            # per-row ones.  ``_normalise_rate`` logs one WARNING per dropped row,
+            # which at scale is N lines and no number, and eToro's contract permits
+            # ``date`` to be null, so contract drift would arrive as a BULK event.
+            # This counts it.  The durable half already exists downstream:
+            # ``refresh_market_data`` increments ``quotes_skipped`` for every
+            # requested instrument that came back without a usable quote and
+            # ``quotes_refresh`` logs it every tick, with ``job_runs.row_count``
+            # carrying ``quotes_updated`` --- so a bulk drop is queryable as a
+            # collapse in that count, not only greppable.  What was missing, and is
+            # added here, is the CAUSE being separable from a failed chunk.
+            #
+            # ⚠ Round 2: counted through ``rates_entries`` so the numerator and
+            # the denominator come from the same population the normaliser walked.
+            entries_returned += len(rates_entries(raw))
+            entries_accepted += len(chunk_quotes)
+            all_quotes.extend(chunk_quotes)
 
         if last_exc is not None and failed_chunks == total_chunks:
             # EVERY chunk failed — that is an outage, not "these instruments
@@ -439,6 +458,21 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 failed_chunks,
                 total_chunks,
                 len(all_quotes),
+            )
+
+        if entries_accepted < entries_returned:
+            # ⚠ Round 2 wording. The previous line read "unusable and dropped
+            # (missing identity, bid/ask or date — per-row reasons logged above)"
+            # and both halves were false: the enumeration omitted non-positive and
+            # unparseable values and non-object entries, and the promise of a
+            # per-row reason did not hold for the non-object case (now it does,
+            # see ``_normalise_rates``). This says only what the counter measures
+            # --- entries in, quotes out --- and does not claim a cause.
+            logger.warning(
+                "Rates fetch: %d of %d returned entries were rejected during normalisation "
+                "(each rejection is logged above with its own reason)",
+                entries_returned - entries_accepted,
+                entries_returned,
             )
 
         return all_quotes
@@ -621,6 +655,33 @@ def _normalise_intraday_candles(raw: object) -> list[IntradayBar]:
     return bars
 
 
+def _parse_etoro_timestamp(raw: object) -> datetime:
+    """Parse one eToro ISO-8601 stamp and normalise it to UTC.
+
+    Raises ``ValueError`` when the value cannot be parsed. Both callers treat
+    that as "skip this row"; the helper does not decide that for them.
+
+    ⚠ eToro stamps SEVEN fractional digits --- ``2026-09-18T19:59:52.1245303Z``,
+    observed live 2026-09-19. ``fromisoformat`` accepts that on the pinned
+    interpreter and did NOT on older ones, which is why the failure branch is
+    live rather than defensive: a parse regression is a bulk event, not a
+    per-row one. ``test_seven_digit_fractional_seconds_parsed`` pins the format.
+
+    ⚠ The UTC coercion is load-bearing. ``fromisoformat`` returns a NAIVE
+    datetime for an offset-less string, and a naive value on ``quotes.quoted_at``
+    is corrupt in two directions: written to a ``timestamptz`` it is
+    re-interpreted in the session's ``TimeZone``, and compared in-process against
+    an aware ``now`` it raises ``TypeError``. Every observed rates payload
+    carries ``Z`` (1,745 of 1,745), so it is unreachable today.
+
+    Extracted in #2312's review round 1: the parse-plus-coerce was written out
+    twice in this module and the two copies had already drifted --- the candle
+    one coerced, the rates one did not.
+    """
+    parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
 def _normalise_intraday_candle(item: Mapping[str, object]) -> IntradayBar | None:
     """Map a single eToro intraday candle dict to an IntradayBar.
 
@@ -639,15 +700,7 @@ def _normalise_intraday_candle(item: Mapping[str, object]) -> IntradayBar | None
         return None
 
     try:
-        # eToro uses ISO timestamps with optional `Z` suffix; .fromisoformat
-        # handles `2026-04-27T14:30:00+00:00` natively and accepts the
-        # `Z` form on Python 3.11+. Coerce to UTC.
-        ts_text = str(raw_date).replace("Z", "+00:00")
-        ts = datetime.fromisoformat(ts_text)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        else:
-            ts = ts.astimezone(UTC)
+        ts = _parse_etoro_timestamp(raw_date)
         return IntradayBar(
             timestamp=ts,
             open=Decimal(str(raw_open)),
@@ -661,19 +714,50 @@ def _normalise_intraday_candle(item: Mapping[str, object]) -> IntradayBar | None
         return None
 
 
+def rates_entries(raw: object) -> list[object]:
+    """The rate entries a rates response offers, or ``[]``.
+
+    Split out so the normaliser and ``get_quotes``'s rejection counter read the
+    SAME population --- counting one thing and normalising another is how a
+    counter starts lying.
+
+    ⚠ ``rates`` is validated as a LIST rather than taken with ``or []``.  #2312
+    review round 2, reproduced by Codex ckpt-3: ``{"rates": "oops"}`` made the
+    old expression iterate CHARACTERS, so the batch counter reported "4 of 4
+    entries rejected" for one malformed response and the normaliser logged a
+    skip per character.  A ``rates`` that is not a list is one malformed
+    response, and is reported as exactly that.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected dict from eToro rates endpoint, got {type(raw)}")
+    entries = raw.get("rates")
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        logger.warning(
+            "Rates response carries 'rates' as %s, not a list — treating the response as empty",
+            type(entries).__name__,
+        )
+        return []
+    return entries
+
+
 def _normalise_rates(raw: object) -> list[Quote]:
     """Normalise a raw eToro rates API response into Quote list.
 
     Real API returns ``{ rates: [...] }``.
     """
-    if not isinstance(raw, dict):
-        raise ValueError(f"Expected dict from eToro rates endpoint, got {type(raw)}")
 
-    items: list[object] = raw.get("rates") or []
+    items = rates_entries(raw)
 
     quotes: list[Quote] = []
     for item in items:
         if not isinstance(item, dict):
+            # #2312 review round 2 (Codex ckpt-3, reproduced): this skip was
+            # SILENT.  It was the one drop cause with no per-entry line at all,
+            # which made the batch aggregate in ``get_quotes`` its only signal and
+            # made that aggregate's "per-row reasons logged above" a false promise.
+            logger.warning("Skipping non-object rates entry: %r", item)
             continue
         quote = _normalise_rate(item)
         if quote is not None:
@@ -705,14 +789,47 @@ def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
         logger.warning("Rate for instrument %s has non-positive bid/ask: %s", instrument_id, item)
         return None
 
+    # ⚠⚠ The timestamp is REQUIRED, exactly like identity and bid/ask above.  It
+    # is not substitutable, and substituting it is worse than dropping the quote:
+    # ``quotes.quoted_at`` is the freshness key every staleness gate reads, so a
+    # ``datetime.now(UTC)`` stamp is maximally fresh BY CONSTRUCTION and wins both
+    # of them --- ``strategy_core_preflight``'s ``CORE_MAX_QUOTE_AGE_SECONDS``
+    # admits it, and ``market_data``'s ``EXCLUDED.quoted_at >= quotes.quoted_at``
+    # upsert guard lets it clobber a genuinely fresher websocket tick.  A
+    # fabricated value that outranks real data is the shape to remove, not to flag.
+    #
+    # #2312: the OTHER producer of this same column already treats it this way.
+    # ``etoro_websocket._parse_rate_delta`` says "Identity + timestamp are the only
+    # REQUIRED fields" (#2243) and returns None when ``Date`` is absent or
+    # unparseable.  The two producers disagreed; this brings the REST one into
+    # line rather than inventing a rule.  Same precedent as #1429's
+    # ``lastExecution=0`` -> NULL: never persist a value the payload did not give.
+    #
+    # SOURCE RULE, from the committed spec rather than from observation:
+    # ``tests/fixtures/etoro/openapi_v1.375.0.json`` declares ``rate.date`` as
+    # ``{"type": "string", "format": "date-time", "nullable": true}``, and NEITHER
+    # rate schema (``rate``, ``LiveRatesResponse.rates.items``) lists ``date`` in a
+    # ``required`` array.  eToro's own contract therefore permits the field to be
+    # absent or null -- so absence is a documented case to handle, not a defect to
+    # paper over, and the measurement below bounds today's rate without promising
+    # tomorrow's.
+    #
+    # Measured before changing it (2026-09-19 ~13:55Z, demo, every equity venue
+    # shut): 1,745 of 1,745 quoted instruments returned a parseable ``date``, so
+    # the observed substitution rate is ZERO and nothing is dropped today.
     raw_ts = item.get("date")
-    if raw_ts:
-        try:
-            quoted_at = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
-        except ValueError:
-            quoted_at = datetime.now(UTC)
-    else:
-        quoted_at = datetime.now(UTC)
+    if not raw_ts:
+        logger.warning("Skipping rate missing date for instrument %s: %s", instrument_id, item)
+        return None
+    try:
+        quoted_at = _parse_etoro_timestamp(raw_ts)
+    except ValueError:
+        logger.warning(
+            "Skipping rate with unparseable date %r for instrument %s",
+            raw_ts,
+            instrument_id,
+        )
+        return None
 
     raw_last = item.get("lastExecution")
 
