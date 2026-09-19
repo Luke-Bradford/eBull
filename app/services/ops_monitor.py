@@ -862,8 +862,22 @@ LANE_BUSY_SKIP_PREFIX: Final[str] = "lane_busy: "
 # from the anchor in ``app/services/processes/scheduled_adapter.py``.
 #
 # ⚠ This is telemetry, not recovery. The fire is already gone when the event is
-# emitted; the row exists so the loss is visible rather than silent. Recovery,
-# where a job can tolerate it, is ``ScheduledJob.misfire_grace_seconds``.
+# emitted; the row exists so the loss is visible rather than silent.
+#
+# Recovery, where a job can tolerate it, is one of TWO routes — and this comment
+# named only the first until #2603, which is how ``ff6a6afa`` came to read it as
+# settling the question:
+#
+#   1. ``ScheduledJob.misfire_grace_seconds`` — admit the late fire. #2880.
+#   2. ``ScheduledJob.rearm_on_lost_fire`` — stamp ``next_retry_at`` on THIS row
+#      and let ``jobs_retry_sweeper`` re-dispatch it. #2603.
+#
+# They are not interchangeable. (1) admits the fire onto the APScheduler pool
+# that was saturated enough to lose it, where it parks on its execution permit
+# still holding a worker thread (#2985 / prevention-log L1780). (2) dispatches
+# on ``JobRuntime._manual_executor`` instead, and is indifferent to how late the
+# fire was — which matters because the median recorded misfire is ~16 minutes
+# late, not seconds.
 MISFIRE_SKIP_PREFIX: Final[str] = "misfire: "
 
 

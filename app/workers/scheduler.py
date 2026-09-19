@@ -368,13 +368,26 @@ class ScheduledJob:
     # recovery. Only a job that is idempotent, side-effect-bounded and
     # indifferent to its own fire time may set this.
     misfire_grace_seconds: int | None = None
-    # #2603 — opt in to re-arming a fire this job LOST to a busy lane. A
-    # ``lane_busy`` skip means "work was due and could not start", and with
-    # ``catch_up_on_boot=False`` nothing re-fires it, so a daily job loses the
-    # whole day (measured: ``core_rebalance_observation`` lost 4 days in 30).
-    # When set, ``app.jobs.runtime._record_lane_busy_skip`` stamps
-    # ``next_retry_at`` on the skip row and the existing ``jobs_retry_sweeper``
-    # re-dispatches it through the audited manual queue.
+    # #2603 — opt in to re-arming a fire this job LOST. Both admitted classes
+    # mean "work was due and could not start", and with ``catch_up_on_boot=
+    # False`` nothing re-fires them, so a daily job loses the whole day
+    # (measured: ``core_rebalance_observation`` lost 4 days in 30 to the first):
+    #
+    #   * ``lane_busy`` — the source lane was held. Stamped by
+    #     ``app.jobs.runtime._record_lane_busy_skip``.
+    #   * ``misfire`` — APScheduler discarded the fire past
+    #     ``misfire_grace_time``, i.e. no worker thread reached it in time.
+    #     Stamped by ``app.jobs.runtime.JobRuntime._arm_missed_fire``.
+    #
+    # Either way the existing ``jobs_retry_sweeper`` re-dispatches the row
+    # through the audited manual queue.
+    #
+    # ⚠ ``max_instances_active`` is deliberately NOT admitted: it means a prior
+    # instance may still be RUNNING, so re-dispatching could overlap live work.
+    # A misfire is the safest of the three — APScheduler raises
+    # ``EVENT_JOB_MISSED`` before it calls the body, so that slot provably never
+    # ran (verified against the installed 3.11.2; a failure after invocation
+    # raises ``EVENT_JOB_ERROR`` instead).
     #
     # ⚠⚠ OPT-IN for the SAME reason ``misfire_grace_seconds`` above is, and the
     # predicate is the same one: only a job that is idempotent, side-effect-

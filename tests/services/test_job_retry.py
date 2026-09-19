@@ -16,7 +16,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.services.job_retry import sweep_due_retries
-from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, RETRY_MAX_ATTEMPTS
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, MISFIRE_SKIP_PREFIX, RETRY_MAX_ATTEMPTS
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.workers.scheduler import JOB_CUSIP_EXTID_SWEEP
 
@@ -273,6 +273,60 @@ def test_lane_busy_audit_does_not_claim_a_transient_failure(
     assert "transient failure" not in explanation
     assert "lost fire (lane busy)" in explanation
     assert source_status == "skipped"
+
+
+def test_misfire_audit_is_not_captioned_as_a_lane_collision(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠ Codex ckpt-3 on PR #3219: the cause was hard-coded, not read.
+
+    ``cause`` was ``"a transient failure" if status == "failure" else "a lost
+    fire (lane busy)"``, so admitting misfires to the re-arm path (#2603) would
+    have captioned every one of them as a lane collision it had nothing to do
+    with. Same defect shape as the sentence it replaced — a fixed string that
+    was true for the only case that existed when it was written.
+    """
+    conn = ebull_test_conn
+    conn.autocommit = True
+    _seed_skip(
+        conn,
+        job=JOB,
+        reason=MISFIRE_SKIP_PREFIX + "fire due ...; worker reached it 180.8s late, past misfire_grace_time",
+        next_retry_at=_NOW - timedelta(minutes=1),
+        started_at=_NOW - timedelta(minutes=10),
+    )
+
+    assert sweep_due_retries(conn, eligible_job_names=ELIGIBLE, now=_NOW) == [JOB]
+
+    row = conn.execute("SELECT explanation FROM decision_audit WHERE stage = 'retry_backoff'").fetchone()
+    assert row is not None
+    assert "lost fire (misfire)" in row[0]
+    assert "lane busy" not in row[0]
+    assert "transient failure" not in row[0]
+
+
+def test_an_unrecognised_skip_reason_degrades_to_the_vague_cause(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Unknown prefix ⇒ "a lost fire", never a guess at which kind."""
+    conn = ebull_test_conn
+    conn.autocommit = True
+    _seed_skip(
+        conn,
+        job=JOB,
+        reason="something_new: a reason class that does not exist yet",
+        next_retry_at=_NOW - timedelta(minutes=1),
+        started_at=_NOW - timedelta(minutes=10),
+    )
+
+    assert sweep_due_retries(conn, eligible_job_names=ELIGIBLE, now=_NOW) == [JOB]
+
+    row = conn.execute("SELECT explanation FROM decision_audit WHERE stage = 'retry_backoff'").fetchone()
+    assert row is not None
+    assert "after a lost fire (run" in row[0]
+    assert "misfire" not in row[0]
+    assert "lane busy" not in row[0]
+    assert "transient failure" not in row[0]
 
 
 def test_unarmed_skip_is_never_swept(ebull_test_conn: psycopg.Connection[tuple]) -> None:

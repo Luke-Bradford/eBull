@@ -2315,6 +2315,167 @@ class TestMisfireVisibilityAndGrace:
             JobExecutionEvent(EVENT_JOB_MISSED, "recurring:portfolio_eod_snapshot", "default", datetime.now(UTC))
         )
 
+    def test_missed_fire_arms_an_opted_in_job_anchored_at_observation(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2603 — a misfire on an opted-in job stamps ``next_retry_at``.
+
+        ⚠ The ARM is anchored at observation time while the ROW stays backdated
+        to the lost slot. Both halves are asserted here because they pull in
+        opposite directions and a future edit is likely to "tidy" them into
+        agreement: a slot-anchored arm on a 3-hour-late misfire would fall due
+        three hours in the past.
+        """
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        from app.services.ops_monitor import RETRY_BASE_SECONDS
+        from app.workers.scheduler import JOB_CORE_REBALANCE_OBSERVATION
+
+        # Three hours late, so a slot-anchored arm would be visibly in the past.
+        scheduled_for = datetime.now(UTC) - timedelta(hours=3)
+        executed: list[tuple[str, dict[str, object]]] = []
+        recorded: list[datetime | None] = []
+
+        class _Conn:
+            def execute(self, sql: str, params: dict[str, object]) -> None:
+                executed.append((sql, params))
+
+        @contextmanager
+        def fake_conn() -> Iterator[object]:
+            yield _Conn()
+
+        monkeypatch.setattr("app.jobs.runtime.background_write_connection", fake_conn)
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, _name, _reason, **kw: recorded.append(kw.get("now")) or 4242,
+        )
+
+        rt = _make_runtime({JOB_CORE_REBALANCE_OBSERVATION: lambda: None})
+        rt._on_job_missed(
+            JobExecutionEvent(EVENT_JOB_MISSED, f"recurring:{JOB_CORE_REBALANCE_OBSERVATION}", "default", scheduled_for)
+        )
+
+        assert recorded == [scheduled_for]  # the ROW sits at the lost slot
+        assert len(executed) == 1
+        sql, params = executed[0]
+        assert "next_retry_at" in sql
+        assert params["id"] == 4242
+        assert params["delay"] == RETRY_BASE_SECONDS
+        # The ARM is anchored at observation, i.e. ~now, NOT three hours ago.
+        observed = params["observed"]
+        assert isinstance(observed, datetime)
+        assert observed > scheduled_for + timedelta(hours=2)
+
+    def test_missed_fire_does_not_arm_a_job_that_did_not_opt_in(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``portfolio_eod_snapshot`` takes the GRACE route, not the re-arm one.
+
+        Admission is the per-job flag and #2603 added a second caller, not a
+        second route — so a job without ``rearm_on_lost_fire`` still records its
+        misfire and is not armed.
+        """
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        from app.workers.scheduler import JOB_PORTFOLIO_EOD_SNAPSHOT
+
+        executed: list[str] = []
+
+        class _Conn:
+            def execute(self, sql: str, _params: dict[str, object]) -> None:
+                executed.append(sql)
+
+        @contextmanager
+        def fake_conn() -> Iterator[object]:
+            yield _Conn()
+
+        monkeypatch.setattr("app.jobs.runtime.background_write_connection", fake_conn)
+        monkeypatch.setattr("app.jobs.runtime.record_job_skip", lambda *_a, **_kw: 7)
+
+        rt = _make_runtime({JOB_PORTFOLIO_EOD_SNAPSHOT: lambda: None})
+        rt._on_job_missed(
+            JobExecutionEvent(EVENT_JOB_MISSED, f"recurring:{JOB_PORTFOLIO_EOD_SNAPSHOT}", "default", datetime.now(UTC))
+        )
+
+        assert executed == []
+
+    def test_missed_fire_without_a_scheduled_time_records_but_does_not_arm(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unknown slot is not an on-time slot (Codex ckpt-2).
+
+        The malformed-event branch exists only to preserve telemetry. With no
+        ``scheduled_run_time`` there is no lateness, so the dominance test has
+        nothing to test — arming there would re-dispatch on no evidence at all.
+        The row must still land; not arming is the pre-#2603 floor.
+        """
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        from app.workers.scheduler import JOB_CORE_REBALANCE_OBSERVATION
+
+        recorded: list[str] = []
+        executed: list[str] = []
+
+        class _Conn:
+            def execute(self, sql: str, _params: dict[str, object]) -> None:
+                executed.append(sql)
+
+        @contextmanager
+        def fake_conn() -> Iterator[object]:
+            yield _Conn()
+
+        monkeypatch.setattr("app.jobs.runtime.background_write_connection", fake_conn)
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, name, _reason, **_kw: recorded.append(name) or 1,
+        )
+
+        rt = _make_runtime({JOB_CORE_REBALANCE_OBSERVATION: lambda: None})
+        rt._on_job_missed(
+            JobExecutionEvent(EVENT_JOB_MISSED, f"recurring:{JOB_CORE_REBALANCE_OBSERVATION}", "default", None)
+        )
+
+        assert recorded == [JOB_CORE_REBALANCE_OBSERVATION]
+        assert executed == []
+
+    def test_a_failing_arm_still_leaves_the_committed_skip_row(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Arming is best-effort: an unarmed skip is the pre-#2603 safe floor.
+
+        The telemetry row is the thing that must survive — losing the fire
+        SILENTLY is the defect this whole path exists to fix, so a stamping
+        failure must not cost the row or raise into APScheduler's dispatch.
+        """
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        from app.workers.scheduler import JOB_CORE_REBALANCE_OBSERVATION
+
+        recorded: list[str] = []
+
+        class _Conn:
+            def execute(self, _sql: str, _params: dict[str, object]) -> None:
+                raise RuntimeError("stamp failed")
+
+        @contextmanager
+        def fake_conn() -> Iterator[object]:
+            yield _Conn()
+
+        monkeypatch.setattr("app.jobs.runtime.background_write_connection", fake_conn)
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, name, _reason, **_kw: recorded.append(name) or 1,
+        )
+
+        rt = _make_runtime({JOB_CORE_REBALANCE_OBSERVATION: lambda: None})
+        rt._on_job_missed(
+            JobExecutionEvent(
+                EVENT_JOB_MISSED, f"recurring:{JOB_CORE_REBALANCE_OBSERVATION}", "default", datetime.now(UTC)
+            )
+        )
+
+        assert recorded == [JOB_CORE_REBALANCE_OBSERVATION]
+
     def test_grace_opt_in_is_an_explicit_allow_list(self) -> None:
         """A late fire is only safe for a job indifferent to its own fire time.
 
