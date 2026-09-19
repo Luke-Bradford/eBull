@@ -341,14 +341,24 @@ function CoreSleeveControl({
             onClick={() => setConfirmRebalance(true)}
             className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {sleeve.can_resume ? "Resume demo order" : "Rebalance demo now"}
+            {/*
+              ⚠⚠ #3222 residual 1. This said "Resume demo order", which reads as a
+              trading action and so contradicted a "Not trading" headline beside it.
+              Both sentences were true; the label was the lie. The backend proves the
+              action cannot trade -- `resume_core_submission` is "Reconcile one
+              committed authority WITHOUT EVER RETRYING ITS MUTATION", a broker lookup
+              -- see the comment on `can_resume` in `app/api/strategies.py`. "Settle"
+              is not a new word either: `strategyPortfolioStatus` already renders
+              "Settling a core order" for this exact state.
+            */}
+            {sleeve.can_resume ? "Settle demo order" : "Rebalance demo now"}
           </button>
         </div>
       </div>
       {outcome ? <p role="status" className="mt-3 text-sm text-slate-700 dark:text-slate-200">{outcome}</p> : null}
       <Modal isOpen={confirmRebalance} onRequestClose={() => setConfirmRebalance(false)} labelledBy="core-rebalance-title">
         <h2 id="core-rebalance-title" className="text-base font-semibold">
-          {sleeve.can_resume ? `Resume demo order ${sleeve.pending_order_id}?` : `Rebalance ${sleeve.selected_symbol} in demo?`}
+          {sleeve.can_resume ? `Settle demo order ${sleeve.pending_order_id}?` : `Rebalance ${sleeve.selected_symbol} in demo?`}
         </h2>
         <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
           {sleeve.can_resume
@@ -357,7 +367,7 @@ function CoreSleeveControl({
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <button type="button" onClick={() => setConfirmRebalance(false)} className="min-h-11 rounded-md border border-slate-300 px-3 text-sm dark:border-slate-700">Cancel</button>
-          <button type="button" disabled={busy} onClick={() => void rebalance()} className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Evaluating…" : sleeve.can_resume ? "Confirm resume" : "Confirm demo rebalance"}</button>
+          <button type="button" disabled={busy} onClick={() => void rebalance()} className="min-h-11 rounded-md bg-sky-700 px-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Evaluating…" : sleeve.can_resume ? "Check with broker" : "Confirm demo rebalance"}</button>
         </div>
       </Modal>
     </>

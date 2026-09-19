@@ -329,7 +329,7 @@ describe("strategyPortfolioStatus — the core sleeve is a second path (#3222)",
 describe("strategyPortfolioStatus — a resume is recovery, not setup (#3222)", () => {
   const RESUME = { execution_action: "resume", state: "ready" } as never;
   const PIPELINE_ONLY = { automation_readiness: { ready: false, state: "no_capital_candidates", capital_candidate_count: 0 } };
-  /** A paused pot — the page still offers "Resume demo order" in this state. */
+  /** A paused pot — the page still offers to settle the order in this state. */
   const PAUSED_POOL = {
     paper_pool: {
       configured: true, enabled: false, effective_capital: "500", currency: "USD", capital_limit: "500",

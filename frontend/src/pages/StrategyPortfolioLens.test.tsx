@@ -548,9 +548,9 @@ describe("StrategyPortfolioLens", () => {
 
     expect(await screen.findByText("Order 31 is unresolved.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Rebalance demo now" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Resume demo order" }));
-    expect(screen.getByRole("heading", { name: "Resume demo order 31?" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Confirm resume" }));
+    await userEvent.click(screen.getByRole("button", { name: "Settle demo order" }));
+    expect(screen.getByRole("heading", { name: "Settle demo order 31?" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Check with broker" }));
     expect(resume).toHaveBeenCalledTimes(1);
     expect(await screen.findByRole("status")).toHaveTextContent("existing broker order was reconciled");
   });
@@ -582,8 +582,8 @@ describe("StrategyPortfolioLens", () => {
     });
     renderLens();
 
-    await userEvent.click(await screen.findByRole("button", { name: "Resume demo order" }));
-    await userEvent.click(screen.getByRole("button", { name: "Confirm resume" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Settle demo order" }));
+    await userEvent.click(screen.getByRole("button", { name: "Check with broker" }));
 
     const status = await screen.findByRole("status");
     expect(status).toHaveTextContent("already reconciled by the scheduled cycle");

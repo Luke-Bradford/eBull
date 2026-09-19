@@ -3860,6 +3860,33 @@ def read_core_sleeve(
     )
     base_ready = core_pool_ready and capital_permits_rebalance
     can_rebalance = base_ready and resume_authority is None
+    # ⚠⚠ #3222 residual 1, ANSWERED: this deliberately does NOT consult the
+    # backend's trading refusals (`automatic trading disabled`, and the two
+    # fail-closed unknowns `runtime configuration unavailable` /
+    # `kill switch state unavailable`), nor the kill switch itself. Gating it on
+    # them would WEDGE an unresolved order at exactly the moment resolving it
+    # matters most, and it would contradict what the engine already does
+    # unattended. The evidence, all in-repo:
+    #
+    #   * `strategy_core_executor.resume_core_submission` --- "Reconcile one
+    #     committed authority WITHOUT EVER RETRYING ITS MUTATION". It reaches
+    #     `_reconcile_core_authority` -> `reconcile_strategy_order`, a broker
+    #     LOOKUP. It cannot submit, so it cannot create exposure, so there is
+    #     nothing for a trading refusal to refuse.
+    #   * `strategy_paper_runtime.run_strategy_paper_cycle` calls
+    #     `reconcile_backlog` as its FIRST statement --- before
+    #     `refresh_strategy_health`, before any block is read. Reconciliation is
+    #     already unconditional every five minutes (#2962 put the core arm in it).
+    #   * `strategy_paper_executor._execute_signal` reconciles an uncertain
+    #     submission BEFORE it reads `enable_auto_trading` or `kill_switch`; those
+    #     two gate the ENTRY path only.
+    #
+    # So the honest reading of the header saying "Not trading" beside a live
+    # settle button is that both are TRUE and they are about different things.
+    # That is a naming problem, fixed in the UI (#3222 round 2: the affordance
+    # says "Settle", matching the "Settling a core order" headline), not a gate
+    # to add here. ⚠ If a future change ever makes resume able to SUBMIT, this
+    # comment stops being true and the refusals have to be consulted.
     can_resume = settings.etoro_env == "demo" and resume_authority is not None
     execution_action: Literal["blocked", "rebalance", "resume"] = (
         "resume" if can_resume else "rebalance" if can_rebalance else "blocked"
