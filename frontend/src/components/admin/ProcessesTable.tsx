@@ -36,7 +36,7 @@ import {
 import { StaleBanner } from "@/components/admin/StaleBanner";
 import {
   VERDICT_SORT_PRIORITY,
-  reasonFromError,
+  meansActiveRunIsStale,
   reasonTooltip,
 } from "@/components/admin/processStatus";
 import { isSteadyStateProcess } from "@/lib/processHealth";
@@ -310,10 +310,11 @@ export function ProcessesTable({
       } catch (err) {
         setRowError(row.process_id, { cancel: err });
         setCancelTarget(null);
-        // #2274 — `run_changed` means the pinned run ended. The table polls, so
-        // it would self-heal on the next tick; refetching now closes the window
-        // where an immediate retry resubmits the same dead pin.
-        if (reasonFromError(err) === "run_changed") onMutationSuccess();
+        // #2274 — the run this row was showing is gone (replaced, or just
+        // finished). The table polls, so it would self-heal on the next tick;
+        // refetching now closes the window where an immediate retry resubmits
+        // the same dead pin.
+        if (meansActiveRunIsStale(err)) onMutationSuccess();
         if (!(err instanceof ApiError)) {
           console.error("cancelProcess failed", err);
         }

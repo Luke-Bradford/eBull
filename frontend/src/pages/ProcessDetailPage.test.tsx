@@ -380,6 +380,48 @@ describe("ProcessDetailPage", () => {
     });
   });
 
+  it("refetches when the pinned run has simply ended", async () => {
+    // #2274 / Codex ckpt-2 P2 — a pinned run that was REPLACED returns
+    // `run_changed`, but one that just FINISHED with nothing behind it returns
+    // `no_active_run`. This page does not poll, so refetching on only the first
+    // leaves it retrying a dead pin forever.
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        can_iterate: false,
+        can_full_wash: false,
+        can_cancel: true,
+        active_run: {
+          run_id: 77,
+          run_kind: "sync_run",
+          started_at: "2026-05-08T13:00:00+00:00",
+          rows_processed_so_far: null,
+          progress_units_done: null,
+          progress_units_total: null,
+          last_progress_at: null,
+          is_cancelling: false,
+        },
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    mockedCancel.mockRejectedValueOnce(
+      new ApiError(409, "conflict", { reason: "no_active_run" }),
+    );
+    renderAt();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy(),
+    );
+    const callsBefore = mockedDetail.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    const dialog = await screen.findByRole("dialog");
+    const confirmBtn = Array.from(dialog.querySelectorAll("button")).find(
+      (b) => b.textContent === "Cancel cooperatively",
+    ) as HTMLButtonElement;
+    fireEvent.click(confirmBtn);
+    await waitFor(() =>
+      expect(mockedDetail.mock.calls.length).toBeGreaterThan(callsBefore),
+    );
+  });
+
   it("names the table a sync run id came from", async () => {
     mockedDetail.mockResolvedValue(
       makeProcessRow({

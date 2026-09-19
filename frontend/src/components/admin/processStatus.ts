@@ -169,6 +169,21 @@ export function reasonFromError(err: unknown): TriggerConflictReason | null {
   return reason as TriggerConflictReason;
 }
 
+/**
+ * #2274 — the rejection says "the active run you are showing is gone".
+ *
+ * Both reasons mean the caller's view is stale, and they are NOT
+ * interchangeable at the source: a pinned run that was REPLACED resolves to a
+ * different id (`run_changed`), while one that simply ENDED with nothing
+ * behind it resolves to no row at all (`no_active_run`). Treating only the
+ * first as stale leaves a non-polling surface retrying a dead pin forever,
+ * which is exactly what happens on `ProcessDetailPage` (Codex ckpt-2 P2).
+ */
+export function meansActiveRunIsStale(err: unknown): boolean {
+  const reason = reasonFromError(err);
+  return reason === "run_changed" || reason === "no_active_run";
+}
+
 export function reasonTooltip(err: unknown): string {
   const reason = reasonFromError(err);
   if (reason !== null) return REASON_TOOLTIP[reason];

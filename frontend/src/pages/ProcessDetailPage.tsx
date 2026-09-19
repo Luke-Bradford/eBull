@@ -49,7 +49,7 @@ import {
   REASON_TOOLTIP,
   RUN_STATUS_VISUAL,
   STATUS_VISUAL,
-  reasonFromError,
+  meansActiveRunIsStale,
   reasonTooltip,
 } from "@/components/admin/processStatus";
 import { useAsync } from "@/lib/useAsync";
@@ -331,11 +331,12 @@ export function ProcessDetailPage() {
         // the reason in the ActionBar tooltip via reasonTooltip.
         setCancelError(err);
         setShowCancel(false);
-        // #2274 — a `run_changed` rejection means this page is showing a run
-        // that has ended. This page does NOT poll its process envelope, so
-        // without an explicit refetch the operator would resubmit the same
-        // dead pin and get the same 409 forever.
-        if (reasonFromError(err) === "run_changed") refetchAll();
+        // #2274 — the rejection says the run on screen is gone, either
+        // replaced (`run_changed`) or simply finished (`no_active_run`). This
+        // page does NOT poll its process envelope, so without an explicit
+        // refetch the operator resubmits the same dead pin and gets the same
+        // 409 forever.
+        if (meansActiveRunIsStale(err)) refetchAll();
         if (!(err instanceof ApiError))
           console.error("cancelProcess failed", err);
       } finally {
