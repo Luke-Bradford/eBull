@@ -272,15 +272,36 @@ def _dispatch_count(conn: psycopg.Connection[Any], run_id: int) -> int:
     ⚠ #2603 — read from ``decision_audit`` rather than stored on ``job_runs``,
     because every dispatch already writes exactly one audit row
     (``_write_retry_audit``): the audit IS the dispatch record, so counting it
-    needs no new column and cannot drift from what actually happened. The
-    alternative — bumping ``job_runs.attempt`` — would have corrupted an
-    operator-visible failure-streak counter to store a different quantity.
+    needs no new column. The alternative — bumping ``job_runs.attempt`` — would
+    have corrupted an operator-visible failure-streak counter to store a
+    different quantity.
+
+    ⚠⚠ The count matches what was actually dispatched only because the publish
+    and this counter's audit INSERT happen inside the SAME
+    ``conn.transaction()`` in ``_refire_one``. A crash between them rolls back
+    both, so there is no state where a dispatch is visible but uncounted. If
+    the audit write is ever moved out of that transaction — or made
+    best-effort — the cap silently stops bounding anything, which is the defect
+    this function exists to fix.
+
+    ⚠ That atomicity is the only guarantee claimed here. It says nothing about
+    RETENTION: nothing prunes ``decision_audit`` today, but an archival job
+    added later would lower the count and hand a row fresh dispatches. Any such
+    job must either exclude ``stage='retry_backoff'`` rows whose source run is
+    still armed, or this cap needs its own column.
+
+    ⚠ BOTH evidence keys are matched. Dispatches before this change recorded
+    ``failed_run_id``; the key became ``source_run_id`` when a re-armed skip
+    made "failed" untrue. Matching only the new key would restart the count
+    from zero for any row carrying pre-change history (167 such audit rows
+    exist on dev; 0 of them currently sit under an armed run, so this is a
+    latent gap being closed rather than a live one).
     """
     row = conn.execute(
         """
         SELECT COUNT(*) FROM decision_audit
          WHERE stage = 'retry_backoff'
-           AND evidence_json->>'source_run_id' = %(id)s::text
+           AND COALESCE(evidence_json->>'source_run_id', evidence_json->>'failed_run_id') = %(id)s::text
         """,
         {"id": run_id},
     ).fetchone()

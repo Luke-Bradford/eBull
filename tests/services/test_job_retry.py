@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from app.services.job_retry import sweep_due_retries
 from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, RETRY_MAX_ATTEMPTS
@@ -334,3 +335,34 @@ def test_redispatch_is_bounded_by_the_attempt_cap(ebull_test_conn: psycopg.Conne
     # operator as "attempt N", so re-dispatching must leave it exactly as the
     # failing run recorded it. The dispatch count lives in ``decision_audit``.
     assert _attempt(conn, run_id) == 1
+
+
+def test_dispatch_cap_counts_legacy_audit_rows_too(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """Pre-#2603 dispatches recorded ``failed_run_id``, not ``source_run_id``.
+
+    Counting only the new key would restart the cap from zero for any row that
+    already carried history, handing it a full extra set of dispatches. Found
+    by Codex ckpt-3; latent rather than live (no armed run on dev currently has
+    legacy audit rows), which is exactly why it needs a test.
+    """
+    conn = ebull_test_conn
+    conn.autocommit = True
+    run_id = _seed_failure(
+        conn,
+        job=JOB,
+        next_retry_at=_NOW - timedelta(minutes=1),
+        started_at=_NOW - timedelta(minutes=10),
+    )
+    # Exhaust the cap entirely with OLD-key audit rows.
+    for _ in range(RETRY_MAX_ATTEMPTS):
+        conn.execute(
+            """
+            INSERT INTO decision_audit (decision_time, stage, pass_fail, explanation, evidence_json)
+            VALUES (NOW(), 'retry_backoff', 'RETRY', 'legacy', %s)
+            """,
+            (Jsonb({"job_name": JOB, "attempt": 1, "failed_run_id": run_id}),),
+        )
+
+    assert sweep_due_retries(conn, eligible_job_names=ELIGIBLE, now=_NOW) == []
+    assert _next_retry_at(conn, run_id) is None  # exhausted → cleared
+    assert _request_count(conn, JOB) == 0  # and never dispatched

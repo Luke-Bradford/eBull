@@ -1184,6 +1184,16 @@ def _record_lane_busy_skip(
             )
             delay = lane_busy_rearm_delay_seconds(_scheduler._JOBS_BY_NAME.get(job_name))
             if delay is not None:
+                # ``attempt = 1`` is the literal truth for this row and not a
+                # placeholder: ``attempt`` means "position in the consecutive-
+                # failure streak", ``record_job_skip`` has just created the
+                # FIRST row for this lost fire, and a skip breaks a streak
+                # rather than continuing one. It is written rather than left to
+                # the column default so the row is explicit about which fire it
+                # represents. ⚠ It is NOT a dispatch counter — the re-dispatch
+                # cap counts ``decision_audit`` rows instead
+                # (``job_retry._dispatch_count``), precisely so this operator-
+                # visible value is never overwritten.
                 conn.execute(
                     """
                     UPDATE job_runs
