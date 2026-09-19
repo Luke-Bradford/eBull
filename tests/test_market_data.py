@@ -458,6 +458,43 @@ class TestNormaliseRate:
         assert quote is not None
         assert quote.timestamp == datetime(2024, 6, 17, 14, 30, tzinfo=UTC)
 
+    def test_seven_digit_fractional_seconds_parsed(self) -> None:
+        """#2312 — the format eToro actually sends, pinned.
+
+        Observed live 2026-09-19: ``2026-09-18T19:59:52.1245303Z``, SEVEN
+        fractional digits. Older interpreters accepted only 3 or 6, and the
+        skip branch below now drops the quote rather than substituting
+        ``now()`` — so a parse regression would empty ``quotes`` wholesale.
+        This test is what turns that into a red build instead.
+        """
+        quote = _normalise_rate({**FIXTURE_RATE, "date": "2026-09-18T19:59:52.1245303Z"})
+        assert quote is not None
+        assert quote.timestamp == datetime(2026, 9, 18, 19, 59, 52, 124530, tzinfo=UTC)
+
+    def test_missing_date_skips_the_quote(self) -> None:
+        """#2312 — never substitute ``now()`` for a timestamp eToro did not send.
+
+        ``quotes.quoted_at`` is the freshness key, so a substituted stamp is
+        maximally fresh by construction: it passes every staleness bound and
+        wins the ``EXCLUDED.quoted_at >= quotes.quoted_at`` upsert guard against
+        a genuinely fresher websocket tick. The websocket producer of the same
+        column already drops such a payload (#2243).
+        """
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "date"}
+        assert _normalise_rate(item) is None
+        assert _normalise_rate({**FIXTURE_RATE, "date": ""}) is None
+
+    def test_unparseable_date_skips_the_quote(self) -> None:
+        assert _normalise_rate({**FIXTURE_RATE, "date": "not-a-timestamp"}) is None
+
+    def test_offsetless_date_is_coerced_to_utc(self) -> None:
+        """A naive stamp on this column is corrupt in two directions — see the
+        module comment. Unreachable on observed payloads (1,745 of 1,745 carry
+        ``Z``); asserted so the coercion cannot be dropped as dead code."""
+        quote = _normalise_rate({**FIXTURE_RATE, "date": "2024-06-17T14:30:00"})
+        assert quote is not None
+        assert quote.timestamp == datetime(2024, 6, 17, 14, 30, tzinfo=UTC)
+
 
 class TestNormaliseRates:
     def test_batch_response(self) -> None:
@@ -468,6 +505,13 @@ class TestNormaliseRates:
 
     def test_empty_rates(self) -> None:
         assert _normalise_rates({"rates": []}) == []
+
+    def test_batch_skips_the_undated_row_and_keeps_the_rest(self) -> None:
+        """#2312 — the drop is per-ROW, not per-response: one undated instrument
+        must not cost the other 49 ids in its chunk their quotes."""
+        undated = {k: v for k, v in FIXTURE_RATE.items() if k != "date"}
+        quotes = _normalise_rates({"rates": [undated, FIXTURE_RATE_2]})
+        assert [q.instrument_id for q in quotes] == [1002]
 
     def test_non_dict_response_raises(self) -> None:
         with pytest.raises(ValueError, match="Expected dict"):

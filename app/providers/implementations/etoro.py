@@ -705,14 +705,63 @@ def _normalise_rate(item: Mapping[str, object]) -> Quote | None:
         logger.warning("Rate for instrument %s has non-positive bid/ask: %s", instrument_id, item)
         return None
 
+    # ⚠⚠ The timestamp is REQUIRED, exactly like identity and bid/ask above.  It
+    # is not substitutable, and substituting it is worse than dropping the quote:
+    # ``quotes.quoted_at`` is the freshness key every staleness gate reads, so a
+    # ``datetime.now(UTC)`` stamp is maximally fresh BY CONSTRUCTION and wins both
+    # of them --- ``strategy_core_preflight``'s ``CORE_MAX_QUOTE_AGE_SECONDS``
+    # admits it, and ``market_data``'s ``EXCLUDED.quoted_at >= quotes.quoted_at``
+    # upsert guard lets it clobber a genuinely fresher websocket tick.  A
+    # fabricated value that outranks real data is the shape to remove, not to flag.
+    #
+    # #2312: the OTHER producer of this same column already treats it this way.
+    # ``etoro_websocket._parse_rate_delta`` says "Identity + timestamp are the only
+    # REQUIRED fields" (#2243) and returns None when ``Date`` is absent or
+    # unparseable.  The two producers disagreed; this brings the REST one into
+    # line rather than inventing a rule.  Same precedent as #1429's
+    # ``lastExecution=0`` -> NULL: never persist a value the payload did not give.
+    #
+    # SOURCE RULE, from the committed spec rather than from observation:
+    # ``tests/fixtures/etoro/openapi_v1.375.0.json`` declares ``rate.date`` as
+    # ``{"type": "string", "format": "date-time", "nullable": true}``, and NEITHER
+    # rate schema (``rate``, ``LiveRatesResponse.rates.items``) lists ``date`` in a
+    # ``required`` array.  eToro's own contract therefore permits the field to be
+    # absent or null -- so absence is a documented case to handle, not a defect to
+    # paper over, and the measurement below bounds today's rate without promising
+    # tomorrow's.
+    #
+    # Measured before changing it (2026-09-19 ~13:55Z, demo, every equity venue
+    # shut): 1,745 of 1,745 quoted instruments returned a parseable ``date``, so
+    # the observed substitution rate is ZERO and nothing is dropped today.
     raw_ts = item.get("date")
-    if raw_ts:
-        try:
-            quoted_at = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
-        except ValueError:
-            quoted_at = datetime.now(UTC)
-    else:
-        quoted_at = datetime.now(UTC)
+    if not raw_ts:
+        logger.warning("Skipping rate missing date for instrument %s: %s", instrument_id, item)
+        return None
+    try:
+        # ⚠ eToro stamps SEVEN fractional digits ("2026-09-18T19:59:52.1245303Z"),
+        # which ``fromisoformat`` accepts on the pinned interpreter and did not on
+        # older ones.  That is why this branch is live rather than defensive: a
+        # parse regression would empty ``quotes`` wholesale instead of silently
+        # poisoning every timestamp in it, and the WARNING below is the tell that
+        # does not exist today.  ``test_seven_digit_fractional_seconds_parsed``
+        # pins the observed format.
+        quoted_at = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+        # ⚠ SECOND, SMALLER CHANGE, named rather than folded in silently: coerce
+        # to UTC exactly as ``_normalise_intraday_candle`` does 60 lines above.
+        # ``fromisoformat`` returns a NAIVE datetime for an offset-less string, and
+        # a naive value on this column is corrupt in two directions --- written to
+        # a ``timestamptz`` it is re-interpreted in the session's TimeZone, and
+        # compared in-process against an aware ``now`` it raises TypeError.  Every
+        # observed payload carries ``Z`` (1,745 of 1,745), so this is unreachable
+        # today and is normalisation, not a new gate.
+        quoted_at = quoted_at.replace(tzinfo=UTC) if quoted_at.tzinfo is None else quoted_at.astimezone(UTC)
+    except ValueError:
+        logger.warning(
+            "Skipping rate with unparseable date %r for instrument %s",
+            raw_ts,
+            instrument_id,
+        )
+        return None
 
     raw_last = item.get("lastExecution")
 
