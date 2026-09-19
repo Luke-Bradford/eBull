@@ -15,7 +15,7 @@ describe("UncoveredReapNote", () => {
     // ⚠ events !== runs on the first entry deliberately: on the real corpus
     // they are usually equal, so a fixture copied from production could not
     // tell a transposed render from a correct one.
-    render(<UncoveredReapNote entries={TWO} partial={false} />);
+    render(<UncoveredReapNote entries={TWO} />);
 
     const note = screen.getByTestId("uncovered-reap-note");
     expect(note.textContent).toContain("daily_candle_refresh");
@@ -26,65 +26,65 @@ describe("UncoveredReapNote", () => {
   });
 
   it("claims only 'not in this table', and names no other surface", () => {
-    // ⚠ BOTH directions are overclaims, and the first draft shipped the
-    // second one. "Nowhere else" is false for the sync-orchestrator layer
-    // jobs, which do have a layers/DAG surface. "Look at the sync layers" is
-    // false for the rest — the backend filter is "any job_name with no row",
-    // so an outside-DAG job like `strategy_backtest_run` can enter the list,
-    // and the operator would go looking for a surface that does not exist.
-    render(<UncoveredReapNote entries={TWO} partial={false} />);
+    // ⚠ BOTH directions are overclaims and the first two drafts shipped one
+    // each. "Nowhere else" is false for the sync-orchestrator layer jobs,
+    // which do have a layers/DAG surface. "Some of these have other surfaces"
+    // is false whenever the residual holds only an outside-DAG job like
+    // `strategy_backtest_run` — the backend filter proves only that a job has
+    // no process row.
+    render(<UncoveredReapNote entries={TWO} />);
 
     const text = screen.getByTestId("uncovered-reap-note").textContent ?? "";
     expect(text).toContain("Not in this table");
-    expect(text).toContain("data freshness rather than repeated reaps");
-    expect(text).not.toMatch(/sync layer|orchestrator|DAG/i);
+    expect(text).not.toMatch(/sync layer|orchestrator|DAG|other surface|nowhere else/i);
   });
 
   it("does not claim lost work", () => {
     // A reaped row may have committed its writes, and the reaper's auto-retry
     // may have re-run it. The reaper detects an orphaned row; it records no
     // cause.
-    render(<UncoveredReapNote entries={TWO} partial={false} />);
+    render(<UncoveredReapNote entries={TWO} />);
 
     const text = screen.getByTestId("uncovered-reap-note").textContent ?? "";
     expect(text).toContain("written off by the orphan reaper");
     expect(text).not.toMatch(/lost work|data loss/i);
   });
 
-  it("renders nothing when there is nothing to disclose", () => {
-    render(<UncoveredReapNote entries={[]} partial={false} />);
+  it("renders nothing when measured and empty", () => {
+    render(<UncoveredReapNote entries={[]} />);
     expect(screen.queryByTestId("uncovered-reap-note")).toBeNull();
   });
 
-  it("renders nothing on a PARTIAL snapshot even with entries", () => {
-    // The backend does not compute the residual on a partial snapshot, so an
-    // empty list there means "not evaluated". Rendering an all-clear would be
-    // a lie; the partial banner is what the operator reads.
-    render(<UncoveredReapNote entries={TWO} partial={true} />);
+  it("renders nothing when NOT EVALUATED, which is null and not []", () => {
+    // The backend sends null when an adapter raised (a short covered set would
+    // make well-covered jobs look uncovered) or when the residual read failed.
+    // Rendering an all-clear for that would be a lie — and note the backend
+    // deliberately does NOT set `partial` for it, because no lanes are omitted.
+    render(<UncoveredReapNote entries={null} />);
     expect(screen.queryByTestId("uncovered-reap-note")).toBeNull();
   });
 
-  it("tolerates a payload with the field absent", () => {
-    render(<UncoveredReapNote entries={undefined} partial={false} />);
+  it("tolerates a cached payload with the field absent", () => {
+    render(<UncoveredReapNote entries={undefined} />);
     expect(screen.queryByTestId("uncovered-reap-note")).toBeNull();
   });
 });
 
 describe("uncoveredReapSummary", () => {
   it("carries the count for the collapsed disclosure label", () => {
-    // ⚠ CollapsibleSection UNMOUNTS its body when closed, so the note above is
-    // only reachable while the section happens to be open. This is the same
+    // ⚠ CollapsibleSection UNMOUNTS its body when closed, so the note is only
+    // reachable while the section happens to be open. This is the same
     // reachability defect PR #3211 fixed for the collapsed `current` group.
-    expect(uncoveredReapSummary(TWO, false)).toBe("2 jobs not listed");
+    expect(uncoveredReapSummary(TWO)).toBe("2 jobs not listed");
   });
 
   it("is singular for one job", () => {
-    expect(uncoveredReapSummary(TWO.slice(0, 1), false)).toBe("1 job not listed");
+    expect(uncoveredReapSummary(TWO.slice(0, 1))).toBe("1 job not listed");
   });
 
-  it("is null when empty or partial, so the label stays unchanged", () => {
-    expect(uncoveredReapSummary([], false)).toBeNull();
-    expect(uncoveredReapSummary(TWO, true)).toBeNull();
-    expect(uncoveredReapSummary(undefined, false)).toBeNull();
+  it("is null when empty or not evaluated, so the label stays unchanged", () => {
+    expect(uncoveredReapSummary([])).toBeNull();
+    expect(uncoveredReapSummary(null)).toBeNull();
+    expect(uncoveredReapSummary(undefined)).toBeNull();
   });
 });

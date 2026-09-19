@@ -154,8 +154,9 @@ def test_partial_snapshot_discloses_nothing(monkeypatch: pytest.MonkeyPatch) -> 
 
     ``covered`` is built from the rows actually collected, so a missing
     mechanism's jobs would be named as uncovered when they are nothing of the
-    sort. The disclosure is skipped entirely, and ``partial`` — already rendered
-    as "this snapshot is incomplete" — is what the operator reads instead.
+    sort. The disclosure is skipped entirely — and the result is ``None``, "not
+    evaluated", NOT ``()``, which would claim it had been measured and found
+    clean.
     """
     _stub_adapters(monkeypatch, scheduled_raises=True)
     called: list[int] = []
@@ -169,18 +170,22 @@ def test_partial_snapshot_discloses_nothing(monkeypatch: pytest.MonkeyPatch) -> 
     snapshot = processes_api._gather_snapshot(_CONN)
 
     assert snapshot.partial is True
-    assert snapshot.uncovered_reaps == ()
+    assert snapshot.uncovered_reaps is None
     assert called == [], "the residual must not even be READ on a partial snapshot"
 
 
-def test_a_failing_residual_read_flags_partial_rather_than_500(
+def test_a_failing_residual_read_does_not_fake_an_adapter_outage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Returning () silently would claim "none"; the envelope says "incomplete".
+    """``None``, and ``partial`` stays FALSE.
 
-    Same contract the adapter loop already has — one failing read does not take
-    the whole page down, but it also does not get to pass itself off as an
-    all-clear.
+    ⚠ The first draft flipped ``partial`` here, reasoning that the envelope
+    should admit it was incomplete. But ``partial`` has exactly one consumer
+    meaning — ``ProcessesTable`` renders it as "One adapter is unavailable —
+    some lanes are omitted from this snapshot" — and a failed disclosure read
+    omits no lanes. That would have reported a false operational outage for a
+    signal nobody had yet missed, which is the #2218 shape: a status that does
+    not match what happened. ``None`` carries "not evaluated" on its own.
     """
     _stub_adapters(monkeypatch)
 
@@ -191,8 +196,29 @@ def test_a_failing_residual_read_flags_partial_rather_than_500(
 
     snapshot = processes_api._gather_snapshot(_CONN)
 
-    assert snapshot.partial is True
+    assert snapshot.uncovered_reaps is None
+    assert snapshot.partial is False, "a failed disclosure read omits no lanes"
+
+
+def test_measured_and_empty_is_not_not_evaluated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``()`` and ``None`` must not collapse — the wire has to keep them apart.
+
+    Without this the FE cannot tell "no job is losing runs off-table" from
+    "nobody looked", and the second would render as the first.
+    """
+    _stub_adapters(monkeypatch)
+    monkeypatch.setattr(
+        processes_api.scheduled_adapter,
+        "uncovered_reap_counts",
+        lambda conn, **_: (),
+        raising=False,
+    )
+
+    snapshot = processes_api._gather_snapshot(_CONN)
+
     assert snapshot.uncovered_reaps == ()
+    assert snapshot.uncovered_reaps is not None
+    assert processes_api.list_processes(conn=_CONN).uncovered_reaps is not None
 
 
 def test_the_field_reaches_the_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,11 +239,29 @@ def test_the_field_reaches_the_response(monkeypatch: pytest.MonkeyPatch) -> None
 
     body = processes_api.list_processes(conn=_CONN)
 
+    assert body.uncovered_reaps is not None
     assert [u.model_dump() for u in body.uncovered_reaps] == [
         {"job_name": "daily_candle_refresh", "events": 11, "runs": 14}
     ]
 
 
-def test_the_field_defaults_empty_for_existing_callers() -> None:
-    """``ProcessSnapshot`` predates this field; older constructions still work."""
-    assert ProcessSnapshot(rows=(), partial=False).uncovered_reaps == ()
+def test_not_evaluated_serialises_as_null_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distinction has to survive the wire, or the FE cannot honour it."""
+    monkeypatch.setattr(
+        processes_api,
+        "_gather_snapshot",
+        lambda conn: ProcessSnapshot(rows=(), partial=False, uncovered_reaps=None),
+    )
+
+    assert processes_api.list_processes(conn=_CONN).uncovered_reaps is None
+
+
+def test_the_field_defaults_to_NOT_EVALUATED_for_existing_callers() -> None:
+    """``ProcessSnapshot`` predates this field, and such a caller has not measured it.
+
+    Defaulting to ``()`` would let every pre-existing construction claim a
+    clean measurement it never made.
+    """
+    assert ProcessSnapshot(rows=(), partial=False).uncovered_reaps is None

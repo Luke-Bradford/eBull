@@ -164,16 +164,22 @@ them onto its own rows.
    `with snapshot_read(conn)` block, after the adapter loop, so the rows and the counts
    observe the same REPEATABLE READ snapshot. `_gather_snapshot` currently `return`s outside
    that block; the read must not follow it out.
-4. **Failure and partial semantics — `()` must not mean two things.**
+4. **Failure semantics — three states, not two.** `None` = **not evaluated**; `()` =
+   **measured, none**; a non-empty tuple = measured, these. The field is
+   `tuple[...] | None`, defaulting to `None`, so a caller predating it cannot claim a
+   clean measurement it never made.
    - When any adapter raised (`partial=True`), `covered` is smaller than the truth, so the
      residual would invent a coverage gap and name jobs that are perfectly well covered.
-     The disclosure is therefore **not computed**.
-   - If the residual read itself raises, it sets `partial=True` and yields `()` rather than
-     500ing the page — consistent with the adapter loop's own contract.
-   - Both cases are the same operator-visible state: `partial` is already rendered as "this
-     snapshot is incomplete", and the FE renders **nothing** for the disclosure rather than
-     an empty-looking all-clear. So `()` + `partial=False` means "measured, none"; `()` +
-     `partial=True` means "not evaluated", and the two are distinguishable on the wire.
+     The disclosure is **not computed** → `None`.
+   - If the residual read itself raises: `None`, logged, no 500.
+   - ⚠ **Neither failure sets `partial`.** `partial` has exactly one consumer meaning —
+     `ProcessesTable.tsx` renders it as *"One adapter is unavailable — some lanes are
+     omitted from this snapshot"* — and a failed disclosure read omits no lanes.
+     Borrowing the flag would report a false operational outage for a signal nobody had
+     yet missed: the #2218 shape, a status that does not match what happened. An earlier
+     draft of this spec did exactly that; Codex ckpt-2 round 2 caught it.
+   - The FE renders nothing for `None` and for `()` alike, but the two remain
+     distinguishable on the wire so a later consumer can tell them apart.
 5. **Wire** — `ProcessListResponse` (not `ProcessSnapshotResponse`; that name does not
    exist) gains `uncovered_reaps: list[UncoveredReapResponse] = []`, defaulted so existing
    fixtures and clients stay valid. `_convert_row` is row-scoped and is not involved.
@@ -187,15 +193,23 @@ them onto its own rows.
    - a muted line inside the section names the subjects and both numbers.
 
    Copy — informational, never alarm (#2274's binding constraint is "must not train the
-   operator to ignore it"), and careful not to claim lost work, since a reaped row may have
-   committed its writes and the reaper's auto-retry may have re-run it:
+   operator to ignore it"), careful not to claim lost work (a reaped row may have committed
+   its writes, and the reaper's auto-retry may have re-run it), and claiming **nothing**
+   about where else to look:
 
-   > **Not in this table:** 2 jobs with no process row had runs written off by the orphan
-   > reaper in the last 7 days — `daily_candle_refresh` (11 reaps, 11 runs),
-   > `daily_portfolio_sync` (4, 4).
+   > **Not in this table:** 2 jobs have no process row here and had runs written off by the
+   > orphan reaper in the last 7 days — `daily_candle_refresh` (11 reaps, 14 runs),
+   > `daily_portfolio_sync` (4 reaps, 4 runs).
 
-   Renders nothing when the list is empty or the snapshot is partial. React key is
-   `job_name`, which is unique by construction (the aggregate groups by it).
+   ⚠ **Both directions are overclaims, and two successive drafts shipped one each.**
+   "Nowhere else" is false for the sync-orchestrator layer jobs, which do have a
+   `/sync/layers/v2` + DAG surface. "Some of these have other surfaces" is false whenever
+   the residual happens to hold only an outside-DAG job (`strategy_backtest_run`) or one
+   recently renamed — the filter proves only "no process row", so any sentence about other
+   surfaces is an inference the data does not support. The note therefore ends at the list.
+
+   Renders nothing when the list is empty or `null`. React key is `job_name`, unique by
+   construction (the aggregate groups by it).
 
 ### Not verdict inputs
 

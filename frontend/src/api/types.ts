@@ -2310,15 +2310,20 @@ export interface ProcessListResponse {
   rows: ProcessRowResponse[];
   partial: boolean;
   /**
-   * ⚠ Empty means "measured, none" ONLY when `partial` is false. The backend
-   * does not compute this on a partial snapshot (a missing adapter's rows
-   * would make well-covered jobs look uncovered), so render nothing at all
-   * when `partial` — an empty-looking all-clear would be a lie.
+   * ⚠ `null` is NOT `[]`. `[]` means "measured, none"; `null` means "not
+   * evaluated" — an adapter raised (so the covered set would be short and the
+   * residual would name well-covered jobs), or the residual read itself
+   * failed. Render nothing for either, but never report `null` as an
+   * all-clear.
    *
-   * Optional so a cached/older payload without the field does not break the
-   * page; treat absent exactly as empty.
+   * ⚠ `null` does NOT imply `partial`. That flag means "some lanes are
+   * omitted", and a failed disclosure read omits no lanes — conflating them
+   * would show a false outage banner.
+   *
+   * Optional as well as nullable so a cached payload predating the field does
+   * not break the page; treat absent exactly as `null`.
    */
-  uncovered_reaps?: UncoveredReapResponse[];
+  uncovered_reaps?: UncoveredReapResponse[] | null;
 }
 
 export type TriggerMode = "iterate" | "full_wash";

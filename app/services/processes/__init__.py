@@ -372,18 +372,25 @@ class ProcessSnapshot:
     rows are built from: jobs at or above ``RECENT_REAP_CHIP_FLOOR`` that have
     no row here.
 
-    ⚠ An empty tuple means "measured, none" ONLY when ``partial`` is False. A
-    raising adapter shrinks the covered set, so the residual would invent a
-    coverage gap and name jobs that are perfectly well covered — the disclosure
-    is therefore not computed at all when ``partial`` is True, and the FE
-    renders nothing rather than an empty-looking all-clear. The two states are
-    distinguishable on the wire precisely because ``partial`` is carried
-    alongside.
+    ⚠ **``None`` is not ``()``.** ``()`` means "measured, and there are none";
+    ``None`` means "not evaluated", which happens when an adapter raised (the
+    covered set would then be short, so the residual would invent a coverage
+    gap and name well-covered jobs) or when the residual read itself failed.
+    The FE renders nothing for either, but the two are distinguishable rather
+    than collapsed into an empty-looking all-clear.
+
+    ⚠ ``None`` deliberately does NOT set ``partial``. ``partial`` has one
+    existing consumer meaning — ``ProcessesTable`` renders it as "One adapter
+    is unavailable — some lanes are omitted from this snapshot" — and a failed
+    disclosure read omits no lanes. Borrowing the flag would report a false
+    operational outage, which is the #2218 shape (a status that does not match
+    what happened). The default is ``None`` for the same reason: a caller that
+    predates the field has not measured it.
     """
 
     rows: tuple[ProcessRow, ...]
     partial: bool
-    uncovered_reaps: tuple[UncoveredReap, ...] = ()
+    uncovered_reaps: tuple[UncoveredReap, ...] | None = None
 
 
 __all__ = [

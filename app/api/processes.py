@@ -250,15 +250,17 @@ class ProcessListResponse(BaseModel):
     showing the lanes that succeeded. Spec §Failure-mode invariants.
 
     ``uncovered_reaps`` (#2274) lists jobs at or above the per-row chip's own
-    floor that have no row here. ⚠ An empty list means "measured, none" ONLY
-    when ``partial`` is False — it is not computed on a partial snapshot,
-    because a missing adapter's rows would make well-covered jobs look
-    uncovered. Defaulted so existing clients and fixtures stay valid.
+    floor that have no row here. ⚠ **``null`` is not ``[]``**: ``[]`` means
+    "measured, none"; ``null`` means "not evaluated" (an adapter raised, so the
+    covered set would be short, or the residual read itself failed). The client
+    renders nothing for either, but must not report ``null`` as an all-clear.
+    ``null`` deliberately does not set ``partial`` — that flag means "some
+    lanes are omitted", and a failed disclosure read omits no lanes.
     """
 
     rows: list[ProcessRowResponse]
     partial: bool
-    uncovered_reaps: list[UncoveredReapResponse] = []
+    uncovered_reaps: list[UncoveredReapResponse] | None = None
 
 
 class TriggerRequest(BaseModel):
@@ -536,7 +538,7 @@ def _gather_snapshot(conn: psycopg.Connection[Any]) -> ProcessSnapshot:
     """
     rows: list[ProcessRow] = []
     partial = False
-    uncovered: tuple[UncoveredReap, ...] = ()
+    uncovered: tuple[UncoveredReap, ...] | None = None
     with snapshot_read(conn):
         for adapter_name, adapter in (
             ("bootstrap", bootstrap_adapter),
@@ -559,18 +561,23 @@ def _gather_snapshot(conn: psycopg.Connection[Any]) -> ProcessSnapshot:
         # ⚠ Skipped entirely when an adapter raised. ``covered`` would then be
         # missing that mechanism's rows, so the residual would invent a coverage
         # gap out of a transient failure and name jobs that are perfectly well
-        # covered. ``partial`` is already rendered as "this snapshot is
-        # incomplete", and the FE renders nothing for the disclosure — so an
-        # empty tuple means "measured, none" only when ``partial`` is False.
+        # covered.
+        #
+        # ⚠ Left as ``None``, NOT ``()``, in both failure branches — and it does
+        # NOT flip ``partial``. ``partial`` has one existing consumer meaning
+        # ("One adapter is unavailable — some lanes are omitted from this
+        # snapshot", ``ProcessesTable.tsx``), and a failed disclosure read omits
+        # no lanes; borrowing the flag would report a false operational outage
+        # for a signal nobody has yet missed. ``None`` says "not evaluated"
+        # without claiming anything about the rows (Codex ckpt-2 round 2).
         if not partial:
             try:
                 uncovered = scheduled_adapter.uncovered_reap_counts(conn, covered={row.process_id for row in rows})
             except Exception:
-                # Same contract as the adapter loop: one failing read does not
-                # 500 the page. Returning () silently would claim "none", so the
-                # envelope is flagged incomplete instead.
+                # One failing read does not 500 the page, and does not get to
+                # pass itself off as "measured, none" either.
                 logger.exception("processes: uncovered-reap read raised; omitting")
-                partial = True
+                uncovered = None
     return ProcessSnapshot(rows=tuple(rows), partial=partial, uncovered_reaps=uncovered)
 
 
@@ -616,7 +623,9 @@ def list_processes(
     return ProcessListResponse(
         rows=[_convert_row(r) for r in snapshot.rows],
         partial=snapshot.partial,
-        uncovered_reaps=[_convert_uncovered_reap(u) for u in snapshot.uncovered_reaps],
+        uncovered_reaps=(
+            None if snapshot.uncovered_reaps is None else [_convert_uncovered_reap(u) for u in snapshot.uncovered_reaps]
+        ),
     )
 
 

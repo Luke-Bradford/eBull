@@ -14,14 +14,14 @@
  * artefact: #1831's measured bug was ~42 halted jobs painted red, burying the
  * real failures. Muted slate, same register as the per-row chip.
  *
- * ⚠ The copy says "not in this table", and says nothing at all about where
- * else a job might appear. Most of the residual is sync-orchestrator layer
- * jobs, which ARE reachable through `/sync/layers/v2` and the DAG drill-in —
- * but the backend filter is "any job_name with no process row", so an
- * outside-DAG job (`strategy_backtest_run`), or one recently renamed or
- * retired, can enter the list too. Naming a surface the operator would then
- * fail to find is the same overclaim in the opposite direction, so the copy
- * makes no promise either way.
+ * ⚠ The copy says "not in this table" and NOTHING else. Both directions are
+ * overclaims and the first two drafts shipped one each. "Nowhere else" is
+ * false for the sync-orchestrator layer jobs, which do have a `/sync/layers/v2`
+ * and DAG surface. "Some of these have other surfaces" is false whenever the
+ * residual happens to hold only an outside-DAG job (`strategy_backtest_run`)
+ * or one recently renamed — the backend filter proves only that the job has no
+ * process row, so any sentence about other surfaces is an inference the data
+ * does not support.
  *
  * ⚠ And it does not claim lost WORK. A reaped row may have committed its
  * writes before the worker died, and the reaper's auto-retry may have re-run
@@ -40,17 +40,20 @@ import type { UncoveredReapResponse } from "@/api/types";
 const RECENT_REAP_WINDOW_DAYS = 7;
 
 interface UncoveredReapNoteProps {
-  readonly entries: readonly UncoveredReapResponse[] | undefined;
   /**
-   * When the snapshot is partial the backend does not compute the residual at
-   * all — a missing adapter's rows would make well-covered jobs look
-   * uncovered. Render nothing rather than an empty-looking all-clear.
+   * ⚠ `null`/absent means "not evaluated" — the backend does not compute the
+   * residual when an adapter raised (a short covered set would make
+   * well-covered jobs look uncovered) or when the read itself failed. `[]`
+   * means "measured, none". Both render nothing; neither is an all-clear the
+   * operator should be shown.
+   *
+   * No separate `partial` prop: nullability already carries this, and a second
+   * condition could only disagree with the first.
    */
-  readonly partial: boolean;
+  readonly entries: readonly UncoveredReapResponse[] | null | undefined;
 }
 
-export function UncoveredReapNote({ entries, partial }: UncoveredReapNoteProps) {
-  if (partial) return null;
+export function UncoveredReapNote({ entries }: UncoveredReapNoteProps) {
   if (!entries || entries.length === 0) return null;
 
   return (
@@ -73,8 +76,7 @@ export function UncoveredReapNote({ entries, partial }: UncoveredReapNoteProps) 
           {entry.runs === 1 ? "run" : "runs"})
         </span>
       ))}
-      . Some of these have other surfaces, but those report data freshness rather
-      than repeated reaps.
+      .
     </p>
   );
 }
@@ -88,10 +90,8 @@ export function UncoveredReapNote({ entries, partial }: UncoveredReapNoteProps) 
  * a collapsed row is invisible — so the count rides the disclosure label too.
  */
 export function uncoveredReapSummary(
-  entries: readonly UncoveredReapResponse[] | undefined,
-  partial: boolean,
+  entries: readonly UncoveredReapResponse[] | null | undefined,
 ): string | null {
-  if (partial) return null;
   if (!entries || entries.length === 0) return null;
   return `${entries.length} ${entries.length === 1 ? "job" : "jobs"} not listed`;
 }

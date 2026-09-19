@@ -161,13 +161,9 @@ export function AdminPage() {
   }, [refreshInterval]);
 
   const [processesOpen, setProcessesOpen] = useState(true);
-  // #2274 — null when there is nothing to disclose OR the snapshot is partial
-  // (the backend does not compute the residual on a partial snapshot, so an
-  // empty list there means "not evaluated", not "none").
-  const uncoveredSummary = uncoveredReapSummary(
-    processes.data?.uncovered_reaps,
-    processes.data?.partial ?? false,
-  );
+  // #2274 — null when there is nothing to disclose, or when the backend did
+  // not evaluate the residual at all (it sends `null`, not `[]`, in that case).
+  const uncoveredSummary = uncoveredReapSummary(processes.data?.uncovered_reaps);
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
 
   const handleRun = useCallback(
@@ -262,10 +258,7 @@ export function AdminPage() {
           <SectionError onRetry={processes.refetch} />
         ) : processes.data ? (
           <>
-          <UncoveredReapNote
-            entries={processes.data.uncovered_reaps}
-            partial={processes.data.partial}
-          />
+          <UncoveredReapNote entries={processes.data.uncovered_reaps} />
           <ProcessesTable
             snapshot={processes.data}
             onMutationSuccess={() => {
