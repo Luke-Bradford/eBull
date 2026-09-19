@@ -9021,3 +9021,66 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry; `.claude/skills/data-sources/sec-edgar.md` §2.3;
   `tests/test_3232_insider_history_line_order.py`;
   `scripts/audit_3232_insider_history_line_order.py`.
+
+### A repair sweep bounded over a mostly-unrepairable population starves itself — and three narrower traps from the same diff (#3236)
+
+- First seen in: #3236 (2026-09-19), Codex checkpoints 1 (48 findings) and 2 (3 findings) on
+  the 13D/G link re-resolution sweep. All four below were caught by review, none by a test.
+- **The starvation one is the functional bug.** The sweep selected candidates with
+  `WHERE instrument_id IS NULL ... ORDER BY accession_number LIMIT n`. That predicate matches
+  **4,199** accessions on dev of which **19** are repairable; a skipped accession keeps its
+  NULL link, so every daily pass re-selects the same permanently-unresolvable head and
+  everything behind it is never reached. Adding the prefilter the sibling job already uses —
+  require a stored body AND *some* `external_identifiers` mapping for the issuer — cut
+  4,199 → **205**, and the order was made to rotate daily
+  (`md5(accession || current UTC date)`) so a stuck head cannot starve the tail even if the
+  prefiltered set outgrows the cap. **Prevention: for any bounded recurring repair job, divide
+  the candidate predicate's population by the repairable population before shipping. If the
+  ratio is not ~1, the bound is selecting a queue you will never drain.** And log when the cap
+  is hit — a truncated pass must not read like a complete one.
+- **A sorted-multiset equality gate loses ORDER when the consumer picks with `max()`.**
+  `resolve_blockholder_reporter_identity` takes the largest `aggregate_amount_owned`, and
+  Python's `max` returns the FIRST element among equals — so two parses can agree as multisets,
+  disagree on order, and yield a different reporter CIK, name and percent. Ties are not exotic
+  here: **13 of 19** affected accessions have one (joint filers each report the same group
+  stake). Prevention: when a gate protects a value chosen by `max`/`min`/`first`, compare the
+  SEQUENCE, not the set — and state the tie rate you measured, because "ties are rare" is a
+  measurement, not an assumption.
+- **A fallback chain means supplying the fallback does not override the primary.** The
+  observation chokepoint evaluates `filing.filed_at or ref.filed_at`. The sweep passed the
+  authoritative stored timestamp on `ref` — which a non-NULL *re-parsed* `filed_at` silently
+  beats. Measured: the re-parse supplies one on 9 of 19, and on 2 it is the `signatureInfo`
+  date at UTC **midnight** where the stored value is the real timestamp. Since `filed_at` sets
+  `period_end` (a natural-key member) and drives amendment ordering, that is a wrong value, not
+  a cosmetic one. Prevention: to override a value consumed through `a or b`, pin `a`
+  (`dataclasses.replace`) — passing `b` is not an override, and it fails silently in exactly
+  the rows where the primary happens to be populated.
+- **PostgreSQL `numeric` rounds half AWAY FROM ZERO; `Decimal.quantize` defaults to
+  `ROUND_HALF_EVEN`.** A gate comparing a parsed value against a `numeric(_, 4)` column stores
+  `5.12345` as `5.1235` but quantizes it to `5.1234`, so the row is judged drifted **forever**.
+  Prevention: any Python-side comparison against a stored `numeric` must quantize with
+  `rounding=ROUND_HALF_UP` at the column's own scale — read the scale from
+  `information_schema.columns`, do not assume it.
+- ⚠ **Repeat offender, logged the previous day and committed anyway**: both measurement scripts
+  set `SET default_transaction_isolation` under `autocommit=True`, which binds only
+  transactions started afterwards — so each statement took its own snapshot while the script
+  claimed one consistent view. Set `conn.isolation_level` BEFORE the first statement and
+  `assert` it via `SHOW transaction_isolation`. A claimed isolation level is not a held one.
+- ⚠ **A named skip-reason vocabulary can contain a literal no code path produces** — caught
+  by the review bot on PR #3237. `observation_missing` was declared in
+  `SWEEP_SKIP_REASONS`, documented in the spec and unreachable: the postcondition raised a
+  bare `RuntimeError`, which the driver's blanket `except Exception` bucketed as `error`.
+  A declared-but-dead reason is worse than no reason, because an operator reading the
+  counters concludes the condition *never fires* rather than that it *cannot*. Prevention:
+  raise a DEDICATED exception type for any failure that deserves its own counter — a bare
+  `RuntimeError` under a blanket handler is indistinguishable from infrastructure failure —
+  and add a test asserting every literal in the vocabulary is produced somewhere
+  (`test_every_declared_skip_reason_is_actually_reachable`). ⚠ Verify such a test
+  DISCRIMINATES before trusting it: a reachability check that matches everything pins
+  nothing. Confirmed here against a reason known to be absent.
+- Enforced in: this entry; `app/services/blockholders.py`
+  (`_select_sweep_candidates`, `_identity_sequence`, `_at_stored_scale`,
+  `_repair_one_accession`, `_ObservationNotWritten`);
+  `tests/test_3236_identity_sequence.py`;
+  `tests/test_3236_blockholder_link_sweep_db.py`;
+  `scripts/probe_3236_parser_drift.py`; `scripts/accept_3236_link_sweep.py`.

@@ -47,10 +47,11 @@ import json
 import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError; no untrusted input parsed here.
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Protocol
+from uuid import uuid4
 
 import psycopg
 import psycopg.rows
@@ -1037,6 +1038,451 @@ def latest_blockholder_positions(
         )
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Link re-resolution sweep (#3236)
+# ---------------------------------------------------------------------------
+
+
+#: Every reason the sweep declines to repair an accession. Named rather than
+#: boolean so a skip is auditable — "it did nothing" and "it refused for this
+#: reason" must never look the same in the log line.
+SWEEP_SKIP_REASONS = (
+    "already_linked",
+    "non_uniform_header",
+    "link_conflict",
+    "still_unresolved",
+    "observation_exists",
+    "no_raw_body",
+    "parse_failed",
+    "drifted",
+    "observation_missing",
+    "error",
+)
+
+#: ``blockholder_filings`` stores the money/share columns as ``numeric(_, 4)``,
+#: so Postgres rounds on store. The re-parse is compared at the same scale —
+#: otherwise a parsed value carrying 5+ decimals would never equal its stored
+#: form and the accession would be skipped as ``drifted`` forever (Codex
+#: checkpoint-1 finding 15).
+_STORED_NUMERIC_SCALE = Decimal("0.0001")
+
+
+def _at_stored_scale(value: Decimal | None) -> Decimal | None:
+    """Round the way PostgreSQL does, not the way Python does by default.
+
+    ⚠ ``numeric`` rounds half AWAY FROM ZERO; ``Decimal.quantize`` defaults to
+    ``ROUND_HALF_EVEN``. So Postgres stores ``5.12345`` as ``5.1235`` while the
+    default quantize returns ``5.1234`` — and the drift gate would then reject
+    an otherwise-unchanged accession forever. Codex checkpoint-2 P2.
+    """
+    if value is None:
+        return None
+    return value.quantize(_STORED_NUMERIC_SCALE, rounding=ROUND_HALF_UP)
+
+
+class _ObservationNotWritten(RuntimeError):
+    """The sweep's postcondition tripped: the link and the observation write
+    both ran, but no single live observation exists at the accession.
+
+    A DEDICATED type, not a bare ``RuntimeError``, so the driver can bucket it
+    as ``observation_missing`` rather than letting the blanket ``except
+    Exception`` fold it into ``error``. An operator has to be able to tell
+    "the postcondition tripped" from "the connection dropped" — they have
+    completely different causes and completely different responses.
+    """
+
+
+@dataclass(frozen=True)
+class BlockholderLinkSweepReport:
+    """One pass of :func:`sweep_unlinked_blockholder_filings`."""
+
+    candidates_seen: int
+    repaired: int
+    rows_linked: int
+    skipped: dict[str, int]
+
+
+def _identity_sequence(
+    persons: Sequence[BlockholderReportingPerson],
+) -> list[tuple[str | None, str, Decimal | None, Decimal | None]]:
+    """The observation-identity columns, IN ORDER.
+
+    ⚠ Order is load-bearing and a sorted multiset would destroy it.
+    :func:`resolve_blockholder_reporter_identity` picks with ``max()``, which
+    returns the FIRST element among equals — and a tie on the largest
+    ``aggregate_amount_owned`` is the MAJORITY condition on the affected
+    population (13 of 19 accessions measured 2026-09-19), not a corner case.
+    So two parses can agree as multisets, disagree on order, and yield a
+    different reporter CIK, name and percent.
+    """
+    return [
+        (p.cik, p.name, _at_stored_scale(p.aggregate_amount_owned), _at_stored_scale(p.percent_of_class))
+        for p in persons
+    ]
+
+
+def _select_sweep_candidates(
+    conn: psycopg.Connection[tuple],
+    *,
+    limit: int,
+) -> list[str]:
+    """Accessions holding at least one ``instrument_id IS NULL`` row, narrowed
+    to those that could plausibly be repaired.
+
+    Whole-accession by construction: a row limit could split an accession
+    across passes, leaving half its rows linked and half not. ``limit`` counts
+    accessions.
+
+    ⚠⚠ **The prefilter is what makes the sweep reach its work at all.** A bare
+    ``instrument_id IS NULL`` scan matches **4,199** accessions on dev, of which
+    **19** are repairable; under a fixed ``ORDER BY accession_number LIMIT n``
+    the same permanently-unresolvable head would be re-selected every day and
+    everything behind it starved forever. Requiring a stored body AND *some*
+    identifier mapping for the issuer cuts that to **205** — the same shape
+    ``cusip_extid_sweep`` uses (select rows whose CUSIP already has a matching
+    ``external_identifiers`` row). Codex checkpoint-2 P1.
+
+    Ordering rotates **daily** (``md5(accession || current UTC date)``) so that
+    even if the prefiltered set ever outgrows ``limit``, a stuck head cannot
+    starve the tail — while a re-run on the same day is still reproducible.
+    The caller logs when the cap is actually hit, so a growing backlog is
+    visible rather than silently truncated.
+
+    This remains a SUPERSET prefilter only, and deliberately looser than the
+    resolver: it asks whether *any* mapping exists, where
+    :func:`_resolve_issuer_to_instrument_id` additionally requires the CIK tier
+    to hit exactly one sibling. Resolvability is decided per candidate by
+    CALLING that function — restating its two tiers in SQL would be a different
+    predicate wearing the same name (PG ``btrim()`` is not Python ``.strip()``;
+    ``lpad(..., 10, '0')`` truncates an overlong CIK).
+    """
+    cur = conn.execute(
+        """
+        SELECT bf.accession_number
+        FROM blockholder_filings bf
+        WHERE bf.instrument_id IS NULL
+          AND EXISTS (
+                SELECT 1 FROM filing_raw_documents d
+                WHERE d.accession_number = bf.accession_number
+                  AND d.document_kind = 'primary_doc_13dg'
+          )
+          AND (
+                EXISTS (
+                    SELECT 1 FROM external_identifiers e
+                    WHERE e.identifier_type = 'cusip'
+                      AND e.provider IN ('sec', 'openfigi')
+                      AND e.identifier_value = upper(btrim(bf.issuer_cusip))
+                )
+             OR EXISTS (
+                    SELECT 1 FROM external_identifiers e2
+                    WHERE e2.identifier_type = 'cik'
+                      AND e2.identifier_value = bf.issuer_cik
+                )
+          )
+        GROUP BY bf.accession_number
+        ORDER BY md5(bf.accession_number || date_trunc('day', now() AT TIME ZONE 'UTC')::text)
+        LIMIT %(limit)s
+        """,
+        {"limit": limit},
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def _repair_one_accession(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession: str,
+) -> tuple[str | None, int]:
+    """Repair ONE stranded accession. Returns ``(skip_reason, rows_linked)``;
+    ``skip_reason`` is ``None`` on a successful repair.
+
+    Runs inside the caller's transaction and never commits — the caller owns
+    the commit/rollback boundary so a failure rolls the whole accession back
+    rather than leaving a link without its observation.
+
+    Every precondition is evaluated on rows read AFTER the accession lock.
+    Candidate selection ran in an earlier transaction, so a concurrent manifest
+    drain or rewash may have repaired or replaced the accession in between;
+    re-reading is what stops the loser of that race from claiming a repair it
+    did not perform.
+    """
+    # #817 lock: a bare UPDATE does not serialise against the manifest drain or
+    # the rewash. No SEC fetch in this path, so it is safe to hold — the body
+    # is read from the raw store, never re-fetched.
+    raw_filings.acquire_filing_accession_write_lock(conn, accession)
+
+    header = conn.execute(
+        """
+        SELECT count(*) FILTER (WHERE instrument_id IS NULL)          AS nulls,
+               count(DISTINCT instrument_id)                          AS distinct_links,
+               min(instrument_id)                                     AS a_link,
+               count(DISTINCT issuer_cik)                             AS d_cik,
+               count(DISTINCT issuer_cusip)                           AS d_cusip,
+               count(DISTINCT submission_type)                        AS d_stype,
+               count(DISTINCT status)                                 AS d_status,
+               count(DISTINCT filed_at)                               AS d_filed_at,
+               count(DISTINCT filer_id)                               AS d_filer,
+               min(issuer_cik)                                        AS issuer_cik,
+               min(issuer_cusip)                                      AS issuer_cusip,
+               min(filed_at)                                          AS filed_at
+        FROM blockholder_filings
+        WHERE accession_number = %(a)s
+        """,
+        {"a": accession},
+    ).fetchone()
+    assert header is not None
+    (
+        nulls,
+        distinct_links,
+        existing_link,
+        d_cik,
+        d_cusip,
+        d_stype,
+        d_status,
+        d_filed_at,
+        d_filer,
+        issuer_cik,
+        issuer_cusip,
+        stored_filed_at,
+    ) = header
+
+    if not nulls:
+        return "already_linked", 0
+    # "The stored row" must be well defined before anything is read from one.
+    # Measured 0 non-uniform accessions on dev 2026-09-19, but the sweep is
+    # recurring and that census is a snapshot.
+    if max(d_cik, d_cusip, d_stype, d_status, d_filed_at, d_filer) > 1:
+        return "non_uniform_header", 0
+    if stored_filed_at is None:
+        # ``filed_at`` is required by the observation contract and is the
+        # source of ``period_end``; without it the chokepoint would return
+        # silently and strand the link.
+        return "non_uniform_header", 0
+
+    instrument_id = _resolve_issuer_to_instrument_id(conn, cusip=issuer_cusip, cik=issuer_cik)
+    if instrument_id is None:
+        return "still_unresolved", 0
+    # A partially-linked accession whose existing link disagrees with the one
+    # we just resolved is a share-class mislink in progress, not a repair.
+    # Measured 0 such accessions across the WHOLE table on dev 2026-09-19.
+    #
+    # ⚠ ``distinct_links > 1`` is a conflict REGARDLESS of what we resolved.
+    # ``existing_link`` is ``min(instrument_id)``, so an accession already
+    # split across two instruments would sail through an equality test
+    # whenever the resolved id happened to be the lower one — and the UPDATE
+    # would then fill the NULL rows while leaving the other link standing,
+    # committing a mixed-instrument accession. Codex checkpoint-2 P2.
+    if distinct_links > 1:
+        return "link_conflict", 0
+    if distinct_links == 1 and existing_link != instrument_id:
+        return "link_conflict", 0
+
+    # ⚠ ``record_blockholder_observation`` is ON CONFLICT DO UPDATE and never
+    # clears ``known_to``. A RETIRED row at the natural key would therefore be
+    # updated-but-still-invisible while the link went non-NULL — permanently
+    # unreachable by any later pass. Refuse instead. Both key columns are
+    # checked because ``source_accession`` is nullable while
+    # ``source_document_id`` is the natural-key member.
+    existing_obs = conn.execute(
+        """
+        SELECT 1 FROM ownership_blockholders_observations
+        WHERE source_document_id = %(a)s OR source_accession = %(a)s
+        LIMIT 1
+        """,
+        {"a": accession},
+    ).fetchone()
+    if existing_obs is not None:
+        return "observation_exists", 0
+
+    raw = conn.execute(
+        """
+        SELECT payload, source_url FROM filing_raw_documents
+        WHERE accession_number = %(a)s AND document_kind = 'primary_doc_13dg'
+        """,
+        {"a": accession},
+    ).fetchone()
+    if raw is None or not raw[0]:
+        return "no_raw_body", 0
+    payload, source_url = raw
+
+    try:
+        filing: BlockholderFiling = parse_primary_doc(payload)
+    except ValueError, ET.ParseError:
+        logger.exception("13D/G link sweep: re-parse failed for accession=%s", accession)
+        return "parse_failed", 0
+
+    # -- drift gate ---------------------------------------------------------
+    # Scoped to exactly what the observation consumes: the ordered identity
+    # sequence, plus submission_type and status. Two columns are EXCLUDED by
+    # citation, not convenience:
+    #   * ``date_of_event`` — the parser gained it after ingest; it is NULL on
+    #     100% of all 119,426 stored rows, so backfilling it is a corpus
+    #     operation with its own ticket, never a step inside a bug closure.
+    #   * ``member_of_group`` — data-engineer invariant I17: the element is
+    #     absent from modern 13D XML and the legacy column is noise, so nothing
+    #     may depend on it. It drifts 'a'/'b' -> NULL on re-parse.
+    # Neither reaches ``ownership_blockholders_observations``.
+    stored_rows = conn.execute(
+        """
+        SELECT reporter_cik, reporter_name, aggregate_amount_owned, percent_of_class,
+               submission_type, status
+        FROM blockholder_filings
+        WHERE accession_number = %(a)s
+        ORDER BY filing_id
+        """,
+        {"a": accession},
+    ).fetchall()
+    stored_identity = [(r[0], r[1], r[2], r[3]) for r in stored_rows]
+    if stored_identity != _identity_sequence(filing.reporting_persons):
+        return "drifted", 0
+    if stored_rows[0][4] != filing.submission_type or stored_rows[0][5] != filing.status:
+        return "drifted", 0
+
+    # -- the repair ---------------------------------------------------------
+    # Narrow by construction: only rows that are currently NULL, never an
+    # overwrite of an existing link. No DELETE anywhere in this path — that is
+    # the decisive difference from the rewash shape #3236 rejected.
+    linked = conn.execute(
+        """
+        UPDATE blockholder_filings
+        SET instrument_id = %(iid)s
+        WHERE accession_number = %(a)s AND instrument_id IS NULL
+        """,
+        {"iid": instrument_id, "a": accession},
+    ).rowcount
+
+    # ⚠ The chokepoint evaluates ``filing.filed_at or ref.filed_at``, so a
+    # non-NULL RE-PARSED filed_at wins over anything passed on the ref. On the
+    # affected population the re-parse supplies one for 9 of 19 accessions and
+    # it DIFFERS on 2 — yielding the ``signatureInfo/date`` at UTC midnight
+    # where the stored value is the real timestamp. Since filed_at sets
+    # ``period_end`` (a natural-key member) and drives amendment ordering,
+    # pin it on the filing rather than hoping the ref is consulted.
+    pinned = replace(filing, filed_at=stored_filed_at)
+    _record_13dg_observation_for_filing(
+        conn,
+        instrument_id=instrument_id,
+        accession_number=accession,
+        # Verified provenance of the body actually parsed, not a reconstructed
+        # archive path — issuer CIK, reporter CIK and filer CIK are not
+        # interchangeable directory identities.
+        primary_document_url=source_url or "",
+        filing=pinned,
+        ref=AccessionRef(
+            accession_number=accession,
+            filing_type=filing.submission_type,
+            filed_at=stored_filed_at,
+        ),
+        run_id=uuid4(),
+    )
+
+    # ⚠ ``_record_13dg_observation_for_filing`` RETURNS NORMALLY when the
+    # identity or filed_at is unavailable. Without this postcondition the sweep
+    # could commit a link with no observation and count it a repair — the exact
+    # shape of "a success check satisfied by the wrong thing happening" that
+    # #3236 rejected the rewash design over.
+    written = conn.execute(
+        """
+        SELECT count(*) FROM ownership_blockholders_observations
+        WHERE instrument_id = %(iid)s AND source_document_id = %(a)s AND known_to IS NULL
+        """,
+        {"iid": instrument_id, "a": accession},
+    ).fetchone()
+    if written is None or written[0] != 1:
+        raise _ObservationNotWritten(
+            f"13D/G link sweep: accession={accession} wrote {written[0] if written else 'no'} "
+            f"live observations, expected exactly 1"
+        )
+
+    # Per-accession lock first, per-instrument lock second — the documented
+    # order (raw_filings.acquire_filing_accession_write_lock). Inside the same
+    # transaction so a refresh failure rolls the link and observation back too.
+    refresh_blockholders_current(conn, instrument_id=instrument_id)
+    return None, linked
+
+
+def sweep_unlinked_blockholder_filings(
+    conn: psycopg.Connection[tuple],
+    *,
+    limit: int = 500,
+) -> BlockholderLinkSweepReport:
+    """Re-resolve ``blockholder_filings`` rows stranded with a NULL
+    ``instrument_id`` and write the ownership observation their ingest skipped
+    (#3236).
+
+    Closes the 13D/G half of the race ``cusip_extid_sweep`` already closes for
+    13F-HR (#788 / #836): when a 13D/G accession is ingested BEFORE the issuer's
+    ``external_identifiers`` mapping lands, ``_ingest_single_accession`` writes
+    every reporter row with a NULL link and — because
+    ``_record_13dg_observation_for_filing`` is gated on a non-NULL
+    ``instrument_id`` — skips the observation write-through entirely. The filing
+    is then absent from the ownership layer outright, not merely unjoinable, and
+    nothing re-resolves it. #3235 relaxed ``_upsert_filing_row``'s conflict
+    action so a LATER re-ingest can heal the link; an accession that is never
+    re-ingested needs this.
+
+    Retention is deliberately NOT capped here, matching
+    ``rewash_filings._apply_blockholders``: its rescue-path gate fires only when
+    ``existing_rows == 0``, and the happy path (typed rows already present) is
+    uncapped per parent spec §6.3. Every accession this sweep touches has typed
+    rows by definition, so capping would refuse repairs the live path already
+    admitted.
+
+    Each accession is committed individually. ``connect_job()`` runs with
+    autocommit off, so wrapping the loop in nested ``conn.transaction()`` blocks
+    would turn each into a savepoint and hold every accession and instrument
+    lock until the job's final commit.
+    """
+    candidates = _select_sweep_candidates(conn, limit=limit)
+    conn.commit()
+    if len(candidates) == limit:
+        # No silent caps: a truncated pass must not read like a complete one.
+        logger.warning(
+            "13D/G link sweep: candidate cap hit (limit=%d) — more stranded "
+            "accessions remain than this pass can see; the daily-rotating "
+            "order means the remainder is reached on subsequent passes.",
+            limit,
+        )
+
+    skipped: dict[str, int] = {}
+    repaired = 0
+    rows_linked = 0
+
+    for accession in candidates:
+        try:
+            reason, linked = _repair_one_accession(conn, accession=accession)
+        except _ObservationNotWritten:
+            # Distinct from ``error``: the guards all passed and the writes ran,
+            # but the chokepoint declined to produce an observation. That points
+            # at the filing's own content, not at infrastructure.
+            logger.exception("13D/G link sweep: accession=%s postcondition failed", accession)
+            conn.rollback()
+            skipped["observation_missing"] = skipped.get("observation_missing", 0) + 1
+            continue
+        except Exception:
+            # One malformed accession must neither poison the connection for
+            # the rest of the batch nor abort the pass.
+            logger.exception("13D/G link sweep: accession=%s failed", accession)
+            conn.rollback()
+            skipped["error"] = skipped.get("error", 0) + 1
+            continue
+        if reason is not None:
+            conn.rollback()
+            skipped[reason] = skipped.get(reason, 0) + 1
+            continue
+        conn.commit()
+        # Counters advance only after the commit that makes the repair real.
+        repaired += 1
+        rows_linked += linked
+
+    return BlockholderLinkSweepReport(
+        candidates_seen=len(candidates),
+        repaired=repaired,
+        rows_linked=rows_linked,
+        skipped=skipped,
+    )
 
 
 # ---------------------------------------------------------------------------

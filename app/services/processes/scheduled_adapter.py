@@ -107,6 +107,7 @@ _LANE_BY_JOB: dict[str, ProcessLane] = {
     "sec_8k_events_ingest": "sec",
     # Ownership (insider / institutional / fund)
     "ownership_observations_sync": "ownership",
+    "blockholder_link_sweep": "ownership",
     "ownership_observations_backfill": "ownership",
     "sec_form3_ingest": "ownership",
     "sec_insider_transactions_ingest": "ownership",

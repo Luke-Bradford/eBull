@@ -85,6 +85,7 @@ Lane = Literal[
     "db_eod_snapshot",
     "db_reconciliation_ledger",
     "db_cusip",
+    "db_blockholder_link",
     "db_ownership_obs",
     "db_raw_sweep",
     "db_fsnds_notes",
@@ -315,6 +316,16 @@ when one overruns). Scheduled-only, so NOT added to the
   (13F rewash). The 13F ingest writers already run on ``sec_rate`` /
   ``db_ownership_inst`` (never ``db``), so extraction introduces no NEW
   race — the sweep already ran concurrently with them.
+* ``db_blockholder_link`` — ``blockholder_link_sweep`` (daily @ 05:10)
+  only (#3236). The 13D/G twin of ``db_cusip``. Writes one column on
+  ``blockholder_filings`` plus ``ownership_blockholders_observations`` /
+  ``_current``. It gets its OWN lane rather than joining
+  ``db_ownership_inst``: that is a single-job FAMILY lane
+  (``sec_13f_ingest_from_dataset``), and adding a second job to it would
+  re-introduce exactly the intra-family serialisation the #1527 split
+  removed. Its per-accession advisory lock already serialises it against
+  the manifest drain and the rewash, which run on ``sec_rate`` /
+  ``db_ownership_*``, so a dedicated lane introduces no new race.
 * ``db_raw_sweep`` — ``raw_payload_retention_sweep`` (#1014,
   manual-only) only. A full sweep nulls ~12k multi-MB payloads in
   bounded batches and holds its lane for minutes; on the catch-all
