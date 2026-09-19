@@ -43,6 +43,7 @@ import psycopg.rows
 import pytest
 
 from app.services.n_port_ingest import (
+    _PARSER_VERSION_NPORT,
     AccessionRef,
     NPortFiling,
     NPortHolding,
@@ -700,7 +701,9 @@ class TestIngestFundNPort:
             )
             raw_rows = cur.fetchall()
         assert len(raw_rows) == 1
-        assert raw_rows[0]["parser_version"] == "nport-v2-edgartools"
+        # Pinned to the CONSTANT, not a literal (#2329) — see the sibling
+        # assertion in tests/test_manifest_parser_sec_n_port.py.
+        assert raw_rows[0]["parser_version"] == _PARSER_VERSION_NPORT
 
         # Tombstone log row written.
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -1054,9 +1057,7 @@ class TestNPortCusipResolutionReadsBothProviders:
 
         conn = ebull_test_conn
         _seed_instrument(conn, iid=2_329_101, symbol="GOOGL")
-        _seed_cusip_mapping_for_provider(
-            conn, instrument_id=2_329_101, cusip="02079K305", provider="openfigi"
-        )
+        _seed_cusip_mapping_for_provider(conn, instrument_id=2_329_101, cusip="02079K305", provider="openfigi")
         conn.commit()
 
         assert _resolve_cusip_to_instrument_id(conn, "02079K305") == 2_329_101
@@ -1079,12 +1080,8 @@ class TestNPortCusipResolutionReadsBothProviders:
         conn = ebull_test_conn
         _seed_instrument(conn, iid=2_329_110, symbol="SECX")
         _seed_instrument(conn, iid=2_329_111, symbol="FIGX")
-        _seed_cusip_mapping_for_provider(
-            conn, instrument_id=2_329_111, cusip="02329U102", provider="openfigi"
-        )
-        _seed_cusip_mapping_for_provider(
-            conn, instrument_id=2_329_110, cusip="02329U102", provider="sec"
-        )
+        _seed_cusip_mapping_for_provider(conn, instrument_id=2_329_111, cusip="02329U102", provider="openfigi")
+        _seed_cusip_mapping_for_provider(conn, instrument_id=2_329_110, cusip="02329U102", provider="sec")
         conn.commit()
 
         assert _resolve_cusip_to_instrument_id(conn, "02329U102") == 2_329_110
@@ -1116,9 +1113,7 @@ class TestNPortCusipResolutionReadsBothProviders:
 
         conn = ebull_test_conn
         _seed_instrument(conn, iid=2_329_130, symbol="THIRD")
-        _seed_cusip_mapping_for_provider(
-            conn, instrument_id=2_329_130, cusip="02329U203", provider="etoro"
-        )
+        _seed_cusip_mapping_for_provider(conn, instrument_id=2_329_130, cusip="02329U203", provider="etoro")
         conn.commit()
 
         assert _resolve_cusip_to_instrument_id(conn, "02329U203") is None

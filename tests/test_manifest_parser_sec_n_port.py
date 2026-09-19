@@ -29,6 +29,7 @@ from app.jobs.sec_manifest_worker import (
     clear_registered_parsers,
     run_manifest_worker,
 )
+from app.services.n_port_ingest import _PARSER_VERSION_NPORT
 from app.services.sec_manifest import get_manifest_row, record_manifest_entry
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 
@@ -165,7 +166,10 @@ def test_happy_path_parses_and_writes_fund_observation(
         )
         raw = cur.fetchone()
     assert raw is not None
-    assert raw[0] == "nport-v2-edgartools"
+    # Pinned to the CONSTANT, not a literal (#2329): a hand-copied version
+    # string makes a legitimate parse-semantics bump look like a test failure,
+    # which is the wrong way round — the bump is the thing being asserted.
+    assert raw[0] == _PARSER_VERSION_NPORT
 
     # Series row persisted (real Vanguard Value Index Fund series
     # post-#932 fixture replacement).

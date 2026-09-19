@@ -153,7 +153,9 @@ def _audit_n_port(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         else:
             uncovered.append((accession, instrument_id))
 
-    narrow_only_cusips = sum(1 for c in cusips if narrow(c) is None and _resolve_cusip_to_instrument_id(conn, c) is not None)
+    narrow_only_cusips = sum(
+        1 for c in cusips if narrow(c) is None and _resolve_cusip_to_instrument_id(conn, c) is not None
+    )
 
     return {
         "accessions_parsed": len(accessions),
