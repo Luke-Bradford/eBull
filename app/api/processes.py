@@ -1703,8 +1703,8 @@ def _pin_or_raise(resolved: int | None, *, pinned: int | None) -> int | None:
     return resolved
 
 
-def _resolve_active_sync_run(conn: psycopg.Connection[Any]) -> int | None:
-    """Lock + return the latest running sync_runs row.
+def _resolve_active_sync_run(conn: psycopg.Connection[Any], *, scope: str | None = None) -> int | None:
+    """Lock + return the latest running sync_runs row, optionally scoped.
 
     Issue #1078 (umbrella #1064) — admin control hub PR6.
     Spec §"Cancel — cooperative" — orchestrator_full_sync cancel writes
@@ -1712,12 +1712,16 @@ def _resolve_active_sync_run(conn: psycopg.Connection[Any]) -> int | None:
     Caller MUST be inside ``conn.transaction()`` so the row stays locked
     until the cancel insert + cancel_requested_at update commit.
 
-    ⚠ Deliberately NOT scope-filtered, even though #2274 made the DISPLAY read
-    scope-filtered. ``sync_runs`` permits one running row per database, and a
-    stranded ``behind`` / ``layer`` / ``job`` walk has no ProcessRow of its own
-    — filtering here would leave it with no cancel route at all. The caller's
-    ``target_run_id`` pin, not a scope filter, is what stops a wrapper row's
-    Cancel from landing on somebody else's run.
+    ⚠⚠ ``scope=None`` is the DATABASE-WIDE resolve — it takes whichever run
+    holds the singleton slot, whatever its scope. That is the pre-#2274
+    behaviour and it is kept for exactly one caller: the full-sync endpoint,
+    which is the only route a stranded ``behind`` / ``layer`` / ``job`` walk
+    has, none of those having a ProcessRow of its own. Every other caller MUST
+    pass a scope. Codex ckpt-2 P1: handing the unscoped resolve to the newly
+    routed HF endpoint would let an unpinned HF cancel kill a running FULL sync
+    and then record the stop against ``orchestrator_high_frequency_sync`` — a
+    destructive action with a false audit trail, and a risk that did not exist
+    before this ticket rather than one inherited from #1078.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -1725,10 +1729,12 @@ def _resolve_active_sync_run(conn: psycopg.Connection[Any]) -> int | None:
             SELECT sync_run_id
               FROM sync_runs
              WHERE status = 'running'
+               AND (%(scope)s::text IS NULL OR scope = %(scope)s)
              ORDER BY started_at DESC
              LIMIT 1
              FOR UPDATE
-            """
+            """,
+            {"scope": scope},
         )
         row = cur.fetchone()
     if row is None:
@@ -1764,8 +1770,18 @@ def _cancel_orchestrator_sync(
     ``process_stop_requests.process_id``.
     """
     with conn.transaction():
+        # Resolve within THIS wrapper's own scope first, so a cancel aimed at
+        # one wrapper can never land on the other's run.
+        resolved = _resolve_active_sync_run(conn, scope=scheduled_adapter.ORCHESTRATOR_SYNC_SCOPE[process_id])
+        if resolved is None and process_id == JOB_ORCHESTRATOR_FULL_SYNC:
+            # The documented pre-#2274 escape path, preserved exactly: the
+            # full-sync endpoint is the ONLY cancel route to a stranded
+            # boot-sweep / layer / job walk, which has no ProcessRow to be
+            # cancelled from. Reached only when no full sync is itself running,
+            # so it cannot shadow this wrapper's own run.
+            resolved = _resolve_active_sync_run(conn)
         try:
-            sync_run_id = _pin_or_raise(_resolve_active_sync_run(conn), pinned=body.target_run_id)
+            sync_run_id = _pin_or_raise(resolved, pinned=body.target_run_id)
         except _RunChanged:
             raise _conflict(
                 "run_changed",

@@ -1154,6 +1154,45 @@ def test_cancel_orchestrator_hf_sync_audits_against_itself(
     assert stop_row[0] == "orchestrator_high_frequency_sync"
 
 
+def test_cancel_hf_sync_never_reaches_another_scopes_run(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """#2274 / Codex ckpt-2 P1 — routing the HF wrapper at the DATABASE-WIDE
+    sync resolver would have made an unpinned HF cancel kill a running FULL
+    sync, and then record the stop against ``orchestrator_high_frequency_sync``.
+
+    ``sync_runs`` permits one running row per database, so "the running sync" is
+    not "this wrapper's run". The unscoped resolve is a deliberate escape path
+    for the FULL-sync endpoint only — a stranded boot-sweep walk has no
+    ProcessRow and no other cancel route — and it is not inherited by a route
+    this ticket created.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    full_run_id = _seed_running_sync_run(ebull_test_conn, layers=[("universe", "running")])
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/orchestrator_high_frequency_sync/cancel",
+        json={"mode": "cooperative"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "no_active_run"
+
+    sync_row = ebull_test_conn.execute(
+        "SELECT cancel_requested_at FROM sync_runs WHERE sync_run_id = %s",
+        (full_run_id,),
+    ).fetchone()
+    assert sync_row is not None
+    assert sync_row[0] is None
+
+    stop_count = ebull_test_conn.execute(
+        "SELECT count(*) FROM process_stop_requests WHERE target_run_kind = 'sync_run'",
+    ).fetchone()
+    assert stop_count is not None
+    assert stop_count[0] == 0
+
+
 def test_cancel_with_stale_pin_is_refused_and_writes_no_stop_row(
     conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
 ) -> None:
