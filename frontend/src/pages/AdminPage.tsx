@@ -36,6 +36,10 @@ import { FundDataRow } from "@/components/admin/FundDataRow";
 import { KillSwitchSection } from "@/components/admin/KillSwitchSection";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import { ProcessesTable } from "@/components/admin/ProcessesTable";
+import {
+  UncoveredReapNote,
+  uncoveredReapSummary,
+} from "@/components/admin/UncoveredReapNote";
 import { NEXT_RUN_EXPECTED_TOOLTIP, VERDICT_VISUAL } from "@/components/admin/processStatus";
 import {
   SectionError,
@@ -157,6 +161,13 @@ export function AdminPage() {
   }, [refreshInterval]);
 
   const [processesOpen, setProcessesOpen] = useState(true);
+  // #2274 — null when there is nothing to disclose OR the snapshot is partial
+  // (the backend does not compute the residual on a partial snapshot, so an
+  // empty list there means "not evaluated", not "none").
+  const uncoveredSummary = uncoveredReapSummary(
+    processes.data?.uncovered_reaps,
+    processes.data?.partial ?? false,
+  );
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
 
   const handleRun = useCallback(
@@ -235,7 +246,13 @@ export function AdminPage() {
 
       <CollapsibleSection
         title="Processes"
-        summary="control hub"
+        // #2274 — the coverage count rides the disclosure label because
+        // CollapsibleSection unmounts its body when closed, so the note below
+        // is only reachable while the section happens to be open. Same shape
+        // PR #3211 used for the collapsed `current` group.
+        summary={
+          uncoveredSummary === null ? "control hub" : `control hub · ${uncoveredSummary}`
+        }
         open={processesOpen}
         onOpenChange={setProcessesOpen}
       >
@@ -244,6 +261,11 @@ export function AdminPage() {
         ) : processes.error !== null ? (
           <SectionError onRetry={processes.refetch} />
         ) : processes.data ? (
+          <>
+          <UncoveredReapNote
+            entries={processes.data.uncovered_reaps}
+            partial={processes.data.partial}
+          />
           <ProcessesTable
             snapshot={processes.data}
             onMutationSuccess={() => {
@@ -267,6 +289,7 @@ export function AdminPage() {
             // false (no false alarm).
             engineDown={systemStatus.data?.engine_down ?? false}
           />
+          </>
         ) : null}
       </CollapsibleSection>
 

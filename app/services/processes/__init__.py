@@ -329,6 +329,39 @@ class ProcessRow:
 
 
 @dataclass(frozen=True, slots=True)
+class UncoveredReap:
+    """One job that would carry the reap chip but has no ProcessRow.
+
+    #2274. "Uncovered" means EXACTLY one thing: no row in this snapshot whose
+    ``process_id`` equals this ``job_name``. It is NOT a claim that the job has
+    no operator surface at all — the 13 sync-orchestrator layer jobs are
+    reachable through ``/sync/layers/v2`` and the DAG drill-in, and
+    ``daily_cik_refresh`` / ``daily_financial_facts`` are invoked by
+    ``fundamentals_sync``, which does have a row. Those surfaces carry data
+    freshness and layer execution state, which is a DIFFERENT axis from reap
+    recurrence: a job stuck ``running`` forever shows up there only once its
+    layer's data goes stale.
+
+    Measured at the shipped window and the shipped floor on 2026-09-19: the
+    Processes table chips ONE job (``sec_filing_documents_ingest``, 4 events /
+    7 d) and hides TWO that clear the same bar — ``daily_candle_refresh`` (11)
+    and ``daily_portfolio_sync`` (4). The loudest job in the corpus is one of
+    the hidden ones.
+
+    ``events`` and ``runs`` carry the same two numbers ``ProcessRow`` does, for
+    the same reason: one boot reaps every orphaned row in a single UPDATE, so
+    counting rows would call one boot many failures while counting events alone
+    would hide how many runs it wrote off.
+
+    Spec: ``docs/proposals/ops/2026-09-19-2274-uncovered-reap-disclosure.md``.
+    """
+
+    job_name: str
+    events: int
+    runs: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessSnapshot:
     """Cross-adapter snapshot returned by ``GET /system/processes``.
 
@@ -336,10 +369,23 @@ class ProcessSnapshot:
     so the FE can render a banner ("ingest sweep telemetry unavailable")
     while still rendering the lanes that succeeded. Spec
     §Failure-mode invariants.
+
+    ``uncovered_reaps`` (#2274) is the residual of the same reap aggregate the
+    rows are built from: jobs at or above ``RECENT_REAP_CHIP_FLOOR`` that have
+    no row here.
+
+    ⚠ An empty tuple means "measured, none" ONLY when ``partial`` is False. A
+    raising adapter shrinks the covered set, so the residual would invent a
+    coverage gap and name jobs that are perfectly well covered — the disclosure
+    is therefore not computed at all when ``partial`` is True, and the FE
+    renders nothing rather than an empty-looking all-clear. The two states are
+    distinguishable on the wire precisely because ``partial`` is carried
+    alongside.
     """
 
     rows: tuple[ProcessRow, ...]
     partial: bool
+    uncovered_reaps: tuple[UncoveredReap, ...] = ()
 
 
 __all__ = [
@@ -355,5 +401,6 @@ __all__ = [
     "ProcessStatus",
     "ProcessWatermark",
     "RunStatus",
+    "UncoveredReap",
     "WatermarkCursorKind",
 ]

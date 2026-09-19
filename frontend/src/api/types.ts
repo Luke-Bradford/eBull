@@ -2285,9 +2285,36 @@ export interface ProcessRowResponse {
   recent_reap_runs: number;
 }
 
+/**
+ * #2274 — one job that would carry the reap chip but has no row in `rows`.
+ *
+ * "Uncovered" means exactly one thing: no row whose `process_id` equals
+ * `job_name`. It does NOT claim the job has no operator surface anywhere —
+ * the sync-orchestrator layer jobs are reachable through `/sync/layers/v2`
+ * and the DAG drill-in, which carry data freshness rather than reap
+ * recurrence. The copy must say "not in this table", never "nowhere else".
+ */
+export interface UncoveredReapResponse {
+  job_name: string;
+  /** Reap incidents — one boot's batch is ONE event, however many rows it wrote off. */
+  events: number;
+  /** `job_runs` rows those incidents wrote off. */
+  runs: number;
+}
+
 export interface ProcessListResponse {
   rows: ProcessRowResponse[];
   partial: boolean;
+  /**
+   * ⚠ Empty means "measured, none" ONLY when `partial` is false. The backend
+   * does not compute this on a partial snapshot (a missing adapter's rows
+   * would make well-covered jobs look uncovered), so render nothing at all
+   * when `partial` — an empty-looking all-clear would be a lie.
+   *
+   * Optional so a cached/older payload without the field does not break the
+   * page; treat absent exactly as empty.
+   */
+  uncovered_reaps?: UncoveredReapResponse[];
 }
 
 export type TriggerMode = "iterate" | "full_wash";

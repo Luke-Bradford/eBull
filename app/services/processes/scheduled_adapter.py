@@ -26,6 +26,7 @@ resolution.
 from __future__ import annotations
 
 import logging
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
@@ -49,6 +50,7 @@ from app.services.processes import (
     ProcessStatus,
     RunStatus,
     StaleReason,
+    UncoveredReap,
 )
 from app.services.processes.bootstrap_coverage import (
     BOOTSTRAP_COVERED_FRESHNESS_SOURCES,
@@ -779,6 +781,51 @@ def _recent_reap_counts(
             },
         )
         return {str(row[0]): (int(row[1]), int(row[2])) for row in cur.fetchall()}
+
+
+def uncovered_reap_counts(
+    conn: psycopg.Connection[Any],
+    *,
+    covered: AbstractSet[str],
+) -> tuple[UncoveredReap, ...]:
+    """Jobs that would carry the reap chip but have no ProcessRow.
+
+    #2274. ``_recent_reap_counts`` already reads the WHOLE ``job_runs``
+    population — the jobs with no row are present in its result and are dropped
+    at the point where ``list_rows`` joins it onto ``SCHEDULED_JOBS``. This is
+    that residual, and nothing else.
+
+    ``covered`` is the set of ``process_id`` values in the snapshot being
+    composed — the REAL served set across all three adapters, not
+    ``SCHEDULED_JOBS``, which is one of three and would over-report by 7 rows.
+
+    The floor is ``RECENT_REAP_CHIP_FLOOR``, the same constant the per-row chip
+    uses, so "would chip if it had a row" is literally this function's
+    definition and the page cannot show two disagreeing thresholds. Measured on
+    2026-09-19 at that floor: one covered job chips
+    (``sec_filing_documents_ingest``, 4 events / 7 d) against two uncovered ones
+    that clear the same bar — ``daily_candle_refresh`` (11) and
+    ``daily_portfolio_sync`` (4).
+
+    ⚠ This re-executes the aggregate ``list_rows`` already ran and discarded.
+    Threading that copy out would couple the adapter's internals to snapshot
+    composition for 5.6 ms (measured against 139k ``job_runs``), so the second
+    read is deliberate and cheap rather than claimed away.
+
+    Ordering is ``(-events, job_name)``: deterministic, so two jobs with equal
+    event counts cannot swap between snapshots and make the disclosure look
+    like it changed when it did not.
+
+    Spec: ``docs/proposals/ops/2026-09-19-2274-uncovered-reap-disclosure.md``.
+    """
+    counts = _recent_reap_counts(conn)
+    residual = [
+        UncoveredReap(job_name=job_name, events=events, runs=runs)
+        for job_name, (events, runs) in counts.items()
+        if job_name not in covered and events >= RECENT_REAP_CHIP_FLOOR
+    ]
+    residual.sort(key=lambda entry: (-entry.events, entry.job_name))
+    return tuple(residual)
 
 
 def _freshness_failure_counts(

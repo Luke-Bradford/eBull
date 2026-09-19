@@ -73,6 +73,7 @@ from app.services.processes import (
     ProcessWatermark,
     RunStatus,
     StaleReason,
+    UncoveredReap,
     bootstrap_adapter,
     ingest_sweep_adapter,
     scheduled_adapter,
@@ -219,16 +220,42 @@ class ProcessRowResponse(BaseModel):
     recent_reap_runs: int = 0
 
 
+class UncoveredReapResponse(BaseModel):
+    """One job that would carry the reap chip but has no row in ``rows``.
+
+    #2274. "Uncovered" means EXACTLY one thing: no row in this response whose
+    ``process_id`` equals ``job_name``. It does NOT claim the job has no
+    operator surface anywhere — the sync-orchestrator layer jobs are reachable
+    through ``/sync/layers/v2`` and the DAG drill-in, which carry data freshness
+    and layer execution state rather than reap recurrence.
+
+    ``events`` is reap incidents (one boot's batch is one event); ``runs`` is the
+    ``job_runs`` rows those incidents wrote off. Both, for the same reason
+    ``ProcessRowResponse`` carries both.
+    """
+
+    job_name: str
+    events: int
+    runs: int
+
+
 class ProcessListResponse(BaseModel):
     """List response wrapper.
 
     ``partial=True`` flips on when at least one adapter raised — the FE
     renders a banner ("ingest sweep telemetry unavailable") while still
     showing the lanes that succeeded. Spec §Failure-mode invariants.
+
+    ``uncovered_reaps`` (#2274) lists jobs at or above the per-row chip's own
+    floor that have no row here. ⚠ An empty list means "measured, none" ONLY
+    when ``partial`` is False — it is not computed on a partial snapshot,
+    because a missing adapter's rows would make well-covered jobs look
+    uncovered. Defaulted so existing clients and fixtures stay valid.
     """
 
     rows: list[ProcessRowResponse]
     partial: bool
+    uncovered_reaps: list[UncoveredReapResponse] = []
 
 
 class TriggerRequest(BaseModel):
@@ -491,6 +518,10 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
 # ---------------------------------------------------------------------------
 
 
+def _convert_uncovered_reap(entry: UncoveredReap) -> UncoveredReapResponse:
+    return UncoveredReapResponse(job_name=entry.job_name, events=entry.events, runs=entry.runs)
+
+
 def _gather_snapshot(conn: psycopg.Connection[Any]) -> ProcessSnapshot:
     """Compose every adapter's rows under one REPEATABLE READ snapshot.
 
@@ -502,6 +533,7 @@ def _gather_snapshot(conn: psycopg.Connection[Any]) -> ProcessSnapshot:
     """
     rows: list[ProcessRow] = []
     partial = False
+    uncovered: tuple[UncoveredReap, ...] = ()
     with snapshot_read(conn):
         for adapter_name, adapter in (
             ("bootstrap", bootstrap_adapter),
@@ -516,7 +548,27 @@ def _gather_snapshot(conn: psycopg.Connection[Any]) -> ProcessSnapshot:
                     adapter_name,
                 )
                 partial = True
-    return ProcessSnapshot(rows=tuple(rows), partial=partial)
+        # #2274 — the coverage disclosure. INSIDE the snapshot_read block so the
+        # residual and the rows observe the same REPEATABLE READ view; computing
+        # it after the block would let a row land between the two reads and be
+        # named as uncovered while its row is on the page.
+        #
+        # ⚠ Skipped entirely when an adapter raised. ``covered`` would then be
+        # missing that mechanism's rows, so the residual would invent a coverage
+        # gap out of a transient failure and name jobs that are perfectly well
+        # covered. ``partial`` is already rendered as "this snapshot is
+        # incomplete", and the FE renders nothing for the disclosure — so an
+        # empty tuple means "measured, none" only when ``partial`` is False.
+        if not partial:
+            try:
+                uncovered = scheduled_adapter.uncovered_reap_counts(conn, covered={row.process_id for row in rows})
+            except Exception:
+                # Same contract as the adapter loop: one failing read does not
+                # 500 the page. Returning () silently would claim "none", so the
+                # envelope is flagged incomplete instead.
+                logger.exception("processes: uncovered-reap read raised; omitting")
+                partial = True
+    return ProcessSnapshot(rows=tuple(rows), partial=partial, uncovered_reaps=uncovered)
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +610,11 @@ def list_processes(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> ProcessListResponse:
     snapshot = _gather_snapshot(conn)
-    return ProcessListResponse(rows=[_convert_row(r) for r in snapshot.rows], partial=snapshot.partial)
+    return ProcessListResponse(
+        rows=[_convert_row(r) for r in snapshot.rows],
+        partial=snapshot.partial,
+        uncovered_reaps=[_convert_uncovered_reap(u) for u in snapshot.uncovered_reaps],
+    )
 
 
 @router.get("/{process_id}", response_model=ProcessRowResponse)
