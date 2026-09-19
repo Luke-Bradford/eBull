@@ -501,20 +501,18 @@ def _resolve_terminal_row(conn: psycopg.Connection[Any], *, job_name: str) -> di
 
     Scope (intentional — #1474 targets the Processes control-hub
     ``schedule_missed`` chip, which was permanently false for
-    ``orchestrator_high_frequency_sync``). This fixes the process-row
-    **terminal** read only. Deliberately NOT changed, each still reading
-    ``job_runs`` for these jobs:
+    ``orchestrator_high_frequency_sync``). This is the process-row
+    **terminal** read.
 
-      * **Active/running state** (``_read_running_run``): an in-flight
-        high-frequency sync writes a ``sync_runs`` 'running' row, not a
-        ``job_runs`` one, so during the (seconds-long, every-5-min)
-        active window the row shows the last terminal run instead of
-        "running"/progress. Strictly better than the *permanent*
-        ``schedule_missed`` it replaces — and ``schedule_missed`` itself
-        is now correct, because the recent terminal ``sync_runs`` row
-        keeps ``expected_fire_at`` current (only a genuinely-stalled HF
-        sync, whose latest terminal row ages out, will re-raise it,
-        which is the right behaviour).
+    ⚠ The **active/running** read was listed here as a deliberate #1474
+    deferral and is no longer one — #2274 closed it; see
+    ``_resolve_active_row`` / ``_read_running_sync_run`` below, which dispatch
+    on this same registry. Do not restore the old wording: it argued from the
+    HF sync's short active window, which was never true of the other member of
+    the dict.
+
+    Still reading ``job_runs`` for these jobs, and deliberately:
+
       * **History tab** (``list_runs`` / ``list_run_errors``).
       * **Legacy** ``/system/jobs`` / ``/system/status``
         (``ops_monitor.check_job_health``).
@@ -536,10 +534,15 @@ def _read_running_sync_run(conn: psycopg.Connection[Any], *, scope: str) -> dict
     ``_resolve_terminal_row`` above deliberately left behind. That deferral was
     justified by the HF sync's "(seconds-long, every-5-min) active window" —
     measured and true for ``high_frequency``, but written about ONE member of a
-    two-member dict. ``orchestrator_full_sync``'s active window is p50 ~37 min
-    and has exceeded four hours, and for all of it the row showed the last
-    TERMINAL run: no ``running`` status, no active run, and therefore no Cancel
-    on the one scheduled process whose cancel the executor actually honours.
+    two-member dict. The full sync's active window is orders of magnitude
+    longer, and for all of it the row showed the last TERMINAL run: no
+    ``running`` status, no active run, and therefore no Cancel on the one
+    scheduled process whose cancel the executor actually honours.
+
+    ⚠ No duration figures are written here on purpose — they move with every
+    new ``sync_runs`` row. The queries that measure them, and the numbers they
+    returned when this shipped, are in
+    ``docs/proposals/ops/2026-09-19-2274-orchestrator-active-run.md``.
 
     ⚠ ``processed_count`` is passed through honestly rather than substituted.
     It has **no production writer** — the executor's progress path writes

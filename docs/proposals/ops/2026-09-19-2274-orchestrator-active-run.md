@@ -177,6 +177,42 @@ observed sync is 4.6 h against a 24 h ceiling.
 Not duplication on the other 4 — there rule 4 measures silence-since-heartbeat, which is a
 different and later instant.
 
+## ⚠⚠ This ticket's OWN prior spec both predicted this fix and scoped it differently
+
+`2026-09-15-2274-sync-run-heartbeat.md` §3 lists "Widening
+`scheduled_adapter._read_running_run`" under what it is NOT doing, and §1.2 gives the
+reason: of the 157 rows ever reaped `orchestrator_crash`, **148 are `boot_sweep`**, whose
+`behind` scope is in neither map — *"a scope-keyed ProcessRow read structurally misses 94%
+of the population this ticket is about."*
+
+**That rejection stands, and it does not govern this change**, because the two are aimed at
+different populations. §1.2 is about STRANDED runs, where the reaped population really is
+94% `boot_sweep` and a scope-keyed read really is the wrong instrument. This spec is about
+the display and cancel gap during a **healthy** full sync. It claims no coverage of the
+stranded-walk population, and §"Known-and-not-fixed" says so.
+
+§3 also anticipated the fix: *"If done later it must land WITH a `mid_flight_stuck`
+threshold override for the two orchestrator process_ids, because `DEFAULT_THRESHOLD_S` is
+300s and 28 runs exceed an hour."* This lands exactly that override — arrived at
+independently, which is some evidence it is the right shape.
+
+⚠ **But it lands on ONE process_id, not two, and the prior spec's own evidence is why.**
+Runs exceeding an hour, whole corpus, by scope:
+
+| scope | n | > 3,600 s | > 300 s |
+| --- | ---: | ---: | ---: |
+| `behind` | 1,369 | 15 | 127 |
+| `full` | 63 | 14 | 55 |
+| `high_frequency` | 22,179 | **0** | **0** |
+
+The 29 long runs (28 when that spec was written) are `behind` and `full`. **Not one of
+22,179 `high_frequency` runs has ever exceeded even 300 s**, so the sentence's justification
+never covered the second process_id it prescribed. Overriding HF would have cost the one
+alarm that still reaches a stranded HF singleton once rule 1 goes quiet for it.
+
+A recommendation's scope can be wider than the evidence that justifies it, and inheriting
+the scope without re-reading the evidence is how that spreads.
+
 ## The change
 
 ### 1. `RUNTIME_CEILING_S` moves to `stale_thresholds`

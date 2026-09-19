@@ -8586,3 +8586,46 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry;
   `app/services/sync_orchestrator/executor.py::_run_layers_loop` (gate #0 carries the trace);
   `tests/test_sync_orchestrator_executor.py::TestShutdownStopsTheWalk`.
+
+---
+
+### A permissive resolver is a DECISION scoped to its original caller — routing a new caller through it is new risk, not inherited risk
+
+- First seen in: #2274 (2026-09-19), PR for the orchestrator active-run slice. Codex
+  checkpoint 2 round 1, P1, on a diff that had already survived two spec-level ckpt-1
+  passes.
+- Symptom: `cancel_process` routed on `process_id == JOB_ORCHESTRATOR_FULL_SYNC`; widening
+  it to registry membership so the high-frequency wrapper could offer a Cancel handed that
+  NEW route `_resolve_active_sync_run`, which takes the latest running `sync_runs` row
+  **with no scope filter**. `sync_runs` permits one running row per database
+  (`idx_sync_runs_single_running`), so an unpinned `POST
+  /orchestrator_high_frequency_sync/cancel` would have cancelled whatever held the slot — a
+  running full sync, or a boot-sweep walk — and then written the stop row under
+  `orchestrator_high_frequency_sync`. Destructive, with an audit trail naming a job that
+  was not running.
+- Root cause: the unscoped resolve was **justified**, in a docstring, as a deliberate escape
+  path — the full-sync endpoint is the only cancel route to a stranded `behind` / `layer` /
+  `job` walk, none of which has a ProcessRow. Reading that justification made the resolver
+  look safe *in general*. It is not: it is safe for the caller whose tradeoff it was
+  written for. The author (me) had even written "no scope filter, for the reason in #4" into
+  the spec as a carried-forward constraint, which is precisely how the scope of a
+  deliberate permission gets widened without anyone re-deciding it.
+- Generalises to: any helper whose docstring explains why it is deliberately permissive —
+  unscoped/unfiltered resolvers, "take the latest", `LIMIT 1` without a discriminator,
+  fail-open defaults, admin-bypass branches, `get_or_create`. The tell is a second caller
+  arriving at a helper whose comment argues for laxity.
+- ⚠ Distinct from "check which registry dispatched it" (#2274, `ad210d5e`): that is about
+  attributing an EFFECT to the wrong actor. This is about granting a new caller a
+  PERMISSION that was priced for a different one.
+- Prevention: when routing a new caller into an existing helper, ask **"whose tradeoff is
+  this default?"** If the docstring justifies a permissive behaviour by naming a specific
+  caller or scenario, the default is that caller's and the new one must opt in explicitly —
+  make the permissive mode a parameter (`scope: str | None = None`) rather than the
+  ambient behaviour, and have the original caller pass it or fall back to it by name. A
+  test that seeds the OTHER scope and asserts the new route refuses is the cheap proof;
+  revert-probe it, because a test that passes both with and without the scoping proves
+  nothing.
+- Enforced in: this entry; `app/api/processes.py::_resolve_active_sync_run` (scope is now a
+  parameter, and the unscoped fallback is reached only by the full-sync endpoint, only
+  after its own scope finds nothing);
+  `tests/test_processes_endpoints.py::test_cancel_hf_sync_never_reaches_another_scopes_run`.
