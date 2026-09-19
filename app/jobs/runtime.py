@@ -1275,17 +1275,27 @@ def lost_fire_rearm_delay_seconds(job: ScheduledJob | None, *, lateness_seconds:
 SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS: Final[int] = 1
 
 
+def _grace_for(job: ScheduledJob | None) -> int:
+    """``effective_misfire_grace_seconds`` for a job already in hand.
+
+    Split out so ``late_admission_seconds`` does not repeat the registry lookup it
+    has already done (review NITPICK on PR #3221).  ``None`` is the unknown-name
+    case and gets the default — an unregistered name is not a scheduled fire and
+    cannot have overridden it.
+    """
+    if job is not None and job.misfire_grace_seconds is not None:
+        return job.misfire_grace_seconds
+    return SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+
+
 def effective_misfire_grace_seconds(job_name: str) -> int:
     """The grace APScheduler actually applied to *job_name*'s dispatch.
 
     ``ScheduledJob.misfire_grace_seconds`` when the job set one, else the
-    scheduler-wide default.  Unknown names get the default — they are not
-    registered fires and cannot have overridden it.
+    scheduler-wide default.  Kept name-keyed because its other callers — the
+    refusal's own log line and the tests — hold a name and not a job.
     """
-    job = _scheduler._JOBS_BY_NAME.get(job_name)
-    if job is not None and job.misfire_grace_seconds is not None:
-        return job.misfire_grace_seconds
-    return SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+    return _grace_for(_scheduler._JOBS_BY_NAME.get(job_name))
 
 
 def previous_scheduled_run(cadence: Cadence, at: datetime) -> datetime | None:
@@ -1348,7 +1358,7 @@ def late_admission_seconds(job_name: str, *, now: datetime | None = None) -> flo
     observed_at = now if now is not None else datetime.now(UTC)
     slot = previous_scheduled_run(job.cadence, observed_at)
     late = waited if slot is None else max(waited, (observed_at - slot).total_seconds())
-    if late <= effective_misfire_grace_seconds(job_name):
+    if late <= _grace_for(job):
         return None
     return late
 
