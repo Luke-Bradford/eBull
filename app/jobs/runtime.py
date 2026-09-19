@@ -1098,6 +1098,23 @@ _CADENCE_MIN_GAP_SECONDS: Final[dict[CadenceKind, int]] = {
     "yearly": 365 * 86_400,
 }
 
+#: The cadence kinds whose gap above is EXACT rather than a lower bound — i.e. a
+#: true period, so ``lateness % gap`` is meaningful.  The scheduler runs in UTC,
+#: where a day and a week are constant; ``monthly`` and ``yearly`` are NOT, and
+#: their entries above understate a real 29-31 day month or a leap year.
+#:
+#: ⚠⚠ The distinction exists because a lower bound survives SUBTRACTION and does
+#: NOT survive MODULO. ``G_min - lateness`` understates the remaining gap, which
+#: is the safe direction the constant's own comment relies on. ``lateness %
+#: G_min`` lands anywhere inside the real period, so it can OVERstate the
+#: remaining gap and arm a retry that the next natural fire beats — measured by
+#: Codex ckpt-3 on a monthly cadence: real next fire 100 s away, the guard armed
+#: for 300 s. Latent today (both opted-in jobs are hourly/daily) and fixed here
+#: rather than left for whoever opts a monthly job in.
+_EXACTLY_PERIODIC_CADENCE_KINDS: Final[frozenset[CadenceKind]] = frozenset(
+    {"every_n_minutes", "hourly", "daily", "weekly"}
+)
+
 
 def min_cadence_gap_seconds(cadence: Cadence) -> int:
     """Lower bound on the seconds between two consecutive fires of *cadence*.
@@ -1140,18 +1157,28 @@ def lost_fire_rearm_delay_seconds(job: ScheduledJob | None, *, lateness_seconds:
       whole reason it misfired is that the APScheduler pool was saturated (max
       observed on dev: 10,946.3 s). By then intermediate slots have gone by.
 
-    ⚠⚠ The debit is MODULO, not subtraction, and that is not a detail. Plain
-    subtraction measures distance from a slot the scheduler has already
-    abandoned: at 10,946.3 s late on an hourly job it yields -7,346.3 s and
-    refuses to arm, while the next real fire is 3,453.7 s away and arming is
-    correct. The remaining gap is periodic in the cadence::
+    ⚠⚠ For an exactly-periodic cadence the debit is MODULO, not subtraction,
+    and that is not a detail. Plain subtraction measures distance from a slot
+    the scheduler has already abandoned: at 10,946.3 s late on an hourly job it
+    yields -7,346.3 s and refuses to arm, while the next real fire is 3,453.7 s
+    away and arming is correct. The remaining gap is periodic in the cadence::
 
         remaining = gap - (lateness % gap)
 
-    ⚠ ``lateness_seconds=0`` gives ``0 % gap == 0`` and therefore
-    ``remaining == gap``, so the lane-busy caller's answers are byte-identical
-    to the pre-#2603 ones. That identity is what makes widening this function
-    in place safe rather than forking it.
+    ⚠⚠ ``monthly`` and ``yearly`` are NOT exactly periodic — their entries in
+    ``_CADENCE_MIN_GAP_SECONDS`` are lower bounds, and a modulo over a lower
+    bound can OVERSTATE the remaining gap (Codex ckpt-3, on a monthly cadence:
+    real next fire 100 s away, a modulo guard arming for 300 s). For those kinds
+    the debit falls back to clamped SUBTRACTION, which understates the remaining
+    gap and is therefore safe in the direction the constant's own comment
+    relies on::
+
+        remaining = max(0, gap_lower_bound - lateness)
+
+    ⚠ ``lateness_seconds=0`` gives ``0 % gap == 0`` under either branch and
+    therefore ``remaining == gap``, so the lane-busy caller's answers are
+    byte-identical to the pre-#2603 ones. That identity is what makes widening
+    this function in place safe rather than forking it.
 
     ⚠ This NARROWS a collision window, it does not close one. Near the boundary
     the test still passes with little room — an hourly ``:20`` slot observed
@@ -1164,7 +1191,12 @@ def lost_fire_rearm_delay_seconds(job: ScheduledJob | None, *, lateness_seconds:
     gap = min_cadence_gap_seconds(job.cadence)
     if gap <= RETRY_BASE_SECONDS:
         return None
-    if gap - (max(0.0, lateness_seconds) % gap) <= RETRY_BASE_SECONDS:
+    late = max(0.0, lateness_seconds)
+    if job.cadence.kind in _EXACTLY_PERIODIC_CADENCE_KINDS:
+        remaining = gap - (late % gap)
+    else:
+        remaining = max(0.0, gap - late)
+    if remaining <= RETRY_BASE_SECONDS:
         return None
     return RETRY_BASE_SECONDS
 

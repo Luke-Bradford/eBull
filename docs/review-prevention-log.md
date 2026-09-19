@@ -8798,10 +8798,16 @@ original, because the gate now *looked* like a bound.
   exactly the defect the code exists to prevent, which made the finding very convincing.
 - ⚠ It was wrong, and the fact that decides it is **not visible at the call site**:
   `background_write_connection(*, autocommit: bool = True)` (`app/db/background_write.py:70`).
-  On an autocommit connection the first statement is already committed, a failed second
-  statement leaves `transaction_status` IDLE rather than aborted, and there is no outer
-  commit to fail. Measured directly: status IDLE before and after, connection still usable,
-  block exits clean.
+  Measured directly: status IDLE before and after a failing statement, connection still
+  usable, block exits clean.
+- ⚠ Two precisions, both from Codex ckpt-3, because the obvious way to say this is wrong:
+  **"the block is not transactional" is the wrong reason.** `record_job_skip` DOES open an
+  explicit `conn.transaction()` — autocommit never excludes one — but that transaction
+  COMMITS before the function returns, i.e. before the second statement runs. The INSERT is
+  durable by then, which is a stronger guarantee than "no transaction existed". And psycopg
+  3.3.3 does call `commit()` on context exit; it issues no SQL when IDLE. (PostgreSQL also
+  treats `COMMIT` on an aborted transaction as `ROLLBACK` rather than raising
+  `InFailedSqlTransaction`, so even the bot's mechanism was not quite the one it named.)
 - Generalises to: any review finding — or design — that reasons about rollback, savepoints
   or atomicity across statements sharing a connection. `with conn:` and
   `with pool.connection() as conn:` look transactional and need not be; psycopg3's
@@ -8818,5 +8824,10 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry;
   `tests/test_2603_misfire_arm_transaction_safety_db.py` (drives
   `JobRuntime._on_job_missed` against the test DB; flipping the call site to
-  `autocommit=False` reds both listener tests, including the exact data-loss scenario the
-  review described).
+  `autocommit=False` reds both listener tests — though note it reds them via
+  `record_job_skip`'s own autocommit assertion, which fires BEFORE any INSERT, so the guard
+  is real but it is not a reproduction of the rollback the review described).
+- ⚠ **Injecting a PYTHON exception does not test this.** A swallowed `RuntimeError` never
+  reaches PostgreSQL, so it cannot abort a transaction and the test would pass under the
+  very semantics it claims to exclude. The failure must be a statement the SERVER rejects.
+  First draft of the test here made exactly that mistake.

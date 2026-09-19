@@ -180,6 +180,45 @@ def test_lateness_never_admits_a_job_that_did_not_opt_in() -> None:
     assert lost_fire_rearm_delay_seconds(silent, lateness_seconds=1.0) is None
 
 
+@pytest.mark.parametrize(
+    ("cadence", "lateness", "expected"),
+    [
+        # 28 days is ``monthly``'s LOWER bound; a real month can be 31. Modulo on
+        # a lower bound can overstate the remaining gap — Codex ckpt-3 measured a
+        # real next fire 100 s away against a guard arming for 300 s. Clamped
+        # subtraction understates instead, which is the safe direction.
+        (Cadence.monthly(day=1, hour=1), 28 * 86_400 - 100.0, None),
+        (Cadence.monthly(day=1, hour=1), 28 * 86_400 + 5_000.0, None),
+        (Cadence.monthly(day=1, hour=1), 3_600.0, RETRY_BASE_SECONDS),
+        (Cadence.yearly(month=4, day=1, hour=1), 365 * 86_400 - 100.0, None),
+        (Cadence.yearly(month=4, day=1, hour=1), 86_400.0, RETRY_BASE_SECONDS),
+    ],
+)
+def test_calendar_cadences_use_clamped_subtraction_not_modulo(
+    cadence: Cadence, lateness: float, expected: int | None
+) -> None:
+    """⚠⚠ A lower bound survives SUBTRACTION and does NOT survive MODULO.
+
+    ``_CADENCE_MIN_GAP_SECONDS``' own comment relies on understating a gap being
+    safe ("can only make the guard stricter, never looser"). Modulo breaks that
+    invariant for the two kinds whose entry is not an exact period.
+
+    Latent today — both opted-in jobs are hourly/daily — and pinned here so
+    opting a monthly job in cannot silently resurrect it.
+    """
+    assert lost_fire_rearm_delay_seconds(_job("cal", cadence, rearm=True), lateness_seconds=lateness) == expected
+
+
+def test_exactly_periodic_kinds_are_the_ones_whose_gap_is_a_true_period() -> None:
+    """Pin the split, so a new CadenceKind must be classified deliberately."""
+    from app.jobs.runtime import _EXACTLY_PERIODIC_CADENCE_KINDS
+
+    assert _EXACTLY_PERIODIC_CADENCE_KINDS == frozenset({"every_n_minutes", "hourly", "daily", "weekly"})
+    # Every registered job's kind must be classified one way or the other.
+    for job in SCHEDULED_JOBS:
+        assert job.cadence.kind in _EXACTLY_PERIODIC_CADENCE_KINDS or job.cadence.kind in {"monthly", "yearly"}
+
+
 def test_a_daily_misfire_arms_at_every_observed_lateness() -> None:
     """The core sleeve's daily producer: no recorded lateness threatens its gap."""
     job = _BY_NAME[JOB_CORE_REBALANCE_OBSERVATION]

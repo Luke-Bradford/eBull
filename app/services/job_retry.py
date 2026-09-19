@@ -44,7 +44,12 @@ from typing import Any, Final
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.ops_monitor import RETRY_MAX_ATTEMPTS, TERMINAL_STATUS_SQL
+from app.services.ops_monitor import (
+    LANE_BUSY_SKIP_PREFIX,
+    MISFIRE_SKIP_PREFIX,
+    RETRY_MAX_ATTEMPTS,
+    TERMINAL_STATUS_SQL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +69,10 @@ _DISPATCH_RECHECK_SECONDS: int = 900  # 15m
 #: Terminal statuses a ``next_retry_at`` may legitimately sit on.
 #:
 #: ``failure`` is the original (#1509). ``skipped`` was added by #2603 for a
-#: fire lost to a busy lane; arming happens only at that one emission site and
-#: only for a job carrying ``rearm_on_lost_fire``, so no other skip reason —
+#: LOST FIRE — one lost to a busy lane (``_record_lane_busy_skip``) or one
+#: discarded past ``misfire_grace_time`` (``JobRuntime._arm_missed_fire``).
+#: Arming happens only at those two emission sites and only for a job carrying
+#: ``rearm_on_lost_fire``, so no other skip reason —
 #: ``prereq_missing``, a session-window guard, "no pending X" — can ever reach
 #: this set. Rendered as a SQL array literal so the tuple here is the single
 #: source of truth for both the query and the ``_refire_one`` recheck.
@@ -166,7 +173,7 @@ def _refire_one(
 
     with conn.transaction():
         locked = conn.execute(
-            "SELECT next_retry_at, status FROM job_runs WHERE run_id = %(id)s FOR UPDATE",
+            "SELECT next_retry_at, status, error_msg FROM job_runs WHERE run_id = %(id)s FOR UPDATE",
             {"id": run_id},
         ).fetchone()
         # Superseded between SELECT-due and lock (a concurrent sweep cleared it,
@@ -205,7 +212,14 @@ def _refire_one(
             process_id=job_name,
             mode="iterate",
         )
-        _write_retry_audit(conn, job_name=job_name, attempt=attempt, run_id=run_id, status=str(locked[1]))
+        _write_retry_audit(
+            conn,
+            job_name=job_name,
+            attempt=attempt,
+            run_id=run_id,
+            status=str(locked[1]),
+            error_msg=locked[2],
+        )
         # Advance, do NOT clear: the request may still be rejected async after
         # this commit (gate/prereq/fence) with no new terminal to restamp the
         # retry. Pushing next_retry_at forward keeps the row a durable backstop
@@ -325,15 +339,27 @@ def _write_retry_audit(
     attempt: int,
     run_id: int,
     status: str,
+    error_msg: str | None = None,
 ) -> None:
     """Record the audited retry in ``decision_audit`` (mirrors the kick audit).
 
-    ⚠ #2603 — the cause is taken from the row's ``status`` rather than asserted.
-    This sentence read "after a transient failure" unconditionally, which is now
-    false for a ``skipped`` row re-armed after losing its fire to a busy lane.
-    An audit line that names the wrong cause is worse than a vague one.
+    ⚠ #2603 — the cause is READ OFF THE ROW rather than asserted. This sentence
+    read "after a transient failure" unconditionally, which stopped being true
+    once a ``skipped`` row could be re-armed; it was then hard-coded to
+    "(lane busy)", which stopped being true the moment a MISFIRE could be armed
+    too (Codex ckpt-3 — every misfire retry would have been captioned as a lane
+    collision it had nothing to do with). An audit line that names the wrong
+    cause is worse than a vague one, so the reason prefix decides it and an
+    unrecognised one degrades to the vague form rather than guessing.
     """
-    cause = "a transient failure" if status == "failure" else "a lost fire (lane busy)"
+    if status == "failure":
+        cause = "a transient failure"
+    elif error_msg is not None and error_msg.startswith(MISFIRE_SKIP_PREFIX):
+        cause = "a lost fire (misfire)"
+    elif error_msg is not None and error_msg.startswith(LANE_BUSY_SKIP_PREFIX):
+        cause = "a lost fire (lane busy)"
+    else:
+        cause = "a lost fire"
     explanation = f"retry/backoff: re-enqueued job {job_name!r} (attempt {attempt}) after {cause} (run {run_id})"
     conn.execute(
         """

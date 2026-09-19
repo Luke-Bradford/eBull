@@ -182,6 +182,25 @@ arm iff   remaining > RETRY_BASE_SECONDS
 `remaining == gap`, so the expression is exactly today's and the `lane_busy` path does not change
 behaviour.
 
+⚠⚠ **Only for an exactly-periodic cadence.** `min_cadence_gap_seconds` is documented as a LOWER
+BOUND, and its constant's own comment relies on that being safe: *"understating a gap can only
+make the re-arm guard stricter, never looser."* Modulo breaks that invariant — `lateness % G_min`
+lands anywhere inside the real period, so it can OVERstate the remaining gap. Codex ckpt-3
+measured it on a monthly cadence: real next fire 100 s away, the guard arming for 300 s.
+`monthly` (28 d) and `yearly` (365 d) are lower bounds; `every_n_minutes` / `hourly` / `daily` /
+`weekly` are exact in UTC. Those two therefore fall back to clamped subtraction,
+`max(0, G_min − lateness)`, which UNDERstates the remaining gap and is safe in the direction the
+constant assumes. Latent today — both opted-in jobs are hourly/daily — and fixed rather than left
+for whoever opts a monthly job in.
+
+### The audit caption is read off the row, not hard-coded
+
+`_write_retry_audit`'s cause was `"a transient failure" if status == "failure" else "a lost fire
+(lane busy)"`. Admitting misfires would have captioned every one of them as a lane collision it
+had nothing to do with — the same defect shape as the sentence #2603 already replaced there, a
+fixed string that was true for the only case existing when it was written. The reason prefix now
+decides it, and an unrecognised prefix degrades to a vague "a lost fire" rather than guessing.
+
 The function is renamed `lost_fire_rearm_delay_seconds` to match the field it reads.
 
 ⚠ **This narrows a collision window; it does not close one.** Near the boundary the test still
