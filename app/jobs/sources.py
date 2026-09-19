@@ -63,6 +63,8 @@ Lane = Literal[
     "init",
     "etoro",
     "etoro_quotes",
+    "etoro_core_rebalance",
+    "etoro_core_eligibility",
     "sec_rate",
     "sec_manifest",
     "sec_per_cik",
@@ -117,9 +119,33 @@ that floor. Do NOT collapse SEC lanes back together believing the lane bounds
 the rate — it does not.
 
 * ``init`` — universe-sync only. Pre-everything fence; one job total.
-* ``etoro`` — eToro REST budget. ``execute_approved_orders`` +
-  ``daily_candle_refresh`` + ``strategy_intraday_harvest`` +
+* ``etoro`` — eToro job-overlap bucket. ``execute_approved_orders`` +
+  ``recommendation_order_reconcile`` + ``daily_candle_refresh`` +
+  ``daily_portfolio_sync`` + ``strategy_intraday_harvest`` +
   ``etoro_lookups_refresh`` + ``exchanges_metadata_refresh`` serialise.
+  ⚠ ``daily_candle_refresh`` runs as an orchestrator LAYER and
+  ``adapters.py::_run_legacy`` holds the lock across its WHOLE body, measured at
+  **3.2-3.8 hours** (dev, 09-15 -> 09-18). Anything landing in that window skips.
+  Do not add a job here whose missed cadence is expensive.
+* ``etoro_core_rebalance`` — ``core_rebalance_observation`` (#2603 step 3b-3).
+* ``etoro_core_eligibility`` — ``core_eligibility_refresh`` (#2603 item 2).
+  Both split off ``etoro`` because the multi-hour candle sweep spans their fire
+  times: the daily 22:45 observation lost 4 of 4 fires and had **never completed
+  a run**; the hourly revalidator lost 18. Same shape and same holder as #2934's
+  ``etoro_quotes`` split.
+  ⚠⚠ They are SEPARATE lanes, not one ``etoro_core``: the observation does NOT
+  read eligibility proofs, so there is no ordering dependency to preserve, and a
+  revalidation batch is capped at 100 requests x 3.33 s (~333 s of sleeps alone,
+  one observed failure at 1022.8 s) — a shared lane would re-create this exact
+  starvation between the pair. Same reasoning as ``db_liveness`` / ``db_retry``
+  (#1526) rather than one ``db_infra``.
+  ⚠⚠ Their request budgets are preserved by eToro's DOCUMENTED per-endpoint
+  quotas (``implementations/etoro_quota_lanes.py``), NOT by a shared process
+  clock: eligibility sits on ``B_eligibility`` (20/min, dedicated — pooled with
+  nothing) and the observation makes ONE ``E_account_read`` request per day
+  against a 60/min pool. ``EtoroBrokerProvider``'s throttle is PER INSTANCE
+  (``shared_ts`` / ``shared_throttle_lock`` built in ``__init__``), unlike the
+  market-data clock #2934 relied on — do not reuse that argument here.
 * ``etoro_quotes`` — ``quotes_refresh`` (#2934) plus
   ``core_candidate_quote_refresh`` (#3118). The immutable hourly core-sleeve
   population cannot wait behind the multi-hour candle sweep. Its writes are
