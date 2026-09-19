@@ -31,9 +31,12 @@ class TestParseText:
             ("", None),
             ("   ", None),
             (None, None),
-            # Case is NOT normalised: SECURITY_TITLE carries 9,422 distinct values across
-            # the cached corpus including `Common Stock`, `COMMON STOCK` and `Common stock`,
-            # and folding them here would invent a canonicalisation the source does not make.
+            # Case is NOT normalised. SECURITY_TITLE carries `Common Stock`, `COMMON STOCK`
+            # and `Common stock` as separate values in the source, and folding them here
+            # would invent a canonicalisation the source does not make. (The distinct-value
+            # COUNT is deliberately not quoted: it moves with every ingest, and quoting it
+            # in a fourth place is how the 9,422-vs-9,963 truncation artefact survived this
+            # long. `census_... --source-columns` is the one place it is stated.)
             ("COMMON STOCK", "COMMON STOCK"),
         ],
     )
