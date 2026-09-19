@@ -123,12 +123,35 @@ endpoints soft-404 under it while the directory listing succeeds.
 
 **Consequence, and it binds item 3.** What the evidence supports is a *quarantine*, not a
 verdict: `nature_of_ownership` has a measured 18.5% disagreement with an independent
-parse of the same filings and **must not be keyed on** until that is explained.
-`direct_indirect` is the one column with positive cross-source confirmation.
-`security_title` is populated but unverified. The key Instruction 5(b)(iii) supports on
-cross-confirmed columns alone is `(class) x (direct|indirect)` — the instruction minus
-its "each form of indirect" refinement, which knowingly merges distinct indirect forms
-and is item 3's trade-off to make explicitly.
+parse of the same filings. `direct_indirect` is the one column with positive cross-source
+confirmation. `security_title` is populated but unverified.
+
+### ⚠⚠ …but "just drop nature from the key" does NOT work — measured after the backfill
+
+An earlier draft of this section concluded that item 3 should key on
+`(class) x (direct|indirect)` alone, taking the instruction minus its "each form of
+indirect" refinement. **That is falsified on the stored population.** Grouped as
+`_current` keys them, over the 62,010 multi-line `:NDH:` groups (190,223 lines):
+
+| candidate key | fully separates the group's lines | still collapsed |
+|---|---:|---:|
+| `(security_title, direct_indirect)` | 32,959 (53.2%) | **29,051** |
+| `+ nature_of_ownership` | 50,852 (82.0%) | 11,158 |
+| **rescued ONLY by `nature_of_ownership`** | **17,893 (28.9%)** | |
+
+And the ticket's own headline example is in that 17,893: **MNSO / Ye Guofu's five lines
+are all `I` and all `Ordinary shares`**, separated solely by nature — `by Mini Investment
+Limited` 314,290,482, `by Mini Investments SP1 Limited` 14,000,000, `by YGF MC LIMITED`
+8,936,000, `by YGF MN LIMITED` 194,465,382, `by YYY MC LIMITED` 257,849,197. Five named
+holding vehicles, which is precisely the "different forms of indirect ownership" the
+instruction requires on separate lines. A key without nature would still collapse the
+case this ticket was filed about. `CNH` is the mirror image — two lines, both `D`, same
+amount, separated only by `Common Shares` vs `Special Voting Shares`.
+
+**So the two axes are each load-bearing for a different half, and item 3 cannot route
+around the nature discordance — it has to resolve it.** The 11,158 groups that all three
+columns still fail to separate are item 3's residual and need a further discriminator
+(the `*_FN` footnote columns are the first place to look).
 
 ### A tie that was algebra, not evidence
 

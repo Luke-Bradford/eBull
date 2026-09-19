@@ -47,11 +47,41 @@
 -- Reproduce the figures quoted above:
 --   PYTHONPATH=. uv run python -m scripts.census_3227_insider_holding_line_collapse --source-columns
 
+-- ⚠⚠ A MIGRATION THAT IS WAITING FOR A LOCK IS NOT PASSIVE (#2363, prevention log).
+-- ---------------------------------------------------------------------------
+-- A pending ACCESS EXCLUSIVE lock queues AHEAD of new readers, so an ALTER that is
+-- merely waiting stops every subsequent SELECT on this relation from starting. On a
+-- 125-partition, 5.58M-row table that is the operator's whole ownership read path.
+--
+-- This is not a hypothetical here. Applying the first draft of this migration on dev
+-- (2026-09-19) queued for 611 seconds behind pid 68498 — an ad-hoc #3146 line-order
+-- concordance SELECT that had been running since 2026-09-17 09:37Z, 2d 9h, holding
+-- ACCESS SHARE. Cancelling our own backend was the fix, exactly as #2363 records.
+-- Assume a long reader is the NORMAL state on this table, not an unlucky collision.
+--
+-- `lock_timeout` turns an unbounded stall-everything wait into a clean, retryable
+-- LockNotAvailable that bounds each attempt's reader impact to five seconds. Note the
+-- consequence at app boot: the FastAPI lifespan runs migrations, so a locked-out
+-- migration fails the boot loudly instead of hanging it — the better of the two.
+SET LOCAL lock_timeout = '5s';
+
 ALTER TABLE ownership_insiders_observations
     ADD COLUMN IF NOT EXISTS security_title      TEXT,
     ADD COLUMN IF NOT EXISTS direct_indirect     TEXT,
     ADD COLUMN IF NOT EXISTS nature_of_ownership TEXT;
 
+-- ⚠ NOT VALID, and it costs nothing to be.
+-- ---------------------------------------------------------------------------
+-- A validated CHECK scans every row across the whole partition tree WHILE still
+-- holding the ACCESS EXCLUSIVE lock the column ALTER took — on 5.58M rows that is a
+-- long blocking window for a guard that cannot possibly fire. Every pre-existing row
+-- receives NULL for a column added in this same statement, so the constraint is
+-- satisfied by construction and there is nothing for a validation scan to discover.
+--
+-- NOT VALID still enforces the constraint on every INSERT and UPDATE from here on,
+-- which is the entire purpose: catching a future DERA drift away from {D, I}. So this
+-- is not a weakened constraint, it is the same guard without a pointless scan. No
+-- follow-up VALIDATE is needed or planned.
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -60,7 +90,7 @@ BEGIN
     ) THEN
         ALTER TABLE ownership_insiders_observations
             ADD CONSTRAINT ownership_insiders_observations_direct_indirect_check
-            CHECK (direct_indirect IS NULL OR direct_indirect IN ('D', 'I'));
+            CHECK (direct_indirect IS NULL OR direct_indirect IN ('D', 'I')) NOT VALID;
     END IF;
 END
 $$;
