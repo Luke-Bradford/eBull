@@ -547,8 +547,47 @@ def _upsert_filing_row(
 ) -> bool:
     """Per-reporter upsert. Returns True on insert, False on
     re-ingest of the same ``(accession, reporter_cik COALESCE '',
-    reporter_name)`` tuple — the partial UNIQUE INDEX from migration
+    reporter_name)`` tuple — the UNIQUE INDEX from migration
     095 backstops re-runs.
+
+    ⚠ The conflict action is a **deliberately conditional** ``DO UPDATE``
+    that can perform exactly one transition: ``instrument_id``
+    NULL → non-NULL. Every other column stays immutable on re-ingest,
+    which is the documented contract (one accession × one reporter ==
+    one row) and the reason ``rewash_filings._apply_blockholders``
+    DELETEs-then-INSERTs rather than updating. **A NULL link is an
+    absence, not a value** — refusing to fill it is what stranded rows
+    here (#2329).
+
+    The prior action was a bare ``ON CONFLICT DO NOTHING``, so a later,
+    successful re-ingest that DID resolve the issuer could not repair
+    the link written by an earlier one that could not. Measured on dev
+    2026-09-19: 8 accessions / 27 reporter rows first ingested at
+    2026-06-14 12:44Z by the pre-#1628 CUSIP-only resolver, re-ingested
+    2026-06-20…06-25 by ``manifest_parsers/sec_13dg.py`` *after*
+    ``c4f1d2e9`` added the CIK fallback. That second pass resolved the
+    instrument, wrote the observation and refreshed ``_current`` — and
+    left ``instrument_id`` NULL here. Both drill-through readers filter
+    ``WHERE bf.instrument_id = %(iid)s``
+    (``app/api/instruments.py:4575`` and ``:4657``), so the ownership
+    card listed the holder while the drill-through omitted the filing.
+
+    ⚠⚠ **Return contract.** ``rowcount`` cannot distinguish the three
+    outcomes once the action is ``DO UPDATE``: an insert and a *healed*
+    conflict both report 1. ``RETURNING (xmax = 0)`` does — ``xmax`` is
+    0 on a tuple this statement inserted and non-zero on one it updated
+    — and a conflict SUPPRESSED by the ``WHERE`` returns no row at all.
+    So: insert → ``(True,)``, heal → ``(False,)``, suppressed → ``None``,
+    and only the first is an insertion for ``rows_inserted``. Codex
+    checkpoint 1 finding 2; pinned by
+    ``tests/test_blockholders_link_heal_db.py``, which drives real
+    PostgreSQL rather than asserting the MVCC behaviour from memory.
+
+    The arbiter is the index's expression list, not a named constraint
+    — ``uq_blockholder_filings_accession_reporter`` is a UNIQUE INDEX,
+    so ``ON CONFLICT ON CONSTRAINT`` would fail. Naming the expressions
+    also keeps an unrelated unique violation (e.g. a desynchronised
+    ``filing_id`` sequence) raising instead of being swallowed.
     """
     cur = conn.execute(
         """
@@ -571,7 +610,11 @@ def _upsert_filing_row(
             %(aggregate_amount_owned)s, %(percent_of_class)s,
             %(date_of_event)s, %(filed_at)s
         )
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (accession_number, COALESCE(reporter_cik, ''), reporter_name)
+        DO UPDATE SET instrument_id = EXCLUDED.instrument_id
+        WHERE blockholder_filings.instrument_id IS NULL
+          AND EXCLUDED.instrument_id IS NOT NULL
+        RETURNING (xmax = 0) AS inserted
         """,
         {
             "filer_id": filer_id,
@@ -598,7 +641,11 @@ def _upsert_filing_row(
             "filed_at": filed_at,
         },
     )
-    return cur.rowcount > 0
+    # ``None`` = conflict suppressed by the WHERE (nothing to heal).
+    # ``(False,)`` = conflict healed — a repair, NOT an insertion.
+    # ``(True,)``  = genuine insert. Only this counts as rows_inserted.
+    row = cur.fetchone()
+    return row is not None and bool(row[0])
 
 
 # ---------------------------------------------------------------------------
