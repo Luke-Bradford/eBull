@@ -368,6 +368,28 @@ class ScheduledJob:
     # recovery. Only a job that is idempotent, side-effect-bounded and
     # indifferent to its own fire time may set this.
     misfire_grace_seconds: int | None = None
+    # #2603 — opt in to re-arming a fire this job LOST to a busy lane. A
+    # ``lane_busy`` skip means "work was due and could not start", and with
+    # ``catch_up_on_boot=False`` nothing re-fires it, so a daily job loses the
+    # whole day (measured: ``core_rebalance_observation`` lost 4 days in 30).
+    # When set, ``app.jobs.runtime._record_lane_busy_skip`` stamps
+    # ``next_retry_at`` on the skip row and the existing ``jobs_retry_sweeper``
+    # re-dispatches it through the audited manual queue.
+    #
+    # ⚠⚠ OPT-IN for the SAME reason ``misfire_grace_seconds`` above is, and the
+    # predicate is the same one: only a job that is idempotent, side-effect-
+    # bounded and indifferent to its own fire time may set this. A rule derived
+    # from ``cadence.kind`` looks principled and is unsafe — it admits
+    # ``execute_approved_orders``, a daily job whose contract is that execution
+    # happens at its scheduled time and never as a surprise catch-up, and the
+    # thing it would re-fire late is order submission. Enforced by
+    # ``tests/test_job_lane_rearm.py``, not by memory.
+    #
+    # ⚠ "Re-arm" does NOT mean replay: the re-fire runs the job's body at the
+    # time it is dispatched, with no params and no record of the original fire
+    # time. Admit a job because a late run is better than no run, never because
+    # the late run reconstructs the missed one.
+    rearm_on_lost_fire: bool = False
 
 
 # Job-name constants. Every ``_tracked_job(...)`` call site below references
@@ -2587,6 +2609,21 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # a non-US core instrument whose venue we have no calendar for.
         cadence=Cadence.daily(hour=22, minute=45),
         catch_up_on_boot=False,
+        # #2603 — the lane split above removed the CAUSE of the 4 lost days;
+        # this covers the CLASS, because a daily fire lost to any future lane
+        # holder is still a day with no rebalance verdict on a live sleeve.
+        #
+        # The predicate on the field is met: the body sizes nothing, quotes no
+        # cost and submits nothing (see ``core_rebalance_observation``'s own
+        # docstring), it appends to ``strategy_core_rebalance_intents``, and the
+        # submission gate reads the latest intent — so a duplicate is an extra
+        # append, not a double-spend.
+        #
+        # ⚠ A re-fire at 23:45 observes the sleeve at 23:45. It does NOT
+        # reconstruct the 22:45 observation, and nothing here should be read as
+        # claiming it does. Admitted because one verdict an hour late beats the
+        # zero verdicts this job produced on each of those 4 days.
+        rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -2640,6 +2677,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # fails the test instead of silently deleting the margin.
         cadence=Cadence.hourly(minute=20),
         catch_up_on_boot=False,
+        # #2603 — this job lost 18 fires between 09-14 and 09-18 to the lane
+        # described above. The predicate on the field is met and this entry
+        # makes the strongest case of the two: the body is explicitly
+        # "informational and NON-WIDENING", it re-asks about instruments the
+        # proofs table already carries, and when nothing is due it skips with
+        # ``prereq_missing`` before any broker call — so a late or duplicate run
+        # costs one no-op.
+        #
+        # ⚠ A lost fire here is not merely late work, it eats the proof-age
+        # margin the cadence comment above is pinned to: the test requires
+        # CORE_ELIGIBILITY_REFRESH_AGE + one tick to stay under
+        # CORE_ELIGIBILITY_MAX_AGE, and a silently-dropped tick spends that
+        # margin without anything recording that it did.
+        rearm_on_lost_fire=True,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(

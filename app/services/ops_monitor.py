@@ -321,8 +321,14 @@ def _utcnow() -> datetime:
 # (auth/schema-drift/db-constraint/missing-key) leaves next_retry_at NULL and
 # surfaces as Needs-attention immediately. Spec:
 # docs/specs/ops/2026-06-07-job-retry-backoff.md
-_RETRY_MAX_ATTEMPTS: int = 4
-_RETRY_BASE_SECONDS: int = 300  # 5m
+RETRY_MAX_ATTEMPTS: int = 4
+#: Public alongside ``RETRY_BASE_SECONDS``: ``app/services/job_retry.py`` now
+#: enforces this same cap at DISPATCH time (#2603). It previously bound only
+#: the arming side, which left an async-rejected row re-dispatching forever.
+RETRY_BASE_SECONDS: int = 300  # 5m
+#: Public because the #2603 lane-busy re-arm guard in ``app/jobs/runtime.py``
+#: compares a cadence gap against it: a retry that cannot land before the job
+#: fires naturally is pure load. One constant, two readers.
 _RETRY_FACTOR: int = 3
 _RETRY_CAP_SECONDS: int = 3600  # 1h
 # RATE_LIMITED gets a longer first delay so a retry never lands back inside a
@@ -334,7 +340,7 @@ def _backoff_seconds(attempt: int, category: FailureCategory | None) -> int:
     """Capped exponential backoff for retry ``attempt`` (1-based)."""
     from app.services.sync_orchestrator.layer_types import FailureCategory
 
-    base = _RETRY_BASE_RATE_LIMITED_SECONDS if category == FailureCategory.RATE_LIMITED else _RETRY_BASE_SECONDS
+    base = _RETRY_BASE_RATE_LIMITED_SECONDS if category == FailureCategory.RATE_LIMITED else RETRY_BASE_SECONDS
     raw = base * (_RETRY_FACTOR ** (attempt - 1))
     return min(raw, _RETRY_CAP_SECONDS)
 
@@ -366,7 +372,7 @@ def _retry_plan(
     ``attempt`` = this run's position in the current consecutive-failure
     streak (1 = first natural fire), counted back from this run until the
     first non-failure terminal row. ``next_retry_at`` is set only when the
-    failure is transient AND ``attempt <= _RETRY_MAX_ATTEMPTS``; otherwise
+    failure is transient AND ``attempt <= RETRY_MAX_ATTEMPTS``; otherwise
     ``None`` (permanent or exhausted → Needs-attention).
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -380,7 +386,7 @@ def _retry_plan(
 
     # Prior terminal rows for this job, newest first. 'running' is excluded
     # (not terminal); success/skipped/cancelled break the streak. LIMIT is
-    # _RETRY_MAX_ATTEMPTS because once the streak would push attempt past the
+    # RETRY_MAX_ATTEMPTS because once the streak would push attempt past the
     # cap we stop retrying regardless, so deeper history is irrelevant.
     with conn.cursor() as cur:
         cur.execute(
@@ -398,7 +404,7 @@ def _retry_plan(
                 "job": this["job_name"],
                 "id": run_id,
                 "ts": this["started_at"],
-                "cap": _RETRY_MAX_ATTEMPTS,
+                "cap": RETRY_MAX_ATTEMPTS,
             },
         )
         prior_statuses = [row[0] for row in cur.fetchall()]
@@ -411,7 +417,7 @@ def _retry_plan(
             break
     attempt = streak + 1
 
-    if not _is_transient(category) or attempt > _RETRY_MAX_ATTEMPTS:
+    if not _is_transient(category) or attempt > RETRY_MAX_ATTEMPTS:
         return attempt, None
     return attempt, now + timedelta(seconds=_backoff_seconds(attempt, category))
 

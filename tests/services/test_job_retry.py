@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 
 from app.services.job_retry import sweep_due_retries
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, RETRY_MAX_ATTEMPTS
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.workers.scheduler import JOB_CUSIP_EXTID_SWEEP
 
@@ -181,3 +182,155 @@ def test_ineligible_job_cleared_not_dispatched(ebull_test_conn: psycopg.Connecti
     assert sweep_due_retries(conn, eligible_job_names=ELIGIBLE, now=_NOW) == []
     assert _next_retry_at(conn, run_id) is None  # cleared so it is not re-swept
     assert _request_count(conn, "orphan_unregistered_job") == 0
+
+
+# ---------------------------------------------------------------------------
+# #2603 — a fire LOST to a busy lane is re-armed on a ``skipped`` row
+# ---------------------------------------------------------------------------
+
+
+def _seed_skip(
+    conn: psycopg.Connection[tuple],
+    *,
+    job: str,
+    reason: str,
+    next_retry_at: datetime | None,
+    started_at: datetime,
+    attempt: int = 1,
+) -> int:
+    row = conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, finished_at, status, error_msg, attempt, next_retry_at)
+        VALUES (%s, %s, %s, 'skipped', %s, %s, %s)
+        RETURNING run_id
+        """,
+        (job, started_at, started_at, reason, attempt, next_retry_at),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _attempt(conn: psycopg.Connection[tuple], run_id: int) -> int:
+    row = conn.execute("SELECT attempt FROM job_runs WHERE run_id = %s", (run_id,)).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_armed_lane_busy_skip_is_redispatched(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """The #2603 case: a ``skipped`` row carrying ``next_retry_at`` re-fires.
+
+    Before this change both ``_select_due`` and ``_refire_one`` filtered
+    ``status = 'failure'``, so an armed skip was invisible to the sweeper and
+    the lost fire was simply gone until the next cadence.
+    """
+    conn = ebull_test_conn
+    conn.autocommit = True
+    run_id = _seed_skip(
+        conn,
+        job=JOB,
+        reason=LANE_BUSY_SKIP_PREFIX + "lane stayed busy through the retry window",
+        next_retry_at=_NOW - timedelta(minutes=1),
+        started_at=_NOW - timedelta(minutes=10),
+    )
+
+    assert sweep_due_retries(conn, eligible_job_names=ELIGIBLE, now=_NOW) == [JOB]
+    assert _request_count(conn, JOB) == 1
+
+    advanced = _next_retry_at(conn, run_id)
+    assert advanced is not None and advanced > _NOW
+
+
+def test_lane_busy_audit_does_not_claim_a_transient_failure(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The audit line names the real cause, and the evidence carries the status.
+
+    It previously asserted "after a transient failure" unconditionally, which is
+    false for a re-armed skip — an audit that names the wrong cause is worse
+    than a vague one.
+    """
+    conn = ebull_test_conn
+    conn.autocommit = True
+    _seed_skip(
+        conn,
+        job=JOB,
+        reason=LANE_BUSY_SKIP_PREFIX + "lane stayed busy",
+        next_retry_at=_NOW - timedelta(minutes=1),
+        started_at=_NOW - timedelta(minutes=10),
+    )
+
+    assert sweep_due_retries(conn, eligible_job_names=ELIGIBLE, now=_NOW) == [JOB]
+
+    row = conn.execute(
+        """
+        SELECT explanation, evidence_json->>'source_status'
+          FROM decision_audit WHERE stage = 'retry_backoff'
+        """
+    ).fetchone()
+    assert row is not None
+    explanation, source_status = row
+    assert "transient failure" not in explanation
+    assert "lost fire (lane busy)" in explanation
+    assert source_status == "skipped"
+
+
+def test_unarmed_skip_is_never_swept(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """A ``prereq_missing`` skip carries no ``next_retry_at`` and must stay inert.
+
+    Arming happens only at the lane-busy emission site, so this is the
+    structural guarantee that a legitimate no-op skip never re-fires.
+    """
+    conn = ebull_test_conn
+    conn.autocommit = True
+    run_id = _seed_skip(
+        conn,
+        job=JOB,
+        reason="prereq_missing: nothing to do",
+        next_retry_at=None,
+        started_at=_NOW - timedelta(minutes=10),
+    )
+
+    assert sweep_due_retries(conn, eligible_job_names=ELIGIBLE, now=_NOW) == []
+    assert _next_retry_at(conn, run_id) is None
+    assert _request_count(conn, JOB) == 0
+
+
+def test_redispatch_is_bounded_by_the_attempt_cap(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """⚠⚠ The pre-existing unbounded-redispatch defect, fixed in #2603.
+
+    ``_refire_one`` read ``attempt`` only for the audit string: it never checked
+    the cap and never incremented, so bounding came entirely from
+    ``record_job_finish`` — which runs only on a new terminal FAILURE. A row
+    whose request is rejected asynchronously produces no new terminal, so it
+    re-dispatched every recheck window forever. Here the request is rejected
+    each round, so nothing but the cap can stop it.
+    """
+    conn = ebull_test_conn
+    conn.autocommit = True
+    run_id = _seed_failure(
+        conn,
+        job=JOB,
+        next_retry_at=_NOW - timedelta(minutes=1),
+        started_at=_NOW - timedelta(minutes=10),
+        attempt=1,
+    )
+
+    now = _NOW
+    dispatches = 0
+    for _ in range(RETRY_MAX_ATTEMPTS + 3):
+        if sweep_due_retries(conn, eligible_job_names=ELIGIBLE, now=now) == [JOB]:
+            dispatches += 1
+        # Async rejection: no new terminal row, so only the cap can terminate.
+        conn.execute(
+            "UPDATE pending_job_requests SET status = 'rejected' WHERE job_name = %s AND request_kind = 'manual_job'",
+            (JOB,),
+        )
+        now = now + timedelta(seconds=901)
+
+    assert dispatches == RETRY_MAX_ATTEMPTS
+    assert _next_retry_at(conn, run_id) is None  # cleared once exhausted
+    # ⚠ The streak counter is NOT the dispatch counter. ``attempt`` means this
+    # run's position in the consecutive-failure streak and is rendered to the
+    # operator as "attempt N", so re-dispatching must leave it exactly as the
+    # failing run recorded it. The dispatch count lives in ``decision_audit``.
+    assert _attempt(conn, run_id) == 1

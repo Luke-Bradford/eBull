@@ -83,6 +83,7 @@ from app.jobs.sources import JobInvoker, source_for
 from app.services.ops_monitor import (
     LANE_BUSY_SKIP_PREFIX,
     MISFIRE_SKIP_PREFIX,
+    RETRY_BASE_SECONDS,
     fetch_latest_successful_runs,
     record_job_skip,
 )
@@ -1084,6 +1085,59 @@ def _lane_backoff_for(job_name: str) -> tuple[float, ...]:
     return _LANE_BUSY_RETRY_BACKOFF
 
 
+#: Lower bound, in seconds, on the gap between two consecutive fires of each
+#: cadence kind. A LOWER BOUND is deliberate and sufficient: the only consumer
+#: compares it ``> _RETRY_BASE_SECONDS``, so understating a gap can only make
+#: the re-arm guard stricter, never looser. ``monthly`` uses 28 days because
+#: ``Cadence.monthly`` caps ``day`` at 28; ``yearly`` uses 365.
+_CADENCE_MIN_GAP_SECONDS: Final[dict[CadenceKind, int]] = {
+    "hourly": 3_600,
+    "daily": 86_400,
+    "weekly": 7 * 86_400,
+    "monthly": 28 * 86_400,
+    "yearly": 365 * 86_400,
+}
+
+
+def min_cadence_gap_seconds(cadence: Cadence) -> int:
+    """Lower bound on the seconds between two consecutive fires of *cadence*.
+
+    ``every_n_minutes`` is computed from its own interval; every other kind is
+    a constant. Pure — no registry, no clock, no DB.
+    """
+    if cadence.kind == "every_n_minutes":
+        return cadence.interval_minutes * 60
+    return _CADENCE_MIN_GAP_SECONDS[cadence.kind]
+
+
+def lane_busy_rearm_delay_seconds(job: ScheduledJob | None) -> int | None:
+    """Delay before re-firing *job* after it lost a fire to a busy lane, or ``None``.
+
+    ``None`` means "do not arm", and it is the answer for every job that has
+    not explicitly opted in. Two conditions, both required:
+
+    1. ``job.rearm_on_lost_fire`` — the per-job assertion that this body is
+       idempotent, side-effect-bounded and indifferent to its own fire time.
+       ⚠ This is the load-bearing one and it is NOT derivable from cadence:
+       ``execute_approved_orders`` is a daily job whose contract is that
+       execution happens at its scheduled time and never as a catch-up. The
+       registry field's docstring carries the full argument.
+    2. The job's own next fire is further away than the first retry would be.
+       Below that the natural fire always wins, so arming could only add load.
+
+    ⚠ Condition 2 is NOMINAL, not a recovery-latency guarantee.
+    ``jobs_retry_sweeper`` is itself a scheduled job, so real dispatch is later
+    than ``next_retry_at`` — by its own cadence, plus any admission delay. This
+    is a cheap dominance check that rejects a pointless arm; nothing here
+    bounds how late the re-fire actually lands.
+    """
+    if job is None or not job.rearm_on_lost_fire:
+        return None
+    if min_cadence_gap_seconds(job.cadence) <= RETRY_BASE_SECONDS:
+        return None
+    return RETRY_BASE_SECONDS
+
+
 def _record_lane_busy_skip(
     database_url: str,
     job_name: str,
@@ -1105,15 +1159,46 @@ def _record_lane_busy_skip(
     path (same posture as ``_wrap_invoker``'s param-validation skip writer).
     Written only when the body never ran — outside any ``_tracked_job``
     (prevention-log L848).
+
+    #2603 — for a job that opted into ``rearm_on_lost_fire``, the skip row is
+    also STAMPED with ``next_retry_at`` so the existing ``jobs_retry_sweeper``
+    re-dispatches the lost fire. See ``lane_busy_rearm_delay_seconds`` for who
+    qualifies and why it is not derivable from cadence.
+
+    ⚠ Arming is BEST-EFFORT, not durable, and the ordering makes that visible:
+    ``record_job_skip`` commits its INSERT before this function can stamp the
+    row, so a crash in between leaves an unarmed skip — which is the pre-#2603
+    behaviour and therefore a safe floor, not a new failure mode. The stamp
+    shares this function's existing ``except`` for the same reason the INSERT
+    does: this runs outside ``_tracked_job`` while a lane-waiter slot is held,
+    and a recovery nicety must never raise into the scheduler or cost the
+    skip's own telemetry.
     """
     try:
         with psycopg.connect(database_url, autocommit=True) as conn:
-            record_job_skip(
+            run_id = record_job_skip(
                 conn,
                 job_name,
                 LANE_BUSY_SKIP_PREFIX + detail,
                 params_snapshot=dict(params) if params is not None else None,
             )
+            delay = lane_busy_rearm_delay_seconds(_scheduler._JOBS_BY_NAME.get(job_name))
+            if delay is not None:
+                conn.execute(
+                    """
+                    UPDATE job_runs
+                       SET next_retry_at = %(now)s + make_interval(secs => %(delay)s),
+                           attempt = 1
+                     WHERE run_id = %(id)s
+                    """,
+                    {"now": datetime.now(UTC), "delay": delay, "id": run_id},
+                )
+                logger.info(
+                    "scheduled fire of %r re-armed: retry in %ss (run %s)",
+                    job_name,
+                    delay,
+                    run_id,
+                )
     except Exception:
         logger.exception("failed to record lane-busy skip for %r", job_name)
 

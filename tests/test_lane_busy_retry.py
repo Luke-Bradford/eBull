@@ -369,3 +369,93 @@ def test_record_lane_busy_skip_composes_prefix_and_swallows_errors(
 
     monkeypatch.setattr(runtime, "record_job_skip", _boom)
     runtime._record_lane_busy_skip("db://x", "job", "lane stayed busy", None)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# #2603 — the skip row is also ARMED for re-dispatch, for opted-in jobs only
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConn:
+    """Minimal psycopg stand-in that captures the arming UPDATE."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, dict[str, object]]] = []
+
+    def __enter__(self) -> _RecordingConn:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def execute(self, sql: str, params: dict[str, object] | None = None) -> None:
+        self.executed.append((sql, params or {}))
+
+
+def _patch_skip_writer(monkeypatch: pytest.MonkeyPatch, conn: _RecordingConn, *, run_id: int = 77) -> None:
+    monkeypatch.setattr(runtime.psycopg, "connect", lambda *_a, **_k: conn)
+    monkeypatch.setattr(
+        runtime,
+        "record_job_skip",
+        lambda _conn, _job, _reason, **_kw: run_id,
+    )
+
+
+def test_lane_busy_skip_arms_an_opted_in_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``core_rebalance_observation`` is daily and opted in, so it re-arms."""
+    from app.workers.scheduler import JOB_CORE_REBALANCE_OBSERVATION
+
+    conn = _RecordingConn()
+    _patch_skip_writer(monkeypatch, conn)
+
+    runtime._record_lane_busy_skip("db://x", JOB_CORE_REBALANCE_OBSERVATION, "lane stayed busy", None)
+
+    assert len(conn.executed) == 1
+    sql, params = conn.executed[0]
+    assert "next_retry_at" in sql
+    assert params["id"] == 77
+    assert params["delay"] == runtime.RETRY_BASE_SECONDS
+
+
+def test_lane_busy_skip_does_not_arm_a_job_that_did_not_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠⚠ ``execute_approved_orders`` is daily too, and must NEVER be re-fired.
+
+    Its contract is that order execution happens at its scheduled time and
+    never as a surprise catch-up, which is why admission is an explicit
+    per-job flag rather than a cadence rule.
+    """
+    from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+    conn = _RecordingConn()
+    _patch_skip_writer(monkeypatch, conn)
+
+    runtime._record_lane_busy_skip("db://x", JOB_EXECUTE_APPROVED_ORDERS, "lane stayed busy", None)
+
+    assert conn.executed == []
+
+
+def test_lane_busy_skip_does_not_arm_an_unregistered_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _RecordingConn()
+    _patch_skip_writer(monkeypatch, conn)
+
+    runtime._record_lane_busy_skip("db://x", "not_a_registered_job", "lane stayed busy", None)
+
+    assert conn.executed == []
+
+
+def test_arming_failure_never_raises_into_the_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stamp is a recovery nicety; it must not cost the skip or the fire.
+
+    This runs outside ``_tracked_job`` while a lane-waiter slot is held, so a
+    raise here would propagate into the scheduled-fire path.
+    """
+    from app.workers.scheduler import JOB_CORE_REBALANCE_OBSERVATION
+
+    class _ExplodingConn(_RecordingConn):
+        def execute(self, sql: str, params: dict[str, object] | None = None) -> None:
+            raise RuntimeError("db down")
+
+    conn = _ExplodingConn()
+    _patch_skip_writer(monkeypatch, conn)
+
+    runtime._record_lane_busy_skip("db://x", JOB_CORE_REBALANCE_OBSERVATION, "lane stayed busy", None)

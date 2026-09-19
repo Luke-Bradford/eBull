@@ -39,12 +39,12 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.ops_monitor import TERMINAL_STATUS_SQL
+from app.services.ops_monitor import RETRY_MAX_ATTEMPTS, TERMINAL_STATUS_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,17 @@ _REQUESTED_BY = "system:retry_backoff"
 # while an async rejection (no new terminal) is simply re-dispatched once this
 # window elapses — no loss, and bounded to one request per window (not per sweep).
 _DISPATCH_RECHECK_SECONDS: int = 900  # 15m
+
+#: Terminal statuses a ``next_retry_at`` may legitimately sit on.
+#:
+#: ``failure`` is the original (#1509). ``skipped`` was added by #2603 for a
+#: fire lost to a busy lane; arming happens only at that one emission site and
+#: only for a job carrying ``rearm_on_lost_fire``, so no other skip reason —
+#: ``prereq_missing``, a session-window guard, "no pending X" — can ever reach
+#: this set. Rendered as a SQL array literal so the tuple here is the single
+#: source of truth for both the query and the ``_refire_one`` recheck.
+_REARMABLE_STATUSES: Final[tuple[str, ...]] = ("failure", "skipped")
+_REARMABLE_STATUS_SQL: Final[str] = "ARRAY['" + "','".join(_REARMABLE_STATUSES) + "']"
 
 
 def sweep_due_retries(
@@ -105,17 +116,26 @@ def sweep_due_retries(
 def _select_due(conn: psycopg.Connection[Any], *, now: datetime) -> list[tuple[int, str, int]]:
     """Due retry rows off the partial ``job_runs_due_retry_idx`` index.
 
-    ``next_retry_at`` is only ever set on a ``status='failure'`` row, so the
-    status predicate is a cheap guard, not the access path. Deterministic
-    order so the latest failure per job is handled first.
+    ⚠ This docstring used to read *"``next_retry_at`` is only ever set on a
+    ``status='failure'`` row"*. That stopped being true in #2603: a lane-busy
+    skip on a job that opted into ``rearm_on_lost_fire`` is stamped by
+    ``app.jobs.runtime._record_lane_busy_skip``, and a ``skipped`` row that
+    lost its fire needs re-dispatching for exactly the same reason a transient
+    failure does — work was due and did not happen.
+
+    The status predicate stays a cheap guard rather than the access path: the
+    index (``sql/183``) is ``ON job_runs (next_retry_at) WHERE next_retry_at IS
+    NOT NULL`` with no status column, so widening the set costs no migration
+    and no plan change. Deterministic order so the latest row per job is
+    handled first.
     """
     rows = conn.execute(
-        """
+        f"""
         SELECT run_id, job_name, attempt
           FROM job_runs
          WHERE next_retry_at IS NOT NULL
            AND next_retry_at <= %(now)s
-           AND status = 'failure'
+           AND status = ANY({_REARMABLE_STATUS_SQL})
          ORDER BY job_name, started_at DESC, run_id DESC
         """,
         {"now": now},
@@ -141,7 +161,23 @@ def _refire_one(
         ).fetchone()
         # Superseded between SELECT-due and lock (a concurrent sweep cleared it,
         # or the status changed): nothing to do.
-        if locked is None or locked[0] is None or locked[1] != "failure" or locked[0] > now:
+        if locked is None or locked[0] is None or locked[1] not in _REARMABLE_STATUSES or locked[0] > now:
+            return False
+        # ⚠⚠ #2603 — bound the re-dispatch HERE, because nothing else does.
+        # This function never checked ``RETRY_MAX_ATTEMPTS``: the cap was
+        # enforced entirely by ``record_job_finish``, which runs only when a new
+        # terminal FAILURE is recorded. A row whose request is rejected
+        # asynchronously (bootstrap gate, per-job prerequisite, full-wash fence)
+        # produces no new terminal at all, so it was re-dispatched every
+        # ``_DISPATCH_RECHECK_SECONDS`` forever. Reachable before #2603 and more
+        # often after it, so it is fixed rather than inherited.
+        #
+        # ⚠ Counted from ``decision_audit``, NOT from ``job_runs.attempt``.
+        # ``attempt`` is the consecutive-failure streak position and is rendered
+        # to the operator as "attempt N"; overwriting it with a dispatch count
+        # would corrupt a different, published quantity.
+        if _dispatch_count(conn, run_id) >= RETRY_MAX_ATTEMPTS:
+            _clear(conn, run_id)
             return False
         # A newer terminal run exists ⇒ this failure is stale; clear + skip.
         if not _is_latest_terminal(conn, job_name=job_name, run_id=run_id):
@@ -159,7 +195,7 @@ def _refire_one(
             process_id=job_name,
             mode="iterate",
         )
-        _write_retry_audit(conn, job_name=job_name, attempt=attempt, run_id=run_id)
+        _write_retry_audit(conn, job_name=job_name, attempt=attempt, run_id=run_id, status=str(locked[1]))
         # Advance, do NOT clear: the request may still be rejected async after
         # this commit (gate/prereq/fence) with no new terminal to restamp the
         # retry. Pushing next_retry_at forward keeps the row a durable backstop
@@ -215,10 +251,40 @@ def _clear(conn: psycopg.Connection[Any], run_id: int) -> None:
 
 
 def _reschedule(conn: psycopg.Connection[Any], run_id: int, next_at: datetime) -> None:
+    """Push this row's next dispatch out.
+
+    ⚠ Deliberately does NOT touch ``attempt``. That column means "this run's
+    position in the consecutive-failure streak" (``ops_monitor._retry_plan``)
+    and is operator-visible — ``app/api/processes.py`` renders it as
+    "attempt N" on a retrying row. Incrementing it per dispatch would make the
+    first failed run read attempt 2 before any second run existed. The dispatch
+    count lives in ``decision_audit`` instead; see ``_dispatch_count``.
+    """
     conn.execute(
         "UPDATE job_runs SET next_retry_at = %(next)s WHERE run_id = %(id)s",
         {"next": next_at, "id": run_id},
     )
+
+
+def _dispatch_count(conn: psycopg.Connection[Any], run_id: int) -> int:
+    """How many times this row has already been re-dispatched.
+
+    ⚠ #2603 — read from ``decision_audit`` rather than stored on ``job_runs``,
+    because every dispatch already writes exactly one audit row
+    (``_write_retry_audit``): the audit IS the dispatch record, so counting it
+    needs no new column and cannot drift from what actually happened. The
+    alternative — bumping ``job_runs.attempt`` — would have corrupted an
+    operator-visible failure-streak counter to store a different quantity.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM decision_audit
+         WHERE stage = 'retry_backoff'
+           AND evidence_json->>'source_run_id' = %(id)s::text
+        """,
+        {"id": run_id},
+    ).fetchone()
+    return 0 if row is None else int(row[0])
 
 
 def _write_retry_audit(
@@ -227,11 +293,17 @@ def _write_retry_audit(
     job_name: str,
     attempt: int,
     run_id: int,
+    status: str,
 ) -> None:
-    """Record the audited retry in ``decision_audit`` (mirrors the kick audit)."""
-    explanation = (
-        f"retry/backoff: re-enqueued job {job_name!r} (attempt {attempt}) after a transient failure (run {run_id})"
-    )
+    """Record the audited retry in ``decision_audit`` (mirrors the kick audit).
+
+    ⚠ #2603 — the cause is taken from the row's ``status`` rather than asserted.
+    This sentence read "after a transient failure" unconditionally, which is now
+    false for a ``skipped`` row re-armed after losing its fire to a busy lane.
+    An audit line that names the wrong cause is worse than a vague one.
+    """
+    cause = "a transient failure" if status == "failure" else "a lost fire (lane busy)"
+    explanation = f"retry/backoff: re-enqueued job {job_name!r} (attempt {attempt}) after {cause} (run {run_id})"
     conn.execute(
         """
         INSERT INTO decision_audit
@@ -241,7 +313,12 @@ def _write_retry_audit(
         """,
         {
             "expl": explanation,
-            "evidence": Jsonb({"job_name": job_name, "attempt": attempt, "failed_run_id": run_id}),
+            # ``source_run_id`` replaces the old ``failed_run_id`` key, which
+            # asserted a failure that a re-armed skip row did not have. The
+            # status travels beside it so a reader never has to infer the cause.
+            "evidence": Jsonb(
+                {"job_name": job_name, "attempt": attempt, "source_run_id": run_id, "source_status": status}
+            ),
         },
     )
 

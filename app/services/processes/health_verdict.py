@@ -173,6 +173,9 @@ def compute_verdict(
     # outrank — a stuck queue means the retry itself may be wedged, so the row
     # stays attention rather than being painted self-healing (preserves the
     # ckpt-1 invariant: an actionable wedge is never masked).
+    # #2603 — captured BEFORE the filter strips the reason, because the
+    # self-healing branch below needs to know the stall was really there.
+    retry_is_recovering = retry_in_flight and "schedule_missed" in stale_reasons
     if retry_in_flight:
         actionable = [r for r in actionable if r != "schedule_missed"]
 
@@ -256,6 +259,28 @@ def compute_verdict(
     # ≤5m sweeper has not yet fired (still scheduled recovery — do not flicker red).
     if retry_in_flight and status in ("failed", "pending_retry"):
         reason = f"will retry {retry_at_display}" if retry_at_display else "retrying shortly"
+        return ("self_healing", True, reason)
+    # ⚠⚠ #2603 — the same shape as ``kick_is_recovering``, for the same reason,
+    # and it became reachable when ``next_retry_at`` stopped implying
+    # ``status='failure'``. A lane-busy skip on a job carrying
+    # ``rearm_on_lost_fire`` is armed for re-dispatch, but its adapter status is
+    # ``idle`` — NOT ``failed``/``pending_retry`` — so it falls past the branch
+    # directly above. Without this, ``retry_in_flight`` would strip
+    # ``schedule_missed`` from the actionable set and the status-only branches
+    # below would paint the row **Current**: an armed retry would HIDE the very
+    # staleness it exists to recover, which is a false green on the one surface
+    # whose whole job is refusing them.
+    #
+    # Deliberately placed AFTER ``running`` and after the failed/pending_retry
+    # branch so neither changes verdict or copy — this only catches rows those
+    # two do not.
+    #
+    # Gated on the stall ACTUALLY being present, exactly like
+    # ``kick_is_recovering``: once a natural fire has cleared the
+    # ``schedule_missed``, a lingering armed row reads its honest status rather
+    # than being repainted "recovering".
+    if retry_is_recovering:
+        reason = f"lost fire, retrying {retry_at_display}" if retry_at_display else "lost fire, retrying shortly"
         return ("self_healing", True, reason)
     if status == "pending_retry":
         # Cadence-covered fallback: next natural fire reattempts the failed
