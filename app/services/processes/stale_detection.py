@@ -57,7 +57,7 @@ from app.services.processes import (
     ProcessStatus,
     StaleReason,
 )
-from app.services.processes.stale_thresholds import get_threshold
+from app.services.processes.stale_thresholds import RUNTIME_CEILING_S, get_threshold
 
 # Cron miss tolerance — APScheduler fires within a few seconds of the
 # nominal time; 60s absorbs jitter without masking a genuine miss.
@@ -78,35 +78,13 @@ WATERMARK_GAP_TOLERANCE_S: Final[int] = 60
 # Boot-recovery sweep handles >6h.
 QUEUE_STUCK_THRESHOLD_S: Final[int] = 30 * 60
 
-# #2274 — whole-run wall-clock ceiling for rule 5. No published or vendor
-# formulation exists for a background-job runtime ceiling, so this is fixed
-# BY CONSTRUCTION and frozen: a ceiling is a safety BACKSTOP, not a health
-# alarm, so it sits an order of magnitude above the measured population
-# rather than fitted to it.
-#
-# ⚠ Do not read a derived figure out of this comment — run the query. Over
-# EVERY status, not successes only (a success-only query cannot establish the
-# counterfactual, because the population a ceiling fires on is exactly the runs
-# that never succeeded):
-#
-#   SELECT job_name, status, count(*),
-#          round(max(extract(epoch FROM coalesce(finished_at, now()) - started_at)))
-#     FROM job_runs
-#    WHERE started_at > now() - interval '180 days'
-#      AND extract(epoch FROM coalesce(finished_at, now()) - started_at) > 86400
-#    GROUP BY 1, 2 ORDER BY 4 DESC;
-#
-# Measured 2026-09-15 on dev: every row it returns is a `failure` — an
-# `orphaned: reaped at boot` run that sat `running` until a restart cleared it,
-# up to 4.4 days. No SUCCESSFUL run of any registered job exceeds this ceiling;
-# the longest is `sec_filing_documents_ingest` at ~2.7h. So the measured
-# false-positive count is zero, which is what #2274's constraint demands ("a
-# watchdog that fires on legitimately-long corpus jobs is worse than none").
-#
-# ⚠ The evidence is right-censored: a reaped row records when a restart
-# happened, not when the work would have finished. That understates long runs,
-# which argues for the large margin rather than for fitting the number tighter.
-RUNTIME_CEILING_S: Final[int] = 86_400  # 24h
+# ``RUNTIME_CEILING_S`` (rule 5's whole-run wall-clock ceiling) is DEFINED in
+# ``stale_thresholds`` and re-exported here. It moved there so
+# ``_OVERRIDES["orchestrator_full_sync"]`` can be expressed as that same ceiling
+# instead of a second hand-picked number — this module already imports
+# ``get_threshold`` from there, so the dependency can only run one way. Existing
+# importers (``run_liveness``) keep reading it from this module; the value and
+# its measured-evidence comment are unchanged, just relocated.
 
 
 def compute(

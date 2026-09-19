@@ -321,6 +321,7 @@ describe("ProcessRow", () => {
         stale_reasons: ["mid_flight_stuck"],
         active_run: {
           run_id: 99,
+          run_kind: "job_run" as const,
           started_at: fiveMinutesAgo,
           rows_processed_so_far: 42,
           progress_units_done: null,
@@ -350,6 +351,7 @@ describe("ProcessRow", () => {
         stale_reasons: ["mid_flight_stuck", "runtime_ceiling"],
         active_run: {
           run_id: 99,
+          run_kind: "job_run" as const,
           started_at: yesterday,
           rows_processed_so_far: 42,
           progress_units_done: null,
@@ -379,6 +381,7 @@ describe("ProcessRow", () => {
         stale_reasons: ["queue_stuck", "mid_flight_stuck"],
         active_run: {
           run_id: 99,
+          run_kind: "job_run" as const,
           started_at: sevenMinutesAgo,
           rows_processed_so_far: 42,
           progress_units_done: null,
@@ -411,6 +414,7 @@ describe("ProcessRow", () => {
         stale_reasons: ["queue_stuck", "mid_flight_stuck"],
         active_run: {
           run_id: 99,
+          run_kind: "job_run" as const,
           started_at: fortyMinutesAgo,
           rows_processed_so_far: 42,
           progress_units_done: null,
@@ -736,6 +740,7 @@ describe("processRowSignature", () => {
       stale_reasons: ["mid_flight_stuck"],
       active_run: {
         run_id: 99,
+        run_kind: "job_run" as const,
         started_at: frozen,
         rows_processed_so_far: 0,
         progress_units_done: null,

@@ -327,7 +327,14 @@ def _read_running_run(conn: psycopg.Connection[Any], *, job_name: str) -> dict[s
             """,
             {"name": job_name},
         )
-        return cur.fetchone()
+        row = cur.fetchone()
+    if row is None:
+        return None
+    # #2274 — the active row carries its KIND for the same reason the terminal
+    # row does (#1508 Task 5): ``run_id`` is only unique within its own table,
+    # and the cancel path has to pin ``(target_run_kind, target_run_id)``.
+    row["run_kind"] = "job_run"
+    return row
 
 
 def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
@@ -419,7 +426,7 @@ def _read_latest_anchor_terminal_run(conn: psycopg.Connection[Any], *, job_name:
 # crons write ``job_runs`` again after a clean restart, so they are
 # deliberately NOT re-homed here (per the #1474 2026-06-04 triage). Add a
 # job_name here only when it is confirmed to record solely in ``sync_runs``.
-_ORCHESTRATOR_SYNC_SCOPE: Final[dict[str, str]] = {
+ORCHESTRATOR_SYNC_SCOPE: Final[dict[str, str]] = {
     "orchestrator_high_frequency_sync": "high_frequency",
     # ``orchestrator_full_sync`` runs ``SyncScope.full()``, which writes a
     # ``sync_runs`` row with ``scope = scope.kind = 'full'`` (see
@@ -515,10 +522,72 @@ def _resolve_terminal_row(conn: psycopg.Connection[Any], *, job_name: str) -> di
     Widen those only if the operator needs full sync_runs parity for
     these jobs; tracked as a #1474 follow-up if so.
     """
-    scope = _ORCHESTRATOR_SYNC_SCOPE.get(job_name)
+    scope = ORCHESTRATOR_SYNC_SCOPE.get(job_name)
     if scope is not None:
         return _read_latest_terminal_sync_run(conn, scope=scope)
     return _read_latest_terminal_run(conn, job_name=job_name)
+
+
+def _read_running_sync_run(conn: psycopg.Connection[Any], *, scope: str) -> dict[str, Any] | None:
+    """In-flight ``sync_runs`` row for ``scope``, shaped like the ``job_runs``
+    running row so ``_build_active_run`` consumes it unchanged (#2274).
+
+    The mirror of ``_read_latest_terminal_sync_run``, for the active half
+    ``_resolve_terminal_row`` above deliberately left behind. That deferral was
+    justified by the HF sync's "(seconds-long, every-5-min) active window" —
+    measured and true for ``high_frequency``, but written about ONE member of a
+    two-member dict. ``orchestrator_full_sync``'s active window is p50 ~37 min
+    and has exceeded four hours, and for all of it the row showed the last
+    TERMINAL run: no ``running`` status, no active run, and therefore no Cancel
+    on the one scheduled process whose cancel the executor actually honours.
+
+    ⚠ ``processed_count`` is passed through honestly rather than substituted.
+    It has **no production writer** — the executor's progress path writes
+    ``sync_layer_progress`` and advances only ``last_progress_at`` on the
+    parent row — so ``_build_active_run`` maps its zero to ``None`` ("not
+    reported"), which is the truth. This read buys a status, an identity and a
+    Cancel; it does not buy a progress ticker.
+
+    ⚠ Scope-filtered on purpose. A ``behind`` / ``layer`` / ``job`` walk has no
+    ProcessRow of its own, and rendering one as "the full sync is running"
+    would be a lie. Cancel routing does NOT inherit this filter — see
+    ``_resolve_active_sync_run`` in ``app/api/processes.py``.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT sync_run_id, started_at, processed_count, target_count,
+                   last_progress_at, warnings_count, cancel_requested_at
+              FROM sync_runs
+             WHERE scope  = %(scope)s
+               AND status = 'running'
+             ORDER BY started_at DESC, sync_run_id DESC
+             LIMIT 1
+            """,
+            {"scope": scope},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    row["run_id"] = row.pop("sync_run_id")
+    row["run_kind"] = "sync_run"
+    return row
+
+
+def _resolve_active_row(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
+    """Active row for the process: ``sync_runs`` for the orchestrator wrappers
+    (#2274), else ``job_runs``.
+
+    The active-half twin of ``_resolve_terminal_row``, dispatching on the SAME
+    ``ORCHESTRATOR_SYNC_SCOPE`` registry so the two halves of one row cannot
+    disagree about which table the job records in. Both ``list_rows`` and
+    ``get_row`` route through here, so the list page and the detail page cannot
+    disagree either.
+    """
+    scope = ORCHESTRATOR_SYNC_SCOPE.get(job_name)
+    if scope is not None:
+        return _read_running_sync_run(conn, scope=scope)
+    return _read_running_run(conn, job_name=job_name)
 
 
 def _cancel_was_operator_initiated(conn: psycopg.Connection[Any], *, run_kind: str, run_id: int) -> bool:
@@ -941,6 +1010,10 @@ def _build_active_run(active_row: dict[str, Any]) -> ActiveRunSummary:
     last_progress_at = active_row.get("last_progress_at")
     return ActiveRunSummary(
         run_id=int(active_row["run_id"]),
+        # #2274 — set by whichever reader produced the row
+        # (``_read_running_run`` / ``_read_running_sync_run``), never inferred
+        # here: this builder cannot see which table the id came from.
+        run_kind=active_row["run_kind"],
         started_at=active_row["started_at"],
         rows_processed_so_far=processed if processed > 0 else None,
         progress_units_done=processed if target is not None else None,
@@ -1344,7 +1417,7 @@ def list_rows(conn: psycopg.Connection[Any]) -> list[ProcessRow]:
     recent_reaps = _recent_reap_counts(conn)
     rows: list[ProcessRow] = []
     for job in SCHEDULED_JOBS:
-        active_row = _read_running_run(conn, job_name=job.name)
+        active_row = _resolve_active_row(conn, job_name=job.name)
         terminal_row = _resolve_terminal_row(conn, job_name=job.name)
         has_inflight_request = _has_inflight_manual_request(conn, job_name=job.name)
         fence_held = _has_pending_full_wash_fence(conn, process_id=job.name)
@@ -1371,7 +1444,7 @@ def get_row(conn: psycopg.Connection[Any], *, process_id: str) -> ProcessRow | N
     return _build_row(
         job,
         conn=conn,
-        active_row=_read_running_run(conn, job_name=job.name),
+        active_row=_resolve_active_row(conn, job_name=job.name),
         terminal_row=_resolve_terminal_row(conn, job_name=job.name),
         has_inflight_request=_has_inflight_manual_request(conn, job_name=job.name),
         fence_held=_has_pending_full_wash_fence(conn, process_id=job.name),

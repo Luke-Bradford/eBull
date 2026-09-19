@@ -26,6 +26,7 @@ import {
   triggerProcess,
 } from "@/api/processes";
 import type {
+  ActiveRunSummaryResponse,
   BootstrapTimelineArchiveResponse,
   BootstrapTimelineResponse,
   BootstrapTimelineStageResponse,
@@ -48,6 +49,7 @@ import {
   REASON_TOOLTIP,
   RUN_STATUS_VISUAL,
   STATUS_VISUAL,
+  reasonFromError,
   reasonTooltip,
 } from "@/components/admin/processStatus";
 import { useAsync } from "@/lib/useAsync";
@@ -308,12 +310,20 @@ export function ProcessDetailPage() {
     [id, refetchAll],
   );
 
+  // #2274 — the run THIS render is showing. Read outside the callback and
+  // listed in its deps so the request pins what the operator can actually see,
+  // rather than whatever a stale closure captured.
+  const activeRunId = detail.data?.active_run?.run_id;
+
   const handleCancelConfirmed = useCallback(
     async (mode: CancelMode) => {
       setCancelError(null);
       setBusy(true);
       try {
-        await cancelProcess(id, { mode });
+        // #2274 — pin the run the operator is looking at. Without it the
+        // server takes whatever is running when the POST lands, which on the
+        // sync side can be a different scope entirely.
+        await cancelProcess(id, { mode, target_run_id: activeRunId });
         setShowCancel(false);
         refetchAll();
       } catch (err) {
@@ -321,13 +331,18 @@ export function ProcessDetailPage() {
         // the reason in the ActionBar tooltip via reasonTooltip.
         setCancelError(err);
         setShowCancel(false);
+        // #2274 — a `run_changed` rejection means this page is showing a run
+        // that has ended. This page does NOT poll its process envelope, so
+        // without an explicit refetch the operator would resubmit the same
+        // dead pin and get the same 409 forever.
+        if (reasonFromError(err) === "run_changed") refetchAll();
         if (!(err instanceof ApiError))
           console.error("cancelProcess failed", err);
       } finally {
         setBusy(false);
       }
     },
-    [id, refetchAll],
+    [activeRunId, id, refetchAll],
   );
 
   return (
@@ -679,11 +694,30 @@ function OverviewTab({
       {row.active_run ? (
         <KeyValueRow
           label="Active run"
-          value={`run #${row.active_run.run_id} · started ${formatDateTime(row.active_run.started_at)}`}
+          value={`${runKindLabel(row.active_run.run_kind)}#${row.active_run.run_id} · started ${formatDateTime(row.active_run.started_at)}`}
         />
       ) : null}
     </div>
   );
+}
+
+/**
+ * #2274 — name the table the run id came from.
+ *
+ * The orchestrator wrapper rows publish a `sync_runs.sync_run_id` in the slot
+ * every other scheduled row uses for a `job_runs.run_id`, and the two id spaces
+ * overlap freely. An operator reading "run #418" off the full sync and then
+ * grepping `job_runs` for 418 finds an unrelated job's run.
+ */
+function runKindLabel(kind: ActiveRunSummaryResponse["run_kind"]): string {
+  switch (kind) {
+    case "sync_run":
+      return "sync run ";
+    case "bootstrap_run":
+      return "bootstrap run ";
+    default:
+      return "run ";
+  }
 }
 
 function KeyValueRow({ label, value }: { label: string; value: string }) {

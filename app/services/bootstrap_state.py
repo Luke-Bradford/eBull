@@ -97,6 +97,16 @@ class BootstrapNotRunning(RuntimeError):
     """
 
 
+class BootstrapRunChanged(RuntimeError):
+    """Raised by ``cancel_run`` when the running row is not the pinned one.
+
+    #2274 — a bootstrap run IS in flight, but it is not the one the caller
+    asked to cancel. Distinct from ``BootstrapNotRunning`` because the operator
+    recovery differs: refresh and look again, rather than "nothing to cancel".
+    The API layer maps it to 409 ``run_changed``.
+    """
+
+
 class BootstrapNoPriorRun(RuntimeError):
     """Raised by ``reset_failed_stages_for_retry`` when the singleton's
     ``last_run_id`` is NULL — no prior bootstrap run exists to retry.
@@ -1230,6 +1240,7 @@ def cancel_run(
     *,
     requested_by_operator_id: UUID | None,
     mode: Literal["cooperative", "terminate"] = "cooperative",
+    expected_run_id: int | None = None,
 ) -> int:
     """Cancel the in-flight bootstrap run.
 
@@ -1289,6 +1300,19 @@ def cancel_run(
         if run_row is None:
             raise BootstrapNotRunning("no running bootstrap_runs row to cancel")
         run_id: int = run_row[0]
+
+        # #2274 — honour the caller's pin INSIDE the lock, so "is this still the
+        # run the operator was looking at?" is answered against the same row the
+        # stop will target. A cancel dialog can stay open indefinitely; without
+        # this the confirm lands on whichever run holds the slot at that moment,
+        # and ``request_stop`` would then record the wrong one as
+        # operator-initiated — which the adapter's ``cancel_was_operator_
+        # initiated`` look-through reads as a BENIGN cancel, so a run nobody
+        # meant to kill renders green.
+        if expected_run_id is not None and run_id != expected_run_id:
+            raise BootstrapRunChanged(
+                f"cancel_run: expected run {expected_run_id}, found {run_id} holding the running slot"
+            )
 
         # Insert the stop signal. ``request_stop`` raises
         # StopAlreadyPendingError on partial-unique violation; the

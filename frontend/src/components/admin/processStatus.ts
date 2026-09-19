@@ -116,6 +116,8 @@ export const REASON_TOOLTIP: Record<TriggerConflictReason, string> = {
     "A sibling job has an active full-wash. Wait for it to complete.",
   no_active_run: "Nothing to cancel — no active run.",
   stop_already_pending: "A cancel is already pending for this run.",
+  run_changed:
+    "That run has already ended and another has started. Refresh and check before cancelling.",
   trigger_not_supported:
     "Sweeps are read-only — trigger via the underlying scheduled job.",
   cancel_not_supported:
@@ -147,6 +149,7 @@ export const REASON_SHORT_LABEL: Record<TriggerConflictReason, string> = {
   shared_source_full_wash_pending: "sibling full-wash pending",
   no_active_run: "no active run",
   stop_already_pending: "cancel already pending",
+  run_changed: "run changed",
   trigger_not_supported: "trigger not supported",
   cancel_not_supported: "cancel not supported",
   bootstrap_not_complete: "bootstrap not complete",
