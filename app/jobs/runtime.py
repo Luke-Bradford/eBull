@@ -808,18 +808,48 @@ def execution_slot_wait_snapshot() -> ExecutionSlotWaitSnapshot:
     }
 
 
-#: Lanes that get their own APScheduler executor (#2985).  A job parked on another
-#: lane's semaphore still OWNS its APScheduler worker thread, so with 50 of the 63
-#: registered jobs sharing one general permit inside a 10-thread default pool, a
-#: reserved job's fire queues behind them and is discarded as a misfire before it
-#: ever reaches the semaphore its reservation bought.  Measured 2026-09-13:
-#: ``quotes_refresh``'s 03:23 fire was dequeued 2801.5s late and lost the 03:00
-#: quote-observation bucket for good.  A dedicated executor gives the lane a thread
-#: nothing else can take; the semaphore still bounds the body (and its connections).
-_RESERVED_EXECUTOR_LANES: Final[tuple[str, ...]] = (
+#: Lanes whose MEMBERSHIP is a reviewed allow-list rather than a fallthrough.  A job
+#: joining one of these takes a share of a single-permit reservation that exists for a
+#: named freshness bound, so the assignment is a deliberate act (pinned by
+#: ``test_reserved_lane_membership_is_an_explicit_allow_list``).  ``sec_rate`` and
+#: ``general_non_sec`` are NOT here: they are where ``execution_lane_for`` sends
+#: everything it does not recognise, so "membership" is not a scarce resource on them.
+#:
+#: ⚠ Distinct from ``_DISPATCH_POOL_LANES`` below since #3220.  The two used to be one
+#: constant, which conflated "this lane's membership is reviewed" with "this lane has
+#: its own thread pool" — and it was the SECOND property that every lane needed.
+_RESTRICTED_LANES: Final[tuple[str, ...]] = (
     EXECUTION_LANE_PAPER,
     EXECUTION_LANE_QUOTE,
 )
+
+#: Lanes that get their own APScheduler executor (#2985, widened to every lane by
+#: #3220).  A job parked on its lane's semaphore still OWNS the APScheduler worker
+#: thread it was dispatched on, while holding no database connection at all — so a
+#: shared pool is spent by whichever lane is jammed and every other lane's fires queue
+#: behind it and are discarded as misfires.
+#:
+#: ⚠⚠ #2985 fixed this for two lanes and left ``general_non_sec`` (50 members) and
+#: ``sec_rate`` (11 members) sharing the 10-thread ``default`` pool — 61 of 65 jobs on
+#: ten threads.  The failure is in the daemon log verbatim, 2026-09-18 (BST stamps):
+#:
+#:     04:23:00,791 Job "orchestrator_full_sync" executed successfully
+#:     04:23:00,792 Run time of job "monitor_positions" was missed by 0:08:00.792096
+#:     04:23:00,795 Run time of job "sec_atom_fast_lane" was missed by 0:08:00.795448
+#:     04:23:00,792 job 'orchestrator_high_frequency_sync' acquired general_non_sec
+#:                  execution capacity after 1380.646s
+#:
+#: Four fires were declared missed in the same millisecond a ``default`` worker freed,
+#: because they had been sitting in that pool's QUEUE.  ``sec_atom_fast_lane`` is on
+#: ``sec_rate``, which had 4 free permits throughout: it lost its fire to a pool, not
+#: to a semaphore.  ⚠ The identical lateness is what identifies the mechanism — a
+#: semaphore releases one waiter at a time, a freed pool worker drains the queue at
+#: once.  The ``job_runs`` timestamps alone do NOT show this (``_on_job_missed`` stamps
+#: the row at ``scheduled_run_time``, so a shared timestamp only means a shared slot);
+#: the log does, which is why it is quoted here rather than a query.
+#:
+#: Sized ``max(permits, members)`` — see ``build_scheduler_executors``.
+_DISPATCH_POOL_LANES: Final[tuple[str, ...]] = tuple(EXECUTION_LANE_PERMITS)
 
 #: APScheduler's own default when no executor is configured (3.11.2,
 #: ``BaseScheduler._create_default_executor`` → ``ThreadPoolExecutor()``).  Named
@@ -827,8 +857,13 @@ _RESERVED_EXECUTOR_LANES: Final[tuple[str, ...]] = (
 #: used to come from the library is now ours to state.  ⚠ Pinned to the library's
 #: actual default by
 #: ``test_default_pool_size_still_matches_apschedulers_own_default`` — an upstream
-#: change must fail a test rather than silently re-size the pool that every
-#: non-reserved job shares.
+#: change must fail a test rather than silently re-size the pool.
+#:
+#: ⚠ Since #3220 no REGISTERED job resolves to ``default``: ``execution_lane_for`` is
+#: total (its ``KeyError`` branch returns ``general_non_sec``), so every name reaches a
+#: lane and every lane has a pool.  ``default`` is kept because APScheduler requires it
+#: — ``BaseScheduler.add_job`` defaults ``executor='default'``, and the scheduler's own
+#: internal submissions use it — not as a fallback for our routing.
 _DEFAULT_EXECUTOR_MAX_WORKERS: Final[int] = 10
 
 #: The producers whose freshness bounds gate a core submission, held off the general
@@ -903,22 +938,35 @@ def execution_lane_for(job_name: str) -> str:
 
 
 def build_scheduler_executors() -> dict[str, APSchedulerThreadPoolExecutor]:
-    """The recurring scheduler's executor map — one pool per reserved lane (#2985).
+    """The recurring scheduler's executor map — one pool per lane (#2985, #3220).
 
-    A job parked on another lane's semaphore still OWNS its APScheduler worker
-    thread, so a reserved lane needs a pool of its own or its fire queues behind
-    work its reservation was supposed to exclude.  A pool smaller than the lane's
-    permit count would become the tighter bound and re-create the starvation inside
-    the lane.
+    A job parked on its lane's semaphore still OWNS its APScheduler worker thread,
+    so a lane that shares a pool loses its fires to whichever lane is jammed.  A
+    pool smaller than the lane's permit count would become the tighter bound and
+    re-create the starvation inside the lane.
 
-    ⚠ Sized ``max(permits, members)`` since #3118, not ``permits``.  The two are the
-    same number for a single-job lane, which every lane was until the quote lane
-    gained ``core_candidate_quote_refresh``.  Permits bound how many bodies may RUN
-    (and therefore the connection budget); members bound how many fires may be
-    waiting to DISPATCH.  Sizing on permits alone puts a second member's fire back
-    in the queue the reservation exists to keep it out of — while raising permits
-    instead would buy the same thread at the cost of a connection slot the dev
-    profile does not have (measured 2026-09-16: usable 27, demand 27).
+    ⚠ Sized ``max(permits, members)`` since #3118, not ``permits``.  Permits bound
+    how many bodies may RUN (and therefore the connection budget); members bound how
+    many fires may be waiting to DISPATCH.  ``job_defaults['max_instances'] = 1``
+    makes ``members`` an exact ceiling rather than an estimate: a job can have at
+    most one fire in flight, so a lane can have at most ``members`` fires parked, and
+    a pool of that size cannot be exhausted by its own membership.
+
+    ⚠ Raising PERMITS instead would buy the same thread at the cost of a connection
+    slot the dev profile does not have (measured 2026-09-16: usable 27, demand 27).
+    Threads are the affordable half of the pair precisely because a parked fire holds
+    NO database connection — ``_job_execution_slot`` admission precedes every
+    connection this runtime opens.
+
+    ⚠ Residual, stated rather than hidden (Codex ckpt-1 finding 6, reproduced):
+    ``BaseExecutor._run_job_success`` decrements ``_instances`` BEFORE dispatching
+    the job's events, and that dispatch runs on the worker thread.  So a worker can
+    still be occupied by a finishing callback while a new fire for the same job is
+    accepted and queued behind it.  ``members`` therefore bounds parked BODIES
+    exactly and worker occupancy only approximately; a listener that blocked for
+    longer than ``misfire_grace_time`` could still cost that one fire.  Not padded
+    with a ``+1``, because the right size for that failure is not derivable and our
+    listeners are bounded short writes.
 
     Exposed (not inlined) so the regression tests configure the SAME map production
     does rather than a copy of it.
@@ -926,14 +974,12 @@ def build_scheduler_executors() -> dict[str, APSchedulerThreadPoolExecutor]:
     executors: dict[str, APSchedulerThreadPoolExecutor] = {
         "default": APSchedulerThreadPoolExecutor(_DEFAULT_EXECUTOR_MAX_WORKERS),
     }
-    for lane in _RESERVED_EXECUTOR_LANES:
-        executors[lane] = APSchedulerThreadPoolExecutor(
-            max(EXECUTION_LANE_PERMITS[lane], reserved_lane_member_count(lane))
-        )
+    for lane in _DISPATCH_POOL_LANES:
+        executors[lane] = APSchedulerThreadPoolExecutor(max(EXECUTION_LANE_PERMITS[lane], lane_member_count(lane)))
     return executors
 
 
-def reserved_lane_member_count(lane: str) -> int:
+def lane_member_count(lane: str) -> int:
     """How many REGISTERED jobs dispatch on *lane*.
 
     Read off ``SCHEDULED_JOBS`` rather than maintained by hand: a lane's pool has
@@ -949,10 +995,15 @@ def reserved_lane_member_count(lane: str) -> int:
 def _scheduler_executor_alias(job_name: str) -> str:
     """Return the APScheduler executor alias for *job_name*'s recurring fire.
 
-    Reserved lanes get their own pool; ``sec_rate`` and general share ``default``.
+    Every lane has its own pool since #3220, and ``execution_lane_for`` is total, so
+    this never returns ``"default"`` for a name the runtime routes.  The conditional
+    remains because ``_DISPATCH_POOL_LANES`` is derived from ``EXECUTION_LANE_PERMITS``
+    and a future lane added to one and not the other must degrade to a real executor
+    rather than raise at first fire — APScheduler resolves the alias when the fire is
+    DUE, so an unregistered alias silently removes the job.
     """
     lane = execution_lane_for(job_name)
-    return lane if lane in _RESERVED_EXECUTOR_LANES else "default"
+    return lane if lane in _DISPATCH_POOL_LANES else "default"
 
 
 @contextmanager

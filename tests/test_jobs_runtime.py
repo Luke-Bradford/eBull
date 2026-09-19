@@ -2542,8 +2542,8 @@ class TestReservedLaneSchedulerExecutors:
 
     def test_reserved_lane_runs_while_every_default_worker_is_parked(self) -> None:
         """The exact shape that failed at 03:23 — and it must now pass."""
-        for lane in runtime._RESERVED_EXECUTOR_LANES:
-            assert self._fires_with_default_pool_parked(lane), f"{lane} starved by the default pool"
+        for lane in runtime._DISPATCH_POOL_LANES:
+            assert self._fires_with_pool_parked("default", lane), f"{lane} starved by the default pool"
 
     def test_default_lane_is_starved_by_the_same_setup(self) -> None:
         """Control arm: proves the harness reproduces the bug it claims to fix.
@@ -2551,11 +2551,33 @@ class TestReservedLaneSchedulerExecutors:
         Without this, a test that passes for an unrelated reason (the pool never
         actually filled, the hogs returned early) reads as a green reservation.
         """
-        assert not self._fires_with_default_pool_parked("default")
+        assert not self._fires_with_pool_parked("default", "default")
+
+    def test_a_sec_fire_survives_a_fully_parked_general_pool(self) -> None:
+        """#3220's regression, reproducing the 2026-09-18 04:23:00,792 log line.
+
+        ``sec_atom_fast_lane`` is on ``sec_rate``, which had 4 free permits at the
+        time, and it still lost its 03:15 fire — dequeued 480.8 s late in the same
+        millisecond ``orchestrator_full_sync`` released a ``default`` worker, because
+        every one of those ten workers was parked on the single ``general_non_sec``
+        permit. Both lanes are now their own pool, so filling one cannot reach the
+        other.
+        """
+        assert self._fires_with_pool_parked(runtime.EXECUTION_LANE_GENERAL, runtime.EXECUTION_LANE_SEC), (
+            "a general-lane pool jam still reaches the sec lane"
+        )
+
+    def test_the_general_pool_jam_is_real(self) -> None:
+        """Control arm for the above — the same jam DOES block another general fire.
+
+        Without it, ``test_a_sec_fire_survives_a_fully_parked_general_pool`` passes
+        whenever the harness fails to fill the pool at all.
+        """
+        assert not self._fires_with_pool_parked(runtime.EXECUTION_LANE_GENERAL, runtime.EXECUTION_LANE_GENERAL)
 
     @staticmethod
-    def _fires_with_default_pool_parked(executor_alias: str) -> bool:
-        """Fill every ``default`` worker, then fire one job on *executor_alias*."""
+    def _fires_with_pool_parked(jammed_alias: str, probe_alias: str) -> bool:
+        """Fill every worker of *jammed_alias*, then fire one job on *probe_alias*."""
         from apscheduler.schedulers.background import BackgroundScheduler
 
         release = threading.Event()
@@ -2566,33 +2588,36 @@ class TestReservedLaneSchedulerExecutors:
             parked.release()
             release.wait(timeout=30)
 
+        executors = runtime.build_scheduler_executors()
+        workers = executors[jammed_alias]._pool._max_workers
         scheduler = BackgroundScheduler(
             timezone="UTC",
-            executors=runtime.build_scheduler_executors(),
+            executors=executors,
             job_defaults={"coalesce": True, "misfire_grace_time": 1, "max_instances": 1},
         )
         scheduler.start()
         try:
             now = datetime.now(UTC)
-            # One hog per default worker, plus two that must queue behind them.
-            for index in range(runtime._DEFAULT_EXECUTOR_MAX_WORKERS + 2):
+            # One hog per worker of the jammed pool, plus two that must queue behind
+            # them — the queue is what carried the misfire in the production case.
+            for index in range(workers + 2):
                 scheduler.add_job(
                     hog,
                     "date",
                     run_date=now,
                     id=f"hog-{index}",
-                    executor="default",
+                    executor=jammed_alias,
                     misfire_grace_time=3600,
                 )
-            for _ in range(runtime._DEFAULT_EXECUTOR_MAX_WORKERS):
-                assert parked.acquire(timeout=10), "default pool never filled — harness is not reproducing"
+            for _ in range(workers):
+                assert parked.acquire(timeout=30), f"{jammed_alias} pool never filled — harness is not reproducing"
 
             scheduler.add_job(
                 ran.set,
                 "date",
                 run_date=datetime.now(UTC),
                 id="probe",
-                executor=executor_alias,
+                executor=probe_alias,
                 misfire_grace_time=3600,
             )
             return ran.wait(timeout=3)
@@ -2616,7 +2641,7 @@ class TestReservedLaneSchedulerExecutors:
     def test_reserved_pool_is_at_least_its_lane_permits(self) -> None:
         """A pool smaller than the semaphore would re-create the starvation inside the lane."""
         executors = runtime.build_scheduler_executors()
-        for lane in runtime._RESERVED_EXECUTOR_LANES:
+        for lane in runtime._DISPATCH_POOL_LANES:
             permits = runtime.EXECUTION_LANE_PERMITS[lane]
             assert executors[lane]._pool._max_workers >= permits, lane
 
@@ -2638,7 +2663,7 @@ class TestReservedLaneSchedulerExecutors:
         from app.workers.scheduler import SCHEDULED_JOBS
 
         executors = runtime.build_scheduler_executors()
-        for lane in runtime._RESERVED_EXECUTOR_LANES:
+        for lane in runtime._DISPATCH_POOL_LANES:
             members = [j.name for j in SCHEDULED_JOBS if runtime.execution_lane_for(j.name) == lane]
             assert members, f"{lane} has no registered job — a reserved lane with no member is dead capacity"
             assert executors[lane]._pool._max_workers >= len(members), f"{lane} has {members}"
@@ -2732,8 +2757,8 @@ class TestReservedLaneSchedulerExecutors:
                 JOB_STRATEGY_HALT_FEED_REFRESH,
             },
         }
-        assert set(expected) == set(runtime._RESERVED_EXECUTOR_LANES), (
-            "a reserved lane was added or removed without updating this allow list"
+        assert set(expected) == set(runtime._RESTRICTED_LANES), (
+            "a restricted lane was added or removed without updating this allow list"
         )
         for lane, names in expected.items():
             actual = {j.name for j in SCHEDULED_JOBS if runtime.execution_lane_for(j.name) == lane}
@@ -2838,14 +2863,33 @@ class TestReservedLaneSchedulerExecutors:
         library_default = inspect.signature(APSchedulerThreadPoolExecutor.__init__).parameters["max_workers"].default
         assert runtime._DEFAULT_EXECUTOR_MAX_WORKERS == library_default
 
-    def test_non_reserved_lanes_stay_on_the_default_executor(self) -> None:
-        """sec_rate and general keep today's pool — this PR does not re-shape them."""
+    def test_no_registered_job_dispatches_on_the_shared_default_pool(self) -> None:
+        """#3220 inverts #2985's ``test_non_reserved_lanes_stay_on_the_default_executor``.
+
+        That test pinned ``sec_rate`` and ``general_non_sec`` to ``default`` and said
+        so explicitly — *"this PR does not re-shape them"*. Re-shaping them IS this
+        change, so the assertion is inverted rather than deleted: a job silently
+        falling back to the shared pool is the defect, and 61 of 65 doing it is what
+        cost ``sec_atom_fast_lane`` its fire while its own lane was idle.
+
+        ``default`` still exists — APScheduler's ``add_job`` defaults to it — it just
+        has no registered member.
+        """
         from app.workers.scheduler import SCHEDULED_JOBS
 
+        assert SCHEDULED_JOBS, "no registered jobs — this assertion would be vacuous"
         for job in SCHEDULED_JOBS:
-            lane = runtime.execution_lane_for(job.name)
-            if lane in (runtime.EXECUTION_LANE_SEC, runtime.EXECUTION_LANE_GENERAL):
-                assert runtime._scheduler_executor_alias(job.name) == "default", job.name
+            assert runtime._scheduler_executor_alias(job.name) != "default", job.name
+
+    def test_every_lane_with_a_permit_has_a_dispatch_pool(self) -> None:
+        """The two constants are derived from each other and must not drift apart.
+
+        A lane present in ``EXECUTION_LANE_PERMITS`` but absent from
+        ``_DISPATCH_POOL_LANES`` would silently route its members back onto the
+        shared pool — the state this ticket fixes, re-entered by omission.
+        """
+        assert set(runtime._DISPATCH_POOL_LANES) == set(runtime.EXECUTION_LANE_PERMITS)
+        assert set(runtime._RESTRICTED_LANES) <= set(runtime._DISPATCH_POOL_LANES)
 
     def test_execution_lane_precedence_and_unknown_name_fallback(self) -> None:
         """SEC source wins over the reserved job names; an unregistered name → general."""
