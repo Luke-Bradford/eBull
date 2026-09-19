@@ -994,3 +994,147 @@ def test_accession_ref_dataclass_is_frozen() -> None:
     )
     with pytest.raises((AttributeError, TypeError)):
         ref.accession_number = "0002"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# #2329 — the N-PORT CUSIP consumer must read BOTH resolution providers
+# ---------------------------------------------------------------------------
+
+
+def _seed_cusip_mapping_for_provider(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    cusip: str,
+    provider: str,
+    is_primary: bool = False,
+) -> None:
+    """Unlike :func:`_seed_cusip_mapping` above this takes the provider and
+    defaults ``is_primary`` FALSE — the shape dev actually holds for OpenFIGI
+    rows, and for most SEC ones too."""
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        )
+        VALUES (%s, %s, 'cusip', %s, %s)
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
+        """,
+        (instrument_id, provider, cusip.upper(), is_primary),
+    )
+
+
+class TestNPortCusipResolutionReadsBothProviders:
+    """``n_port_ingest._resolve_cusip_to_instrument_id`` filtered
+    ``provider = 'sec'`` until #2329. #2213 had already widened the 13F
+    sibling; this copy and the (now deleted) 13D/G one were left behind.
+
+    #2329 filed it as LATENT on the premise that the bulk DERA twin covers
+    what the per-filing path drops. Measured on dev 2026-09-19 over the FULL
+    population of parsed accessions
+    (``PYTHONPATH=. uv run python -m scripts.audit_2329_cusip_consumer_widening``):
+    348 of 1,025 eligible holdings dropped, and 221 of those
+    ``(accession, instrument)`` pairs absent from
+    ``ownership_funds_observations`` — so the premise is false and the drop
+    is live. The twin cannot cover a filing parsed the week it lands, because
+    DERA publishes N-PORT quarterly.
+    """
+
+    def test_openfigi_only_mapping_resolves(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The regression guard. Pre-#2329 this returned ``None`` and the
+        holding was counted into ``skipped_no_cusip`` — with no
+        ``unresolved_13f_cusips`` queue entry either, because the N-PORT
+        path deliberately writes none."""
+        from app.services.n_port_ingest import _resolve_cusip_to_instrument_id
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_329_101, symbol="GOOGL")
+        _seed_cusip_mapping_for_provider(
+            conn, instrument_id=2_329_101, cusip="02079K305", provider="openfigi"
+        )
+        conn.commit()
+
+        assert _resolve_cusip_to_instrument_id(conn, "02079K305") == 2_329_101
+
+    def test_sec_mapping_wins_when_both_providers_present(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """SEC stays authoritative; OpenFIGI is the approved fallback
+        (settled decision 2026-05-22).
+
+        Both rows seeded ``is_primary=FALSE`` and the OpenFIGI row inserted
+        FIRST, so neither the ``is_primary DESC`` nor the
+        ``external_identifier_id ASC`` tiebreak can produce the right answer.
+        Only the provider CASE can — without that isolation the test would
+        pass against a query that had lost the provider ordering entirely.
+        """
+        from app.services.n_port_ingest import _resolve_cusip_to_instrument_id
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_329_110, symbol="SECX")
+        _seed_instrument(conn, iid=2_329_111, symbol="FIGX")
+        _seed_cusip_mapping_for_provider(
+            conn, instrument_id=2_329_111, cusip="02329U102", provider="openfigi"
+        )
+        _seed_cusip_mapping_for_provider(
+            conn, instrument_id=2_329_110, cusip="02329U102", provider="sec"
+        )
+        conn.commit()
+
+        assert _resolve_cusip_to_instrument_id(conn, "02329U102") == 2_329_110
+
+    def test_unmapped_cusip_still_returns_none(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The widening must not turn an unmapped CUSIP into a match — an
+        unresolvable holding is still dropped, never attributed to an
+        arbitrary instrument."""
+        from app.services.n_port_ingest import _resolve_cusip_to_instrument_id
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_329_120, symbol="NOPE")
+        conn.commit()
+
+        assert _resolve_cusip_to_instrument_id(conn, "999999999") is None
+
+    def test_third_provider_is_still_refused(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The widening is to a named pair, not to "any provider". Only
+        ``sec`` and ``openfigi`` are approved CUSIP resolution sources; a row
+        written by some future provider must not resolve until that decision
+        is made explicitly."""
+        from app.services.n_port_ingest import _resolve_cusip_to_instrument_id
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_329_130, symbol="THIRD")
+        _seed_cusip_mapping_for_provider(
+            conn, instrument_id=2_329_130, cusip="02329U203", provider="etoro"
+        )
+        conn.commit()
+
+        assert _resolve_cusip_to_instrument_id(conn, "02329U203") is None
+
+
+def test_blockholders_no_longer_exposes_a_narrow_cusip_resolver() -> None:
+    """#2329 DELETED ``blockholders._resolve_cusip_to_instrument_id`` rather
+    than widening it: it had no callers, having been superseded by
+    ``_resolve_issuer_to_instrument_id`` at #1628 (``c4f1d2e9``), which reads
+    both providers AND adds the single-class CIK fallback.
+
+    This guard is about reintroduction, not deletion. A narrow CUSIP resolver
+    sitting next to the correct one is the #2213 trap: the next caller reaches
+    for the name that matches what they are resolving.
+    """
+    from app.services import blockholders
+
+    assert not hasattr(blockholders, "_resolve_cusip_to_instrument_id")
+    assert hasattr(blockholders, "_resolve_issuer_to_instrument_id")

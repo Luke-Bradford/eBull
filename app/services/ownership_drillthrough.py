@@ -230,6 +230,23 @@ def _blockholder_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pip
         # issuer_cusip → external_identifiers as a fallback so the
         # tombstone count reflects the full state. Codex pre-push
         # review caught the gap.
+        #
+        # Provider filter widened to ``('sec', 'openfigi')`` by #2329,
+        # matching the 13F unresolved-count query above (widened at
+        # #1233 PR-1b) and every other CUSIP consumer. Measured LATENT
+        # on dev 2026-09-19: of the 9,861 ``blockholder_filings`` rows
+        # with ``instrument_id IS NULL``, **26** carry a ``sec`` CUSIP
+        # mapping and **0** an OpenFIGI-only one, so today the widening
+        # changes no count. It is fixed because the narrowing had no
+        # reason, not because it is currently biting. (The 26 are a
+        # DIFFERENT defect — a ``sec`` mapping exists and the row was
+        # still left NULL; see #2329.)
+        #
+        # 1:N safety: 75 CUSIPs carry both providers, so the join can
+        # now emit two rows per filing. Both queries absorb that by
+        # construction — this one feeds ``IN (SELECT DISTINCT
+        # accession_number …)`` and the body count below is a
+        # ``COUNT(DISTINCT r.accession_number)``. No LATERAL needed.
         cur.execute(
             """
             SELECT COUNT(*) AS tombstone_count
@@ -243,7 +260,7 @@ def _blockholder_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pip
                   FROM blockholder_filings b2
                   JOIN external_identifiers ei
                     ON ei.identifier_value = b2.issuer_cusip
-                   AND ei.provider = 'sec'
+                   AND ei.provider IN ('sec', 'openfigi')
                    AND ei.identifier_type = 'cusip'
                   WHERE b2.instrument_id IS NULL
                     AND ei.instrument_id = %s
@@ -261,7 +278,7 @@ def _blockholder_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pip
             JOIN blockholder_filings b ON b.accession_number = r.accession_number
             LEFT JOIN external_identifiers ei
               ON ei.identifier_value = b.issuer_cusip
-             AND ei.provider = 'sec'
+             AND ei.provider IN ('sec', 'openfigi')
              AND ei.identifier_type = 'cusip'
             WHERE r.document_kind = 'primary_doc_13dg'
               AND (b.instrument_id = %s OR (b.instrument_id IS NULL AND ei.instrument_id = %s))
