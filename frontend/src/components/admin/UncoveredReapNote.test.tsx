@@ -50,6 +50,34 @@ describe("UncoveredReapNote", () => {
     expect(text).not.toMatch(/lost work|data loss/i);
   });
 
+  it("caps what it renders and says so, per the array-size rule", () => {
+    // `.claude/skills/frontend/api-shape-and-types.md` — #2178 froze the tab
+    // with a `.map()` over an uncapped API array. The backend applies NO limit
+    // here, so the component cap is the only bound. `job_name` is
+    // unconstrained TEXT, so a malformed producer is how this gets long.
+    const many: UncoveredReapResponse[] = Array.from({ length: 40 }, (_, i) => ({
+      job_name: `job_${String(i).padStart(2, "0")}`,
+      events: 100 - i,
+      runs: 100 - i,
+    }));
+
+    render(<UncoveredReapNote entries={many} />);
+
+    const text = screen.getByTestId("uncovered-reap-note").textContent ?? "";
+    expect(text).toContain("25 of 40 shown");
+    expect(text).toContain("job_00"); // loudest kept
+    expect(text).not.toContain("job_39"); // quietest dropped
+    // ⚠ The COUNT is the pre-cap total — capping the render must not silently
+    // shrink what the operator is told exists.
+    expect(text).toContain("40 jobs have");
+    expect(uncoveredReapSummary(many)).toBe("40 jobs not listed");
+  });
+
+  it("does not say 'shown' when nothing was dropped", () => {
+    render(<UncoveredReapNote entries={TWO} />);
+    expect(screen.getByTestId("uncovered-reap-note").textContent).not.toContain("shown");
+  });
+
   it("renders nothing when measured and empty", () => {
     render(<UncoveredReapNote entries={[]} />);
     expect(screen.queryByTestId("uncovered-reap-note")).toBeNull();

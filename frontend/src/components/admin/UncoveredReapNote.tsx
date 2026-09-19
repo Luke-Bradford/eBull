@@ -39,6 +39,25 @@ import type { UncoveredReapResponse } from "@/api/types";
  */
 const RECENT_REAP_WINDOW_DAYS = 7;
 
+/**
+ * Render cap, per the array-size rule in
+ * `.claude/skills/frontend/api-shape-and-types.md` (#2178: a `.map()` over an
+ * uncapped API array froze the tab with 29,281 rows).
+ *
+ * The backend applies NO limit — it returns every off-table job at or above
+ * the chip floor — so this is the only bound, which is exactly the case the
+ * rule is written for. It sits far above any plausible residual (the whole
+ * `job_runs` corpus carried 78 distinct job names over 30 days, and only those
+ * clearing the floor in 7 can qualify), so a later server-side limit cannot be
+ * silently truncated here. `job_name` is unconstrained `TEXT`, so a malformed
+ * or legacy producer is the realistic way this list gets long — not normal
+ * operation.
+ *
+ * The pre-cap total needs no field of its own: the backend sends the whole
+ * array, so `entries.length` IS the total.
+ */
+const MAX_RENDERED_JOBS = 25;
+
 interface UncoveredReapNoteProps {
   /**
    * ⚠ `null`/absent means "not evaluated" — the backend does not compute the
@@ -56,6 +75,9 @@ interface UncoveredReapNoteProps {
 export function UncoveredReapNote({ entries }: UncoveredReapNoteProps) {
   if (!entries || entries.length === 0) return null;
 
+  const shown = entries.slice(0, MAX_RENDERED_JOBS);
+  const hidden = entries.length - shown.length;
+
   return (
     <p
       className="mb-3 border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400"
@@ -68,7 +90,7 @@ export function UncoveredReapNote({ entries }: UncoveredReapNoteProps) {
       {entries.length} {entries.length === 1 ? "job has" : "jobs have"} no process row
       here and had runs written off by the orphan reaper in the last{" "}
       {RECENT_REAP_WINDOW_DAYS} days —{" "}
-      {entries.map((entry, index) => (
+      {shown.map((entry, index) => (
         <span key={entry.job_name}>
           {index > 0 ? ", " : ""}
           <code className="font-mono">{entry.job_name}</code> ({entry.events}{" "}
@@ -76,6 +98,12 @@ export function UncoveredReapNote({ entries }: UncoveredReapNoteProps) {
           {entry.runs === 1 ? "run" : "runs"})
         </span>
       ))}
+      {hidden > 0 ? (
+        <>
+          {" "}
+          ({shown.length} of {entries.length} shown, loudest first)
+        </>
+      ) : null}
       .
     </p>
   );

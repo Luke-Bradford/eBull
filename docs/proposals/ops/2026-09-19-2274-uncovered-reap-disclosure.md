@@ -211,6 +211,16 @@ them onto its own rows.
    Renders nothing when the list is empty or `null`. React key is `job_name`, unique by
    construction (the aggregate groups by it).
 
+   ⚠ **The render is capped at 25 entries with an "N of M shown" disclosure**, per the
+   array-size rule in `.claude/skills/frontend/api-shape-and-types.md` (#2178: a `.map()`
+   over an uncapped API array committed ~150k DOM nodes and froze the tab). The backend
+   applies **no** limit, so the component cap is the only bound — which is precisely the
+   case that rule is written for — and 25 sits far above any plausible residual, so a later
+   server-side limit cannot be silently truncated by the client. `job_name` is unconstrained
+   `TEXT`, so a malformed or legacy producer is the realistic way the list gets long. The
+   **count** in both the note and the section summary stays the PRE-CAP total; capping the
+   render must not shrink what the operator is told exists.
+
 ### Not verdict inputs
 
 Same rule as `recent_reap_events` on `ProcessRow`: these do **not** feed `compute_verdict`,
