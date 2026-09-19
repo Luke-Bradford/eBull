@@ -1254,13 +1254,18 @@ def _build_row(
     # outranks). Probe is cheap (single EXISTS) and bounded to the 30-min window.
     liveness_kick_in_flight = _has_inflight_liveness_kick(conn, job_name=job.name, now=now)
 
-    can_cancel = (
-        active_run is not None and active_run.run_id is not None and process_status == "running"
-        # short-runners (heartbeat etc.) are not worth cooperative-cancel;
-        # spec marks them can_cancel=False but PR3 doesn't know which jobs
-        # cooperate — leave True universally and let PR8 trim the list
-        # once the per-job checkpoint catalogue is wired.
-    )
+    # #2274 — gated on the ACTIVE RUN, not on ``process_status``, because
+    # ``_status_for`` returns ``disabled`` under the kill switch BEFORE it
+    # consults ``has_running_row`` and a halt does not end a run already in
+    # flight. An active row implies ``status in {running, disabled}``, so
+    # dropping the old ``== "running"`` term widens this on exactly two inputs:
+    # the switch being on, and ``_kill_switch_active`` failing CLOSED on a
+    # missing singleton. Starting work stays gated (``can_iterate`` /
+    # ``can_full_wash`` / the trigger endpoint). Still True for short-runners
+    # the spec would exclude — that list needs the unwired checkpoint
+    # catalogue, and no generic scheduled job polls ``is_stop_requested`` yet.
+    # docs/proposals/ops/2026-09-19-2274-cancel-on-halted-wedge.md
+    can_cancel = active_run is not None and active_run.run_id is not None
 
     return ProcessRow(
         process_id=job.name,

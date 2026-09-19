@@ -16,7 +16,7 @@ chips can fire on the same row simultaneously. Source of truth:
 | `schedule missed` | `schedule_missed` | Cron should have fired by now and didn't (>60s past `expected_fire_at`). Scheduled-job mechanism only. Suppressed while the row is actively `running`. | Check the jobs process is up. If it is, check whether another job is holding a singleton or shared-source lock. |
 | `source has fresh data` | `watermark_gap` | `data_freshness_index.expected_next_at` for this process's source is in the past (>60s). We're behind the source. Scheduled-job + ingest-sweep only; bootstrap NEVER watermark-gaps. Suppressed while running. | Click *Iterate*. If Iterate doesn't clear the gap, open the row's Logs tab — usually a structured upstream error (rate limit, 404). |
 | `queue stuck` | `queue_stuck` | A `pending_job_requests` row for this process has `status='dispatched'` and worker pickup older than 30 minutes. The dispatcher hasn't observed terminal status from the worker. Applies to all mechanisms. | If the worker is alive (heartbeat fresh), wait — drain may be slow. If the worker is wedged or restarted, see [Jobs-process restart procedure](#jobs-process-restart-procedure). |
-| `no progress` | `mid_flight_stuck` | The active run hasn't bumped `last_progress_at` in longer than the per-process threshold. Fires whenever an ACTIVE RUN exists — including while the kill switch is on. | Decide cooperative cancel vs jobs-process restart based on the per-process threshold (see below). ⚠ Under a halt, Cancel is unavailable — see the note under the action ladder. |
+| `no progress` | `mid_flight_stuck` | The active run hasn't bumped `last_progress_at` in longer than the per-process threshold. Fires whenever an ACTIVE RUN exists — including while the kill switch is on. | Decide cooperative cancel vs jobs-process restart based on the per-process threshold (see below). Cancel is available under a halt too (#2274, 2026-09-19) — but read the two limits under the action ladder before relying on it. |
 
 The chip is rendered with the elapsed-since-heartbeat appended on the
 `mid_flight_stuck` chip (e.g. "no progress 7m"), computed client-side
@@ -84,13 +84,32 @@ process registry).
    is genuinely wedged — it can't reach a checkpoint.
 4. **Jobs-process restart.** See [Jobs-process restart procedure](#jobs-process-restart-procedure).
 
-⚠⚠ **Steps 2 and 3 are unavailable while the kill switch is on.**
-`scheduled_adapter` gates `can_cancel` on `process_status == "running"`, and
-`_status_for` returns `disabled` under a halt — so a halted row showing
-`no progress` (reachable only since #2274; see the chip table) has no Cancel
-affordance. Go to step 4, or lift the switch first if a cooperative cancel is
-what you want. Making Cancel reachable while halted is a behaviour change on
-an operator control path and has deliberately NOT been made.
+✅ **Steps 2 and 3 now work while the kill switch is on (#2274, 2026-09-19).**
+This section previously said the opposite, and that was a real gap rather than a
+policy: `scheduled_adapter` gated `can_cancel` on `process_status == "running"`
+while `_status_for` returns `disabled` under a halt, so every in-flight run lost
+its Cancel button for the whole of the halt that ran 2026-06-28 → 2026-09-18
+(`SELECT changed_at, old_value, new_value FROM runtime_config_audit WHERE field =
+'kill_switch' ORDER BY changed_at` is the switch's history). The flag
+is now gated on the active run, matching the endpoint — which never read the kill
+switch. **Starting work is still blocked under a halt** (Run now / Iterate /
+Full-wash stay disabled, and the trigger endpoint still refuses): stopping is not
+starting.
+
+⚠⚠ **Step 3 does not resolve for a generic scheduled job, and step 4 does not
+honour the request.** Two limits worth knowing before you climb the ladder:
+
+- `observed_at` is set by a worker polling `is_stop_requested`, and today only
+  the **bootstrap orchestrator** and the **sync orchestrator** do that. A generic
+  scheduled job never observes the signal, so step 3's wait always expires —
+  Cancel records operator intent (`job_runs.cancel_requested_at`, surfaced as
+  `is_cancelling`) and the work continues until it finishes or the process
+  restarts.
+- The restart in step 4 does **not** complete the cancel.
+  `reap_orphaned_job_runs` does not consult `cancel_requested_at`: it writes
+  `failure`, and the normal retry path may re-enqueue the same work under a new
+  `run_id` that the stop row does not target. If you need the work to stay
+  stopped, check for a re-enqueue after the restart.
 
 Do NOT issue a second cancel as an "upgrade" to terminate. The
 partial-unique index `process_stop_requests_active_unq` (sql/135)

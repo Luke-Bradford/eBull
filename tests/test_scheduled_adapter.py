@@ -28,6 +28,18 @@ def _ensure_kill_switch_off(conn: psycopg.Connection[tuple]) -> None:
     )
 
 
+def _ensure_kill_switch_on(conn: psycopg.Connection[tuple]) -> None:
+    conn.execute(
+        """
+        INSERT INTO kill_switch (id, is_active, activated_at, activated_by, reason)
+        VALUES (TRUE, TRUE, now(), 'test', 'pause everything')
+        ON CONFLICT (id) DO UPDATE
+        SET is_active = TRUE, activated_at = now(), activated_by = 'test',
+            reason = 'pause everything'
+        """
+    )
+
+
 def _make_run(
     conn: psycopg.Connection[tuple],
     *,
@@ -213,6 +225,105 @@ def test_kill_switch_active_disables_row(
     assert row.status == "disabled"
     assert row.can_iterate is False
     assert row.can_full_wash is False
+
+
+def test_halted_row_with_a_run_in_flight_keeps_cancel(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2274 — a halt does not end a run that started before it.
+
+    ``_status_for`` returns ``disabled`` under the kill switch BEFORE it
+    consults ``has_running_row``, so gating ``can_cancel`` on
+    ``process_status == "running"`` silently withdrew the stop affordance from
+    every in-flight run for the whole 82-day halt of 2026-06-28..09-18. The
+    cancel endpoint accepts this request (it reads no kill switch), so the
+    greyed button was the only thing refusing it.
+
+    The two START prohibitions are asserted on the SAME row: this is not "the
+    kill switch no longer gates the process", it is "stopping is not starting".
+    """
+    _ensure_kill_switch_on(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_FUNDAMENTALS_SYNC, status="running")
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_FUNDAMENTALS_SYNC)
+    assert row is not None
+    assert row.status == "disabled"
+    assert row.active_run is not None
+    assert row.can_cancel is True
+    assert row.can_iterate is False
+    assert row.can_full_wash is False
+
+
+def test_halted_row_without_a_run_offers_no_cancel(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2274 — the halt does not MINT an affordance where there is no run.
+
+    Pins the other half of the ``can_cancel`` contract: false iff there is no
+    active run, which is exactly what the FE tooltip ("No active run to
+    cancel.") asserts.
+    """
+    _ensure_kill_switch_on(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="success", finished=True)
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "disabled"
+    assert row.active_run is None
+    assert row.can_cancel is False
+
+
+def test_missing_kill_switch_singleton_still_offers_cancel(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2274 — the fail-closed read is a SECOND newly-reachable input.
+
+    ``_kill_switch_active`` returns True when the singleton is missing, by
+    design ("honest under configuration corruption"), so the row reads
+    ``disabled`` for a reason that is not an operator halt. Cancel must survive
+    that too — a stop action is the one control that should outlive a state you
+    cannot read. Pinned deliberately rather than acquired as a side effect.
+    """
+    ebull_test_conn.execute("DELETE FROM kill_switch")
+    _make_run(ebull_test_conn, job_name=JOB_FUNDAMENTALS_SYNC, status="running")
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_FUNDAMENTALS_SYNC)
+    assert row is not None
+    assert row.status == "disabled"
+    assert row.can_cancel is True
+
+
+def test_retry_in_flight_reads_running_but_offers_no_cancel(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """#2274 — the branch that makes dropping the status term safe.
+
+    Auto-hide-on-retry is the one path to ``status == "running"`` with no
+    active ``job_runs`` row. ``can_cancel`` must stay False there, and it does
+    because the active-run terms exclude it — not because of the status term
+    that was removed. Pinned so a future change to ``_status_for`` cannot
+    quietly re-couple the two.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _make_run(ebull_test_conn, job_name=JOB_RETRY_DEFERRED, status="failure", finished=True)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO pending_job_requests
+            (request_kind, job_name, process_id, mode, status)
+        VALUES ('manual_job', %s, %s, 'iterate', 'pending')
+        """,
+        (JOB_RETRY_DEFERRED, JOB_RETRY_DEFERRED),
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert row.status == "running"
+    assert row.active_run is None
+    assert row.can_cancel is False
 
 
 def test_full_wash_fence_disables_iterate_and_full_wash(
