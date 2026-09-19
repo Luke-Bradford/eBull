@@ -8700,3 +8700,88 @@ original, because the gate now *looked* like a bound.
   `docs/proposals/execution/2026-09-19-2603-core-lane-starvation.md` (the root-cause table
   carries a `last_progress_at` vs `finished_at` column);
   `tests/test_etoro_core_lane_starvation.py` (module docstring records the corroboration).
+
+### Before adding a per-entity POLICY field, read the registry's EXISTING policy fields — the rule you need, and its counterexample, is usually already written on a sibling
+
+- First seen in: #2603 (2026-09-19), Codex checkpoint 1, attacking the admission rule for
+  re-arming a scheduled fire lost to a busy lane (PR #3217).
+- Symptom: the spec admitted any job whose cadence gap exceeded the first retry delay,
+  presented as a derived "dominance argument" rather than a picked threshold. It reads as
+  principled. It admits **`execute_approved_orders`** — `Cadence.daily(hour=6, minute=30)`,
+  `catch_up_on_boot=False` — whose registry entry states the opposite contract: *"order
+  execution must only happen at the scheduled time, not as a surprise catch-up hours
+  later."* The thing the rule would have re-fired late is **order submission**.
+- ⚠⚠ The refutation was already in the file being edited, **30 lines above the insertion
+  point**, on `ScheduledJob.misfire_grace_seconds`: *"Deliberately OPT-IN per job, NOT
+  derived from `cadence.kind`. A cadence-wide rule looks principled and is unsafe"* — and
+  it names the same job as its example. A previous session had written the exact lesson,
+  against the exact temptation, on the exact class of field.
+- Generalises to: any new per-job / per-instrument / per-source policy flag. These fields
+  cluster in one dataclass precisely because they encode the same kind of judgement, so a
+  sibling field is the highest-yield place to look for both the governing predicate and
+  the entity that breaks a tempting shortcut. Same family as #2274 `5a3045b3` ("when a
+  finding's rationale is a property of a shared helper, sweep the file for the helper's
+  other readers") — there the rationale was 30 lines away too.
+- Prevention: before writing a new policy field, **read every existing field on the same
+  dataclass and its docstring**. If one of them already refuses a derived/global rule, the
+  new field inherits that refusal unless you can say specifically why it does not. Then
+  pin the exclusion with a TEST naming the entity — a registry comment is documentation,
+  a test is enforcement.
+- Enforced in: this entry; `app/workers/scheduler.py::ScheduledJob.rearm_on_lost_fire`
+  (its docstring states the opt-in reason and names `execute_approved_orders`);
+  `tests/test_job_lane_rearm.py::test_execute_approved_orders_is_never_rearmed` and
+  `::test_exactly_the_two_core_producers_opt_in`;
+  `docs/specs/ops/2026-09-19-lane-busy-fire-rearm.md` §Admission.
+
+### An OPERATOR-VISIBLE counter is not spare storage — do not repurpose it for a second quantity
+
+- First seen in: #2603 (2026-09-19), Codex checkpoint 2 round 1, on PR #3217.
+- Symptom: a new dispatch cap needed a count of re-dispatches. `job_runs.attempt` was
+  already an integer on the right row and already read by the retry path, so the first
+  implementation incremented it per dispatch. But `attempt` means *"this run's position in
+  the consecutive-failure streak"* (`ops_monitor._retry_plan`) and is **published** —
+  `app/api/processes.py` renders it to the operator as "attempt N" on a retrying row. The
+  first failed run would have started reading attempt 2 before any second run existed, and
+  two terminal rows could both report attempt 2.
+- Generalises to: any reuse of an existing column whose value reaches a UI, an export, an
+  audit payload or an alert. Type-compatible is not meaning-compatible, and the corruption
+  is invisible in tests that only assert the new behaviour.
+- Prevention: before storing a new quantity in an existing column, `grep` for its READERS,
+  not just its writers, and check whether any of them is operator-facing. Where a durable
+  counter is genuinely needed, prefer a record that already exists for that exact event —
+  here every dispatch already writes one `decision_audit` row, so counting those needed no
+  new column and could not disagree with what happened. ⚠ Such a derived count is only as
+  good as its atomicity and its retention: state both. The count here is trustworthy
+  because the publish and the audit INSERT share one `conn.transaction()`, and its
+  retention caveat (a future `decision_audit` pruning job) is written at the call site
+  rather than assumed away.
+- Enforced in: this entry; `app/services/job_retry.py::_dispatch_count` and `::_reschedule`
+  (both docstrings state why `attempt` is left alone);
+  `tests/services/test_job_retry.py::test_redispatch_is_bounded_by_the_attempt_cap`
+  (asserts `attempt` is UNCHANGED at 1 after four dispatches).
+
+### When a stored KEY NAME changes, the reader must match BOTH until the old rows are gone
+
+- First seen in: #2603 (2026-09-19), Codex checkpoint 3 — found while verifying an
+  unrelated rebuttal, not by the reviewer that prompted the change.
+- Symptom: the retry audit's evidence key was renamed `failed_run_id` → `source_run_id`,
+  correctly, because "failed" became untrue once a re-armed *skip* could also be
+  dispatched. The new dispatch-cap reader then matched only `source_run_id`, so the **167**
+  existing audit rows were invisible to it and any run carrying pre-change history would
+  have restarted its cap from zero and received a full extra set of dispatches.
+- ⚠ The reachable set measured **0** at the time (no currently-armed run had legacy rows),
+  which is safety BY ABSENCE and is exactly the condition under which this class ships: the
+  rename is correct, the tests are green, and the gap is invisible until old data meets new
+  code.
+- Generalises to: renaming any key inside a JSONB payload, an enum value, a status string
+  or a reason code that PRIOR ROWS still carry. Unlike a column rename, nothing in the
+  schema forces the reader to be updated, and no migration is prompted.
+- Prevention: when renaming a stored key, **count the rows still carrying the old one** and
+  either backfill them or make every reader match both (`COALESCE(new, old)`). Write the
+  measured legacy count into the code comment so a later reader knows when the compatibility
+  branch can go. A test must exercise the LEGACY key specifically — a test written against
+  the new key passes either way.
+- Enforced in: this entry; `app/services/job_retry.py::_dispatch_count` (matches both keys,
+  records the 167/0 measurement);
+  `tests/services/test_job_retry.py::test_dispatch_cap_counts_legacy_audit_rows_too`
+  (exhausts the cap using ONLY old-key rows).
