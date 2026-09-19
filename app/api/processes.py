@@ -225,9 +225,12 @@ class UncoveredReapResponse(BaseModel):
 
     #2274. "Uncovered" means EXACTLY one thing: no row in this response whose
     ``process_id`` equals ``job_name``. It does NOT claim the job has no
-    operator surface anywhere — the sync-orchestrator layer jobs are reachable
-    through ``/sync/layers/v2`` and the DAG drill-in, which carry data freshness
-    and layer execution state rather than reap recurrence.
+    operator surface anywhere — most of the residual is sync-orchestrator layer
+    jobs, reachable through ``/sync/layers/v2`` and the DAG drill-in, which
+    carry data freshness rather than reap recurrence. ⚠ Nor does it promise
+    one: the filter is "any ``job_name`` with no row", so an outside-DAG job
+    can enter the list, and operator copy must not name a surface it might not
+    have.
 
     ``events`` is reap incidents (one boot's batch is one event); ``runs`` is the
     ``job_runs`` rows those incidents wrote off. Both, for the same reason

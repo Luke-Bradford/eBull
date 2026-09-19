@@ -2,21 +2,26 @@
  * #2274 — the Processes table's own coverage disclosure.
  *
  * The per-row reap chip (`ProcessRow`) answers "is this job repeatedly losing
- * runs to the orphan reaper?" only for jobs that HAVE a row. Measured at the
- * shipped window and floor on 2026-09-19, the table chipped ONE job
- * (`sec_filing_documents_ingest`, 4 events / 7d) and silently hid TWO that
- * clear the same bar — `daily_candle_refresh` (11) and `daily_portfolio_sync`
- * (4). The loudest job in the corpus was one of the hidden ones.
+ * runs to the orphan reaper?" only for jobs that HAVE a row. When this shipped
+ * the table was chipping one job and silently hiding two that cleared the same
+ * bar, one of them the loudest in the corpus. The census is deliberately NOT
+ * written down here — it describes a moving seven-day window and would go
+ * stale in the place a reader trusts most. It is measured, with the query, in
+ * `docs/proposals/ops/2026-09-19-2274-uncovered-reap-disclosure.md`.
  *
  * ⚠ Tone is INFORMATIONAL, never alarm. #2274's binding constraint is "must
  * not train the operator to ignore it", and a reap is largely a deploy
  * artefact: #1831's measured bug was ~42 halted jobs painted red, burying the
  * real failures. Muted slate, same register as the per-row chip.
  *
- * ⚠ The copy says "not in this table", NEVER "nowhere else". These jobs are
- * reachable through `/sync/layers/v2` and the orchestrator DAG — those
- * surfaces carry data freshness, which is a different axis from reap
- * recurrence, but they are not nothing.
+ * ⚠ The copy says "not in this table", and says nothing at all about where
+ * else a job might appear. Most of the residual is sync-orchestrator layer
+ * jobs, which ARE reachable through `/sync/layers/v2` and the DAG drill-in —
+ * but the backend filter is "any job_name with no process row", so an
+ * outside-DAG job (`strategy_backtest_run`), or one recently renamed or
+ * retired, can enter the list too. Naming a surface the operator would then
+ * fail to find is the same overclaim in the opposite direction, so the copy
+ * makes no promise either way.
  *
  * ⚠ And it does not claim lost WORK. A reaped row may have committed its
  * writes before the worker died, and the reaper's auto-retry may have re-run
@@ -68,8 +73,8 @@ export function UncoveredReapNote({ entries, partial }: UncoveredReapNoteProps) 
           {entry.runs === 1 ? "run" : "runs"})
         </span>
       ))}
-      . They are reachable elsewhere — sync layers, the orchestrator DAG — but those
-      surfaces report data freshness, not repeated reaps.
+      . Some of these have other surfaces, but those report data freshness rather
+      than repeated reaps.
     </p>
   );
 }

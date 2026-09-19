@@ -801,11 +801,12 @@ def uncovered_reap_counts(
 
     The floor is ``RECENT_REAP_CHIP_FLOOR``, the same constant the per-row chip
     uses, so "would chip if it had a row" is literally this function's
-    definition and the page cannot show two disagreeing thresholds. Measured on
-    2026-09-19 at that floor: one covered job chips
-    (``sec_filing_documents_ingest``, 4 events / 7 d) against two uncovered ones
-    that clear the same bar — ``daily_candle_refresh`` (11) and
-    ``daily_portfolio_sync`` (4).
+    definition and the page cannot show two disagreeing thresholds.
+
+    ⚠ The census that motivated this is NOT written down here — it describes a
+    moving 7-day window and would go stale silently. It is measured, with the
+    query that reproduces it, in
+    ``docs/proposals/ops/2026-09-19-2274-uncovered-reap-disclosure.md``.
 
     ⚠ This re-executes the aggregate ``list_rows`` already ran and discarded.
     Threading that copy out would couple the adapter's internals to snapshot

@@ -334,19 +334,17 @@ class UncoveredReap:
 
     #2274. "Uncovered" means EXACTLY one thing: no row in this snapshot whose
     ``process_id`` equals this ``job_name``. It is NOT a claim that the job has
-    no operator surface at all — the 13 sync-orchestrator layer jobs are
-    reachable through ``/sync/layers/v2`` and the DAG drill-in, and
+    no operator surface at all — most of the residual is sync-orchestrator
+    layer jobs, reachable through ``/sync/layers/v2`` and the DAG drill-in, and
     ``daily_cik_refresh`` / ``daily_financial_facts`` are invoked by
     ``fundamentals_sync``, which does have a row. Those surfaces carry data
     freshness and layer execution state, which is a DIFFERENT axis from reap
     recurrence: a job stuck ``running`` forever shows up there only once its
     layer's data goes stale.
 
-    Measured at the shipped window and the shipped floor on 2026-09-19: the
-    Processes table chips ONE job (``sec_filing_documents_ingest``, 4 events /
-    7 d) and hides TWO that clear the same bar — ``daily_candle_refresh`` (11)
-    and ``daily_portfolio_sync`` (4). The loudest job in the corpus is one of
-    the hidden ones.
+    ⚠ Equally, the filter is "any ``job_name`` with no row", so an outside-DAG
+    job or one recently renamed can enter the list. Neither this type nor the
+    operator copy may promise a particular other surface.
 
     ``events`` and ``runs`` carry the same two numbers ``ProcessRow`` does, for
     the same reason: one boot reaps every orphaned row in a single UPDATE, so

@@ -2289,10 +2289,14 @@ export interface ProcessRowResponse {
  * #2274 — one job that would carry the reap chip but has no row in `rows`.
  *
  * "Uncovered" means exactly one thing: no row whose `process_id` equals
- * `job_name`. It does NOT claim the job has no operator surface anywhere —
- * the sync-orchestrator layer jobs are reachable through `/sync/layers/v2`
- * and the DAG drill-in, which carry data freshness rather than reap
- * recurrence. The copy must say "not in this table", never "nowhere else".
+ * `job_name`. Most of the residual is sync-orchestrator layer jobs, which are
+ * reachable through `/sync/layers/v2` and the DAG drill-in (those carry data
+ * freshness, not reap recurrence) — but the filter is "any job_name with no
+ * row", so an outside-DAG or recently-renamed job can enter the list.
+ *
+ * ⚠ So the copy says "not in this table" and promises nothing about where
+ * else to look. Both overclaims are defects: "nowhere else" is false for the
+ * layer jobs, and "look at the sync layers" is false for the rest.
  */
 export interface UncoveredReapResponse {
   job_name: string;

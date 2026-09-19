@@ -25,15 +25,19 @@ describe("UncoveredReapNote", () => {
     expect(note.textContent).toContain("4 reaps");
   });
 
-  it("says 'not in this table', never 'nowhere else'", () => {
-    // These jobs ARE reachable through the sync layers and the orchestrator
-    // DAG — those surfaces carry data freshness, which is a different axis
-    // from reap recurrence. Overclaiming would be the defect.
+  it("claims only 'not in this table', and names no other surface", () => {
+    // ⚠ BOTH directions are overclaims, and the first draft shipped the
+    // second one. "Nowhere else" is false for the sync-orchestrator layer
+    // jobs, which do have a layers/DAG surface. "Look at the sync layers" is
+    // false for the rest — the backend filter is "any job_name with no row",
+    // so an outside-DAG job like `strategy_backtest_run` can enter the list,
+    // and the operator would go looking for a surface that does not exist.
     render(<UncoveredReapNote entries={TWO} partial={false} />);
 
     const text = screen.getByTestId("uncovered-reap-note").textContent ?? "";
     expect(text).toContain("Not in this table");
-    expect(text).toContain("reachable elsewhere");
+    expect(text).toContain("data freshness rather than repeated reaps");
+    expect(text).not.toMatch(/sync layer|orchestrator|DAG/i);
   });
 
   it("does not claim lost work", () => {
