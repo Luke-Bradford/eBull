@@ -38,6 +38,29 @@ export function positionsOutsideStrategyPnl(
   return positions.filter((position) => position.strategy_id === null);
 }
 
+/** How many distinct entries `namedList` will name before counting the rest. */
+export const NAMED_LIST_LIMIT = 3;
+
+/**
+ * Distinct `values`, in first-seen order, bounded — the overflow COUNTED, never
+ * dropped (review NITPICK on PR #3226: an unbounded comma list can run a caveat
+ * sentence off the page).
+ *
+ * ⚠ The overflow is stated rather than truncated silently. A list that stops at
+ * three and says nothing reads as "these are all of them", which is the same
+ * class of defect as the total this caveat exists to qualify — a figure that
+ * looks complete while covering a subset. `docs/review-prevention-log.md`'s
+ * no-silent-caps rule is the general form.
+ *
+ * Returns `[]` for no values, so the caller renders nothing rather than "0 of".
+ */
+export function namedList(values: readonly string[]): string[] {
+  const distinct = [...new Set(values)];
+  if (distinct.length <= NAMED_LIST_LIMIT) return distinct;
+  const named = distinct.slice(0, NAMED_LIST_LIMIT);
+  return [...named, `+${distinct.length - named.length} more`];
+}
+
 /**
  * Cross-strategy roll-up shared by both `/strategies` lenses (#2868).
  *

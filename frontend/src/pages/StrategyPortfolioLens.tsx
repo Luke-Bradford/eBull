@@ -27,7 +27,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
-import { aggregate, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
+import { aggregate, namedList, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
 import { number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
 import { useAsync } from "@/lib/useAsync";
@@ -403,8 +403,18 @@ export function StrategyPortfolioLens() {
    *  asserts an exclusion, and asserting one before the list is known would be
    *  a claim about positions nobody has read yet. */
   const outsideStrategyPnl = positionsOutsideStrategyPnl(positions);
-  const excludedTitles = [...new Set(outsideStrategyPnl.map((position) => position.strategy_title))];
-  const excludedCurrencies = [...new Set(outsideStrategyPnl.map((position) => position.currency))];
+  const excludedTitles = namedList(outsideStrategyPnl.map((position) => position.strategy_title));
+  /** ⚠ Only the currencies this total genuinely CANNOT take, i.e. those that
+   *  differ from the pool's (review WARNING on PR #3226). The exclusion and the
+   *  conversion problem are two different facts: a position is left out because
+   *  it is outside the strategy roll-up — ALWAYS true of it — whereas currency
+   *  is only why it cannot simply be added, which is true only sometimes. The
+   *  core position is natively USD and the pre-#3222 fixture reports it as such,
+   *  so "reported in USD, which this USD total cannot convert" is a reachable
+   *  sentence, and it asserts an FX conflict that does not exist. */
+  const unconvertibleCurrencies = namedList(
+    outsideStrategyPnl.map((position) => position.currency).filter((code) => code !== pool.currency),
+  );
   /** ⚠ Bulk close operates on CLOSABLE positions only. A row whose trade is
    *  already `closing` disables its own Close button, and resubmitting it makes
    *  the endpoint reject — which, because the loop stops on first failure,
@@ -516,8 +526,10 @@ export function StrategyPortfolioLens() {
           <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
             ⚠ Excludes {formatNumber(outsideStrategyPnl.length, 0)}{" "}
             {outsideStrategyPnl.length === 1 ? "position" : "positions"} held outside the
-            strategies ({excludedTitles.join(", ")}): reported in {excludedCurrencies.join(" / ")},
-            which this {pool.currency} total cannot convert.
+            strategies ({excludedTitles.join(", ")}).
+            {unconvertibleCurrencies.length > 0
+              ? ` Reported in ${unconvertibleCurrencies.join(" / ")}, which this ${pool.currency} total cannot convert.`
+              : ""}
           </p>
         ) : null}
 

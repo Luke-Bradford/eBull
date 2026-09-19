@@ -806,6 +806,29 @@ describe("StrategyPortfolioLens", () => {
     expect(caveat.textContent).toContain("GBP");
   });
 
+  it("claims no conversion problem when the excluded position is already in the pool's currency", async () => {
+    // Review WARNING on PR #3226. The exclusion and the conversion problem are
+    // two different facts: a position is left out because it sits outside the
+    // strategy roll-up (always true of it), while currency is only why it
+    // cannot simply be added (true only sometimes). The core instrument is
+    // natively USD — `instruments.currency = 'USD'` for 3417,
+    // `openConversionRate = 1.0` — and this fixture reports it that way, so
+    // "reported in USD, which this USD total cannot convert" was reachable and
+    // asserted an FX conflict that does not exist.
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [
+        { strategy_trade_id: 2, broker_position_id: "3601264304", strategy_id: null, strategy_title: "Core / cash mandate", instrument_id: 3417, symbol: "SPY.RTH", currency: "USD", units: "0.296155", assigned_value: "225.04", current_price: "570.72", trade_status: "open" },
+      ],
+      live_quote_instrument_ids: [3417],
+    } as never);
+
+    renderLens();
+    const caveat = await screen.findByText(/Excludes 1 position held outside the strategies/);
+    // Still excluded, and still said so — only the CAUSE clause drops.
+    expect(caveat.textContent).toContain("Core / cash mandate");
+    expect(caveat.textContent).not.toContain("cannot convert");
+  });
+
   it("raises no exclusion caveat when every position belongs to a strategy the total sums", async () => {
     // The negative case, and the point of the test: a caveat that is always
     // present is not a signal. Same page, same tile, one field different.

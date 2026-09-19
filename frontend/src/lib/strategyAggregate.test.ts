@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
-import { aggregate, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
+import { NAMED_LIST_LIMIT, aggregate, namedList, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
 
 function strategy(overrides: {
   totalPnl?: string | null;
@@ -113,5 +113,26 @@ describe("positionsOutsideStrategyPnl", () => {
 
   it("returns nothing for an empty list, so an unresolved fetch asserts no exclusion", () => {
     expect(positionsOutsideStrategyPnl([])).toEqual([]);
+  });
+});
+
+describe("namedList", () => {
+  it("dedupes and keeps first-seen order", () => {
+    expect(namedList(["GBP", "USD", "GBP"])).toEqual(["GBP", "USD"]);
+  });
+
+  it("names up to the limit without an overflow entry", () => {
+    expect(namedList(["a", "b", "c"])).toEqual(["a", "b", "c"]);
+    expect(namedList(["a", "b", "c"])).toHaveLength(NAMED_LIST_LIMIT);
+  });
+
+  it("COUNTS the overflow rather than truncating it silently", () => {
+    // The point of the bound: a list that stops at three saying nothing reads
+    // as "these are all of them" — the defect class the caveat exists to fix.
+    expect(namedList(["a", "b", "c", "d", "e"])).toEqual(["a", "b", "c", "+2 more"]);
+  });
+
+  it("returns nothing for no values, so the caller renders nothing rather than '0 of'", () => {
+    expect(namedList([])).toEqual([]);
   });
 });
