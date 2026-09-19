@@ -8629,3 +8629,74 @@ original, because the gate now *looked* like a bound.
   parameter, and the unscoped fallback is reached only by the full-sync endpoint, only
   after its own scope finds nothing);
   `tests/test_processes_endpoints.py::test_cancel_hf_sync_never_reaches_another_scopes_run`.
+
+### A lane-split safety argument must name the actual throttle OBJECT — "the HTTP layer bounds it" is a claim about one provider, not about a vendor
+
+- First seen in: #2603 (2026-09-19), Codex checkpoint 1, on the spec that moved
+  `core_rebalance_observation` and `core_eligibility_refresh` off the shared `etoro`
+  `JobLock` lane.
+- Symptom: the spec's safety section read *"the shared process-wide HTTP clock in
+  `implementations/etoro.py` still bounds the combined request rate"*, copied in good
+  faith from `Lane`'s own docstring and from #2934's `etoro_quotes` split, which relies on
+  exactly that sentence and is correct. It is **false for this change**. #2934 moved
+  `quotes_refresh`, which uses `EtoroMarketDataProvider` and the module-level
+  `_ETORO_RATE_LIMIT_CLOCK` / `_ETORO_RATE_LIMIT_LOCK` — genuinely process-wide. Both jobs
+  here use `EtoroBrokerProvider`, whose `shared_ts` and `shared_throttle_lock` are
+  constructed **inside `__init__`** (`etoro_broker.py:287-288`), so two concurrent sessions
+  pace independently and the lane was the only thing serialising them. The sentence names
+  a real mechanism, in the same vendor's code, protecting a different call path — which is
+  why it survives a read-through and only dies on a grep for where the lock is built.
+- ⚠ The unmoved half matters too: the ScheduledJob comment being replaced said the shared
+  lane existed so "neither holds the broker session while the other is mid-batch". That
+  rationale was also unfounded, but only provably so from the SOURCE RULE — eToro
+  documents the eligibility endpoint as a dedicated 20/min quota "not shared with any
+  other endpoint" (`etoro_quota_lanes.LANES['B_eligibility']`), while the observation draws
+  on `E_account_read`. Two separate published budgets cannot exhaust each other. Rebutting
+  an author's stated intent needs that citation; "I could not see how it would break" does
+  not.
+- Generalises to: any de-serialisation (lane split, lock removal, parallelising a loop)
+  justified by "a lower layer already bounds this". Shared-throttle objects, connection
+  pools, rate clocks and caches are routinely per-instance in one class and per-process in
+  its sibling, and the class you are touching is the one that decides.
+- Prevention: before writing "the HTTP/transport layer bounds it", **grep for where the
+  lock or clock is CONSTRUCTED**, not where it is used — `rg -n 'Lock\(|= \[0\.0\]'` in the
+  provider — and state in the spec whether it is module-level or `__init__`-level. If it
+  is per-instance, the argument must instead come from the vendor's DOCUMENTED per-endpoint
+  budget (this repo encodes those in
+  `app/providers/implementations/etoro_quota_lanes.py`), with the requests-per-fire
+  arithmetic written down. Cite the lane key, not "the eToro budget".
+- Enforced in: this entry; `app/jobs/sources.py::Lane` (the `etoro_core_*` bullets carry
+  the per-instance warning and the quota-lane citation);
+  `app/workers/scheduler.py` (both ScheduledJob rows state which quota lane bounds them);
+  `docs/proposals/execution/2026-09-19-2603-core-lane-starvation.md` §2.
+
+### An `orphaned: reaped at boot` row's `finished_at` cannot bound how long anything was HELD — it is the reap time, and `last_progress_at` is the witness
+
+- First seen in: #2603 (2026-09-19), Codex checkpoint 1, attacking the discriminator that
+  attributed `core_rebalance_observation`'s `lane_busy` skips to `daily_candle_refresh`.
+- Symptom: the attribution joined each fire to any `daily_candle_refresh` row with
+  `started_at <= fire AND coalesce(finished_at, now()) >= fire` and reported 22/22. The
+  challenge was precise and correct in principle: **two of the four spanning sweeps end
+  `orphaned: reaped at boot`**, where `finished_at` is written by
+  `reap_orphaned_job_runs` at the next boot and says nothing about when the worker thread
+  died. A thread that died at 20:30 and was reaped at 23:45 produces a row that *looks*
+  like a 3.2-hour hold and released its advisory lock three hours earlier — session-scoped
+  advisory locks die with the connection. Every number in the table would still have been
+  internally consistent.
+- The claim survived, but only because a second column settles it: `last_progress_at` (the
+  #2274 heartbeat) was **3-4 seconds before `finished_at`** on both orphaned rows, so the
+  sweep was demonstrably alive — and therefore holding — right up to the reap.
+- Generalises to: any duration, occupancy, overlap or "was X running at time T" claim read
+  off `job_runs` intervals. The interval describes a ROW; only a heartbeat describes the
+  THREAD. Same family as "group by `status` before reading a duration column as a runtime"
+  (#2274, `5a3045b3`) — both are cases where a column's meaning depends on the terminal
+  state that produced it.
+- Prevention: when an interval is load-bearing, **select the terminal state and
+  `last_progress_at` alongside it** and show the gap. If the row is `orphaned`/reaped and
+  carries no heartbeat, the interval is an UPPER BOUND on the hold and must be reported as
+  one — or the claim needs a different witness (`pg_locks` sampling, a log line). Never
+  quote `finished_at - started_at` for a reaped row as though it were a duration.
+- Enforced in: this entry;
+  `docs/proposals/execution/2026-09-19-2603-core-lane-starvation.md` (the root-cause table
+  carries a `last_progress_at` vs `finished_at` column);
+  `tests/test_etoro_core_lane_starvation.py` (module docstring records the corroboration).
