@@ -2953,3 +2953,107 @@ class TestReservedLaneSchedulerExecutors:
         assert defaults["coalesce"] is True
         assert defaults["max_instances"] == 1
         assert defaults["misfire_grace_time"] == 1
+
+
+class TestLateAdmissionRefusal:
+    """#3220 — the second way a fire arrives late, and the one grace cannot see.
+
+    APScheduler tests ``misfire_grace_time`` inside ``run_job``, i.e. BEFORE the
+    wrapper runs, and the wrapper's outermost statement is an unbounded
+    ``_job_execution_slot`` acquire. Admissions of 990-1410 s were measured on the
+    general lane on 2026-09-18, so a fire can pass the one-second grace and then
+    submit orders 23 minutes later with nothing rechecking its age.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _slot_wait(job_name: str, seconds: float) -> Iterator[None]:
+        """Publish the wait the way ``_job_execution_slot`` does."""
+        token = runtime._execution_slot_wait_seconds.set((job_name, seconds))
+        try:
+            yield
+        finally:
+            runtime._execution_slot_wait_seconds.reset(token)
+
+    def test_a_job_that_has_not_opted_in_is_never_refused(self) -> None:
+        """The default must stay "run it" — most general-lane jobs park for minutes
+        and running late is the better outcome for them."""
+        from app.workers.scheduler import JOB_SEC_MANIFEST_WORKER
+
+        with self._slot_wait(JOB_SEC_MANIFEST_WORKER, 1_410.0):
+            assert runtime.late_admission_seconds(JOB_SEC_MANIFEST_WORKER) is None
+
+    def test_the_order_job_is_refused_past_its_own_grace(self) -> None:
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+        with self._slot_wait(JOB_EXECUTE_APPROVED_ORDERS, 1_380.6):
+            assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS) == pytest.approx(1_380.6)
+
+    def test_an_immediate_or_within_grace_admission_is_not_refused(self) -> None:
+        """Both boundary arms. ``0.0`` is the only admission this job has ever
+        actually recorded, so refusing it would refuse the observed case."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+        grace = runtime.effective_misfire_grace_seconds(JOB_EXECUTE_APPROVED_ORDERS)
+        for waited in (0.0, float(grace)):
+            with self._slot_wait(JOB_EXECUTE_APPROVED_ORDERS, waited):
+                assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None, waited
+
+    def test_an_unknown_wait_is_not_refused(self) -> None:
+        """``None`` means no slot of this job's own — a direct or bootstrap
+        invocation, or another job's enclosing slot. Refusing on an unknown wait
+        would refuse the fires we know least about."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+        assert runtime.current_execution_slot_wait_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None
+        assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None
+
+    def test_another_jobs_slot_does_not_supply_the_wait(self) -> None:
+        """#3189 finding 13 — a slot can enclose another job's work, and the
+        orchestrator's admission must not be attributed to the layer beneath it."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS, JOB_ORCHESTRATOR_FULL_SYNC
+
+        with self._slot_wait(JOB_ORCHESTRATOR_FULL_SYNC, 1_380.6):
+            assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None
+
+    def test_refuse_late_admission_is_an_explicit_allow_list(self) -> None:
+        """Adding a name here is a deliberate act — the same shape as the
+        ``rearm_on_lost_fire`` and reserved-lane allow lists. A job that refuses a
+        late admission LOSES that fire, so the field is not a safe default."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS, SCHEDULED_JOBS
+
+        assert {j.name for j in SCHEDULED_JOBS if j.refuse_late_admission} == {JOB_EXECUTE_APPROVED_ORDERS}
+
+    def test_the_two_opt_ins_are_never_set_together(self) -> None:
+        """They are inverse predicates. ``rearm_on_lost_fire`` says "a late run beats
+        no run"; ``refuse_late_admission`` says the opposite. A job asserting both
+        would re-fire the very fire it just refused."""
+        from app.workers.scheduler import SCHEDULED_JOBS
+
+        both = [j.name for j in SCHEDULED_JOBS if j.rearm_on_lost_fire and j.refuse_late_admission]
+        assert not both, both
+
+    def test_the_grace_used_is_the_jobs_own_and_falls_back_to_the_scheduler_default(self) -> None:
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS, JOB_QUOTES_REFRESH, SCHEDULED_JOBS
+
+        quotes = next(j for j in SCHEDULED_JOBS if j.name == JOB_QUOTES_REFRESH)
+        assert quotes.misfire_grace_seconds is not None
+        assert runtime.effective_misfire_grace_seconds(JOB_QUOTES_REFRESH) == quotes.misfire_grace_seconds
+
+        orders = next(j for j in SCHEDULED_JOBS if j.name == JOB_EXECUTE_APPROVED_ORDERS)
+        assert orders.misfire_grace_seconds is None
+        assert (
+            runtime.effective_misfire_grace_seconds(JOB_EXECUTE_APPROVED_ORDERS)
+            == runtime.SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+        )
+        assert runtime.effective_misfire_grace_seconds("no-such-job-3220") == (
+            runtime.SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+        )
+
+    def test_the_named_default_is_the_one_the_scheduler_configures(self) -> None:
+        """Otherwise the check could bound against a grace APScheduler never applied."""
+        runtime_obj = JobRuntime(invokers={}, database_url="postgresql://stub/stub")
+        assert (
+            runtime_obj._scheduler._job_defaults["misfire_grace_time"]
+            == runtime.SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+        )

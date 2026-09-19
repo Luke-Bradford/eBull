@@ -1268,6 +1268,59 @@ def lost_fire_rearm_delay_seconds(job: ScheduledJob | None, *, lateness_seconds:
     return RETRY_BASE_SECONDS
 
 
+#: The scheduler-wide ``misfire_grace_time``, named so the late-admission check and
+#: ``job_defaults`` cannot drift apart.  ⚠ ``1`` is the smallest positive integer
+#: APScheduler accepts (``0`` raises ``TypeError``); see ``JobRuntime.__init__`` for
+#: why the default is right for frequent jobs and lossy for daily ones.
+SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS: Final[int] = 1
+
+
+def effective_misfire_grace_seconds(job_name: str) -> int:
+    """The grace APScheduler actually applied to *job_name*'s dispatch.
+
+    ``ScheduledJob.misfire_grace_seconds`` when the job set one, else the
+    scheduler-wide default.  Unknown names get the default — they are not
+    registered fires and cannot have overridden it.
+    """
+    job = _scheduler._JOBS_BY_NAME.get(job_name)
+    if job is not None and job.misfire_grace_seconds is not None:
+        return job.misfire_grace_seconds
+    return SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
+
+
+def late_admission_seconds(job_name: str) -> float | None:
+    """Seconds the execution slot added, if that is too late for *job_name* (#3220).
+
+    ``None`` means "run it" and is the answer for every job that has not set
+    ``refuse_late_admission``.  Three conditions, all required:
+
+    1. the job is registered and declares ``refuse_late_admission`` — the same
+       opt-in predicate as ``misfire_grace_seconds`` and ``rearm_on_lost_fire``,
+       stated from the other side: this body's lateness is a defect, not a
+       recovery;
+    2. the call is inside ``_job_execution_slot`` for THIS job.  ``None`` from
+       ``current_execution_slot_wait_seconds`` means no slot of its own (a direct
+       or bootstrap invocation, or another job's enclosing slot), and refusing on
+       an unknown wait would refuse the fires we know least about;
+    3. the wait exceeds the grace APScheduler already applied.
+
+    ⚠ The bound is the job's OWN grace re-applied, not a new constant.  The two
+    lateness sources compose: APScheduler admitted the dispatch within the grace,
+    then the slot added this.  A job that tolerates a 150 s dispatch delay
+    tolerates a 150 s admission delay by the same argument.
+
+    ⚠ Strictly greater-than, so a job whose slot was free (``0.0``) can never be
+    refused however small the grace.
+    """
+    job = _scheduler._JOBS_BY_NAME.get(job_name)
+    if job is None or not job.refuse_late_admission:
+        return None
+    waited = current_execution_slot_wait_seconds(job_name)
+    if waited is None or waited <= effective_misfire_grace_seconds(job_name):
+        return None
+    return waited
+
+
 def _record_lane_busy_skip(
     database_url: str,
     job_name: str,
@@ -2088,7 +2141,7 @@ class JobRuntime:
                 # A job that can tolerate a late fire opts in per-job via
                 # ``ScheduledJob.misfire_grace_seconds``; see the field's
                 # docstring for why this is NOT derived from cadence kind.
-                "misfire_grace_time": 1,
+                "misfire_grace_time": SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS,
                 # One concurrent instance per job. The per-job
                 # advisory lock is the source of truth for
                 # serialisation; this is a defensive second layer.
@@ -3195,6 +3248,24 @@ class JobRuntime:
                         "not started. Same reason as above — the row would not survive the drain.",
                         job_name,
                     )
+                    return
+                # ⚠ #3220 — the SECOND way a fire arrives late, and the one
+                # ``misfire_grace_time`` cannot see. APScheduler tests the grace in
+                # ``run_job``, before this wrapper; the wait that follows happens
+                # inside it. A job that declares its lateness a defect is refused
+                # here rather than running hours after its slot.
+                late = late_admission_seconds(job_name)
+                if late is not None:
+                    detail = (
+                        f"the execution slot admitted this fire {late:.1f}s late, past its own "
+                        f"{effective_misfire_grace_seconds(job_name)}s misfire grace; this job "
+                        "refuses a late admission and will fire next cadence"
+                    )
+                    logger.warning("scheduled fire of %r skipped: %s", job_name, detail)
+                    # ``params`` is deliberately ``None``: the refusal precedes
+                    # ``run_bounded``'s param materialisation, so there is no snapshot
+                    # to record and inventing one would misreport what was attempted.
+                    _record_lane_busy_skip(database_url, job_name, detail, None)
                     return
                 run_bounded()
 

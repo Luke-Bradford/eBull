@@ -112,6 +112,38 @@ Dispatch **every** lane on its own executor, sized by that rule.
 
 Resulting pool sizes: general 50, sec 11, quote 3, paper 1, default 10.
 
+### Second change — refuse a fire the SLOT admitted too late
+
+Codex ckpt-2 returned one P1 and it is on the order path, so it is fixed here rather
+than recorded. `execute_approved_orders` sits on `general_non_sec` and its registration
+says order execution *"must only happen at the scheduled time, not as a surprise
+catch-up hours later"*. `misfire_grace_time` does not enforce that: APScheduler tests
+the grace inside `run_job`, **before** `wrapped()` runs, and the unbounded
+`_job_execution_slot` acquire is `wrapped()`'s first statement. Nothing re-checked the
+fire's age afterwards. The measured general-lane admissions above are 990–1410 s.
+
+⚠ This is a pre-existing hole, not one this change opens — a parked fire runs late
+today too, whenever a `default` thread happens to be free. Giving general its own
+50-thread pool makes admission *more* likely, which is why the check belongs in the
+same commit.
+
+- New `ScheduledJob.refuse_late_admission: bool = False`, set on
+  `execute_approved_orders` only. Opt-in, with the same predicate as
+  `misfire_grace_seconds` and `rearm_on_lost_fire` stated from the other side.
+- `late_admission_seconds(job_name)` returns the wait when the job opted in, a slot of
+  its own is held, and that wait exceeds the job's own effective grace. `wrapped()`
+  then records a `lane_busy` skip and returns.
+- **The bound is not a new constant**: it is the job's own
+  `misfire_grace_seconds`, or `SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS` (the named
+  `job_defaults` value, previously the bare literal `1`) — the grace APScheduler
+  already applied, applied a second time to the delay the slot added.
+- Strictly greater-than, so the only admission this job has ever recorded (`0.000 s`,
+  twice) can never be refused.
+- `LANE_BUSY_SKIP_PREFIX` is reused deliberately: the cause *is* a busy lane, and that
+  prefix is what keeps the row out of `scheduled_adapter`'s `expected_fire_at` anchor.
+  It arms nothing, because arming needs `rearm_on_lost_fire`, which this job must never
+  set — the two fields are asserted mutually exclusive.
+
 ## Costs, measured
 
 - **Configured scheduler threads 14 → 75.** (The earlier draft said 22; that was
@@ -137,14 +169,8 @@ Resulting pool sizes: general 50, sec 11, quote 3, paper 1, default 10.
   charged to other lanes.
 - **⚠ It converts some lost general fires into very late ones.** A fire that today is
   discarded at dispatch will instead be admitted, park, and run when the permit frees.
-  For most jobs that is the better failure. It is NOT obviously better for
-  `execute_approved_orders`, whose registration says order execution *"must only happen
-  at the scheduled time, not as a surprise catch-up hours later"* — and
-  `misfire_grace_time` does not protect it, because grace is tested before
-  `wrapped()` and nothing re-checks freshness after semaphore admission. Measured: that
-  job's only two recorded admissions both waited **0.000 s**, and it is the one job
-  already excluded from `rearm_on_lost_fire` for this exact reason. Left unchanged here
-  and recorded on #3220 rather than fixed by widening this diff.
+  For most jobs that is the better failure — see the second change below for the one
+  job where it is not.
 - **No fairness or throughput guarantee.** `threading.Semaphore` does not document
   FIFO wakeup, so a newly arriving fire can overtake a waiter, and nothing here shows
   the general lane can drain faster than it fills.
@@ -178,6 +204,11 @@ for that case is not derivable, and our two listeners are bounded short writes.
    membership allow-list.
 6. `tests/test_etoro_core_lane_starvation.py::test_the_split_adds_no_execution_permit`
    keeps its claim and updates its assertion from `"default"` to the general lane.
+7. `TestLateAdmissionRefusal` (9 cases) — not refused when the job did not opt in, at
+   `0.0`, at exactly the grace, or when the wait is unknown; refused past the grace;
+   another job's enclosing slot does not supply the wait (#3189 finding 13);
+   `refuse_late_admission` is an explicit allow-list; it and `rearm_on_lost_fire` are
+   never both set; and the named default equals the one the scheduler configures.
 
 ## Security
 
