@@ -2963,7 +2963,14 @@ class TestLateAdmissionRefusal:
     ``_job_execution_slot`` acquire. Admissions of 990-1410 s were measured on the
     general lane on 2026-09-18, so a fire can pass the one-second grace and then
     submit orders 23 minutes later with nothing rechecking its age.
+
+    ⚠ Every arm pins ``now`` to the job's own slot. Reading the wall clock would
+    make the result depend on the hour the suite runs, which for a daily job is a
+    24-hour swing across the very boundary under test.
     """
+
+    ORDER_SLOT = datetime(2026, 9, 19, 6, 30, tzinfo=UTC)
+    EOD_SLOT = datetime(2026, 9, 18, 22, 30, tzinfo=UTC)
 
     @staticmethod
     @contextmanager
@@ -2974,6 +2981,12 @@ class TestLateAdmissionRefusal:
             yield
         finally:
             runtime._execution_slot_wait_seconds.reset(token)
+
+    def _verdict(self, job_name: str, slot: datetime, *, waited: float, dispatch_late: float = 0.0):
+        """Run the check for a fire dispatched ``dispatch_late`` after ``slot`` that
+        then waited ``waited`` seconds for admission."""
+        with self._slot_wait(job_name, waited):
+            return runtime.late_admission_seconds(job_name, now=slot + timedelta(seconds=dispatch_late + waited))
 
     def test_a_job_that_has_not_opted_in_is_never_refused(self) -> None:
         """The default must stay "run it" — most general-lane jobs park for minutes
@@ -2986,8 +2999,7 @@ class TestLateAdmissionRefusal:
     def test_the_order_job_is_refused_past_its_own_grace(self) -> None:
         from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
 
-        with self._slot_wait(JOB_EXECUTE_APPROVED_ORDERS, 1_380.6):
-            assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS) == pytest.approx(1_380.6)
+        assert self._verdict(JOB_EXECUTE_APPROVED_ORDERS, self.ORDER_SLOT, waited=1_380.6) == pytest.approx(1_380.6)
 
     def test_an_immediate_or_within_grace_admission_is_not_refused(self) -> None:
         """Both boundary arms. ``0.0`` is the only admission this job has ever
@@ -2996,8 +3008,7 @@ class TestLateAdmissionRefusal:
 
         grace = runtime.effective_misfire_grace_seconds(JOB_EXECUTE_APPROVED_ORDERS)
         for waited in (0.0, float(grace)):
-            with self._slot_wait(JOB_EXECUTE_APPROVED_ORDERS, waited):
-                assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None, waited
+            assert self._verdict(JOB_EXECUTE_APPROVED_ORDERS, self.ORDER_SLOT, waited=waited) is None, waited
 
     def test_an_unknown_wait_is_not_refused(self) -> None:
         """``None`` means no slot of this job's own — a direct or bootstrap
@@ -3006,7 +3017,7 @@ class TestLateAdmissionRefusal:
         from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
 
         assert runtime.current_execution_slot_wait_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None
-        assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None
+        assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS, now=self.ORDER_SLOT) is None
 
     def test_another_jobs_slot_does_not_supply_the_wait(self) -> None:
         """#3189 finding 13 — a slot can enclose another job's work, and the
@@ -3014,7 +3025,47 @@ class TestLateAdmissionRefusal:
         from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS, JOB_ORCHESTRATOR_FULL_SYNC
 
         with self._slot_wait(JOB_ORCHESTRATOR_FULL_SYNC, 1_380.6):
-            assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS) is None
+            assert runtime.late_admission_seconds(JOB_EXECUTE_APPROVED_ORDERS, now=self.ORDER_SLOT) is None
+
+    def test_dispatch_lateness_and_admission_wait_compose(self) -> None:
+        """⚠⚠ Codex ckpt-2 round 3 — the defect this class was first written with.
+
+        The two sources add up, and bounding them separately does not bound the sum.
+        A 22:30 EOD fire dispatched at 02:20 is inside its 4 h grace, and a further
+        20-minute wait is inside it too — but admission at 02:40 is past the 02:30
+        ceiling the grace exists to express, and a longer one crosses the 03:00
+        sweep and resolves a LATER snapshot_date.
+        """
+        from app.workers.scheduler import JOB_PORTFOLIO_EOD_SNAPSHOT
+
+        grace = runtime.effective_misfire_grace_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT)
+        dispatch_late = grace - 600.0  # 03:50 after the 22:30 slot — inside the grace
+        waited = 1_200.0  # also inside the grace on its own
+        assert dispatch_late <= grace and waited <= grace
+        assert self._verdict(
+            JOB_PORTFOLIO_EOD_SNAPSHOT, self.EOD_SLOT, waited=waited, dispatch_late=dispatch_late
+        ) == pytest.approx(dispatch_late + waited)
+
+    def test_the_eod_snapshots_ceiling_is_enforced_after_admission(self) -> None:
+        """The 4 h grace is a CEILING chosen by construction — due 22:30, next
+        frontier-advancing sweep at 03:00. Enforced only at dispatch it bounds
+        nothing, because the wait comes after it."""
+        from app.workers.scheduler import JOB_PORTFOLIO_EOD_SNAPSHOT
+
+        grace = runtime.effective_misfire_grace_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT)
+        assert grace == 4 * 60 * 60
+        assert self._verdict(JOB_PORTFOLIO_EOD_SNAPSHOT, self.EOD_SLOT, waited=float(grace)) is None
+        assert self._verdict(JOB_PORTFOLIO_EOD_SNAPSHOT, self.EOD_SLOT, waited=grace + 1.0) == pytest.approx(
+            grace + 1.0
+        )
+
+    def test_a_fire_more_than_one_period_late_is_still_refused(self) -> None:
+        """``previous_scheduled_run`` would return a NEWER slot and read as barely
+        late, which is why the check takes ``max(wait, now - slot)``."""
+        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS
+
+        waited = 25 * 60 * 60.0  # more than the daily period
+        assert self._verdict(JOB_EXECUTE_APPROVED_ORDERS, self.ORDER_SLOT, waited=waited) == pytest.approx(waited)
 
     def test_refuse_late_admission_is_an_explicit_allow_list(self) -> None:
         """Adding a name here is a deliberate act — the same shape as the
@@ -3038,24 +3089,21 @@ class TestLateAdmissionRefusal:
             JOB_PORTFOLIO_EOD_SNAPSHOT,
         }
 
-    def test_the_eod_snapshots_ceiling_is_enforced_after_admission(self) -> None:
-        """Codex ckpt-2 P2 — the 4h grace is a CEILING chosen so a late fire cannot
-        leap onto the next session (due 22:30, `orchestrator_full_sync` at 03:00).
-        Enforced only at dispatch it bounds nothing, because the wait comes after.
-        """
-        from app.workers.scheduler import JOB_PORTFOLIO_EOD_SNAPSHOT
+    def test_a_refusing_job_must_have_an_exactly_periodic_cadence(self) -> None:
+        """``previous_scheduled_run`` returns ``None`` for monthly/yearly, which
+        degrades the check to the wait-only bound. Safe, but it would silently stop
+        enforcing the deadline the opt-in was added for."""
+        from app.workers.scheduler import SCHEDULED_JOBS
 
-        grace = runtime.effective_misfire_grace_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT)
-        assert grace == 4 * 60 * 60
-        with self._slot_wait(JOB_PORTFOLIO_EOD_SNAPSHOT, float(grace)):
-            assert runtime.late_admission_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT) is None
-        with self._slot_wait(JOB_PORTFOLIO_EOD_SNAPSHOT, grace + 1.0):
-            assert runtime.late_admission_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT) == pytest.approx(grace + 1.0)
+        for job in SCHEDULED_JOBS:
+            if job.refuse_late_admission:
+                assert job.cadence.kind in runtime._EXACTLY_PERIODIC_CADENCE_KINDS, job.name
 
     def test_the_two_opt_ins_are_never_set_together(self) -> None:
-        """They are inverse predicates. ``rearm_on_lost_fire`` says "a late run beats
-        no run"; ``refuse_late_admission`` says the opposite. A job asserting both
-        would re-fire the very fire it just refused."""
+        """They are inverse predicates, and the code path makes it concrete: the
+        refusal writes its skip through ``_record_lane_busy_skip``, which ARMS the
+        row when ``rearm_on_lost_fire`` is set — so a job asserting both would
+        re-dispatch the very fire it just refused, later still."""
         from app.workers.scheduler import SCHEDULED_JOBS
 
         both = [j.name for j in SCHEDULED_JOBS if j.rearm_on_lost_fire and j.refuse_late_admission]
@@ -3085,3 +3133,57 @@ class TestLateAdmissionRefusal:
             runtime_obj._scheduler._job_defaults["misfire_grace_time"]
             == runtime.SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
         )
+
+
+class TestPreviousScheduledRun:
+    """#3220 — derived from ``compute_next_run`` rather than a second calendar."""
+
+    @pytest.mark.parametrize(
+        ("cadence", "at", "expected"),
+        [
+            (
+                Cadence.daily(hour=22, minute=30),
+                datetime(2026, 9, 19, 2, 40, tzinfo=UTC),
+                datetime(2026, 9, 18, 22, 30, tzinfo=UTC),
+            ),
+            (
+                Cadence.daily(hour=22, minute=30),
+                datetime(2026, 9, 18, 23, 0, tzinfo=UTC),
+                datetime(2026, 9, 18, 22, 30, tzinfo=UTC),
+            ),
+            (
+                Cadence.hourly(minute=23),
+                datetime(2026, 9, 18, 4, 5, tzinfo=UTC),
+                datetime(2026, 9, 18, 3, 23, tzinfo=UTC),
+            ),
+            (
+                Cadence.every_n_minutes(interval=5),
+                datetime(2026, 9, 18, 3, 17, 42, tzinfo=UTC),
+                datetime(2026, 9, 18, 3, 15, tzinfo=UTC),
+            ),
+            (
+                Cadence.weekly(weekday=6, hour=7, minute=0),
+                datetime(2026, 9, 18, 12, 0, tzinfo=UTC),  # Friday
+                datetime(2026, 9, 13, 7, 0, tzinfo=UTC),  # the preceding Sunday
+            ),
+        ],
+    )
+    def test_it_returns_the_slot_at_or_before(self, cadence: Cadence, at: datetime, expected: datetime) -> None:
+        assert runtime.previous_scheduled_run(cadence, at) == expected
+
+    def test_a_time_exactly_on_a_slot_returns_that_slot(self) -> None:
+        """The fire being checked IS that slot's fire, so the answer must be itself
+        and the computed lateness must be zero rather than a whole period."""
+        cadence = Cadence.daily(hour=6, minute=30)
+        at = datetime(2026, 9, 19, 6, 30, tzinfo=UTC)
+        assert runtime.previous_scheduled_run(cadence, at) == at
+
+    @pytest.mark.parametrize(
+        "cadence",
+        [Cadence.monthly(day=1, hour=3), Cadence.yearly(month=1, day=2, hour=4)],
+    )
+    def test_lower_bound_cadences_refuse_to_answer(self, cadence: Cadence) -> None:
+        """Their ``_CADENCE_MIN_GAP_SECONDS`` entry is a lower bound, so stepping
+        back by it does not land in the previous period — returning the wrong slot
+        would be worse than returning none."""
+        assert runtime.previous_scheduled_run(cadence, datetime(2026, 9, 18, 12, 0, tzinfo=UTC)) is None

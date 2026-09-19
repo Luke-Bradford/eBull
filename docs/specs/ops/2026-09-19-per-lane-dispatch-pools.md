@@ -143,9 +143,22 @@ same commit.
     successor is due, and they sit on the quote lane where the longest admission
     measured is 13.1 s. Refusing them would trade a bounded wait for the lost
     observation bucket #2934 exists to prevent.
-- `late_admission_seconds(job_name)` returns the wait when the job opted in, a slot of
-  its own is held, and that wait exceeds the job's own effective grace. `wrapped()`
-  then records a `lane_busy` skip and returns.
+- `late_admission_seconds(job_name)` returns the fire's lateness when the job opted
+  in, a slot of its own is held, and that lateness exceeds the job's own effective
+  grace. `wrapped()` then records a `lane_busy` skip and returns.
+- **⚠⚠ Lateness is measured from the fire's own SLOT, not from the wait** (ckpt-2 round
+  3 corrected the first implementation, which bounded the wait alone). The two sources
+  compose and bounding them separately does not bound the sum: a 22:30 EOD fire
+  dispatched at 02:20 is inside its 4 h grace, a further 20-minute wait is inside it
+  too, and admission at 02:40 is past the 02:30 ceiling anyway.
+  `previous_scheduled_run(cadence, at)` supplies the slot, derived from
+  `compute_next_run` rather than a second calendar — for an exactly-periodic cadence
+  the first slot strictly after `at − gap` is the last slot at or before `at`. It
+  returns `None` for `monthly`/`yearly`, whose gap constant is a lower bound; a test
+  asserts no opted-in job has such a cadence.
+- The comparison uses `max(wait, now − slot)`: a fire admitted more than one full
+  period late would find `previous_scheduled_run` returning a NEWER slot and read as
+  barely late, and the wait cannot be understated that way.
 - **The bound is not a new constant**: it is the job's own
   `misfire_grace_seconds`, or `SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS` (the named
   `job_defaults` value, previously the bare literal `1`) — the grace APScheduler
@@ -217,7 +230,7 @@ for that case is not derivable, and our two listeners are bounded short writes.
    membership allow-list.
 6. `tests/test_etoro_core_lane_starvation.py::test_the_split_adds_no_execution_permit`
    keeps its claim and updates its assertion from `"default"` to the general lane.
-7. `TestLateAdmissionRefusal` (10 cases) — not refused when the job did not opt in, at
+7. `TestLateAdmissionRefusal` (13 cases) and `TestPreviousScheduledRun` (8 cases) — not refused when the job did not opt in, at
    `0.0`, at exactly the grace, or when the wait is unknown; refused past the grace;
    another job's enclosing slot does not supply the wait (#3189 finding 13);
    `refuse_late_admission` is an explicit allow-list; it and `rearm_on_lost_fire` are

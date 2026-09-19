@@ -47,7 +47,7 @@ from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, TypedDict, get_args
 
 import psycopg
@@ -1288,8 +1288,26 @@ def effective_misfire_grace_seconds(job_name: str) -> int:
     return SCHEDULER_DEFAULT_MISFIRE_GRACE_SECONDS
 
 
-def late_admission_seconds(job_name: str) -> float | None:
-    """Seconds the execution slot added, if that is too late for *job_name* (#3220).
+def previous_scheduled_run(cadence: Cadence, at: datetime) -> datetime | None:
+    """The most recent slot of *cadence* at or before *at*, or ``None``.
+
+    Derived from ``compute_next_run`` rather than a second implementation of the
+    calendar: for an EXACTLY-periodic cadence the slots are ``gap`` apart, so the
+    first slot strictly after ``at - gap`` is the last slot at or before ``at``.
+
+    ``None`` for ``monthly`` / ``yearly``, whose ``_CADENCE_MIN_GAP_SECONDS`` entry
+    is a lower bound — stepping back by 28 days does not land in the previous
+    period, so the same trick would return the wrong slot rather than no slot.
+    The caller degrades to the wait-only bound, which is never LOOSER than the
+    behaviour before this function existed.
+    """
+    if cadence.kind not in _EXACTLY_PERIODIC_CADENCE_KINDS:
+        return None
+    return compute_next_run(cadence, at - timedelta(seconds=min_cadence_gap_seconds(cadence)))
+
+
+def late_admission_seconds(job_name: str, *, now: datetime | None = None) -> float | None:
+    """How late *job_name*'s fire is, if that is too late to run it (#3220).
 
     ``None`` means "run it" and is the answer for every job that has not set
     ``refuse_late_admission``.  Three conditions, all required:
@@ -1302,23 +1320,37 @@ def late_admission_seconds(job_name: str) -> float | None:
        ``current_execution_slot_wait_seconds`` means no slot of its own (a direct
        or bootstrap invocation, or another job's enclosing slot), and refusing on
        an unknown wait would refuse the fires we know least about;
-    3. the wait exceeds the grace APScheduler already applied.
+    3. the lateness exceeds the grace APScheduler already applied.
 
-    ⚠ The bound is the job's OWN grace re-applied, not a new constant.  The two
-    lateness sources compose: APScheduler admitted the dispatch within the grace,
-    then the slot added this.  A job that tolerates a 150 s dispatch delay
-    tolerates a 150 s admission delay by the same argument.
+    ⚠⚠ Lateness is measured from the fire's own SLOT, not from the wait — the two
+    sources COMPOSE and bounding them separately does not bound the sum (Codex
+    ckpt-2 round 3).  ``portfolio_eod_snapshot`` is the worked case: a 22:30 fire
+    dispatched at 02:20 is inside its 4 h grace, and a further 20-minute wait is
+    also inside it, yet admission at 02:40 is past the 02:30 ceiling that grace
+    exists to express.
 
-    ⚠ Strictly greater-than, so a job whose slot was free (``0.0``) can never be
+    ⚠ ``max(wait, now - slot)`` rather than ``now - slot`` alone, because a fire
+    admitted more than one full period late would find ``previous_scheduled_run``
+    returning a NEWER slot and read as barely late.  The wait cannot be
+    understated that way, so the maximum is monotone in both and closes the
+    wraparound.  It is also what makes the ``monthly``/``yearly`` degradation safe.
+
+    ⚠ The bound is the job's OWN grace, not a new constant, and the comparison is
+    strictly greater-than — a fire admitted on time into a free slot can never be
     refused however small the grace.
     """
     job = _scheduler._JOBS_BY_NAME.get(job_name)
     if job is None or not job.refuse_late_admission:
         return None
     waited = current_execution_slot_wait_seconds(job_name)
-    if waited is None or waited <= effective_misfire_grace_seconds(job_name):
+    if waited is None:
         return None
-    return waited
+    observed_at = now if now is not None else datetime.now(UTC)
+    slot = previous_scheduled_run(job.cadence, observed_at)
+    late = waited if slot is None else max(waited, (observed_at - slot).total_seconds())
+    if late <= effective_misfire_grace_seconds(job_name):
+        return None
+    return late
 
 
 def _record_lane_busy_skip(
