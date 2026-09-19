@@ -61,7 +61,7 @@ _BASIS_SQL = """
     SELECT adjustment_basis, count(*)
     FROM research_price_series
     WHERE series_id = ANY(%(ids)s)
-    GROUP BY 1 ORDER BY 2 DESC
+    GROUP BY 1 ORDER BY 2 DESC, 1
 """
 
 #: ⚠ A LITERAL, not an f-string over ``FILL_COLUMN``. psycopg types ``execute``
@@ -112,8 +112,13 @@ def _bucket_sql() -> sql.Composed:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database-url", default=settings.database_url)
+    # ⚠ Default resolved at USE, never stored on the parser. The DSN carries a
+    # password, and an argparse default is one `ArgumentDefaultsHelpFormatter`
+    # away from being printed by `--help`. It is not printed today (measured),
+    # but the hardening removes the class rather than the instance.
+    parser.add_argument("--database-url", default=None)
     args = parser.parse_args()
+    database_url = args.database_url or settings.database_url
 
     print("cost model bands (p75_spread_pct is a ROUND TRIP; half is one side)")
     for band in BANDS:
@@ -129,7 +134,7 @@ def main() -> None:
     for archive in RESEARCH_ARCHIVES:
         print(f"  {archive.vendor:<38} {archive.adjustment_basis:<15} capture {archive.quarantine_as_of}")
 
-    with psycopg.connect(args.database_url) as conn:
+    with psycopg.connect(database_url) as conn:
         conn.execute("SET statement_timeout = '1800s'")
         validated = load_validated_universe(conn)
         for universe in UNIVERSES:
