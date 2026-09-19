@@ -128,14 +128,15 @@ the rate — it does not.
   **3.2-3.8 hours** (dev, 09-15 -> 09-18). Anything landing in that window skips.
   Do not add a job here whose missed cadence is expensive.
 * ``etoro_core_rebalance`` — ``core_rebalance_observation`` (#2603 step 3b-3).
-  ⚠ Splitting it off ``etoro`` gave up one exclusion that the shared lane was
-  providing incidentally: ``load_engine_capital_authority`` reads ``trade_events``,
-  which its former lanemate ``daily_portfolio_sync`` WRITES (``portfolio_sync.py``
-  ``record_trade_events``; 953 runs / 7 days, avg 5.2 s). Accepted because the job
+  ⚠ The split gave up one exclusion the shared lane provided incidentally:
+  ``load_engine_capital_authority`` READS ``trade_events``, which its former
+  lanemate ``daily_portfolio_sync`` WRITES. Guarded, not merely accepted — the job
   re-reads the authority under ``PAPER_ALLOCATOR_ADVISORY_LOCK`` +
-  ``CORE_MANDATE_ADVISORY_LOCK`` and RAISES on any change — the race is fail-loud,
-  once-daily, and the next tick is correct. Disjoint output tables did not prove
-  coherent INPUTS, which is the thing to re-check before moving anything else here.
+  ``CORE_MANDATE_ADVISORY_LOCK`` and RAISES on any change. The lesson to carry
+  before moving anything else onto or off this lane: disjoint output tables do not
+  prove coherent INPUTS. Exposure arithmetic and the measuring queries:
+  ``docs/proposals/execution/2026-09-19-2603-core-lane-starvation.md`` §4 — kept
+  there rather than restated here, because those figures move.
 * ``etoro_core_eligibility`` — ``core_eligibility_refresh`` (#2603 item 2).
   Both split off ``etoro`` because the multi-hour candle sweep spans their fire
   times: the daily 22:45 observation lost 4 of 4 fires and had **never completed
