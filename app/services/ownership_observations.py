@@ -348,6 +348,15 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION: Final[str] = """
 #     NULLS LAST would hand the group to a DERA row the de-collision may then drop, deleting
 #     the key outright via the MERGE's NOT MATCHED BY SOURCE prune.
 # Spec: docs/proposals/ownership/2026-09-17-3146-insider-line-order.md
+#
+# ⚠ #3232 — THREE readers share this, not two. ``refresh_insiders_current``,
+# ``refresh_insiders_current_batch`` and ``ownership_history._insiders_history`` (the
+# operator's insider chart, ``GET /instruments/{symbol}/ownership-history``). The chart was
+# left on the bare ``source_document_id ASC`` when #3146 landed, so for a year the projection
+# and the chart could name different lines of the SAME filing — 693,492 of 2,616,746
+# per-holder buckets, 680,027 of them a different share VALUE, over 3,748 instruments. Editing
+# this constant now moves an operator-visible chart; re-run
+# ``scripts/audit_3232_insider_history_line_order.py`` if you do.
 _INSIDER_WINNER_ORDER_TAIL: Final[str] = """
                         split_part(source_document_id, ':', 1) ASC,
                         (CASE WHEN source_document_id ~ ':NDT:[0-9]+$'

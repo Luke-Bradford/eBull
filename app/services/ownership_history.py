@@ -52,6 +52,8 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
+from app.services.ownership_observations import _INSIDER_WINNER_ORDER_TAIL
+
 HistoryCategory = Literal["insiders", "blockholders", "institutions", "treasury", "def14a"]
 
 
@@ -166,8 +168,24 @@ def _insiders_history(
     Time-bucket dedup: for each ``(period_end, ownership_nature)``,
     pick the highest-priority source — form4 > form3 > def14a (DEF
     14A bene rows that resolve to a CIK end up in insiders too).
-    Final tie-breakers: ``filed_at DESC, source_document_id ASC`` so
-    the chart timeseries is deterministic across runs."""
+
+    ⚠ #3232 — the final tie-breaker was ``filed_at DESC,
+    source_document_id ASC``. When one filing reports several Table I
+    lines for the same bucket, every preceding term ties and that last
+    term decided the chart's share value by STRING order on a DERA
+    surrogate key: ``{accn}:NDT:1000`` sorts before ``{accn}:NDT:999``.
+    #3146 removed exactly this rule from ``refresh_insiders_current``
+    and missed this reader, so the chart and the projection could
+    disagree about the same filing.
+
+    Form 4 General Instruction 4(a)(i) fixes the target — *"Report
+    total beneficial ownership following the reported transaction(s)"*,
+    i.e. the filing's LAST line for that series — and the order is
+    recovered by construction from ``NONDERIV_TRANS_SK`` ascending,
+    which is measured to BE XML document order (skill §2.3: 123,901 /
+    123,901 concordant, swapped-pair control 0). So this shares
+    ``_INSIDER_WINNER_ORDER_TAIL`` with the projection rather than
+    restating it; a second copy is how the two drift apart."""
     where_extra = ""
     params: dict[str, Any] = {"iid": instrument_id}
     if holder_cik is not None:
@@ -196,7 +214,7 @@ def _insiders_history(
                 ownership_nature,
                 CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN 'def14a' THEN 4 ELSE 10 END ASC,
                 filed_at DESC,
-                source_document_id ASC
+                {_INSIDER_WINNER_ORDER_TAIL}
             """,
             params,
         )
