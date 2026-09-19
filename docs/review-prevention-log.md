@@ -9066,8 +9066,21 @@ original, because the gate now *looked* like a bound.
   transactions started afterwards — so each statement took its own snapshot while the script
   claimed one consistent view. Set `conn.isolation_level` BEFORE the first statement and
   `assert` it via `SHOW transaction_isolation`. A claimed isolation level is not a held one.
+- ⚠ **A named skip-reason vocabulary can contain a literal no code path produces** — caught
+  by the review bot on PR #3237. `observation_missing` was declared in
+  `SWEEP_SKIP_REASONS`, documented in the spec and unreachable: the postcondition raised a
+  bare `RuntimeError`, which the driver's blanket `except Exception` bucketed as `error`.
+  A declared-but-dead reason is worse than no reason, because an operator reading the
+  counters concludes the condition *never fires* rather than that it *cannot*. Prevention:
+  raise a DEDICATED exception type for any failure that deserves its own counter — a bare
+  `RuntimeError` under a blanket handler is indistinguishable from infrastructure failure —
+  and add a test asserting every literal in the vocabulary is produced somewhere
+  (`test_every_declared_skip_reason_is_actually_reachable`). ⚠ Verify such a test
+  DISCRIMINATES before trusting it: a reachability check that matches everything pins
+  nothing. Confirmed here against a reason known to be absent.
 - Enforced in: this entry; `app/services/blockholders.py`
   (`_select_sweep_candidates`, `_identity_sequence`, `_at_stored_scale`,
-  `_repair_one_accession`); `tests/test_3236_identity_sequence.py`;
+  `_repair_one_accession`, `_ObservationNotWritten`);
+  `tests/test_3236_identity_sequence.py`;
   `tests/test_3236_blockholder_link_sweep_db.py`;
   `scripts/probe_3236_parser_drift.py`; `scripts/accept_3236_link_sweep.py`.

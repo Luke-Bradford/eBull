@@ -1082,6 +1082,18 @@ def _at_stored_scale(value: Decimal | None) -> Decimal | None:
     return value.quantize(_STORED_NUMERIC_SCALE, rounding=ROUND_HALF_UP)
 
 
+class _ObservationNotWritten(RuntimeError):
+    """The sweep's postcondition tripped: the link and the observation write
+    both ran, but no single live observation exists at the accession.
+
+    A DEDICATED type, not a bare ``RuntimeError``, so the driver can bucket it
+    as ``observation_missing`` rather than letting the blanket ``except
+    Exception`` fold it into ``error``. An operator has to be able to tell
+    "the postcondition tripped" from "the connection dropped" — they have
+    completely different causes and completely different responses.
+    """
+
+
 @dataclass(frozen=True)
 class BlockholderLinkSweepReport:
     """One pass of :func:`sweep_unlinked_blockholder_filings`."""
@@ -1379,7 +1391,7 @@ def _repair_one_accession(
         {"iid": instrument_id, "a": accession},
     ).fetchone()
     if written is None or written[0] != 1:
-        raise RuntimeError(
+        raise _ObservationNotWritten(
             f"13D/G link sweep: accession={accession} wrote {written[0] if written else 'no'} "
             f"live observations, expected exactly 1"
         )
@@ -1441,6 +1453,14 @@ def sweep_unlinked_blockholder_filings(
     for accession in candidates:
         try:
             reason, linked = _repair_one_accession(conn, accession=accession)
+        except _ObservationNotWritten:
+            # Distinct from ``error``: the guards all passed and the writes ran,
+            # but the chokepoint declined to produce an observation. That points
+            # at the filing's own content, not at infrastructure.
+            logger.exception("13D/G link sweep: accession=%s postcondition failed", accession)
+            conn.rollback()
+            skipped["observation_missing"] = skipped.get("observation_missing", 0) + 1
+            continue
         except Exception:
             # One malformed accession must neither poison the connection for
             # the rest of the batch nor abort the pass.

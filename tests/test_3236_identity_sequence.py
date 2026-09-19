@@ -89,3 +89,37 @@ def test_identity_sequence_carries_a_no_cik_reporter_as_none() -> None:
     """Natural persons / trusts file without a CIK; the sequence must keep the
     ``None`` rather than coercing it, because the stored column is NULL."""
     assert _identity_sequence([_person("THE LAL 2015 ELF TRUST", None, "1500000")])[0][0] is None
+
+
+def test_every_declared_skip_reason_is_actually_reachable() -> None:
+    """PREVENTION (#3237 review): a named-skip-reason vocabulary must not
+    contain a literal no code path can produce.
+
+    The review bot caught exactly this: ``observation_missing`` was declared in
+    ``SWEEP_SKIP_REASONS``, documented in the spec, and unreachable — the
+    postcondition raised a bare ``RuntimeError`` that the driver's blanket
+    ``except Exception`` bucketed as ``error``. A declared-but-dead reason is
+    worse than no reason at all, because an operator reading the counters
+    concludes the condition never fires rather than that it cannot.
+
+    Asserted against the module SOURCE rather than by driving every branch:
+    several reasons need a specific corrupt DB state to reach, and a test that
+    needed all of them would be the integration suite. What this pins is the
+    cheap invariant the bot actually found — that each literal appears as a
+    value the sweep can produce.
+    """
+    import inspect
+
+    from app.services import blockholders
+
+    source = inspect.getsource(blockholders)
+    unreachable = [
+        reason
+        for reason in blockholders.SWEEP_SKIP_REASONS
+        # Either returned as a skip reason, or bucketed directly by the driver.
+        if f'return "{reason}"' not in source and f'skipped["{reason}"]' not in source
+    ]
+    assert not unreachable, (
+        f"declared skip reasons with no producing code path: {unreachable}. "
+        "Either wire them up or drop them from SWEEP_SKIP_REASONS."
+    )
