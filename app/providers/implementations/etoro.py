@@ -365,8 +365,8 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
         all_quotes: list[Quote] = []
         failed_chunks = 0
-        rows_returned = 0
-        rows_usable = 0
+        entries_returned = 0
+        entries_accepted = 0
         # Retained so an all-chunks-failed batch can re-raise the real cause
         # (and keep its FailureCategory) instead of returning a silent [].
         last_exc: Exception | None = None
@@ -424,8 +424,11 @@ class EtoroMarketDataProvider(MarketDataProvider):
             # carrying ``quotes_updated`` --- so a bulk drop is queryable as a
             # collapse in that count, not only greppable.  What was missing, and is
             # added here, is the CAUSE being separable from a failed chunk.
-            rows_returned += len(raw.get("rates") or []) if isinstance(raw, dict) else 0
-            rows_usable += len(chunk_quotes)
+            #
+            # ⚠ Round 2: counted through ``rates_entries`` so the numerator and
+            # the denominator come from the same population the normaliser walked.
+            entries_returned += len(rates_entries(raw))
+            entries_accepted += len(chunk_quotes)
             all_quotes.extend(chunk_quotes)
 
         if last_exc is not None and failed_chunks == total_chunks:
@@ -457,12 +460,19 @@ class EtoroMarketDataProvider(MarketDataProvider):
                 len(all_quotes),
             )
 
-        if rows_usable < rows_returned:
+        if entries_accepted < entries_returned:
+            # ⚠ Round 2 wording. The previous line read "unusable and dropped
+            # (missing identity, bid/ask or date — per-row reasons logged above)"
+            # and both halves were false: the enumeration omitted non-positive and
+            # unparseable values and non-object entries, and the promise of a
+            # per-row reason did not hold for the non-object case (now it does,
+            # see ``_normalise_rates``). This says only what the counter measures
+            # --- entries in, quotes out --- and does not claim a cause.
             logger.warning(
-                "Rates fetch: %d of %d returned row(s) were unusable and dropped "
-                "(missing identity, bid/ask or date — per-row reasons logged above)",
-                rows_returned - rows_usable,
-                rows_returned,
+                "Rates fetch: %d of %d returned entries were rejected during normalisation "
+                "(each rejection is logged above with its own reason)",
+                entries_returned - entries_accepted,
+                entries_returned,
             )
 
         return all_quotes
@@ -704,19 +714,50 @@ def _normalise_intraday_candle(item: Mapping[str, object]) -> IntradayBar | None
         return None
 
 
+def rates_entries(raw: object) -> list[object]:
+    """The rate entries a rates response offers, or ``[]``.
+
+    Split out so the normaliser and ``get_quotes``'s rejection counter read the
+    SAME population --- counting one thing and normalising another is how a
+    counter starts lying.
+
+    ⚠ ``rates`` is validated as a LIST rather than taken with ``or []``.  #2312
+    review round 2, reproduced by Codex ckpt-3: ``{"rates": "oops"}`` made the
+    old expression iterate CHARACTERS, so the batch counter reported "4 of 4
+    entries rejected" for one malformed response and the normaliser logged a
+    skip per character.  A ``rates`` that is not a list is one malformed
+    response, and is reported as exactly that.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected dict from eToro rates endpoint, got {type(raw)}")
+    entries = raw.get("rates")
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        logger.warning(
+            "Rates response carries 'rates' as %s, not a list — treating the response as empty",
+            type(entries).__name__,
+        )
+        return []
+    return entries
+
+
 def _normalise_rates(raw: object) -> list[Quote]:
     """Normalise a raw eToro rates API response into Quote list.
 
     Real API returns ``{ rates: [...] }``.
     """
-    if not isinstance(raw, dict):
-        raise ValueError(f"Expected dict from eToro rates endpoint, got {type(raw)}")
 
-    items: list[object] = raw.get("rates") or []
+    items = rates_entries(raw)
 
     quotes: list[Quote] = []
     for item in items:
         if not isinstance(item, dict):
+            # #2312 review round 2 (Codex ckpt-3, reproduced): this skip was
+            # SILENT.  It was the one drop cause with no per-entry line at all,
+            # which made the batch aggregate in ``get_quotes`` its only signal and
+            # made that aggregate's "per-row reasons logged above" a false promise.
+            logger.warning("Skipping non-object rates entry: %r", item)
             continue
         quote = _normalise_rate(item)
         if quote is not None:

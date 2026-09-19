@@ -29,6 +29,7 @@ from app.providers.implementations.etoro import (
     _normalise_market_snapshot_instrument,
     _normalise_rate,
     _normalise_rates,
+    rates_entries,
 )
 from app.providers.market_data import OHLCVBar, Quote
 from app.services import market_data
@@ -518,6 +519,32 @@ class TestNormaliseRates:
         with pytest.raises(ValueError, match="Expected dict"):
             _normalise_rates(["not", "a", "dict"])
 
+    def test_non_list_rates_is_one_malformed_response_not_n_entries(self, caplog: pytest.LogCaptureFixture) -> None:
+        """#2312 round 2 (Codex ckpt-3, reproduced).
+
+        ``raw.get("rates") or []`` iterated a STRING character by character, so
+        ``{"rates": "oops"}`` produced four skips and made the batch counter
+        report "4 of 4" for a single malformed response.
+        """
+        with caplog.at_level(logging.WARNING, logger="app.providers.implementations.etoro"):
+            assert _normalise_rates({"rates": "oops"}) == []
+            assert rates_entries({"rates": "oops"}) == []
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("not a list" in m for m in messages)
+        assert not any("non-object rates entry" in m for m in messages)
+
+    def test_non_object_entry_is_logged_not_skipped_silently(self, caplog: pytest.LogCaptureFixture) -> None:
+        """#2312 round 2 — this was the one drop cause with no per-entry line,
+        which made the batch aggregate's "reasons logged above" a false promise."""
+        with caplog.at_level(logging.WARNING, logger="app.providers.implementations.etoro"):
+            quotes = _normalise_rates({"rates": ["not-an-object", FIXTURE_RATE_2]})
+        assert [q.instrument_id for q in quotes] == [1002]
+        assert any("non-object rates entry" in r.getMessage() for r in caplog.records)
+
+    def test_missing_rates_key_counts_nothing(self) -> None:
+        assert rates_entries({}) == []
+        assert rates_entries({"rates": None}) == []
+
 
 # ---------------------------------------------------------------------------
 # Provider get_quotes chunking
@@ -586,7 +613,7 @@ class TestGetQuotesChunking:
                 quotes = provider.get_quotes([1001, 1002])
 
         assert [q.instrument_id for q in quotes] == [1002]
-        assert any("1 of 2 returned row(s) were unusable" in r.getMessage() for r in caplog.records)
+        assert any("1 of 2 returned entries were rejected" in r.getMessage() for r in caplog.records)
 
     def test_no_unusable_row_log_when_every_row_is_usable(self, caplog: pytest.LogCaptureFixture) -> None:
         """The aggregate line must not fire on a clean batch — a warning that is
@@ -603,7 +630,7 @@ class TestGetQuotesChunking:
             with caplog.at_level(logging.WARNING, logger="app.providers.implementations.etoro"):
                 provider.get_quotes([1001, 1002])
 
-        assert not any("were unusable" in r.getMessage() for r in caplog.records)
+        assert not any("were rejected during normalisation" in r.getMessage() for r in caplog.records)
 
     def test_chunking_at_51_ids(self) -> None:
         """51 IDs should produce exactly 2 HTTP requests (50 + 1)."""
