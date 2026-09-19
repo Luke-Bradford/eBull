@@ -67,6 +67,7 @@ from app.services.processes.watermarks import (
     resolve_watermark,
 )
 from app.services.sec_manifest import ManifestSource
+from app.services.sync_orchestrator.layer_types import FailureCategory
 from app.workers.scheduler import (
     SCHEDULED_JOBS,
     Cadence,
@@ -735,7 +736,11 @@ def _recent_reap_counts(
 
     ⚠ The predicate is all THREE columns, never the message alone. A reap has no
     structured marker (see ``ORPHAN_REAP_ERROR_MSG``), so this is a convention
-    and is read as one.
+    and is read as one. The two columns that ARE typed are bound to the writer's
+    own definitions — ``ORPHAN_REAP_ERROR_MSG`` and
+    ``FailureCategory.INTERNAL_ERROR`` — so only the message half is a string
+    agreement, and ``test_reaper_output_matches_the_readers_predicate`` reds if
+    even that drifts.
 
     One batched ``GROUP BY`` for the whole snapshot — measured 5.6 ms on dev
     against 139k ``job_runs`` — rather than a probe per row, and captured once by
@@ -752,7 +757,7 @@ def _recent_reap_counts(
                            COUNT(*) AS rows_lost
                       FROM job_runs
                      WHERE status = 'failure'
-                       AND error_category = 'internal_error'
+                       AND error_category = %(category)s
                        AND error_msg = %(reap_msg)s
                        AND finished_at > now() - %(window)s::interval
                        AND (%(job_name)s::text IS NULL OR job_name = %(job_name)s)
@@ -761,6 +766,13 @@ def _recent_reap_counts(
              GROUP BY job_name
             """,
             {
+                # Bound to the SAME enum the reaper writes, not a re-typed
+                # literal — the two sides would otherwise drift if the enum
+                # value changed. Passed as a PARAM rather than interpolated:
+                # psycopg3 types ``execute`` as ``LiteralString``, so a runtime
+                # ``str`` cannot go into the query text (see TERMINAL_STATUS_SQL's
+                # note on why that guard is worth keeping).
+                "category": FailureCategory.INTERNAL_ERROR.value,
                 "reap_msg": ORPHAN_REAP_ERROR_MSG,
                 "window": timedelta(days=RECENT_REAP_WINDOW_DAYS),
                 "job_name": job_name,
