@@ -436,7 +436,12 @@ export function StrategyPortfolioLens() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 id="pot-state" className="flex items-center gap-2 text-lg font-semibold">
             {status.headline}
-            <Badge tone={status.tone}>{status.trading ? "live" : "halted"}</Badge>
+            {/* ⚠ Three states, not two (#3222). `null` is "the core-sleeve
+                request has not landed", and printing `halted` over it is a
+                confident wrong answer — permanently so if that request errors. */}
+            <Badge tone={status.tone}>
+              {status.trading === null ? "checking" : status.trading ? "live" : "halted"}
+            </Badge>
           </h2>
           {closable.length > 0 ? (
             <button

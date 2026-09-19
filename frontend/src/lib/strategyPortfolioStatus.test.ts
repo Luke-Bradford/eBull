@@ -268,16 +268,39 @@ describe("strategyPortfolioStatus — the core sleeve is a second path (#3222)",
     expect(status.trading).toBe(true);
   });
 
-  it("does not flip when the sleeve itself is blocked, or absent", () => {
-    for (const sleeve of [core({ execution_action: "blocked" }), null]) {
-      const status = strategyPortfolioStatus(overview(PIPELINE_ONLY), sleeve);
-      expect(status.trading).toBe(false);
-      expect(status.headline).toBe("Not trading");
+  it("does not flip when the sleeve itself is blocked", () => {
+    const status = strategyPortfolioStatus(overview(PIPELINE_ONLY), core({ execution_action: "blocked" }));
+    expect(status.trading).toBe(false);
+    expect(status.headline).toBe("Not trading");
+  });
+
+  it("refuses rather than deciding while the sleeve is unknown", () => {
+    // Codex ckpt-2 — `coreSleeve.data ?? null` is `null` while the request is in
+    // flight AND after it fails, so collapsing that into "blocked" prints a
+    // definitive `halted` over a path that may be live, permanently if the
+    // endpoint errors. Same rule the `Open` tile follows.
+    for (const sleeve of [null, undefined]) {
+      const status = sleeve === undefined
+        ? strategyPortfolioStatus(overview(PIPELINE_ONLY))
+        : strategyPortfolioStatus(overview(PIPELINE_ONLY), sleeve);
+      expect(status.trading).toBeNull();
+      expect(status.headline).toBe("Checking the core sleeve…");
+      expect(status.blockers.map((b) => b.key)).toEqual(["no_approved_strategies"]);
     }
   });
 
-  it("omitting the argument keeps the pre-#3222 answer, so no caller changes by accident", () => {
-    expect(strategyPortfolioStatus(overview(PIPELINE_ONLY)).headline).toBe("Not trading");
+  it("does NOT defer when something the sleeve cannot clear is blocking", () => {
+    // Deferring here would hide a kill switch behind a spinner. There is nothing
+    // to wait for: the sleeve spends this pot and cannot clear these.
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        entry_block: { new_entries_blocked: true, global_kill_active: true, global_kill_reason: "drill", global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: [] },
+      }),
+      null,
+    );
+    expect(status.trading).toBe(false);
+    expect(status.tone).toBe("risk");
   });
 
   it("NEVER overrides the kill switch", () => {

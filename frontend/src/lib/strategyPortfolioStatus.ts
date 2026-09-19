@@ -44,7 +44,15 @@ export interface StrategyBlocker {
 }
 
 export interface StrategyPortfolioStatus {
-  readonly trading: boolean;
+  /**
+   * `null` = NOT YET KNOWN, and it is a third state rather than a falsy
+   * `false` (#3222, Codex ckpt-2). The verdict depends on the core sleeve,
+   * which arrives on its own request; collapsing "the request has not landed"
+   * into "blocked" prints a definitive `halted` over a path that may be live,
+   * and prints it permanently when `/strategies/core-sleeve` errors. Same rule
+   * the `Open` tile follows: an unknown count refuses rather than reading 0.
+   */
+  readonly trading: boolean | null;
   readonly headline: string;
   readonly tone: "ok" | "warn" | "risk";
   readonly blockers: readonly StrategyBlocker[];
@@ -67,10 +75,18 @@ function hasCapital(amount: string | null): boolean {
  * ALSO carrying a `core_live_snapshot_required` blocker, so "no blockers" is the
  * wrong predicate and would have read as blocked.
  */
-function coreSleeveIsOpen(core: CoreSleeveResponse | null): boolean {
-  return core !== null && core.execution_action !== "blocked";
+function coreSleeveIsOpen(core: CoreSleeveResponse): boolean {
+  return core.execution_action !== "blocked";
 }
 
+/**
+ * @param core the loaded core-sleeve payload, or `null` when its request has
+ *   not landed or failed. ⚠ `null` means UNKNOWN, never "blocked": the endpoint
+ *   always answers, and `state: "unavailable"` / `execution_action: "blocked"`
+ *   are how it says the sleeve is not a path. Defaults to `null` so a caller
+ *   that does not fetch it gets the honest answer rather than a confident wrong
+ *   one.
+ */
 export function strategyPortfolioStatus(
   overview: StrategyOverviewResponse,
   core: CoreSleeveResponse | null = null,
@@ -158,8 +174,16 @@ export function strategyPortfolioStatus(
   // blocker also stays in the array: it is still true, the panel below still
   // lists it, and it is still the thing that has to change for a STRATEGY to
   // earn capital.
-  if (coreSleeveIsOpen(core) && blockers.every((b) => b.key === "no_approved_strategies")) {
-    return { trading: true, headline: "Trading — core sleeve", tone: "ok", blockers };
+  if (blockers.every((b) => b.key === "no_approved_strategies")) {
+    // ⚠ The sleeve is the DECIDING input only here. Above this line the pot is
+    // blocked for a reason the sleeve cannot clear, so there is nothing to wait
+    // for and deferring the verdict would hide a kill switch behind a spinner.
+    if (core === null) {
+      return { trading: null, headline: "Checking the core sleeve…", tone: "warn", blockers };
+    }
+    if (coreSleeveIsOpen(core)) {
+      return { trading: true, headline: "Trading — core sleeve", tone: "ok", blockers };
+    }
   }
 
   // The kill switch is a safety state, not a setup step — it reads as risk;
