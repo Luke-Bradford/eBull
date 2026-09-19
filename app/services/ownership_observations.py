@@ -59,7 +59,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Final, Literal, TypeGuard
+from typing import Any, Final, Literal, LiteralString, TypeGuard
 from uuid import UUID
 
 import psycopg
@@ -357,7 +357,12 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION: Final[str] = """
 # per-holder buckets, 680,027 of them a different share VALUE, over 3,748 instruments. Editing
 # this constant now moves an operator-visible chart; re-run
 # ``scripts/audit_3232_insider_history_line_order.py`` if you do.
-_INSIDER_WINNER_ORDER_TAIL: Final[str] = """
+#
+# ⚠ ``LiteralString``, not ``str`` — psycopg3's injection guard is a TYPE, and interpolating a
+# plain ``str`` into an f-string widens the whole query to ``str``, which pyright then rejects
+# at every call site (#3232). Typing the constant for what it is keeps the guard intact for
+# all three readers instead of pushing a ``cast`` into each one.
+_INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
                         split_part(source_document_id, ':', 1) ASC,
                         (CASE WHEN source_document_id ~ ':NDT:[0-9]+$'
                               THEN split_part(source_document_id, ':NDT:', 2)::numeric END) DESC,

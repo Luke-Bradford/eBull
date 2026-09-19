@@ -71,9 +71,7 @@ def _observe(conn: psycopg.Connection[Any], *, instrument_id: int, doc_id: str, 
 
 
 def _chart_shares(conn: psycopg.Connection[Any], instrument_id: int) -> Decimal | None:
-    points = oh.get_ownership_history(
-        conn, instrument_id=instrument_id, category="insiders", holder_id=_HOLDER_CIK
-    )
+    points = oh.get_ownership_history(conn, instrument_id=instrument_id, category="insiders", holder_id=_HOLDER_CIK)
     assert len(points) == 1, f"expected exactly one chart point, got {points}"
     return points[0].shares
 
@@ -83,8 +81,9 @@ def test_chart_point_is_the_filings_last_table_i_line(conn: psycopg.Connection[A
     """Equal-width SKs, so text and numeric order agree and only DIRECTION is under test.
 
     The old tail (``source_document_id ASC``) picks ``:NDT:1000`` — 111, the balance BEFORE the
-    filing's later line. Instruction 4(a)(i) wants 222. This is the whole live defect:
-    693,492 of 693,492 moved buckets move to a LATER line.
+    filing's later line. Instruction 4(a)(i) wants 222. This is the whole live defect: every
+    moved bucket moves to a LATER line, with no exceptions, per
+    ``scripts/audit_3232_insider_history_line_order --ab --gain``.
     """
     iid = 932320
     _instrument(conn, iid)

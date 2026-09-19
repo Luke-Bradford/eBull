@@ -2,9 +2,15 @@
 
 #3232: ``ownership_history._insiders_history`` ended its ``DISTINCT ON`` ``ORDER BY`` with
 ``source_document_id ASC``. When one filing reports several Table I lines for the same
-``(period_end, ownership_nature)``, every prior key ties, so the share value the operator
-sees at that point was decided by string order on a DERA surrogate key —
-``{accn}:NDT:1000`` before ``{accn}:NDT:999``.
+``(period_end, ownership_nature)``, every prior key ties, so ascending document id decided
+the point — and ascending picks the filing's **FIRST** line. Form 4 General Instruction
+4(a)(i) wants the **LAST**: *"Report total beneficial ownership following the reported
+transaction(s)"*.
+
+⚠ The string-vs-numeric hazard (``{accn}:NDT:1000`` sorting before ``{accn}:NDT:999``) is
+real but its live population is **zero** — ``--gain`` reports differing-width SKs within one
+filing. Lead with first-vs-last, which is 100% of the movement; the ``::numeric`` cast is a
+guard, not the defect.
 
 #3146 removed exactly that rule from ``refresh_insiders_current`` and missed this reader, so
 the projection and the chart could name different lines of the same filing. The fix shares
@@ -42,7 +48,7 @@ Usage (read-only; one REPEATABLE READ snapshot per run):
 from __future__ import annotations
 
 import argparse
-from typing import Any
+from typing import Any, LiteralString, cast
 
 import psycopg
 
@@ -51,17 +57,17 @@ from app.services.ownership_observations import _INSIDER_WINNER_ORDER_TAIL
 
 # The pre-#3232 tie-break, frozen. This is the CONTROL and must never be re-pointed at the
 # shared constant — the whole question is what the old rule did.
-_OLD_TAIL = "source_document_id ASC"
+_OLD_TAIL: LiteralString = "source_document_id ASC"
 
 # The reader's two call shapes. Unfiltered is `category=insiders`; per-holder is the
 # drill-through, which pins `holder_identity_key` via the `holder_cik` parameter. The
 # DISTINCT ON itself does not carry the holder, so both have to be measured.
-_PARTITIONS: dict[str, str] = {
+_PARTITIONS: dict[str, LiteralString] = {
     "unfiltered": "instrument_id, period_end, ownership_nature",
     "per_holder": "instrument_id, holder_identity_key, period_end, ownership_nature",
 }
 
-_BASE = """
+_BASE: LiteralString = """
     SELECT instrument_id, holder_identity_key, period_end, ownership_nature,
            source_document_id, shares, filed_at,
            CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN 'def14a' THEN 4 ELSE 10 END AS srank
@@ -69,7 +75,7 @@ _BASE = """
      WHERE known_to IS NULL AND shares IS NOT NULL
 """
 
-_AB_SQL = """
+_AB_SQL: LiteralString = """
 WITH base AS ({base}),
 old_pick AS (
   SELECT DISTINCT ON ({part}) {part}, shares AS shares_old, source_document_id AS doc_old
@@ -89,7 +95,7 @@ SELECT count(*)                                                        AS bucket
   FROM old_pick JOIN new_pick USING ({part})
 """
 
-_GAIN_SQL = """
+_GAIN_SQL: LiteralString = """
 WITH base AS ({base}),
 old_pick AS (
   SELECT DISTINCT ON ({part}) {part}, source_document_id AS doc_old
@@ -102,15 +108,29 @@ new_pick AS (
 SELECT CASE WHEN doc_old ~ ':NDT:' THEN 'NDT' WHEN doc_old ~ ':NDH:' THEN 'NDH' ELSE 'xml' END AS was,
        CASE WHEN doc_new ~ ':NDT:' THEN 'NDT' WHEN doc_new ~ ':NDH:' THEN 'NDH' ELSE 'xml' END AS now,
        count(*) AS n,
-       count(*) FILTER (WHERE split_part(doc_old, ':', 1) <> split_part(doc_new, ':', 1)) AS crossed_accession
+       count(*) FILTER (WHERE split_part(doc_old, ':', 1) <> split_part(doc_new, ':', 1)) AS crossed_accession,
+       count(*) FILTER (WHERE length(split_part(doc_old, ':NDT:', 2))
+                           <> length(split_part(doc_new, ':NDT:', 2)))                    AS differing_sk_width,
+       count(*) FILTER (WHERE doc_old ~ ':NDT:[0-9]+$' AND doc_new ~ ':NDT:[0-9]+$'
+                          AND split_part(doc_new, ':NDT:', 2)::numeric
+                            > split_part(doc_old, ':NDT:', 2)::numeric)                   AS moved_to_later_line
   FROM old_pick JOIN new_pick USING ({part})
  WHERE doc_old IS DISTINCT FROM doc_new
  GROUP BY 1, 2 ORDER BY n DESC
 """
 
 
-def _fmt(sql: str, part: str) -> str:
-    return sql.format(base=_BASE, part=part, old_tail=_OLD_TAIL, new_tail=_INSIDER_WINNER_ORDER_TAIL)
+def _fmt(sql: LiteralString, part: LiteralString) -> LiteralString:
+    """Compose the arm. Every input is a module constant — no caller value reaches this.
+
+    ``str.format`` widens ``LiteralString`` to ``str``, so the cast restores psycopg3's
+    injection guard rather than waiving it (same shape as
+    ``scripts/audit_3146_insider_line_order``).
+    """
+    return cast(
+        LiteralString,
+        sql.format(base=_BASE, part=part, old_tail=_OLD_TAIL, new_tail=_INSIDER_WINNER_ORDER_TAIL),
+    )
 
 
 def _connect() -> psycopg.Connection[Any]:
@@ -126,7 +146,7 @@ def run_ab(conn: psycopg.Connection[Any]) -> None:
     print(f"treatment    : {' '.join(_INSIDER_WINNER_ORDER_TAIL.split())}\n")
     with conn.cursor() as cur:
         for label, part in _PARTITIONS.items():
-            cur.execute(_fmt(_AB_SQL, part))  # noqa: S608 - composed from module constants only
+            cur.execute(_fmt(_AB_SQL, part))
             cols = [d.name for d in cur.description or []]
             row = cur.fetchone() or ()
             print(f"=== {label} — DISTINCT ON ({part}) ===")
@@ -138,14 +158,17 @@ def run_ab(conn: psycopg.Connection[Any]) -> None:
 def run_gain(conn: psycopg.Connection[Any]) -> None:
     with conn.cursor() as cur:
         for label, part in _PARTITIONS.items():
-            cur.execute(_fmt(_GAIN_SQL, part))  # noqa: S608 - composed from module constants only
+            cur.execute(_fmt(_GAIN_SQL, part))
             print(f"=== {label}: provenance of every moved pick ===")
             rows = cur.fetchall()
             if not rows:
                 print("  (no pick moves)")
-            for was, now, n, crossed in rows:
+            for was, now, n, crossed, width, later in rows:
                 flag = "  ⚠ CROSSED ACCESSION" if crossed else ""
-                print(f"  {was:3s} -> {now:3s} {n:>12,}   crossed_accession={crossed:,}{flag}")
+                print(
+                    f"  {was:3s} -> {now:3s} {n:>12,}   crossed_accession={crossed:,}"
+                    f"   differing_sk_width={width:,}   moved_to_later_line={later:,}{flag}"
+                )
             print()
 
 
