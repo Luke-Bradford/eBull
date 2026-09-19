@@ -151,6 +151,11 @@ class InsiderObservation:
     known_to: datetime | None
     ingest_run_id: UUID
     shares: Decimal | None
+    # #3227 item 2 — Table I line grain. Defaulted so existing constructions of
+    # this dataclass (round-trip helpers, tests) are unchanged.
+    security_title: str | None = None
+    direct_indirect: str | None = None
+    nature_of_ownership: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +180,9 @@ def record_insider_observation(
     period_end: date,
     ingest_run_id: UUID,
     shares: Decimal | None,
+    security_title: str | None = None,
+    direct_indirect: str | None = None,
+    nature_of_ownership: str | None = None,
 ) -> None:
     """Append one observation. Idempotent on the natural key
     ``(instrument_id, holder_cik, ownership_nature, source, source_document_id, period_end)``
@@ -185,18 +193,40 @@ def record_insider_observation(
     The legacy ingester paths (insider_transactions, insider_initial_holdings)
     call this on every successful upsert so ``_current`` stays
     refreshable on demand. Backfill is the one-shot retro version of
-    the same path (see ``scripts/backfill_840_insiders.py``)."""
+    the same path (see ``scripts/backfill_840_insiders.py``).
+
+    ``security_title`` / ``direct_indirect`` / ``nature_of_ownership`` are the
+    #3227 Table I line-grain discriminators (Form 3 Instr. 5(b)(iii); Form 4 and
+    5 Instr. 4(b)(iii)). They default to ``None`` so existing call sites are
+    unchanged.
+
+    ⚠ **Every current caller passes nothing, and that is a SCOPE decision rather
+    than an impossibility.** The XML writers emit COLLAPSED groups — one
+    observation row per ``(filer_cik, direct_indirect)``, so several Table I
+    classes fold into one row — and ``ownership_observations_sync`` additionally
+    groups transactions by filer name and iterates holdings with no ``ORDER BY``,
+    leaving its conflict winner undefined. Those writers DO retain a selected
+    line whose attributes are knowable; populating them belongs with #3227 item
+    3, which is where the collapse is actually repaired. Writing one member's
+    title onto a row that represents several would be the defect.
+
+    ⚠ **``NULL`` here is overloaded and must not be read as "collapsed group".**
+    It equally means a ``:NDT:`` row, a row written before the #3227 backfill, or
+    a source cell that was genuinely empty. A consumer needing the distinction
+    needs explicit grain metadata, not an inference from ``NULL``."""
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO ownership_insiders_observations (
                 instrument_id, holder_cik, holder_name, ownership_nature,
                 source, source_document_id, source_accession, source_field, source_url,
-                filed_at, period_start, period_end, ingest_run_id, shares
+                filed_at, period_start, period_end, ingest_run_id, shares,
+                security_title, direct_indirect, nature_of_ownership
             ) VALUES (
                 %(iid)s, %(cik)s, %(name)s, %(nature)s,
                 %(source)s, %(doc_id)s, %(accession)s, %(field)s, %(url)s,
-                %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s, %(shares)s
+                %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s, %(shares)s,
+                %(security_title)s, %(direct_indirect)s, %(nature_of_ownership)s
             )
             ON CONFLICT (instrument_id, holder_identity_key, ownership_nature, source, source_document_id, period_end)
             DO UPDATE SET
@@ -208,6 +238,25 @@ def record_insider_observation(
                 period_start = EXCLUDED.period_start,
                 shares = EXCLUDED.shares,
                 ingest_run_id = EXCLUDED.ingest_run_id,
+                -- #3227 item 2 — COALESCE, NOT unconditional EXCLUDED, and the
+                -- asymmetry with sec_insider_dataset_ingest's drain is
+                -- deliberate. That writer always supplies the true source
+                -- payload for the `:NDH:` row it is writing, so assigning
+                -- EXCLUDED lets a source that clears a value clear ours. THIS
+                -- writer supplies nothing for these three (see the docstring),
+                -- so an unconditional assignment would be pure erase-risk with
+                -- no upside: it could only ever blank evidence the DERA path or
+                -- the #3227 backfill had written.
+                --
+                -- ⚠ Revisit with #3227 item 3. Once these callers DO pass real
+                -- values, COALESCE becomes the wrong default for the same reason
+                -- it is the right one now — it would pin a stale value that the
+                -- source had legitimately cleared.
+                security_title = COALESCE(EXCLUDED.security_title, ownership_insiders_observations.security_title),
+                direct_indirect = COALESCE(EXCLUDED.direct_indirect, ownership_insiders_observations.direct_indirect),
+                nature_of_ownership = COALESCE(
+                    EXCLUDED.nature_of_ownership, ownership_insiders_observations.nature_of_ownership
+                ),
                 ingested_at = clock_timestamp()
             """,
             {
@@ -225,6 +274,9 @@ def record_insider_observation(
                 "period_end": period_end,
                 "run_id": str(ingest_run_id),
                 "shares": shares,
+                "security_title": security_title,
+                "direct_indirect": direct_indirect,
+                "nature_of_ownership": nature_of_ownership,
             },
         )
 

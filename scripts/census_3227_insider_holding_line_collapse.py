@@ -50,12 +50,20 @@ re-implemented the ``DISTINCT ON`` could disagree with the table it claims to de
   an indirect amount may be the person's proportionate interest *or*, at their option, the
   entity's entire holding, so even correctly attributed lines are not always additive.
 * **Not which lines are duplicates.**  ``identical_value`` groups are reported in their own
-  bucket rather than folded in either direction: equal sibling amounts are consistent BOTH
-  with one holding fanned out across co-filers AND with two genuinely equal holdings, and the
-  discriminator that would separate them (``SECURITY_TITLE`` / ``DIRECT_INDIRECT_OWNERSHIP`` /
-  ``NATURE_OF_OWNERSHIP``) is dropped at ingest — ``sec_insider_dataset_ingest`` reads
-  ``SHRS_OWND_FOLWNG_TRANS`` and ``NONDERIV_HOLDING_SK`` and nothing else from
-  ``NONDERIV_HOLDING.tsv``.
+  bucket rather than folded in either direction.  ⚠ This bullet used to say equal sibling
+  amounts were "consistent BOTH with one holding fanned out across co-filers AND with two
+  genuinely equal holdings", which is causally backwards and contradicted ``classify_group``
+  a hundred lines below: the group key ALREADY fixes the holder, so the owner fan-out
+  duplicates a line BETWEEN groups and can never produce two inside one.  Equal siblings are
+  two genuinely distinct source lines of equal size, and the live example is class mixing
+  (``CNH`` reports 366,927,900 common AND 366,927,900 special voting).
+* **Not the CLASS or OWNERSHIP-FORM axis, before #3227 item 2.**  ⚠ This bullet used to say
+  ``SECURITY_TITLE`` / ``DIRECT_INDIRECT_OWNERSHIP`` / ``NATURE_OF_OWNERSHIP`` were "dropped
+  at ingest".  That was true when this census shipped and is **no longer true**: ``sql/400``
+  carries all three onto ``ownership_insiders_observations`` and
+  ``sec_insider_dataset_ingest`` now reads them on the ``:NDH:`` path.  The census still does
+  not USE them, because the ``_current`` re-key is #3227 item 3 — but a reader must not
+  conclude from here that the columns are unavailable.  See ``--source-columns``.
 * **Not the observations-layer population.**  Most ``:NDH:`` multi-line groups on ``form4``
   accessions never reach ``_current`` at all — ``_INSIDER_DUAL_PIPELINE_DECOLLISION`` removes
   a dataset row whose plain-accession XML sibling survives.  This census measures what an
@@ -65,6 +73,8 @@ re-implemented the ``DISTINCT ON`` could disagree with the table it claims to de
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
@@ -323,10 +333,147 @@ def load_groups(conn: psycopg.Connection[Any]) -> list[HoldingLineGroup]:
     ]
 
 
+def census_source_columns() -> None:
+    """#3227 item 2 — measure the SOURCE columns the repair needs, over every cached archive.
+
+    Separate mode because it reads the DERA archives rather than the database, and because
+    the spec's numbers must be re-derivable rather than quoted. Every figure in
+    ``docs/specs/ownership/2026-09-19-3227-ndh-line-grain-columns.md`` that concerns the
+    source files comes from here.
+
+    ⚠ "Full population" means every archive THIS DEPLOYMENT HAS CACHED.
+    ``_delete_archive_after_success`` removes an archive once its ingest succeeds, and SEC
+    publishes quarters later than the newest cached one, so this is a lower bound on the
+    corpus and says nothing about future header stability.
+    """
+    import zipfile
+    from collections import Counter as _Counter
+
+    from app.security.master_key import resolve_data_dir
+
+    base = resolve_data_dir() / "sec" / "bulk"
+    archives = sorted(p for p in base.iterdir() if p.name.startswith("insider_") and p.name.endswith(".zip"))
+    print(f"cached insider archives            {len(archives):>12,}")
+    if not archives:
+        print("  none cached — nothing to measure.")
+        return
+
+    def _rows(zf: zipfile.ZipFile, *candidates: str) -> Any:
+        names = zf.namelist()
+        for candidate in candidates:
+            target = candidate if candidate in names else next((n for n in names if n.endswith("/" + candidate)), None)
+            if target is not None:
+                fh = zf.open(target)
+                return csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8", newline=""), delimiter="\t")
+        return iter(())
+
+    headers: _Counter[tuple[str, ...]] = _Counter()
+    totals: _Counter[str] = _Counter()
+    dio_values: _Counter[str] = _Counter()
+    titles: set[str] = set()
+    doc_ids: _Counter[str] = _Counter()
+    owner_dupes = 0
+    accessions_scanned = 0
+
+    for archive in archives:
+        with zipfile.ZipFile(archive) as zf:
+            with zf.open(
+                next(
+                    n
+                    for n in zf.namelist()
+                    if n.endswith("NONDERIV_HOLDING.tsv") or n.endswith("NON_DERIV_HOLDING.tsv")
+                )
+            ) as fh:
+                headers[
+                    tuple(io.TextIOWrapper(fh, encoding="utf-8", newline="").readline().rstrip("\r\n").split("\t"))
+                ] += 1
+
+            txn_accessions = {
+                (r.get("ACCESSION_NUMBER") or "").strip()
+                for r in _rows(zf, "NONDERIV_TRANS.tsv", "NON_DERIV_TRANS.tsv")
+            }
+
+            for holding in _rows(zf, "NONDERIV_HOLDING.tsv", "NON_DERIV_HOLDING.tsv"):
+                totals["rows"] += 1
+                accn = (holding.get("ACCESSION_NUMBER") or "").strip()
+                sk = (holding.get("NONDERIV_HOLDING_SK") or "").strip()
+                if not sk:
+                    totals["sk_blank"] += 1
+                doc_ids[f"{accn}:NDH:{sk or '0'}"] += 1
+                if accn in txn_accessions:
+                    totals["skipped_by_holdings_loop"] += 1
+                title = (holding.get("SECURITY_TITLE") or "").strip()
+                if title:
+                    totals["security_title"] += 1
+                    titles.add(title)
+                dio = (holding.get("DIRECT_INDIRECT_OWNERSHIP") or "").strip()
+                if dio:
+                    totals["direct_indirect"] += 1
+                    dio_values[dio] += 1
+                if (holding.get("NATURE_OF_OWNERSHIP") or "").strip():
+                    totals["nature_of_ownership"] += 1
+
+            per_accession: dict[str, _Counter[str]] = {}
+            for owner in _rows(zf, "REPORTINGOWNER.tsv", "REPORTING_OWNER.tsv"):
+                accn = (owner.get("ACCESSION_NUMBER") or "").strip()
+                cik = (owner.get("RPTOWNERCIK") or "").strip().zfill(10)
+                name = (owner.get("RPTOWNERNAME") or "").strip().lower()
+                identity = ("CIK:" + cik) if cik.strip("0") else ("NAME:" + name)
+                per_accession.setdefault(accn, _Counter())[identity] += 1
+            for counts in per_accession.values():
+                accessions_scanned += 1
+                owner_dupes += sum(v - 1 for v in counts.values() if v > 1)
+
+    rows = totals["rows"]
+
+    def pct(value: int) -> str:
+        return f"{100.0 * value / rows:6.2f}%" if rows else "   n/a"
+
+    print(f"distinct header signatures         {len(headers):>12,}   (>1 means the layout drifted)")
+    for signature, count in headers.most_common():
+        print(f"  {count:>3} archives: {', '.join(signature)}")
+
+    print("\n=== fill rates, every cached archive ===")
+    for label in ("rows", "security_title", "direct_indirect", "nature_of_ownership"):
+        print(f"{label:<34} {totals[label]:>12,}   {pct(totals[label])}")
+    print(f"{'NONDERIV_HOLDING_SK blank':<34} {totals['sk_blank']:>12,}   {pct(totals['sk_blank'])}")
+    print(f"{'distinct SECURITY_TITLE values':<34} {len(titles):>12,}")
+    print(f"DIRECT_INDIRECT_OWNERSHIP values   {dict(dio_values.most_common())}")
+
+    print("\n=== source-line key integrity ===")
+    repeated = sum(1 for count in doc_ids.values() if count > 1)
+    print(f"{'distinct {accn}:NDH:{sk} ids':<34} {len(doc_ids):>12,}")
+    print(f"{'ids seen more than once':<34} {repeated:>12,}   (>0 makes UPDATE ... FROM ambiguous)")
+
+    print("\n=== what the holdings loop can even reach ===")
+    skipped = totals["skipped_by_holdings_loop"]
+    print(f"{'on an accession WITH transactions':<34} {skipped:>12,}   {pct(skipped)}")
+    print(f"{'reachable by the holdings loop':<34} {rows - skipped:>12,}   {pct(rows - skipped)}")
+    print("  ⚠ `sec_insider_dataset_ingest` skips an accession's holdings entirely when it")
+    print("    also has NONDERIV_TRANS rows. Those lines are never written, so no backfill")
+    print("    can reach them. Separate defect from the line collapse — see #3227.")
+
+    print("\n=== DISTINCT ON tie risk (ctid DESC is physical placement, not insert order) ===")
+    print(f"{'accessions scanned':<34} {accessions_scanned:>12,}")
+    print(f"{'duplicate owner identities':<34} {owner_dupes:>12,}")
+    print("  A `:NDH:` staging tie needs a repeated owner identity on one accession, because")
+    print("  the document id is unique per line. At 0 there is no tie for ctid to adjudicate,")
+    print("  so widening the staging row cannot move a winner.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--examples", type=int, default=10, help="worked rows to print, worst naive delta first")
+    parser.add_argument(
+        "--source-columns",
+        action="store_true",
+        help="#3227 item 2: measure the DERA source columns over every cached archive, then exit",
+    )
     args = parser.parse_args()
+
+    if args.source_columns:
+        census_source_columns()
+        return
 
     with psycopg.connect(settings.database_url) as conn:
         population = count_current_population(conn)

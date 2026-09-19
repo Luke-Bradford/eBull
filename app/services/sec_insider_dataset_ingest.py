@@ -269,6 +269,38 @@ def _parse_decimal(value: str | None) -> Decimal | None:
         return None
 
 
+def _parse_text(value: str | None) -> str | None:
+    """Strip a DERA text cell; an empty cell becomes NULL, not ``''``.
+
+    #3227 item 2. Shared by the ingest and
+    ``scripts/backfill_3227_ndh_line_grain`` so the two cannot drift into
+    writing ``''`` and ``NULL`` for the same source cell.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _parse_direct_indirect(value: str | None) -> str | None:
+    """Sanitise ``DIRECT_INDIRECT_OWNERSHIP`` to ``D`` / ``I`` / NULL.
+
+    ⚠ **Load-bearing, not defensive.** ``sql/400`` puts a CHECK on this column,
+    and ``COPY ... ON_ERROR ignore`` protects the copy into the staging table but
+    NOT the ``INSERT ... SELECT`` that drains it into the partitioned target. An
+    unexpected value would therefore abort the whole drain rather than skip one
+    row. Measured across all 81 cached archives the column is exactly
+    ``{D: 647,231, I: 1,720,305}``, so this rejects nothing today and exists to
+    keep a future drift from wedging the ingest.
+
+    Mirrors the XML-side sanitiser at
+    ``app/services/insider_transactions.py:1241``, deliberately — the two paths
+    write the same column and must agree on what is storable.
+    """
+    parsed = _parse_text(value)
+    return parsed if parsed in ("D", "I") else None
+
+
 _OFFICER_DIRECTOR_FLAGS = {"OFFICER", "DIRECTOR", "ISOFFICER", "ISDIRECTOR"}
 _TEN_PERCENT_FLAGS = {"TENPERCENTOWNER", "TEN_PERCENT_OWNER", "10PERCENTOWNER"}
 
@@ -388,25 +420,32 @@ _STG_COPY_COLUMNS = (
     "period_end",
     "ingest_run_id",
     "shares",
+    # #3227 item 2 — Table I line grain, carried on `:NDH:` rows only.
+    "security_title",
+    "direct_indirect",
+    "nature_of_ownership",
 )
 
 
 _CREATE_STG_SQL = """
 CREATE TEMP TABLE _stg_insider (
-    instrument_id      BIGINT,
-    holder_cik         TEXT,
-    holder_name        TEXT,
-    ownership_nature   TEXT,
-    source             TEXT,
-    source_document_id TEXT,
-    source_accession   TEXT,
-    source_field       TEXT,
-    source_url         TEXT,
-    filed_at           TIMESTAMPTZ,
-    period_start       DATE,
-    period_end         DATE,
-    ingest_run_id      UUID,
-    shares             NUMERIC(24, 4)
+    instrument_id       BIGINT,
+    holder_cik          TEXT,
+    holder_name         TEXT,
+    ownership_nature    TEXT,
+    source              TEXT,
+    source_document_id  TEXT,
+    source_accession    TEXT,
+    source_field        TEXT,
+    source_url          TEXT,
+    filed_at            TIMESTAMPTZ,
+    period_start        DATE,
+    period_end          DATE,
+    ingest_run_id       UUID,
+    shares              NUMERIC(24, 4),
+    security_title      TEXT,
+    direct_indirect     TEXT,
+    nature_of_ownership TEXT
 ) ON COMMIT DROP
 """
 
@@ -428,7 +467,8 @@ _INSERT_FROM_STG_SQL = """
 INSERT INTO ownership_insiders_observations (
     instrument_id, holder_cik, holder_name, ownership_nature,
     source, source_document_id, source_accession, source_field, source_url,
-    filed_at, period_start, period_end, ingest_run_id, shares
+    filed_at, period_start, period_end, ingest_run_id, shares,
+    security_title, direct_indirect, nature_of_ownership
 )
 SELECT DISTINCT ON (
     instrument_id,
@@ -441,7 +481,8 @@ SELECT DISTINCT ON (
 )
     instrument_id, holder_cik, holder_name, ownership_nature,
     source, source_document_id, source_accession, source_field, source_url,
-    filed_at, period_start, period_end, ingest_run_id, shares
+    filed_at, period_start, period_end, ingest_run_id, shares,
+    security_title, direct_indirect, nature_of_ownership
 FROM _stg_insider
 ORDER BY
     instrument_id,
@@ -465,6 +506,14 @@ DO UPDATE SET
     period_start = EXCLUDED.period_start,
     shares = EXCLUDED.shares,
     ingest_run_id = EXCLUDED.ingest_run_id,
+    -- #3227 item 2. Unconditional EXCLUDED, like every other column here, so a
+    -- re-ingest is idempotent and a source that legitimately clears a value
+    -- clears ours. This cannot blank a `:NDH:` row from the `:NDT:` loop: the
+    -- two write different ``source_document_id`` markers, which is part of the
+    -- conflict key, so their rows never collide.
+    security_title = EXCLUDED.security_title,
+    direct_indirect = EXCLUDED.direct_indirect,
+    nature_of_ownership = EXCLUDED.nature_of_ownership,
     ingested_at = clock_timestamp()
 """
 
@@ -484,6 +533,9 @@ def _stage_owners(
     ingest_run_id: UUID,
     shares: Decimal | None,
     result: InsiderIngestResult,
+    security_title: str | None = None,
+    direct_indirect: str | None = None,
+    nature_of_ownership: str | None = None,
 ) -> None:
     """Write one staging row per reporting owner on the input row.
 
@@ -493,6 +545,16 @@ def _stage_owners(
     Mirrors the legacy ``_write_for_owners`` semantics, but stages
     into ``_stg_insider`` via ``copy.write_row`` instead of executing
     a per-row INSERT.
+
+    ``security_title`` / ``direct_indirect`` / ``nature_of_ownership`` are the
+    #3227 Table I line-grain discriminators. They default to ``None`` because
+    only the ``:NDH:`` caller supplies them — the ``:NDT:`` loop leaves them
+    unset (``NONDERIV_TRANS`` publishes the same three columns, but carrying
+    them is #3146's surface, not this ticket's).
+
+    ⚠ These are per-LINE attributes replicated across every owner and every
+    share-class sibling instrument. That replication is correct here: all
+    replicas descend from one source line, so they share one payload.
     """
     accession_no_dashes = accn.replace("-", "")
     source_url = f"https://www.sec.gov/Archives/edgar/data/{int(issuer_cik)}/{accession_no_dashes}/"
@@ -521,6 +583,9 @@ def _stage_owners(
                 period_end,
                 str(ingest_run_id),
                 shares,
+                security_title,
+                direct_indirect,
+                nature_of_ownership,
             )
         )
         result.touched_instrument_ids.add(instrument_id)
@@ -784,10 +849,22 @@ def ingest_insider_dataset_archive(
                 # '4'/'4/A'. 4.3.8.3 allows one exception on a '5' submission,
                 # a LATE '3' holding, which is 'L' and not 'E'. So no early
                 # holding exists for the exemption to protect, and
-                # NONDERIV_HOLDING has neither a timeliness nor a form-type
-                # column to read (#2790): a holding is not a transaction line, so
-                # §4.3.8.2's per-line rule has nothing to say about it and the
-                # submission type governs alone.
+                # NONDERIV_HOLDING has no timeliness column to read (#2790): a
+                # holding is not a transaction line, so §4.3.8.2's per-line rule
+                # has nothing to say about it and the submission type governs
+                # alone.
+                #
+                # ⚠ CORRECTED 2026-09-19 (#3227): this comment used to say
+                # NONDERIV_HOLDING has "neither a timeliness nor a form-type
+                # column". The timeliness half is right; the form-type half is
+                # NOT — the file does publish TRANS_FORM_TYPE, in all 81 cached
+                # archives. Passing it would still change nothing, and that is a
+                # measurement rather than an argument: the column is populated on
+                # 1,435 of 2,367,536 holding rows (0.06%) and its ONLY value is
+                # '3'. `_reject_reason_for_form`'s line-form clause fires only on
+                # {'4','5'}, so a holdings line can never reach it. Behaviour is
+                # unchanged; the stated reason was wrong and a later reader would
+                # have inherited a false claim about the source.
                 reason = _reject_reason_for_form(
                     form_upper=form_upper,
                     period_end=period_end,
@@ -808,6 +885,15 @@ def ingest_insider_dataset_archive(
                 ).strip() or "0"
                 source_document_id = f"{accn}:NDH:{holding_sk}"
 
+                # #3227 item 2 — the Table I line grain the SEC requires to be
+                # reported on separate lines: (class) x (direct | each form of
+                # indirect), per Form 3 Instr. 5(b)(iii) / Form 4 and 5 Instr.
+                # 4(b)(iii). Read here and carried as evidence; the `_current`
+                # key that consumes them is item 3, not this pass.
+                security_title = _parse_text(holding.get("SECURITY_TITLE"))
+                direct_indirect = _parse_direct_indirect(holding.get("DIRECT_INDIRECT_OWNERSHIP"))
+                nature_of_ownership = _parse_text(holding.get("NATURE_OF_OWNERSHIP"))
+
                 # Fan-out across share-class siblings on the same CIK (#1117).
                 for instrument_id in matched_instruments:
                     pre_count = copy_attempted
@@ -825,6 +911,9 @@ def ingest_insider_dataset_archive(
                         ingest_run_id=ingest_run_id,
                         shares=shares,
                         result=result,
+                        security_title=security_title,
+                        direct_indirect=direct_indirect,
+                        nature_of_ownership=nature_of_ownership,
                     )
                     copy_attempted = pre_count + (sum(1 for o in owner_list if (o.get("RPTOWNERNAME") or "").strip()))
 
