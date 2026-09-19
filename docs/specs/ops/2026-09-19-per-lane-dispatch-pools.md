@@ -127,9 +127,22 @@ today too, whenever a `default` thread happens to be free. Giving general its ow
 50-thread pool makes admission *more* likely, which is why the check belongs in the
 same commit.
 
-- New `ScheduledJob.refuse_late_admission: bool = False`, set on
-  `execute_approved_orders` only. Opt-in, with the same predicate as
-  `misfire_grace_seconds` and `rearm_on_lost_fire` stated from the other side.
+- New `ScheduledJob.refuse_late_admission: bool = False`. Opt-in, with the same
+  predicate as `misfire_grace_seconds` and `rearm_on_lost_fire` stated from the other
+  side. Two members:
+  - `execute_approved_orders` — the no-catch-up contract above.
+  - `portfolio_eod_snapshot` (ckpt-2 round 2, P2) — its 4 h grace is a **ceiling**
+    chosen by construction: due 22:30, next frontier-advancing sweep 03:00, so 02:30 is
+    the latest admission that cannot leap onto the following session. Enforced only at
+    dispatch, that ceiling bounds nothing, because the wait comes after it — the job
+    would resolve a later `snapshot_date` and miss the session permanently, which is
+    the 2026-08-12 / 08-20 gap the grace was added to close, and #2844's last
+    acceptance clause needs five CONSECUTIVE reconciled days.
+  - ⚠ Deliberately NOT every job with a `misfire_grace_seconds`. `quotes_refresh` and
+    `core_candidate_quote_refresh` set one so a fire is not admitted while its
+    successor is due, and they sit on the quote lane where the longest admission
+    measured is 13.1 s. Refusing them would trade a bounded wait for the lost
+    observation bucket #2934 exists to prevent.
 - `late_admission_seconds(job_name)` returns the wait when the job opted in, a slot of
   its own is held, and that wait exceeds the job's own effective grace. `wrapped()`
   then records a `lane_busy` skip and returns.
@@ -204,11 +217,12 @@ for that case is not derivable, and our two listeners are bounded short writes.
    membership allow-list.
 6. `tests/test_etoro_core_lane_starvation.py::test_the_split_adds_no_execution_permit`
    keeps its claim and updates its assertion from `"default"` to the general lane.
-7. `TestLateAdmissionRefusal` (9 cases) — not refused when the job did not opt in, at
+7. `TestLateAdmissionRefusal` (10 cases) — not refused when the job did not opt in, at
    `0.0`, at exactly the grace, or when the wait is unknown; refused past the grace;
    another job's enclosing slot does not supply the wait (#3189 finding 13);
    `refuse_late_admission` is an explicit allow-list; it and `rearm_on_lost_fire` are
-   never both set; and the named default equals the one the scheduler configures.
+   never both set; the named default equals the one the scheduler configures; and the
+   EOD snapshot's 4 h ceiling holds at the boundary and refuses one second past it.
 
 ## Security
 

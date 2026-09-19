@@ -1404,6 +1404,15 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # and mutates no broker state, so running it late is a strictly better
         # outcome than not running it.
         misfire_grace_seconds=4 * 60 * 60,
+        # #3220 (Codex ckpt-2 P2) — and the 02:30 ceiling above is only a ceiling if
+        # something enforces it AFTER admission. APScheduler tests the 4h grace in
+        # ``run_job``, before the wrapper; this job is on ``general_non_sec`` (50
+        # members, 1 permit), so it can pass that test at 22:30 and then park on the
+        # permit past 03:00 — resolving a LATER ``snapshot_date`` and missing the
+        # session permanently, which is exactly the 2026-08-12 / 08-20 gap the grace
+        # was added to close. The refusal uses this same 4h figure, so the sentence
+        # above is now load-bearing in both directions rather than only one.
+        refuse_late_admission=True,
         prerequisite=_bootstrap_complete,
         catch_up_on_boot=False,
     ),

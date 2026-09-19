@@ -3018,11 +3018,39 @@ class TestLateAdmissionRefusal:
 
     def test_refuse_late_admission_is_an_explicit_allow_list(self) -> None:
         """Adding a name here is a deliberate act — the same shape as the
-        ``rearm_on_lost_fire`` and reserved-lane allow lists. A job that refuses a
-        late admission LOSES that fire, so the field is not a safe default."""
-        from app.workers.scheduler import JOB_EXECUTE_APPROVED_ORDERS, SCHEDULED_JOBS
+        ``rearm_on_lost_fire`` and restricted-lane allow lists. A job that refuses a
+        late admission LOSES that fire, so the field is not a safe default.
 
-        assert {j.name for j in SCHEDULED_JOBS if j.refuse_late_admission} == {JOB_EXECUTE_APPROVED_ORDERS}
+        ⚠ Deliberately NOT every job carrying a ``misfire_grace_seconds``. The two
+        quote producers set one because their fire must not be admitted while its
+        successor is due, and they sit on the quote lane where the longest admission
+        measured is 13.1 s — refusing them would trade a bounded wait for the lost
+        observation bucket #2934 exists to prevent.
+        """
+        from app.workers.scheduler import (
+            JOB_EXECUTE_APPROVED_ORDERS,
+            JOB_PORTFOLIO_EOD_SNAPSHOT,
+            SCHEDULED_JOBS,
+        )
+
+        assert {j.name for j in SCHEDULED_JOBS if j.refuse_late_admission} == {
+            JOB_EXECUTE_APPROVED_ORDERS,
+            JOB_PORTFOLIO_EOD_SNAPSHOT,
+        }
+
+    def test_the_eod_snapshots_ceiling_is_enforced_after_admission(self) -> None:
+        """Codex ckpt-2 P2 — the 4h grace is a CEILING chosen so a late fire cannot
+        leap onto the next session (due 22:30, `orchestrator_full_sync` at 03:00).
+        Enforced only at dispatch it bounds nothing, because the wait comes after.
+        """
+        from app.workers.scheduler import JOB_PORTFOLIO_EOD_SNAPSHOT
+
+        grace = runtime.effective_misfire_grace_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT)
+        assert grace == 4 * 60 * 60
+        with self._slot_wait(JOB_PORTFOLIO_EOD_SNAPSHOT, float(grace)):
+            assert runtime.late_admission_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT) is None
+        with self._slot_wait(JOB_PORTFOLIO_EOD_SNAPSHOT, grace + 1.0):
+            assert runtime.late_admission_seconds(JOB_PORTFOLIO_EOD_SNAPSHOT) == pytest.approx(grace + 1.0)
 
     def test_the_two_opt_ins_are_never_set_together(self) -> None:
         """They are inverse predicates. ``rearm_on_lost_fire`` says "a late run beats
