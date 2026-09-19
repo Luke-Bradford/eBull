@@ -185,7 +185,7 @@ export function strategyPortfolioStatus(
 
   // ⚠⚠ RECOVERY OUTRANKS SETUP, and is NOT gated on the blockers below (Codex
   // ckpt-2). `resume` means an order the broker may already hold is unresolved,
-  // and the page enables "Resume demo order" for it regardless of whether the
+  // and the page enables "Settle demo order" for it regardless of whether the
   // pot is funded, enabled or mandated — see the note on `execution_action`
   // above for why the backend computes it that way. Reporting "Not trading ·
   // halted" next to that live button recreates the exact contradiction this
@@ -203,10 +203,15 @@ export function strategyPortfolioStatus(
   // system that is REFUSING must stay the headline; "Settling a core order ·
   // warn" over an unreadable kill switch trades a safety signal for a tidier
   // sentence. ⚠ Residual, stated rather than hidden: in that combination the
-  // header reads "Not trading" while "Resume demo order" is still enabled,
-  // because `can_resume` does not consult those either. The blocker row names
-  // the reason, and the conservative side of an unknown refusal is the right
-  // one to be on.
+  // header reads "Not trading" while the settle affordance is still enabled.
+  // ⚠ ANSWERED in round 2 rather than left as a residual: `can_resume` is RIGHT
+  // not to consult those. A settle is `resume_core_submission`, which "reconciles
+  // one committed authority WITHOUT EVER RETRYING ITS MUTATION" -- a broker
+  // lookup that cannot create exposure -- and `reconcile_backlog` already runs it
+  // unattended every cycle ahead of any block being read. Gating it would wedge
+  // an unresolved order exactly when resolving it matters most. Both sentences
+  // are true and they are about different things; the label was what conflated
+  // them, and it now says "Settle". See `can_resume` in `app/api/strategies.py`.
   if (blockers.every((b) => SETUP_BLOCKERS.has(b.key)) && core !== null && core.execution_action === "resume") {
     return {
       trading: false,
