@@ -2551,11 +2551,26 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_CORE_REBALANCE_OBSERVATION,
         display_name="Core/cash rebalance observation (#2603)",
-        # Lane ``etoro`` and not ``strategy_execution``: the only external call
-        # is an eToro read, and ``etoro`` is the lane that owns that budget.
+        # Own lane, NOT ``etoro`` and NOT ``strategy_execution``.
+        #
         # ``strategy_execution`` is held by strategy_paper_cycle every five
-        # minutes, so a daily job landing there is a daily job that skips.
-        source="etoro",
+        # minutes, so a daily job landing there is a daily job that skips. The
+        # original ``etoro`` choice then hit the identical failure one lane
+        # over, and harder: ``daily_candle_refresh`` runs as an orchestrator
+        # layer whose ``_run_legacy`` holds ``job_source:etoro`` across its
+        # WHOLE body — 3.2-3.8 h, measured 09-15 -> 09-18 — and it spans 22:45
+        # every day. The ~11.5 s patient backoff (#1710) cannot outlast that, so
+        # 4 of 4 fires recorded ``lane_busy`` and this job had NEVER completed a
+        # run (0 ``success`` rows in 28 days).
+        #
+        # ⚠ The lane was never what bounded the request budget — ``Lane``'s own
+        # docstring says a lane is a job-overlap bucket, not a rate limiter
+        # (#1478). This job's ONE ``get_account_risk_snapshot`` call sits in
+        # eToro's documented ``E_account_read`` pool (60/min,
+        # ``etoro_quota_lanes.py``) — up to 4 ATTEMPTS once a day
+        # (``ResilientClient`` defaults to ``max_retries=3``), against a
+        # co-tenant already paced at 1.1 s. It cannot breach the pool.
+        source="etoro_core_rebalance",
         description=(
             "Daily — observe the core sleeve from one informational eToro "
             "account-risk snapshot and store one append-only rebalance "
@@ -2577,11 +2592,36 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_CORE_ELIGIBILITY_REFRESH,
         display_name="Core eligibility revalidation (#2603)",
-        # Same lane as the observation job and for the same reason: the only
-        # external call is an informational eToro read and ``etoro`` owns that
-        # budget. The lane also serialises the two, so neither holds the broker
-        # session while the other is mid-batch.
-        source="etoro",
+        # Own lane. This entry previously read ``etoro``, "the lane that owns
+        # that budget", and noted that the shared lane also serialised this job
+        # with ``core_rebalance_observation`` "so neither holds the broker
+        # session while the other is mid-batch". BOTH halves are revised here,
+        # deliberately and with the evidence, rather than quietly dropped:
+        #
+        # 1. ``etoro`` cost this job 18 fires between 09-14 and 09-18, all 18
+        #    inside a ``daily_candle_refresh`` sweep holding the lane for 3.2-3.8
+        #    h. A lane is a job-overlap bucket, not a rate limiter (``Lane``
+        #    docstring, #1478), so it never was what owned the budget.
+        # 2. The serialisation it bought was protecting against an overlap that
+        #    cannot contend *with the observation*: eToro documents this job's
+        #    endpoint as a DEDICATED 20/min quota
+        #    (``etoro_quota_lanes.LANES['B_eligibility']``), while the
+        #    observation's call draws on ``E_account_read``. Two separate
+        #    quotas, so those two cannot exhaust each other. eToro auth is a
+        #    per-request header pair, not an exclusive session.
+        #    ⚠ "Dedicated" is per ENDPOINT, not per JOB — ``strategy_position_
+        #    manager.check_instrument_n`` hits the same endpoint and always did,
+        #    so this lane is not a private budget and must not be read as one.
+        #    ⚠ The bound is ATTEMPTS: ``ResilientClient`` defaults to
+        #    ``max_retries=3``, so the 100-instrument cap is up to 400 attempts.
+        #
+        # SEPARATE from ``etoro_core_rebalance`` rather than one shared lane:
+        # this job is capped at 100 requests x 3.33 s (~333 s of sleeps before
+        # any HTTP; one observed failure ran 1022.8 s), so a :20 fire can still
+        # be running at :45 and a shared lane would re-create exactly the
+        # starvation being fixed — the ``db_liveness`` / ``db_retry`` call
+        # (#1526), not one ``db_infra``.
+        source="etoro_core_eligibility",
         description=(
             "Hourly — re-ask eToro about instruments already proved on this "
             "account whose latest proof has passed half of "

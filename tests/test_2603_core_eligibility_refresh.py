@@ -130,10 +130,24 @@ def test_the_job_is_registered_in_both_the_schedule_and_the_invoker_map() -> Non
     assert JOB_CORE_ELIGIBILITY_REFRESH in _INVOKERS
 
 
-def test_the_job_shares_the_etoro_lane() -> None:
-    """The lane is what serialises this against the core observation job, so
-    neither holds a broker session while the other is mid-batch."""
-    assert _registered_job().source == "etoro"
+def test_the_job_owns_its_lane_and_shares_it_with_nothing() -> None:
+    """This used to share ``etoro`` with the core observation job, so that
+    "neither holds a broker session while the other is mid-batch".
+
+    Both halves of that were revised (#2603): ``etoro`` is held 3.2-3.8h a day by
+    ``daily_candle_refresh`` and cost this job 18 fires, and the serialisation
+    was guarding an overlap that cannot contend — this job's endpoint is a
+    DEDICATED 20/min eToro quota "not shared with any other endpoint", while the
+    observation draws on ``E_account_read``. Separate lanes rather than one
+    shared ``etoro_core``, because a 100-request batch here can still be running
+    at the observation's :45 fire.
+    """
+    entry = _registered_job()
+    assert entry.source == "etoro_core_eligibility"
+    assert entry.source != "etoro"
+    # Not merged with the observation's lane — that would re-create the exact
+    # starvation this split exists to remove.
+    assert entry.source != "etoro_core_rebalance"
 
 
 # --------------------------------------------------------------------------

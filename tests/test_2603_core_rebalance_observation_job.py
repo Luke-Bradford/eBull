@@ -384,14 +384,24 @@ def test_the_job_is_registered_and_invocable() -> None:
     assert JOB_CORE_REBALANCE_OBSERVATION in _INVOKERS
 
 
-def test_the_lane_is_etoro_and_not_strategy_execution() -> None:
-    """``strategy_execution`` is held by strategy_paper_cycle every five minutes,
-    so a daily job on that lane is a daily job that skips. The only external call
-    here is an eToro read, and ``etoro`` is the lane that owns that budget."""
+def test_the_lane_is_its_own_and_not_a_lane_a_long_job_holds() -> None:
+    """The daily fire must not land on a lane something else holds for hours.
+
+    ``strategy_execution`` is held by strategy_paper_cycle every five minutes, so
+    a daily job there is a daily job that skips. ``etoro`` — the original choice,
+    on the since-corrected grounds that it "owns that budget" — turned out to be
+    worse: ``daily_candle_refresh`` holds ``job_source:etoro`` for 3.2-3.8h
+    across 22:45, so 4 of 4 fires recorded ``lane_busy`` and this job had never
+    completed a run. A lane bounds job overlap, not request rate (#1478).
+    """
     from app.workers.scheduler import SCHEDULED_JOBS
 
     entry = next(j for j in SCHEDULED_JOBS if j.name == JOB_CORE_REBALANCE_OBSERVATION)
-    assert entry.source == "etoro"
+    assert entry.source == "etoro_core_rebalance"
+    # The two lanes it must NOT be on, named so a future re-collapse fails here
+    # rather than silently costing the fire again. ``_ALLOWED_SOURCES`` cannot
+    # catch that: ``etoro`` legitimately remains an allowed lane.
+    assert entry.source not in {"etoro", "strategy_execution"}
 
 
 def test_the_mandate_mode_check_still_pins_paper() -> None:

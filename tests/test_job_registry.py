@@ -41,6 +41,17 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # #2934 — the hourly immutable quote population cannot share the
         # multi-hour candle job lock; HTTP rate remains globally throttled.
         "etoro_quotes",
+        # #2603 — the two core-sleeve jobs split off ``etoro`` for the SAME
+        # holder as #2934: the candle sweep holds that lane 3.2-3.8h and spans
+        # both fire times. The daily observation had never completed a run (0
+        # success in 28 days, 4/4 lane_busy); the hourly revalidator lost 18
+        # fires. Separate lanes and not one ``etoro_core`` — the observation
+        # does not read eligibility proofs, and a 100-request revalidation
+        # batch can still be running at :45. Budgets stay bounded by eToro's
+        # documented per-endpoint quotas, NOT by the lane.
+        # See app/jobs/sources.py::Lane.
+        "etoro_core_rebalance",
+        "etoro_core_eligibility",
         "sec_rate",
         # #1478 — sec_manifest_worker extracted from sec_rate into its own
         # lane so the heavy drainer stops starving the SEC producers. A lane

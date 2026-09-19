@@ -2485,11 +2485,18 @@ class TestReservedLaneSchedulerExecutors:
     def test_an_etoro_source_buys_no_lane(self) -> None:
         """#3189 finding 9 — ``source`` and the execution lane are different budgets.
 
-        ``source="etoro"`` buys a share of the eToro REQUEST budget
-        (``app/jobs/sources.py``). It buys nothing from ``execution_lane_for``,
-        which knows ``sec_rate``, the paper cycle and the core-preflight
-        producers and nothing else — so every ``etoro``-sourced job dispatches
-        on the GENERAL executor and takes a general semaphore permit.
+        A ``source`` buys a JOB-OVERLAP bucket — one ``JobLock`` shared by that
+        lane's members (``app/jobs/sources.py``). It buys nothing from
+        ``execution_lane_for``, which knows ``sec_rate``, the paper cycle and
+        the core-preflight producers and nothing else — so every job listed
+        below dispatches on the GENERAL executor and takes a general semaphore
+        permit, whichever source lane it sits on.
+
+        ⚠ Nor does a ``source`` buy a share of the eToro request budget, which
+        this docstring used to claim. ``Lane``'s own text has recorded since
+        #1478 that a lane is a job-overlap bucket and not a rate limiter, and
+        #2603 leaned on exactly that to move the two core jobs onto their own
+        lanes.
 
         A comment on ``recommendation_order_reconcile`` claimed the opposite
         ("joining an existing lane buys a dispatch thread"), which is how a
@@ -2501,20 +2508,33 @@ class TestReservedLaneSchedulerExecutors:
         """
         from app.jobs.sources import source_for
         from app.workers.scheduler import (
+            JOB_CORE_ELIGIBILITY_REFRESH,
             JOB_CORE_REBALANCE_OBSERVATION,
             JOB_EXECUTE_APPROVED_ORDERS,
             JOB_RECOMMENDATION_ORDER_RECONCILE,
         )
 
-        for name in (
-            JOB_RECOMMENDATION_ORDER_RECONCILE,
-            JOB_EXECUTE_APPROVED_ORDERS,
-            JOB_CORE_REBALANCE_OBSERVATION,
-        ):
-            assert source_for(name) == "etoro"
+        # ⚠ The two core jobs LEFT ``etoro`` in #2603 (2026-09-19) — the candle
+        # sweep holds that lane 3.2-3.8h a day and the daily observation had
+        # never completed a run. They are kept here, on their new lanes, because
+        # the invariant this test guards is not about the string "etoro": it is
+        # that a SOURCE lane buys nothing from ``execution_lane_for``, which
+        # knows only ``sec_rate``, the paper cycle and the core-preflight
+        # producers. Minting two new source lanes and still landing on the
+        # general executor is the sharpest available statement of that, and it
+        # doubles as the #1472 guard — if either mover had bought a lane, the
+        # connection budget (usable 27, demand 27) would fail boot.
+        expected_sources = {
+            JOB_RECOMMENDATION_ORDER_RECONCILE: "etoro",
+            JOB_EXECUTE_APPROVED_ORDERS: "etoro",
+            JOB_CORE_REBALANCE_OBSERVATION: "etoro_core_rebalance",
+            JOB_CORE_ELIGIBILITY_REFRESH: "etoro_core_eligibility",
+        }
+        for name, expected_source in expected_sources.items():
+            assert source_for(name) == expected_source
             assert runtime.execution_lane_for(name) == runtime.EXECUTION_LANE_GENERAL, (
-                f"{name} is sourced 'etoro' and must still run on the general lane — "
-                "if it moved, the connection budget was re-reviewed and this test's "
+                f"{name} is sourced {expected_source!r} and must still run on the general "
+                "lane — if it moved, the connection budget was re-reviewed and this test's "
                 "premise (and the comment beside `source=`) needs rewriting"
             )
 
