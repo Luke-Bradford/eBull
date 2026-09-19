@@ -2486,13 +2486,17 @@ class TestReservedLaneSchedulerExecutors:
         """#3189 finding 9 — ``source`` and the execution lane are different budgets.
 
         A ``source`` buys a JOB-OVERLAP bucket — one ``JobLock`` shared by that
-        lane's members (``app/jobs/sources.py``). ⚠ It does NOT buy a share of
-        the eToro request budget, which this docstring used to say: ``Lane``'s
-        own text has recorded since #1478 that a lane is not a rate limiter, and
-        #2603 leaned on that to split the core jobs out. It buys nothing from ``execution_lane_for``,
-        which knows ``sec_rate``, the paper cycle and the core-preflight
-        producers and nothing else — so every ``etoro``-sourced job dispatches
-        on the GENERAL executor and takes a general semaphore permit.
+        lane's members (``app/jobs/sources.py``). It buys nothing from
+        ``execution_lane_for``, which knows ``sec_rate``, the paper cycle and
+        the core-preflight producers and nothing else — so every job listed
+        below dispatches on the GENERAL executor and takes a general semaphore
+        permit, whichever source lane it sits on.
+
+        ⚠ Nor does a ``source`` buy a share of the eToro request budget, which
+        this docstring used to claim. ``Lane``'s own text has recorded since
+        #1478 that a lane is a job-overlap bucket and not a rate limiter, and
+        #2603 leaned on exactly that to move the two core jobs onto their own
+        lanes.
 
         A comment on ``recommendation_order_reconcile`` claimed the opposite
         ("joining an existing lane buys a dispatch thread"), which is how a
