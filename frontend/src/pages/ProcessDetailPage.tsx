@@ -12,7 +12,7 @@
  */
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
@@ -48,10 +48,12 @@ import { AdvancedParamsForm } from "@/components/admin/AdvancedParamsForm";
 import {
   REASON_TOOLTIP,
   RUN_STATUS_VISUAL,
+  STALE_REASON_LABEL,
   STATUS_VISUAL,
   meansActiveRunIsStale,
   reasonTooltip,
 } from "@/components/admin/processStatus";
+import { VerdictPill } from "@/components/admin/VerdictPill";
 import { useAsync } from "@/lib/useAsync";
 import {
   formatDateTime,
@@ -356,15 +358,33 @@ export function ProcessDetailPage() {
           >
             ← Admin
           </Link>
-          <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">
-            {detail.data?.display_name ?? id}
-          </h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">
+              {detail.data?.display_name ?? id}
+            </h1>
+            {/* #2274 — the health claim lives in the HEADER, not in the
+                Overview tab, so it survives a switch to History / Errors /
+                DAG. Before this the drill-in rendered STATUS_VISUAL[status]
+                inside Overview only, which both disagreed with the table's
+                verdict and vanished on any other tab.
+
+                ⚠ Two inherited limits this placement now INHERITS rather than
+                introduces, both named on #2274 rather than fixed here:
+                (a) the envelope never polls, so the headline can sit on a
+                    stale verdict indefinitely — the drill-in poll that
+                    admin-control-hub-rewrite.md:90 prescribes was never built;
+                (b) only the Overview and Errors tabs surface `detail.error`,
+                    so a failed detail fetch removes this pill silently while
+                    History / DAG / Timeline show their own request's state. */}
+            {detail.data ? <VerdictPill row={detail.data} /> : null}
+          </div>
           {detail.data ? (
             <p className="text-xs text-slate-500 dark:text-slate-400">
               {detail.data.process_id} · {detail.data.mechanism} ·{" "}
               {detail.data.lane}
             </p>
           ) : null}
+          {detail.data ? <HealthDetail row={detail.data} /> : null}
           {/* PR4 #1082 — operator-facing description rendered inline
               on the drill-in (vs the ⓘ tooltip on the table row). The
               drill-in has the screen real estate; the table row uses
@@ -650,6 +670,90 @@ function tabTitle(tab: TabKey): string {
   }
 }
 
+/**
+ * #2274 — the verdict's reason, plus every stale reason the backend reported.
+ *
+ * `verdict_reason` is a HEADLINE: several reasons can fire and
+ * `compute_verdict` picks one (`_REASON_ORDER`, or `_WEDGE_HEADLINE_ORDER`
+ * inside its `status == "disabled"` branch). The drill-in is where the full
+ * list belongs — which is why `stale_reasons` is on the payload at all
+ * (`api/types.ts`: "`status` + `stale_reasons` stay on the payload for the
+ * drill-in"). Until now nothing rendered it: `STALE_REASON_LABEL` was
+ * exported, unit-tested and dead.
+ *
+ * ⚠⚠ These are muted TEXT, not pills, and that is load-bearing rather than a
+ * style choice. A reason surviving in the payload does not mean the backend
+ * thinks it is an alarm: `compute_verdict` returns neutral `paused` for a
+ * halted row still carrying `schedule_missed` / `watermark_gap`, and
+ * `self_healing` calms a reason whose retry is already in flight. Giving them
+ * pill weight would undo that suppression and put two competing signals on one
+ * page — the exact defect this change removes. The verdict pill stays the only
+ * toned health claim here; these are the inputs it was computed from, stated
+ * as such.
+ *
+ * Shape copied from `ProcessRow::RecentReaps`, which solves the identical
+ * problem (a fact that must be visible without reading as a second status) the
+ * same way: slate, lowercase, no border, no pill geometry. ⚠ A bordered chip
+ * here would also re-declare Badge's geometry, which `check-hand-rolled-pills`
+ * exists to stop — it happened not to fire only because the text-size class
+ * sat on the parent line.
+ *
+ * ⚠ Order is the payload's own array order, NOT a re-derived precedence — the
+ * backend's ordering constants govern which reason wins the headline, and
+ * mirroring them here would be a second copy of a rule that can drift.
+ *
+ * ⚠ The React key carries the index as well as the reason. `stale_detection
+ * .compute` cannot emit a duplicate — it is five independent `if` blocks each
+ * appending one distinct literal, with no loop — so this is belt-and-braces,
+ * not a known-reachable case. It is here because the FE has no way to VERIFY
+ * that producer invariant (`StaleReason[]` does not express uniqueness) and a
+ * violation would surface as a React key collision, i.e. a rendering bug
+ * blamed on this file rather than a data bug traced to its source. Indexing is
+ * safe here specifically: the array is replaced wholesale on refetch, never
+ * reordered or spliced between renders.
+ *
+ * ⚠ No elapsed-since-heartbeat suffix on any chip. `ProcessRow` appends one to
+ * its reason line, but that advances only because the TABLE polls and folds
+ * the elapsed string into `processRowSignature`; `formatElapsedSince` has no
+ * timer of its own. This page's envelope (`useAsync(() => fetchProcess(id),
+ * [id])`) has no interval — it refetches on actions and route change only — so
+ * a duration rendered here would freeze at fetch time while reading as live.
+ */
+function HealthDetail({ row }: { row: ProcessRowResponse }) {
+  if (!row.verdict_reason && row.stale_reasons.length === 0) return null;
+  return (
+    <div className="mt-1 space-y-1">
+      {row.verdict_reason ? (
+        <p
+          data-testid="verdict-reason"
+          className="text-xs text-slate-600 dark:text-slate-300"
+        >
+          {row.verdict_reason}
+        </p>
+      ) : null}
+      {row.stale_reasons.length > 0 ? (
+        <div
+          data-testid="stale-reasons"
+          className="flex flex-wrap items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400"
+        >
+          <span>reported:</span>
+          {row.stale_reasons.map((reason, i) => (
+            <Fragment key={`${reason}-${i}`}>
+              {/* Separator is a SIBLING, not part of the labelled span: the
+                  span's text is exactly the reason label, so a test reading it
+                  reads the operator-facing copy and nothing else. */}
+              {i > 0 ? <span aria-hidden="true">·</span> : null}
+              <span data-testid="stale-reason-chip" data-reason={reason}>
+                {STALE_REASON_LABEL[reason]}
+              </span>
+            </Fragment>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function OverviewTab({
   row,
   loading,
@@ -664,17 +768,21 @@ function OverviewTab({
   if (loading) return <SectionSkeleton rows={4} />;
   if (error) return <SectionError onRetry={onRetry} />;
   if (!row) return <p className="text-sm text-slate-500">No detail available.</p>;
-  const visual = STATUS_VISUAL[row.status];
   return (
     <div className="space-y-3 text-sm">
-      <div className="flex items-center gap-2">
-        <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-          Status
-        </span>
-        <Badge tone={visual.tone} uppercase className={visual.extraClass}>
-          {visual.label}
-        </Badge>
-      </div>
+      {/* #2274 — DEMOTED from a toned pill to plain text, and the health claim
+          moved to the page header.
+          `status` is kept because it is real and distinct information: the
+          adapter-normalised process state the verdict was computed FROM,
+          including the kill switch's masking to `disabled`. It is not a stored
+          run status. It loses its tone because a second toned pill beside the
+          verdict is the two-cells-that-disagree defect `ProcessRow::RecentReaps`
+          already names. The label still comes from `STATUS_VISUAL`, so the two
+          surfaces keep sharing their wording for this field. */}
+      <KeyValueRow
+        label="Process state"
+        value={STATUS_VISUAL[row.status].label}
+      />
       <KeyValueRow label="Cadence" value={row.cadence_human} />
       <KeyValueRow
         label="Next fire"
