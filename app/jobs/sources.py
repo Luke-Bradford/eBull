@@ -130,13 +130,13 @@ the rate — it does not.
 * ``etoro_core_rebalance`` — ``core_rebalance_observation`` (#2603 step 3b-3).
   ⚠ The split gave up one exclusion the shared lane provided incidentally:
   ``load_engine_capital_authority`` READS ``trade_events``, which its former
-  lanemate ``daily_portfolio_sync`` WRITES. Guarded, not merely accepted — the job
-  re-reads the authority under ``PAPER_ALLOCATOR_ADVISORY_LOCK`` +
+  lanemate ``daily_portfolio_sync`` WRITES. Guarded, not merely accepted — the
+  job re-reads the authority under ``PAPER_ALLOCATOR_ADVISORY_LOCK`` +
   ``CORE_MANDATE_ADVISORY_LOCK`` and RAISES on any change. The lesson to carry
-  before moving anything else onto or off this lane: disjoint output tables do not
-  prove coherent INPUTS. Exposure arithmetic and the measuring queries:
-  ``docs/proposals/execution/2026-09-19-2603-core-lane-starvation.md`` §4 — kept
-  there rather than restated here, because those figures move.
+  before moving anything else onto or off this lane: disjoint output tables do
+  not prove coherent INPUTS. Exposure arithmetic and the measuring queries live
+  in ``docs/proposals/execution/2026-09-19-2603-core-lane-starvation.md``
+  §4 — kept there rather than restated here, because those figures move.
 * ``etoro_core_eligibility`` — ``core_eligibility_refresh`` (#2603 item 2).
   Both split off ``etoro`` because the multi-hour candle sweep spans their fire
   times: the daily 22:45 observation lost 4 of 4 fires and had **never completed
