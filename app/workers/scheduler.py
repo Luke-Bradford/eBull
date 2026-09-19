@@ -2567,7 +2567,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # docstring says a lane is a job-overlap bucket, not a rate limiter
         # (#1478). This job's ONE ``get_account_risk_snapshot`` call sits in
         # eToro's documented ``E_account_read`` pool (60/min,
-        # ``etoro_quota_lanes.py``); one request per day cannot breach it.
+        # ``etoro_quota_lanes.py``) — up to 4 ATTEMPTS once a day
+        # (``ResilientClient`` defaults to ``max_retries=3``), against a
+        # co-tenant already paced at 1.1 s. It cannot breach the pool.
         source="etoro_core_rebalance",
         description=(
             "Daily — observe the core sleeve from one informational eToro "
@@ -2601,12 +2603,17 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         #    h. A lane is a job-overlap bucket, not a rate limiter (``Lane``
         #    docstring, #1478), so it never was what owned the budget.
         # 2. The serialisation it bought was protecting against an overlap that
-        #    cannot contend: eToro documents this job's endpoint as a DEDICATED
-        #    20/min quota "not shared with any other endpoint"
+        #    cannot contend *with the observation*: eToro documents this job's
+        #    endpoint as a DEDICATED 20/min quota
         #    (``etoro_quota_lanes.LANES['B_eligibility']``), while the
-        #    observation's single call draws on ``E_account_read``. Two separate
-        #    quotas, so concurrent sessions cannot exhaust each other. eToro
-        #    auth is a per-request header pair, not an exclusive session.
+        #    observation's call draws on ``E_account_read``. Two separate
+        #    quotas, so those two cannot exhaust each other. eToro auth is a
+        #    per-request header pair, not an exclusive session.
+        #    ⚠ "Dedicated" is per ENDPOINT, not per JOB — ``strategy_position_
+        #    manager.check_instrument_n`` hits the same endpoint and always did,
+        #    so this lane is not a private budget and must not be read as one.
+        #    ⚠ The bound is ATTEMPTS: ``ResilientClient`` defaults to
+        #    ``max_retries=3``, so the 100-instrument cap is up to 400 attempts.
         #
         # SEPARATE from ``etoro_core_rebalance`` rather than one shared lane:
         # this job is capped at 100 requests x 3.33 s (~333 s of sleeps before

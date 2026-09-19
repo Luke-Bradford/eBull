@@ -125,9 +125,13 @@ a collision surface:
   would re-create this ticket's own starvation between the two jobs.
 
 That is exactly the reasoning `tests/test_db_lane_infra_starvation.py` records for keeping
-`db_liveness` and `db_retry` separate rather than minting one `db_infra`. Two lanes cost
-nothing extra: a `JobLock` connection is held per *running job*, so moving a job between
-lanes does not change the count of concurrently-held locks.
+`db_liveness` and `db_retry` separate rather than minting one `db_infra`.
+
+⚠ An earlier draft argued the two lanes "cost nothing extra" because a `JobLock`
+connection is held per running job. That is wrong in the direction that matters: a split
+*permits* more jobs to run at once, so it can raise the number of simultaneously-held
+locks. The valid connection-budget argument is §1's — the execution-permit ceiling is
+unchanged, and that is what bounds concurrency.
 
 ### No constant is chosen
 
@@ -158,17 +162,24 @@ published per-endpoint budgets:
 
 | job | call | quota lane | documented |
 | --- | --- | --- | --- |
-| `core_eligibility_refresh` | eligibility POST ×N | `B_eligibility` | 20/min, **dedicated — "not shared with any other endpoint"** |
+| `core_eligibility_refresh` | eligibility POST ×N | `B_eligibility` | 20/min, **dedicated endpoint quota** |
 | `core_rebalance_observation` | `get_account_risk_snapshot` → `GET /api/v1/trading/info/demo/pnl` | `E_account_read` | 60/min, **shared** (pnl / portfolio / instrument-breakdown) |
 
-- **Eligibility is budget-isolated by the vendor's own rule.** Nothing else can draw on
-  `B_eligibility`, so de-serialising it from the `etoro` lane cannot breach any budget.
-  Its existing 3.33 s pacing is already derived from that budget and is unchanged.
+- **Eligibility draws on a separate published budget from the observation**, so those two
+  cannot exhaust each other and de-serialising them breaches nothing. Its existing 3.33 s
+  pacing is derived from that budget and is unchanged.
+  ⚠ **"Dedicated" is per ENDPOINT, not per JOB** — an earlier draft of this section said
+  nothing else could draw on `B_eligibility`. False: `strategy_position_manager` reaches
+  the same endpoint via `check_instrument_n`. Those callers already ran independently of
+  the `etoro` lane, so this is a documentation correction, not a collision this change
+  introduces — but the lane must not be read as a private budget.
 - **Rebalance shares `E_account_read` with `daily_portfolio_sync`'s `get_portfolio`.** It
-  issues **exactly one** request per fire, once per day. Its co-tenant is independently
-  paced by `_ETORO_READ_INTERVAL_S = 1.1 s` (≤ ~54 stamps/min). One extra stamp in a
-  rolling minute leaves the 60/min ceiling intact. This is arithmetic against a published
-  budget, not an appeal to a shared throttle that does not exist on this path.
+  issues **one call, up to 4 ATTEMPTS** (`ResilientClient` defaults to `max_retries=3`),
+  once per day. Its co-tenant is independently paced by `_ETORO_READ_INTERVAL_S = 1.1 s`
+  (≤ 55 stamps/rolling minute); 55 + 4 still fits 60. This is arithmetic against a
+  published budget, not an appeal to a shared throttle that does not exist on this path.
+  ⚠ Count attempts, not calls: the eligibility cap is likewise up to **400** attempts,
+  not 100 requests.
 
 ### 3. Output writes are disjoint
 
@@ -198,9 +209,13 @@ exclusion. Accepted deliberately, because:
   `PAPER_ALLOCATOR_ADVISORY_LOCK` + `CORE_MANDATE_ADVISORY_LOCK` (`scheduler.py:6586-6587`)
   and raises `RuntimeError("assigned-capital authority changed during core observation")`
   on any change. The race is **fail-loud**, not silent misattribution;
-- the exposure is one ~1 s window per day against a writer occupying ~0.9 % of wall-clock,
-  and the next daily tick is correct;
-- the status quo is 100 % of fires lost. A ~1 %/day loud failure strictly dominates.
+- the exposure is one short window per day against a writer occupying ~0.9 % of
+  wall-clock, and the next daily tick is correct. ⚠ That occupancy figure bounds how much
+  of the day the writer is active; it is **not** a collision probability for a scheduled
+  fire, which depends on phase alignment this document does not measure. Stated as the
+  order of magnitude it is;
+- the status quo is 100 % of fires lost, so any bounded, loud, self-correcting failure
+  strictly dominates it.
 
 ⚠ Residual, stated rather than left to be found: a `trade_events` write landing *after*
 the final re-read is not caught by the equality check. That is inherent to snapshot

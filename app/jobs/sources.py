@@ -150,11 +150,16 @@ the rate — it does not.
   (#1526) rather than one ``db_infra``.
   ⚠⚠ Their request budgets are preserved by eToro's DOCUMENTED per-endpoint
   quotas (``implementations/etoro_quota_lanes.py``), NOT by a shared process
-  clock: eligibility sits on ``B_eligibility`` (20/min, dedicated — pooled with
-  nothing) and the observation makes ONE ``E_account_read`` request per day
-  against a 60/min pool. ``EtoroBrokerProvider``'s throttle is PER INSTANCE
-  (``shared_ts`` / ``shared_throttle_lock`` built in ``__init__``), unlike the
-  market-data clock #2934 relied on — do not reuse that argument here.
+  clock: eligibility sits on ``B_eligibility`` (20/min) and the observation on
+  ``E_account_read`` (60/min). ``EtoroBrokerProvider``'s throttle is PER
+  INSTANCE (``shared_ts`` / ``shared_throttle_lock`` built in ``__init__``),
+  unlike the market-data clock #2934 relied on — do not reuse that argument.
+  ⚠ Read "dedicated" precisely: it is a dedicated ENDPOINT quota, not a
+  dedicated JOB quota. ``strategy_position_manager`` reaches the same
+  eligibility endpoint via ``check_instrument_n``, and did so before this split.
+  ⚠ Count ATTEMPTS, not calls: ``ResilientClient`` defaults to
+  ``max_retries=3``, so the observation's single call is up to 4 attempts and a
+  100-instrument revalidation batch is up to 400.
 * ``etoro_quotes`` — ``quotes_refresh`` (#2934) plus
   ``core_candidate_quote_refresh`` (#3118). The immutable hourly core-sleeve
   population cannot wait behind the multi-hour candle sweep. Its writes are
