@@ -90,7 +90,29 @@ logger = logging.getLogger(__name__)
 # in the manifest worker (#869). The bump propagates to the manifest
 # adapter (`app/services/manifest_parsers/sec_n_port.py`) via direct
 # symbol import.
-_PARSER_VERSION_NPORT = "nport-v2-edgartools"
+# v3 (#2329): CUSIP resolution widened from ``provider='sec'`` to
+# ``IN ('sec','openfigi')``. This changes what lands in
+# ``ownership_funds_observations`` for an unchanged payload — 221
+# (accession, instrument) pairs on the 35 already-parsed accessions —
+# so it is a parse-semantics bump, not a cosmetic one.
+#
+# ⚠⚠ **The bump does NOT requeue anything on its own** (Codex ckpt-2,
+# #2329). Manifest rediscovery leaves an existing row ``parsed``, the
+# worker drains only pending rows, N-PORT has no registered rewash
+# parser (``nport_xml`` is in ``KEPT_NEGLIGIBLE_DOCUMENT_KINDS`` —
+# reuse deferred by volume, #1731), and the per-CIK HTTP sweep skips
+# every accession already present in ``n_port_ingest_log`` whatever
+# its parser version. The constant is an AUDIT tag here, not a
+# trigger. The backfill is an explicit operator action:
+#
+#     POST /jobs/sec_rebuild/run   {"source": "sec_n_port"}
+#
+# which resets the manifest rows to ``pending`` for the worker to
+# re-drain. Verified in scope on dev 2026-09-19: all 35 parsed and all
+# 132 tombstoned ``sec_n_port`` manifest rows match one of the 16
+# ``data_freshness_index`` triples that scope resolves to, so none is
+# left behind.
+_PARSER_VERSION_NPORT = "nport-v3-both-cusip-providers"
 
 
 # Both spellings appear in the SEC submissions API. The current
@@ -693,17 +715,55 @@ def _resolve_cusip_to_instrument_id(
     cusip: str,
 ) -> int | None:
     """Resolve CUSIP via ``external_identifiers``. Same contract as
-    the 13F path."""
+    the 13F path (``institutional_holdings._resolve_cusip_to_instrument_id``).
+
+    Reads BOTH resolution providers, SEC first. ``provider='sec'`` is
+    the #740 backfill off the 13F Official List; ``provider='openfigi'``
+    is the approved CUSIP-resolution fallback (settled decision
+    2026-05-22) written by ``cusip_resolver`` PR-1b. This function said
+    ``provider = 'sec'`` alone until #2329 — it predated OpenFIGI, and
+    #2213 widened only the 13F sibling.
+
+    ⚠ #2329 filed this as LATENT, on the premise that the bulk twin
+    (``sec_nport_dataset_ingest`` -> ``load_bulk_cusip_map``, which
+    reads both providers) covers whatever the per-filing path drops.
+    **Measured on dev 2026-09-19 and that premise is false.** Re-parsing
+    all 35 ``sec_n_port`` accessions the manifest worker has parsed,
+    from their stored ``nport_xml`` payloads, and resolving every
+    equity-common-Long-NS holding under each filter:
+
+      * 209 distinct CUSIPs, of which 66 resolve ONLY under the widened
+        filter — GOOGL, GOOG, BAC, KO, BRK.B, CSCO, ADBE, CMCSA … the
+        same cohort #2213 found dark on the 13F path;
+      * **348 of 1,025 eligible holdings dropped** by the narrow filter;
+      * of those 348 ``(accession, instrument)`` pairs, only 127 exist
+        in ``ownership_funds_observations`` via the bulk twin —
+        **221 are absent**, i.e. present-day data loss.
+
+    The twin cannot cover them by construction: DERA publishes N-PORT
+    quarterly, so a filing the manifest worker handles the week it
+    lands has no bulk row for a quarter or more. A drop is silent — the
+    holding is counted into ``skipped_no_cusip`` and, unlike the 13F
+    path, N-PORT deliberately writes nothing to ``unresolved_13f_cusips``
+    (see the caller's comment), so there is no queue entry either.
+
+    SEC wins when a CUSIP carries both mappings (75 do). The
+    ``LIMIT 1`` keeps the widened lookup 1:1; ``is_primary`` does NOT
+    discriminate provider (OpenFIGI rows are ``FALSE``, but so are many
+    SEC rows), so only the CASE can order them.
+    """
     if not cusip or len(cusip.strip()) != 9:
         return None
     cur = conn.execute(
         """
         SELECT instrument_id
         FROM external_identifiers
-        WHERE provider = 'sec'
+        WHERE provider IN ('sec', 'openfigi')
           AND identifier_type = 'cusip'
           AND identifier_value = %(cusip)s
-        ORDER BY is_primary DESC, external_identifier_id ASC
+        ORDER BY CASE provider WHEN 'sec' THEN 0 ELSE 1 END,
+                 is_primary DESC,
+                 external_identifier_id ASC
         LIMIT 1
         """,
         {"cusip": cusip.strip().upper()},

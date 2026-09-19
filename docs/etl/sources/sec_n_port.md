@@ -30,7 +30,7 @@ PR7 #1233 §4.6 cohort bound (mirror of #1010 for 13F-HR). Collapses ~5k registe
 `sec_filing_manifest.source = 'sec_n_port'`. `subject_type='institutional_filer'` or `'fund_series'` depending on discovery path. `subject_id=<trust_cik_zero_padded>` or `<series_id>`. `instrument_id=NULL` (per-holding issuer linkage at parse time). Option C `filed_at` gate at `record_manifest_entry`.
 
 ## 7. Parser
-`app/services/manifest_parsers/sec_n_port.py::_parse_n_port`. Version `_PARSER_VERSION_NPORT = "nport-v2-edgartools"` (`app/services/n_port_ingest.py:82`). Registered with `requires_raw_payload=True` (`sec_n_port.py:40-43`) — body persisted BEFORE parse so re-wash bumps never re-fetch.
+`app/services/manifest_parsers/sec_n_port.py::_parse_n_port`. Version `_PARSER_VERSION_NPORT = "nport-v3-both-cusip-providers"` (`app/services/n_port_ingest.py:98`). v3 (#2329) widened CUSIP resolution from `provider = 'sec'` to `IN ('sec','openfigi')`, which changes what lands in `ownership_funds_observations` for an unchanged payload — hence a parse-semantics bump. Registered with `requires_raw_payload=True` (`sec_n_port.py:40-43`) — body persisted BEFORE parse so re-wash bumps never re-fetch.
 
 Extraction (`n_port_ingest.py::parse_n_port_payload`, EdgarTools-backed):
 1. Lazy-import EdgarTools FundReport (`_edgar_fund_report`, #925 drop-in pattern).

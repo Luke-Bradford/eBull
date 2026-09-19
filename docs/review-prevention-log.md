@@ -8887,3 +8887,57 @@ original, because the gate now *looked* like a bound.
   `GroupVerdict.invalid_reason`);
   `tests/test_3227_holding_line_collapse_census.py::test_a_survivor_that_is_not_one_of_the_groups_lines_is_unclassifiable`,
   `::test_an_accession_with_no_reporting_owner_is_unclassifiable_not_joint`.
+
+## 2026-09-19 — "latent" is a claim about the population, not a property of the code (#2329)
+
+- Symptom: #2329 filed two `provider = 'sec'` CUSIP lookups as **latent, measured harmless
+  today**, on the reasoning that each has a provider-wide bulk twin that covers whatever the
+  narrow copy drops. Both halves of that were wrong, in opposite directions, and the ticket's
+  own severity framing is what stopped anyone checking for eleven weeks.
+- **`n_port_ingest._resolve_cusip_to_instrument_id` was not latent — it was losing data now.**
+  Re-parsed the FULL population of the live per-filing path (all 35 `sec_n_port` accessions the
+  manifest worker has parsed, from their stored `nport_xml` payloads, so no sampling and no
+  re-fetch) and resolved every eligible holding under both filters: **348 of 1,025 eligible
+  holdings dropped**, 66 of 209 distinct CUSIPs resolvable only when widened (GOOGL, GOOG, BAC,
+  KO, BRK.B, ADBE …), and of the 348 `(accession, instrument)` pairs only 127 exist in
+  `ownership_funds_observations` via the twin — **221 absent**.
+- ⚠ **The twin argument was structurally false and could have been refuted without any query.**
+  DERA publishes N-PORT *quarterly*; the manifest path exists precisely to handle a filing the
+  week it lands. So the bulk twin cannot cover the recent tail **by construction**, and the
+  tail is where a per-filing path spends its whole life. **When a defence is "another path
+  covers it", state the LAG between the two paths before believing it** — a twin that runs on a
+  different cadence covers the middle of the distribution and none of the edge you care about.
+- ⚠ **`blockholders._resolve_cusip_to_instrument_id` was not latent either — it was DEAD.** It
+  has had no callers since #1628 (`c4f1d2e9`) replaced it with `_resolve_issuer_to_instrument_id`,
+  which already read both providers. The ticket proposed widening it; the correct change is
+  deletion. A narrow resolver kept alive beside the correct one is the #2213 trap in its purest
+  form — the next caller reaches for the name matching what they are resolving (a CUSIP), not
+  the one that is right. **Before widening a function, grep its callers: "fix it everywhere" and
+  "delete it" look identical from the call site table and are opposite changes.**
+- ⚠ A third consumer the ticket did not list, `ownership_drillthrough` (two joins in
+  `_blockholder_state`), was still narrow — **in the same file that widened its 13F sibling at
+  #1233 PR-1b, eight lines above**. Widened here, and measured genuinely latent this time and
+  stated as such: of 9,861 `blockholder_filings` rows with `instrument_id IS NULL`, **26** carry
+  a `sec` mapping and **0** an OpenFIGI-only one. The 26 are a different defect.
+- ⚠ **De-duplication is not provider AUTHORITY, and the first patch confused them.** Both
+  drill-through joins already collapse to distinct accessions, so I reasoned the 1:N fan-out
+  was absorbed and wrote "no LATERAL needed". Codex ckpt-2 killed it: `DISTINCT` suppresses a
+  duplicate accession, it cannot express "SEC wins", so a CUSIP mapped to instrument A by SEC
+  and B by OpenFIGI would attribute the filing to **both** — and the write-side resolver
+  credits only A. Fixed to a SEC-first `JOIN LATERAL (… ORDER BY CASE provider … LIMIT 1)`.
+  **The skill's rule is about the ORDERING, and the 1:N warning is only its symptom** — reading
+  it as a de-duplication rule passes the test the wrong way.
+- **Prevention: a "latent / harmless today" label in a ticket body is an unrun measurement
+  wearing a severity.** It travels into every later reader's prioritisation and is the reason a
+  cheap fix waits. Treat it exactly like a causal claim: name the population, run it, and record
+  the live arm and the latent arm as two numbers — never one averaged verdict (the #2419
+  precedent: a live arm reading `0 → 0` alongside a latent arm moving 43,239 → 34,582).
+- Enforced in: this entry; `.claude/skills/data-engineer/SKILL.md` § "Widening an identifier
+  allow-list" (the consumer table's three corrected rows + the cadence-lag rule);
+  `scripts/audit_2329_cusip_consumer_widening.py` (recomputes every figure above, and exits
+  non-zero if the widening ever re-attributes or loses a CUSIP);
+  `app/services/n_port_ingest.py::_resolve_cusip_to_instrument_id` (docstring carries the
+  measurement + the reproducing command); `app/services/blockholders.py` (the deletion note
+  where the function stood);
+  `tests/test_n_port_ingest.py::TestNPortCusipResolutionReadsBothProviders`,
+  `::test_blockholders_no_longer_exposes_a_narrow_cusip_resolver`.

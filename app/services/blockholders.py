@@ -25,7 +25,7 @@ endpoint:
   * Lower-level DB helpers (:func:`_upsert_filer`,
     :func:`_upsert_filing_row`,
     :func:`_record_13dg_observation_for_filing`,
-    :func:`_resolve_cusip_to_instrument_id`,
+    :func:`_resolve_issuer_to_instrument_id`,
     :func:`_record_ingest_attempt`).
   * URL builders (:func:`_archive_file_url`,
     :func:`_submissions_url`).
@@ -432,27 +432,19 @@ def _record_ingest_attempt(
     )
 
 
-def _resolve_cusip_to_instrument_id(
-    conn: psycopg.Connection[tuple],
-    cusip: str,
-) -> int | None:
-    """Look up the instrument_id mapped to a CUSIP via
-    external_identifiers. Same lookup shape as the 13F-HR ingester —
-    the CUSIP backfill (#740) populates these rows."""
-    cur = conn.execute(
-        """
-        SELECT instrument_id
-        FROM external_identifiers
-        WHERE provider = 'sec'
-          AND identifier_type = 'cusip'
-          AND identifier_value = %(cusip)s
-        ORDER BY is_primary DESC, external_identifier_id ASC
-        LIMIT 1
-        """,
-        {"cusip": cusip.strip().upper()},
-    )
-    row = cur.fetchone()
-    return int(row[0]) if row is not None else None
+# ``_resolve_cusip_to_instrument_id`` lived here until #2329 and was
+# DELETED, not widened. #2329 filed it alongside the N-PORT copy as a
+# latent ``provider='sec'`` narrowing; it is neither latent nor live,
+# because it had **no callers**. #1628 (`c4f1d2e9`) replaced it with
+# :func:`_resolve_issuer_to_instrument_id` below — which reads both
+# providers with the SEC-first CASE tiebreak and adds the single-class
+# CIK fallback — and left the old function behind. It was the only
+# reference in this module's docstring inventory of "shared substrate",
+# which is what made it look load-bearing.
+#
+# ⚠ Keeping a narrow copy alive next to the correct one is the trap
+# #2213 documents: the next caller reaches for the name that matches
+# what they are resolving (a CUSIP), not the one that is right.
 
 
 def _resolve_issuer_to_instrument_id(

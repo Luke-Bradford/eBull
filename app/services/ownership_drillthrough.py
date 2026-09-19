@@ -230,6 +230,29 @@ def _blockholder_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pip
         # issuer_cusip → external_identifiers as a fallback so the
         # tombstone count reflects the full state. Codex pre-push
         # review caught the gap.
+        #
+        # Provider filter widened to ``('sec', 'openfigi')`` by #2329,
+        # matching the 13F unresolved-count query above (widened at
+        # #1233 PR-1b) and every other CUSIP consumer. Measured LATENT
+        # on dev 2026-09-19: of the 9,861 ``blockholder_filings`` rows
+        # with ``instrument_id IS NULL``, **26** carry a ``sec`` CUSIP
+        # mapping and **0** an OpenFIGI-only one, so today the widening
+        # changes no count. It is fixed because the narrowing had no
+        # reason, not because it is currently biting. (The 26 are a
+        # DIFFERENT defect — a ``sec`` mapping exists and the row was
+        # still left NULL; see #2329.)
+        #
+        # ⚠ The widening is a LATERAL, not a bare ``IN``. Both queries
+        # already de-duplicate accessions, so 1:N fan-out is harmless
+        # here — but de-duplication is not provider AUTHORITY. A CUSIP
+        # mapped to instrument A by SEC and instrument B by OpenFIGI
+        # would attribute the filing to BOTH under a bare join, and
+        # ``DISTINCT`` cannot express "SEC wins". The write-side
+        # resolver picks SEC first, so the drill-through must agree or
+        # it reports a tombstone against an issuer the ingester never
+        # credited. (#2213's A/B found 0 such CUSIPs across all 68,694
+        # and this run confirms 0 — the LATERAL is what keeps that a
+        # property of the query rather than of today's data.)
         cur.execute(
             """
             SELECT COUNT(*) AS tombstone_count
@@ -241,10 +264,17 @@ def _blockholder_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pip
                   UNION
                   SELECT DISTINCT b2.accession_number
                   FROM blockholder_filings b2
-                  JOIN external_identifiers ei
-                    ON ei.identifier_value = b2.issuer_cusip
-                   AND ei.provider = 'sec'
-                   AND ei.identifier_type = 'cusip'
+                  JOIN LATERAL (
+                      SELECT e.instrument_id
+                      FROM external_identifiers e
+                      WHERE e.identifier_value = b2.issuer_cusip
+                        AND e.provider IN ('sec', 'openfigi')
+                        AND e.identifier_type = 'cusip'
+                      ORDER BY CASE e.provider WHEN 'sec' THEN 0 ELSE 1 END,
+                               e.is_primary DESC,
+                               e.external_identifier_id ASC
+                      LIMIT 1
+                  ) ei ON TRUE
                   WHERE b2.instrument_id IS NULL
                     AND ei.instrument_id = %s
               )
@@ -253,16 +283,24 @@ def _blockholder_state(conn: psycopg.Connection[Any], instrument_id: int) -> Pip
         )
         tomb = cur.fetchone() or {"tombstone_count": 0}
 
-        # Same instrument_id-or-cusip union for raw body coverage.
+        # Same instrument_id-or-cusip union for raw body coverage, and
+        # the same SEC-first LATERAL for the same reason.
         cur.execute(
             """
             SELECT COUNT(DISTINCT r.accession_number) AS body_count
             FROM filing_raw_documents r
             JOIN blockholder_filings b ON b.accession_number = r.accession_number
-            LEFT JOIN external_identifiers ei
-              ON ei.identifier_value = b.issuer_cusip
-             AND ei.provider = 'sec'
-             AND ei.identifier_type = 'cusip'
+            LEFT JOIN LATERAL (
+                SELECT e.instrument_id
+                FROM external_identifiers e
+                WHERE e.identifier_value = b.issuer_cusip
+                  AND e.provider IN ('sec', 'openfigi')
+                  AND e.identifier_type = 'cusip'
+                ORDER BY CASE e.provider WHEN 'sec' THEN 0 ELSE 1 END,
+                         e.is_primary DESC,
+                         e.external_identifier_id ASC
+                LIMIT 1
+            ) ei ON TRUE
             WHERE r.document_kind = 'primary_doc_13dg'
               AND (b.instrument_id = %s OR (b.instrument_id IS NULL AND ei.instrument_id = %s))
             """,
