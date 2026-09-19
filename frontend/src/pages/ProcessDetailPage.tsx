@@ -702,6 +702,16 @@ function tabTitle(tab: TabKey): string {
  * backend's ordering constants govern which reason wins the headline, and
  * mirroring them here would be a second copy of a rule that can drift.
  *
+ * ⚠ The React key carries the index as well as the reason. `stale_detection
+ * .compute` cannot emit a duplicate — it is five independent `if` blocks each
+ * appending one distinct literal, with no loop — so this is belt-and-braces,
+ * not a known-reachable case. It is here because the FE has no way to VERIFY
+ * that producer invariant (`StaleReason[]` does not express uniqueness) and a
+ * violation would surface as a React key collision, i.e. a rendering bug
+ * blamed on this file rather than a data bug traced to its source. Indexing is
+ * safe here specifically: the array is replaced wholesale on refetch, never
+ * reordered or spliced between renders.
+ *
  * ⚠ No elapsed-since-heartbeat suffix on any chip. `ProcessRow` appends one to
  * its reason line, but that advances only because the TABLE polls and folds
  * the elapsed string into `processRowSignature`; `formatElapsedSince` has no
@@ -728,7 +738,7 @@ function HealthDetail({ row }: { row: ProcessRowResponse }) {
         >
           <span>reported:</span>
           {row.stale_reasons.map((reason, i) => (
-            <Fragment key={reason}>
+            <Fragment key={`${reason}-${i}`}>
               {/* Separator is a SIBLING, not part of the labelled span: the
                   span's text is exactly the reason label, so a test reading it
                   reads the operator-facing copy and nothing else. */}
