@@ -1110,8 +1110,8 @@ def min_cadence_gap_seconds(cadence: Cadence) -> int:
     return _CADENCE_MIN_GAP_SECONDS[cadence.kind]
 
 
-def lane_busy_rearm_delay_seconds(job: ScheduledJob | None) -> int | None:
-    """Delay before re-firing *job* after it lost a fire to a busy lane, or ``None``.
+def lost_fire_rearm_delay_seconds(job: ScheduledJob | None, *, lateness_seconds: float = 0.0) -> int | None:
+    """Delay before re-firing *job* after it LOST a fire, or ``None``.
 
     ``None`` means "do not arm", and it is the answer for every job that has
     not explicitly opted in. Two conditions, both required:
@@ -1130,10 +1130,41 @@ def lane_busy_rearm_delay_seconds(job: ScheduledJob | None) -> int | None:
     than ``next_retry_at`` — by its own cadence, plus any admission delay. This
     is a cheap dominance check that rejects a pointless arm; nothing here
     bounds how late the re-fire actually lands.
+
+    ``lateness_seconds`` is how long after its scheduled slot the lost fire was
+    OBSERVED, and it exists because the two callers differ (#2603):
+
+    * a ``lane_busy`` skip is recorded at about its own fire time, so 0 is the
+      truth and condition 2 reads the plain cadence gap;
+    * a ``misfire`` can be recorded HOURS after the slot it represents — the
+      whole reason it misfired is that the APScheduler pool was saturated (max
+      observed on dev: 10,946.3 s). By then intermediate slots have gone by.
+
+    ⚠⚠ The debit is MODULO, not subtraction, and that is not a detail. Plain
+    subtraction measures distance from a slot the scheduler has already
+    abandoned: at 10,946.3 s late on an hourly job it yields -7,346.3 s and
+    refuses to arm, while the next real fire is 3,453.7 s away and arming is
+    correct. The remaining gap is periodic in the cadence::
+
+        remaining = gap - (lateness % gap)
+
+    ⚠ ``lateness_seconds=0`` gives ``0 % gap == 0`` and therefore
+    ``remaining == gap``, so the lane-busy caller's answers are byte-identical
+    to the pre-#2603 ones. That identity is what makes widening this function
+    in place safe rather than forking it.
+
+    ⚠ This NARROWS a collision window, it does not close one. Near the boundary
+    the test still passes with little room — an hourly ``:20`` slot observed
+    3,299 s late leaves 301 s, so the retry falls due at ``:19:59`` and the
+    5-minute sweeper can reach it alongside the successor fire. The source lane
+    serialises the two bodies; it does not prevent two sequential runs.
     """
     if job is None or not job.rearm_on_lost_fire:
         return None
-    if min_cadence_gap_seconds(job.cadence) <= RETRY_BASE_SECONDS:
+    gap = min_cadence_gap_seconds(job.cadence)
+    if gap <= RETRY_BASE_SECONDS:
+        return None
+    if gap - (max(0.0, lateness_seconds) % gap) <= RETRY_BASE_SECONDS:
         return None
     return RETRY_BASE_SECONDS
 
@@ -1162,7 +1193,7 @@ def _record_lane_busy_skip(
 
     #2603 — for a job that opted into ``rearm_on_lost_fire``, the skip row is
     also STAMPED with ``next_retry_at`` so the existing ``jobs_retry_sweeper``
-    re-dispatches the lost fire. See ``lane_busy_rearm_delay_seconds`` for who
+    re-dispatches the lost fire. See ``lost_fire_rearm_delay_seconds`` for who
     qualifies and why it is not derivable from cadence.
 
     ⚠ Arming is BEST-EFFORT, not durable, and the ordering makes that visible:
@@ -1182,7 +1213,10 @@ def _record_lane_busy_skip(
                 LANE_BUSY_SKIP_PREFIX + detail,
                 params_snapshot=dict(params) if params is not None else None,
             )
-            delay = lane_busy_rearm_delay_seconds(_scheduler._JOBS_BY_NAME.get(job_name))
+            # ``lateness_seconds`` defaults to 0 and that is the literal truth
+            # here: this runs on the fire's own thread, moments after the lane
+            # refused it. The misfire caller is the one that must pass a value.
+            delay = lost_fire_rearm_delay_seconds(_scheduler._JOBS_BY_NAME.get(job_name))
             if delay is not None:
                 # ``attempt = 1`` is the literal truth for this row and not a
                 # placeholder: ``attempt`` means "position in the consecutive-
@@ -2150,7 +2184,10 @@ class JobRuntime:
                 return
             job_name = job_id.removeprefix(_RECURRING_JOB_ID_PREFIX)
             scheduled_for = getattr(event, "scheduled_run_time", None)
-            lateness = (datetime.now(UTC) - scheduled_for).total_seconds() if scheduled_for is not None else None
+            # ONE clock reading, used for the lateness, the dominance test and
+            # the arm, so those three cannot disagree if the DB checkout is slow.
+            observed_at = datetime.now(UTC)
+            lateness = (observed_at - scheduled_for).total_seconds() if scheduled_for is not None else None
             reason = MISFIRE_SKIP_PREFIX + (
                 f"fire due {scheduled_for.isoformat()} discarded by APScheduler; "
                 f"worker reached it {lateness:.1f}s late, past misfire_grace_time"
@@ -2158,7 +2195,14 @@ class JobRuntime:
                 else "fire discarded by APScheduler past misfire_grace_time (no scheduled_run_time on event)"
             )
             with background_write_connection() as conn:
-                record_job_skip(conn, job_name, reason, now=scheduled_for)
+                run_id = record_job_skip(conn, job_name, reason, now=scheduled_for)
+                self._arm_missed_fire(
+                    conn,
+                    job_name=job_name,
+                    run_id=run_id,
+                    lateness_seconds=lateness,
+                    observed_at=observed_at,
+                )
             logger.warning(
                 "scheduled job %s: fire due %s MISSED (%.1fs late) — recorded 'skipped' job_runs row",
                 job_name,
@@ -2170,6 +2214,82 @@ class JobRuntime:
                 "misfire listener failed for event job_id=%r",
                 getattr(event, "job_id", "?"),
             )
+
+    def _arm_missed_fire(
+        self,
+        conn: psycopg.Connection[Any],
+        *,
+        job_name: str,
+        run_id: int,
+        lateness_seconds: float | None,
+        observed_at: datetime,
+    ) -> None:
+        """Stamp ``next_retry_at`` on a misfire skip row for an opted-in job (#2603).
+
+        ``ff6a6afa`` armed a ``lane_busy`` skip and deliberately EXCLUDED this
+        class, on the ground that ``MISFIRE_SKIP_PREFIX``'s own comment settled
+        misfire recovery as ``ScheduledJob.misfire_grace_seconds``. That comment
+        is #2880's, and it states the only recovery that existed when it was
+        written rather than forbidding another. Measured afterwards on the full
+        set of recorded misfires (76 rows, median 959.6 s late, max 10,946.3 s),
+        a grace is the worse instrument HERE for a reason that is structural and
+        not a preference:
+
+        a misfire on the general lane means the APScheduler pool was saturated,
+        and ``wrapped()``'s outermost statement is ``_job_execution_slot``, whose
+        fallback is an UNBOUNDED blocking acquire. Raising the grace admits the
+        fire, which then owns a worker thread while parked on the general permit
+        — exactly the pathology (#2985, prevention-log L1780) that exhausts the
+        pool and costs OTHER jobs their fires. The re-dispatch does not touch
+        that pool: ``_refire_one`` publishes a manual request and the manual path
+        runs on ``self._manual_executor``, one slot per wired invoker.
+
+        ⚠ Admission is the SAME per-job flag, with no second route. A job that
+        has not asserted ``rearm_on_lost_fire`` is not armed here either, so
+        ``execute_approved_orders`` — whose contract is that order submission
+        happens at its scheduled time and never as a catch-up — stays excluded.
+
+        ⚠ Anchored to ``observed_at``, NOT to the lost slot. The ROW is
+        backdated to the slot on purpose (#2880: the fact worth keeping is which
+        slot was lost), but an arm backdated the same way would fall due in the
+        past — for a 3-h-late misfire, three hours in the past.
+
+        ⚠ Best-effort, and it swallows its own failure for the same reason the
+        listener does: this runs on a pool thread during exactly the congestion
+        that caused the misfire, and losing an arm must never cost the skip row
+        its telemetry or raise into APScheduler's event dispatch. An unarmed
+        skip is the pre-#2603 behaviour, i.e. a safe floor.
+        """
+        try:
+            delay = lost_fire_rearm_delay_seconds(
+                self._job_registry.get(job_name),
+                lateness_seconds=lateness_seconds if lateness_seconds is not None else 0.0,
+            )
+            if delay is None:
+                return
+            conn.execute(
+                """
+                UPDATE job_runs
+                   SET next_retry_at = %(observed)s + make_interval(secs => %(delay)s),
+                       attempt = 1
+                 WHERE run_id = %(id)s
+                """,
+                # ``attempt = 1`` for the same reason the lane-busy path writes
+                # it: ``attempt`` is the position in the consecutive-FAILURE
+                # streak, this is the first row for this lost fire, and a skip
+                # breaks a streak rather than continuing one. It is NOT a
+                # dispatch counter — ``job_retry._dispatch_count`` counts
+                # ``decision_audit`` rows so this operator-visible value survives.
+                {"observed": observed_at, "delay": delay, "id": run_id},
+            )
+            logger.info(
+                "missed fire of %r re-armed: retry in %ss (run %s)",
+                job_name,
+                delay,
+                run_id,
+            )
+        except Exception:
+            logger.exception("failed to arm missed fire for %r (run %s)", job_name, run_id)
 
     def _catch_up(self) -> None:
         """Fire overdue jobs after startup (fire-and-forget).

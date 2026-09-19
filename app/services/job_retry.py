@@ -117,11 +117,21 @@ def _select_due(conn: psycopg.Connection[Any], *, now: datetime) -> list[tuple[i
     """Due retry rows off the partial ``job_runs_due_retry_idx`` index.
 
     ⚠ This docstring used to read *"``next_retry_at`` is only ever set on a
-    ``status='failure'`` row"*. That stopped being true in #2603: a lane-busy
-    skip on a job that opted into ``rearm_on_lost_fire`` is stamped by
-    ``app.jobs.runtime._record_lane_busy_skip``, and a ``skipped`` row that
-    lost its fire needs re-dispatching for exactly the same reason a transient
-    failure does — work was due and did not happen.
+    ``status='failure'`` row"*. That stopped being true in #2603: a ``skipped``
+    row that lost its fire needs re-dispatching for exactly the same reason a
+    transient failure does — work was due and did not happen. Two writers stamp
+    one, both gated on the same per-job ``rearm_on_lost_fire`` flag:
+
+    * ``app.jobs.runtime._record_lane_busy_skip`` — the lane was held;
+    * ``app.jobs.runtime.JobRuntime._arm_missed_fire`` — APScheduler discarded
+      the fire past ``misfire_grace_time``.
+
+    ⚠ The misfire row's ``started_at`` is BACKDATED to the slot it lost, so
+    ``_is_latest_terminal`` below can clear it before it ever dispatches if any
+    newer terminal row has appeared. For a newer SUCCESS that is correct — the
+    slot has been superseded. For a newer non-work ``skipped`` row it is a
+    silent drop, which degrades to the pre-#2603 behaviour (no recovery at all)
+    and is therefore a safe floor rather than a regression.
 
     The status predicate stays a cheap guard rather than the access path: the
     index (``sql/183``) is ``ON job_runs (next_retry_at) WHERE next_retry_at IS
