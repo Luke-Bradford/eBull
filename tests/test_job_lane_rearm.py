@@ -210,13 +210,25 @@ def test_calendar_cadences_use_clamped_subtraction_not_modulo(
 
 
 def test_exactly_periodic_kinds_are_the_ones_whose_gap_is_a_true_period() -> None:
-    """Pin the split, so a new CadenceKind must be classified deliberately."""
-    from app.jobs.runtime import _EXACTLY_PERIODIC_CADENCE_KINDS
+    """Pin the split, so a new CadenceKind must be classified deliberately.
+
+    ⚠ The real enforcement is an IMPORT-TIME assert in ``app.jobs.runtime``
+    (review NITPICK on PR #3219): a test only fires for someone who runs it,
+    whereas the unclassified-kind case must fail loudly for everyone. This test
+    pins the partition's CONTENT; the assert pins its COMPLETENESS.
+    """
+    from typing import get_args
+
+    from app.jobs.runtime import _EXACTLY_PERIODIC_CADENCE_KINDS, _LOWER_BOUND_CADENCE_KINDS
+    from app.workers.scheduler import CadenceKind
 
     assert _EXACTLY_PERIODIC_CADENCE_KINDS == frozenset({"every_n_minutes", "hourly", "daily", "weekly"})
-    # Every registered job's kind must be classified one way or the other.
+    assert _LOWER_BOUND_CADENCE_KINDS == frozenset({"monthly", "yearly"})
+    assert not (_EXACTLY_PERIODIC_CADENCE_KINDS & _LOWER_BOUND_CADENCE_KINDS), "a kind cannot be both"
+    assert _EXACTLY_PERIODIC_CADENCE_KINDS | _LOWER_BOUND_CADENCE_KINDS == set(get_args(CadenceKind))
+    # And every registered job's kind is covered by the partition.
     for job in SCHEDULED_JOBS:
-        assert job.cadence.kind in _EXACTLY_PERIODIC_CADENCE_KINDS or job.cadence.kind in {"monthly", "yearly"}
+        assert job.cadence.kind in _EXACTLY_PERIODIC_CADENCE_KINDS | _LOWER_BOUND_CADENCE_KINDS
 
 
 def test_a_daily_misfire_arms_at_every_observed_lateness() -> None:

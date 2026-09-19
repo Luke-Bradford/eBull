@@ -48,7 +48,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final, TypedDict
+from typing import Any, Final, TypedDict, get_args
 
 import psycopg
 import psycopg.sql
@@ -1113,6 +1113,22 @@ _CADENCE_MIN_GAP_SECONDS: Final[dict[CadenceKind, int]] = {
 #: rather than left for whoever opts a monthly job in.
 _EXACTLY_PERIODIC_CADENCE_KINDS: Final[frozenset[CadenceKind]] = frozenset(
     {"every_n_minutes", "hourly", "daily", "weekly"}
+)
+
+#: The complement, stated rather than implied — every kind whose gap constant is
+#: a LOWER BOUND and which therefore must not be used as a modulus.
+_LOWER_BOUND_CADENCE_KINDS: Final[frozenset[CadenceKind]] = frozenset({"monthly", "yearly"})
+
+# ⚠ Import-time completeness check (review NITPICK on PR #3219). Without it a new
+# ``CadenceKind`` added in ``scheduler.py`` would fall silently into the
+# subtraction branch. That branch is the SAFE one, which is exactly why the drift
+# would go unnoticed — a new calendar kind would be handled correctly by accident
+# while a new EXACTLY-PERIODIC kind would be handled conservatively and quietly
+# refuse arms it should allow. Classifying is a deliberate act, so an unclassified
+# kind fails at import rather than at a test someone might not run.
+assert _EXACTLY_PERIODIC_CADENCE_KINDS | _LOWER_BOUND_CADENCE_KINDS == set(get_args(CadenceKind)), (
+    "every CadenceKind must be classified as exactly-periodic or lower-bound: "
+    f"unclassified={set(get_args(CadenceKind)) - _EXACTLY_PERIODIC_CADENCE_KINDS - _LOWER_BOUND_CADENCE_KINDS}"
 )
 
 
