@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { StrategyOverviewResponse } from "@/api/types";
-import { aggregate } from "@/lib/strategyAggregate";
+import type { StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
+import { NAMED_LIST_LIMIT, aggregate, namedList, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
 
 function strategy(overrides: {
   totalPnl?: string | null;
@@ -80,5 +80,59 @@ describe("aggregate", () => {
     expect(summary.resolved).toBe(2);
     expect(summary.awaitingOutcome).toBe(3);
     expect(summary.unsuccessful).toBe(1);
+  });
+});
+
+function ownedPosition(overrides: Partial<StrategyOwnedPosition>): StrategyOwnedPosition {
+  return {
+    strategy_id: "s2",
+    strategy_title: "Mean reversion",
+    currency: "USD",
+    ...overrides,
+  } as StrategyOwnedPosition;
+}
+
+/**
+ * The scope limit on `aggregate().totalPnl`. These pin the SIGN of the answer in
+ * both directions: a strategy-owned position must NOT raise a caveat (a warning
+ * that is always present is not a signal), and a core one must.
+ */
+describe("positionsOutsideStrategyPnl", () => {
+  it("names the core sleeve, whose strategy_id is null", () => {
+    const outside = positionsOutsideStrategyPnl([
+      ownedPosition({}),
+      ownedPosition({ strategy_id: null, strategy_title: "Core / cash mandate", currency: "GBP" }),
+    ]);
+    expect(outside).toHaveLength(1);
+    expect(outside[0]?.strategy_title).toBe("Core / cash mandate");
+  });
+
+  it("returns nothing when every position belongs to a strategy the roll-up sums", () => {
+    expect(positionsOutsideStrategyPnl([ownedPosition({}), ownedPosition({ strategy_id: "s4" })])).toEqual([]);
+  });
+
+  it("returns nothing for an empty list, so an unresolved fetch asserts no exclusion", () => {
+    expect(positionsOutsideStrategyPnl([])).toEqual([]);
+  });
+});
+
+describe("namedList", () => {
+  it("dedupes and keeps first-seen order", () => {
+    expect(namedList(["GBP", "USD", "GBP"])).toEqual(["GBP", "USD"]);
+  });
+
+  it("names up to the limit without an overflow entry", () => {
+    expect(namedList(["a", "b", "c"])).toEqual(["a", "b", "c"]);
+    expect(namedList(["a", "b", "c"])).toHaveLength(NAMED_LIST_LIMIT);
+  });
+
+  it("COUNTS the overflow rather than truncating it silently", () => {
+    // The point of the bound: a list that stops at three saying nothing reads
+    // as "these are all of them" — the defect class the caveat exists to fix.
+    expect(namedList(["a", "b", "c", "d", "e"])).toEqual(["a", "b", "c", "+2 more"]);
+  });
+
+  it("returns nothing for no values, so the caller renders nothing rather than '0 of'", () => {
+    expect(namedList([])).toEqual([]);
   });
 });
