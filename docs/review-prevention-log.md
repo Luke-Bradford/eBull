@@ -8919,6 +8919,14 @@ original, because the gate now *looked* like a bound.
   #1233 PR-1b, eight lines above**. Widened here, and measured genuinely latent this time and
   stated as such: of 9,861 `blockholder_filings` rows with `instrument_id IS NULL`, **26** carry
   a `sec` mapping and **0** an OpenFIGI-only one. The 26 are a different defect.
+- ⚠ **De-duplication is not provider AUTHORITY, and the first patch confused them.** Both
+  drill-through joins already collapse to distinct accessions, so I reasoned the 1:N fan-out
+  was absorbed and wrote "no LATERAL needed". Codex ckpt-2 killed it: `DISTINCT` suppresses a
+  duplicate accession, it cannot express "SEC wins", so a CUSIP mapped to instrument A by SEC
+  and B by OpenFIGI would attribute the filing to **both** — and the write-side resolver
+  credits only A. Fixed to a SEC-first `JOIN LATERAL (… ORDER BY CASE provider … LIMIT 1)`.
+  **The skill's rule is about the ORDERING, and the 1:N warning is only its symptom** — reading
+  it as a de-duplication rule passes the test the wrong way.
 - **Prevention: a "latent / harmless today" label in a ticket body is an unrun measurement
   wearing a severity.** It travels into every later reader's prioritisation and is the reason a
   cheap fix waits. Treat it exactly like a causal claim: name the population, run it, and record

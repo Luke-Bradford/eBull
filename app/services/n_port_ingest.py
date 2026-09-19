@@ -95,6 +95,23 @@ logger = logging.getLogger(__name__)
 # ``ownership_funds_observations`` for an unchanged payload — 221
 # (accession, instrument) pairs on the 35 already-parsed accessions —
 # so it is a parse-semantics bump, not a cosmetic one.
+#
+# ⚠⚠ **The bump does NOT requeue anything on its own** (Codex ckpt-2,
+# #2329). Manifest rediscovery leaves an existing row ``parsed``, the
+# worker drains only pending rows, N-PORT has no registered rewash
+# parser (``nport_xml`` is in ``KEPT_NEGLIGIBLE_DOCUMENT_KINDS`` —
+# reuse deferred by volume, #1731), and the per-CIK HTTP sweep skips
+# every accession already present in ``n_port_ingest_log`` whatever
+# its parser version. The constant is an AUDIT tag here, not a
+# trigger. The backfill is an explicit operator action:
+#
+#     POST /jobs/sec_rebuild/run   {"source": "sec_n_port"}
+#
+# which resets the manifest rows to ``pending`` for the worker to
+# re-drain. Verified in scope on dev 2026-09-19: all 35 parsed and all
+# 132 tombstoned ``sec_n_port`` manifest rows match one of the 16
+# ``data_freshness_index`` triples that scope resolves to, so none is
+# left behind.
 _PARSER_VERSION_NPORT = "nport-v3-both-cusip-providers"
 
 

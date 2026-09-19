@@ -137,19 +137,37 @@ def _audit_n_port(conn: psycopg.Connection[Any]) -> dict[str, Any]:
             elif narrow_iid is not None and wide_iid is not None and narrow_iid != wide_iid:
                 reattributed.append((cusip, narrow_iid, wide_iid))
 
+    # ⚠ Coverage must be attributed BY PROVENANCE, not by row existence. Once the v3
+    # rebuild lands, the per-filing writer creates a row for exactly this
+    # (source_accession, instrument_id) — so a bare existence check would re-badge every
+    # repaired pair as "the bulk twin had it all along" and walk the measured loss to
+    # zero. That is the census quietly erasing its own finding.
+    #
+    # The two writers are distinguishable at the row: the bulk DERA path writes
+    # ``source_document_id = f"{accession}:{holding_id}"``
+    # (``sec_nport_dataset_ingest.py:705``), the per-filing path writes the bare
+    # accession (``n_port_ingest`` / the manifest parser pass ``source_document_id=
+    # accession``). Measured on dev 2026-09-19: 3,713,591 rows differ, 594 match.
     covered_by_twin = 0
+    covered_by_per_filing_repair = 0
     uncovered: list[tuple[str, int]] = []
     for accession, instrument_id in sorted(dropped_pairs):
         row = conn.execute(
             """
-            SELECT 1 FROM ownership_funds_observations
+            SELECT
+              bool_or(source_document_id <> source_accession) AS from_bulk,
+              bool_or(source_document_id  = source_accession) AS from_per_filing
+            FROM ownership_funds_observations
             WHERE source_accession = %s AND instrument_id = %s
-            LIMIT 1
             """,
             (accession, instrument_id),
         ).fetchone()
-        if row is not None:
+        from_bulk = bool(row and row[0])
+        from_per_filing = bool(row and row[1])
+        if from_bulk:
             covered_by_twin += 1
+        elif from_per_filing:
+            covered_by_per_filing_repair += 1
         else:
             uncovered.append((accession, instrument_id))
 
@@ -167,6 +185,7 @@ def _audit_n_port(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         "holdings_dropped_by_narrow_filter": dropped_holdings,
         "dropped_accession_instrument_pairs": len(dropped_pairs),
         "pairs_covered_by_bulk_twin": covered_by_twin,
+        "pairs_covered_by_per_filing_repair": covered_by_per_filing_repair,
         "pairs_uncovered_real_loss": len(uncovered),
         # Both MUST be empty. A re-attribution means the widening moved a holding to a
         # different issuer, which is a data-integrity failure and not an improvement;
@@ -236,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  holdings dropped by narrow filter     {n['holdings_dropped_by_narrow_filter']:>8}")
     print(f"  distinct (accession, instrument)      {n['dropped_accession_instrument_pairs']:>8}")
     print(f"  … already covered by the bulk twin    {n['pairs_covered_by_bulk_twin']:>8}")
+    print(f"  … repaired by the widened per-filing  {n['pairs_covered_by_per_filing_repair']:>8}")
     print(f"  … NOT covered — real data loss        {n['pairs_uncovered_real_loss']:>8}")
     print(f"  re-attributed (must be 0)             {len(n['reattributed']):>8}")
     print(f"  lost (must be 0)                      {len(n['lost']):>8}")
