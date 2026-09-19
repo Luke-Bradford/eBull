@@ -134,10 +134,26 @@ def _fmt(sql: LiteralString, part: LiteralString) -> LiteralString:
 
 
 def _connect() -> psycopg.Connection[Any]:
-    conn = psycopg.connect(settings.database_url)
+    """One REPEATABLE READ snapshot for the whole run — set on the CONNECTION, not by SET.
+
+    ⚠ ``SET default_transaction_isolation`` would not do this (Codex ckpt-2). It applies to
+    transactions started AFTERWARDS, and executing it is itself the first statement, so
+    psycopg has already opened the implicit transaction at READ COMMITTED by the time it
+    lands — the arms could then read different snapshots while ingestion writes, which is
+    precisely the inconsistency the contract exists to exclude.
+
+    ``statement_timeout`` goes in the connection options for the same reason: no statement
+    should have to run before the guard is in force. The isolation is ASSERTED below rather
+    than assumed, because this is a claim the script makes about its own evidence.
+    """
+    conn = psycopg.connect(settings.database_url, options="-c statement_timeout=900000")
+    conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
     with conn.cursor() as cur:
-        cur.execute("SET default_transaction_isolation = 'repeatable read'")
-        cur.execute("SET statement_timeout = '900s'")
+        cur.execute("SELECT current_setting('transaction_isolation')")
+        row = cur.fetchone()
+    actual = row[0] if row else None
+    if actual != "repeatable read":
+        raise SystemExit(f"expected a repeatable read snapshot, got {actual!r}")
     return conn
 
 
