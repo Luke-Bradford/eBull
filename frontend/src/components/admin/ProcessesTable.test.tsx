@@ -710,3 +710,47 @@ describe("ProcessesTable", () => {
     expect(screen.queryByTestId("bootstrap-backfill-section")).toBeNull();
   });
 });
+
+describe("collapsed disclosure surfaces reap history (#2274)", () => {
+  it("counts repeatedly-reaped rows in the label, so they are reachable while collapsed", () => {
+    // The trap this covers: a repeatedly-reaped job reads `current` BY
+    // CONSTRUCTION, and `current` rows are collapsed by default — so the chip
+    // alone is only discoverable by expanding a group the operator had no
+    // reason to suspect. Caught by looking at the real page, not by a test.
+    const snapshot = makeProcessList([
+      makeProcessRow({
+        process_id: "sec_filing_documents_ingest",
+        status: "ok",
+        recent_reap_events: 4,
+        recent_reap_runs: 4,
+      }),
+      makeProcessRow({ process_id: "quiet_job", status: "ok" }),
+    ]);
+    render(
+      <MemoryRouter>
+        <ProcessesTable snapshot={snapshot} onMutationSuccess={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    const disclosure = screen.getByTestId("collapsed-disclosure");
+    expect(disclosure.textContent).toContain("2 current");
+    expect(disclosure.textContent).toContain("1 losing runs");
+    // Still collapsed — the label is the signal, not an auto-expand.
+    expect(screen.queryByTestId("recent-reaps-chip")).toBeNull();
+  });
+
+  it("omits the clause when nothing is losing runs", () => {
+    const snapshot = makeProcessList([
+      makeProcessRow({ process_id: "quiet_job", status: "ok" }),
+      makeProcessRow({ process_id: "quiet_job_2", status: "ok" }),
+    ]);
+    render(
+      <MemoryRouter>
+        <ProcessesTable snapshot={snapshot} onMutationSuccess={vi.fn()} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("collapsed-disclosure").textContent).not.toContain(
+      "losing runs",
+    );
+  });
+});

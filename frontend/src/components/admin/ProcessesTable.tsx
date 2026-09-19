@@ -28,7 +28,11 @@ import type {
 import { Modal } from "@/components/ui/Modal";
 
 import { LaneFilter } from "@/components/admin/LaneFilter";
-import { ProcessRow, processRowSignature } from "@/components/admin/ProcessRow";
+import {
+  ProcessRow,
+  hasRecentReapChip,
+  processRowSignature,
+} from "@/components/admin/ProcessRow";
 import { StaleBanner } from "@/components/admin/StaleBanner";
 import {
   VERDICT_SORT_PRIORITY,
@@ -204,6 +208,10 @@ export function ProcessesTable({
   ).length;
   const collapsedCurrent =
     collapsedRows.length - collapsedSelfHealing - collapsedWorking - collapsedPaused;
+  // #2274 — counted across ALL collapsed rows, not just the `current` ones: a
+  // reap history is orthogonal to the verdict, so a working or self-healing
+  // row can carry it too.
+  const collapsedLosingRuns = collapsedRows.filter(hasRecentReapChip).length;
   const [showCollapsed, setShowCollapsed] = useState(false);
   // #1530 C7 — the "Bootstrap & backfill" section is a SECOND, distinct
   // disclosure (separate from the C3 in-view collapse above) and defaults
@@ -418,6 +426,7 @@ export function ProcessesTable({
                         collapsedWorking,
                         collapsedSelfHealing,
                         collapsedPaused,
+                        collapsedLosingRuns,
                       )}
                       {" — "}
                       {showCollapsed ? "hide" : "show"}
@@ -500,6 +509,7 @@ function collapsedLabel(
   working: number,
   selfHealing: number,
   paused: number,
+  losingRuns: number,
 ): string {
   const parts: string[] = [];
   if (current > 0) parts.push(`${current} current`);
@@ -507,6 +517,13 @@ function collapsedLabel(
   if (selfHealing > 0) parts.push(`${selfHealing} self-healing`);
   // #1831 — surface paused (kill-switch) rows explicitly in the collapsed label.
   if (paused > 0) parts.push(`${paused} paused`);
+  // #2274 — a job repeatedly orphan-reaped reads `current` BY CONSTRUCTION
+  // (the verdict is a function of the latest terminal run, and the run after a
+  // reap usually succeeds), so its chip lands inside this very group. Without
+  // this term the count is only discoverable by expanding a group nothing gave
+  // the operator a reason to expand — the chip would be honest and unreachable.
+  // Counted, not repainted: the group keeps its calm tone, per #1831.
+  if (losingRuns > 0) parts.push(`${losingRuns} losing runs`);
   return parts.join(" · ");
 }
 
