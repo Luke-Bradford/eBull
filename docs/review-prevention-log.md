@@ -8941,3 +8941,40 @@ original, because the gate now *looked* like a bound.
   where the function stood);
   `tests/test_n_port_ingest.py::TestNPortCusipResolutionReadsBothProviders`,
   `::test_blockholders_no_longer_exposes_a_narrow_cusip_resolver`.
+
+
+## An exact tie between two cells is ALGEBRA until you find the identity that forces it (#3227, 2026-09-19)
+
+- Symptom: a cross-tab of DERA's `NONDERIV_HOLDING` read `(D, nature-present)` **150,452** and
+  `(I, nature-absent)` **150,452**. Identical. Re-measured per accession, the two were equal
+  inside **every one of 142,671 accessions, 0 exceptions** — and the "direct" lines carried
+  unmistakably indirect natures (`By Spouse`, `By 401(k)`, `By IRA`, `By Trust`). That is a
+  near-irresistible case for "DERA transposes `DIRECT_INDIRECT_OWNERSHIP` against
+  `NATURE_OF_OWNERSHIP` between paired lines", and I wrote it down as a finding.
+- It is false. Cross-checked against our own XML parse of the same filings, `D`/`I` agrees
+  **50,313 / 50,313 — zero disagreements**. The tie is an identity: per accession,
+  `#nature-non-empty` happens to equal `#I`, and given that, `#(D,nature) == #(I,no-nature)`
+  follows **by construction** for any assignment whatsoever. The equality carries no
+  information about pairing at all.
+- Root cause of the near-miss: an exact match between two independently-computed numbers reads
+  as evidence of a shared mechanism, because coincidence at that precision feels impossible.
+  But the two cells were not independent — they are complements of the same two marginals, so
+  the arithmetic pins them together no matter what the rows say. Per-accession replication made
+  it *more* persuasive and added nothing, because the identity holds per accession too.
+- ⚠ The tell that should fire: before believing a mechanism, **check whether the marginals
+  already force the number**. Write out the two totals and see whether the cell is determined.
+  Here `#nature == #I` was visible in the very first fill-rate table — 1,720,305 for both — and
+  I read it as a curiosity rather than as the explanation.
+- ⚠ What actually settled it was a SECOND SOURCE, not more of the first. No amount of
+  re-cutting the DERA file could have distinguished "transposed" from "algebra"; joining to an
+  independently-parsed copy of the same filings did it in one query. **When a pattern is
+  internal to one dataset, the discriminator is usually outside it.**
+- Prevention: a suspiciously exact equality is a prompt to do algebra, not to name a mechanism.
+  State the marginals, check whether they determine the cell, and only then look for a cause —
+  and confirm any cross-field pairing claim against a source that parsed the fields
+  independently. Corollary already in this log ("a shared VALUE is not a shared ROW", #3227's
+  sibling entry) is the row-level version of the same error; this is the aggregate version.
+- Enforced in: this entry; `.claude/skills/data-sources/sec-edgar.md` §2.3 (the per-column
+  cross-source status table, which records D/I as confirmed and nature as 18.5% discordant);
+  `docs/specs/ownership/2026-09-19-3227-ndh-line-grain-columns.md` § "A tie that was algebra,
+  not evidence".

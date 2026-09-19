@@ -450,12 +450,49 @@ they are not a partition and must never be added.
    ROW counts across groups; it does NOT explain equal siblings *within* one group, because the
    group key already fixes the holder. Getting that backwards is the #3227 prevention entry.
 
-⚠ **`NONDERIV_HOLDING.tsv` publishes the discriminators the correct key needs** —
-`SECURITY_TITLE`, `DIRECT_INDIRECT_OWNERSHIP`, `NATURE_OF_OWNERSHIP` — and
-`sec_insider_dataset_ingest` reads **none** of them (`:725-830` takes
-`SHRS_OWND_FOLWNG_TRANS` and `NONDERIV_HOLDING_SK` only). Any fix needs those columns carried
-through the write path first, so it needs a holdings re-ingest before the aggregation rule can
-even be expressed.
+✅ **The three discriminators are now CARRIED — `sql/400` / `ad6bd46e` (#3227 item 2).**
+`NONDERIV_HOLDING.tsv` publishes `SECURITY_TITLE`, `DIRECT_INDIRECT_OWNERSHIP` and
+`NATURE_OF_OWNERSHIP`; `ownership_insiders_observations` now has a column for each and the
+`:NDH:` ingest path populates them. ⚠ This block used to say the ingest "reads **none** of
+them" — true until 2026-09-19, false now. Backfilled on all 312,849 stored `:NDH:` rows
+(title/DI 100%, nature 42.40%). `_current` is UNCHANGED: these are evidence columns, and the
+re-key is #3227 item 3.
+
+Measured over all 81 cached archives (2,367,536 rows), reproducible — never quote these by
+hand, run `scripts/census_3227_insider_holding_line_collapse --source-columns`:
+
+| column | fill | cross-source status |
+|---|---:|---|
+| `SECURITY_TITLE` | 100.00% | **unverified** — it is the join predicate of the check below, so that test is circular for it |
+| `DIRECT_INDIRECT_OWNERSHIP` | 100.00% | **confirmed 50,313/50,313** against our own XML parse |
+| `NATURE_OF_OWNERSHIP` | 72.66% | ⚠ **9,329 of 50,313 disagree (18.5%)** with that parse |
+
+⚠⚠ **Do NOT plan the item-3 key as `(class) x (direct|indirect)` and drop nature.** Measured on
+the 62,010 multi-line `:NDH:` groups: that key fully separates only 32,959 (53.2%) and leaves
+**29,051 collapsed**; adding nature reaches 50,852 (82.0%), and **17,893 groups (28.9%) are
+rescued ONLY by nature**. The ticket's own headline case is one of them — MNSO/Ye Guofu's five
+lines are all `I` and all `Ordinary shares`, separated solely by the vehicle name (`by YGF MN
+LIMITED`, `by YYY MC LIMITED`, …). `CNH` is the mirror image, separated solely by title. Both
+axes are load-bearing for a different half, so the nature discordance has to be RESOLVED, not
+routed around. ⚠ Settling it needs a real `settings.sec_user_agent` — it is the placeholder
+`eBull dev@example.com`, under which EDGAR *document* endpoints soft-404 while the directory
+listing succeeds.
+
+⚠⚠ **A far bigger line loss sits in the same writer: 77.75% of holding rows are NEVER WRITTEN.**
+`sec_insider_dataset_ingest`'s holdings loop opens `if accn in accessions_with_transactions:
+continue`, so 1,840,672 of 2,367,536 cached rows are dropped because their accession also has
+`NONDERIV_TRANS` rows. Only 526,864 are reachable and 262,833 distinct ids are stored. So
+"observations hold the lines `_current` discards" is true of the reachable 22.25% ONLY — a
+claim worth checking before any `:NDH:` backfill is scoped against it.
+
+⚠ `{accn}:NDH:{sk}` is a unique per-line key: 0 blank SKs, 0 duplicate `(accession, SK)` pairs,
+0 ids in more than one archive, across the whole cached corpus. That is what makes an
+`UPDATE ... FROM` keyed on `source_document_id` unambiguous.
+
+⚠ `NONDERIV_HOLDING` DOES have a `TRANS_FORM_TYPE` column (all 81 archives), contrary to what
+the ingest comment claimed until #3227. It changes nothing — 1,435 rows (0.06%), only ever
+`'3'`, and the `_reject_reason_for_form` line-form clause matches only `{'4','5'}` — but do not
+repeat the absence claim.
 
 ⚠⚠ **The XML path has the same defect one layer earlier.**
 `insider_form3_ingest._record_form3_observations_for_filing` derives *"one
