@@ -52,7 +52,7 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
-from app.services.ownership_observations import _INSIDER_WINNER_ORDER_TAIL
+from app.services.ownership_observations import INSIDER_WINNER_ORDER_TAIL
 
 HistoryCategory = Literal["insiders", "blockholders", "institutions", "treasury", "def14a"]
 
@@ -184,7 +184,7 @@ def _insiders_history(
     recovered by construction from ``NONDERIV_TRANS_SK`` ascending,
     which is measured to BE XML document order (skill §2.3: 123,901 /
     123,901 concordant, swapped-pair control 0). So this shares
-    ``_INSIDER_WINNER_ORDER_TAIL`` with the projection rather than
+    ``INSIDER_WINNER_ORDER_TAIL`` with the projection rather than
     restating it; a second copy is how the two drift apart."""
     where_extra = ""
     params: dict[str, Any] = {"iid": instrument_id}
@@ -214,7 +214,7 @@ def _insiders_history(
                 ownership_nature,
                 CASE source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN 'def14a' THEN 4 ELSE 10 END ASC,
                 filed_at DESC,
-                {_INSIDER_WINNER_ORDER_TAIL}
+                {INSIDER_WINNER_ORDER_TAIL}
             """,
             params,
         )

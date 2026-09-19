@@ -211,7 +211,7 @@ def test_single_and_batch_projections_agree(conn: psycopg.Connection[Any]) -> No
     """The #2269 divergence check: the two forms must not disagree on tied rows.
 
     A per-row reader and its bulk twin get different plans, so a non-unique ORDER BY can pick
-    a different arbitrary winner in each. Both carry ``_INSIDER_WINNER_ORDER_TAIL``.
+    a different arbitrary winner in each. Both carry ``INSIDER_WINNER_ORDER_TAIL``.
     """
     single_iid, batch_iid = 931465, 931466
     for iid in (single_iid, batch_iid):

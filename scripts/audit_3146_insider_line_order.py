@@ -61,7 +61,7 @@ from psycopg import IsolationLevel
 from app.config import settings
 from app.services.ownership_observations import (
     _INSIDER_DUAL_PIPELINE_DECOLLISION,
-    _INSIDER_WINNER_ORDER_TAIL,
+    INSIDER_WINNER_ORDER_TAIL,
 )
 
 # The ORDER BY tail as it stood BEFORE #3146, copied verbatim from the pre-change source.
@@ -397,7 +397,7 @@ def run_ab(cur: psycopg.Cursor[Any]) -> None:
     print("\n=== #3146 --ab: full-population A/B of the projection's winner set ===")
     _materialise_winners(cur, target="w_old", order_tail=_OLD_ORDER_TAIL)
     print("  old arm materialised")
-    _materialise_winners(cur, target="w_new", order_tail=_INSIDER_WINNER_ORDER_TAIL)
+    _materialise_winners(cur, target="w_new", order_tail=INSIDER_WINNER_ORDER_TAIL)
     print("  new arm materialised")
     n_old = cur.execute("SELECT count(*) FROM w_old").fetchone()[0]  # type: ignore[index]
     n_new = cur.execute("SELECT count(*) FROM w_new").fetchone()[0]  # type: ignore[index]

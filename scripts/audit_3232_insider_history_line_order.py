@@ -14,7 +14,7 @@ guard, not the defect.
 
 #3146 removed exactly that rule from ``refresh_insiders_current`` and missed this reader, so
 the projection and the chart could name different lines of the same filing. The fix shares
-``_INSIDER_WINNER_ORDER_TAIL`` between them; this script is its evidence.
+``INSIDER_WINNER_ORDER_TAIL`` between them; this script is its evidence.
 
 **Every figure is computed at run time** — nothing is hand-written into prose, so a
 re-harvest cannot leave a number lying (prevention-log: "never hardcode a derived
@@ -53,7 +53,7 @@ from typing import Any, LiteralString, cast
 import psycopg
 
 from app.config import settings
-from app.services.ownership_observations import _INSIDER_WINNER_ORDER_TAIL
+from app.services.ownership_observations import INSIDER_WINNER_ORDER_TAIL
 
 # The pre-#3232 tie-break, frozen. This is the CONTROL and must never be re-pointed at the
 # shared constant — the whole question is what the old rule did.
@@ -129,7 +129,7 @@ def _fmt(sql: LiteralString, part: LiteralString) -> LiteralString:
     """
     return cast(
         LiteralString,
-        sql.format(base=_BASE, part=part, old_tail=_OLD_TAIL, new_tail=_INSIDER_WINNER_ORDER_TAIL),
+        sql.format(base=_BASE, part=part, old_tail=_OLD_TAIL, new_tail=INSIDER_WINNER_ORDER_TAIL),
     )
 
 
@@ -159,7 +159,7 @@ def _connect() -> psycopg.Connection[Any]:
 
 def run_ab(conn: psycopg.Connection[Any]) -> None:
     print(f"control tail : {_OLD_TAIL}")
-    print(f"treatment    : {' '.join(_INSIDER_WINNER_ORDER_TAIL.split())}\n")
+    print(f"treatment    : {' '.join(INSIDER_WINNER_ORDER_TAIL.split())}\n")
     with conn.cursor() as cur:
         for label, part in _PARTITIONS.items():
             cur.execute(_fmt(_AB_SQL, part))

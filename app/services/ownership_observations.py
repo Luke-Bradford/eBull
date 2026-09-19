@@ -358,11 +358,17 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION: Final[str] = """
 # this constant now moves an operator-visible chart; re-run
 # ``scripts/audit_3232_insider_history_line_order.py`` if you do.
 #
+# ⚠ PUBLIC name, deliberately (review NITPICK on PR #3233). It was ``_``-prefixed while it
+# looked module-internal, but two #3146 scripts already imported it and #3232 made
+# ``ownership_history`` a third consumer inside ``app/``. A leading underscore on a constant
+# three modules depend on advertises the opposite of its real status — this is a shared
+# contract, and renaming it says so.
+#
 # ⚠ ``LiteralString``, not ``str`` — psycopg3's injection guard is a TYPE, and interpolating a
 # plain ``str`` into an f-string widens the whole query to ``str``, which pyright then rejects
 # at every call site (#3232). Typing the constant for what it is keeps the guard intact for
 # all three readers instead of pushing a ``cast`` into each one.
-_INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
+INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
                         split_part(source_document_id, ':', 1) ASC,
                         (CASE WHEN source_document_id ~ ':NDT:[0-9]+$'
                               THEN split_part(source_document_id, ':NDT:', 2)::numeric END) DESC,
@@ -443,7 +449,7 @@ def refresh_insiders_current(
                         period_end DESC,
                         filed_at DESC,
                         source ASC,
-                        {_INSIDER_WINNER_ORDER_TAIL}
+                        {INSIDER_WINNER_ORDER_TAIL}
                 )
                 SELECT w.* FROM winners w
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}
@@ -2164,7 +2170,7 @@ def refresh_insiders_current_batch(
                         period_end DESC,
                         filed_at DESC,
                         source ASC,
-                        {_INSIDER_WINNER_ORDER_TAIL}
+                        {INSIDER_WINNER_ORDER_TAIL}
                 )
                 SELECT w.* FROM winners w
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}

@@ -8,7 +8,7 @@ was decided by string order on a DERA surrogate key — which picks the filing's
 Form 4 General Instruction 4(a)(i) wants the balance *"following the reported
 transaction(s)"*, i.e. the LAST line. #3146 fixed exactly this in
 ``refresh_insiders_current`` and missed this reader; the fix shares
-``_INSIDER_WINNER_ORDER_TAIL`` between them.
+``INSIDER_WINNER_ORDER_TAIL`` between them.
 
 ⚠ Every fixture here is built so the input **disagrees with the old rule** — a tie-break test
 whose fixture the defect also satisfies pins nothing (prevention-log: "a fixture the defect
@@ -117,7 +117,7 @@ def test_chart_and_projection_name_the_same_line(conn: psycopg.Connection[Any]) 
 
     Before the fix these two readers used different tie-breaks over the same rows, so the
     ownership CARD and the ownership CHART could report different balances for the same
-    holder on the same date. Sharing ``_INSIDER_WINNER_ORDER_TAIL`` is what makes this hold.
+    holder on the same date. Sharing ``INSIDER_WINNER_ORDER_TAIL`` is what makes this hold.
     """
     iid = 932322
     _instrument(conn, iid)
