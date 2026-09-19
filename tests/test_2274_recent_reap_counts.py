@@ -81,9 +81,7 @@ def test_one_boot_reaping_many_rows_is_ONE_event(
 
     counts = scheduled_adapter._recent_reap_counts(ebull_test_conn)
 
-    assert counts[JOB_RETRY_DEFERRED] == (2, 4), (
-        "3 rows in one instant plus 1 separate reap is 2 EVENTS / 4 runs lost"
-    )
+    assert counts[JOB_RETRY_DEFERRED] == (2, 4), "3 rows in one instant plus 1 separate reap is 2 EVENTS / 4 runs lost"
 
 
 def test_window_is_on_finished_at_not_started_at(
@@ -214,9 +212,7 @@ def test_counts_reach_the_row_and_list_agrees_with_detail(
     # Every other job is 0, not absent — the honest value for "no reap in the
     # window". A KeyError here would mean the map leaked into the row.
     others = {
-        (row.recent_reap_events, row.recent_reap_runs)
-        for pid, row in listed.items()
-        if pid != JOB_RETRY_DEFERRED
+        (row.recent_reap_events, row.recent_reap_runs) for pid, row in listed.items() if pid != JOB_RETRY_DEFERRED
     }
     assert others == {(0, 0)}
 

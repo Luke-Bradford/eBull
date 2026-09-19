@@ -268,9 +268,7 @@ JOB_TERMINAL_STATUSES: Final[tuple[str, ...]] = tuple(
 #:
 #: Read it with the full three-column predicate, never the message alone:
 #: ``status = 'failure' AND error_category = 'internal_error' AND error_msg = %s``.
-ORPHAN_REAP_ERROR_MSG: Final[str] = (
-    "orphaned: reaped at boot (owning worker thread died without a terminal status)"
-)
+ORPHAN_REAP_ERROR_MSG: Final[str] = "orphaned: reaped at boot (owning worker thread died without a terminal status)"
 
 
 LayerStatus = Literal["ok", "stale", "empty", "error"]

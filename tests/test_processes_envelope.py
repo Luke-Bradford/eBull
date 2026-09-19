@@ -99,6 +99,15 @@ def test_process_row_carries_all_envelope_fields() -> None:
         "role",
         # #1689 — latest terminal job_runs.attempt, for the FE "attempt N" label.
         "attempt",
+        # #2274 — WIRE fields, like ``role``: historical orphan-reap counts that
+        # ``_convert_row`` maps straight onto ``ProcessRowResponse``. They are
+        # deliberately NOT verdict inputs (unlike the five exceptions above), so
+        # the FE receives the raw counts and renders a muted historical chip —
+        # a recurrence must not repaint a chronic, largely deploy-caused row red
+        # (#1831). ``events`` is incidents, ``runs`` is work lost; one boot reaps
+        # every orphaned row at once so the two are not the same number.
+        "recent_reap_events",
+        "recent_reap_runs",
     }
     assert set(row.__slots__) == expected
 
