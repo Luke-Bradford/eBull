@@ -94,13 +94,26 @@ def _audit_n_port(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     )
     accessions = [r[0] for r in cur.fetchall()]
 
+    # Both arms memoized on the same key. A CUSIP repeats across funds — 1,025 eligible
+    # holdings over 209 distinct CUSIPs on the current population — and the two arms must
+    # stay symmetric: caching one and not the other makes the wide arm's cost scale with
+    # holdings while the narrow arm's scales with CUSIPs, which is the shape that would
+    # make a larger population look like a regression in the widening.
     narrow_cache: dict[str, int | None] = {}
+    wide_cache: dict[str, int | None] = {}
 
     def narrow(cusip: str) -> int | None:
         if cusip not in narrow_cache:
             row = conn.execute(NARROW_SQL, {"cusip": cusip}).fetchone()
             narrow_cache[cusip] = int(row[0]) if row is not None else None
         return narrow_cache[cusip]
+
+    def wide(cusip: str) -> int | None:
+        """The SHIPPED resolver, not a re-spelling of it — comparing a hand-copied query
+        against itself would pass whatever the code does."""
+        if cusip not in wide_cache:
+            wide_cache[cusip] = _resolve_cusip_to_instrument_id(conn, cusip)
+        return wide_cache[cusip]
 
     missing_body: list[str] = []
     parse_errors: list[str] = []
@@ -128,7 +141,7 @@ def _audit_n_port(conn: psycopg.Connection[Any]) -> dict[str, Any]:
             cusip = holding.cusip.strip().upper()
             cusips.add(cusip)
             narrow_iid = narrow(cusip)
-            wide_iid = _resolve_cusip_to_instrument_id(conn, cusip)
+            wide_iid = wide(cusip)
             if narrow_iid is None and wide_iid is not None:
                 dropped_holdings += 1
                 dropped_pairs.add((accession, wide_iid))
@@ -171,9 +184,7 @@ def _audit_n_port(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         else:
             uncovered.append((accession, instrument_id))
 
-    narrow_only_cusips = sum(
-        1 for c in cusips if narrow(c) is None and _resolve_cusip_to_instrument_id(conn, c) is not None
-    )
+    narrow_only_cusips = sum(1 for c in cusips if narrow(c) is None and wide(c) is not None)
 
     return {
         "accessions_parsed": len(accessions),
