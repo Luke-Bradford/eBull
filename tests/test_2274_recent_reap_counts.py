@@ -149,7 +149,10 @@ def test_predicate_requires_all_three_columns(
     )
     ebull_test_conn.commit()
 
-    assert scheduled_adapter._recent_reap_counts(ebull_test_conn) == {}
+    # Scoped to this job, not a global empty map: the worker DB is shared, so a
+    # qualifying reap left by any other test would fail a `== {}` assertion
+    # while every row under test was correctly excluded.
+    assert JOB_RETRY_DEFERRED not in scheduled_adapter._recent_reap_counts(ebull_test_conn)
 
 
 def test_reaper_output_matches_the_readers_predicate(
@@ -171,7 +174,8 @@ def test_reaper_output_matches_the_readers_predicate(
         (JOB_RETRY_DEFERRED,),
     )
     ebull_test_conn.commit()
-    assert scheduled_adapter._recent_reap_counts(ebull_test_conn) == {}
+    # Scoped, for the shared-DB reason above.
+    assert JOB_RETRY_DEFERRED not in scheduled_adapter._recent_reap_counts(ebull_test_conn)
 
     reaped = reap_orphaned_job_runs(ebull_test_conn, reap_all=True)
     ebull_test_conn.commit()

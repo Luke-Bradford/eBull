@@ -388,11 +388,17 @@ function RecentReaps({ row }: { row: ProcessRowResponse }) {
     <div
       className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400"
       data-testid="recent-reaps-chip"
+      // ⚠ States what was OBSERVED, not what caused it. A reap means the run
+      // never reached a terminal status and a later boot wrote it off; the
+      // restart DETECTED that, and need not have caused it — `reap_orphaned_job_runs`
+      // names a dead worker thread, a double-dispatch orphan, `kill -9` and OOM
+      // as the same shape. Naming a cause here would be a guess rendered as a
+      // fact on the operator's page.
       title={
-        `Restart-reaped ${row.recent_reap_events} time(s) in the last ` +
+        `Orphan-reaped ${row.recent_reap_events} time(s) in the last ` +
         `${RECENT_REAP_WINDOW_DAYS} days, writing off ${row.recent_reap_runs} run(s). ` +
-        `History, not a current fault — each run was interrupted by a restart ` +
-        `and never reached a terminal status.`
+        `History, not a current fault — each run never reached a terminal ` +
+        `status and was written off at a later boot. The cause is not recorded.`
       }
     >
       {row.recent_reap_events} reaps · {RECENT_REAP_WINDOW_DAYS}d{lost}
