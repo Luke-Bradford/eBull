@@ -466,18 +466,18 @@ for helper in $HELPERS; do
   # #3146 — the insiders tail lives in a shared Python constant so the single-instrument and
   # batch projections cannot drift (prevention-log: a DISTINCT ON tie-break must agree between
   # a per-row reader and its bulk twin). This lint pins the EFFECTIVE ordering, so expand the
-  # constant; pinning the literal "{_INSIDER_WINNER_ORDER_TAIL}" placeholder would pin nothing
+  # constant; pinning the literal "{INSIDER_WINNER_ORDER_TAIL}" placeholder would pin nothing
   # and the guard would pass however the tail were rewritten.
-  if [[ "$actual_order" == *"{_INSIDER_WINNER_ORDER_TAIL}"* ]]; then
+  if [[ "$actual_order" == *"{INSIDER_WINNER_ORDER_TAIL}"* ]]; then
     tail_text=$(awk '
-      /^_INSIDER_WINNER_ORDER_TAIL/ { in_c = 1; next }
+      /^INSIDER_WINNER_ORDER_TAIL/ { in_c = 1; next }
       in_c && /^"""/ { exit }
       in_c { print }
     ' "$FILE_OBS" | tr '\n' ' ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     if [[ -z "$tail_text" ]]; then
-      fail "H helper=${helper}: _INSIDER_WINNER_ORDER_TAIL referenced but its body could not be read from ${FILE_OBS}."
+      fail "H helper=${helper}: INSIDER_WINNER_ORDER_TAIL referenced but its body could not be read from ${FILE_OBS}."
     fi
-    actual_order="${actual_order/\{_INSIDER_WINNER_ORDER_TAIL\}/$tail_text}"
+    actual_order="${actual_order/\{INSIDER_WINNER_ORDER_TAIL\}/$tail_text}"
   fi
   # Normalise expected.
   expected_order_norm=$(printf '%s' "$expected_order" | tr -s ' ' \

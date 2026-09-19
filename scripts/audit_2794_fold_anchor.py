@@ -335,7 +335,7 @@ SELECT count(*)                                                       AS live_in
 #
 # ⚠⚠ STALE — DO NOT QUOTE THIS CENSUS'S FIGURE. The ORDER BY below is a hand copy of the
 # pre-#3146 rule, and #3146 (PR #3148) added a component to exactly this key. Production now
-# orders by ``_INSIDER_WINNER_ORDER_TAIL`` (``ownership_observations.py:299``) — accession
+# orders by ``INSIDER_WINNER_ORDER_TAIL`` (``ownership_observations.py:299``) — accession
 # prefix ASC, then the ``:NDT:`` surrogate key as a NUMERIC DESC (the filing's LAST Table I
 # line, document order, measured by ``scripts/audit_3146_insider_line_order.py --order-rule``),
 # and only THEN ``source_document_id ASC``. So the lexical key is no longer the tie-break that

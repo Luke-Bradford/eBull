@@ -59,7 +59,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Final, Literal, TypeGuard
+from typing import Any, Final, Literal, LiteralString, TypeGuard
 from uuid import UUID
 
 import psycopg
@@ -348,7 +348,27 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION: Final[str] = """
 #     NULLS LAST would hand the group to a DERA row the de-collision may then drop, deleting
 #     the key outright via the MERGE's NOT MATCHED BY SOURCE prune.
 # Spec: docs/proposals/ownership/2026-09-17-3146-insider-line-order.md
-_INSIDER_WINNER_ORDER_TAIL: Final[str] = """
+#
+# ⚠ #3232 — THREE readers share this, not two. ``refresh_insiders_current``,
+# ``refresh_insiders_current_batch`` and ``ownership_history._insiders_history`` (the
+# operator's insider chart, ``GET /instruments/{symbol}/ownership-history``). The chart was
+# left on the bare ``source_document_id ASC`` when #3146 landed, so for a year the projection
+# and the chart could name different lines of the SAME filing — 693,492 of 2,616,746
+# per-holder buckets, 680,027 of them a different share VALUE, over 3,748 instruments. Editing
+# this constant now moves an operator-visible chart; re-run
+# ``scripts/audit_3232_insider_history_line_order.py`` if you do.
+#
+# ⚠ PUBLIC name, deliberately (review NITPICK on PR #3233). It was ``_``-prefixed while it
+# looked module-internal, but two #3146 scripts already imported it and #3232 made
+# ``ownership_history`` a third consumer inside ``app/``. A leading underscore on a constant
+# three modules depend on advertises the opposite of its real status — this is a shared
+# contract, and renaming it says so.
+#
+# ⚠ ``LiteralString``, not ``str`` — psycopg3's injection guard is a TYPE, and interpolating a
+# plain ``str`` into an f-string widens the whole query to ``str``, which pyright then rejects
+# at every call site (#3232). Typing the constant for what it is keeps the guard intact for
+# all three readers instead of pushing a ``cast`` into each one.
+INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
                         split_part(source_document_id, ':', 1) ASC,
                         (CASE WHEN source_document_id ~ ':NDT:[0-9]+$'
                               THEN split_part(source_document_id, ':NDT:', 2)::numeric END) DESC,
@@ -429,7 +449,7 @@ def refresh_insiders_current(
                         period_end DESC,
                         filed_at DESC,
                         source ASC,
-                        {_INSIDER_WINNER_ORDER_TAIL}
+                        {INSIDER_WINNER_ORDER_TAIL}
                 )
                 SELECT w.* FROM winners w
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}
@@ -2150,7 +2170,7 @@ def refresh_insiders_current_batch(
                         period_end DESC,
                         filed_at DESC,
                         source ASC,
-                        {_INSIDER_WINNER_ORDER_TAIL}
+                        {INSIDER_WINNER_ORDER_TAIL}
                 )
                 SELECT w.* FROM winners w
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}

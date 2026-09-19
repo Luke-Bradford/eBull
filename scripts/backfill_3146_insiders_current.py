@@ -37,7 +37,7 @@ import psycopg
 
 from app.config import settings
 from app.services.ownership_observations import (
-    _INSIDER_WINNER_ORDER_TAIL,
+    INSIDER_WINNER_ORDER_TAIL,
     refresh_current_with_batch_fallback,
     refresh_insiders_current,
     refresh_insiders_current_batch,
@@ -98,7 +98,7 @@ def _verify(conn: psycopg.Connection[Any]) -> int:
                        source_document_id, shares
                   FROM ownership_insiders_observations
                  WHERE known_to IS NULL
-                 {_VERIFY_ORDER_HEAD} {_INSIDER_WINNER_ORDER_TAIL}
+                 {_VERIFY_ORDER_HEAD} {INSIDER_WINNER_ORDER_TAIL}
             )
             SELECT count(*)
               FROM ownership_insiders_current c
