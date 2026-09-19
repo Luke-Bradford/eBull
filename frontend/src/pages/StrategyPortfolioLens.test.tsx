@@ -685,7 +685,11 @@ describe("StrategyPortfolioLens", () => {
     // Scoped to the state section: the setup form below carries its own
     // "Available"/"Reserved" breakdown, so an unscoped query is ambiguous.
     const state = (await screen.findByText("Not trading")).closest("section")!;
-    for (const label of ["Pot", "P&L", "Open", "Available"]) {
+    // ⚠ "Strategy P&L", not "P&L" (#3222 residual 2) — the tile sums
+    // `pnl.total_pnl` over the registered strategies only, and the unqualified
+    // label claimed a pot-wide total in a row whose other three tiles are
+    // pot-level.
+    for (const label of ["Pot", "Strategy P&L", "Open", "Available"]) {
       expect(within(state).getByText(label)).toBeInTheDocument();
     }
   });
@@ -778,6 +782,44 @@ describe("StrategyPortfolioLens", () => {
     const value = (await screen.findByText("Open")).nextElementSibling!;
     await waitFor(() => expect(value.textContent).toBe("1"));
     expect(await screen.findByText("Close all 1 positions")).toBeInTheDocument();
+  });
+
+  it("names the position its P&L total cannot account for, with the currency that blocks it", async () => {
+    // #3222 residual 2, measured on dev 2026-09-19: every registered strategy
+    // reports `total_pnl: "0"`, so the tile rendered a confident `$0.00` while
+    // the pot held an open core position with non-zero P&L. The figure is right
+    // for the strategies it sums — so the fix names the scope and states the
+    // exclusion rather than folding in a GBP number under a USD symbol, which
+    // is `fx_unmodelled` (#2363).
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [
+        { strategy_trade_id: 2, broker_position_id: "3601264304", strategy_id: null, strategy_title: "Core / cash mandate", instrument_id: 3417, symbol: "SPY.RTH", currency: "GBP", units: "0.296155", assigned_value: "168.64", current_price: "570.72", trade_status: "open" },
+      ],
+      live_quote_instrument_ids: [3417],
+    } as never);
+
+    renderLens();
+    const caveat = await screen.findByText(/Excludes 1 position held outside the strategies/);
+    expect(caveat.textContent).toContain("Core / cash mandate");
+    // The currency IS the reason, so it must be in the sentence: "excluded" on
+    // its own reads as an oversight rather than a refusal with a cause.
+    expect(caveat.textContent).toContain("GBP");
+  });
+
+  it("raises no exclusion caveat when every position belongs to a strategy the total sums", async () => {
+    // The negative case, and the point of the test: a caveat that is always
+    // present is not a signal. Same page, same tile, one field different.
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [
+        { strategy_trade_id: 2, broker_position_id: "3601264304", strategy_id: "s4", strategy_title: "Volatility breakout", instrument_id: 3417, symbol: "SPY.RTH", currency: "USD", units: "0.296155", assigned_value: "168.64", current_price: "570.72", trade_status: "open" },
+      ],
+      live_quote_instrument_ids: [3417],
+    } as never);
+
+    renderLens();
+    // Anchored on the tile so this cannot pass by rendering nothing at all.
+    expect(await screen.findByText("Strategy P&L")).toBeInTheDocument();
+    expect(screen.queryByText(/held outside the strategies/)).not.toBeInTheDocument();
   });
 
   describe("with open positions", () => {

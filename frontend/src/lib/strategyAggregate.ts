@@ -1,5 +1,42 @@
-import type { StrategyOverviewResponse } from "@/api/types";
+import type { StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
 import { number } from "@/lib/strategyFormat";
+
+/**
+ * Open positions that NO strategy's `pnl` block covers — today, the core sleeve.
+ *
+ * `aggregate().totalPnl` sums `pnl.total_pnl` over `overview.strategies`, so its
+ * scope is exactly "the registered strategies". The core sleeve is a separate
+ * capital authority on a separate fetch and appears in no strategy's block, which
+ * is why #3222's `Open` tile had to be re-pointed at `GET /strategies/positions`.
+ * The P&L tile beside it was left alone in that pass and inherited the same gap.
+ *
+ * ⚠⚠ Measured 2026-09-19, and it is not a rounding-scale omission: all 11
+ * strategies report `total_pnl: "0"` with `owned_position_count: 0`, so the tile
+ * renders a confident **$0.00** while the pot holds a position whose unrealised
+ * P&L is non-zero. A wrong number, not a missing one.
+ *
+ * ⚠ This does NOT fold the position into the total, deliberately. Its money
+ * cells are display-converted to the operator's currency (`currency: "GBP"`,
+ * #2129) while the pool's authority currency is USD, and converting between them
+ * for capital accounting is `fx_unmodelled` — a standing refusal (#2363, recorded
+ * at `app/services/strategy_base_currency.py`). The caller names the exclusion
+ * instead; see `StrategyPortfolioLens`.
+ *
+ * `strategy_id === null` IS the core marker: `get_strategy_owned_positions` sets
+ * it from `row["strategy_id"]`, which is NULL for a core-mandate trade, and
+ * stamps `strategy_title: "Core / cash mandate"` off `core_rebalance_intent_id`.
+ * Kept as the general "outside the strategy roll-up" test rather than a title
+ * match, so a second non-strategy authority is caught by construction.
+ *
+ * ⚠ INVALIDATING CONDITION: if a strategy's `pnl` block ever starts covering the
+ * core sleeve, or a pool-currency P&L becomes available for it, this exclusion
+ * stops being correct and the tile should fold it in rather than name it.
+ */
+export function positionsOutsideStrategyPnl(
+  positions: readonly StrategyOwnedPosition[],
+): StrategyOwnedPosition[] {
+  return positions.filter((position) => position.strategy_id === null);
+}
 
 /**
  * Cross-strategy roll-up shared by both `/strategies` lenses (#2868).
@@ -13,6 +50,10 @@ import { number } from "@/lib/strategyFormat";
  *
  * - `totalPnl` is `null` unless EVERY strategy reports a parseable P&L. A
  *   partial sum rendered as a total is a wrong number, not a missing one.
+ *   ⚠ That rule governs the STRATEGIES it sums; it cannot speak for capital
+ *   authorities outside `overview.strategies`. `totalPnl` is therefore a
+ *   strategy-scoped figure and callers must label it as one — see
+ *   `positionsOutsideStrategyPnl`, which names what it leaves out.
  * - The attribution figures cover only `forward_outcome_supported` strategies,
  *   and `averageReturn` collapses to `null` the moment any contributing
  *   strategy has resolved entries but no average — a resolved-count-weighted

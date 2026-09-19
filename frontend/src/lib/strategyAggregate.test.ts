@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { StrategyOverviewResponse } from "@/api/types";
-import { aggregate } from "@/lib/strategyAggregate";
+import type { StrategyOverviewResponse, StrategyOwnedPosition } from "@/api/types";
+import { aggregate, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
 
 function strategy(overrides: {
   totalPnl?: string | null;
@@ -80,5 +80,38 @@ describe("aggregate", () => {
     expect(summary.resolved).toBe(2);
     expect(summary.awaitingOutcome).toBe(3);
     expect(summary.unsuccessful).toBe(1);
+  });
+});
+
+function ownedPosition(overrides: Partial<StrategyOwnedPosition>): StrategyOwnedPosition {
+  return {
+    strategy_id: "s2",
+    strategy_title: "Mean reversion",
+    currency: "USD",
+    ...overrides,
+  } as StrategyOwnedPosition;
+}
+
+/**
+ * The scope limit on `aggregate().totalPnl`. These pin the SIGN of the answer in
+ * both directions: a strategy-owned position must NOT raise a caveat (a warning
+ * that is always present is not a signal), and a core one must.
+ */
+describe("positionsOutsideStrategyPnl", () => {
+  it("names the core sleeve, whose strategy_id is null", () => {
+    const outside = positionsOutsideStrategyPnl([
+      ownedPosition({}),
+      ownedPosition({ strategy_id: null, strategy_title: "Core / cash mandate", currency: "GBP" }),
+    ]);
+    expect(outside).toHaveLength(1);
+    expect(outside[0]?.strategy_title).toBe("Core / cash mandate");
+  });
+
+  it("returns nothing when every position belongs to a strategy the roll-up sums", () => {
+    expect(positionsOutsideStrategyPnl([ownedPosition({}), ownedPosition({ strategy_id: "s4" })])).toEqual([]);
+  });
+
+  it("returns nothing for an empty list, so an unresolved fetch asserts no exclusion", () => {
+    expect(positionsOutsideStrategyPnl([])).toEqual([]);
   });
 });

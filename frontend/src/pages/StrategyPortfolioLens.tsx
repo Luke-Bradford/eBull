@@ -27,7 +27,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
-import { aggregate } from "@/lib/strategyAggregate";
+import { aggregate, positionsOutsideStrategyPnl } from "@/lib/strategyAggregate";
 import { number } from "@/lib/strategyFormat";
 import { strategyPortfolioStatus } from "@/lib/strategyPortfolioStatus";
 import { useAsync } from "@/lib/useAsync";
@@ -396,6 +396,15 @@ export function StrategyPortfolioLens() {
   const summary = aggregate(data);
   const pool = data.paper_pool;
   const positions = ownedPositions.data?.positions ?? [];
+  /** What the `Strategy P&L` tile above cannot account for. Derived from the
+   *  page's own position list — the same operand #3222 re-pointed the `Open`
+   *  tile at — so the caveat and the count it sits beside can never disagree.
+   *  Empty while the fetch is unresolved, which is correct here: the caveat
+   *  asserts an exclusion, and asserting one before the list is known would be
+   *  a claim about positions nobody has read yet. */
+  const outsideStrategyPnl = positionsOutsideStrategyPnl(positions);
+  const excludedTitles = [...new Set(outsideStrategyPnl.map((position) => position.strategy_title))];
+  const excludedCurrencies = [...new Set(outsideStrategyPnl.map((position) => position.currency))];
   /** ⚠ Bulk close operates on CLOSABLE positions only. A row whose trade is
    *  already `closing` disables its own Close button, and resubmitting it makes
    *  the endpoint reject — which, because the loop stops on first failure,
@@ -470,8 +479,18 @@ export function StrategyPortfolioLens() {
 
         <div className="mt-4 grid grid-cols-2 gap-x-6 lg:grid-cols-4">
           <StatTile label="Pot" value={formatMoney(number(pool.effective_capital), pool.currency)} hint={pool.capital_mode === "compound" ? "Compounding" : "Fixed limit"} />
+          {/* ⚠ "Strategy P&L", not "P&L" — this sums `pnl.total_pnl` over
+              `overview.strategies` and nothing else, while the three tiles
+              beside it are pot-level. The core sleeve is in no strategy's
+              block, so the unqualified label claimed a pot-wide total the
+              figure never was: measured 2026-09-19, all 11 strategies report
+              `0`, so it rendered a confident `$0.00` against a pot holding an
+              open position with non-zero P&L. The number is RIGHT for what it
+              covers; the label was the defect (#3222 residual 2), the same
+              shape as residual 1. Folding the position in is refused, not
+              deferred — see `positionsOutsideStrategyPnl`. */}
           <StatTile
-            label="P&L"
+            label="Strategy P&L"
             value={formatMoney(summary.totalPnl, pool.currency)}
             hint={formatPct(summary.averageReturn) + " / trade"}
             tone={summary.totalPnl === null || summary.totalPnl === 0 ? "muted" : summary.totalPnl > 0 ? "positive" : "negative"}
@@ -487,6 +506,20 @@ export function StrategyPortfolioLens() {
           <StatTile label="Open" value={formatNumber(ownedPositions.data ? positions.length : null, 0)} hint={`${formatNumber(summary.approved, 0)} strategies approved`} />
           <StatTile label="Available" value={formatMoney(number(pool.capital_observation_complete === false ? null : pool.remaining_capital), pool.currency)} hint={pool.capital_observation_complete === false ? "Checked at action" : "To deploy"} />
         </div>
+
+        {/* The exclusion, stated rather than implied by the label alone —
+            the #2129 caveat pattern `SummaryCards` uses for its own
+            unconvertible rows. Rendered only when such a position is actually
+            held, so it is evidence about the pot's current contents and not
+            standing boilerplate the operator learns to skip. */}
+        {outsideStrategyPnl.length > 0 ? (
+          <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+            ⚠ Excludes {formatNumber(outsideStrategyPnl.length, 0)}{" "}
+            {outsideStrategyPnl.length === 1 ? "position" : "positions"} held outside the
+            strategies ({excludedTitles.join(", ")}): reported in {excludedCurrencies.join(" / ")},
+            which this {pool.currency} total cannot convert.
+          </p>
+        ) : null}
 
         {actionError ? (
           <p role="alert" className="mt-3 text-sm text-rose-700 dark:text-rose-300">
@@ -637,7 +670,12 @@ export function StrategyPortfolioLens() {
         {/* The pot's trade record, as numbers rather than sentences. Automated
             positions only; research backtests are excluded by `aggregate`. */}
         <div className="mt-3 grid grid-cols-2 gap-x-6 sm:grid-cols-3">
-          <StatTile size="md" label="Total P&L" value={formatMoney(summary.totalPnl, pool.currency)} hint="Realised + open" />
+          {/* Same operand, same scope, so the same name — a "Total P&L" here
+              beside a "Strategy P&L" above reads as two different figures
+              when it is one `summary.totalPnl`. The section's own comment
+              already limits it to automated positions; this limits it to the
+              strategies. */}
+          <StatTile size="md" label="Strategy total P&L" value={formatMoney(summary.totalPnl, pool.currency)} hint="Realised + open" />
           <StatTile size="md" label="Average / trade" value={formatPct(summary.averageReturn)} hint="Completed outcomes" />
           {/* UNSIGNED, and it sits beside a SIGNED expectancy on purpose. A win
               rate is the share of completed outcomes that won — a composition,
