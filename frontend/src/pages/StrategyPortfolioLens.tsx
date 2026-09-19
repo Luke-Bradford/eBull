@@ -378,7 +378,7 @@ export function StrategyPortfolioLens() {
   if (overview.error || !overview.data) return <SectionError onRetry={overview.refetch} />;
 
   const data: StrategyOverviewResponse = overview.data;
-  const status = strategyPortfolioStatus(data);
+  const status = strategyPortfolioStatus(data, coreSleeve.data ?? null);
   const summary = aggregate(data);
   const pool = data.paper_pool;
   const positions = ownedPositions.data?.positions ?? [];
@@ -459,7 +459,14 @@ export function StrategyPortfolioLens() {
             tone={summary.totalPnl === null || summary.totalPnl === 0 ? "muted" : summary.totalPnl > 0 ? "positive" : "negative"}
             toneHint
           />
-          <StatTile label="Open" value={formatNumber(summary.activePositions, 0)} hint={`${formatNumber(summary.approved, 0)} strategies approved`} />
+          {/* ⚠ #3222 — counted off the SAME list the `Close all` button uses, not
+              off `aggregate(overview).activePositions`. That sum is per registered
+              strategy, and the core sleeve's row carries `strategy_id: null`
+              (`strategy_title: "Core / cash mandate"`), so it was in no strategy's
+              count: the tile read 0 while the button beside it read 1. ⚠ `null`
+              until the fetch resolves — a 0 drawn during loading is the same wrong
+              number, just briefer. */}
+          <StatTile label="Open" value={formatNumber(ownedPositions.data ? positions.length : null, 0)} hint={`${formatNumber(summary.approved, 0)} strategies approved`} />
           <StatTile label="Available" value={formatMoney(number(pool.capital_observation_complete === false ? null : pool.remaining_capital), pool.currency)} hint={pool.capital_observation_complete === false ? "Checked at action" : "To deploy"} />
         </div>
 

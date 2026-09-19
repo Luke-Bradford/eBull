@@ -54,10 +54,14 @@ export function aggregate(overview: StrategyOverviewResponse) {
     awaitingOutcome: Math.max(0, fired - resolved),
     successRate: resolved > 0 ? winners / resolved : null,
     averageReturn: averageReturnKnown ? weightedReturn / resolved / 100 : null,
-    activePositions: overview.strategies.reduce(
-      (sum, strategy) => sum + strategy.pnl.active_position_count,
-      0,
-    ),
+    // ⚠ #3222 removed `activePositions` (the sum of `pnl.active_position_count`
+    // over `overview.strategies`). It had exactly one consumer — the portfolio
+    // lens's `Open` tile — and it was the wrong operand there: the core sleeve's
+    // position carries `strategy_id: null`, so it is in no strategy's count, and
+    // the tile read 0 while the `Close all` button beside it read 1. Deleted
+    // rather than left unused, because an available-but-wrong operand is how the
+    // same tile gets re-wired to it. Open positions come from
+    // `GET /strategies/positions`, which is the page's own list.
     approved: overview.strategies.filter((strategy) => strategy.allocation_ready).length,
   };
 }

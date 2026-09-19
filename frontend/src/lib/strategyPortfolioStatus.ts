@@ -1,4 +1,4 @@
-import type { StrategyOverviewResponse } from "@/api/types";
+import type { CoreSleeveResponse, StrategyOverviewResponse } from "@/api/types";
 
 /**
  * The plain-English answer to "is the fenced-off pot trading, and if not, why?"
@@ -57,7 +57,24 @@ function hasCapital(amount: string | null): boolean {
   return Number.isFinite(value) && value > 0;
 }
 
-export function strategyPortfolioStatus(overview: StrategyOverviewResponse): StrategyPortfolioStatus {
+/**
+ * Is the core/cash sleeve an OPEN path right now? (#3222)
+ *
+ * ⚠ Read off the backend's own verdict — `execution_action` — and not re-derived
+ * from `state`, `mandate.enabled` and `blockers`, for the same reason the
+ * entry-block loop below does not re-derive "can entries happen". Measured on
+ * dev 2026-09-19: the live sleeve returns `execution_action: "rebalance"` while
+ * ALSO carrying a `core_live_snapshot_required` blocker, so "no blockers" is the
+ * wrong predicate and would have read as blocked.
+ */
+function coreSleeveIsOpen(core: CoreSleeveResponse | null): boolean {
+  return core !== null && core.execution_action !== "blocked";
+}
+
+export function strategyPortfolioStatus(
+  overview: StrategyOverviewResponse,
+  core: CoreSleeveResponse | null = null,
+): StrategyPortfolioStatus {
   const blockers: StrategyBlocker[] = [];
   const { entry_block: entryBlock, paper_pool: pool, automation_readiness: readiness } = overview;
 
@@ -123,6 +140,28 @@ export function strategyPortfolioStatus(overview: StrategyOverviewResponse): Str
   if (blockers.length === 0) {
     return { trading: true, headline: "Trading", tone: "ok", blockers: [] };
   }
+
+  // ⚠⚠ #3222 — the core sleeve is a SEPARATE authority path and does not appear
+  // in `StrategyOverviewResponse` at all, so before this branch the verdict was
+  // computed over a payload that structurally could not see the one path that
+  // was trading. Measured on dev 2026-09-19: the pot reported
+  // `reserved_capital "225.038507"` of a `"500.000000"` limit, the page rendered
+  // "Close all 1 positions", and the headline above them read "Not trading ·
+  // halted" — from `no_approved_strategies` alone, which is TRUE (all 11
+  // registered strategies are `harness_validation`; #3104 has the missing
+  // promotion-evidence producer) and was being presented as the whole answer.
+  //
+  // ⚠ It neutralises `no_approved_strategies` and NOTHING ELSE, deliberately.
+  // The kill switch, a backend execution block, an unfunded pot and a missing
+  // mandate each stop the sleeve too — the sleeve spends this same pot — so a
+  // sleeve that claims otherwise is reporting on a state it does not own. The
+  // blocker also stays in the array: it is still true, the panel below still
+  // lists it, and it is still the thing that has to change for a STRATEGY to
+  // earn capital.
+  if (coreSleeveIsOpen(core) && blockers.every((b) => b.key === "no_approved_strategies")) {
+    return { trading: true, headline: "Trading — core sleeve", tone: "ok", blockers };
+  }
+
   // The kill switch is a safety state, not a setup step — it reads as risk;
   // everything else is "not set up yet", which is a warning at most.
   const tone = blockers.some((b) => b.key === "global_kill") ? "risk" : "warn";

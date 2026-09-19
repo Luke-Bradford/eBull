@@ -236,3 +236,69 @@ describe("strategyPortfolioStatus — blocker identity", () => {
     expect(new Set(entryBlockers.map((b) => `${b.key}:${b.label}`)).size).toBe(2);
   });
 });
+
+describe("strategyPortfolioStatus — the core sleeve is a second path (#3222)", () => {
+  /** The backend's own verdict is `execution_action`; nothing else is read. */
+  function core(patch: Record<string, unknown> = {}) {
+    return { execution_action: "rebalance", state: "ready", ...patch } as never;
+  }
+  /** Only the strategy pipeline is blocked — the state measured on dev 2026-09-19. */
+  const PIPELINE_ONLY = { automation_readiness: { ready: false, state: "no_capital_candidates", capital_candidate_count: 0 } };
+
+  it("reports trading when the sleeve is open and only the pipeline is blocked", () => {
+    const status = strategyPortfolioStatus(overview(PIPELINE_ONLY), core());
+    expect(status.trading).toBe(true);
+    expect(status.headline).toBe("Trading — core sleeve");
+    expect(status.tone).toBe("ok");
+  });
+
+  it("still lists the evidence blocker — it is true, and it is what a STRATEGY must clear", () => {
+    const status = strategyPortfolioStatus(overview(PIPELINE_ONLY), core());
+    expect(status.blockers.map((b) => b.key)).toEqual(["no_approved_strategies"]);
+  });
+
+  it("reads the backend's execution_action, not an empty blocker list", () => {
+    // Measured on dev: the live sleeve returns `rebalance` while ALSO carrying a
+    // `core_live_snapshot_required` blocker, so "no blockers" is the wrong
+    // predicate and would have read the working sleeve as blocked.
+    const status = strategyPortfolioStatus(
+      overview(PIPELINE_ONLY),
+      core({ blockers: [{ code: "core_live_snapshot_required", detail: "…" }] }),
+    );
+    expect(status.trading).toBe(true);
+  });
+
+  it("does not flip when the sleeve itself is blocked, or absent", () => {
+    for (const sleeve of [core({ execution_action: "blocked" }), null]) {
+      const status = strategyPortfolioStatus(overview(PIPELINE_ONLY), sleeve);
+      expect(status.trading).toBe(false);
+      expect(status.headline).toBe("Not trading");
+    }
+  });
+
+  it("omitting the argument keeps the pre-#3222 answer, so no caller changes by accident", () => {
+    expect(strategyPortfolioStatus(overview(PIPELINE_ONLY)).headline).toBe("Not trading");
+  });
+
+  it("NEVER overrides the kill switch", () => {
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        entry_block: { new_entries_blocked: true, global_kill_active: true, global_kill_reason: "drill", global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: [] },
+      }),
+      core(),
+    );
+    expect(status.trading).toBe(false);
+    expect(status.tone).toBe("risk");
+  });
+
+  it.each([
+    ["a backend execution block", { entry_block: { new_entries_blocked: true, global_kill_active: false, global_kill_reason: null, global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: ["automatic trading disabled"] } }],
+    ["an unfunded pot", { paper_pool: { configured: true, enabled: true, effective_capital: "0", currency: "USD", capital_limit: "0", capital_mode: "fixed", approval_mode: "manual", reserved_capital: "0", invested_capital: "0", remaining_capital: "0", capital_observation_complete: true, mandate: { configured: true, risk_profile: "balanced" }, available_mandates: [] } }],
+    ["a missing mandate", { paper_pool: { configured: true, enabled: true, effective_capital: "10000", currency: "USD", capital_limit: "10000", capital_mode: "fixed", approval_mode: "manual", reserved_capital: "0", invested_capital: "0", remaining_capital: "10000", capital_observation_complete: true, mandate: { configured: false, risk_profile: "unconfigured" }, available_mandates: [] } }],
+  ])("does not paper over %s — the sleeve spends this same pot", (_name, patch) => {
+    const status = strategyPortfolioStatus(overview({ ...PIPELINE_ONLY, ...patch }), core());
+    expect(status.trading).toBe(false);
+    expect(status.headline).toBe("Not trading");
+  });
+});
