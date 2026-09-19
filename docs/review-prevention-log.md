@@ -8831,3 +8831,59 @@ original, because the gate now *looked* like a bound.
   reaches PostgreSQL, so it cannot abort a transaction and the test would pass under the
   very semantics it claims to exclude. The failure must be a statement the SERVER rejects.
   First draft of the test here made exactly that mistake.
+
+## 2026-09-19 — two filings that look identical are not evidence of a fan-out (#3227)
+
+- **What happened.** Two `_current` rows on `MNSO` carried the identical share count and the
+  identical multi-line sum. I read that as the known write-side fan-out — `_stage_owners`
+  writes every Table I line against every reporting owner on an accession — and wrote it into
+  a new issue as the measured falsification of a candidate fix. It is **two separate
+  single-filer accessions** (`0001104659-26-030863` Ye Guofu, `0001104659-26-030888` Yang
+  Yunyun), i.e. two people each reporting the same jointly-held positions on their own Form 3.
+  A duplication in the SOURCE, not one our writer created.
+- ⚠ **The mechanism was real and the example was not, which is the dangerous combination.**
+  The fan-out does exist and does falsify the fix — on `CNH.US` accession
+  `0001193125-25-198794`, where two Table I lines and two reporting owners genuinely become
+  four rows. Because the conclusion was right, nothing downstream would have contradicted the
+  wrong worked example; it would simply have been quoted forward as the proof.
+- **Prevention: a shared VALUE is not a shared ROW.** Before attributing two identical figures
+  to one write-side mechanism, check whether they share the identifier that mechanism operates
+  on — here the accession. One `select` settles it. The general form: a fan-out, a duplicate
+  and a coincidence all render the same on a `count`/`sum` readout, and only the key
+  distinguishes them.
+- ⚠ It was caught by the census this ticket shipped printing `reporting_owner_count` per
+  group, **not** by review — which is the argument for a census emitting the discriminator it
+  classifies on rather than only the classification. A readout that prints just
+  "joint_filing" cannot contradict the author who chose the word.
+- Enforced in: this entry;
+  `scripts/census_3227_insider_holding_line_collapse.py` (`HoldingLineGroup.reporting_owner_count`
+  carries the discriminator onto every printed row, and `classify_group`'s docstring states
+  that attribution is decided by owner count alone);
+  `tests/test_3227_holding_line_collapse_census.py::test_attribution_is_decided_by_owner_count_alone`;
+  `.claude/skills/data-sources/sec-edgar.md` section 2.3.
+
+## 2026-09-19 — a reconciliation whose two sides are derived from each other checks nothing (#3227)
+
+- **What happened.** The #3227 census printed a population split and then "verified" it:
+  `unaffected = len(verdicts) - len(affected)`, followed by a guard raising unless
+  `unaffected + len(affected) == len(verdicts)`. That identity holds for every possible input,
+  including the one that matters — an inner join that silently dropped rows, leaving a
+  truncated population reported as a complete one. I had even written a why-comment explaining
+  that it was NOT an `assert` because `python -O` strips those, which made a tautology look
+  like a considered gate. Caught by a Codex framing pass, not by the tests.
+- **Prevention: one side of a reconciliation must be measured by a path the other does not use.**
+  The fix was a second query — `count(*)` over `ownership_insiders_current` with no join at all —
+  and reporting `population - len(joined)` as its own line, so a lost row appears as a non-zero
+  bucket instead of vanishing into an identity. ⚠ Test: if you can prove the equality by
+  substituting the definitions, it is arithmetic, not evidence.
+- ⚠ The same pass found the classifier absorbing impossible states into substantive verdicts —
+  a survivor that is not one of its own group's lines reported `lines_dropped = n-1`, and a zero
+  owner count fell through to `joint_filing`. **An unreachable state must be surfaced as
+  unclassifiable, not bucketed**, or a defect in the measurement is indistinguishable from a
+  finding about the data.
+- Enforced in: this entry;
+  `scripts/census_3227_insider_holding_line_collapse.py` (`_CURRENT_POPULATION_SQL` +
+  `count_current_population`, the `NOT matched (join lost them)` line, and
+  `GroupVerdict.invalid_reason`);
+  `tests/test_3227_holding_line_collapse_census.py::test_a_survivor_that_is_not_one_of_the_groups_lines_is_unclassifiable`,
+  `::test_an_accession_with_no_reporting_owner_is_unclassifiable_not_joint`.
