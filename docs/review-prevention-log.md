@@ -8785,3 +8785,38 @@ original, because the gate now *looked* like a bound.
   records the 167/0 measurement);
   `tests/services/test_job_retry.py::test_dispatch_cap_counts_legacy_audit_rows_too`
   (exhausts the cap using ONLY old-key rows).
+
+### A shared connection's transaction semantics are a DEFAULT ARGUMENT, not a property of the `with` block
+
+- First seen in: #2603 (2026-09-19), PR #3219 — raised as BLOCKING by the review bot and
+  refuted by measurement.
+- Symptom: a helper issues two statements on one `conn` inside a single
+  `with background_write_connection() as conn:` block and swallows the second's exception.
+  That reads as the classic aborted-transaction bug — the failure poisons the transaction,
+  the outer commit raises `InFailedSqlTransaction`, and the FIRST write is lost. Here the
+  first write is the telemetry row recording a lost job fire, so the predicted loss was
+  exactly the defect the code exists to prevent, which made the finding very convincing.
+- ⚠ It was wrong, and the fact that decides it is **not visible at the call site**:
+  `background_write_connection(*, autocommit: bool = True)` (`app/db/background_write.py:70`).
+  On an autocommit connection the first statement is already committed, a failed second
+  statement leaves `transaction_status` IDLE rather than aborted, and there is no outer
+  commit to fail. Measured directly: status IDLE before and after, connection still usable,
+  block exits clean.
+- Generalises to: any review finding — or design — that reasons about rollback, savepoints
+  or atomicity across statements sharing a connection. `with conn:` and
+  `with pool.connection() as conn:` look transactional and need not be; psycopg3's
+  `conn.transaction()` is the thing that actually issues BEGIN.
+- Prevention: **read the connection factory's signature before reasoning about atomicity,
+  and assert the mode rather than inferring it.** Two statements in one `with` block are
+  only one transaction if something says so. The corollary binds the other direction too: if
+  you WANT atomicity there, autocommit means you are not getting it, and neither reading is
+  safe to assume.
+- ⚠ A rebuttal resting on a default argument two modules away is one that stops being true
+  silently, so it must be PINNED, not argued. Pin it by driving the real call site against a
+  real database — a test that calls the helper itself would still pass after someone changes
+  the call site to `autocommit=False`.
+- Enforced in: this entry;
+  `tests/test_2603_misfire_arm_transaction_safety_db.py` (drives
+  `JobRuntime._on_job_missed` against the test DB; flipping the call site to
+  `autocommit=False` reds both listener tests, including the exact data-loss scenario the
+  review described).
