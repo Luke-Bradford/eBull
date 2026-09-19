@@ -21,6 +21,7 @@ import {
   makeProcessRow,
   makeError,
 } from "@/components/admin/__fixtures__/processes";
+import { ProcessRow, processRowSignature } from "@/components/admin/ProcessRow";
 import { ProcessDetailPage } from "@/pages/ProcessDetailPage";
 
 vi.mock("@/api/processes", async () => {
@@ -1201,4 +1202,255 @@ describe("ProcessDetailPage — Advanced tab", () => {
     expect(alert.textContent).toMatch(/trigger rejected/);
     expect(alert.textContent).toMatch(/cannot coerce/);
   });
+});
+
+/**
+ * #2274 — the drill-in must state the SAME health claim as the table that
+ * linked to it.
+ *
+ * Before this the page rendered `STATUS_VISUAL[row.status]` inside the
+ * Overview tab. Measured against the live snapshot (72 rows, `partial=False`,
+ * 2026-09-19): the two surfaces printed a different health word on **every**
+ * row, and on 2 of 72 they printed them in different alarm colours — a
+ * `schedule_missed` row that the table pins red showed a calm grey `idle` on
+ * the page the operator reached by clicking the red.
+ *
+ * ⚠ Every fixture here sets `health_verdict` / `verdict_reason` /
+ * `stale_reasons` EXPLICITLY. `__fixtures__/processes.ts::deriveVerdict`
+ * auto-derives a verdict from `{status, stale_reasons}`, but it is a
+ * hand-maintained mirror of `compute_verdict`, not that function — it already
+ * differs from the backend on disabled-row precedence. Deriving the value
+ * under test from a mirror of the thing under test proves nothing.
+ */
+describe("ProcessDetailPage — health verdict (#2274)", () => {
+  const ALL_VERDICTS = [
+    ["current", "current"],
+    ["working", "working"],
+    ["self_healing", "retrying"],
+    ["attention", "needs attention"],
+    ["stale_manual", "stale"],
+    ["paused", "paused"],
+  ] as const;
+
+  it.each(ALL_VERDICTS)(
+    "renders health_verdict=%s in the page header as %s",
+    async (verdict, label) => {
+      mockedDetail.mockResolvedValue(
+        makeProcessRow({ health_verdict: verdict, verdict_reason: "" }),
+      );
+      mockedRuns.mockResolvedValue([]);
+      renderAt();
+      const pill = await screen.findByTestId("status-pill");
+      expect(pill.getAttribute("data-verdict")).toBe(verdict);
+      expect(pill.textContent).toBe(label);
+      expect(pill.getAttribute("aria-label")).toBe(`Health: ${label}`);
+    },
+  );
+
+  it("keeps the verdict visible on every tab, not just Overview", async () => {
+    // The pill lives in the page header for exactly this reason: a health
+    // headline that vanishes when the operator opens History is not a
+    // headline. ProblemsPanel / StaleBanner / the bootstrap timeline all
+    // deep-link into this route.
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        health_verdict: "attention",
+        verdict_reason: "schedule missed",
+        stale_reasons: ["schedule_missed"],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAt();
+    await screen.findByTestId("status-pill");
+    for (const tabName of ["History", "Errors", "Overview"]) {
+      fireEvent.click(screen.getByRole("tab", { name: tabName }));
+      expect(screen.getByTestId("status-pill").getAttribute("data-verdict")).toBe(
+        "attention",
+      );
+    }
+  });
+
+  it("shows the verdict AND the raw process state when they diverge", async () => {
+    // The exact live shape: `core_rebalance_observation`, status `idle`,
+    // verdict `attention`. Both facts belong on the page — the verdict is the
+    // health claim, `status` is the adapter-normalised state it was computed
+    // from. Dropping either is how the two surfaces disagreed in the first
+    // place.
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "core_rebalance_observation",
+        status: "idle",
+        health_verdict: "attention",
+        verdict_reason: "schedule missed",
+        stale_reasons: ["schedule_missed"],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAt();
+    const pill = await screen.findByTestId("status-pill");
+    expect(pill.getAttribute("data-verdict")).toBe("attention");
+    // `Process state` is plain text, NOT a second toned pill: two toned pills
+    // side by side re-create the two-cells-that-disagree defect.
+    expect(screen.getByText("Process state")).toBeTruthy();
+    expect(screen.getByText("idle")).toBeTruthy();
+    expect(screen.getAllByTestId("status-pill")).toHaveLength(1);
+  });
+
+  it("renders every stale reason as a chip, in payload order", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        status: "running",
+        health_verdict: "attention",
+        verdict_reason: "running past its runtime ceiling",
+        // Two reasons fire; `verdict_reason` can only show one. The full list
+        // is why `stale_reasons` is on the payload at all.
+        stale_reasons: ["runtime_ceiling", "mid_flight_stuck"],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAt();
+    await screen.findByTestId("stale-reasons");
+    const chips = screen.getAllByTestId("stale-reason-chip");
+    expect(chips.map((c) => c.getAttribute("data-reason"))).toEqual([
+      "runtime_ceiling",
+      "mid_flight_stuck",
+    ]);
+    expect(chips.map((c) => c.textContent)).toEqual([
+      "past runtime ceiling",
+      "no progress",
+    ]);
+    // ⚠ No elapsed suffix on any chip. `ProcessRow` appends one to its reason
+    // line, but that advances only because the TABLE polls and folds the
+    // elapsed string into `processRowSignature`. This page's envelope has no
+    // interval, so a duration here would freeze at fetch time while reading
+    // as live.
+    for (const chip of chips) expect(chip.textContent).not.toMatch(/\d+[smhd]/);
+  });
+
+  it("renders no chip container when there are no stale reasons", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({ health_verdict: "current", stale_reasons: [] }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAt();
+    await screen.findByTestId("status-pill");
+    expect(screen.queryByTestId("stale-reasons")).toBeNull();
+  });
+
+  it("a paused row keeps its neutral verdict while still showing the reason", async () => {
+    // ⚠⚠ The suppression test. `compute_verdict` returns neutral `paused` for
+    // a halted row that still carries `schedule_missed` — the kill switch is
+    // the loop's normal state and #1831 measured what false-red flooding costs
+    // (~42 halted jobs painted red, burying the real failures). The chip must
+    // report the reason WITHOUT re-alarming the row the backend calmed.
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        status: "disabled",
+        health_verdict: "paused",
+        verdict_reason: "",
+        stale_reasons: ["schedule_missed"],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAt();
+    const pill = await screen.findByTestId("status-pill");
+    expect(pill.getAttribute("data-verdict")).toBe("paused");
+    const chip = screen.getByTestId("stale-reason-chip");
+    expect(chip.textContent).toBe("schedule missed");
+    // "Carries no tone", machine-checkable: every `Badge` TONE_CLASSES entry
+    // sets a `bg-*` utility, so the absence of one is the absence of a tone.
+    // Asserted as a class FAMILY rather than a specific colour — pinning raw
+    // Tailwind is how `eightKSeverity.ts` shipped light-only chips past the
+    // dark gate.
+    expect(chip.className).not.toMatch(/\bbg-/);
+    // And the verdict pill stays the only toned health claim on the page.
+    expect(screen.getAllByTestId("status-pill")).toHaveLength(1);
+  });
+
+  it("renders verdict_reason when non-empty and nothing when empty", async () => {
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        health_verdict: "attention",
+        verdict_reason: "schedule missed",
+        stale_reasons: ["schedule_missed"],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAt();
+    expect((await screen.findByTestId("verdict-reason")).textContent).toBe(
+      "schedule missed",
+    );
+
+    cleanup();
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({ health_verdict: "current", verdict_reason: "" }),
+    );
+    renderAt();
+    await screen.findByTestId("status-pill");
+    expect(screen.queryByTestId("verdict-reason")).toBeNull();
+  });
+});
+
+/**
+ * #2274 — the cross-surface test. The table and the drill-in render the same
+ * `VerdictPill`, so given ONE payload row they must make an identical claim.
+ *
+ * ⚠ This does not — and cannot — assert that the two surfaces agree at any
+ * given instant: the table polls and the drill-in does not, so they can be
+ * looking at different payloads. The guarantee under test is narrower and is
+ * the one the defect was: GIVEN THE SAME ROW, the same claim.
+ */
+describe("table vs drill-in — same row, same health claim (#2274)", () => {
+  it.each([
+    ["attention", "idle"],
+    ["paused", "disabled"],
+    ["self_healing", "pending_retry"],
+    ["current", "ok"],
+  ] as const)(
+    "verdict=%s with status=%s renders identically on both surfaces",
+    async (verdict, status) => {
+      const row = makeProcessRow({
+        status,
+        health_verdict: verdict,
+        verdict_reason: "",
+        stale_reasons: [],
+      });
+
+      const table = render(
+        <MemoryRouter>
+          <table>
+            <tbody>
+              <ProcessRow
+                row={row}
+                signature={processRowSignature(row)}
+                triggerError={undefined}
+                cancelError={undefined}
+                busy={false}
+                onIterate={vi.fn()}
+                onFullWash={vi.fn()}
+                onCancel={vi.fn()}
+              />
+            </tbody>
+          </table>
+        </MemoryRouter>,
+      );
+      const tablePill = table.getByTestId("status-pill");
+      const fromTable = {
+        label: tablePill.textContent,
+        verdict: tablePill.getAttribute("data-verdict"),
+        aria: tablePill.getAttribute("aria-label"),
+      };
+      cleanup();
+
+      mockedDetail.mockResolvedValue(row);
+      mockedRuns.mockResolvedValue([]);
+      renderAt();
+      const detailPill = await screen.findByTestId("status-pill");
+      expect({
+        label: detailPill.textContent,
+        verdict: detailPill.getAttribute("data-verdict"),
+        aria: detailPill.getAttribute("aria-label"),
+      }).toEqual(fromTable);
+    },
+  );
 });

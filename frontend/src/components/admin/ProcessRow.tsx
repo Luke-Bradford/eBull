@@ -22,10 +22,10 @@ import { formatDateTime } from "@/lib/format";
 import {
   NEXT_RUN_EXPECTED_TOOLTIP,
   REASON_TOOLTIP,
-  VERDICT_VISUAL,
   reasonShortLabel,
   reasonTooltip,
 } from "@/components/admin/processStatus";
+import { VerdictPill } from "@/components/admin/VerdictPill";
 
 export interface ProcessRowProps {
   readonly row: ProcessRowResponse;
@@ -127,9 +127,6 @@ function arePropsEqual(prev: ProcessRowProps, next: ProcessRowProps): boolean {
     prev.onCancel === next.onCancel
   );
 }
-
-const PENDING_RETRY_TOOLTIP =
-  "hiding prior errors during retry — re-shown if retry also fails or fails to reattempt failed subjects.";
 
 function ProcessRowImpl({
   row,
@@ -254,7 +251,7 @@ function ProcessRowImpl({
         </Badge>
       </td>
       <td className="px-2 py-2">
-        <StatusPill row={row} />
+        <VerdictPill row={row} />
         <VerdictReason row={row} />
         {/* #2274 — historical reap note. Beneath the verdict, muted, never a
             second status; see RecentReaps for why it is not a verdict input. */}
@@ -418,25 +415,6 @@ function RecentReaps({ row }: { row: ProcessRowResponse }) {
     >
       {row.recent_reap_events} reaps · {RECENT_REAP_WINDOW_DAYS}d{lost}
     </div>
-  );
-}
-
-function StatusPill({ row }: { row: ProcessRowResponse }) {
-  // #1512 — render the single computed verdict, not the raw status.
-  const visual = VERDICT_VISUAL[row.health_verdict];
-  const tooltip = row.self_healing ? PENDING_RETRY_TOOLTIP : undefined;
-  return (
-    <Badge
-      tone={visual.tone}
-      uppercase
-      className={visual.extraClass}
-      data-testid="status-pill"
-      data-verdict={row.health_verdict}
-      title={tooltip}
-      aria-label={`Health: ${visual.label}`}
-    >
-      {visual.label}
-    </Badge>
   );
 }
 
