@@ -1003,19 +1003,22 @@ def _seed_running_sync_run(
     conn: psycopg.Connection[tuple],
     *,
     layers: list[tuple[str, str]],
+    scope: str = "full",
 ) -> int:
     """Insert a running sync_runs row + per-layer rows.
 
     ``layers`` is a list of ``(layer_name, status)`` so each test can
-    pin the cohort it wants.
+    pin the cohort it wants. ``scope`` defaults to ``full``; #2274 needs the
+    other wrapper's scope too, and ``idx_sync_runs_single_running`` permits
+    only ONE running row per database, so a test can seed exactly one.
     """
     row = conn.execute(
         """
         INSERT INTO sync_runs (scope, scope_detail, trigger, layers_planned, status)
-        VALUES ('full', NULL, 'manual', %s, 'running')
+        VALUES (%s, NULL, 'manual', %s, 'running')
         RETURNING sync_run_id
         """,
-        (len(layers),),
+        (scope, len(layers)),
     ).fetchone()
     assert row is not None
     sync_run_id = int(row[0])
@@ -1073,6 +1076,182 @@ def test_cancel_orchestrator_full_sync_targets_sync_run_kind(
     ).fetchone()
     assert sync_row is not None
     assert sync_row[0] is not None
+
+
+def test_full_sync_row_goes_live_while_its_sync_run_is_running(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """#2274 — the whole operator-visible change, on one row, end to end.
+
+    Pre-fix every assertion below was unreachable: ``orchestrator_full_sync``
+    has never written a ``running`` row to ``job_runs`` (its only rows there
+    are ``skipped`` suppression records), so the active read always returned
+    ``None`` and the row showed its last TERMINAL run — for a window whose
+    median is over half an hour.
+
+    ``mid_flight_stuck`` is asserted ABSENT at an age far past the 300 s
+    default: the threshold override is what stops this change red-flagging the
+    large majority of healthy full syncs.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    sync_run_id = _seed_running_sync_run(ebull_test_conn, layers=[("universe", "running")])
+    ebull_test_conn.execute(
+        "UPDATE sync_runs SET started_at = now() - interval '2 hours' WHERE sync_run_id = %s",
+        (sync_run_id,),
+    )
+    ebull_test_conn.commit()
+
+    resp = client.get("/system/processes")
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json()["rows"] if r["process_id"] == "orchestrator_full_sync")
+
+    assert row["status"] == "running"
+    assert row["active_run"] is not None
+    assert row["active_run"]["run_id"] == sync_run_id
+    assert row["active_run"]["run_kind"] == "sync_run"
+    assert row["can_cancel"] is True
+    # Starting more work while the singleton slot is held is refused, like
+    # every other running row in the table.
+    assert row["can_iterate"] is False
+    assert row["can_full_wash"] is False
+    assert "mid_flight_stuck" not in row["stale_reasons"]
+
+
+def test_cancel_orchestrator_hf_sync_audits_against_itself(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """#2274 — the HF wrapper is cancellable, and the stop names the HF job.
+
+    Pre-fix this POST fell through to the ``job_runs`` branch and 409'd, because
+    routing was ``process_id == JOB_ORCHESTRATOR_FULL_SYNC`` rather than
+    registry membership. The audit half is the part worth pinning: the handler
+    used to hardcode the full sync's name into ``request_stop``, so an HF stop
+    would have been recorded against a job that was not running.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    sync_run_id = _seed_running_sync_run(ebull_test_conn, layers=[("universe", "running")], scope="high_frequency")
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/orchestrator_high_frequency_sync/cancel",
+        json={"mode": "cooperative", "target_run_id": sync_run_id},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["target_run_kind"] == "sync_run"
+    assert resp.json()["target_run_id"] == sync_run_id
+
+    stop_row = ebull_test_conn.execute(
+        """
+        SELECT process_id FROM process_stop_requests
+         WHERE target_run_kind = 'sync_run' AND target_run_id = %s
+         ORDER BY id DESC LIMIT 1
+        """,
+        (sync_run_id,),
+    ).fetchone()
+    assert stop_row is not None
+    assert stop_row[0] == "orchestrator_high_frequency_sync"
+
+
+def test_cancel_hf_sync_never_reaches_another_scopes_run(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """#2274 / Codex ckpt-2 P1 — routing the HF wrapper at the DATABASE-WIDE
+    sync resolver would have made an unpinned HF cancel kill a running FULL
+    sync, and then record the stop against ``orchestrator_high_frequency_sync``.
+
+    ``sync_runs`` permits one running row per database, so "the running sync" is
+    not "this wrapper's run". The unscoped resolve is a deliberate escape path
+    for the FULL-sync endpoint only — a stranded boot-sweep walk has no
+    ProcessRow and no other cancel route — and it is not inherited by a route
+    this ticket created.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    full_run_id = _seed_running_sync_run(ebull_test_conn, layers=[("universe", "running")])
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/orchestrator_high_frequency_sync/cancel",
+        json={"mode": "cooperative"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "no_active_run"
+
+    sync_row = ebull_test_conn.execute(
+        "SELECT cancel_requested_at FROM sync_runs WHERE sync_run_id = %s",
+        (full_run_id,),
+    ).fetchone()
+    assert sync_row is not None
+    assert sync_row[0] is None
+
+    stop_count = ebull_test_conn.execute(
+        "SELECT count(*) FROM process_stop_requests WHERE target_run_kind = 'sync_run'",
+    ).fetchone()
+    assert stop_count is not None
+    assert stop_count[0] == 0
+
+
+def test_cancel_with_stale_pin_is_refused_and_writes_no_stop_row(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """#2274 — the pin is what makes offering Cancel on these rows safe.
+
+    The FE holds the row it rendered for the whole life of the confirm dialog,
+    so the run occupying the singleton slot at confirm time can be a completely
+    different one. Refusing is the only safe answer: cancelling the replacement
+    would also mark it operator-initiated, which the adapter's cancel
+    look-through later reads as a BENIGN cancel — so the wrongly-killed run
+    would render green.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    sync_run_id = _seed_running_sync_run(ebull_test_conn, layers=[("universe", "running")])
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/orchestrator_full_sync/cancel",
+        json={"mode": "cooperative", "target_run_id": sync_run_id + 999},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "run_changed"
+
+    # The refusal is total — no stop row, and the live run is untouched.
+    stop_count = ebull_test_conn.execute(
+        "SELECT count(*) FROM process_stop_requests WHERE target_run_kind = 'sync_run'",
+    ).fetchone()
+    assert stop_count is not None
+    assert stop_count[0] == 0
+
+    sync_row = ebull_test_conn.execute(
+        "SELECT cancel_requested_at FROM sync_runs WHERE sync_run_id = %s",
+        (sync_run_id,),
+    ).fetchone()
+    assert sync_row is not None
+    assert sync_row[0] is None
+
+
+def test_cancel_without_a_pin_still_takes_the_running_run(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """#2274 — ``target_run_id`` is OPTIONAL on purpose.
+
+    A ``behind`` / ``layer`` / ``job`` walk holds the same singleton slot but
+    has no ProcessRow, so a caller cannot read an id to pin. Omitting the field
+    must keep reaching it, or the one route to a stranded walk disappears.
+    """
+    _ensure_kill_switch_off(ebull_test_conn)
+    _wipe_orchestrator_state(ebull_test_conn)
+    sync_run_id = _seed_running_sync_run(ebull_test_conn, layers=[("universe", "running")], scope="behind")
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        "/system/processes/orchestrator_full_sync/cancel",
+        json={"mode": "cooperative"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["target_run_id"] == sync_run_id
 
 
 def test_cancel_orchestrator_full_sync_no_active_returns_409(

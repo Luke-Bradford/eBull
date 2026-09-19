@@ -147,6 +147,7 @@ describe("admin a11y — ProcessRow", () => {
         status: "running",
         active_run: {
           run_id: 1,
+          run_kind: "job_run" as const,
           started_at: "2026-05-09T13:00:00+00:00",
           rows_processed_so_far: 100,
           progress_units_done: null,

@@ -757,3 +757,87 @@ def test_runtime_ceiling_sorts_last_in_canonical_order() -> None:
         now=NOW,
     )
     assert reasons == ("queue_stuck", "mid_flight_stuck", "runtime_ceiling")
+
+
+# ---------------------------------------------------------------------------
+# #2274 — the orchestrator wrappers, whose active run comes from sync_runs
+# ---------------------------------------------------------------------------
+
+
+def _wrapper_reasons(process_id: str, *, age_s: int) -> tuple[str, ...]:
+    """Rules as they fire for an orchestrator wrapper's in-flight sync run.
+
+    ``last_progress_at=None`` is the common case by a wide margin on
+    ``sync_runs`` (most rows never record one), which is exactly why rule 4
+    degenerates into a duration rule for these processes.
+    """
+    return compute(
+        mechanism="scheduled_job",
+        status="running",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(age_s),
+        process_id=process_id,
+        now=NOW,
+        cadence_period_s=300,
+    )
+
+
+def test_full_sync_mid_run_is_not_mid_flight_stuck() -> None:
+    """A full sync well past the 300 s default is WORKING, not stuck.
+
+    The measured shape this defends: on ``sync_runs`` scope='full' the large
+    majority of runs that COMPLETED SUCCESSFULLY would have tripped rule 4 at
+    the default. Surfacing the active run without this would have turned most
+    healthy full syncs red — i.e. routed a sync run into the threshold model
+    ``run_liveness`` deliberately refuses.
+    """
+    assert _wrapper_reasons("orchestrator_full_sync", age_s=DEFAULT_THRESHOLD_S * 10) == ()
+
+
+def test_full_sync_past_the_ceiling_still_chips() -> None:
+    """The exemption is a RAISED THRESHOLD, not a removed rule. Past the
+    ceiling both rule 4 and rule 5 fire — deliberately, since for a run with no
+    heartbeat the two are measuring the same instant and silence about a
+    day-old sync would be the worse error."""
+    reasons = _wrapper_reasons("orchestrator_full_sync", age_s=RUNTIME_CEILING_S + 1)
+    assert "runtime_ceiling" in reasons
+    assert "mid_flight_stuck" in reasons
+
+
+def test_high_frequency_sync_keeps_the_default_threshold() -> None:
+    """⚠ The asymmetry, asserted rather than assumed.
+
+    The HF wrapper reads the same table through the same code, so an exemption
+    keyed on the RUN KIND would have covered it too. It must not: its whole
+    active window is a fraction of the 300 s default, so a run silent past the
+    default is genuinely stranded — and with the row now reading ``running``,
+    rule 1 no longer covers that case.
+    """
+    assert _wrapper_reasons("orchestrator_high_frequency_sync", age_s=DEFAULT_THRESHOLD_S + 1) == ("mid_flight_stuck",)
+
+
+def test_bootstrap_still_fires_rule_4_at_its_own_override() -> None:
+    """Regression guard for the design this ticket did NOT ship (Codex ckpt-1).
+
+    Rev 1 proposed exempting rule 4 via a new ``active_run_kind`` parameter on
+    ``compute``. Bootstrap passes a real ``active_run_started_at`` and rule 5
+    excludes bootstrap by design, so rule 4 is bootstrap's ONLY hung-run
+    detector — a signature change there is the kind of thing that silently
+    disarms it. Shipping the fix as a threshold override instead means
+    ``compute`` is untouched, and this test pins that.
+    """
+    reasons = compute(
+        mechanism="bootstrap",
+        status="running",
+        expected_fire_at=None,
+        has_data_freshness_gap=False,
+        has_dispatched_queue_age=False,
+        last_progress_at=None,
+        active_run_started_at=_seconds_ago(get_threshold("bootstrap") + 1),
+        process_id="bootstrap",
+        now=NOW,
+    )
+    assert reasons == ("mid_flight_stuck",)

@@ -269,6 +269,9 @@ def _build_active_run(active_row: dict[str, Any], aggregates: dict[str, Any]) ->
     progress_units_done = finished_stages if total_stages > 0 else None
     return ActiveRunSummary(
         run_id=int(active_row["id"]),
+        # #2274 — ``bootstrap_runs.id``, matching the ``target_run_kind`` the
+        # bootstrap cancel path already writes (``bootstrap_state.cancel_run``).
+        run_kind="bootstrap_run",
         started_at=active_row["triggered_at"],
         rows_processed_so_far=rows_processed_so_far,
         progress_units_done=progress_units_done,

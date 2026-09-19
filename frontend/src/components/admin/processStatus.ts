@@ -116,6 +116,8 @@ export const REASON_TOOLTIP: Record<TriggerConflictReason, string> = {
     "A sibling job has an active full-wash. Wait for it to complete.",
   no_active_run: "Nothing to cancel — no active run.",
   stop_already_pending: "A cancel is already pending for this run.",
+  run_changed:
+    "That run has already ended and another has started. Refresh and check before cancelling.",
   trigger_not_supported:
     "Sweeps are read-only — trigger via the underlying scheduled job.",
   cancel_not_supported:
@@ -147,6 +149,7 @@ export const REASON_SHORT_LABEL: Record<TriggerConflictReason, string> = {
   shared_source_full_wash_pending: "sibling full-wash pending",
   no_active_run: "no active run",
   stop_already_pending: "cancel already pending",
+  run_changed: "run changed",
   trigger_not_supported: "trigger not supported",
   cancel_not_supported: "cancel not supported",
   bootstrap_not_complete: "bootstrap not complete",
@@ -164,6 +167,21 @@ export function reasonFromError(err: unknown): TriggerConflictReason | null {
   if (typeof reason !== "string") return null;
   if (!KNOWN_REASONS.has(reason)) return null;
   return reason as TriggerConflictReason;
+}
+
+/**
+ * #2274 — the rejection says "the active run you are showing is gone".
+ *
+ * Both reasons mean the caller's view is stale, and they are NOT
+ * interchangeable at the source: a pinned run that was REPLACED resolves to a
+ * different id (`run_changed`), while one that simply ENDED with nothing
+ * behind it resolves to no row at all (`no_active_run`). Treating only the
+ * first as stale leaves a non-polling surface retrying a dead pin forever,
+ * which is exactly what happens on `ProcessDetailPage` (Codex ckpt-2 P2).
+ */
+export function meansActiveRunIsStale(err: unknown): boolean {
+  const reason = reasonFromError(err);
+  return reason === "run_changed" || reason === "no_active_run";
 }
 
 export function reasonTooltip(err: unknown): string {

@@ -42,6 +42,7 @@ from app.services.bootstrap_state import (
     BootstrapNoPriorRun,
     BootstrapNotResettable,
     BootstrapNotRunning,
+    BootstrapRunChanged,
 )
 from app.services.bootstrap_state import (
     cancel_run as bootstrap_cancel_run,
@@ -71,6 +72,7 @@ from app.services.processes import (
     ProcessSnapshot,
     ProcessStatus,
     ProcessWatermark,
+    RunKind,
     RunStatus,
     StaleReason,
     UncoveredReap,
@@ -137,6 +139,11 @@ class ProcessRunSummaryResponse(BaseModel):
 
 class ActiveRunSummaryResponse(BaseModel):
     run_id: int
+    # #2274 — which table ``run_id`` keys. The orchestrator wrapper rows
+    # publish a ``sync_runs.sync_run_id`` in the same slot every other
+    # scheduled row publishes a ``job_runs.run_id``, so the bare integer is
+    # ambiguous without this.
+    run_kind: RunKind
     started_at: datetime
     rows_processed_so_far: int | None
     progress_units_done: int | None
@@ -274,6 +281,24 @@ class TriggerResponse(BaseModel):
 
 class CancelRequest(BaseModel):
     mode: Literal["cooperative", "terminate"]
+    # #2274 — the run the CALLER was looking at. Optional, and when supplied the
+    # handler refuses (409 ``run_changed``) rather than cancelling a different
+    # run that started in the meantime.
+    #
+    # ⚠⚠ This is a correctness prerequisite for offering Cancel on the
+    # orchestrator wrapper rows, not a nicety. The FE captures ``cancelTarget``
+    # as a row object and holds it for the entire life of the confirm dialog
+    # (``ProcessesTable.tsx`` → ``handleCancelConfirmed(cancelTarget, mode)``),
+    # so the window between "what the operator saw" and "what the server
+    # resolves" is bounded by nothing at all. On the sync side that matters
+    # most: ``sync_runs`` allows ONE running row per database
+    # (``idx_sync_runs_single_running``), and the run occupying that slot when
+    # the operator confirms may be a different scope entirely.
+    #
+    # Optional rather than required so the unscoped direct-POST route to a
+    # stranded non-wrapper walk (``behind`` / ``layer`` / ``job``, none of which
+    # has a ProcessRow) keeps working exactly as it does today.
+    target_run_id: int | None = None
 
 
 class CancelResponse(BaseModel):
@@ -450,6 +475,7 @@ def _convert_run(summary: ProcessRunSummary) -> ProcessRunSummaryResponse:
 def _convert_active_run(active: ActiveRunSummary) -> ActiveRunSummaryResponse:
     return ActiveRunSummaryResponse(
         run_id=active.run_id,
+        run_kind=active.run_kind,
         started_at=active.started_at,
         rows_processed_so_far=active.rows_processed_so_far,
         progress_units_done=active.progress_units_done,
@@ -1652,14 +1678,65 @@ def trigger_process(
     return TriggerResponse(request_id=request_id, mode=body.mode)
 
 
-def _resolve_active_sync_run(conn: psycopg.Connection[Any]) -> int | None:
-    """Lock + return the latest running sync_runs row.
+class _RunChanged(Exception):
+    """The locked run is not the one the caller pinned (#2274)."""
+
+
+def _pin_or_raise(resolved: int | None, *, pinned: int | None) -> int | None:
+    """Enforce the caller's ``target_run_id`` against the locked row (#2274).
+
+    ``None`` pinned → no opinion, take whatever is running (the pre-#2274
+    behaviour, kept so a direct POST can still reach a stranded run that has no
+    ProcessRow to read an id from). Pinned and mismatched → ``_RunChanged``, so
+    the operator's cancel cannot land on a run that started after they looked.
+
+    ⚠ Raising is the ONLY safe answer to a mismatch. Falling through to the
+    resolved run cancels something the operator never saw, and ``request_stop``
+    would then record it as operator-initiated — which
+    ``_cancel_was_operator_initiated`` later reads as "benign, deliberately
+    cancelled", so the wrongly-killed run renders green.
+    """
+    if resolved is None or pinned is None:
+        return resolved
+    if resolved != pinned:
+        raise _RunChanged
+    return resolved
+
+
+def _run_changed_conflict() -> HTTPException:
+    """The single 409 for "that is not the run you asked to cancel" (#2274).
+
+    Three call sites raise it — the sync branch, the ``job_run`` branch, and
+    bootstrap (whose pin is enforced inside ``cancel_run``'s ``FOR UPDATE``).
+    Centralised because the operator-facing ADVICE is the part that drifts, and
+    three copies of a recovery instruction is three chances for two of them to
+    go stale. The FE keys on ``reason``; the advice is what a curl user reads.
+    """
+    return _conflict(
+        "run_changed",
+        advice="the run you were looking at has ended; refresh and retry",
+    )
+
+
+def _resolve_active_sync_run(conn: psycopg.Connection[Any], *, scope: str | None = None) -> int | None:
+    """Lock + return the latest running sync_runs row, optionally scoped.
 
     Issue #1078 (umbrella #1064) — admin control hub PR6.
     Spec §"Cancel — cooperative" — orchestrator_full_sync cancel writes
     ``target_run_kind='sync_run'`` against the locked sync_run_id.
     Caller MUST be inside ``conn.transaction()`` so the row stays locked
     until the cancel insert + cancel_requested_at update commit.
+
+    ⚠⚠ ``scope=None`` is the DATABASE-WIDE resolve — it takes whichever run
+    holds the singleton slot, whatever its scope. That is the pre-#2274
+    behaviour and it is kept for exactly one caller: the full-sync endpoint,
+    which is the only route a stranded ``behind`` / ``layer`` / ``job`` walk
+    has, none of those having a ProcessRow of its own. Every other caller MUST
+    pass a scope. Codex ckpt-2 P1: handing the unscoped resolve to the newly
+    routed HF endpoint would let an unpinned HF cancel kill a running FULL sync
+    and then record the stop against ``orchestrator_high_frequency_sync`` — a
+    destructive action with a false audit trail, and a risk that did not exist
+    before this ticket rather than one inherited from #1078.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -1667,10 +1744,12 @@ def _resolve_active_sync_run(conn: psycopg.Connection[Any]) -> int | None:
             SELECT sync_run_id
               FROM sync_runs
              WHERE status = 'running'
+               AND (%(scope)s::text IS NULL OR scope = %(scope)s)
              ORDER BY started_at DESC
              LIMIT 1
              FOR UPDATE
-            """
+            """,
+            {"scope": scope},
         )
         row = cur.fetchone()
     if row is None:
@@ -1678,32 +1757,54 @@ def _resolve_active_sync_run(conn: psycopg.Connection[Any]) -> int | None:
     return int(row[0])
 
 
-def _cancel_orchestrator_full_sync(
+def _cancel_orchestrator_sync(
     conn: psycopg.Connection[Any],
     *,
+    process_id: str,
     body: CancelRequest,
     operator_uuid: UUID | None,
 ) -> CancelResponse:
-    """Cancel handler for the ``orchestrator_full_sync`` scheduled job.
+    """Cancel handler for an orchestrator wrapper job.
 
     Issue #1078 (umbrella #1064). The orchestrator writes ``sync_runs``,
     not ``job_runs``, so the cancel signal must target
     ``target_run_kind='sync_run'``. The cancel checkpoint inside
     ``_run_layers_loop`` polls ``process_stop_requests`` keyed on
-    ``(target_run_kind='sync_run', target_run_id=<sync_run_id>)``.
+    ``(target_run_kind='sync_run', target_run_id=<sync_run_id>)`` — keyed on
+    the RUN, not on the scope, which is why this one handler serves both
+    wrappers.
 
     ``mechanism`` on ``process_stop_requests`` is ``'scheduled_job'``
     because the orchestrator surfaces as one ``mechanism="scheduled_job"``
     row in the Processes table (spec §"Sync-orchestrator surface").
+
+    ⚠ #2274 — ``process_id`` is a PARAMETER. It used to be hardcoded to
+    ``JOB_ORCHESTRATOR_FULL_SYNC`` because only that job routed here; now that
+    ``orchestrator_high_frequency_sync`` can offer a Cancel too, hardcoding
+    would audit an HF stop against the full sync in
+    ``process_stop_requests.process_id``.
     """
     with conn.transaction():
-        sync_run_id = _resolve_active_sync_run(conn)
+        # Resolve within THIS wrapper's own scope first, so a cancel aimed at
+        # one wrapper can never land on the other's run.
+        resolved = _resolve_active_sync_run(conn, scope=scheduled_adapter.ORCHESTRATOR_SYNC_SCOPE[process_id])
+        if resolved is None and process_id == JOB_ORCHESTRATOR_FULL_SYNC:
+            # The documented pre-#2274 escape path, preserved exactly: the
+            # full-sync endpoint is the ONLY cancel route to a stranded
+            # boot-sweep / layer / job walk, which has no ProcessRow to be
+            # cancelled from. Reached only when no full sync is itself running,
+            # so it cannot shadow this wrapper's own run.
+            resolved = _resolve_active_sync_run(conn)
+        try:
+            sync_run_id = _pin_or_raise(resolved, pinned=body.target_run_id)
+        except _RunChanged:
+            raise _run_changed_conflict() from None
         if sync_run_id is None:
             raise _conflict("no_active_run")
         try:
             request_stop(
                 conn,
-                process_id=JOB_ORCHESTRATOR_FULL_SYNC,
+                process_id=process_id,
                 mechanism="scheduled_job",
                 target_run_kind="sync_run",
                 target_run_id=sync_run_id,
@@ -1798,8 +1899,17 @@ def cancel_process(
 
     _, operator_uuid = _identify_requestor(request)
 
-    if mechanism == "scheduled_job" and process_id == JOB_ORCHESTRATOR_FULL_SYNC:
-        return _cancel_orchestrator_full_sync(conn, body=body, operator_uuid=operator_uuid)
+    # #2274 — routed by the SAME registry the adapter re-homes these jobs'
+    # terminal and active rows with, so a row that renders a Cancel button
+    # cannot POST into the ``job_runs`` branch and 409 on a run that was never
+    # going to be there.
+    if mechanism == "scheduled_job" and process_id in scheduled_adapter.ORCHESTRATOR_SYNC_SCOPE:
+        return _cancel_orchestrator_sync(
+            conn,
+            process_id=process_id,
+            body=body,
+            operator_uuid=operator_uuid,
+        )
 
     if mechanism == "bootstrap":
         try:
@@ -1818,16 +1928,33 @@ def cancel_process(
                 conn,
                 requested_by_operator_id=operator_uuid,
                 mode=body.mode,
+                # #2274 — the pin is enforced INSIDE cancel_run's FOR UPDATE, so
+                # bootstrap gets the same guard as the two scheduled branches
+                # rather than silently ignoring a field the shared request body
+                # accepts.
+                expected_run_id=body.target_run_id,
             )
         except BootstrapNotRunning as exc:
             raise _conflict("no_active_run") from exc
+        except BootstrapRunChanged as exc:
+            raise _run_changed_conflict() from exc
         except StopAlreadyPendingError as exc:
             raise _conflict("stop_already_pending") from exc
         return CancelResponse(target_run_kind="bootstrap_run", target_run_id=run_id)
 
     # mechanism == 'scheduled_job'
     with conn.transaction():
-        run_id = _resolve_active_job_run(conn, job_name=process_id)
+        # #2274 — same pin as the sync branch. The race is smaller here (this
+        # resolver is already scoped to one job_name, so a mismatch means a
+        # SECOND run of the same job started) but not absent, and the guard
+        # costs one comparison.
+        try:
+            run_id = _pin_or_raise(
+                _resolve_active_job_run(conn, job_name=process_id),
+                pinned=body.target_run_id,
+            )
+        except _RunChanged:
+            raise _run_changed_conflict() from None
         if run_id is None:
             raise _conflict("no_active_run")
         try:

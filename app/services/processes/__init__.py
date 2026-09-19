@@ -78,6 +78,12 @@ HealthVerdict = Literal["current", "working", "self_healing", "attention", "stal
 # behind the switch, so it needs its own member rather than a mapping.
 RunStatus = Literal["success", "failure", "partial", "cancelled", "skipped", "degraded"]
 
+# #2274 — WHICH table an in-flight run lives in. Same three-member vocabulary
+# as ``process_stop_requests.target_run_kind`` (sql/135:65, CHECK-constrained)
+# and as the terminal row's ``terminal_kind`` (#1508 Task 5), because a cancel
+# has to pin the kind alongside the id: run ids are only unique within a table.
+RunKind = Literal["job_run", "sync_run", "bootstrap_run"]
+
 WatermarkCursorKind = Literal[
     "filed_at",
     "accession",
@@ -174,9 +180,16 @@ class ActiveRunSummary:
 
     ``is_cancelling`` reflects ``cancel_requested_at`` non-NULL on the
     underlying run row.
+
+    ⚠ ``run_kind`` says which table ``run_id`` keys (#2274). It is REQUIRED
+    rather than defaulted so a new adapter cannot omit it: a bare integer is
+    ambiguous across ``job_runs`` / ``sync_runs`` / ``bootstrap_runs``, and the
+    orchestrator wrapper rows publish a ``sync_run_id`` in the same slot every
+    other scheduled row publishes a ``job_runs.run_id``.
     """
 
     run_id: int
+    run_kind: RunKind
     started_at: datetime
     rows_processed_so_far: int | None
     progress_units_done: int | None
@@ -405,6 +418,7 @@ __all__ = [
     "ProcessSnapshot",
     "ProcessStatus",
     "ProcessWatermark",
+    "RunKind",
     "RunStatus",
     "UncoveredReap",
     "WatermarkCursorKind",

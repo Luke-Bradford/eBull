@@ -2199,6 +2199,12 @@ export interface ProcessRunSummaryResponse {
 
 export interface ActiveRunSummaryResponse {
   run_id: number;
+  /**
+   * #2274 — which table `run_id` keys. The orchestrator wrapper rows publish a
+   * `sync_runs.sync_run_id` in the same slot every other scheduled row
+   * publishes a `job_runs.run_id`, so the bare number is ambiguous without it.
+   */
+  run_kind: "job_run" | "sync_run" | "bootstrap_run";
   started_at: string;
   rows_processed_so_far: number | null;
   progress_units_done: number | null;
@@ -2340,6 +2346,14 @@ export interface TriggerResponse {
 
 export interface CancelRequestBody {
   mode: CancelMode;
+  /**
+   * #2274 — the run the operator was looking at when they opened the confirm
+   * dialog. The server refuses with `run_changed` rather than cancelling a
+   * different run that started while the dialog was open. Always send it when
+   * the row has an `active_run`; omitting it restores the old take-whatever-
+   * is-running behaviour, which is only correct for a caller with no row.
+   */
+  target_run_id?: number;
 }
 
 export interface CancelResponse {
@@ -2361,6 +2375,10 @@ export type TriggerConflictReason =
   | "shared_source_full_wash_pending"
   | "no_active_run"
   | "stop_already_pending"
+  // #2274 — the caller pinned a target_run_id and the run that is
+  // actually holding the slot is a different one (the confirm dialog was
+  // open while the run ended and another started).
+  | "run_changed"
   // PR6 (#1078) — ingest_sweep rows are READ-ONLY; trigger / cancel
   // surface these reasons to point the operator at the underlying
   // scheduled job.

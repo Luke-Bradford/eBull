@@ -130,6 +130,9 @@ def test_active_run_envelope_drops_legacy_fields() -> None:
 
     expected = {
         "run_id",
+        # #2274 — which table ``run_id`` keys (job_runs / sync_runs /
+        # bootstrap_runs). Part of the wire format, not a placeholder.
+        "run_kind",
         "started_at",
         "rows_processed_so_far",
         "progress_units_done",
@@ -176,6 +179,7 @@ def test_active_run_pristine_no_progress() -> None:
     The FE renders ``Processed: N`` only — no division-by-zero risk."""
     active = ActiveRunSummary(
         run_id=1,
+        run_kind="job_run",
         started_at=_now(),
         rows_processed_so_far=100,
         progress_units_done=None,

@@ -36,6 +36,7 @@ import {
 import { StaleBanner } from "@/components/admin/StaleBanner";
 import {
   VERDICT_SORT_PRIORITY,
+  meansActiveRunIsStale,
   reasonTooltip,
 } from "@/components/admin/processStatus";
 import { isSteadyStateProcess } from "@/lib/processHealth";
@@ -294,12 +295,26 @@ export function ProcessesTable({
       clearRowError(row.process_id, "cancel");
       setBusyId(row.process_id);
       try {
-        await cancelProcess(row.process_id, { mode });
+        // #2274 — pin the run that was on screen. `cancelTarget` is captured
+        // when the dialog OPENS and held for its whole life, so without this
+        // the POST cancels whatever holds the slot at confirm time. That is not
+        // a poll-width race: the dialog can stay open indefinitely, and
+        // `sync_runs` allows one running row per database, so the replacement
+        // can be a different scope entirely.
+        await cancelProcess(row.process_id, {
+          mode,
+          target_run_id: row.active_run?.run_id,
+        });
         setCancelTarget(null);
         onMutationSuccess();
       } catch (err) {
         setRowError(row.process_id, { cancel: err });
         setCancelTarget(null);
+        // #2274 — the run this row was showing is gone (replaced, or just
+        // finished). The table polls, so it would self-heal on the next tick;
+        // refetching now closes the window where an immediate retry resubmits
+        // the same dead pin.
+        if (meansActiveRunIsStale(err)) onMutationSuccess();
         if (!(err instanceof ApiError)) {
           console.error("cancelProcess failed", err);
         }

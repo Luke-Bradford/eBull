@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from app.services.processes.stale_thresholds import (
     DEFAULT_THRESHOLD_S,
+    RUNTIME_CEILING_S,
     get_threshold,
     overridden_process_ids,
 )
@@ -80,3 +81,32 @@ def test_override_keys_resolve_to_real_process_ids() -> None:
             f"override key {process_id!r} does not resolve to a real "
             "stale-detection ProcessRow (scheduled job or ingest sweep)"
         )
+
+
+def test_full_sync_override_is_the_runtime_ceiling() -> None:
+    """#2274 — the full sync's active row comes from ``sync_runs``, which has
+    no derivable heartbeat threshold (``run_liveness.assess_run`` carries no
+    staleness verdict for exactly that reason). Setting the override TO the
+    rule-5 ceiling is how rule 4 declines to invent one.
+
+    Pinned against the constant, never against 86_400: the point is that the
+    two are the same number by construction, so a future ceiling change moves
+    both together.
+    """
+    assert get_threshold("orchestrator_full_sync") == RUNTIME_CEILING_S
+
+
+def test_high_frequency_sync_is_NOT_overridden() -> None:
+    """#2274 — the asymmetry is the finding, so it gets its own test.
+
+    Both orchestrator wrappers read the SAME ``sync_runs`` table through the
+    same code path, so the obvious move is to exempt them together by run kind.
+    That would be wrong: the HF sync's whole-corpus maximum runtime is
+    multiples below the 300 s default, so the default costs it nothing AND is
+    worth real signal — once the HF row can read ``running``, rule 1
+    (``schedule_missed``) is suppressed for it and rule 4 becomes what chips a
+    stranded HF singleton. A kind-keyed exemption would have left nothing until
+    the 24 h ceiling.
+    """
+    assert get_threshold("orchestrator_high_frequency_sync") == DEFAULT_THRESHOLD_S
+    assert "orchestrator_high_frequency_sync" not in overridden_process_ids()
