@@ -2399,6 +2399,45 @@ class TestMisfireVisibilityAndGrace:
 
         assert executed == []
 
+    def test_missed_fire_without_a_scheduled_time_records_but_does_not_arm(
+        self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unknown slot is not an on-time slot (Codex ckpt-2).
+
+        The malformed-event branch exists only to preserve telemetry. With no
+        ``scheduled_run_time`` there is no lateness, so the dominance test has
+        nothing to test — arming there would re-dispatch on no evidence at all.
+        The row must still land; not arming is the pre-#2603 floor.
+        """
+        from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+        from app.workers.scheduler import JOB_CORE_REBALANCE_OBSERVATION
+
+        recorded: list[str] = []
+        executed: list[str] = []
+
+        class _Conn:
+            def execute(self, sql: str, _params: dict[str, object]) -> None:
+                executed.append(sql)
+
+        @contextmanager
+        def fake_conn() -> Iterator[object]:
+            yield _Conn()
+
+        monkeypatch.setattr("app.jobs.runtime.background_write_connection", fake_conn)
+        monkeypatch.setattr(
+            "app.jobs.runtime.record_job_skip",
+            lambda _conn, name, _reason, **_kw: recorded.append(name) or 1,
+        )
+
+        rt = _make_runtime({JOB_CORE_REBALANCE_OBSERVATION: lambda: None})
+        rt._on_job_missed(
+            JobExecutionEvent(EVENT_JOB_MISSED, f"recurring:{JOB_CORE_REBALANCE_OBSERVATION}", "default", None)
+        )
+
+        assert recorded == [JOB_CORE_REBALANCE_OBSERVATION]
+        assert executed == []
+
     def test_a_failing_arm_still_leaves_the_committed_skip_row(
         self, patched_runtime: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:

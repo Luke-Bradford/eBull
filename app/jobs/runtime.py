@@ -2261,9 +2261,17 @@ class JobRuntime:
         skip is the pre-#2603 behaviour, i.e. a safe floor.
         """
         try:
+            if lateness_seconds is None:
+                # ⚠ No ``scheduled_run_time`` on the event — the malformed-event
+                # branch, which exists ONLY to preserve telemetry. Treating an
+                # unknown lateness as 0.0 would arm on no evidence: nothing says
+                # which fire was lost, nor whether a retry would beat the next
+                # natural one, which is the whole dominance test. The row is
+                # already written; not arming is the pre-#2603 floor.
+                return
             delay = lost_fire_rearm_delay_seconds(
                 self._job_registry.get(job_name),
-                lateness_seconds=lateness_seconds if lateness_seconds is not None else 0.0,
+                lateness_seconds=lateness_seconds,
             )
             if delay is None:
                 return
