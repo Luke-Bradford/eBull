@@ -1703,6 +1703,21 @@ def _pin_or_raise(resolved: int | None, *, pinned: int | None) -> int | None:
     return resolved
 
 
+def _run_changed_conflict() -> HTTPException:
+    """The single 409 for "that is not the run you asked to cancel" (#2274).
+
+    Three call sites raise it — the sync branch, the ``job_run`` branch, and
+    bootstrap (whose pin is enforced inside ``cancel_run``'s ``FOR UPDATE``).
+    Centralised because the operator-facing ADVICE is the part that drifts, and
+    three copies of a recovery instruction is three chances for two of them to
+    go stale. The FE keys on ``reason``; the advice is what a curl user reads.
+    """
+    return _conflict(
+        "run_changed",
+        advice="the run you were looking at has ended; refresh and retry",
+    )
+
+
 def _resolve_active_sync_run(conn: psycopg.Connection[Any], *, scope: str | None = None) -> int | None:
     """Lock + return the latest running sync_runs row, optionally scoped.
 
@@ -1783,10 +1798,7 @@ def _cancel_orchestrator_sync(
         try:
             sync_run_id = _pin_or_raise(resolved, pinned=body.target_run_id)
         except _RunChanged:
-            raise _conflict(
-                "run_changed",
-                advice="the run you were looking at has ended; refresh and retry",
-            ) from None
+            raise _run_changed_conflict() from None
         if sync_run_id is None:
             raise _conflict("no_active_run")
         try:
@@ -1925,10 +1937,7 @@ def cancel_process(
         except BootstrapNotRunning as exc:
             raise _conflict("no_active_run") from exc
         except BootstrapRunChanged as exc:
-            raise _conflict(
-                "run_changed",
-                advice="the run you were looking at has ended; refresh and retry",
-            ) from exc
+            raise _run_changed_conflict() from exc
         except StopAlreadyPendingError as exc:
             raise _conflict("stop_already_pending") from exc
         return CancelResponse(target_run_kind="bootstrap_run", target_run_id=run_id)
@@ -1945,10 +1954,7 @@ def cancel_process(
                 pinned=body.target_run_id,
             )
         except _RunChanged:
-            raise _conflict(
-                "run_changed",
-                advice="the run you were looking at has ended; refresh and retry",
-            ) from None
+            raise _run_changed_conflict() from None
         if run_id is None:
             raise _conflict("no_active_run")
         try:
