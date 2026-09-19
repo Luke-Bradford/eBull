@@ -350,6 +350,70 @@ def test_cancel_no_active_run_returns_409(conn_override: None, ebull_test_conn: 
     assert resp.json()["detail"]["reason"] == "no_active_run"
 
 
+def test_cancel_scheduled_job_accepted_while_kill_switch_is_on(
+    conn_override: None, ebull_test_conn: psycopg.Connection[tuple]
+) -> None:
+    """#2274 — the enabled button reaches a path that accepts it.
+
+    The adapter now reports ``can_cancel`` for an in-flight run on a halted
+    row. This is the other half of that claim: the endpoint reads no kill
+    switch (``cancel_process`` -> ``request_stop``), so the affordance is not a
+    grey button traded for a 409. Without this the FE change would be
+    unfalsifiable from the backend suite.
+    """
+    ebull_test_conn.execute(
+        """
+        INSERT INTO kill_switch (id, is_active, activated_at, activated_by, reason)
+        VALUES (TRUE, TRUE, now(), 'test', 'pause everything')
+        ON CONFLICT (id) DO UPDATE
+        SET is_active = TRUE, activated_at = now(), activated_by = 'test',
+            reason = 'pause everything'
+        """
+    )
+    run_id = ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, status)
+        VALUES (%s, now() - interval '30 hours', 'running')
+        RETURNING run_id
+        """,
+        (JOB_RETRY_DEFERRED,),
+    ).fetchone()
+    assert run_id is not None
+    ebull_test_conn.commit()
+
+    resp = client.post(
+        f"/system/processes/{JOB_RETRY_DEFERRED}/cancel",
+        json={"mode": "cooperative"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["target_run_kind"] == "job_run"
+    assert body["target_run_id"] == run_id[0]
+
+    stop_row = ebull_test_conn.execute(
+        """
+        SELECT process_id, mechanism, mode
+          FROM process_stop_requests
+         WHERE target_run_kind = 'job_run' AND target_run_id = %s
+        """,
+        (run_id[0],),
+    ).fetchone()
+    assert stop_row is not None
+    assert stop_row[0] == JOB_RETRY_DEFERRED
+    assert stop_row[1] == "scheduled_job"
+    assert stop_row[2] == "cooperative"
+
+    job_row = ebull_test_conn.execute(
+        "SELECT cancel_requested_at, status FROM job_runs WHERE run_id = %s",
+        (run_id[0],),
+    ).fetchone()
+    assert job_row is not None
+    assert job_row[0] is not None
+    # Cancel REQUESTS a stop; it does not terminalise the row (settled
+    # decision "Cancel UX (#1064)" — cooperative, never a faked hard-kill).
+    assert job_row[1] == "running"
+
+
 def test_cancel_invalid_mode_returns_422(conn_override: None) -> None:
     resp = client.post(
         f"/system/processes/{JOB_RETRY_DEFERRED}/cancel",

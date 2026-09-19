@@ -276,3 +276,12 @@ lifting the switch. Making cancel reachable while halted is a behaviour change
 on an operator control path and is not folded in here. The runbook's
 "Action ladder" is updated to say so, since it currently implies Cancel is
 always available.
+
+> ✅ **SHIPPED 2026-09-19 — this deferral is closed.**
+> `docs/proposals/ops/2026-09-19-2274-cancel-on-halted-wedge.md`. The flag is
+> now gated on the active run, the runbook's ladder says so, and the two START
+> prohibitions (`can_iterate` / `can_full_wash`, plus the trigger endpoint's
+> precondition) are asserted on the same newly-cancellable row. The deferral
+> was right that it is a behaviour change on an operator control path; what it
+> did not have is that the endpoint behind that path never read the kill switch,
+> so the button was the only thing refusing.

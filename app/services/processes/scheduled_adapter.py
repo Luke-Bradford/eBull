@@ -1254,13 +1254,36 @@ def _build_row(
     # outranks). Probe is cheap (single EXISTS) and bounded to the 30-min window.
     liveness_kick_in_flight = _has_inflight_liveness_kick(conn, job_name=job.name, now=now)
 
-    can_cancel = (
-        active_run is not None and active_run.run_id is not None and process_status == "running"
-        # short-runners (heartbeat etc.) are not worth cooperative-cancel;
-        # spec marks them can_cancel=False but PR3 doesn't know which jobs
-        # cooperate — leave True universally and let PR8 trim the list
-        # once the per-job checkpoint catalogue is wired.
-    )
+    # #2274 — gated on the ACTIVE RUN, not on ``process_status``.
+    #
+    # ⚠ This used to carry ``and process_status == "running"``, which
+    # ``_status_for`` pre-empts: it returns ``disabled`` under the kill switch
+    # BEFORE it consults ``has_running_row``. Halting the schedule does not end
+    # a run that started before the halt, so that run kept its ``job_runs`` row
+    # and its ``active_run`` and lost only its cancel affordance — the row
+    # rendering "past runtime ceiling" beside a greyed Cancel reading "No active
+    # run to cancel". The halt this was measured against is not a corner case:
+    # ``runtime_config_audit WHERE field = 'kill_switch'`` is the switch's
+    # history, and the spec below carries the occupancy query and its numbers.
+    #
+    # Dropping the term widens the flag on exactly two inputs, because an active
+    # row implies ``status in {running, disabled}`` and nothing else: the kill
+    # switch being on, and ``_kill_switch_active`` failing CLOSED on a missing
+    # singleton. Both are cases where a stop action should survive. ``running``
+    # is also reachable with no active row (auto-hide on an in-flight retry);
+    # the first two terms already exclude it.
+    #
+    # Same move rule 5 (``runtime_ceiling``) took in ``stale_detection`` for the
+    # same reason. Starting work stays gated: ``can_iterate`` / ``can_full_wash``
+    # keep their ``kill_switch_active`` terms, and so does the trigger endpoint.
+    #
+    # ⚠ Still universally True for every job with an active run: short-runners
+    # (heartbeat etc.) are not worth cooperative-cancel and the spec marks them
+    # ``can_cancel=False``, but the per-job checkpoint catalogue that would
+    # decide the list is still unwired. See
+    # ``docs/proposals/ops/2026-09-19-2274-cancel-on-halted-wedge.md`` §5 — no
+    # generic scheduled job polls ``is_stop_requested`` at all today.
+    can_cancel = active_run is not None and active_run.run_id is not None
 
     return ProcessRow(
         process_id=job.name,
