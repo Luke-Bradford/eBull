@@ -20,6 +20,7 @@ from __future__ import annotations
 import psycopg
 
 from app.workers.scheduler import (
+    JOB_BLOCKHOLDER_LINK_SWEEP,
     JOB_CORE_CANDIDATE_QUOTE_REFRESH,
     JOB_CUSIP_EXTID_SWEEP,
     JOB_CUSIP_UNIVERSE_BACKFILL,
@@ -124,6 +125,10 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
         # Maintenance jobs not bootstrap-dependent.
         JOB_CUSIP_EXTID_SWEEP,
+        # #3236 — repairs already-ingested rows; no bootstrap state to wait on.
+        # Same class as the CUSIP sweep: it no-ops harmlessly (``still_unresolved``)
+        # while the identifier corpus is still filling.
+        JOB_BLOCKHOLDER_LINK_SWEEP,
         JOB_RAW_DATA_RETENTION_SWEEP,
         JOB_SEED_COST_MODELS,
         JOB_WEEKLY_REPORT,

@@ -614,6 +614,7 @@ JOB_DRS_DISCLOSURE_REFRESH = "drs_disclosure_refresh"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
+JOB_BLOCKHOLDER_LINK_SWEEP = "blockholder_link_sweep"
 JOB_OWNERSHIP_OBSERVATIONS_SYNC = "ownership_observations_sync"
 JOB_OWNERSHIP_OBSERVATIONS_BACKFILL = "ownership_observations_backfill"
 JOB_SEC_13F_FILER_DIRECTORY_SYNC = "sec_13f_filer_directory_sync"
@@ -1707,6 +1708,40 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # the sweep is one indexed JOIN; even with the full ~119-row
         # backlog the rewash work is per-accession and the LIMIT 1000
         # cap holds.
+        catch_up_on_boot=True,
+    ),
+    ScheduledJob(
+        name=JOB_BLOCKHOLDER_LINK_SWEEP,
+        display_name="13D/G link re-resolution sweep",
+        # The 13D/G twin of ``cusip_extid_sweep`` (#3236). Writes
+        # ``blockholder_filings`` (one column), ``ownership_blockholders_*``.
+        # Its OWN single-job lane, mirroring ``db_cusip``. NOT
+        # ``db_ownership_inst``: that is a single-job FAMILY lane owned by
+        # ``sec_13f_ingest_from_dataset``, and adding a second job to it would
+        # re-introduce exactly the intra-family serialisation #1527 removed
+        # (pinned by tests/test_db_lane_family_split.py, which caught this).
+        source="db_blockholder_link",
+        description=(
+            "Re-resolve ``blockholder_filings`` rows stranded with a "
+            "NULL ``instrument_id`` and write the ownership "
+            "observation their ingest skipped (#3236). Closes the "
+            "13D/G half of the race ``cusip_extid_sweep`` closes for "
+            "13F-HR: a 13D/G accession ingested BEFORE the issuer's "
+            "``external_identifiers`` mapping lands gets every reporter "
+            "row written with a NULL link, and because the observation "
+            "write-through is gated on a non-NULL instrument_id the "
+            "filing is absent from the ownership layer outright — not "
+            "merely unjoinable. #3235 lets a LATER re-ingest heal the "
+            "link; an accession that is never re-ingested needs this. "
+            "Repairs from the STORED raw body with the same parser "
+            "ingest used, gated on agreement with the already-stored "
+            "typed rows; it never DELETEs a reporter row. Cheap (one "
+            "grouped index scan, bounded to 200 accessions/pass); "
+            "daily 05:10 UTC, 20 min after the CUSIP sweep."
+        ),
+        cadence=Cadence.daily(hour=5, minute=10),
+        # Catch up on boot so a fresh deployment drains the backlog without
+        # waiting for the next 05:10. Bounded by the same 200-accession cap.
         catch_up_on_boot=True,
     ),
     ScheduledJob(
@@ -10511,6 +10546,34 @@ def cusip_extid_sweep() -> None:
             report.rewashed,
             report.rewash_deferred,
             report.rewash_failed,
+        )
+
+
+def blockholder_link_sweep() -> None:
+    """Re-resolve stranded 13D/G links and write the missing ownership
+    observations (#3236).
+
+    ``repaired`` is the headline rowcount — accessions fully repaired
+    (link + observation + ``_current`` refresh, all committed together).
+    ``rows_linked`` and the per-reason skip counts are bookkept in the log
+    line so a regression where the sweep mass-skips is visible: a pass that
+    repairs nothing because every candidate is ``drifted`` must not read the
+    same as a pass with nothing to do.
+    """
+    from app.services.blockholders import sweep_unlinked_blockholder_filings
+
+    with _tracked_job(JOB_BLOCKHOLDER_LINK_SWEEP) as tracker:
+        with connect_job() as conn:
+            report = sweep_unlinked_blockholder_filings(conn)
+            conn.commit()
+
+        tracker.row_count = report.repaired
+        logger.info(
+            "blockholder_link_sweep: candidates=%d repaired=%d rows_linked=%d skipped=%s",
+            report.candidates_seen,
+            report.repaired,
+            report.rows_linked,
+            report.skipped or "{}",
         )
 
 

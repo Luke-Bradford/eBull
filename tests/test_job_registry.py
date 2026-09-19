@@ -136,6 +136,10 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # racing db_eod_snapshot for a lock it does not need.
         "db_reconciliation_ledger",
         "db_cusip",
+        # #3236 — the 13D/G link sweep gets its own single-job lane rather
+        # than joining the ``db_ownership_inst`` FAMILY lane, which would
+        # re-introduce the intra-family serialisation #1527 removed.
+        "db_blockholder_link",
         "db_ownership_obs",
         # #1564 — pg_size_sample single-job lane. A daily db_size snapshot
         # would lose the catch-all ``db`` lane race to raw_data_retention_sweep's
