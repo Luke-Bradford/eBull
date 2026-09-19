@@ -2285,9 +2285,45 @@ export interface ProcessRowResponse {
   recent_reap_runs: number;
 }
 
+/**
+ * #2274 — one job that would carry the reap chip but has no row in `rows`.
+ *
+ * "Uncovered" means exactly one thing: no row whose `process_id` equals
+ * `job_name`. Most of the residual is sync-orchestrator layer jobs, which are
+ * reachable through `/sync/layers/v2` and the DAG drill-in (those carry data
+ * freshness, not reap recurrence) — but the filter is "any job_name with no
+ * row", so an outside-DAG or recently-renamed job can enter the list.
+ *
+ * ⚠ So the copy says "not in this table" and promises nothing about where
+ * else to look. Both overclaims are defects: "nowhere else" is false for the
+ * layer jobs, and "look at the sync layers" is false for the rest.
+ */
+export interface UncoveredReapResponse {
+  job_name: string;
+  /** Reap incidents — one boot's batch is ONE event, however many rows it wrote off. */
+  events: number;
+  /** `job_runs` rows those incidents wrote off. */
+  runs: number;
+}
+
 export interface ProcessListResponse {
   rows: ProcessRowResponse[];
   partial: boolean;
+  /**
+   * ⚠ `null` is NOT `[]`. `[]` means "measured, none"; `null` means "not
+   * evaluated" — an adapter raised (so the covered set would be short and the
+   * residual would name well-covered jobs), or the residual read itself
+   * failed. Render nothing for either, but never report `null` as an
+   * all-clear.
+   *
+   * ⚠ `null` does NOT imply `partial`. That flag means "some lanes are
+   * omitted", and a failed disclosure read omits no lanes — conflating them
+   * would show a false outage banner.
+   *
+   * Optional as well as nullable so a cached payload predating the field does
+   * not break the page; treat absent exactly as `null`.
+   */
+  uncovered_reaps?: UncoveredReapResponse[] | null;
 }
 
 export type TriggerMode = "iterate" | "full_wash";

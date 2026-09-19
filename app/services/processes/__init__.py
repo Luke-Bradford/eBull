@@ -329,6 +329,37 @@ class ProcessRow:
 
 
 @dataclass(frozen=True, slots=True)
+class UncoveredReap:
+    """One job that would carry the reap chip but has no ProcessRow.
+
+    #2274. "Uncovered" means EXACTLY one thing: no row in this snapshot whose
+    ``process_id`` equals this ``job_name``. It is NOT a claim that the job has
+    no operator surface at all — most of the residual is sync-orchestrator
+    layer jobs, reachable through ``/sync/layers/v2`` and the DAG drill-in, and
+    ``daily_cik_refresh`` / ``daily_financial_facts`` are invoked by
+    ``fundamentals_sync``, which does have a row. Those surfaces carry data
+    freshness and layer execution state, which is a DIFFERENT axis from reap
+    recurrence: a job stuck ``running`` forever shows up there only once its
+    layer's data goes stale.
+
+    ⚠ Equally, the filter is "any ``job_name`` with no row", so an outside-DAG
+    job or one recently renamed can enter the list. Neither this type nor the
+    operator copy may promise a particular other surface.
+
+    ``events`` and ``runs`` carry the same two numbers ``ProcessRow`` does, for
+    the same reason: one boot reaps every orphaned row in a single UPDATE, so
+    counting rows would call one boot many failures while counting events alone
+    would hide how many runs it wrote off.
+
+    Spec: ``docs/proposals/ops/2026-09-19-2274-uncovered-reap-disclosure.md``.
+    """
+
+    job_name: str
+    events: int
+    runs: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessSnapshot:
     """Cross-adapter snapshot returned by ``GET /system/processes``.
 
@@ -336,10 +367,30 @@ class ProcessSnapshot:
     so the FE can render a banner ("ingest sweep telemetry unavailable")
     while still rendering the lanes that succeeded. Spec
     §Failure-mode invariants.
+
+    ``uncovered_reaps`` (#2274) is the residual of the same reap aggregate the
+    rows are built from: jobs at or above ``RECENT_REAP_CHIP_FLOOR`` that have
+    no row here.
+
+    ⚠ **``None`` is not ``()``.** ``()`` means "measured, and there are none";
+    ``None`` means "not evaluated", which happens when an adapter raised (the
+    covered set would then be short, so the residual would invent a coverage
+    gap and name well-covered jobs) or when the residual read itself failed.
+    The FE renders nothing for either, but the two are distinguishable rather
+    than collapsed into an empty-looking all-clear.
+
+    ⚠ ``None`` deliberately does NOT set ``partial``. ``partial`` has one
+    existing consumer meaning — ``ProcessesTable`` renders it as "One adapter
+    is unavailable — some lanes are omitted from this snapshot" — and a failed
+    disclosure read omits no lanes. Borrowing the flag would report a false
+    operational outage, which is the #2218 shape (a status that does not match
+    what happened). The default is ``None`` for the same reason: a caller that
+    predates the field has not measured it.
     """
 
     rows: tuple[ProcessRow, ...]
     partial: bool
+    uncovered_reaps: tuple[UncoveredReap, ...] | None = None
 
 
 __all__ = [
@@ -355,5 +406,6 @@ __all__ = [
     "ProcessStatus",
     "ProcessWatermark",
     "RunStatus",
+    "UncoveredReap",
     "WatermarkCursorKind",
 ]

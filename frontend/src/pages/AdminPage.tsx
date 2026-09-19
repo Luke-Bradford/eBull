@@ -36,6 +36,10 @@ import { FundDataRow } from "@/components/admin/FundDataRow";
 import { KillSwitchSection } from "@/components/admin/KillSwitchSection";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
 import { ProcessesTable } from "@/components/admin/ProcessesTable";
+import {
+  UncoveredReapNote,
+  uncoveredReapSummary,
+} from "@/components/admin/UncoveredReapNote";
 import { NEXT_RUN_EXPECTED_TOOLTIP, VERDICT_VISUAL } from "@/components/admin/processStatus";
 import {
   SectionError,
@@ -157,6 +161,9 @@ export function AdminPage() {
   }, [refreshInterval]);
 
   const [processesOpen, setProcessesOpen] = useState(true);
+  // #2274 — null when there is nothing to disclose, or when the backend did
+  // not evaluate the residual at all (it sends `null`, not `[]`, in that case).
+  const uncoveredSummary = uncoveredReapSummary(processes.data?.uncovered_reaps);
   const [rowState, setRowState] = useState<Record<string, RowState>>({});
 
   const handleRun = useCallback(
@@ -235,7 +242,13 @@ export function AdminPage() {
 
       <CollapsibleSection
         title="Processes"
-        summary="control hub"
+        // #2274 — the coverage count rides the disclosure label because
+        // CollapsibleSection unmounts its body when closed, so the note below
+        // is only reachable while the section happens to be open. Same shape
+        // PR #3211 used for the collapsed `current` group.
+        summary={
+          uncoveredSummary === null ? "control hub" : `control hub · ${uncoveredSummary}`
+        }
         open={processesOpen}
         onOpenChange={setProcessesOpen}
       >
@@ -244,29 +257,32 @@ export function AdminPage() {
         ) : processes.error !== null ? (
           <SectionError onRetry={processes.refetch} />
         ) : processes.data ? (
-          <ProcessesTable
-            snapshot={processes.data}
-            onMutationSuccess={() => {
-              // After a trigger / cancel re-poll BOTH the processes
-              // snapshot AND bootstrap status — a successful Re-run
-              // all on the bootstrap row may flip status to
-              // 'complete', which lifts the bootstrap-only render
-              // gate. Refetching only `processes` would leave the
-              // table in bootstrap-only mode until the next cadence
-              // tick (Codex pre-push round 1).
-              processes.refetch();
-              refetchBootstrap();
-            }}
-            bootstrapStatus={bootstrap.data?.status ?? null}
-            checkedAt={processes.checkedAt}
-            // #1508 / C4 — fold the dead-engine signal from /system/status
-            // (already fetched above for the credential-health banner) into
-            // the Processes header. When the jobs process is not running every
-            // per-row verdict is stale, so the table raises a hard-red banner.
-            // Fail-open: a pending/errored /system/status read leaves this
-            // false (no false alarm).
-            engineDown={systemStatus.data?.engine_down ?? false}
-          />
+          <>
+            <UncoveredReapNote entries={processes.data.uncovered_reaps} />
+            <ProcessesTable
+              snapshot={processes.data}
+              onMutationSuccess={() => {
+                // After a trigger / cancel re-poll BOTH the processes
+                // snapshot AND bootstrap status — a successful Re-run
+                // all on the bootstrap row may flip status to
+                // 'complete', which lifts the bootstrap-only render
+                // gate. Refetching only `processes` would leave the
+                // table in bootstrap-only mode until the next cadence
+                // tick (Codex pre-push round 1).
+                processes.refetch();
+                refetchBootstrap();
+              }}
+              bootstrapStatus={bootstrap.data?.status ?? null}
+              checkedAt={processes.checkedAt}
+              // #1508 / C4 — fold the dead-engine signal from /system/status
+              // (already fetched above for the credential-health banner) into
+              // the Processes header. When the jobs process is not running every
+              // per-row verdict is stale, so the table raises a hard-red banner.
+              // Fail-open: a pending/errored /system/status read leaves this
+              // false (no false alarm).
+              engineDown={systemStatus.data?.engine_down ?? false}
+            />
+          </>
         ) : null}
       </CollapsibleSection>
 
