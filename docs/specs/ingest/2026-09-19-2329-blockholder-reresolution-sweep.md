@@ -74,9 +74,14 @@ design Codex rejected. Carried on the issue with the objections; see "Cause B" b
 2. **"Pinned `status='partial'` forever" was wrong** (Codex ckpt-1 finding 7).
    `blockholder_filings.status` is the 13D/G active/passive flag, constrained by
    `blockholder_filings_submission_type_status_consistent` — not an ingest
-   status. And `blockholder_filings_ingest_log` records **one row per attempt**:
-   all 8 accessions read `status='success'` there today, written by the later
-   manifest ingest. The ingest audit trail is correct; only the link is not.
+   status. All 8 accessions read `status='success'` in
+   `blockholder_filings_ingest_log` today, written by the later manifest ingest.
+   ⚠ My *correction* to that claim was itself wrong and is corrected here
+   (Codex ckpt-1 revision, finding 22): that log is **keyed `accession_number`
+   PRIMARY KEY** (`sql/096_blockholder_filer_seeds_and_log.sql:63`) and
+   `_record_ingest_attempt` overwrites on conflict, so it holds the **latest
+   recorded status, not an attempt history**. The ingest audit reads correct
+   today; it does not preserve the earlier `partial`.
 
 ## Source rule
 
@@ -204,13 +209,20 @@ observations.
    excluding the `instrument_id` column, before and after, is **identical** —
    including `filing_id`, `fetched_at`, `filed_at`, reporter identity and every
    ownership figure. Row count unchanged at 119,426.
-3. **No ownership figure moves.** `ownership_blockholders_observations` and
+3. **The rollup layer does not move:** `ownership_blockholders_observations` and
    `ownership_blockholders_current` are byte-identical on exact keyed checksums
-   before/after — this repair is drill-through joinability only.
-4. **Operator-visible:** for at least one of the 8 instruments, the blockholder
-   drill-through (`app/api/instruments.py:4575`) lists the previously-missing
-   accession after the repair and did not before. Golden panel
-   (AAPL/GME/MSFT/JPM/HD) rollup unchanged.
+   before/after, because the observation for each of these accessions already
+   existed.
+4. **The drill-through DOES move, and that is the point** (Codex ckpt-1 revision,
+   finding 14 — the earlier draft wrongly called this "joinability only").
+   `/instruments/{symbol}/blockholders` aggregates the typed rows directly, so a
+   repaired filing does not merely appear: where it is the most recent filing for
+   a reporter it **wins the amendment chain** and supersedes a stale cover-page
+   figure. Measure each of the 8 instruments counterfactually (the endpoint's own
+   `per_reporter_chain` / `per_accession_block` SQL, with and without the
+   repaired `filing_id`s) and validate the harness by matching its "after" column
+   against the live endpoint. Golden panel (AAPL/GME/MSFT/JPM/HD) unchanged —
+   guaranteed by acceptance 2, since none of their rows is in the differing set.
 5. **Runtime fix pinned by a revert probe:** a DB test asserts (a) a re-ingest
    heals a NULL link, (b) a re-ingest does **not** overwrite a non-NULL link with
    a different value, (c) no other column changes on conflict, (d) the

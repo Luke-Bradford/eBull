@@ -235,14 +235,14 @@ def test_a_changed_reporter_identity_inserts_and_leaves_the_old_row_stranded(
     _seed_instrument(conn, 930007, "DRFT")
     filer_id = _upsert_filer(conn, cik="0000999888", name="FILER CO")
 
-    assert _write(conn, filer_id=filer_id, instrument_id=None, person=_person(cik=None, no_cik=True, name="ACME LP")) is True
-    assert (
-        _write(conn, filer_id=filer_id, instrument_id=930007, person=_person(cik=None, no_cik=True, name="ACME L.P."))
-        is True
-    )
+    original = _person(cik=None, no_cik=True, name="ACME LP")
+    renamed = _person(cik=None, no_cik=True, name="ACME L.P.")
+    assert _write(conn, filer_id=filer_id, instrument_id=None, person=original) is True
+    assert _write(conn, filer_id=filer_id, instrument_id=930007, person=renamed) is True
 
     cur = conn.execute(
-        "SELECT reporter_name, instrument_id FROM blockholder_filings WHERE accession_number = %s ORDER BY reporter_name",
+        "SELECT reporter_name, instrument_id FROM blockholder_filings"
+        " WHERE accession_number = %s ORDER BY reporter_name",
         (_ACCESSION,),
     )
     assert cur.fetchall() == [("ACME L.P.", 930007), ("ACME LP", None)]
