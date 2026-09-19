@@ -362,6 +362,21 @@ const RECENT_REAP_CHIP_FLOOR = 3;
 const RECENT_REAP_WINDOW_DAYS = 7;
 
 /**
+ * True when this row carries the historical reap chip.
+ *
+ * Exported because the collapsed-group disclosure has to count these too.
+ * A repeatedly-reaped job reads `current` by construction, and `current` rows
+ * are COLLAPSED by default — so the chip alone is only discoverable by an
+ * operator who already expanded the group they had no reason to suspect.
+ * The disclosure label is what makes it reachable; keeping the floor behind
+ * one predicate stops the two sites from disagreeing about what "chipped"
+ * means.
+ */
+export function hasRecentReapChip(row: ProcessRowResponse): boolean {
+  return row.recent_reap_events >= RECENT_REAP_CHIP_FLOOR;
+}
+
+/**
  * A muted, HISTORICAL note that this job keeps losing runs to orphan reaps.
  *
  * ⚠ Deliberately NOT a status and NOT part of `health_verdict`. A job reaped
@@ -379,7 +394,7 @@ const RECENT_REAP_WINDOW_DAYS = 7;
  * appears only when it exceeds `events`, where it is the more alarming half.
  */
 function RecentReaps({ row }: { row: ProcessRowResponse }) {
-  if (row.recent_reap_events < RECENT_REAP_CHIP_FLOOR) return null;
+  if (!hasRecentReapChip(row)) return null;
   const lost =
     row.recent_reap_runs > row.recent_reap_events
       ? ` · ${row.recent_reap_runs} runs lost`
