@@ -2266,6 +2266,23 @@ export interface ProcessRowResponse {
   // when the registry entry has no description; the FE hides the
   // icon on empty rather than showing a blank popover.
   description: string;
+  // #2274 — HISTORICAL orphan-reap counts over the backend's trailing
+  // window (`scheduled_adapter.RECENT_REAP_WINDOW_DAYS`, 7 days).
+  //
+  // `events` counts reap INCIDENTS, not rows: one boot reaps every orphaned
+  // row in a single UPDATE, so `runs` can be much larger than `events` (one
+  // `thesis_refresh` boot wrote off 25 runs in one instant). `runs` is how
+  // much work was lost; `events` is how often it happened. Render `events`
+  // as the count and `runs` only when the two differ, or the chip claims 25
+  // failures where there was one.
+  //
+  // ⚠ Not a health claim and NOT part of `health_verdict` — a chronic,
+  // largely deploy-caused condition must not repaint the row red (#1831).
+  // Render it muted and historical so it can never read as a second status
+  // disagreeing with the verdict pill. 0 for bootstrap / ingest_sweep rows,
+  // which are not backed by `job_runs`.
+  recent_reap_events: number;
+  recent_reap_runs: number;
 }
 
 export interface ProcessListResponse {

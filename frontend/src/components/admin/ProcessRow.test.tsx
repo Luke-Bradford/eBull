@@ -790,3 +790,53 @@ describe("ProcessRow memoisation (#1480)", () => {
     expect(screen.getByRole("link", { name: "Beta" })).toBeTruthy();
   });
 });
+
+describe("historical orphan-reap chip (#2274)", () => {
+  it("stays hidden below the display floor", () => {
+    // 2 events is inside the ordinary deploy band — a chip here would be the
+    // chronic-red flood #1831 measured, wearing a muted colour.
+    renderRow({ row: makeProcessRow({ recent_reap_events: 2, recent_reap_runs: 2 }) });
+    expect(screen.queryByTestId("recent-reaps-chip")).toBeNull();
+  });
+
+  it("shows the EVENT count, not the row count, at the floor", () => {
+    // One boot reaps every orphaned row at once, so 3 incidents that wrote off
+    // 9 runs must read "3 reaps", never "9". Reporting rows as the headline
+    // would claim 9 separate failures where there were 3.
+    renderRow({ row: makeProcessRow({ recent_reap_events: 3, recent_reap_runs: 9 }) });
+    const chip = screen.getByTestId("recent-reaps-chip");
+    expect(chip.textContent).toContain("3 reaps");
+    expect(chip.textContent).toContain("9 runs lost");
+    expect(chip.textContent).not.toMatch(/^9 reaps/);
+  });
+
+  it("omits the runs-lost clause when every reap cost one run", () => {
+    renderRow({ row: makeProcessRow({ recent_reap_events: 4, recent_reap_runs: 4 }) });
+    expect(screen.getByTestId("recent-reaps-chip").textContent).not.toContain("runs lost");
+  });
+
+  it("does not contradict a green verdict", () => {
+    // The whole point: a repeatedly-reaped job that later succeeded reads
+    // `current`, and the chip is HISTORY beside it — not a second status.
+    // A tone/badge here would put two cells that disagree on one row, which
+    // is the defect `health_verdict` exists to prevent.
+    const row = makeProcessRow({
+      status: "ok",
+      recent_reap_events: 5,
+      recent_reap_runs: 5,
+    });
+    renderRow({ row });
+    expect(row.health_verdict).toBe("current");
+    const chip = screen.getByTestId("recent-reaps-chip");
+    expect(chip.className).toContain("text-slate-500");
+    expect(chip.getAttribute("title")).toContain("History, not a current fault");
+  });
+
+  it("is carried by the memo signature so the count can advance", () => {
+    // `processRowSignature` serialises the whole envelope; if that ever
+    // narrows to a field list, a changing reap count would freeze on screen.
+    const before = makeProcessRow({ recent_reap_events: 3, recent_reap_runs: 3 });
+    const after = makeProcessRow({ recent_reap_events: 4, recent_reap_runs: 4 });
+    expect(processRowSignature(before)).not.toBe(processRowSignature(after));
+  });
+});

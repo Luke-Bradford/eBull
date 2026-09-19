@@ -256,6 +256,9 @@ function ProcessRowImpl({
       <td className="px-2 py-2">
         <StatusPill row={row} />
         <VerdictReason row={row} />
+        {/* #2274 — historical reap note. Beneath the verdict, muted, never a
+            second status; see RecentReaps for why it is not a verdict input. */}
+        <RecentReaps row={row} />
       </td>
       <td className="px-2 py-2 text-xs text-slate-600 dark:text-slate-400">
         {lastRunLabel}
@@ -342,6 +345,57 @@ function VerdictReason({ row }: { row: ProcessRowResponse }) {
     >
       {row.verdict_reason}
       {elapsed}
+    </div>
+  );
+}
+
+/**
+ * #2274 — display floor for the historical reap chip.
+ *
+ * ⚠ MIRRORS `scheduled_adapter.RECENT_REAP_CHIP_FLOOR` (and the window it
+ * counts over, `RECENT_REAP_WINDOW_DAYS = 7`). The value cannot be shared
+ * across the language boundary, so grep `RECENT_REAP_CHIP_FLOOR` and change
+ * both. Chosen to bound the display rate, not as a causal claim — see
+ * `docs/proposals/ops/2026-09-19-2274-repeat-reap-visibility.md`.
+ */
+const RECENT_REAP_CHIP_FLOOR = 3;
+const RECENT_REAP_WINDOW_DAYS = 7;
+
+/**
+ * A muted, HISTORICAL note that this job keeps losing runs to orphan reaps.
+ *
+ * ⚠ Deliberately NOT a status and NOT part of `health_verdict`. A job reaped
+ * repeatedly reads `current` (green) today, because the verdict is a function
+ * of the latest terminal run plus current staleness and a recurrence is a
+ * property of a WINDOW of runs. Surfacing it as a second red signal would
+ * both repaint a chronic, largely deploy-caused condition (#1831's measured
+ * bug: ~42 halted jobs red, burying the real failures) and put two cells that
+ * disagree on one row — the exact defect the verdict model exists to prevent.
+ * So: slate, lowercase, beneath the reason line, no tone.
+ *
+ * ⚠ `events` is the incident count and `runs` is the work lost. One boot reaps
+ * every orphaned row at once, so they are NOT the same number — rendering
+ * `runs` as the headline would report a single boot as 25 failures. `runs`
+ * appears only when it exceeds `events`, where it is the more alarming half.
+ */
+function RecentReaps({ row }: { row: ProcessRowResponse }) {
+  if (row.recent_reap_events < RECENT_REAP_CHIP_FLOOR) return null;
+  const lost =
+    row.recent_reap_runs > row.recent_reap_events
+      ? ` · ${row.recent_reap_runs} runs lost`
+      : "";
+  return (
+    <div
+      className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400"
+      data-testid="recent-reaps-chip"
+      title={
+        `Restart-reaped ${row.recent_reap_events} time(s) in the last ` +
+        `${RECENT_REAP_WINDOW_DAYS} days, writing off ${row.recent_reap_runs} run(s). ` +
+        `History, not a current fault — each run was interrupted by a restart ` +
+        `and never reached a terminal status.`
+      }
+    >
+      {row.recent_reap_events} reaps · {RECENT_REAP_WINDOW_DAYS}d{lost}
     </div>
   );
 }
