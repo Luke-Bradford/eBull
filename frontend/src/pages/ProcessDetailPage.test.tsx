@@ -1252,6 +1252,11 @@ describe("ProcessDetailPage — health verdict (#2274)", () => {
     // headline that vanishes when the operator opens History is not a
     // headline. ProblemsPanel / StaleBanner / the bootstrap timeline all
     // deep-link into this route.
+    //
+    // ⚠ "every tab" means every tab THIS row offers. A plain scheduled job
+    // gets three; the conditional DAG tab is covered separately below on an
+    // orchestrator row, because a test that silently exercises 3 of a possible
+    // 6 while claiming "every" is the claim, not the coverage.
     mockedDetail.mockResolvedValue(
       makeProcessRow({
         health_verdict: "attention",
@@ -1262,12 +1267,71 @@ describe("ProcessDetailPage — health verdict (#2274)", () => {
     mockedRuns.mockResolvedValue([]);
     renderAt();
     await screen.findByTestId("status-pill");
-    for (const tabName of ["History", "Errors", "Overview"]) {
+    const offered = screen
+      .getAllByRole("tab")
+      .map((t) => t.textContent ?? "");
+    expect(offered).toEqual(["Overview", "History", "Errors"]);
+    for (const tabName of offered) {
       fireEvent.click(screen.getByRole("tab", { name: tabName }));
       expect(screen.getByTestId("status-pill").getAttribute("data-verdict")).toBe(
         "attention",
       );
     }
+  });
+
+  it("keeps the verdict visible on the conditional DAG tab too", async () => {
+    // The DAG tab only exists on `orchestrator_full_sync`, and it is the tab
+    // whose body is furthest from the Overview shape — if the pill were still
+    // inside a tab body rather than the header, this is where it would vanish.
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        process_id: "orchestrator_full_sync",
+        display_name: "Orchestrator full sync",
+        health_verdict: "working",
+        verdict_reason: "",
+        stale_reasons: [],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    mockedDag.mockResolvedValue(makeDagPayload());
+    render(
+      <MemoryRouter initialEntries={["/admin/processes/orchestrator_full_sync"]}>
+        <Routes>
+          <Route path="admin/processes/:id" element={<ProcessDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByTestId("status-pill");
+    fireEvent.click(screen.getByRole("tab", { name: "DAG" }));
+    expect(screen.getByTestId("status-pill").getAttribute("data-verdict")).toBe(
+      "working",
+    );
+  });
+
+  it("carries the self-healing tooltip across the extraction", async () => {
+    // ⚠ `self_healing` is a SEPARATE payload field from `health_verdict` —
+    // `makeProcessRow`'s deriveVerdict leaves it false when the verdict is
+    // overridden directly, so the tooltip branch needs it set explicitly or
+    // the test passes while exercising nothing.
+    //
+    // The tooltip copy is a known pre-existing overclaim (it says prior errors
+    // are hidden, which is not true of a watchdog re-enqueue with no prior
+    // error). It is asserted here as MOVED UNCHANGED: the extraction is a
+    // structural change and altering copy while moving it would hide which
+    // one caused a later difference.
+    mockedDetail.mockResolvedValue(
+      makeProcessRow({
+        status: "pending_retry",
+        health_verdict: "self_healing",
+        self_healing: true,
+        verdict_reason: "retrying at 14:05",
+        stale_reasons: [],
+      }),
+    );
+    mockedRuns.mockResolvedValue([]);
+    renderAt();
+    const pill = await screen.findByTestId("status-pill");
+    expect(pill.getAttribute("title")).toContain("hiding prior errors");
   });
 
   it("shows the verdict AND the raw process state when they diverge", async () => {

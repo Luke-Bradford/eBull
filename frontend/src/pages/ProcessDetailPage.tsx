@@ -366,7 +366,16 @@ export function ProcessDetailPage() {
                 Overview tab, so it survives a switch to History / Errors /
                 DAG. Before this the drill-in rendered STATUS_VISUAL[status]
                 inside Overview only, which both disagreed with the table's
-                verdict and vanished on any other tab. */}
+                verdict and vanished on any other tab.
+
+                ⚠ Two inherited limits this placement now INHERITS rather than
+                introduces, both named on #2274 rather than fixed here:
+                (a) the envelope never polls, so the headline can sit on a
+                    stale verdict indefinitely — the drill-in poll that
+                    admin-control-hub-rewrite.md:90 prescribes was never built;
+                (b) only the Overview and Errors tabs surface `detail.error`,
+                    so a failed detail fetch removes this pill silently while
+                    History / DAG / Timeline show their own request's state. */}
             {detail.data ? <VerdictPill row={detail.data} /> : null}
           </div>
           {detail.data ? (
