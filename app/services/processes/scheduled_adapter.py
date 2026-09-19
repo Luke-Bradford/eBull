@@ -34,7 +34,12 @@ import psycopg.rows
 
 from app.services.data_freshness import cadence_for
 from app.services.job_liveness import cadence_period
-from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, MISFIRE_SKIP_PREFIX, TERMINAL_STATUS_SQL
+from app.services.ops_monitor import (
+    LANE_BUSY_SKIP_PREFIX,
+    MISFIRE_SKIP_PREFIX,
+    ORPHAN_REAP_ERROR_MSG,
+    TERMINAL_STATUS_SQL,
+)
 from app.services.processes import (
     ActiveRunSummary,
     ErrorClassSummary,
@@ -62,6 +67,7 @@ from app.services.processes.watermarks import (
     resolve_watermark,
 )
 from app.services.sec_manifest import ManifestSource
+from app.services.sync_orchestrator.layer_types import FailureCategory
 from app.workers.scheduler import (
     SCHEDULED_JOBS,
     Cadence,
@@ -191,6 +197,36 @@ _RUN_STATUS_TO_SUMMARY: dict[str, RunStatus] = {
 # at the ``last_n_errors`` assignment for why this is a state list and not a
 # ``== "failed"`` test (#3111 slice 2).
 _ERROR_SUMMARY_SUPPRESSED_STATUSES: Final[frozenset[ProcessStatus]] = frozenset({"running", "pending_retry"})
+
+# #2274 — trailing window for ``ProcessRow.recent_reap_events`` / ``_runs``. Spec:
+# ``docs/proposals/ops/2026-09-19-2274-repeat-reap-visibility.md``.
+#
+# No published or vendor formulation exists for "how often may a background job
+# lose a run before that is worth showing", so this is fixed BY CONSTRUCTION and
+# frozen here — the same rule ``RUNTIME_CEILING_S`` follows in
+# ``stale_detection.py``, and stated rather than given an invented citation.
+#
+# 7 days is short enough that the count describes the situation NOW rather than a
+# regime that has ended. That is the specific trap #2274 has hit twice: its
+# 90-day reap totals described a regime that had already stopped, and its M1
+# post-fix window was ten minutes and described nothing.
+RECENT_REAP_WINDOW_DAYS: Final[int] = 7
+
+# Display floor for the muted historical chip. ⚠ NOT a causal claim: deploys and
+# genuine faults are not separable from ``job_runs`` (several ordinary deploys in
+# one session produce several reaps, and a single reap can be an OOM). It is
+# chosen to bound the DISPLAY rate, measured on the real corpus over 30 days
+# (events, ``finished_at``, no look-ahead):
+#
+#   >= 2 events / 7d : 17/30 days carry a firing job; max 10 concurrent
+#   >= 3 events / 7d : 17/30 days carry a firing job; max  5 concurrent  <- this
+#
+# Same day-coverage, half the worst-case row count.
+#
+# ⚠ The frontend mirrors this value in ``frontend/src/pages/...`` — grep
+# ``RECENT_REAP_CHIP_FLOOR`` before changing it. It cannot be shared across the
+# language boundary, so the two copies are kept honest by name.
+RECENT_REAP_CHIP_FLOOR: Final[int] = 3
 
 
 def _status_for(
@@ -673,6 +709,78 @@ def _has_pending_full_wash_fence(conn: psycopg.Connection[Any], *, process_id: s
         return cur.fetchone() is not None
 
 
+def _recent_reap_counts(
+    conn: psycopg.Connection[Any],
+    *,
+    job_name: str | None = None,
+) -> dict[str, tuple[int, int]]:
+    """Orphan-reap EVENTS and rows-lost per job inside the trailing window.
+
+    Returns ``{job_name: (events, runs)}``. A job with no reap in the window is
+    simply absent — callers default to ``(0, 0)``, which is the honest value:
+    "no reap event", not "unknown". There is no unavailable state, because this
+    read either succeeds for every row or the snapshot has already failed.
+
+    ⚠ **Windowed on ``finished_at``, not ``started_at``.** The reap EVENT happens
+    when the reaper runs, not when the run started, and the lag is large —
+    measured on dev at 2026-09-19: p50 0.005 d, p90 0.281 d, p99 1.86 d, max
+    4.375 d. A ``started_at`` window would miss a ten-day-old run reaped today
+    and would drop a six-day-old one tomorrow.
+
+    ⚠ **An EVENT is one reap batch, not one row.** ``reap_orphaned_job_runs``
+    rewrites EVERY orphaned row in a single UPDATE, so one boot can write many
+    rows for the same job in the same instant — ``thesis_refresh`` has 25 rows
+    sharing one ``finished_at`` second. Counting rows would report that boot as
+    25 separate failures. Corpus-wide, 502 rows collapse to 467 events. Both
+    numbers are returned because each hides something the other shows.
+
+    ⚠ The predicate is all THREE columns, never the message alone. A reap has no
+    structured marker (see ``ORPHAN_REAP_ERROR_MSG``), so this is a convention
+    and is read as one. The two columns that ARE typed are bound to the writer's
+    own definitions — ``ORPHAN_REAP_ERROR_MSG`` and
+    ``FailureCategory.INTERNAL_ERROR`` — so only the message half is a string
+    agreement, and ``test_reaper_output_matches_the_readers_predicate`` reds if
+    even that drifts.
+
+    One batched ``GROUP BY`` for the whole snapshot — measured 5.6 ms on dev
+    against 139k ``job_runs`` — rather than a probe per row, and captured once by
+    ``list_rows`` so the window cannot drift between rows. ``job_name`` narrows it
+    for ``get_row`` so the detail page agrees with the list.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT job_name, COUNT(*) AS events, SUM(rows_lost) AS runs
+              FROM (
+                    SELECT job_name,
+                           date_trunc('second', finished_at) AS reaped_at,
+                           COUNT(*) AS rows_lost
+                      FROM job_runs
+                     WHERE status = 'failure'
+                       AND error_category = %(category)s
+                       AND error_msg = %(reap_msg)s
+                       AND finished_at > now() - %(window)s::interval
+                       AND (%(job_name)s::text IS NULL OR job_name = %(job_name)s)
+                     GROUP BY job_name, date_trunc('second', finished_at)
+                   ) AS events
+             GROUP BY job_name
+            """,
+            {
+                # Bound to the SAME enum the reaper writes, not a re-typed
+                # literal — the two sides would otherwise drift if the enum
+                # value changed. Passed as a PARAM rather than interpolated:
+                # psycopg3 types ``execute`` as ``LiteralString``, so a runtime
+                # ``str`` cannot go into the query text (see TERMINAL_STATUS_SQL's
+                # note on why that guard is worth keeping).
+                "category": FailureCategory.INTERNAL_ERROR.value,
+                "reap_msg": ORPHAN_REAP_ERROR_MSG,
+                "window": timedelta(days=RECENT_REAP_WINDOW_DAYS),
+                "job_name": job_name,
+            },
+        )
+        return {str(row[0]): (int(row[1]), int(row[2])) for row in cur.fetchall()}
+
+
 def _freshness_failure_counts(
     conn: psycopg.Connection[Any],
     *,
@@ -916,6 +1024,7 @@ def _build_row(
     has_inflight_request: bool,
     fence_held: bool,
     kill_switch_active: bool,
+    recent_reaps: tuple[int, int] = (0, 0),
 ) -> ProcessRow:
     # next_fire_at: always compute against ``now`` rather than the last
     # successful run — the operator wants "when will this fire next?",
@@ -1155,6 +1264,11 @@ def _build_row(
         # #1689 — latest terminal ``attempt`` (``.get`` so a sync_runs-shaped
         # orchestrator row, which has no such column, yields None).
         attempt=terminal_row.get("attempt") if terminal_row is not None else None,
+        # #2274 — historical reap counts. NOT verdict inputs, deliberately; see
+        # the ProcessRow field comments and the spec for why a chronic,
+        # largely deploy-caused condition must not repaint the row red.
+        recent_reap_events=recent_reaps[0],
+        recent_reap_runs=recent_reaps[1],
     )
 
 
@@ -1171,6 +1285,10 @@ def list_rows(conn: psycopg.Connection[Any]) -> list[ProcessRow]:
     flip mid-loop cannot produce a row-by-row inconsistency.
     """
     kill_switch_active = _kill_switch_active(conn)
+    # #2274 — ONE batched read for the whole snapshot, captured here for the same
+    # reason ``kill_switch_active`` is: the window is relative to ``now()``, so a
+    # per-row probe would let the window drift between rows of one page.
+    recent_reaps = _recent_reap_counts(conn)
     rows: list[ProcessRow] = []
     for job in SCHEDULED_JOBS:
         active_row = _read_running_run(conn, job_name=job.name)
@@ -1186,6 +1304,7 @@ def list_rows(conn: psycopg.Connection[Any]) -> list[ProcessRow]:
                 has_inflight_request=has_inflight_request,
                 fence_held=fence_held,
                 kill_switch_active=kill_switch_active,
+                recent_reaps=recent_reaps.get(job.name, (0, 0)),
             )
         )
     return rows
@@ -1204,6 +1323,9 @@ def get_row(conn: psycopg.Connection[Any], *, process_id: str) -> ProcessRow | N
         has_inflight_request=_has_inflight_manual_request(conn, job_name=job.name),
         fence_held=_has_pending_full_wash_fence(conn, process_id=job.name),
         kill_switch_active=_kill_switch_active(conn),
+        # #2274 — same helper, narrowed to this job, so the detail page cannot
+        # disagree with the list page about how many reaps are in the window.
+        recent_reaps=_recent_reap_counts(conn, job_name=job.name).get(job.name, (0, 0)),
     )
 
 

@@ -159,6 +159,10 @@ export function makeProcessRow(
     ...derived,
     params_metadata: [],
     description: "Operator-facing description for the Insider Form 4 ingest.",
+    // #2274 — a healthy fixture has never been restart-reaped, so the
+    // historical chip is absent by default and a test that wants it must ask.
+    recent_reap_events: 0,
+    recent_reap_runs: 0,
     ...overrides,
   };
 }

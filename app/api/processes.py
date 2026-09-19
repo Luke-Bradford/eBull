@@ -205,6 +205,18 @@ class ProcessRowResponse(BaseModel):
     # position). The FE renders "attempt N" on a self-healing/retrying row.
     # None when never failed or for adapters that don't track it.
     attempt: int | None = None
+    # #2274 — HISTORICAL orphan-reap counts over the trailing
+    # ``scheduled_adapter.RECENT_REAP_WINDOW_DAYS``. ``events`` is the number of
+    # reap incidents (one boot reaps every orphaned row in a single UPDATE, so
+    # rows and incidents are NOT the same number — 502 rows collapse to 467
+    # events corpus-wide); ``runs`` is how many runs those incidents wrote off.
+    #
+    # ⚠ Not a health claim and not a verdict input — the FE renders a muted
+    # historical chip, never a status. See the ProcessRow field comments.
+    # 0 for the bootstrap / ingest_sweep adapters, which are not backed by
+    # ``job_runs``.
+    recent_reap_events: int = 0
+    recent_reap_runs: int = 0
 
 
 class ProcessListResponse(BaseModel):
@@ -468,6 +480,9 @@ def _convert_row(row: ProcessRow) -> ProcessRowResponse:
         role=row.role,
         # #1689 — latest terminal attempt for the "attempt N" retrying label.
         attempt=row.attempt,
+        # #2274 — historical reap counts; the FE decides whether to chip them.
+        recent_reap_events=row.recent_reap_events,
+        recent_reap_runs=row.recent_reap_runs,
     )
 
 

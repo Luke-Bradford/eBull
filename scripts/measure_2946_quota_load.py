@@ -87,6 +87,7 @@ import psycopg
 from app.config import settings
 from app.providers.implementations import etoro_quota_lanes as lanes
 from app.providers.implementations import etoro_request_log
+from app.services.ops_monitor import ORPHAN_REAP_ERROR_MSG
 
 # ---------------------------------------------------------------------------
 # A1 -- how each caller is actually paced
@@ -177,12 +178,17 @@ PACED_CALLERS: tuple[PacedCaller, ...] = (
     ),
 )
 
-#: The reaper's exact message. ``ops_monitor.py:648`` rewrites an orphaned ``running``
-#: row at boot with ``finished_at = now()``, so a reaped row's "duration" spans the
-#: OUTAGE, not the work -- the difference between a 90-minute candle sweep and a 17-day
-#: one. ⚠ Counting stranded ``running`` rows is the WRONG detector: the reaper has
-#: already converted them. Match the message.
-REAPER_MSG_PREFIX = "orphaned: reaped at boot"
+#: The reaper's exact message. ``reap_orphaned_job_runs`` rewrites an orphaned
+#: ``running`` row at boot with ``finished_at = now()``, so a reaped row's "duration"
+#: spans the OUTAGE, not the work -- the difference between a 90-minute candle sweep
+#: and a 17-day one. ⚠ Counting stranded ``running`` rows is the WRONG detector: the
+#: reaper has already converted them. Match the message.
+#:
+#: #2274 — aliased to the WRITER's own constant rather than re-typed here. This file
+#: previously kept a second hand-written copy of the marker, which is how two copies
+#: of a vocabulary drift apart. Every existing row matches it identically (one
+#: spelling, 502 rows on dev), so the ``LIKE`` below is unchanged in effect.
+REAPER_MSG_PREFIX = ORPHAN_REAP_ERROR_MSG
 
 _SCHED = "app/workers/scheduler.py"
 

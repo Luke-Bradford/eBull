@@ -298,6 +298,34 @@ class ProcessRow:
     # on a retrying row. None for adapters that don't track it (bootstrap /
     # ingest_sweep) or jobs that have never failed.
     attempt: int | None = None
+    # #2274 — HISTORICAL counts, deliberately NOT verdict inputs. How many times
+    # this job was orphan-reaped in the trailing
+    # ``RECENT_REAP_WINDOW_DAYS``, and how many ``job_runs`` rows those reaps
+    # wrote off. Spec:
+    # ``docs/proposals/ops/2026-09-19-2274-repeat-reap-visibility.md``.
+    #
+    # ⚠ EVENTS, not rows, is the incident count: one boot reaps EVERY orphaned
+    # row in a single UPDATE, so ``thesis_refresh``'s apparent 25-run streak is
+    # 25 rows sharing one ``finished_at`` second — one incident. Corpus-wide,
+    # 502 rows collapse to 467 events. Reporting rows alone would call one boot
+    # 25 failures; reporting events alone would hide that 25 runs were lost.
+    # Both are carried so neither story is silently dropped.
+    #
+    # ⚠ These do NOT feed ``compute_verdict`` and must not. A recurrence is a
+    # property of a WINDOW of runs, whereas the verdict is a function of the
+    # latest terminal run plus current staleness — which is exactly why repeated
+    # reaps are invisible today. Painting the row red for a chronic, largely
+    # deploy-caused condition is #1831's measured bug (~42 halted jobs red,
+    # burying the real failures), and #2274's binding constraint is "must not
+    # train the operator to ignore it". The FE renders a muted HISTORICAL chip;
+    # the operator keeps the judgement.
+    #
+    # Zero is the honest default for the adapters not backed by ``job_runs``
+    # (bootstrap / ingest_sweep) and for a job with no reap in the window —
+    # there is no "unavailable" state, because the batched read either succeeds
+    # for every row or the adapter has already failed the snapshot.
+    recent_reap_events: int = 0
+    recent_reap_runs: int = 0
 
 
 @dataclass(frozen=True, slots=True)

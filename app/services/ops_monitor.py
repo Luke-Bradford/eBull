@@ -254,6 +254,22 @@ JOB_TERMINAL_STATUSES: Final[tuple[str, ...]] = tuple(
     part.strip().strip("'") for part in TERMINAL_STATUS_SQL.strip("()").split(",")
 )
 
+#: The exact ``job_runs.error_msg`` written by :func:`reap_orphaned_job_runs`.
+#:
+#: ⚠ This is a CONVENTION, not provenance, and callers must read it as one.
+#: A reap has no structured marker: ``error_category`` is the shared
+#: ``INTERNAL_ERROR`` that every internal failure carries, so the message is
+#: the only reap-specific discriminator that exists. Exporting it keeps the
+#: write site and every reader on one string — ``scripts/measure_2946_quota_load.py``
+#: previously kept its own hand-rolled copy — but it cannot stop a future
+#: writer storing identical text, and CHANGING it would strand every historical
+#: row (502 on dev at 2026-09-19, one single spelling). A reserved structured
+#: marker is the durable form and would be a migration; #2274 records it.
+#:
+#: Read it with the full three-column predicate, never the message alone:
+#: ``status = 'failure' AND error_category = 'internal_error' AND error_msg = %s``.
+ORPHAN_REAP_ERROR_MSG: Final[str] = "orphaned: reaped at boot (owning worker thread died without a terminal status)"
+
 
 LayerStatus = Literal["ok", "stale", "empty", "error"]
 
@@ -778,13 +794,14 @@ def reap_orphaned_job_runs(
         UPDATE job_runs
         SET status = 'failure',
             finished_at = now(),
-            error_msg = 'orphaned: reaped at boot (owning worker thread died without a terminal status)',
+            error_msg = %(reap_msg)s,
             error_category = %(category)s
         WHERE status = 'running'
           AND (%(reap_all)s OR started_at < now() - %(timeout)s::interval)
         RETURNING run_id
         """,
         {
+            "reap_msg": ORPHAN_REAP_ERROR_MSG,
             "category": FailureCategory.INTERNAL_ERROR.value,
             "reap_all": reap_all,
             "timeout": timeout,
