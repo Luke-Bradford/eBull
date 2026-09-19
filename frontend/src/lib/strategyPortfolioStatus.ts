@@ -1,4 +1,4 @@
-import type { StrategyOverviewResponse } from "@/api/types";
+import type { CoreSleeveResponse, StrategyOverviewResponse } from "@/api/types";
 
 /**
  * The plain-English answer to "is the fenced-off pot trading, and if not, why?"
@@ -44,11 +44,40 @@ export interface StrategyBlocker {
 }
 
 export interface StrategyPortfolioStatus {
-  readonly trading: boolean;
+  /**
+   * `null` = NOT YET KNOWN, and it is a third state rather than a falsy
+   * `false` (#3222, Codex ckpt-2). The verdict depends on the core sleeve,
+   * which arrives on its own request; collapsing "the request has not landed"
+   * into "blocked" prints a definitive `halted` over a path that may be live,
+   * and prints it permanently when `/strategies/core-sleeve` errors. Same rule
+   * the `Open` tile follows: an unknown count refuses rather than reading 0.
+   */
+  readonly trading: boolean | null;
   readonly headline: string;
+  /**
+   * The one-word badge beside the headline. Carried here rather than derived
+   * from `trading` in the component: `settling` is neither live nor halted, so
+   * deriving it produced a "Settling a core order · halted" contradiction of
+   * exactly the kind this module exists to remove.
+   */
+  readonly badge: "live" | "halted" | "checking" | "settling";
   readonly tone: "ok" | "warn" | "risk";
   readonly blockers: readonly StrategyBlocker[];
 }
+
+/**
+ * Blockers that mean "not set up yet" rather than "the system is refusing".
+ *
+ * The complement — `global_kill` and `entries_blocked` — is a refusal, and a
+ * refusal outranks every other verdict this module can produce. Written as the
+ * positive set so a NEW blocker key is excluded by default: a key nobody has
+ * classified must not silently join the side that can be overridden.
+ */
+const SETUP_BLOCKERS: ReadonlySet<StrategyBlockerKey> = new Set<StrategyBlockerKey>([
+  "no_capital",
+  "no_mandate",
+  "no_approved_strategies",
+]);
 
 /** `"0"`, `""`, `null` and unparseable all mean "no capital". */
 function hasCapital(amount: string | null): boolean {
@@ -57,7 +86,35 @@ function hasCapital(amount: string | null): boolean {
   return Number.isFinite(value) && value > 0;
 }
 
-export function strategyPortfolioStatus(overview: StrategyOverviewResponse): StrategyPortfolioStatus {
+/**
+ * The sleeve's state is read off the backend's own `execution_action` and is
+ * NOT re-derived from `state`, `mandate.enabled` and `blockers` — the same rule
+ * the entry-block loop below follows. Measured on dev 2026-09-19: the live
+ * sleeve returns `execution_action: "rebalance"` while ALSO carrying a
+ * `core_live_snapshot_required` blocker, so "no blockers" is the wrong
+ * predicate and would have read a working sleeve as blocked.
+ *
+ * ⚠⚠ Its three values are NOT a severity ladder, and treating them as one is
+ * the trap (Codex ckpt-2). `rebalance` means new entries are possible;
+ * `resume` is RECOVERY on an order the broker may already hold, and
+ * `app/api/strategies.py:3863` computes it as
+ * `etoro_env == "demo" and resume_authority is not None` — consulting neither
+ * pool readiness nor capital. So a pot that is disabled, unfunded or without a
+ * mandate can still be `resume`, and the page will still offer the button.
+ */
+
+/**
+ * @param core the loaded core-sleeve payload, or `null` when its request has
+ *   not landed or failed. ⚠ `null` means UNKNOWN, never "blocked": the endpoint
+ *   always answers, and `state: "unavailable"` / `execution_action: "blocked"`
+ *   are how it says the sleeve is not a path. Defaults to `null` so a caller
+ *   that does not fetch it gets the honest answer rather than a confident wrong
+ *   one.
+ */
+export function strategyPortfolioStatus(
+  overview: StrategyOverviewResponse,
+  core: CoreSleeveResponse | null = null,
+): StrategyPortfolioStatus {
   const blockers: StrategyBlocker[] = [];
   const { entry_block: entryBlock, paper_pool: pool, automation_readiness: readiness } = overview;
 
@@ -121,10 +178,96 @@ export function strategyPortfolioStatus(overview: StrategyOverviewResponse): Str
   }
 
   if (blockers.length === 0) {
-    return { trading: true, headline: "Trading", tone: "ok", blockers: [] };
+    return { trading: true, headline: "Trading", badge: "live", tone: "ok", blockers: [] };
   }
+
+  const killed = blockers.some((b) => b.key === "global_kill");
+
+  // ⚠⚠ RECOVERY OUTRANKS SETUP, and is NOT gated on the blockers below (Codex
+  // ckpt-2). `resume` means an order the broker may already hold is unresolved,
+  // and the page enables "Resume demo order" for it regardless of whether the
+  // pot is funded, enabled or mandated — see the note on `execution_action`
+  // above for why the backend computes it that way. Reporting "Not trading ·
+  // halted" next to that live button recreates the exact contradiction this
+  // change removes. It is still not `trading`: a resume settles an existing
+  // commitment, it does not open a new one.
+  //
+  // ⚠ The kill switch still wins. It is the safety state, it is the thing the
+  // operator must see first, and the pending order is visible in the Core &
+  // cash card either way.
+  //
+  // ⚠⚠ Gated on SETUP-ONLY blockers, not merely on "not the kill switch"
+  // (review WARNING on PR #3223). `entries_blocked` carries the backend's own
+  // refusals — `automatic trading disabled`, and the two fail-closed unknowns
+  // `runtime configuration unavailable` / `kill-switch state unavailable`. A
+  // system that is REFUSING must stay the headline; "Settling a core order ·
+  // warn" over an unreadable kill switch trades a safety signal for a tidier
+  // sentence. ⚠ Residual, stated rather than hidden: in that combination the
+  // header reads "Not trading" while "Resume demo order" is still enabled,
+  // because `can_resume` does not consult those either. The blocker row names
+  // the reason, and the conservative side of an unknown refusal is the right
+  // one to be on.
+  if (blockers.every((b) => SETUP_BLOCKERS.has(b.key)) && core !== null && core.execution_action === "resume") {
+    return {
+      trading: false,
+      headline: "Settling a core order",
+      badge: "settling",
+      tone: "warn",
+      blockers,
+    };
+  }
+
+  // ⚠⚠ #3222 — the core sleeve is a SEPARATE authority path and does not appear
+  // in `StrategyOverviewResponse` at all, so before this branch the verdict was
+  // computed over a payload that structurally could not see the one path that
+  // was trading. Measured on dev 2026-09-19: the pot reported
+  // `reserved_capital "225.038507"` of a `"500.000000"` limit, the page rendered
+  // "Close all 1 positions", and the headline above them read "Not trading ·
+  // halted" — from `no_approved_strategies` alone, which is TRUE (all 11
+  // registered strategies are `harness_validation`; #3104 has the missing
+  // promotion-evidence producer) and was being presented as the whole answer.
+  //
+  // ⚠ It neutralises `no_approved_strategies` and NOTHING ELSE, deliberately.
+  // The kill switch, a backend execution block, an unfunded pot and a missing
+  // mandate each stop the sleeve too — the sleeve spends this same pot — so a
+  // sleeve that claims otherwise is reporting on a state it does not own. The
+  // blocker also stays in the array: it is still true, the panel below still
+  // lists it, and it is still the thing that has to change for a STRATEGY to
+  // earn capital.
+  if (blockers.every((b) => b.key === "no_approved_strategies")) {
+    // ⚠ The sleeve is the DECIDING input only here. Above this line the pot is
+    // blocked for a reason the sleeve cannot clear, so there is nothing to wait
+    // for and deferring the verdict would hide a kill switch behind a spinner.
+    if (core === null) {
+      return {
+        trading: null,
+        headline: "Checking the core sleeve…",
+        badge: "checking",
+        tone: "warn",
+        blockers,
+      };
+    }
+    // `rebalance` explicitly, not `!== "blocked"`: `resume` already returned
+    // above, and a future fourth action must be classified rather than fall
+    // into "trading" by being merely not-blocked.
+    if (core.execution_action === "rebalance") {
+      return {
+        trading: true,
+        headline: "Trading — core sleeve",
+        badge: "live",
+        tone: "ok",
+        blockers,
+      };
+    }
+  }
+
   // The kill switch is a safety state, not a setup step — it reads as risk;
   // everything else is "not set up yet", which is a warning at most.
-  const tone = blockers.some((b) => b.key === "global_kill") ? "risk" : "warn";
-  return { trading: false, headline: "Not trading", tone, blockers };
+  return {
+    trading: false,
+    headline: "Not trading",
+    badge: "halted",
+    tone: killed ? "risk" : "warn",
+    blockers,
+  };
 }

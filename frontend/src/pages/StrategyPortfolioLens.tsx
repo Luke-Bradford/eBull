@@ -367,7 +367,11 @@ function CoreSleeveControl({
 export function StrategyPortfolioLens() {
   const overview = useAsync(fetchStrategyOverview, []);
   const coreSleeve = useAsync(fetchCoreSleeve, [], { preserveOnRefetch: true });
-  const ownedPositions = useAsync(fetchStrategyOwnedPositions, []);
+  /** ⚠ `preserveOnRefetch` so the `Open` tile's honest `—` (#3222) is the FIRST
+   *  load only. A close refetches this list, and without it the count would
+   *  blink to `—` every time — an honest answer, but a distracting one for a
+   *  value the page already knew a moment ago (review NITPICK on PR #3223). */
+  const ownedPositions = useAsync(fetchStrategyOwnedPositions, [], { preserveOnRefetch: true });
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
   const [confirmCloseAll, setConfirmCloseAll] = useState(false);
@@ -378,7 +382,7 @@ export function StrategyPortfolioLens() {
   if (overview.error || !overview.data) return <SectionError onRetry={overview.refetch} />;
 
   const data: StrategyOverviewResponse = overview.data;
-  const status = strategyPortfolioStatus(data);
+  const status = strategyPortfolioStatus(data, coreSleeve.data ?? null);
   const summary = aggregate(data);
   const pool = data.paper_pool;
   const positions = ownedPositions.data?.positions ?? [];
@@ -436,7 +440,11 @@ export function StrategyPortfolioLens() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 id="pot-state" className="flex items-center gap-2 text-lg font-semibold">
             {status.headline}
-            <Badge tone={status.tone}>{status.trading ? "live" : "halted"}</Badge>
+            {/* ⚠ Four states, not two (#3222), and the verdict names its own
+                badge rather than the component deriving one from `trading`:
+                `checking` is "not yet known" and `settling` is a recovery that
+                is neither live nor halted. */}
+            <Badge tone={status.tone}>{status.badge}</Badge>
           </h2>
           {closable.length > 0 ? (
             <button
@@ -459,7 +467,14 @@ export function StrategyPortfolioLens() {
             tone={summary.totalPnl === null || summary.totalPnl === 0 ? "muted" : summary.totalPnl > 0 ? "positive" : "negative"}
             toneHint
           />
-          <StatTile label="Open" value={formatNumber(summary.activePositions, 0)} hint={`${formatNumber(summary.approved, 0)} strategies approved`} />
+          {/* ⚠ #3222 — counted off the SAME list the `Close all` button uses, not
+              off `aggregate(overview).activePositions`. That sum is per registered
+              strategy, and the core sleeve's row carries `strategy_id: null`
+              (`strategy_title: "Core / cash mandate"`), so it was in no strategy's
+              count: the tile read 0 while the button beside it read 1. ⚠ `null`
+              until the fetch resolves — a 0 drawn during loading is the same wrong
+              number, just briefer. */}
+          <StatTile label="Open" value={formatNumber(ownedPositions.data ? positions.length : null, 0)} hint={`${formatNumber(summary.approved, 0)} strategies approved`} />
           <StatTile label="Available" value={formatMoney(number(pool.capital_observation_complete === false ? null : pool.remaining_capital), pool.currency)} hint={pool.capital_observation_complete === false ? "Checked at action" : "To deploy"} />
         </div>
 

@@ -728,9 +728,17 @@ describe("StrategyPortfolioLens", () => {
   });
 
   it("never reports zero open positions while the positions request is failing", async () => {
-    // The tile reads the overview's count, which is already loaded, rather than
-    // the length of a list that is empty only because its request has not
-    // landed — a 0 next to an error message is a false statement (Codex ckpt-2).
+    // ⚠⚠ #3222 REVERSED this test's MECHANISM and kept its claim. It used to
+    // assert the tile falls back to the overview's `active_position_count` sum
+    // (here: "2"), on the Codex ckpt-2 argument that a 0 beside an error message
+    // is a false statement. That argument still holds and is what this test is
+    // for. The fallback does not: that sum is per REGISTERED strategy, and the
+    // core sleeve's position carries `strategy_id: null`, so on dev 2026-09-19 it
+    // read 0 while the `Close all` button beside it read 1. Swapping one false
+    // number for another is not a fix.
+    //
+    // The tile now refuses instead — `—`, not a count — which satisfies the
+    // claim in the test's own name without asserting a figure it cannot know.
     vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockRejectedValue(new Error("boom"));
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
       ...BLOCKED,
@@ -740,8 +748,36 @@ describe("StrategyPortfolioLens", () => {
     } as unknown as StrategyOverviewResponse);
 
     renderLens();
-    const tile = (await screen.findByText("Open")).parentElement!;
-    expect(tile.textContent).toContain("2");
+    // ⚠ The VALUE div, not the tile: the hint reads "0 strategies approved", so
+    // a `toContain("0")` over the whole tile can never fail and would be a test
+    // that passes by construction.
+    const value = (await screen.findByText("Open")).nextElementSibling!;
+    expect(value.textContent).toBe("—");
+  });
+
+  it("counts the core sleeve's position, which belongs to no registered strategy", async () => {
+    // #3222 — the defect measured on dev 2026-09-19: `/strategies/positions`
+    // returned one row (`strategy_id: null`, `strategy_title: "Core / cash
+    // mandate"`) and the page rendered "Close all 1 positions", while the tile
+    // beside the button read 0 because it summed `active_position_count` over
+    // the registered strategies, all of which held nothing.
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [
+        { strategy_trade_id: 2, broker_position_id: "3601264304", strategy_id: null, instrument_id: 3417, symbol: "SPY.RTH", currency: "USD", units: "0.296155", assigned_value: "168.64", current_price: "570.72", trade_status: "open" },
+      ],
+      live_quote_instrument_ids: [3417],
+    } as never);
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...BLOCKED,
+      strategies: [
+        { pnl: { total_pnl: "0", active_position_count: 0 }, attribution: {}, allocation: {}, purpose: "harness_validation" },
+      ],
+    } as unknown as StrategyOverviewResponse);
+
+    renderLens();
+    const value = (await screen.findByText("Open")).nextElementSibling!;
+    await waitFor(() => expect(value.textContent).toBe("1"));
+    expect(await screen.findByText("Close all 1 positions")).toBeInTheDocument();
   });
 
   describe("with open positions", () => {

@@ -45,7 +45,7 @@ function overview(patch: Record<string, unknown> = {}): StrategyOverviewResponse
 describe("strategyPortfolioStatus", () => {
   it("reports trading with no blockers when every gate is clear", () => {
     const status = strategyPortfolioStatus(overview());
-    expect(status).toEqual({ trading: true, headline: "Trading", tone: "ok", blockers: [] });
+    expect(status).toEqual({ trading: true, headline: "Trading", badge: "live", tone: "ok", blockers: [] });
   });
 
   it("orders the kill switch first — it is the outermost gate", () => {
@@ -234,5 +234,186 @@ describe("strategyPortfolioStatus — blocker identity", () => {
     const entryBlockers = status.blockers.filter((b) => b.key === "entries_blocked");
     expect(entryBlockers).toHaveLength(2);
     expect(new Set(entryBlockers.map((b) => `${b.key}:${b.label}`)).size).toBe(2);
+  });
+});
+
+describe("strategyPortfolioStatus — the core sleeve is a second path (#3222)", () => {
+  /** The backend's own verdict is `execution_action`; nothing else is read. */
+  function core(patch: Record<string, unknown> = {}) {
+    return { execution_action: "rebalance", state: "ready", ...patch } as never;
+  }
+  /** Only the strategy pipeline is blocked — the state measured on dev 2026-09-19. */
+  const PIPELINE_ONLY = { automation_readiness: { ready: false, state: "no_capital_candidates", capital_candidate_count: 0 } };
+
+  it("reports trading when the sleeve is open and only the pipeline is blocked", () => {
+    const status = strategyPortfolioStatus(overview(PIPELINE_ONLY), core());
+    expect(status.trading).toBe(true);
+    expect(status.headline).toBe("Trading — core sleeve");
+    expect(status.tone).toBe("ok");
+  });
+
+  it("still lists the evidence blocker — it is true, and it is what a STRATEGY must clear", () => {
+    const status = strategyPortfolioStatus(overview(PIPELINE_ONLY), core());
+    expect(status.blockers.map((b) => b.key)).toEqual(["no_approved_strategies"]);
+  });
+
+  it("reads the backend's execution_action, not an empty blocker list", () => {
+    // Measured on dev: the live sleeve returns `rebalance` while ALSO carrying a
+    // `core_live_snapshot_required` blocker, so "no blockers" is the wrong
+    // predicate and would have read the working sleeve as blocked.
+    const status = strategyPortfolioStatus(
+      overview(PIPELINE_ONLY),
+      core({ blockers: [{ code: "core_live_snapshot_required", detail: "…" }] }),
+    );
+    expect(status.trading).toBe(true);
+  });
+
+  it("does not flip when the sleeve itself is blocked", () => {
+    const status = strategyPortfolioStatus(overview(PIPELINE_ONLY), core({ execution_action: "blocked" }));
+    expect(status.trading).toBe(false);
+    expect(status.headline).toBe("Not trading");
+  });
+
+  it("refuses rather than deciding while the sleeve is unknown", () => {
+    // Codex ckpt-2 — `coreSleeve.data ?? null` is `null` while the request is in
+    // flight AND after it fails, so collapsing that into "blocked" prints a
+    // definitive `halted` over a path that may be live, permanently if the
+    // endpoint errors. Same rule the `Open` tile follows.
+    for (const sleeve of [null, undefined]) {
+      const status = sleeve === undefined
+        ? strategyPortfolioStatus(overview(PIPELINE_ONLY))
+        : strategyPortfolioStatus(overview(PIPELINE_ONLY), sleeve);
+      expect(status.trading).toBeNull();
+      expect(status.headline).toBe("Checking the core sleeve…");
+      expect(status.blockers.map((b) => b.key)).toEqual(["no_approved_strategies"]);
+    }
+  });
+
+  it("does NOT defer when something the sleeve cannot clear is blocking", () => {
+    // Deferring here would hide a kill switch behind a spinner. There is nothing
+    // to wait for: the sleeve spends this pot and cannot clear these.
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        entry_block: { new_entries_blocked: true, global_kill_active: true, global_kill_reason: "drill", global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: [] },
+      }),
+      null,
+    );
+    expect(status.trading).toBe(false);
+    expect(status.tone).toBe("risk");
+  });
+
+  it("NEVER overrides the kill switch", () => {
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        entry_block: { new_entries_blocked: true, global_kill_active: true, global_kill_reason: "drill", global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: [] },
+      }),
+      core(),
+    );
+    expect(status.trading).toBe(false);
+    expect(status.tone).toBe("risk");
+  });
+
+  it.each([
+    ["a backend execution block", { entry_block: { new_entries_blocked: true, global_kill_active: false, global_kill_reason: null, global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: ["automatic trading disabled"] } }],
+    ["an unfunded pot", { paper_pool: { configured: true, enabled: true, effective_capital: "0", currency: "USD", capital_limit: "0", capital_mode: "fixed", approval_mode: "manual", reserved_capital: "0", invested_capital: "0", remaining_capital: "0", capital_observation_complete: true, mandate: { configured: true, risk_profile: "balanced" }, available_mandates: [] } }],
+    ["a missing mandate", { paper_pool: { configured: true, enabled: true, effective_capital: "10000", currency: "USD", capital_limit: "10000", capital_mode: "fixed", approval_mode: "manual", reserved_capital: "0", invested_capital: "0", remaining_capital: "10000", capital_observation_complete: true, mandate: { configured: false, risk_profile: "unconfigured" }, available_mandates: [] } }],
+  ])("does not paper over %s — the sleeve spends this same pot", (_name, patch) => {
+    const status = strategyPortfolioStatus(overview({ ...PIPELINE_ONLY, ...patch }), core());
+    expect(status.trading).toBe(false);
+    expect(status.headline).toBe("Not trading");
+  });
+});
+
+describe("strategyPortfolioStatus — a resume is recovery, not setup (#3222)", () => {
+  const RESUME = { execution_action: "resume", state: "ready" } as never;
+  const PIPELINE_ONLY = { automation_readiness: { ready: false, state: "no_capital_candidates", capital_candidate_count: 0 } };
+  /** A paused pot — the page still offers "Resume demo order" in this state. */
+  const PAUSED_POOL = {
+    paper_pool: {
+      configured: true, enabled: false, effective_capital: "500", currency: "USD", capital_limit: "500",
+      capital_mode: "fixed", approval_mode: "manual", reserved_capital: "225", invested_capital: "0",
+      remaining_capital: "275", capital_observation_complete: true,
+      mandate: { configured: true, risk_profile: "cautious" }, available_mandates: [],
+    },
+  };
+
+  it("is reported even when a blocker the sleeve cannot clear is present", () => {
+    // `app/api/strategies.py:3863` computes `can_resume` from the pending
+    // authority and the demo environment ONLY, so the button is live while the
+    // pot is paused. "Not trading · halted" beside a live button is the very
+    // contradiction this module removes.
+    const status = strategyPortfolioStatus(overview({ ...PIPELINE_ONLY, ...PAUSED_POOL }), RESUME);
+    expect(status.headline).toBe("Settling a core order");
+    expect(status.badge).toBe("settling");
+    expect(status.tone).toBe("warn");
+  });
+
+  it("is not called trading — a resume settles a commitment, it does not open one", () => {
+    expect(strategyPortfolioStatus(overview(PIPELINE_ONLY), RESUME).trading).toBe(false);
+    expect(strategyPortfolioStatus(overview(PIPELINE_ONLY), RESUME).badge).toBe("settling");
+  });
+
+  it("keeps every blocker visible", () => {
+    const status = strategyPortfolioStatus(overview({ ...PIPELINE_ONLY, ...PAUSED_POOL }), RESUME);
+    expect(status.blockers.map((b) => b.key).sort()).toEqual(["no_approved_strategies", "no_capital"]);
+  });
+
+  it("NEVER outranks the kill switch", () => {
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        entry_block: { new_entries_blocked: true, global_kill_active: true, global_kill_reason: "drill", global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: [] },
+      }),
+      RESUME,
+    );
+    expect(status.headline).toBe("Not trading");
+    expect(status.badge).toBe("halted");
+    expect(status.tone).toBe("risk");
+  });
+
+  it.each([
+    ["automatic trading disabled"],
+    ["runtime configuration unavailable"],
+    ["kill switch state unavailable"],
+  ])("NEVER outranks a backend refusal either — %s", (reason) => {
+    // Review WARNING on PR #3223: gating on "not the kill switch" left this
+    // combination overridden AND untested. Two of the three reasons are
+    // fail-closed UNKNOWNS, and "Settling a core order · warn" over an
+    // unreadable kill switch trades a safety signal for a tidier sentence.
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        entry_block: { new_entries_blocked: true, global_kill_active: false, global_kill_reason: null, global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: [reason] },
+      }),
+      RESUME,
+    );
+    expect(status.headline).toBe("Not trading");
+    expect(status.badge).toBe("halted");
+  });
+
+  it("still outranks the SETUP blockers, which is the case it exists for", () => {
+    // An unfunded, unmandated pot with no approved strategy — none of which
+    // stops `can_resume`, so the button is live and the header must not deny it.
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        paper_pool: {
+          configured: true, enabled: true, effective_capital: "0", currency: "USD", capital_limit: "0",
+          capital_mode: "fixed", approval_mode: "manual", reserved_capital: "0", invested_capital: "0",
+          remaining_capital: "0", capital_observation_complete: true,
+          mandate: { configured: false, risk_profile: "unconfigured" }, available_mandates: [],
+        },
+      }),
+      RESUME,
+    );
+    expect(status.headline).toBe("Settling a core order");
+    expect(status.blockers.map((b) => b.key).sort()).toEqual(["no_approved_strategies", "no_capital", "no_mandate"]);
+  });
+
+  it("a rebalance is classified explicitly, so a future action cannot fall into 'trading'", () => {
+    const unknownAction = { execution_action: "some_future_action", state: "ready" } as never;
+    expect(strategyPortfolioStatus(overview(PIPELINE_ONLY), unknownAction).badge).toBe("halted");
   });
 });
