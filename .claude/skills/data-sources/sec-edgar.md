@@ -402,6 +402,33 @@ reading `insider_transactions` would miss ~91% of the population.
 snapshot per class and ownership form, not a sequence, and no ordinal has been established
 for `NONDERIV_HOLDING_SK`.
 
+⚠⚠ **THREE readers apply this rule, and #3146 only fixed two (#3232, fixed 2026-09-19).**
+`refresh_insiders_current` and `refresh_insiders_current_batch` got the shared tail;
+`ownership_history._insiders_history` — behind
+`GET /instruments/{symbol}/ownership-history?category=insiders` — kept `source_document_id
+ASC` for a year, so the ownership CARD and the ownership CHART could name different lines of
+the SAME filing. Measured when found: **693,492 of 2,616,746** per-holder chart buckets
+picked a different line, **680,027** a different share VALUE, over **3,748** instruments.
+All three now import `ownership_observations.INSIDER_WINNER_ORDER_TAIL` (public since #3232
+precisely because three modules depend on it), and
+`scripts/check_ownership_refresh_writer_pattern.sh` invariant H expands it BY NAME so a
+drifting copy is caught.
+
+```bash
+# before closing any ticket that changes this rule, enumerate the readers:
+rg -n "FROM ownership_insiders_observations" app/
+PYTHONPATH=. uv run python -m scripts.audit_3232_insider_history_line_order --ab --gain
+```
+
+⚠ The defect is **first-line-vs-last-line**, NOT the string-vs-numeric hazard. Ascending
+`source_document_id` picks the filing's FIRST line where Instruction 4(a)(i) wants its LAST —
+`moved_to_later_line` is 693,492 of 693,492. The `:NDT:1000`-before-`:NDT:999` hazard is real
+but `differing_sk_width` measures **0** on this corpus, so the `::numeric` cast is a guard
+against future drift, not evidence of the shipped bug. Cross-source confirmed on AAPL
+accession `0002050912-25-000008` (Kevan Parekh, 2025-10-16): DERA SK order and the
+independently parsed XML agree line-for-line `12,464 → 10,799 → 9,265 → 8,765`; the chart had
+been showing 12,464.
+
 #### ⚠⚠ …and being out of the ORDER rule is why they hit an AGGREGATION defect (#3227)
 
 `ownership_insiders_current` is keyed `(instrument_id, holder_identity_key,
