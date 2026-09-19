@@ -373,6 +373,45 @@ describe("strategyPortfolioStatus — a resume is recovery, not setup (#3222)", 
     expect(status.tone).toBe("risk");
   });
 
+  it.each([
+    ["automatic trading disabled"],
+    ["runtime configuration unavailable"],
+    ["kill switch state unavailable"],
+  ])("NEVER outranks a backend refusal either — %s", (reason) => {
+    // Review WARNING on PR #3223: gating on "not the kill switch" left this
+    // combination overridden AND untested. Two of the three reasons are
+    // fail-closed UNKNOWNS, and "Settling a core order · warn" over an
+    // unreadable kill switch trades a safety signal for a tidier sentence.
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        entry_block: { new_entries_blocked: true, global_kill_active: false, global_kill_reason: null, global_kill_activated_at: null, global_kill_activated_by: null, execution_block_reasons: [reason] },
+      }),
+      RESUME,
+    );
+    expect(status.headline).toBe("Not trading");
+    expect(status.badge).toBe("halted");
+  });
+
+  it("still outranks the SETUP blockers, which is the case it exists for", () => {
+    // An unfunded, unmandated pot with no approved strategy — none of which
+    // stops `can_resume`, so the button is live and the header must not deny it.
+    const status = strategyPortfolioStatus(
+      overview({
+        ...PIPELINE_ONLY,
+        paper_pool: {
+          configured: true, enabled: true, effective_capital: "0", currency: "USD", capital_limit: "0",
+          capital_mode: "fixed", approval_mode: "manual", reserved_capital: "0", invested_capital: "0",
+          remaining_capital: "0", capital_observation_complete: true,
+          mandate: { configured: false, risk_profile: "unconfigured" }, available_mandates: [],
+        },
+      }),
+      RESUME,
+    );
+    expect(status.headline).toBe("Settling a core order");
+    expect(status.blockers.map((b) => b.key).sort()).toEqual(["no_approved_strategies", "no_capital", "no_mandate"]);
+  });
+
   it("a rebalance is classified explicitly, so a future action cannot fall into 'trading'", () => {
     const unknownAction = { execution_action: "some_future_action", state: "ready" } as never;
     expect(strategyPortfolioStatus(overview(PIPELINE_ONLY), unknownAction).badge).toBe("halted");

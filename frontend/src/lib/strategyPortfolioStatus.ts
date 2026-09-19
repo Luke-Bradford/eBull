@@ -65,6 +65,20 @@ export interface StrategyPortfolioStatus {
   readonly blockers: readonly StrategyBlocker[];
 }
 
+/**
+ * Blockers that mean "not set up yet" rather than "the system is refusing".
+ *
+ * The complement — `global_kill` and `entries_blocked` — is a refusal, and a
+ * refusal outranks every other verdict this module can produce. Written as the
+ * positive set so a NEW blocker key is excluded by default: a key nobody has
+ * classified must not silently join the side that can be overridden.
+ */
+const SETUP_BLOCKERS: ReadonlySet<StrategyBlockerKey> = new Set<StrategyBlockerKey>([
+  "no_capital",
+  "no_mandate",
+  "no_approved_strategies",
+]);
+
 /** `"0"`, `""`, `null` and unparseable all mean "no capital". */
 function hasCapital(amount: string | null): boolean {
   if (amount === null || amount.trim() === "") return false;
@@ -181,7 +195,19 @@ export function strategyPortfolioStatus(
   // ⚠ The kill switch still wins. It is the safety state, it is the thing the
   // operator must see first, and the pending order is visible in the Core &
   // cash card either way.
-  if (!killed && core !== null && core.execution_action === "resume") {
+  //
+  // ⚠⚠ Gated on SETUP-ONLY blockers, not merely on "not the kill switch"
+  // (review WARNING on PR #3223). `entries_blocked` carries the backend's own
+  // refusals — `automatic trading disabled`, and the two fail-closed unknowns
+  // `runtime configuration unavailable` / `kill-switch state unavailable`. A
+  // system that is REFUSING must stay the headline; "Settling a core order ·
+  // warn" over an unreadable kill switch trades a safety signal for a tidier
+  // sentence. ⚠ Residual, stated rather than hidden: in that combination the
+  // header reads "Not trading" while "Resume demo order" is still enabled,
+  // because `can_resume` does not consult those either. The blocker row names
+  // the reason, and the conservative side of an unknown refusal is the right
+  // one to be on.
+  if (blockers.every((b) => SETUP_BLOCKERS.has(b.key)) && core !== null && core.execution_action === "resume") {
     return {
       trading: false,
       headline: "Settling a core order",

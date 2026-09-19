@@ -367,7 +367,11 @@ function CoreSleeveControl({
 export function StrategyPortfolioLens() {
   const overview = useAsync(fetchStrategyOverview, []);
   const coreSleeve = useAsync(fetchCoreSleeve, [], { preserveOnRefetch: true });
-  const ownedPositions = useAsync(fetchStrategyOwnedPositions, []);
+  /** ⚠ `preserveOnRefetch` so the `Open` tile's honest `—` (#3222) is the FIRST
+   *  load only. A close refetches this list, and without it the count would
+   *  blink to `—` every time — an honest answer, but a distracting one for a
+   *  value the page already knew a moment ago (review NITPICK on PR #3223). */
+  const ownedPositions = useAsync(fetchStrategyOwnedPositions, [], { preserveOnRefetch: true });
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
   const [confirmCloseAll, setConfirmCloseAll] = useState(false);
