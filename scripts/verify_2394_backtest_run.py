@@ -95,7 +95,7 @@ from app.services.research_price_structure_store import (
 from app.services.signal_ledger import resolve_fills
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
-from app.services.strategy_price_basis import from_archive_basis
+from app.services.strategy_price_basis import from_undeclared_source
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
     CORPUS_VERSION,
@@ -540,7 +540,11 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
                 universe=UNIVERSE,
                 masked_reason="quarantined_bar",
                 regime=unconstrained_regime(len(series)),
-                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                # ⚠ NO PINNED ARCHIVE ON THIS PATH, SO NO ARCHIVE BASIS TO PASS (#2840). This
+                # used to read a literal ``"unadjusted"`` and was only safe because S-12's
+                # ``AS_TRADED_UNIVERSES`` token refused every bar first; with the token gone the
+                # literal would have certified a back-adjusted level against a nominal gate.
+                price_basis=from_undeclared_source(n_bars=len(series)),
             )
             rows = resolve_fills(signals, series=series, identity=identity, instrument_id=int(instrument_id))
             entries, exits = _fills(rows, int(instrument_id))

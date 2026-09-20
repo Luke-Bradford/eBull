@@ -42,7 +42,6 @@ from app.services.outcome_resolver import ExitLevels
 from app.services.research_corpus_ingest import RESEARCH_ARCHIVES
 from app.services.strategies.s4_volatility_compression_breakout import s4_exit_bracket, s4_signals
 from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
-    AS_TRADED_UNIVERSES,
     CHEAPEST_BAND,
     PRICE_BASIS_REFUSAL_REASON,
     PRICE_FLOOR,
@@ -55,7 +54,7 @@ from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
 )
 from app.services.strategy_entry_liquidity import archive_policy_for
 from app.services.strategy_manifest import STRATEGY_MANIFEST
-from app.services.strategy_price_basis import from_archive_basis
+from app.services.strategy_price_basis import from_archive_basis, from_undeclared_source
 from app.services.strategy_registry import StrategySignal
 from app.services.technical_analysis import OHLCVRow
 from app.services.universe_selection import vendor_for
@@ -445,53 +444,75 @@ def test_the_backtest_universes_pinned_archive_is_as_traded() -> None:
     assert any(archive.adjustment_basis == "unadjusted" for archive in RESEARCH_ARCHIVES)
 
 
-def test_a_universe_whose_prices_are_not_as_traded_refuses_every_bar() -> None:
-    """⚠ REFUSES, never judges. A `survivor_only` close is back-adjusted, so judging
+def test_a_series_with_no_declared_basis_refuses_every_bar() -> None:
+    """⚠ REFUSES, never judges. An uncertified close may be back-adjusted, so judging
     it against a nominal edge would record a verdict about a price that never traded
-    — and scan rows are terminal, so there is no later correction."""
+    — and scan rows are terminal, so there is no later correction.
+
+    ⚠⚠ THE GATE IS THE BASIS, NOT THE UNIVERSE (#2840 §6 item 3). This test used to
+    pass a CERTIFIED carrier on ``survivor_only`` and assert a refusal, because the
+    removed ``AS_TRADED_UNIVERSES`` token refused the universe by name. The universe
+    here is now the backtest one and the refusal comes from the carrier, which is the
+    honest statement of what the rule checks. ⚠ The last bar is ``no_fill_bar`` — the
+    short-circuit routes through ``evaluate``, which the universe token never did.
+    """
     series = _above_edge()
     signals = s12_signals(
         series,
-        universe="survivor_only",
+        universe=BACKTEST_UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_undeclared_source(n_bars=len(series)),
     )
     assert len(signals) == len(series)
-    assert {(s.verdict, s.reason) for s in signals} == {("not_evaluable", PRICE_BASIS_REFUSAL_REASON)}
+    assert {(s.verdict, s.reason) for s in signals[:-1]} == {("not_evaluable", PRICE_BASIS_REFUSAL_REASON)}
+    assert (signals[-1].verdict, signals[-1].reason) == ("not_evaluable", "no_fill_bar")
     assert [s.signal_index for s in signals] == list(range(len(series)))
     assert {s.kind for s in signals} == {"entry"}
 
 
 def test_the_refusal_is_not_a_decline_even_where_s4_would_fire() -> None:
     """The distinction the cohort counts are built on: this is an absent CONTEXT, not
-    a rule that looked and said no. S-4 fires on this bar under the same universe."""
+    a rule that looked and said no. S-4 fires on this bar under the same universe.
+
+    ⚠ The absent context is now the BASIS rather than the universe (#2840 §6 item 3) —
+    S-4 reads no basis at all, so it fires on the very bar S-12 refuses.
+    """
     series = _above_edge()
-    assert _fired(s4_signals(series, universe="survivor_only", masked_reason=REASON)) == [FIRING_INDEX]
+    assert _fired(s4_signals(series, universe=BACKTEST_UNIVERSE, masked_reason=REASON)) == [FIRING_INDEX]
     signals = s12_signals(
         series,
-        universe="survivor_only",
+        universe=BACKTEST_UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_undeclared_source(n_bars=len(series)),
     )
     assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
 
 
-def test_only_the_backtest_universe_is_declared_as_traded() -> None:
-    """⚠ Pinned as a SET, so widening it is a visible edit that moves the identity.
+def test_no_universe_token_survives_in_the_rule_or_its_identity() -> None:
+    """⚠⚠ THE DE-OVERLOADING, asserted rather than trusted (#2840 §6 item 3).
 
-    `survivorship_free` is `BACKTEST_UNIVERSE`; `survivor_only` is `SCAN_UNIVERSE`.
-    A universe added later refuses until somebody states why its prices are as traded.
+    The rule used to declare ``AS_TRADED_UNIVERSES`` and hash ``as_traded_universes``
+    into its params — a universe NAME standing in for a per-bar price-basis FACT. Both
+    are gone, and the params carry the basis RULE VERSION instead. A reader coming back
+    to the module needs one place that says the token is not merely unused but absent.
     """
-    assert AS_TRADED_UNIVERSES == frozenset({BACKTEST_UNIVERSE}) == frozenset({"survivorship_free"})
-    assert S12_PARAMS["as_traded_universes"] == ("survivorship_free",)
+    assert not hasattr(s12_module, "AS_TRADED_UNIVERSES")
+    assert "as_traded_universes" not in S12_PARAMS
+    assert "price_basis_rule" in S12_PARAMS
 
 
-def test_widening_the_declared_universes_moves_the_version(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_moving_the_price_basis_rule_moves_the_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠ The identity must follow the rule that now does the token's job.
+
+    Replaces ``test_widening_the_declared_universes_moves_the_version``: the params key
+    whose movement matters is no longer the universe set but the basis rule's version,
+    which composes this module's bytes with the pinned archive provenances.
+    """
     before = s12_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID).version
     monkeypatch.setattr(
         s12_module,
         "S12_PARAMS",
-        {**S12_PARAMS, "as_traded_universes": ("survivor_only", "survivorship_free")},
+        {**S12_PARAMS, "price_basis_rule": "price-basis-carrier-v1+ffffffffffff+archives-ffffffffffff"},
     )
     after = s12_module.s12_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID).version
     assert before != after

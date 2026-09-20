@@ -7,9 +7,11 @@ broker touched, no strategy evaluated on real bars and no outcome opened.
 WHY THIS EXISTS
 ---------------
 The panel declaration was refused at Codex checkpoint 1 because the panel is downstream
-of a forward INSTRUMENT that does not exist: ``AS_TRADED_UNIVERSES`` admits only
-``survivorship_free``, S-4/S-12 are DAILY rules, and the intraday panel collects
-30m/5m/1m. That pass established one claim and named two it did not:
+of a forward INSTRUMENT that does not exist: at the time, S-12's ``AS_TRADED_UNIVERSES``
+token admitted only ``survivorship_free`` (that token was removed in #2840 §6 item 3 and
+the equivalent refusal is now the undeclared price basis on the scan path), S-4/S-12 are
+DAILY rules, and the intraday panel collects 30m/5m/1m. That pass established one claim
+and named two it did not:
 
 * ESTABLISHED — a stored bar is never re-based by THIS writer. ``_INSERT_INTRADAY_BAR`` is
   a plain INSERT and ``store_intraday_bars`` RAISES on any bar at or behind the stored

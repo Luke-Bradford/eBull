@@ -106,9 +106,9 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Final
 
+from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
-    AS_TRADED_UNIVERSES,
     GATE_EDGE,
     MAX_HOLD_BARS,
     S12_STRATEGY_ID,
@@ -206,13 +206,27 @@ def _check(report: dict[str, Any]) -> None:
             f"census measured gate edge {report.get('gate_edge')!r} against the rule's {GATE_EDGE!r}; "
             "the band table has moved and every count describes a gate nobody declared"
         )
-    # ⚠ THE RULE'S OWN DECLARED SET, not a guess at which universes are as-traded.
-    # ``AS_TRADED_UNIVERSES`` is hashed into S-12's identity and ``s12_signals`` refuses
-    # every bar outside it, so a census taken elsewhere measured a rule that refuses.
-    if report.get("universe") not in AS_TRADED_UNIVERSES:
+    # ⚠⚠ THIS IS A **POPULATION** CHECK, NOT A PRICE-BASIS ONE — and it used to say
+    # otherwise (#2840, Codex checkpoint 1). It read S-12's ``AS_TRADED_UNIVERSES``
+    # and claimed to be checking as-tradedness, so when that token was removed the
+    # obvious move was to delete this as "already covered by the ``cost_price_basis``
+    # refusal above". It is not covered. Every rate this script projects is declared
+    # *"conditional on an evaluable name-day in a survivorship-free 1962-2021
+    # cross-section"* (see ASSUMPTIONS below), and without this check the projection
+    # would accept a ``survivor_only`` census while still printing that sentence.
+    #
+    # ⚠ So it is DECLARED LOCALLY, against the universe whose population this
+    # script's own output describes, rather than borrowed from a strategy constant
+    # that was answering a different question.
+    #
+    # ⚠ And the basis refusal above genuinely does not substitute: it reads a report
+    # FIELD, and ``ab_3238_cost_basis`` exists precisely because the charging basis
+    # can be overridden independently of the resolved policy. Field-equals-policy is
+    # a property of today's producer, not a contract.
+    if report.get("universe") != BACKTEST_UNIVERSE:
         raise ProjectionRefused(
-            f"census ran on universe {report.get('universe')!r}, which S-12 does not accept as as-traded "
-            f"(AS_TRADED_UNIVERSES = {sorted(AS_TRADED_UNIVERSES)}); the rule refuses every bar there"
+            f"census ran on universe {report.get('universe')!r}, not {BACKTEST_UNIVERSE!r}; every rate below is "
+            "conditional on the survivorship-free cross-section and does not transfer from another population"
         )
     # ⚠ The collapse factor quarantines exactly this many bars, so a census taken under a
     # different cap converted fires to positions under a different rule.
@@ -666,8 +680,9 @@ def main(argv: list[str] | None = None) -> int:
                     "near-identical books if its sub-gate names rarely fire.",
                     "BOUNDARY CONDITIONS: a fresh panel needs warm-up before its first evaluable bar, and a "
                     "signal on the last session fills outside the window; neither end is modelled here.",
-                    "CAPACITY IS NOT EXPOSURE: s12_signals refuses SCAN_UNIVERSE = survivor_only, so a declared "
-                    "panel does not by itself let S-12 emit a forward signal.",
+                    "CAPACITY IS NOT EXPOSURE: s12_signals refuses every bar on the scan path because no "
+                    "as-traded provenance source is declared for it (strategy_price_basis.from_undeclared_source), "
+                    "so a declared panel does not by itself let S-12 emit a forward signal.",
                 ],
                 "WHAT_THIS_DOES_NOT_SAY": (
                     "Whether the accrual is SUFFICIENT, and nothing here 'clears' anything. "

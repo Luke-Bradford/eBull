@@ -93,7 +93,7 @@ from app.services.signal_ledger import resolve_fills
 from app.services.strategies.s2_cross_sectional_momentum import S2_STRATEGY_ID
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
-from app.services.strategy_price_basis import from_archive_basis
+from app.services.strategy_price_basis import from_undeclared_source
 
 #: The live corpus is today's tradable list, so every figure here inherits the
 #: survivorship label #2288 put on the research one. ``instrument_universe_
@@ -329,7 +329,11 @@ def arrears() -> bool:
                     universe=UNIVERSE,
                     masked_reason=MASKED_REASON,
                     regime=unconstrained_regime(len(series)),
-                    price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                    # ⚠ NO PINNED ARCHIVE ON THIS PATH, SO NO ARCHIVE BASIS TO PASS (#2840). This
+                    # used to read a literal ``"unadjusted"`` and was only safe because S-12's
+                    # ``AS_TRADED_UNIVERSES`` token refused every bar first; with the token gone the
+                    # literal would have certified a back-adjusted level against a nominal gate.
+                    price_basis=from_undeclared_source(n_bars=len(series)),
                 )
                 if s.signal_index == index
             }
@@ -340,7 +344,7 @@ def arrears() -> bool:
                     universe=UNIVERSE,
                     masked_reason=MASKED_REASON,
                     regime=unconstrained_regime(len(same_day)),
-                    price_basis=from_archive_basis("unadjusted", n_bars=len(same_day)),
+                    price_basis=from_undeclared_source(n_bars=len(same_day)),
                 )
                 if s.signal_index == same_day_index
             }
@@ -425,7 +429,7 @@ def cost() -> bool:
                 universe=UNIVERSE,
                 masked_reason=MASKED_REASON,
                 regime=unconstrained_regime(len(series)),
-                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                price_basis=from_undeclared_source(n_bars=len(series)),
             )
             if instrument_id not in at_frontier:
                 continue
@@ -463,7 +467,7 @@ def cost() -> bool:
             universe=UNIVERSE,
             masked_reason=MASKED_REASON,
             regime=unconstrained_regime(len(series)),
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            price_basis=from_undeclared_source(n_bars=len(series)),
         )
         if instrument_id not in at_frontier:
             continue
@@ -548,7 +552,7 @@ def truncation() -> bool:
                 universe=UNIVERSE,
                 masked_reason=MASKED_REASON,
                 regime=unconstrained_regime(len(series)),
-                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                price_basis=from_undeclared_source(n_bars=len(series)),
             )
             full = {(s.kind, s.verdict, s.reason) for s in emitted if s.signal_index == index}
             for window in TRUNCATION_WINDOWS:
@@ -564,7 +568,7 @@ def truncation() -> bool:
                         universe=UNIVERSE,
                         masked_reason=MASKED_REASON,
                         regime=unconstrained_regime(len(tail)),
-                        price_basis=from_archive_basis("unadjusted", n_bars=len(tail)),
+                        price_basis=from_undeclared_source(n_bars=len(tail)),
                     )
                     if s.signal_index == tail_index
                 }

@@ -242,13 +242,16 @@ def test_a_census_taken_at_a_different_gate_edge_is_refused(tmp_path: Path) -> N
         run(tmp_path, report(gate_edge="50"))
 
 
-def test_a_universe_the_rule_refuses_is_refused(tmp_path: Path) -> None:
-    """⚠ ``AS_TRADED_UNIVERSES`` is the rule's OWN declared set, hashed into its identity.
+def test_a_census_from_another_population_is_refused(tmp_path: Path) -> None:
+    """⚠⚠ A **POPULATION** refusal, and it used to be written as a price-basis one.
 
-    ``s12_signals`` refuses every bar outside it, so a census taken elsewhere measured a
-    strategy that returns ``not_evaluable`` on every row — and would still print counts.
+    It read S-12's ``AS_TRADED_UNIVERSES`` and matched on "does not accept as as-traded",
+    so when #2840 §6 item 3 removed that token the check looked redundant with the
+    ``cost_price_basis`` refusal beside it. It is not: every rate this script projects is
+    declared conditional on the survivorship-free 1962-2021 cross-section, and a
+    ``survivor_only`` census would be accepted while that sentence was still printed.
     """
-    with pytest.raises(ProjectionRefused, match="does not accept as as-traded"):
+    with pytest.raises(ProjectionRefused, match="conditional on the survivorship-free cross-section"):
         run(tmp_path, report(universe="survivor_only"))
 
 
