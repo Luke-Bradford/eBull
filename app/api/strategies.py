@@ -192,7 +192,7 @@ _TITLES = {
     "s9-squeeze-expansion": "Squeeze expansion",
     "s10-relative-strength-leader": "Relative-strength leader",
     "s11-volatile-regime-gated-breakout": "Volatility breakout (volatile markets only)",
-    "s12-cheapest-band-price-gated-breakout": f"Volatility breakout ({S12_BAND.label} shares only)",
+    "s12-cheapest-band-price-gated-breakout": f"Volatility breakout (shares over ${S12_BAND.lower})",
 }
 
 _PRESENTATION = {
@@ -245,10 +245,15 @@ _PRESENTATION = {
     #: "higher-priced shares only": a recalibration that moved the cheapest band's
     #: edge would leave the copy importable, true-ish and stale, which is the
     #: hardcoded-derived-statistic rule applied to operator-facing text. The
-    #: strategy refuses to import unless that band is open-above, so "``label`` and
-    #: up" is accurate by construction whatever the edge becomes.
+    #: strategy refuses to import unless that band is open-above, so "$``lower`` or
+    #: more" is accurate by construction whatever the edge becomes.
+    #:
+    #: ⚠ ``lower`` AND NOT ``label``. The label already carries its own comparator
+    #: (``>=$100``), so interpolating it after the word "priced" rendered
+    #: "priced >=$100 or more" — the comparator stated twice. The bound is the
+    #: number; the prose supplies the relation.
     "s12-cheapest-band-price-gated-breakout": (
-        f"The same volatility-compression breakout, but it only trades shares priced {S12_BAND.label} "
+        f"The same volatility-compression breakout, but it only trades shares priced at ${S12_BAND.lower} "
         f"or more — the cheapest dealing-cost band we charge ({S12_BAND.p75_spread_pct}% round trip).",
         "Up to 40 market days",
     ),
