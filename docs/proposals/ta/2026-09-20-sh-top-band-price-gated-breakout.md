@@ -406,6 +406,33 @@ quantity playing the role of arm 1's 14 dates and #2837's 3 drawdowns?
 count, the distinct signal-bar dates, the span and the same-day concentration. It loads
 no bar on or after `HOLDOUT_BOUNDARY`, reads no return and writes no row.
 
+Measured over the full in-sample population — 14,260 series evaluated, 1962-08-17 ..
+2021-06-25, 21,497 calendar days (58.9 years):
+
+| | fired | distinct fire-dates | median fires/date | max fires/date |
+| --- | ---: | ---: | ---: | ---: |
+| S-12, `masked` (production arm) | 44,842 | 4,916 | 2 | 168 |
+| S-12, `admitted` | 48,714 | 4,925 | 2 | 185 |
+| S-4, `masked` | 1,043,493 | 11,616 | 30 | 1,691 |
+| S-4, `admitted` | 1,087,285 | 11,619 | 31 | 1,762 |
+
+`N_masked <= N_admitted` holds on both axes, as predicted.
+
+⚠⚠ **This REFUTES the "date-dense" half of this document's own §"Measured premise".**
+That section says *"95.50% of in-sample dates carry at least one gated bar while only
+11.27% of series ever do. Name-sparse, date-dense."* Both figures are correct AS BAR
+COUNTS and the section labels them so. At the SIGNAL level the gate is far from
+date-neutral: it keeps **4.30%** of S-4's fires (44,842 of 1,043,493) but only **42.32%**
+of S-4's fire-dates (4,916 of 11,616). So S-12 is name-sparse and **date-thinning**, not
+date-dense, and the bar-level 95.50% overstates the date supply available to the rule by
+more than a factor of two. This is exactly what §"Measured premise" warned about when it
+said bar supply is an upper bound on signal supply *"and nothing more"* — the warning was
+right and the characterising sentence beside it was not.
+
+⚠ Fan-out is much lower than S-4's — median 2 fires per date against 30, and 1,797 of
+S-12's 4,916 dates (36.6%) carry exactly ONE fire. That is the quantity the floor's
+date denomination exists to protect against, and on this rule it is mild.
+
 ⚠ **A fired count is an UPPER bound on a trade count**, in both arms: an unusable fill
 open, a `superseded_open_position` collapse, and `namespace_for_signal`'s purge of a
 pre-boundary signal whose FILL crosses the boundary all sit between a fire and a costed
