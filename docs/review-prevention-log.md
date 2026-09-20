@@ -9435,3 +9435,83 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry; `scripts/verify_2437_s10_census.py` (`loaded: dict[int, BarSeries]`,
   three ignores removed); `.claude/skills/engineering/pre-push-checklist.md`'s bare
   `uv run pyright`.
+
+## An inherited PREREQUISITE is a premise too — re-derive the NECESSITY, not just the blocker
+
+- Symptom: #2840, 2026-09-20. Two prior close-outs of mine (`9246f77c`, `b9860cf2`) recorded
+  the next step as blocked because *"no forward corporate-action calendar exists"*. Working-order
+  3c says an inherited root-cause must be re-falsified, so I did re-derive the half that reads
+  like a root cause — that `bar_capture_certificate.py:416` downgrades every certifying verdict
+  while `PROVIDER_REWRITE_TIMING_VERIFIED` is `False`, and therefore gates the whole line. That
+  part was true. I then built against the *other* half, which nobody had ever derived: that
+  moving the flag REQUIRES knowing an effective instant in advance.
+- ⛔ It does not. Codex checkpoint 1 (finding 58): *"Advance knowledge of the effective instant
+  is not logically necessary. Continuous capture, or discovery after effectiveness but before
+  open, can still obtain the required observation."* The flag needs one bar that SITS in the
+  window, not a bar captured BECAUSE the window was known. A pre-open capture across a panel
+  produces it for whatever re-denominates, and the event is identified retrospectively from the
+  register `308d1e38` already built. Measured the same session: **10,127 bars over 8 instruments
+  were already captured before 09:30 ET**, so the corrected route was live on the box while the
+  blocker was being restated.
+- ⚠⚠ The failure mode is RE-DERIVING HALF A PREMISE AND FEELING DONE. A handoff of the form
+  "X is blocked because Y is missing" carries two claims — that X is blocked, and that Y is what
+  unblocks it. Checking the first is the easy, satisfying one, and it certifies nothing about the
+  second. A prerequisite is a claim about NECESSITY, and necessity is the half that decays
+  silently across sessions because each reader inherits it as already-checked.
+- Prevention: when a handoff names a prerequisite, write the necessity claim out as a sentence —
+  *"X cannot happen without Y"* — and attack THAT sentence directly by asking what else would
+  produce X. If no alternative route was ever enumerated, the prerequisite has not been derived,
+  only asserted. ⚠ Tell: the same blocker phrase appearing verbatim in two consecutive close-outs
+  with no measurement attached to it.
+- Enforced in: this entry; `docs/proposals/ta/2026-09-20-2840-the-forward-announcement-source.md`
+  §0 and §6.
+
+## A structured-field check that cannot see its target reports the same zero as one that looked
+
+- Symptom: #2840, 2026-09-20. "A classifier over source text is a data-treatment decision" tells
+  you to check for a structured field first and record the check. I did, and wrote a detector
+  over inline-XBRL element names to turn "no structured split fact exists on an 8-K cover page"
+  from an assertion into a measurement. Codex checkpoint 1 defeated it three ways before it ever
+  ran on the population: it matched **any** HTML `name=` attribute (a plain anchor
+  `name="effective-date"` scored as a hit), it missed `name = "…"` with whitespace around the
+  `=` which XML permits, and its vocabulary omitted **consolidation** — the reverse split's own
+  other name, which the direction regex three lines away already matched.
+- ⚠⚠ Every one of those failures returns ZERO, which is the same answer a correct detector would
+  have given if the claim were true. The measurement was therefore unfalsifiable in the direction
+  that mattered, while reading as evidence because it was a measurement rather than an assertion.
+  Upgrading an assertion to a measurement is only progress if the measurement could have come
+  back the other way.
+- ⚠ A second half, from the same finding: SEC staff guidance requires tagging **all** cover-page
+  information, not only identifiers, so searching two substrings could not have established
+  absence even with a correct detector.
+- Prevention: before quoting a zero from a detector, feed it a POSITIVE control you constructed —
+  the exact shape you claim is absent — and confirm it fires. A detector that has never returned
+  non-zero has not been tested, it has only been run. ⚠ And derive its vocabulary from the
+  synonyms the surrounding code already knows: "consolidation" was in the same file.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-20-2840-the-forward-announcement-source.md` §2.
+
+## Mirroring a regex BOUND copies the corpus assumption it was tuned on
+
+- Symptom: #2840, 2026-09-20. Reusing `dividend_calendar`'s label-extraction idiom, I took its
+  `[^.]{0,120}` window — the guard that stops "effective" in one sentence binding to a date in
+  the next. On split text it silently failed the exact shape the rule existed for:
+  *"effective at 12:01 a.m. Eastern Time on October 3, 2026"* carries two periods inside `a.m.`,
+  so the bound stopped short and a delayed-effectiveness reverse split read as having no date.
+  Dividend announcements put no clock between their label and their date, so the idiom's corpus
+  assumption travelled with the characters.
+- ⛔ And the obvious fix re-broke the thing the bound protected. Stripping abbreviation periods
+  also deletes the period that ENDS a sentence, so *"became effective at 5 p.m. Results are due
+  October 3, 2026"* then returned 3 October with full confidence — a date belonging to a
+  different fact. The two guards were fighting and the loose window let the loser through
+  silently. ⚠ It is irreducible: in *"…5 p.m. On October 3, 2026, the Company will report"* that
+  period IS a sentence end, and no local rule separates the two.
+- Prevention: a reused regex bound is a reused ASSUMPTION about what sits between the anchor and
+  the target. Before copying one, write down what the source corpus never puts in that gap and
+  check whether yours does. ⚠ And when a bound has to be relaxed, re-test the case the bound was
+  originally added for — the relaxation's first casualty is usually the guard's own motivating
+  example. The durable fix here was not a wider window but a BINDER: requiring the target to be
+  introduced by an explicit token adjacent to it, so distance stops being the only evidence of
+  association.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-20-2840-the-forward-announcement-source.md` §3.
