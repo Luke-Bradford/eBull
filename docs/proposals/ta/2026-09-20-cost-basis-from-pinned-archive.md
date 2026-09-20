@@ -491,10 +491,19 @@ have reached the curve rather than raised. The carried value is now `_usable`-ch
 
 **`Decimal(repr(float))` at a band edge — measured, not argued.** The comparator bands
 from a float array, so a stored value within a double-epsilon of 5/20/100 could round
-across. Max scale on `research_price_daily` is **22 decimal places over 75,972,669
-rows**, which looks alarming until the values are read: `32.54649353027344` is the exact
-decimal expansion of a **float32**. These NUMERICs *originate* as floats, so the
-`Decimal → float64` conversion is exact.
+across. Max scale on `research_price_daily` is **22 decimal places over 75,972,669 rows**.
+
+⚠⚠ **The first version of this section explained that away with an argument that is false,
+and checkpoint 3 caught it.** It read: *"`32.54649353027344` is the exact decimal expansion
+of a float32, so the `Decimal → float64` conversion is exact."* It is not the exact
+expansion — it is the **shortest repr** of the float; the float32's exact value is
+`32.5464935302734375`. `Decimal(repr(x))` round-trips to the same float but does not equal
+that float's exact mathematical value (`Decimal.from_float` does). Float provenance
+establishes nothing here.
+
+**The census is the whole argument**, and it bounds the mechanism far more tightly than it
+needs to: a crossing requires the stored decimal within about half an ulp of an edge —
+`8.9e-16` at `5.0` — and the census window is `1e-9`, about a million times wider.
 
 ```sql
 select count(*) filter (where open_at_risk), count(*) filter (where close_at_risk), count(*)
@@ -504,8 +513,11 @@ from (select (open <> 5 and abs(open - 5) < 1e-9) or (open <> 20 and abs(open - 
 ```
 
 **0 of 75,972,669** open/close values sit within `1e-9` of a band edge without being
-equal to it. ⚠ The synthetic control does not have this exposure at all — `OHLCVRow.open`
-is a `Decimal` and `cost_band_for` receives it unconverted.
+equal to it. ⚠ The hazard itself is real and reproducible on a value this corpus does not
+hold — `float(Decimal("4.9999999999999999")) == 5.0` picks the cheaper band — and the
+precision is lost when the float array is BUILT, so `repr` is not the lever. ⚠ The
+synthetic control does not have this exposure at all — `OHLCVRow.open` is a `Decimal` and
+`cost_band_for` receives it unconverted.
 
 **The `COST_MODEL_ID` bump rotates every strategy identity** (`entry.identity(...,
 cost_model_id=COST_MODEL_ID)`), which the spec had not costed. Measured with the existing
@@ -574,7 +586,11 @@ equality doubles as the detector for bar data moving between arms.
 - *"Cardinality must move 1 → >1"* was in the first draft and is wrong as a gate; it is
   now a reported diagnostic. Checkpoint 1 is right that a benchmark can legitimately keep
   one band while the strategy's opens span several.
-- *"Retain the original `Decimal` in the comparator"* — declined on the measurement above.
-  `_dense_price_history` builds a compact `array("d")` deliberately, and carrying
-  `Decimal`s through it to close a gap measured at zero occurrences would cost the memory
-  that array exists to save.
+- *"Retain the original `Decimal` in the comparator"* — declined on the MEASUREMENT and on
+  cost, not on an exactness argument (see the correction above).
+  `_dense_price_history` builds a compact `array("d")` deliberately — its own comment puts
+  it at ~25M floats against the 85M a dense panel would need — and carrying `Decimal`s
+  through it to close a gap measured at zero occurrences would cost the memory that array
+  exists to save. ⚠ Checkpoint 3 is right that the residual risk is a FUTURE archive whose
+  values are not float-derived; that is recorded here rather than pre-solved, and the
+  remedy if it ever arrives is a precomputed per-bar band identifier, not a `repr` change.

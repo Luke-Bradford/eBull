@@ -63,6 +63,7 @@ from app.services.synthetic_control_run import (
     WorkerCanaryBudgetExceeded,
     WorkerCanaryConfig,
     _attach_shared_member_inputs,
+    _eligible_fill_bars,
     _half_spread_for,
     _MemberInputs,
     _place_member,
@@ -1212,3 +1213,166 @@ class TestTheNullIsChargedPerBand:
         for price in ("0.5", "3", "12", "45", "250", "9999"):
             assert _half_spread_for(Decimal(price), price_basis="split_adjusted") == _HALF_SPREAD
         assert _half_spread_for(Decimal("250"), price_basis="as_traded") != _HALF_SPREAD
+
+
+class TestTheNullBandsTheNominalOpenAndNotTheCarriedOne:
+    """#3238 ckpt-3 — this drives the REAL `_eligible_fill_bars`, not a fixture.
+
+    ⚠⚠ ``TestTheNullIsChargedPerBand`` builds its placements by calling
+    ``cost_band_for`` itself, so it proves what a correctly-built placement does
+    and CANNOT catch production selecting the band from the carried price. That
+    is the #2400 error the whole ticket is about, and it needs a test that lets
+    production do the selecting.
+
+    The discriminator is a total-return factor far from 1: the raw open is $250
+    (``>=$100``, the CHEAPEST band) while the carried open is $2.50 (``<$5``,
+    the DEAREST). The two answers differ by 4.5x, so no rounding or tolerance
+    can confuse them.
+    """
+
+    _RAW_OPEN = Decimal("250")
+    _CARRY = 0.01  # wealth_close / raw_close — pushes the carried open to $2.50
+
+    def _collector(self) -> CohortCollector:
+        bars = 12
+        dates = AXIS[:bars]
+        rows: tuple[OHLCVRow, ...] = tuple(
+            OHLCVRow(
+                open=self._RAW_OPEN,
+                high=self._RAW_OPEN * Decimal("1.01"),
+                low=self._RAW_OPEN * Decimal("0.99"),
+                close=self._RAW_OPEN,
+                volume=1000,
+            )
+            for _ in range(bars)
+        )
+        series = BarSeries(dates=dates, rows=rows)
+        ledger = [
+            LedgerRow(
+                strategy_id="fixture",
+                strategy_version="v1",
+                instrument_id=1,
+                signal_bar_date=when,
+                signal_kind="entry",
+                verdict="not_fired",
+                universe="survivorship_free",
+                input_rule_set_versions={"fixture": "v1"},
+                not_evaluable_reason=None,
+            )
+            for when in dates
+        ]
+        raw_closes = [float(self._RAW_OPEN)] * bars
+        wealth_closes = [float(self._RAW_OPEN) * self._CARRY] * bars
+        collector = CohortCollector(window=Window(dates[0], dates[-1]), price_basis="as_traded")
+        collector.collect(
+            rows=ledger,
+            series=series,
+            costed=[],
+            axis_pos={when: index for index, when in enumerate(dates)},
+            raw_closes=raw_closes,
+            wealth_closes=wealth_closes,
+            first_axis_index=0,
+        )
+        return collector
+
+    def test_the_fixture_actually_discriminates(self) -> None:
+        """⚠ Asserted FIRST. If the raw and carried opens shared a band, every
+        assertion below would pass on the defective code too."""
+        carried = self._RAW_OPEN * Decimal(repr(self._CARRY))
+        assert cost_band_for(self._RAW_OPEN, price_basis="as_traded").label == ">=$100"
+        assert cost_band_for(carried, price_basis="as_traded").label == "<$5"
+
+    def test_production_selects_the_band_from_the_raw_open(self) -> None:
+        collector = self._collector()
+        # ``costed=[]`` means no realised hold, so the collector keeps no
+        # placement — drive the eligible-bar builder the same way it does.
+        assert collector.placements == []
+
+    def test_eligible_bars_carry_the_raw_bands_and_the_carried_prices(self) -> None:
+        """The two halves of `_eligible_fill_bars`, checked against each other.
+
+        ⚠ This is the assertion that would fail if the band were read off
+        ``carried``: the PRICE is the carried one ($2.50) and the BAND is the
+        raw one (``>=$100``). A defect that banded the carried price would still
+        produce a perfectly self-consistent pair — just the wrong one — which is
+        why both are asserted rather than only the band.
+        """
+        bars = 12
+        dates = AXIS[:bars]
+        rows: tuple[OHLCVRow, ...] = tuple(
+            OHLCVRow(
+                open=self._RAW_OPEN,
+                high=self._RAW_OPEN,
+                low=self._RAW_OPEN,
+                close=self._RAW_OPEN,
+                volume=1000,
+            )
+            for _ in range(bars)
+        )
+        series = BarSeries(dates=dates, rows=rows)
+        ledger = [
+            LedgerRow(
+                strategy_id="fixture",
+                strategy_version="v1",
+                instrument_id=1,
+                signal_bar_date=when,
+                signal_kind="entry",
+                verdict="not_fired",
+                universe="survivorship_free",
+                input_rule_set_versions={"fixture": "v1"},
+                not_evaluable_reason=None,
+            )
+            for when in dates
+        ]
+        _, _, adjusted, half_spreads = _eligible_fill_bars(
+            rows=ledger,
+            series=series,
+            bar_of={when: index for index, when in enumerate(dates)},
+            axis_pos={when: index for index, when in enumerate(dates)},
+            window=Window(dates[0], dates[-1]),
+            raw_closes=[float(self._RAW_OPEN)] * bars,
+            wealth_closes=[float(self._RAW_OPEN) * self._CARRY] * bars,
+            first_axis_index=0,
+            price_basis="as_traded",
+        )
+        assert half_spreads, "the fixture produced no eligible fill bar"
+        raw_h = float(cost_band_for(self._RAW_OPEN, price_basis="as_traded").half_spread)
+        carried_h = float(cost_band_for(self._RAW_OPEN * Decimal("0.01"), price_basis="as_traded").half_spread)
+        assert set(half_spreads) == {raw_h}
+        assert raw_h != carried_h
+        # …while the PRICE really is the carried one, so the two are not simply
+        # both reading the same number.
+        assert adjusted == pytest.approx([float(self._RAW_OPEN) * self._CARRY] * len(adjusted))
+
+    def test_a_split_adjusted_run_still_takes_the_maximum_band_here(self) -> None:
+        bars = 6
+        dates = AXIS[:bars]
+        rows: tuple[OHLCVRow, ...] = tuple(
+            OHLCVRow(open=self._RAW_OPEN, high=self._RAW_OPEN, low=self._RAW_OPEN, close=self._RAW_OPEN, volume=1)
+            for _ in range(bars)
+        )
+        _, _, _, half_spreads = _eligible_fill_bars(
+            rows=[
+                LedgerRow(
+                    strategy_id="fixture",
+                    strategy_version="v1",
+                    instrument_id=1,
+                    signal_bar_date=when,
+                    signal_kind="entry",
+                    verdict="not_fired",
+                    universe="survivor_only",
+                    input_rule_set_versions={"fixture": "v1"},
+                    not_evaluable_reason=None,
+                )
+                for when in dates
+            ],
+            series=BarSeries(dates=dates, rows=rows),
+            bar_of={when: index for index, when in enumerate(dates)},
+            axis_pos={when: index for index, when in enumerate(dates)},
+            window=Window(dates[0], dates[-1]),
+            raw_closes=[float(self._RAW_OPEN)] * bars,
+            wealth_closes=[float(self._RAW_OPEN)] * bars,
+            first_axis_index=0,
+            price_basis="split_adjusted",
+        )
+        assert set(half_spreads) == {_HALF_SPREAD}

@@ -283,29 +283,49 @@ def _charge_moved(control: NamespaceMeasurement, treatment: NamespaceMeasurement
         # No realised leg: nothing was charged on either side, so "it moved" is
         # not a question this namespace can answer either way.
         return unmoved
-    if control.half_spreads == treatment.half_spreads:
+    strategy_moved = control.half_spreads != treatment.half_spreads
+    comparator_moved = control.metrics.buy_and_hold_return_pct != treatment.metrics.buy_and_hold_return_pct
+    # ⚠⚠ THE GATE IS ASYMMETRY, NOT MOVEMENT (ckpt-3). Requiring movement has
+    # the same defect the direction test had: a population whose entries ALL sit
+    # in the maximum band re-prices to exactly the same charge under either
+    # basis, so a correct run would be reported as broken wiring. What is never
+    # correct is one consumer moving while another does not — that is precisely
+    # the partial fix this ticket exists to prevent, and it is detectable
+    # without assuming anything about the population.
+    if strategy_moved and not comparator_moved:
         unmoved.append(
-            f"the STRATEGY's charge did not move: both arms charged {sorted(control.half_spreads)} — "
-            "the cost_positions call sites are still on one basis"
+            "the STRATEGY re-priced but the BUY-AND-HOLD COMPARATOR did not "
+            f"(buy_and_hold_return_pct {control.metrics.buy_and_hold_return_pct} on both arms) — "
+            "_benchmark_book is still on the maximum band, so return_vs_buy_and_hold_pct is flattering the strategy"
         )
-    if control.metrics.buy_and_hold_return_pct == treatment.metrics.buy_and_hold_return_pct:
+    if comparator_moved and not strategy_moved:
         unmoved.append(
-            "the BUY-AND-HOLD COMPARATOR's charge did not move "
-            f"({control.metrics.buy_and_hold_return_pct}) — _benchmark_book is still on the maximum band, so "
-            "return_vs_buy_and_hold_pct is flattering the strategy"
+            "the BUY-AND-HOLD COMPARATOR re-priced but the STRATEGY did not "
+            f"(both arms charged {sorted(control.half_spreads)}) — the cost_positions call sites are still on a "
+            "literal, so the comparison is biased against the strategy"
         )
     return unmoved
 
 
 def _null_moved(control: ArmMeasurement, treatment: ArmMeasurement) -> list[str]:
-    """The synthetic control is the third consumer and the easiest to forget."""
+    """The synthetic control is the third consumer and the easiest to forget.
+
+    ⚠ Same asymmetry rule as ``_charge_moved``: the null failing to move is only
+    a defect when the STRATEGY moved. An all-maximum-band placement space
+    re-prices to itself under either basis.
+    """
     if control.cohort is None or treatment.cohort is None:
         return []
-    if control.cohort.control.mean_return_pct == treatment.cohort.control.mean_return_pct:
+    strategy_moved = any(
+        control.namespaces[name].half_spreads != treatment.namespaces[name].half_spreads
+        for name in control.namespaces
+        if name in treatment.namespaces
+    )
+    if strategy_moved and control.cohort.control.mean_return_pct == treatment.cohort.control.mean_return_pct:
         return [
-            "the SYNTHETIC CONTROL's charge did not move "
-            f"({control.cohort.control.mean_return_pct}) — the null is still costed at the maximum band while "
-            "the strategy is not, which manufactures a synthetic_control_passed the run did not earn"
+            "the STRATEGY re-priced but the SYNTHETIC CONTROL did not "
+            f"(mean_return_pct {control.cohort.control.mean_return_pct} on both arms) — the null is still costed at "
+            "the maximum band, which manufactures a synthetic_control_passed the run did not earn"
         ]
     return []
 
@@ -345,7 +365,15 @@ def main() -> None:
             "spec_cohort_size": backtest_run.SPEC_COHORT_SIZE,
             "control_basis": control_corpus.cost_price_basis,
             "treatment_basis": treatment_corpus.cost_price_basis,
-            "evaluate_arm_site_exercised": not (treatment_corpus.termination != {}),
+            # ⚠ ckpt-3: terminations are not the only thing that routes away from
+            # ``evaluate_arm``. ``run_backtest`` sends a LEVEL-BASED strategy to
+            # ``evaluate_level_arms`` too, so a corpus with no terminations can
+            # still leave the ordinary call site unexercised. Both conditions, in
+            # the same order the runner applies them.
+            "evaluate_arm_site_exercised": not (
+                _regime_for(STRATEGY_MANIFEST[args.strategy], treatment_corpus.axis).level_based
+                or treatment_corpus.termination
+            ),
         }
         print(json.dumps({"header": header}, indent=2, default=str), flush=True)
         if args.limit is not None:
@@ -405,10 +433,24 @@ def main() -> None:
             print(f"  - {reason}", flush=True)
     if violations or unmoved:
         raise SystemExit(1)
+    # ⚠ ckpt-3: the success line is SCOPED to what actually ran. `--no-cohort`,
+    # or a scale refusal on both arms, means no null was compared — and claiming
+    # "ALL re-priced" there would assert the one thing this run did not check.
+    cohorts_compared = sum(
+        1 for key in control_arms if control_arms[key].cohort is not None and treatment_arms[key].cohort is not None
+    )
+    consumers = "the strategy and its buy-and-hold comparator"
+    if cohorts_compared:
+        consumers += f" and its synthetic control ({cohorts_compared} cohort(s) compared)"
     print(
         "\n✅ every leg, hold, gross return, exclusion and termination is identical; "
-        "the strategy, its buy-and-hold comparator and its synthetic control ALL re-priced."
+        f"no charge consumer moved without the others — {consumers} re-priced together."
     )
+    if not cohorts_compared:
+        print(
+            "⚠ NO SYNTHETIC CONTROL WAS COMPARED on this run (--no-cohort, or refused on both arms). "
+            "The null's own re-pricing is NOT evidenced here — run without --no-cohort to check it."
+        )
 
 
 if __name__ == "__main__":

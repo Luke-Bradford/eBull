@@ -9132,15 +9132,35 @@ original, because the gate now *looked* like a bound.
   the anchor cannot rot silently; when re-anchoring, re-point it at the NEW invariant
   (`price_basis=corpus.cost_price_basis`, the selector's body) rather than deleting the
   probe.
-- ⚠ **A float round-trip at a threshold is a real mechanism and still worth measuring
-  before engineering around it.** The comparator bands from an `array("d")`, so a stored
-  price within a double-epsilon of 5/20/100 could round across. Max scale on
-  `research_price_daily` is 22 dp over 75,972,669 rows — alarming until the values are
-  read: `32.54649353027344` is the exact decimal expansion of a float32, so the
-  `Decimal → float64` conversion is exact. **0 of 75,972,669** values sit within `1e-9` of
-  a band edge without equalling it. Prevention: cite the query and its two numbers; the
-  remedy (carrying `Decimal`s through a compact array built to save memory) would have
-  cost more than the risk it removed.
+- ⚠ **A float round-trip at a threshold is a real mechanism; measure it, and do not defend it
+  with an exactness argument that does not hold.** The comparator bands from an `array("d")`,
+  so a stored price within a double-epsilon of 5/20/100 could round across. Max scale on
+  `research_price_daily` is 22 dp over 75,972,669 rows, and the first draft of this entry
+  explained that away as *"the values are exact decimal expansions of float32s, so the
+  conversion is exact"*. **That is false and Codex ckpt-3 caught it.** `32.54649353027344` is
+  the SHORTEST REPR of the float, not its exact value — the float32's exact value is
+  `32.5464935302734375`. `Decimal(repr(x))` round-trips back to the same float but does not
+  equal the float's exact mathematical value (`Decimal.from_float` does), so float provenance
+  establishes nothing about band selection.
+  The census is the entire argument, and it is a far wider bound than the mechanism needs: a
+  crossing requires the stored decimal within about half an ulp of an edge — `8.9e-16` at
+  `5.0` — while the census window is `1e-9`, roughly **a million times wider**, and returns
+  **0 of 75,972,669**.
+
+  ```sql
+  select count(*) filter (where open_at_risk), count(*) filter (where close_at_risk), count(*)
+  from (select (open <> 5 and abs(open - 5) < 1e-9) or (open <> 20 and abs(open - 20) < 1e-9)
+             or (open <> 100 and abs(open - 100) < 1e-9) as open_at_risk, ... from research_price_daily) t
+  --  (0, 0, 75972669)
+  ```
+
+  ⚠ The hazard is reproducible on a value this corpus does not contain —
+  `float(Decimal("4.9999999999999999")) == 5.0`, selecting the cheaper band — and the
+  precision is lost when the float array is BUILT, so `repr` is not the lever. Prevention:
+  when declining a precision remedy, decline it on the measurement and on cost (threading
+  `Decimal`s through `_dense_price_history` costs the memory its compact `array("d")` exists
+  to save), never on a plausible-sounding exactness claim. ⚠ The synthetic control has no
+  exposure at all: `OHLCVRow.open` is a `Decimal` and reaches `cost_band_for` unconverted.
 - Enforced in: this entry; `app/services/cost_model.py` (`cost_price_basis`,
   `COST_MODEL_ID`); `app/services/backtest_run.py` (`_Corpus.cost_price_basis`,
   `load_corpus`, `_resolve_liquidity_policy`, `_benchmark_book`);

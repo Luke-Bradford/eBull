@@ -1476,6 +1476,14 @@ def _benchmark_book(
         # ⚠ A comparator leg bands on its entry CLOSE where a strategy leg bands
         # on its entry OPEN, because the comparator's entry IS that close. The
         # asymmetry is in the fills, not in the banding rule.
+        # ⚠ ``Decimal(repr(...))`` matches the idiom two lines below and
+        # recovers THIS float exactly — but it is not the float's exact
+        # mathematical value (``Decimal.from_float`` would be), so it is not an
+        # exactness guarantee about band selection. What licenses banding off a
+        # float here is a measurement: a crossing needs the stored decimal
+        # within about half an ulp of an edge (8.9e-16 at 5.0), and 0 of
+        # 75,972,669 ``research_price_daily`` open/close values sit within 1e-9
+        # of 5/20/100 without equalling it. #3238 records the query.
         half = cost_band_for(Decimal(repr(entry_close)), price_basis=price_basis).half_spread
         book.add(
             entry_index=start + entry_offset - lo,
