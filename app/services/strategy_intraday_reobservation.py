@@ -288,16 +288,23 @@ def _cast_to_storage(conn: psycopg.Connection[Any], bar: ProviderBar) -> _Values
     """
     volume = None if bar.volume is None else Decimal(bar.volume)
     try:
-        row = conn.execute(
-            _CAST_TO_STORAGE,
-            {
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": volume,
-            },
-        ).fetchone()
+        # ⚠ The cast runs inside its own transaction block — a SAVEPOINT when the
+        # caller already holds a transaction. Catching the error is not enough:
+        # PostgreSQL leaves the enclosing transaction ABORTED, so on a non-autocommit
+        # connection every later statement (including the outcome insert and the
+        # cursor advance) would fail with InFailedSqlTransaction. Scoping the
+        # rollback is what makes "count this one bar invalid and carry on" true.
+        with conn.transaction():
+            row = conn.execute(
+                _CAST_TO_STORAGE,
+                {
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": volume,
+                },
+            ).fetchone()
     except psycopg.DataError:
         return None
     if row is None:  # pragma: no cover — a bare SELECT of literals always yields a row
@@ -310,16 +317,29 @@ def _cast_to_storage(conn: psycopg.Connection[Any], bar: ProviderBar) -> _Values
 
 
 def _is_storable(values: _Values) -> bool:
-    """Refuse non-finite or non-positive prices on either side of a comparison.
+    """Refuse anything ``strategy_intraday_reobserved_bars`` would refuse.
+
+    ⚠ This mirrors EVERY value CHECK on that table, not just finiteness: positivity,
+    the OHLC shape, and non-negative volume.  A candle that passes here and then fails
+    the insert does not cost one bar — the batch insert is one statement inside one
+    transaction, so it would roll back every valid comparison in the call and report
+    ``comparison_skipped``.  Turning one malformed candle into a lost call is exactly
+    the outcome ``invalid_baseline_bars`` exists to prevent, and the eToro normalizer
+    permits both shapes (it skips only candles that fail to parse).
 
     ``strategy_intraday_bars`` CHECKs ``open > 0``, which excludes NaN but NOT
-    ``Infinity``, so a stored baseline can in principle be non-finite too.  Both
-    sides are validated, not just the delivered one.
+    ``Infinity``, so a stored baseline can in principle be non-finite too.  Both sides
+    are validated, not just the delivered one.
     """
     prices = (values.open, values.high, values.low, values.close)
     if any(value != value or value in (float("inf"), float("-inf")) or value <= 0 for value in prices):
         return False
-    if values.volume is not None and (values.volume != values.volume or values.volume in (float("inf"), float("-inf"))):
+    if values.high < max(values.open, values.close, values.low):
+        return False
+    if values.low > min(values.open, values.close, values.high):
+        return False
+    volume = values.volume
+    if volume is not None and (volume != volume or volume in (float("inf"), float("-inf")) or volume < 0):
         return False
     return True
 

@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 
+from app.providers.market_data import IntradayBar as ProviderBar
 from app.providers.market_data import MarketDataProvider
 from app.services import strategy_intraday_harvest
 from app.services.strategy_intraday_harvest import run_intraday_harvest
@@ -246,3 +247,74 @@ def test_counters_reconcile_against_the_bar_rows_they_claim(
                                      AND b.price_changed)
         """
     ).fetchone() == (0,)
+
+
+def _malformed(stamp: str) -> ProviderBar:
+    """A candle the eToro normalizer accepts but our tables refuse: high < close."""
+    return ProviderBar(
+        timestamp=datetime.fromisoformat(stamp),
+        open=Decimal("100"),
+        high=Decimal("100"),
+        low=Decimal("99"),
+        close=Decimal("101"),
+        volume=100,
+    )
+
+
+def test_one_malformed_candle_costs_one_bar_not_the_whole_call(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The batch insert is one statement in one transaction.
+
+    A candle that passes the Python guard and then fails a table CHECK would roll back
+    every valid comparison in the call and report ``comparison_skipped`` — turning one
+    bad candle into a lost call, which is what ``invalid_baseline_bars`` exists to stop.
+    """
+    _activate_test_universe(ebull_test_conn, instrument_id=2_840_009)
+    _fire(ebull_test_conn, _provider("100"))
+
+    mixed = MagicMock(spec=MarketDataProvider)
+    mixed.get_intraday_candles.return_value = [
+        _bar(_STAMPS[0], "100"),
+        _malformed(_STAMPS[1]),
+        _bar(_STAMPS[2], "100"),
+    ]
+    second = run_intraday_harvest(ebull_test_conn, mixed, observed_at=_OBSERVED, max_requests=1)
+
+    assert second.failures == ()
+    assert second.compared == 2
+    assert _calls(ebull_test_conn)[1][1:6] == ("compared", 3, 2, 2, 0)
+    assert ebull_test_conn.execute(
+        "SELECT invalid_baseline_bars FROM strategy_intraday_reobservations ORDER BY reobservation_id"
+    ).fetchall() == [(0,), (1,)]
+
+
+def test_an_out_of_range_value_does_not_poison_the_transaction(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Catching the cast error is not enough — PostgreSQL leaves the transaction ABORTED.
+
+    Without a savepoint every later statement in the call, including the outcome insert
+    and the cursor advance, fails with ``InFailedSqlTransaction``.
+    """
+    _activate_test_universe(ebull_test_conn, instrument_id=2_840_010)
+    _fire(ebull_test_conn, _provider("100"))
+
+    overflowing = MagicMock(spec=MarketDataProvider)
+    overflowing.get_intraday_candles.return_value = [
+        ProviderBar(
+            timestamp=datetime.fromisoformat(_STAMPS[0]),
+            open=Decimal("1e1000"),
+            high=Decimal("1e1000"),
+            low=Decimal("1e1000"),
+            close=Decimal("1e1000"),
+            volume=100,
+        ),
+        _bar(_STAMPS[1], "100"),
+        _bar(_STAMPS[2], "100"),
+    ]
+    second = run_intraday_harvest(ebull_test_conn, overflowing, observed_at=_OBSERVED, max_requests=1)
+
+    assert second.failures == ()
+    assert second.compared == 2
+    assert _calls(ebull_test_conn)[1][1:6] == ("compared", 3, 2, 2, 0)

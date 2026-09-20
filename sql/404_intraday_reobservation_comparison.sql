@@ -208,13 +208,15 @@ CREATE TABLE IF NOT EXISTS strategy_intraday_reobserved_bars (
     -- ⚠⚠ COMPARISON IS AT STORAGE PRECISION, AND PRICE-ONLY.
     --
     -- The provider constructs `Decimal(str(raw))` (etoro.py:706-709) while sql/277 stores
-    -- DOUBLE PRECISION, so a naive `Decimal == float` is exact and therefore FALSE for
-    -- almost every bar — it would manufacture a divergence on every comparison. The
-    -- delivered Decimal is converted with `float(d)`, which is the same value PostgreSQL
-    -- produces for `numeric::double precision` (verified on 3,006 values including
-    -- 1.0000000000000002 and 20-digit inputs: zero mismatches). Two Decimals differing
-    -- below float resolution therefore compare EQUAL. That is a stated limit of the
-    -- detector, not a defect.
+    -- DOUBLE PRECISION, so a naive `Decimal == float` is exact and therefore FALSE for any
+    -- price not representable in binary — it would manufacture a divergence on nearly
+    -- every non-integer bar. POSTGRESQL does the narrowing, with
+    -- `%(x)s::numeric::double precision`: the identical conversion `store_intraday_bars`
+    -- triggers by passing a Decimal into a DOUBLE PRECISION column. Python's `float(d)`
+    -- is a SECOND conversion path — it agrees across the ordinary price domain but
+    -- returns `inf` for values PostgreSQL rejects — so it is deliberately not used.
+    -- Two Decimals differing below float resolution therefore compare EQUAL. That is a
+    -- stated limit of the detector, not a defect.
     --
     -- Volume is NOT a divergence trigger. `etoro._int_or_none` evaluates
     -- `int(float(str(value)))` and maps a result of zero to NULL, so a genuinely
