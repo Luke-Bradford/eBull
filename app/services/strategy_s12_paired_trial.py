@@ -434,7 +434,9 @@ def _union_axis(
         pooled = clusters.trade_counts.sum()
         if pooled != clusters.trade_count:
             raise S12PairedTrialRefused(
-                f"a cluster axis holds {pooled!r} trades but declares {clusters.trade_count} — the point estimate "
+                # ⚠ ``!s``, not ``!r`` (review NITPICK, PR #3245): a NumPy scalar's
+                # repr is ``np.float64(250.4)``, which reads as a type error in a log.
+                f"a cluster axis holds {pooled!s} trades but declares {clusters.trade_count} — the point estimate "
                 "and the declared population would divide by different nominal counts"
             )
         for day, count, total in zip(clusters.dates, clusters.trade_counts, clusters.return_sums):
