@@ -473,11 +473,19 @@ def test_the_smallest_panel_can_express_every_declared_share() -> None:
     """⚠ REVIEW WARNING 3 — a literal floor of 2 was accepted and then crashed at 0.75.
 
     The floor is derived from the grid, so adding a more extreme share moves it.
+
+    ⚠ The PROPERTY is asserted, not the value. Writing ``MIN_PANEL_SIZE == 4`` would
+    couple this test to today's grid and need updating in lockstep with it — the same
+    hardcoded-derived-value trap the constant was introduced to remove.
     """
-    assert MIN_PANEL_SIZE == 4
     for share in SUB_GATE_SHARE_GRID:
         above, below = _split_panel(MIN_PANEL_SIZE, share)
         assert above >= 1 and below >= 1 and above + below == MIN_PANEL_SIZE
+    # …and it is the SMALLEST such size: one share below it cannot be expressed.
+    assert MIN_PANEL_SIZE >= 2
+    with pytest.raises(ProjectionRefused, match="must straddle"):
+        for share in SUB_GATE_SHARE_GRID:
+            _split_panel(MIN_PANEL_SIZE - 1, share)
 
 
 def test_a_census_whose_strategies_saw_different_bar_counts_is_refused(tmp_path: Path) -> None:
