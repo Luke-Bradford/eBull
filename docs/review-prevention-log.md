@@ -9569,3 +9569,42 @@ original, because the gate now *looked* like a bound.
   evidence about it.
 - Enforced in: this entry;
   `docs/proposals/ta/2026-09-20-2840-re-observation-is-not-capture.md` §0 and §2.
+
+## A caught DB error leaves the transaction ABORTED, so the recovery write is itself unsafe
+
+- Symptom: #2840, 2026-09-21. An `except Exception` around a database call wrote a
+  "record what went wrong" row on the **same connection**. On a non-autocommit connection
+  PostgreSQL has already put that transaction in `INERROR`, so the recovery write raised
+  `InFailedSqlTransaction` — and because the recovery helper swallowed its own failures,
+  the damage surfaced two steps later: the cursor advance failed, and so did **every
+  later member of the loop**. The failure that broke the run was never the one reported.
+- ⚠ The obvious remedy does not work. `conn.rollback()` raises
+  `ProgrammingError: Explicit rollback() forbidden within a Transaction context` whenever
+  psycopg holds a transaction context — which is exactly when you need it. The error must
+  be **contained**, not recovered from: run each risky region inside its own
+  `conn.transaction()` (a SAVEPOINT when a transaction is already held) so the rollback is
+  scoped and the connection stays usable.
+- ⚠⚠ Fixing ONE call site is the trap that produced this entry. The same PR had already
+  wrapped a cast helper in `conn.transaction()` for precisely this reason, then left three
+  sibling `except` blocks writing to the same connection unguarded. The reviewer's framing
+  is the durable one: **grep for every `except` in the loop that calls back into a write
+  helper on the same `conn`, and require each to sit behind its own savepoint.**
+- ⚠ "The scheduler passes an autocommit connection" is not a defence. Tests and direct
+  callers supply their own, and a correctness property that holds only for one caller's
+  connection mode is not a property of the code.
+- Test that has teeth: assert a LATER unit still completes after an earlier one takes a
+  raw DB error. Revert-probe it — removing the containment must reproduce
+  `InFailedSqlTransaction`, or the test is passing vacuously.
+- Enforced in: this entry; `app/services/strategy_intraday_harvest.py::_harvest_member`
+  (each risky region wrapped); `tests/test_strategy_intraday_reobservation.py::
+  test_a_db_error_stays_local_to_one_member`.
+
+## An outcome enum that collapses two failure layers cannot answer the question it exists for
+
+- Symptom: #2840, 2026-09-21. A denominator table recorded `comparison_skipped` both when
+  the CAPTURE path raised and when the COMPARISON path raised. The row was durable,
+  well-constrained and useless for the one question it was built to answer — which layer
+  broke. Split into `capture_failed` and `comparison_skipped`.
+- The test: for every outcome value, name the operator question it answers. If two code
+  paths that would prompt **different next actions** map to the same value, it is one
+  value too few. This is cheap to fix while the migration is unmerged and expensive after.
