@@ -42,11 +42,20 @@
 -- Schema it sits beside: sql/276 (bars), sql/278 (watermarks, and the dropped bar PK),
 -- sql/402 (captured_at = clock_timestamp()).
 
--- ⚠ Both tables take a FOREIGN KEY on `instruments`, which needs SHARE ROW EXCLUSIVE on a
--- hot relation. A PENDING lock queues ahead of new readers, so an unbounded wait would stop
--- subsequent reads of `instruments` from starting — and the FastAPI lifespan runs
--- migrations, so that hangs app boot rather than failing it. Bounded, retryable, five
--- seconds. Precedent: `docs/review-prevention-log.md`, "A migration that is WAITING for a
+-- ⚠⚠ NO FOREIGN KEY ON `instruments` EITHER, FOR THE SAME REASON AS THE BAR TABLE.
+-- `instrument_id` here is COPIED IDENTITY, exactly like `bar_time` and the two OHLCV
+-- value sets — not a reference. An `ON DELETE CASCADE` would silently delete durable
+-- evidence when an instrument row is removed, which is precisely what this file's
+-- `ON DELETE RESTRICT` on `baseline_reobservation_id` exists to prevent; and an
+-- `ON DELETE RESTRICT` would make an evidence log able to block instrument maintenance.
+-- An evidence row whose instrument no longer exists is still a true record of what the
+-- provider said, so it is kept and the identifier is allowed to dangle. Every table in
+-- this file therefore copies identity and references nothing outside itself.
+--
+-- ⚠ Consequence worth stating: this migration is pure `CREATE TABLE` / `CREATE INDEX` on
+-- new relations and takes NO lock on any existing table. `SET LOCAL lock_timeout` is kept
+-- as a cheap backstop rather than because a contended lock is expected. Precedent for the
+-- rule it defends: `docs/review-prevention-log.md`, "A migration that is WAITING for a
 -- lock is not passive" (#2363); sql/335; sql/402.
 SET LOCAL lock_timeout = '5s';
 
@@ -67,7 +76,7 @@ CREATE TABLE IF NOT EXISTS strategy_intraday_reobservations (
     ordinal               INTEGER     NOT NULL,
     timeframe             TEXT        NOT NULL CHECK (timeframe IN ('30m', '5m', '1m')),
     symbol                TEXT        NOT NULL,
-    instrument_id         BIGINT      REFERENCES instruments(instrument_id) ON DELETE CASCADE,
+    instrument_id         BIGINT,
 
     -- ⚠⚠ BOUNDS OF THIS CALL, NOT THE JOB CLOCK. `app/workers/scheduler.py` computes
     -- `observed_at = datetime.now(tz=UTC)` once, BEFORE `run_intraday_harvest` fetches
@@ -168,8 +177,7 @@ CREATE TABLE IF NOT EXISTS strategy_intraday_reobserved_bars (
 
     -- Copied identity: queryable without a join, and independent of the bar's partition.
     timeframe                 TEXT        NOT NULL CHECK (timeframe IN ('30m', '5m', '1m')),
-    instrument_id             BIGINT      NOT NULL
-                                  REFERENCES instruments(instrument_id) ON DELETE CASCADE,
+    instrument_id             BIGINT      NOT NULL,
 
     -- What the provider delivered THIS call, at storage precision (see the comparison note
     -- below). Same widths and same positivity CHECKs as `strategy_intraday_bars`, so any

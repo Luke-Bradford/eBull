@@ -366,23 +366,30 @@ corporate action effective at `T` with following open `O`, a bracket is decisive
 
 `sql/404` applied to dev; four real harvest slices of 6 members run with the live eToro
 provider (`get_intraday_candles` is informational — no broker mutation, and the unattended
-guard permits it). 2026-09-21, market closed since the 18th.
+guard permits it). 2026-09-21, market closed since the 18th. Run three times in total, the
+migration being replayed between runs as review findings changed the schema.
 
-| slice | **written** | **compared** | diverged | failures |
-| --- | --- | --- | --- | --- |
-| 1 | 0 | 1,322 | 0 | 0 |
-| 2 | 0 | 2,106 | **5** | 0 |
-| 3 | 0 | 359 | 0 | 0 |
-| 4 | 0 | 1,322 | 0 | 0 |
+| | latest run (4 slices) |
+| --- | --- |
+| **written** | **0** |
+| **compared** | **5,924** |
+| diverged | **5** |
+| failures | 0 |
+| outcomes | `compared` × 24 |
+| baselines | `prior_reobservation` 2,110 · `stored_bar` 3,814 |
 
-**`written = 0` on every slice against `compared = 5,109` is the whole finding** — nothing
-new existed to capture, and 5,109 bars of re-observation evidence were delivered and,
-before this change, discarded. All 24 calls returned `outcome = 'compared'`;
-`missing_baseline` and `invalid_baseline` were zero throughout.
+**`written = 0` against `compared = 5,924` is the whole finding** — nothing new existed to
+capture, and 5,924 bars of re-observation evidence were delivered and, before this change,
+discarded. `missing_baseline` and `invalid_baseline` were zero throughout.
 
-⚠ These counts are **not** stable across runs and must not be quoted as a fixed figure:
+⚠ The **totals** are not stable across runs and must not be quoted as a fixed figure:
 which bars get compared depends on where the round-robin cursor sits and how far each
-member's watermark lags. The tables measure it; this row is one sample of it.
+member's watermark lags. Earlier runs of the same code produced 4,059 and 5,109. The
+tables measure this; the row above is one sample of it.
+
+⚠⚠ The **divergences**, by contrast, reproduced *identically* across all three runs —
+same five bars, same values, after the tables were dropped and rebuilt each time. That is
+the difference between a sampling artefact and a finding.
 
 **A real bracket exists.** 1,322 rows carry `baseline_source = 'prior_reobservation'`, so
 their left edge is a prior call's `requested_at` rather than a `captured_at` upper bound.
