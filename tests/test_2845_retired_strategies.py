@@ -96,11 +96,16 @@ def test_all_ten_stay_in_the_manifest_and_keep_resolving() -> None:
     resolving it, and `/strategies` loses it entirely — the "vanished" outcome the
     acceptance criteria forbid.
     """
-    # ⚠ ELEVEN. The ten stay; #2840's S-11 research seat was added afterwards.
-    # Derived from RETIRED | KEPT rather than restated, so the next addition
-    # updates one place.
-    assert len(STRATEGY_MANIFEST) == len(RETIRED | KEPT) == 11
+    # ⚠ THE LITERAL COUNT IS GONE (was 11, then would have been 12). The comment
+    # beside it already claimed the assertion was "derived rather than restated, so
+    # the next addition updates one place" — and it was not: the literal was a
+    # second copy that the next addition had to edit too, which is the hardcoded
+    # derived statistic `.claude/CLAUDE.md` says to compute or omit. The set
+    # identity below is strictly stronger than any count and needs no number: it
+    # catches an entry that vanished, one that appeared, and one that was renamed,
+    # none of which a length comparison can tell apart.
     assert RETIRED | KEPT == set(STRATEGY_MANIFEST)
+    assert not RETIRED & KEPT, "a strategy cannot be both retired and kept"
     assert set(current_result_versions()) == set(STRATEGY_MANIFEST)
 
 

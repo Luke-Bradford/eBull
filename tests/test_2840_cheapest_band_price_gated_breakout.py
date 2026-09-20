@@ -42,7 +42,9 @@ from app.services.outcome_resolver import ExitLevels
 from app.services.research_corpus_ingest import RESEARCH_ARCHIVES
 from app.services.strategies.s4_volatility_compression_breakout import s4_exit_bracket, s4_signals
 from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
+    AS_TRADED_UNIVERSES,
     CHEAPEST_BAND,
+    PRICE_BASIS_REFUSAL_REASON,
     PRICE_FLOOR,
     S12_PARAMS,
     S12_STRATEGY_ID,
@@ -387,6 +389,48 @@ def test_the_backtest_universes_pinned_archive_is_as_traded() -> None:
     assert policy is not None, "the backtest universe's pinned vendor has no declared provenance"
     assert cost_price_basis(policy.adjustment_basis) == "as_traded"
     assert any(archive.adjustment_basis == "unadjusted" for archive in RESEARCH_ARCHIVES)
+
+
+def test_a_universe_whose_prices_are_not_as_traded_refuses_every_bar() -> None:
+    """⚠ REFUSES, never judges. A `survivor_only` close is back-adjusted, so judging
+    it against a nominal edge would record a verdict about a price that never traded
+    — and scan rows are terminal, so there is no later correction."""
+    series = _above_edge()
+    signals = s12_signals(series, universe="survivor_only", masked_reason=REASON)
+    assert len(signals) == len(series)
+    assert {(s.verdict, s.reason) for s in signals} == {("not_evaluable", PRICE_BASIS_REFUSAL_REASON)}
+    assert [s.signal_index for s in signals] == list(range(len(series)))
+    assert {s.kind for s in signals} == {"entry"}
+
+
+def test_the_refusal_is_not_a_decline_even_where_s4_would_fire() -> None:
+    """The distinction the cohort counts are built on: this is an absent CONTEXT, not
+    a rule that looked and said no. S-4 fires on this bar under the same universe."""
+    series = _above_edge()
+    assert _fired(s4_signals(series, universe="survivor_only", masked_reason=REASON)) == [FIRING_INDEX]
+    signals = s12_signals(series, universe="survivor_only", masked_reason=REASON)
+    assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
+
+
+def test_only_the_backtest_universe_is_declared_as_traded() -> None:
+    """⚠ Pinned as a SET, so widening it is a visible edit that moves the identity.
+
+    `survivorship_free` is `BACKTEST_UNIVERSE`; `survivor_only` is `SCAN_UNIVERSE`.
+    A universe added later refuses until somebody states why its prices are as traded.
+    """
+    assert AS_TRADED_UNIVERSES == frozenset({BACKTEST_UNIVERSE}) == frozenset({"survivorship_free"})
+    assert S12_PARAMS["as_traded_universes"] == ("survivorship_free",)
+
+
+def test_widening_the_declared_universes_moves_the_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    before = s12_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID).version
+    monkeypatch.setattr(
+        s12_module,
+        "S12_PARAMS",
+        {**S12_PARAMS, "as_traded_universes": ("survivor_only", "survivorship_free")},
+    )
+    after = s12_module.s12_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID).version
+    assert before != after
 
 
 # --------------------------------------------------------------- the manifest wiring

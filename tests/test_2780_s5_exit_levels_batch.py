@@ -60,6 +60,8 @@ BATCHED = (
     #: registered adapter, so this row proves S-11's own `_s11_exit_levels` agrees
     #: with the batch, which S-4's row cannot speak for.
     ("s11-volatile-regime-gated-breakout", s4_exit_levels_batch, 40),
+    #: #2840 arm 2's S-12, same construction and same reason as the row above.
+    ("s12-cheapest-band-price-gated-breakout", s4_exit_levels_batch, 40),
 )
 
 

@@ -231,10 +231,13 @@ class TestRunnableStrategies:
         builder regressed and retirement happened to hide it.
         """
         runnable, excluded = runnable_strategies()
-        # ⚠ THREE. #2840's S-11 research seat is deliberately NOT retired — it
-        # exists to produce new evidence, which is what retirement forbids.
+        # ⚠ FOUR. #2840's S-11 and S-12 research seats are deliberately NOT
+        # retired — they exist to produce new evidence, which is what retirement
+        # forbids. S-12 also keeps the trial count above
+        # `deflated_sharpe.MIN_MEASURED_TRIALS` for arm 2's exploration.
         assert list(runnable) == [
             "s11-volatile-regime-gated-breakout",
+            "s12-cheapest-band-price-gated-breakout",
             "s4-volatility-compression-breakout",
             "s8-range-mean-reversion",
         ]

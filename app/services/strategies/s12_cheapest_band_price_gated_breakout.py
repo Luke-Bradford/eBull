@@ -46,16 +46,21 @@ shipped. The close is ALREADY one of S-4's four declared inputs, so a priced bar
 can evaluate is one S-12 can evaluate and the gate introduces no new unevaluable
 state. It can only turn a ``fired`` into a ``not_fired``, never a refusal into either.
 
-⚠ THE PRICE MUST BE AS TRADED, AND THIS MODULE CANNOT CHECK THAT.
-A ``>= $100`` gate is a nominal-price gate only on an as-traded corpus.
-``BACKTEST_UNIVERSE`` is ``survivorship_free``, pinned to an archive whose declared
-``adjustment_basis`` is ``unadjusted``, and #3238 made that the live cost basis. The
-coupling is asserted in two places OUTSIDE this module — a config test on the pinned
-archive, and a run-time assertion on the actual run's ``cost_price_basis`` in the
-step-3 measurement script — because the manifest's signals callable has no
-price-basis channel and because mapping universe to basis HERE would be wrong on the
-scan path, whose prices are live candles rather than the pinned archive. The spec's
-"price basis" section carries what each guard does and does not catch.
+⚠⚠ THE PRICE MUST BE AS TRADED, AND THAT IS ENFORCED HERE BY DECLARATION.
+A ``>= $100`` gate is a nominal-price gate only on an as-traded corpus, so
+``AS_TRADED_UNIVERSES`` names the universes this rule may read and ``s12_signals``
+refuses EVERY bar on any other — see that constant for why the set is declared
+rather than derived from ``vendor_for``, and why a refusal beats excluding the
+strategy from the scan.
+
+⚠ THE DECLARATION IS NOT THE WHOLE GUARD, because it cannot see a RUN. A universe
+in the set is still served by whichever series the corpus loader resolved, and
+``load_corpus`` fails closed to ``split_adjusted`` when an archive's provenance is
+missing — so the step-3 measurement script asserts the run's own
+``cost_price_basis`` before opening any outcome, and a config test pins the pinned
+archive. Neither validates the PAYLOAD: a stored ``unadjusted`` label on rescaled
+data satisfies all three. That is the corpus's invariant (``sql/249``, ``sql/251``),
+and the spec's "price basis" section states the division.
 
 ⚠ ``s4_source_hash`` IS IN ``S12_PARAMS`` AND IS LOAD-BEARING, for S-11's reason
 verbatim: this module imports S-4's rule, so an edit to S-4 changes what S-12 DOES,
@@ -149,6 +154,43 @@ def _check_gate_is_expressible(band: PriceBand) -> Decimal:
 #: The edge itself, in the table's own type. Hashed into ``S12_PARAMS``.
 GATE_EDGE: Decimal = _check_gate_is_expressible(CHEAPEST_BAND)
 
+#: ⚠⚠ THE UNIVERSES WHOSE PRICES THIS RULE MAY READ AS NOMINAL. A DECLARED SET,
+#: hashed into the identity, NOT a mapping from universe to archive.
+#:
+#: ``survivorship_free`` is ``BACKTEST_UNIVERSE``, pinned to an archive whose
+#: stored ``adjustment_basis`` is ``unadjusted`` — its closes ARE the as-traded
+#: level. ``survivor_only`` is excluded for a DIFFERENT reason than a reader would
+#: guess: on the scan path it is not served by that universe's archive at all but
+#: by ``price_daily``, whose history the provider back-adjusts at fetch time, and
+#: whose #2066 split-cliff guard HEALS a mixed series onto the back-adjusted basis
+#: rather than preserving the traded one (``market_data.py:751``). Deriving the set
+#: from ``vendor_for(universe)`` would reach the right answer today by the wrong
+#: route, and would go silently wrong the first time a universe changed how it is
+#: served.
+#:
+#: ⚠ FAIL-CLOSED BY CONSTRUCTION: a universe added later is refused until somebody
+#: states why its prices are as traded. That is the direction that has to need
+#: saying out loud.
+#:
+#: ⚠ WHY A REFUSAL AND NOT AN EXCLUSION FROM THE SCAN. S-12 is the first strategy
+#: in this package with an ABSOLUTE price threshold — every other rule compares
+#: prices to prices, so a uniformly re-based series gives it the same answer and
+#: back-adjustment is invisible to it. A scan catching up across a split hands this
+#: rule pre-split bars on the post-split scale, and scan rows are terminal. So the
+#: bar is refused rather than judged: no wrong verdict is ever recorded, the
+#: strategy stays non-retired (retirement would also remove it from the BACKTEST,
+#: which is the evidence #2840 arm 2 actually needs), and the scan keeps running.
+AS_TRADED_UNIVERSES: frozenset[str] = frozenset({"survivorship_free"})
+
+#: ⚠ ``missing_market_context`` and not a new code. It is one of OUR four reasons
+#: (``OUR_ADDITIONAL_REASON_CODES``), so its meaning is ours to state: the bar
+#: exists and its fields are present, but the CONTEXT this rule needs — a price on
+#: the scale it would have traded at — is not available on this universe. Minting a
+#: fifth code would mean editing a closed vocabulary that is written out in four
+#: places including ``sql/255``'s CHECK, which is the drift defect the registry's
+#: own comment carries from #2218.
+PRICE_BASIS_REFUSAL_REASON: NotEvaluableReason = "missing_market_context"
+
 #: The gate's threshold. ⚠ A ``float`` because the comparison runs once per bar over
 #: tens of millions of them and ``series.float_closes`` is already float. What
 #: licenses that is a measurement, not an assumption: 0 of 75,972,669
@@ -186,6 +228,7 @@ S12_PARAMS: Mapping[str, object] = {
     "atr_stop_multiple": ATR_STOP_MULTIPLE,
     "atr_target_multiple": ATR_TARGET_MULTIPLE,
     "max_hold_bars": MAX_HOLD_BARS,
+    "as_traded_universes": tuple(sorted(AS_TRADED_UNIVERSES)),
     "price_band_label": CHEAPEST_BAND.label,
     "price_band_lower": str(GATE_EDGE),
     "s4_source_hash": _s4_source_hash(),
@@ -262,6 +305,17 @@ def s12_signals(
     if masked_reason not in NOT_EVALUABLE_REASONS:
         raise ValueError(f"unknown reason code {masked_reason!r}; must be one of {sorted(NOT_EVALUABLE_REASONS)}")
 
+    # ⚠⚠ REFUSE EVERY BAR ON A UNIVERSE WHOSE PRICES ARE NOT AS TRADED, rather
+    # than gate on a number that is not a nominal price. See AS_TRADED_UNIVERSES.
+    # A refusal is the honest verdict and it is also the CHEAP one: the rows are
+    # written, counted and reconciled exactly as any other refusal, so nothing
+    # downstream has to learn about this strategy.
+    if universe not in AS_TRADED_UNIVERSES:
+        return [
+            StrategySignal(verdict="not_evaluable", signal_index=index, kind="entry", reason=PRICE_BASIS_REFUSAL_REASON)
+            for index in range(len(series))
+        ]
+
     closes = series.float_closes
     atr = atr_series(series, universe=universe, period=ATR_PERIOD)
     compression = compression_rank_series(atr, universe=universe)
@@ -290,8 +344,10 @@ def s12_signals(
 
 
 __all__ = [
+    "AS_TRADED_UNIVERSES",
     "ATR_PERIOD",
     "GATE_EDGE",
+    "PRICE_BASIS_REFUSAL_REASON",
     "ATR_STOP_MULTIPLE",
     "ATR_TARGET_MULTIPLE",
     "BREAKOUT_LOOKBACK",

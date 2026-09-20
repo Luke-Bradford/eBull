@@ -79,6 +79,14 @@ pairs):
 | admitted by the gate, charged a dearer band (`close >= 100`, next `open < 100`) | 6,815 | 0.67% of admitted |
 | rejected by the gate though the fill was cheap (`close < 100`, next `open >= 100`) | 7,579 | 0.02% of rejected |
 
+⚠ The successor is taken over the **unfiltered** series and classified afterwards.
+Filtering first would delete an unusable successor and slide a later bar into the
+fill slot, scoring a fill the resolver never makes — it takes `signal_index + 1` and
+records `unusable_fill_price` when that bar cannot be filled on. Measured, the
+correction moves nothing: this corpus has **0** decision bars whose immediate
+successor is unusable, so both figures are identical either way. The query now
+reports that count instead of assuming it.
+
 So the gate admits downward overnight crossers and rejects upward ones, which is a
 selection effect on the gap distribution and not only a cost leak. It is small and
 near-symmetric in absolute count. The readout reports the realised charged-band mix
@@ -90,7 +98,7 @@ not a quantity any 1990 trader could have read. That is one of several reasons t
 declaration is `falsification_only`; it is a limit on what a pass could mean, and it
 does not affect what a fail means.
 
-## The price basis this gate needs, and the two places the guard sits
+## The price basis this gate needs, and the three places the guard sits
 
 A `>= $100` gate is a nominal-price gate only if the prices are as traded.
 
@@ -101,31 +109,48 @@ A `>= $100` gate is a nominal-price gate only if the prices are as traded.
   125.01). #3238 made this the live cost basis at all four charge sites, so the gate
   and the band selection now read the same kind of number.
 - **Live scan.** `SCAN_UNIVERSE` is `survivor_only` over `price_daily`, whose history
-  the provider **back-adjusts at fetch time** (`market_data.py:751`). ⚠ The claim
+  the provider **back-adjusts at fetch time** (`market_data.py:751`). ⚠ The defence
   *"the gate reads only the latest bar, so back-adjustment cannot reach it"* is **not
-  made here**: this module is a callable that gates every bar it is handed, and a
-  replay or backfill through the scan path would gate on adjusted closes. Nothing in
-  arm 2 depends on the scan path — `BACKTEST_UNIVERSE` is what the exploration
-  measures — and the scan-universe identity is a SEPARATE `strategy_version` needing
-  its own declaration. Settling the scan path's basis is that declaration's problem,
-  and it is recorded here so it is not silently inherited.
+  available**: this module is a callable that gates every bar it is handed, and a
+  scan catching up across a split hands it pre-split bars on the post-split scale.
+  So the strategy refuses that universe outright rather than relying on the scan
+  being up to date — guard 1 below. The scan-universe identity is in any case a
+  SEPARATE `strategy_version` needing its own declaration, and arm 2 reads
+  `BACKTEST_UNIVERSE` only.
 
-**Two guards, because one is not enough.** A configuration test alone would pass while
+**Three guards, because no one of them is enough.** The first is in the rule itself:
+`AS_TRADED_UNIVERSES` declares the universes whose closes this rule may read as
+nominal, and `s12_signals` refuses EVERY bar on any other with
+`not_evaluable / missing_market_context` rather than judging a price on a scale it
+never traded at. ⚠ That refusal exists because S-12 is the first strategy in the
+package with an ABSOLUTE threshold: every other rule compares prices to prices, so a
+uniformly re-based series gives it the same verdict and back-adjustment is invisible
+to it. A live scan catching up across a split would hand this rule pre-split bars on
+the post-split scale, and scan rows are terminal.
+
+⚠ The set is DECLARED, not derived from `vendor_for(universe)`. `survivor_only` is
+excluded for a different reason than a reader would guess: on the scan path it is
+not served by that universe's archive at all, but by `price_daily`, whose history
+the provider back-adjusts at fetch time and whose #2066 split-cliff guard HEALS a
+mixed series onto the back-adjusted basis (`market_data.py:751`). Deriving the set
+would reach today's answer by the wrong route.
+
+The other two guards sit outside the rule, because a declaration cannot see a RUN. A configuration test alone would pass while
 the run it is supposed to protect charged every leg the maximum band, since
 `load_corpus` derives the basis from `_resolve_liquidity_policy` on the actually
 selected series and `cost_price_basis(None)` fails closed to `split_adjusted`
 (`backtest_run.py:2199`):
 
-1. **Config, at test time.** `cost_price_basis(archive_policy_for(vendor_for(
+2. **Config, at test time.** `cost_price_basis(archive_policy_for(vendor_for(
    BACKTEST_UNIVERSE)).adjustment_basis) == "as_traded"`. Reds if the backtest corpus
    ever moves to a split-adjusted archive.
-2. **Run, at measurement time.** The step-3 measurement script asserts the RUN's
+3. **Run, at measurement time.** The step-3 measurement script asserts the RUN's
    `cost_price_basis` resolved to `as_traded` and refuses to open the outcomes
    otherwise. A run whose provenance went missing is charged the maximum band on every
    leg, which would test the gate against precisely the distortion the gate exists to
    exploit — the same trap #3238 was filed for.
 
-Neither guard validates the PAYLOAD: a stored `unadjusted` label on rescaled or
+None of the three validates the PAYLOAD: a stored `unadjusted` label on rescaled or
 mixed-basis data would satisfy both. That is the corpus's own invariant to hold
 (`sql/249` / `sql/251`), not this strategy's, and it is named so the coverage is not
 overstated.
@@ -198,6 +223,30 @@ cohort read came back empty.
 **Run set: S-12, S-4 and S-11.** S-4 is the control the gate is measured against;
 keeping S-11 in keeps `deflated_sharpe.MIN_MEASURED_TRIALS` cleared. Narrowing to
 S-12 alone would write rows permanently refused with `deflated_sharpe_not_computed`.
+
+⚠⚠ **The deflated Sharpe is refused TODAY, and clearing `MIN_MEASURED_TRIALS` is not
+what fixes it.** `deflate_group` (`backtest_run.py:3417`) computes
+`set(measured) - TRIAL_REGISTER.trial_ids` and returns `(None, reason)` for the
+WHOLE GROUP if that difference is non-empty — one undeclared strategy nulls the
+deflation for every strategy measured beside it. On `main` at `61ef6e47` that
+difference is already `['s11-volatile-regime-gated-breakout']`: arm 1's register
+entry declares S-11 via `declared_for`, but `deflate_group` keys on the STRATEGY ID
+and the ten original strategies each have a trial whose `trial_id` IS their
+strategy id. S-11 has no such entry, so the group has been refused since arm 1
+landed, and S-12 adds a second name to the same refusal rather than causing it.
+
+Consequences, stated so the readout cannot promise a metric it will not have:
+
+- Step 2's register entry must be keyed on the **strategy id**, not only on
+  `declared_for`, or step 3 writes rows with `deflated_sharpe` NULL — immutably.
+- **S-11's missing entry is a pre-existing defect and is NOT fixed here.** Adding
+  trials moves `TRIAL_REGISTER_VERSION`, which changes `M` and therefore the bar
+  every frozen declaration was measured against. That is a declaration decision, not
+  a drive-by edit inside a strategy PR.
+- If step 3 runs before either entry exists, the readout reports
+  `deflated_sharpe_not_computed` and decides on `expectancy_per_trade_pct` and
+  `profit_factor` alone — which is arm 1's actual, accepted position, not a new
+  concession.
 
 **Pass bar — a SIGN test with both legs required, no magnitude invented:**
 
