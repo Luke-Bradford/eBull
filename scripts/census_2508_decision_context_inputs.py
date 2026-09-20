@@ -158,12 +158,18 @@ SELECT s.signal_id,
          LIMIT 1
   ) prev ON TRUE
   LEFT JOIN LATERAL (
-        SELECT r.series_id
+        -- ⚠ THE EXACT BAR, NOT THE SERIES' SPAN. `first_bar <= D <= last_bar` is
+        -- satisfied by a series with a HOLE on D, and `sql/249` documents that this
+        -- metadata drifts. `observed_unadjusted` is a claim about one observation, so
+        -- the join has to reach it.
+        SELECT d.series_id
           FROM research_price_series r
+          JOIN research_price_daily d ON d.series_id = r.series_id
          WHERE r.instrument_id = s.instrument_id
            AND r.adjustment_basis = 'unadjusted'
-           AND r.first_bar <= s.signal_bar_date
-           AND r.last_bar >= s.signal_bar_date
+           AND d.bar_date = s.signal_bar_date
+           AND d.close IS NOT NULL
+           AND d.close > 0
          LIMIT 1
   ) unadj ON TRUE
   LEFT JOIN LATERAL (
@@ -224,8 +230,15 @@ def _prior_us_session(day: date) -> date:
     return candidate
 
 
-def vix_dates_available(vix_bar_dates: frozenset[date], decision_dates: Sequence[date]) -> dict[date, bool]:
-    """Per decision date, whether ``load_decision_vix`` would return a complete row.
+def vix_refusals(vix_bar_dates: frozenset[date], decision_dates: Sequence[date]) -> dict[date, str | None]:
+    """Per decision date, the name ``build_decision_context`` would append, or ``None``.
+
+    ⚠ The name is TYPED, not the bare ``"vix"``. ``load_decision_vix`` returns
+    ``missing_source`` or ``stale_source:<stored>` <expected:<expected>>``, and the builder
+    prefixes it — ``missing.append(f"vix_{inputs.vix.refusal_reason}")``. A census that
+    collapses both to ``"vix"`` cannot call its taxonomy the exact stored string, and it
+    merges two different defects: a source that has not been fetched, and a source that
+    has been fetched and carries a row the calendar says cannot exist.
 
     ⚠ This reproduces BOTH of that function's steps, and the second one is easy to drop.
     ``load_vix_close_as_known`` takes the LATEST stored bar strictly before the decision
@@ -237,15 +250,21 @@ def vix_dates_available(vix_bar_dates: frozenset[date], decision_dates: Sequence
     for membership reports that decision as available, which is the optimistic direction
     and therefore the one to get right.
     """
-    available: dict[date, bool] = {}
+    refusals: dict[date, str | None] = {}
     for day in decision_dates:
         earlier = [bar_date for bar_date in vix_bar_dates if bar_date < day]
-        selected = max(earlier) if earlier else None
-        available[day] = selected is not None and selected == _prior_us_session(day)
-    return available
+        if not earlier:
+            refusals[day] = "vix_missing_source"
+            continue
+        selected = max(earlier)
+        expected = _prior_us_session(day)
+        refusals[day] = (
+            None if selected == expected else f"vix_stale_source:{selected.isoformat()}<expected:{expected.isoformat()}"
+        )
+    return refusals
 
 
-def missing_inputs(row: Mapping[str, Any], *, vix_available: bool) -> tuple[str, ...]:
+def missing_inputs(row: Mapping[str, Any], *, vix_refusal: str | None) -> tuple[str, ...]:
     """The names ``build_decision_context`` would put in ``refusal_reason``.
 
     ⚠ The names and their ORDER follow ``build_decision_context`` lines 280-296: the
@@ -295,8 +314,8 @@ def missing_inputs(row: Mapping[str, Any], *, vix_available: bool) -> tuple[str,
         raise AssertionError(f"required-input set drifted from the contract: {sorted(unknown)}")
 
     missing = [name for name in _REQUIRED_INPUTS if not available[name]]
-    if not vix_available:
-        missing.append("vix")
+    if vix_refusal is not None:
+        missing.append(vix_refusal)
     if not row["has_classification"]:
         missing.append("point_in_time_classification")
     else:
@@ -332,7 +351,7 @@ def _vix_bar_dates(conn: psycopg.Connection[Any]) -> frozenset[date]:
     return frozenset(row[0] for row in rows)
 
 
-def _report(rows: Sequence[Mapping[str, Any]], vix: Mapping[date, bool]) -> str:
+def _report(rows: Sequence[Mapping[str, Any]], vix: Mapping[date, str | None]) -> str:
     total = len(rows)
     out: list[str] = []
     out.append(f"context_version        {CONTEXT_VERSION}")
@@ -341,7 +360,7 @@ def _report(rows: Sequence[Mapping[str, Any]], vix: Mapping[date, bool]) -> str:
     if total == 0:
         return "\n".join(out)
 
-    missing_by_signal = [missing_inputs(row, vix_available=vix[row["signal_bar_date"]]) for row in rows]
+    missing_by_signal = [missing_inputs(row, vix_refusal=vix[row["signal_bar_date"]]) for row in rows]
     eligible = sum(1 for names in missing_by_signal if not names)
     out.append(f"eligible contexts      {eligible:,}  ({eligible / total:.4%})")
     out.append(f"refused contexts       {total - eligible:,}")
@@ -351,10 +370,14 @@ def _report(rows: Sequence[Mapping[str, Any]], vix: Mapping[date, bool]) -> str:
         per_input.update(names)
     out.append("")
     out.append("MISSING BY INPUT (share of fired signals that could not resolve it)")
-    order = (*_REQUIRED_INPUTS, "vix", *_CLASSIFICATION_PARTS)
-    for name in order:
+    for name in (*_REQUIRED_INPUTS, *_CLASSIFICATION_PARTS):
         count = per_input.get(name, 0)
         out.append(f"  {name:<32} {count:>9,}  {count / total:7.2%}")
+    # VIX names carry the stored bar date, so they are grouped by their typed prefix
+    # rather than listed as one row per affected session.
+    for name, count in sorted(per_input.items()):
+        if name.startswith("vix_"):
+            out.append(f"  {name:<32} {count:>9,}  {count / total:7.2%}")
 
     out.append("")
     out.append(
@@ -408,7 +431,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows = _fetch(conn)
         vix_bar_dates = _vix_bar_dates(conn)
     decision_dates = sorted({row["signal_bar_date"] for row in rows})
-    vix = vix_dates_available(vix_bar_dates, decision_dates)
+    vix = vix_refusals(vix_bar_dates, decision_dates)
     print(_report(rows, vix))
     return 0
 
@@ -417,4 +440,4 @@ if __name__ == "__main__":  # pragma: no cover - CLI
     raise SystemExit(main())
 
 
-__all__ = ["main", "missing_inputs", "vix_dates_available"]
+__all__ = ["main", "missing_inputs", "vix_refusals"]
