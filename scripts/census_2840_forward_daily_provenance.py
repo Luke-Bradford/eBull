@@ -778,7 +778,12 @@ def _fetch(conn: psycopg.Connection[Any], *, as_of: datetime) -> dict[str, Any]:
         )
         cur.execute(_BARS, {"timeframe": TIMEFRAME, "instrument_ids": instrument_ids, "as_of": as_of})
         bars = cur.fetchall()
-        since = min((row["bar_time"] for row in bars), default=datetime.now(UTC)).date()
+        # ⚠ The NY SESSION date, not the UTC calendar date. Every other boundary in this script
+        # is NY-anchored, and a 30m bar at 13:30 UTC on one NY date can carry a different UTC
+        # date at other times of year. Only widens the window either way, but a lower bound on
+        # a different clock from the sessions it bounds is the kind of inconsistency that is
+        # harmless until someone reuses it.
+        since = min((row["bar_time"] for row in bars), default=datetime.now(UTC)).astimezone(_NY).date()
         cur.execute(_FIVE_MINUTE_BARS, {"instrument_ids": instrument_ids, "as_of": as_of})
         five = cur.fetchall()
         cur.execute(_DAILY, {"instrument_ids": instrument_ids, "since": since, "as_of_date": as_of.date()})

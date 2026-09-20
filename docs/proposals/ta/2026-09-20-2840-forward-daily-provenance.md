@@ -300,7 +300,7 @@ repo answers it today: `PreregDeclaration` carries no corpus-version field eithe
 
 | claim | what replaced it |
 | --- | --- |
-| "Yes, a nominal daily series is composable at 97.6%" | composable ≠ nominal-and-in-time; the intersection is 58.6% post-activation |
+| "Yes, a nominal daily series is composable at 97.6%" | composable ≠ nominal-and-in-time; the intersection is **16/29 = 55.2%** post-activation per member, **114/232 = 49.14%** panel-wide |
 | composition validated by bar COUNT | exact slot-set match; a duplicate slot and an off-grid session both passed the count |
 | restrict to same-session captures | unsatisfiable — the last bar completes at the close; the boundary is the next open |
 | `WARMUP_BARS` = bars needed | 115 measured; 113 is the first evaluable index |
