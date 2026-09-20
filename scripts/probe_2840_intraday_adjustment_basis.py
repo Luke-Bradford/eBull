@@ -91,9 +91,9 @@ import argparse
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from statistics import median
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -191,6 +191,38 @@ def session_ratios(
             raise ValueError(f"unknown estimator {estimator!r}; use 'last' or 'median'")
         out.append((day, ratio, len(values)))
     return out
+
+
+#: Minutes per documented interval. ⚠ The names are the endpoint's own enum
+#: (``docs/etoro-api-reference.md:409``); the probe accepts whatever is passed, so an interval
+#: absent here falls back to the widest reach rather than silently under-fetching the reference.
+_INTERVAL_MINUTES: Final[dict[str, int]] = {
+    "OneMinute": 1,
+    "FiveMinutes": 5,
+    "TenMinutes": 10,
+    "FifteenMinutes": 15,
+    "ThirtyMinutes": 30,
+    "OneHour": 60,
+    "FourHours": 240,
+    "OneDay": 390,
+    "OneWeek": 1_950,
+}
+
+
+def reference_window_start(interval: str, count: int, *, slack: float = 2.0, today: date | None = None) -> date:
+    """Lower bound for the daily reference fetch, DERIVED from the interval's reach.
+
+    ⚠ REPLACES A HARDCODED ``date(2025, 1, 1)``, which had no stated rationale and would
+    silently under-fetch the reference for a long-reach interval. The endpoint is count-based
+    with no date anchor, so the furthest a request can reach back is ``count`` bars of
+    ``interval``; ``slack`` covers the fact that only RTH bars are counted while calendar time
+    runs continuously. ``OneDay``/``OneWeek`` are expressed in RTH minutes so one formula covers
+    every documented interval.
+    """
+    minutes = _INTERVAL_MINUTES.get(interval, max(_INTERVAL_MINUTES.values()))
+    sessions = max(1, int(count * minutes / _INTERVAL_MINUTES["OneDay"]))
+    days = int(sessions * slack * 7 / 5) + 30
+    return (today or datetime.now(UTC).date()) - timedelta(days=days)
 
 
 def is_split_scale(factor: float, *, limit: int = 20, tolerance: float = 0.01) -> tuple[int, int] | None:
@@ -322,6 +354,13 @@ def _report(results: Sequence[Mapping[str, Any]], *, interval: IntradayInterval)
             f"  ratio range {step['ratio_min']:.8f} .. {step['ratio_max']:.8f}; max |ratio - 1| = "
             f"{step['max_abs_deviation']:.2e}; largest adjacent jump {step['largest_jump']:.6f}"
         )
+        noisy = result.get("step_median_estimator") or {}
+        if noisy.get("largest_jump") is not None:
+            out.append(
+                f"  median-bar estimator for contrast: range {noisy['ratio_min']:.8f} .. "
+                f"{noisy['ratio_max']:.8f}, largest adjacent jump {noisy['largest_jump']:.6f} — the estimator "
+                "whose noise exceeded the threshold on the CONTROL, printed rather than argued"
+            )
         if not step["jumps"]:
             out.append("  no adjacent jump above tolerance")
         for jump in step["jumps"]:
@@ -404,7 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             targets = candidates + [dict(control) | {"role": "control (asserted: 0 recent adjustment_heal rows)"}]
             daily: dict[int, dict[date, float]] = {}
-            since = date(2025, 1, 1)
+            since = reference_window_start(interval, args.count)
             for target in targets:
                 cur.execute(_DAILY_CLOSES, {"instrument_id": target["instrument_id"], "since": since})
                 daily[int(target["instrument_id"])] = {row["price_date"]: float(row["close"]) for row in cur.fetchall()}
@@ -444,10 +483,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _load_credentials() -> tuple[str, str]:
-    """Demo eToro credentials for an INFORMATIONAL candle read.
+    """eToro credentials for ``settings.etoro_env`` — NOT necessarily demo.
 
-    Imported lazily from the scheduler so this probe uses the same loader production does
-    rather than re-implementing credential resolution.
+    Imported lazily from the scheduler so this probe uses the same loader production does rather
+    than re-implementing credential resolution.
+
+    ⚠ TWO PROPERTIES THE CALLER INHERITS, both stated because an earlier version of this
+    docstring said "Demo eToro credentials" and was wrong on both counts:
+
+    * the environment is whatever ``settings.etoro_env`` resolves to, so this is not a demo-only
+      path by construction;
+    * ``_load_etoro_credentials`` COMMITS a credential-access audit row per load by its own
+      docstring, so calling it makes this script a writer.
     """
     from app.workers.scheduler import _load_etoro_credentials
 
@@ -461,4 +508,4 @@ if __name__ == "__main__":  # pragma: no cover - CLI
     raise SystemExit(main())
 
 
-__all__ = ["detect_step", "is_split_scale", "main", "session_ratios"]
+__all__ = ["detect_step", "is_split_scale", "main", "reference_window_start", "session_ratios"]

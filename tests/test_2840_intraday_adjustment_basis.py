@@ -12,7 +12,12 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from scripts.probe_2840_intraday_adjustment_basis import detect_step, is_split_scale, session_ratios
+from scripts.probe_2840_intraday_adjustment_basis import (
+    detect_step,
+    is_split_scale,
+    reference_window_start,
+    session_ratios,
+)
 
 
 @dataclass(frozen=True)
@@ -227,3 +232,31 @@ class TestNonFiniteGuards:
         assert session_ratios(_session(day, [100.0]), {day: float("nan")}) == []
         assert session_ratios(_session(day, [100.0]), {day: -5.0}) == []
         assert session_ratios(_session(day, [-5.0]), {day: 100.0}) == []
+
+
+class TestReferenceWindow:
+    def test_the_lower_bound_FOLLOWS_the_interval_reach_rather_than_a_fixed_date(self) -> None:
+        """⚠ Replaces a hardcoded `date(2025, 1, 1)` that had no stated rationale.
+
+        The endpoint is count-based with no date anchor, so the furthest a request reaches back
+        is `count` bars of `interval`. A fixed date silently under-fetches the daily reference for
+        a long-reach interval — the failure is invisible because it looks like missing pairs.
+        """
+        today = date(2026, 9, 20)
+        thirty = reference_window_start("ThirtyMinutes", 1000, today=today)
+        four_hours = reference_window_start("FourHours", 1000, today=today)
+        weekly = reference_window_start("OneWeek", 1000, today=today)
+        assert thirty < today
+        assert four_hours < thirty, "a wider interval reaches further back, so its reference must too"
+        assert weekly < four_hours
+
+    def test_an_unknown_interval_falls_back_to_the_WIDEST_reach(self) -> None:
+        """Under-fetching is the silent failure; over-fetching is merely a bigger query."""
+        today = date(2026, 9, 20)
+        assert reference_window_start("SomeNewInterval", 1000, today=today) == reference_window_start(
+            "OneWeek", 1000, today=today
+        )
+
+    def test_a_tiny_count_still_yields_a_usable_window(self) -> None:
+        today = date(2026, 9, 20)
+        assert reference_window_start("ThirtyMinutes", 1, today=today) < today
