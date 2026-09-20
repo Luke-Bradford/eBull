@@ -157,6 +157,7 @@ from app.services.backtest_run import (
     load_corpus,
 )
 from app.services.cost_model import COST_MODEL_ID, PriceBasis, cost_band_for
+from app.services.indicator_series import BarSeries
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.research_price_structure_store import load_arms
 from app.services.strategies.s4_volatility_compression_breakout import MAX_HOLD_BARS, S4_PARAMS
@@ -333,7 +334,7 @@ class _BandMix:
 def _absorb_bands(
     *,
     fired_indices: Sequence[int],
-    series: object,
+    series: BarSeries,
     price_basis: PriceBasis,
     mixes: Mapping[str, _BandMix],
     decision_bar_dispersion: _Dispersion,
@@ -356,9 +357,9 @@ def _absorb_bands(
     be the first bar of the position's own P&L, which is exactly the thing that must
     not be opened before the declaration is frozen.
     """
-    rows = series.rows  # type: ignore[attr-defined]
-    dates = series.dates  # type: ignore[attr-defined]
-    closes = series.array_closes  # type: ignore[attr-defined]
+    rows = series.rows
+    dates = series.dates
+    closes = series.array_closes
     quarantined_until: int | None = None
     for index in sorted(fired_indices):
         if index >= 1:
@@ -400,7 +401,7 @@ def _absorb_bands(
             quarantined_until = index + MAX_HOLD_BARS - 1
 
 
-def _absorb_dispersion(series: object, *, dispersion: Mapping[tuple[str, str], _Dispersion], arm: str) -> None:
+def _absorb_dispersion(series: BarSeries, *, dispersion: Mapping[tuple[str, str], _Dispersion], arm: str) -> None:
     """Fold one series' close-to-close returns into the two dispersion populations.
 
     The split is on the LEFT bar's close against the gate edge — i.e. the forward
@@ -417,7 +418,7 @@ def _absorb_dispersion(series: object, *, dispersion: Mapping[tuple[str, str], _
     comparison is False, so masked bars drop out of BOTH populations without a
     branch — the same treatment the strategy gives them.
     """
-    closes = series.array_closes  # type: ignore[attr-defined]
+    closes = series.array_closes
     if closes.size < 2:
         return
     previous, following = closes[:-1], closes[1:]
