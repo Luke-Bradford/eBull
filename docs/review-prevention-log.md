@@ -9407,3 +9407,31 @@ original, because the gate now *looked* like a bound.
   `tests/test_2840_bar_capture_certificate.py::TestTheNyseCalendarIsAPreconditionAndNowSaysSo`,
   whose last case pins the accepted set against the producer's own `Literal` so the two
   cannot drift.
+
+## `pyright <one file>` IS NOT `pyright` — a per-file run infers the widened type as anything
+
+- Symptom: #2840, PR #3257. The review bot raised a WARNING on a
+  `# type: ignore[attr-defined]` I had put on `len(series.dates)` while building a carrier's
+  length, and a NITPICK suggesting `len(series)` instead. I applied the nitpick, ran
+  `uv run pyright scripts/verify_2437_s10_census.py`, saw **0 errors**, and concluded the
+  suppression had been unnecessary. The full-tree `uv run pyright` then failed:
+  `Argument of type "object" cannot be assigned to parameter "obj" of type "Sized"`. The
+  variable really was `object` — `loaded: dict[int, object]` — so the bot's WARNING was the
+  correct finding and the NITPICK's fix did not stand on its own.
+- ⚠ The two runs disagree because a single-file invocation resolves imports and inference
+  differently from the configured whole-project run. **A green per-file pyright is not
+  evidence about the gate.** The gate is `uv run pyright` with no argument, which is what
+  `.githooks/pre-push` runs.
+- ⚠⚠ The deeper lesson is about the shape of the fix, not the tool. A `type: ignore` added
+  to make a new call site compile is a claim that the surrounding type is wrong; the right
+  move is almost always to **narrow the declaration** rather than suppress at the use. Typing
+  the dict as `dict[int, BarSeries]` removed **three** pre-existing suppressions in that file
+  and made the new call typecheck with none — a strictly smaller diff than the one
+  suppression I had added.
+- Prevention: never add a `type: ignore` to a call site you are migrating; fix the
+  declaration it is compensating for. And when a reviewer questions a suppression, re-run the
+  **full** gate command before answering — answering from a narrower invocation than the gate
+  uses produces a confident, wrong rebuttal.
+- Enforced in: this entry; `scripts/verify_2437_s10_census.py` (`loaded: dict[int, BarSeries]`,
+  three ignores removed); `.claude/skills/engineering/pre-push-checklist.md`'s bare
+  `uv run pyright`.

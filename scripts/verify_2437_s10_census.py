@@ -27,6 +27,7 @@ from datetime import date
 import psycopg
 
 from app.config import settings
+from app.services.indicator_series import BarSeries
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.price_masked_bars import load_masked_bars
 from app.services.price_segments import load_unresolved_breaks
@@ -61,7 +62,13 @@ def main() -> int:
         breaks = load_unresolved_breaks(conn, universe)
 
         calendar: set[date] = set()
-        loaded: dict[int, object] = {}
+        # ⚠ TYPED, not ``object`` (#2840, review bot). It was widened, which forced
+        # a ``# type: ignore[attr-defined]`` at every use below — and the review
+        # correctly flagged that the ignore sitting on the carrier's LENGTH could
+        # hide a real shape mismatch in the one script whose job is to catch
+        # scan/production divergence. ``load_masked_bars(...).series`` is a
+        # ``BarSeries``; saying so removes the suppressions instead of adding one.
+        loaded: dict[int, BarSeries] = {}
         skipped_short = 0
         for instrument_id in universe:
             series = load_masked_bars(conn, instrument_id).series
@@ -77,12 +84,12 @@ def main() -> int:
     dates_by_member: dict[int, tuple[date, ...]] = {}
     scores_by_leg: dict[SignalKind, dict[date, dict[int, float]]] = {leg: {} for leg in legs}
     for instrument_id, series in loaded.items():
-        dates_by_member[instrument_id] = series.dates  # type: ignore[attr-defined]
-        regime = provider.for_dates(series.dates)  # type: ignore[attr-defined]
+        dates_by_member[instrument_id] = series.dates
+        regime = provider.for_dates(series.dates)
         for leg in legs:
             staged = segmented_member(
                 entry,
-                series,  # type: ignore[arg-type]
+                series,
                 panel_decision_dates=panel_dates,
                 universe=SCAN_UNIVERSE,
                 masked_reason="quarantined_bar",
@@ -92,7 +99,7 @@ def main() -> int:
                 # census exists to reproduce the production scan; a hand-picked
                 # carrier here would let the two diverge silently, which is the
                 # "two texts" defect #2840 already carries a prevention entry for.
-                price_basis=from_archive_basis(SCAN_ARCHIVE_ADJUSTMENT_BASIS, n_bars=len(series.dates)),  # type: ignore[attr-defined]
+                price_basis=from_archive_basis(SCAN_ARCHIVE_ADJUSTMENT_BASIS, n_bars=len(series)),
                 leg=leg,
             )
             staged_by_leg[leg][instrument_id] = staged
