@@ -9542,3 +9542,30 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry;
   `docs/proposals/ta/2026-09-20-2840-the-forward-announcement-source.md` §0.1 (the withdrawn
   version is kept beside the correction, with both wrong numbers named).
+
+## A cadence change cannot fix a claim about the wrong MECHANISM
+
+- Symptom: #2840, 2026-09-20. The queue head read *"pre-open capture CADENCE first, then
+  breadth"*, and it was carried across three close-outs. The experiment it exists for needs the
+  provider's CURRENT answer about a bar we ALREADY HOLD — a re-observation. Capture is a
+  different mechanism, and pre-open there is nothing to capture at all:
+  `strategy_intraday_harvest._completed_rth_bars` rejects `stamp < bounds[0]` where `bounds[0]`
+  is 09:30 ET, so no RTH bar has completed yet. Widening the window would have been built,
+  measured, and found to answer nothing.
+- ⚠ The conflation survived because both mechanisms are served by the SAME job and the SAME
+  provider call. `_fetch_count` already re-requests bars behind the watermark on every fire
+  (`_OVERLAP_BARS = 3`), `_completed_rth_bars` keeps them, and line 301 discards them unread —
+  so the re-observation evidence was already being fetched and thrown away while its absence was
+  being described as a cadence problem.
+- ⚠⚠ The same session produced the corresponding INTERVAL error, which is the reusable half: a
+  bracket that STRADDLES the boundary you are asking about is inconclusive however narrow it is.
+  Agreement at 09:25 and divergence at 09:35 permits a rewrite at 09:26, so it cannot answer
+  "did the rewrite precede 09:30". The bracket must lie ENTIRELY INSIDE the interval in
+  question, which needs two observations inside it, not one near it.
+- Prevention: before specifying a cadence, schedule or window change, name the MECHANISM whose
+  output changes and state what it will write that it does not write today. If the answer is
+  "nothing, but sooner", the head is misaimed. And when a conclusion depends on bracketing an
+  instant, check whether the proposed bracket CONTAINS that instant — if it does, it is not
+  evidence about it.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-20-2840-re-observation-is-not-capture.md` §0 and §2.
