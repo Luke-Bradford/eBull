@@ -379,6 +379,16 @@ requirement is a design choice wearing a derivation's clothes — and it is keye
 accident of corpus length. A longer archive would RAISE the floor and a shorter one
 would LOWER it, neither of which follows from the hypothesis.
 
+⚠⚠ **And the obvious repair does not work, which is worth recording so it is not
+re-proposed.** The natural response is "key the floor on the DECLARED in-sample window
+rather than on the archive" — arm 1 keyed its 14 on the pinned `primary-2022-plus`, so
+the analogue would be arm 2's in-sample span. It is not an analogue:
+`strategy_result.py:117-125` states that `EVALUATION_WINDOW_START` **is measured, not
+chosen** — *"It is the first bar the corpus holds for any instrument in the validated
+universe … the window opens where the data does"*. So arm 2's in-sample window IS the
+archive's extent, and a floor keyed to it is archive-keyed however it is phrased. The
+whole family of "reproduce the exploration window" derivations inherits the defect.
+
 **The question, in one sentence:** what required count does arm 2's contract declare
 that a forward confirmation must reach — i.e. what is arm 2's abort bar on `n`, the
 quantity playing the role of arm 1's 14 dates and #2837's 3 drawdowns?
@@ -393,11 +403,14 @@ quantity playing the role of arm 1's 14 dates and #2837's 3 drawdowns?
    is an admissible outcome rather than a failure to derive.
 2. **Declare an abort bar on `n` the way arm 1 declared its 508** — *"the largest
    independent cohort the lead itself rests on, i.e. an upper bound on available
-   evidence, explicitly NOT a power calculation"*. Arm 2's lead is the #2840 addendum's
-   re-pricing of S-4's 189,076 measured trades at the cheapest band; that re-pricing is
-   a sensitivity over ALL trades and does not publish the cheapest-band subset, which
-   is the missing number. `scripts/census_2840_s12_signal_supply.py` bounds it from
-   above with S-12's own in-sample fired count.
+   evidence, explicitly NOT a power calculation"*. ⚠ This route is WEAKER than it
+   looks and route 1 should be tried first: arm 1's 508 was read off cohort figures
+   that already existed because S-11 had been run, and arm 2 is pre-look by
+   construction. Its lead is the #2840 addendum's re-pricing of S-4's 189,076 measured
+   trades at the cheapest band — a sensitivity over ALL trades that does not publish
+   the cheapest-band subset. `scripts/census_2840_s12_signal_supply.py` bounds that
+   subset from above at **44,842** fires over **4,916** dates (`masked`), which is a
+   supply figure and still not a declared requirement.
 
 ### The measurement that exists, and the bounds it does NOT establish
 
