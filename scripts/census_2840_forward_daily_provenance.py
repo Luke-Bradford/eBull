@@ -1131,9 +1131,44 @@ def _report(payload: Mapping[str, Any], *, as_of: datetime) -> str:
     return "\n".join(out)
 
 
+# ⚠ THE SESSION PROFILE IS RESOLVED HERE AND NOT IN THE RULE. ``capture_certificate``
+# refuses any listing the NYSE calendar does not describe, and takes the profile as a
+# required argument rather than deriving it — a service reaching into ``app.api`` would
+# invert the layering, and a second copy of the CASE would be the "two texts" shape.
+#
+# ⚠ THE CASE IS ``app/api/instruments.py::_SESSION_PROFILE_SQL``, MIRRORED DOWN TO THE
+# BRANCH ORDER, including the half that is easy to get wrong: exchange 33 is an RTH-only
+# duplicate whose ``asset_class`` is still ``us_equity``, so the exchange test must precede
+# the asset-class test or every ``.RTH`` row resolves to plain ``us_equity``. Both are in
+# ``NYSE_SESSION_PROFILES``, so the bucket is unchanged either way today — but the census
+# prints the profile split, and getting it wrong would misreport WHICH listing kind the
+# store holds.
+#
+# ⚠⚠ BOTH JOINS ARE ``LEFT`` AND THAT IS THE LOAD-BEARING PART, NOT TIDINESS. This query
+# feeds a CENSUS whose entire output is a set of counts, so an inner join would silently
+# shrink the denominator: a bar whose instrument or exchange row is missing would vanish
+# from ``scanned`` instead of being reported, and the census would present a subset as the
+# whole population. Measured today (dev DB, 2026-09-20): ZERO bars lack an ``instruments``
+# row and ZERO instruments lack an ``exchanges`` row — which is exactly why the inner form
+# would have looked correct indefinitely and then quietly stopped being so.
+#
+# With ``LEFT``, a missing row yields NULL, the ``ELSE`` resolves it to ``continuous``, and
+# ``capture_certificate`` refuses it under ``non_nyse_trading_calendar``. The population
+# stays fixed and the unknown becomes a visible refusal instead of an absence.
 _CAPTURE_CERTIFICATE_SQL = """
-    SELECT timeframe, bar_time, captured_at
-    FROM strategy_intraday_bars
+    SELECT b.timeframe,
+           b.bar_time,
+           b.captured_at,
+           CASE
+               WHEN i.exchange = '33' THEN 'us_equity_rth'
+               WHEN e.asset_class = 'us_equity' THEN 'us_equity'
+               WHEN e.asset_class IN ('eu_equity', 'uk_equity', 'asia_equity', 'mena_equity')
+                   THEN 'foreign_equity'
+               ELSE 'continuous'
+           END AS session_profile
+    FROM strategy_intraday_bars b
+    LEFT JOIN instruments i ON i.instrument_id = b.instrument_id
+    LEFT JOIN exchanges e ON e.exchange_id = i.exchange
 """
 
 
@@ -1166,7 +1201,7 @@ def _bucket_table(by_timeframe: Mapping[str, Counter[str]]) -> list[str]:
 
 
 def capture_certificate_report(
-    rows: Iterable[tuple[str, datetime, datetime]], *, capture_semantics_from: datetime | None
+    rows: Iterable[tuple[str, datetime, datetime, str]], *, capture_semantics_from: datetime | None
 ) -> str:
     """Every stored bar under ``bar_capture_certificate``, and what the withdrawn proxy cost.
 
@@ -1187,8 +1222,10 @@ def capture_certificate_report(
     # ⚠ Counted as we go rather than ``len(rows)``: the caller streams a
     # server-side cursor, so the sequence is consumed once and has no length.
     scanned = 0
-    for timeframe_text, bar_time, captured_at in rows:
+    profiles: Counter[str] = Counter()
+    for timeframe_text, bar_time, captured_at, session_profile in rows:
         scanned += 1
+        profiles[session_profile] += 1
         # ⚠ VALIDATED, NOT CAST. The column is a TEXT with its own CHECK, and a cast would
         # turn a tier added to the table but not to INTRADAY_TIERS into a KeyError several
         # frames away instead of a named refusal here.
@@ -1196,7 +1233,11 @@ def capture_certificate_report(
             raise ValueError(f"stored timeframe {timeframe_text!r} is not a declared tier")
         timeframe = cast("Timeframe", timeframe_text)
         bucket = capture_certificate(
-            bar_time, captured_at, timeframe=timeframe, capture_semantics_from=capture_semantics_from
+            bar_time,
+            captured_at,
+            timeframe=timeframe,
+            capture_semantics_from=capture_semantics_from,
+            session_profile=session_profile,
         )
         by_timeframe[timeframe][bucket] += 1
         # ⚠ The proxy comparison is against the ARITHMETIC half deliberately. It
@@ -1226,6 +1267,13 @@ def capture_certificate_report(
         # semantics are already active, and naming 402 would misdiagnose it.
         f"  capture semantics trustworthy from: "
         f"{capture_semantics_from or 'UNKNOWN — sql/403 cutover marker unavailable; nothing admissible'}",
+        # ⚠ PRINTED, because the NYSE-calendar precondition is otherwise invisible. Every
+        # bar in the store is US-listed today, so the refusal below is a no-op and would
+        # stay silently a no-op after a foreign member joined the harvested panel — the
+        # bucket table only shows a profile once one appears in it. This line shows the
+        # composition of the population the rule was applied to, whatever it is.
+        "  session profiles scanned: "
+        + (", ".join(f"{profile}={count:,}" for profile, count in sorted(profiles.items())) or "none"),
         "",
     ]
     out.append("ADMISSION verdict (capture_certificate) — what a consumer may use:")
@@ -1282,7 +1330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scan.execute(_CAPTURE_CERTIFICATE_SQL)
                 print(
                     capture_certificate_report(
-                        cast("Iterable[tuple[str, datetime, datetime]]", scan),
+                        cast("Iterable[tuple[str, datetime, datetime, str]]", scan),
                         capture_semantics_from=cutover,
                     )
                 )
