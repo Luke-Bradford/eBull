@@ -3,12 +3,19 @@
 Refs #2840, #2832, #2437, #3238. Depends on #2829 (the declaration freezes after this
 lands).
 
-Contract version: `sh-cheapest-band-price-gate-2026-09-20`. ⚠ That string is what the
-frozen declaration will carry in `PreregDeclaration.contract_version`, and it is how
-the readout rule in §"Readout and abort bar" becomes part of the declaration. The
+Contract version: `sh-cheapest-band-price-gate-2026-09-20-v2`. ⚠ That string is what
+the frozen declaration will carry in `PreregDeclaration.contract_version`, and it is
+how the readout rule in §"Readout and abort bar" becomes part of the declaration. The
 digest hashes the STRING, not this file's bytes (`prereg_contract.digest_payload`), so
 once the freeze runs this document is append-only: a correction is a new contract
 version and a new trial.
+
+⚠⚠ **`-v2` is the amendment recorded in §"Statistical contract".** The original string
+attested a pass bar that no longer exists — two point-estimate inequalities, replaced
+on 2026-09-20 by a preregistered paired date-clustered block-bootstrap test. Nothing is
+frozen yet, so this is an edit and not a supersession; the version moves anyway,
+because a digest over the old string would attest a rule this document no longer
+contains.
 
 Arm 2 of #2840, per the ticket's 2026-08-22 addendum. Arm 1
 (`s11-volatile-regime-gated-breakout`) is terminal — it FAILED its frozen bar on
@@ -232,7 +239,11 @@ trial against `MIN_MEASURED_TRIALS = 2` and write rows permanently refused with
 ⚠⚠ **The deflated Sharpe is refused TODAY, and clearing `MIN_MEASURED_TRIALS` is not
 what fixes it.** `deflate_group` (`backtest_run.py:3417`) computes
 `set(measured) - TRIAL_REGISTER.trial_ids` and returns `(None, reason)` for the
-WHOLE GROUP if that difference is non-empty — one undeclared strategy nulls the
+WHOLE GROUP if that difference is non-empty. ⚠ Narrower than earlier wording: the set
+difference is taken AFTER filtering to `usable` measurements carrying moments and an
+effective sample size, so it is not an unconditional rejection whenever any measured
+strategy is undeclared (`backtest_run.py:3438-3453`). Within that filtered set, one
+undeclared strategy nulls the
 deflation for every strategy measured beside it. On `main` at `61ef6e47` that
 difference is already `['s11-volatile-regime-gated-breakout']`: arm 1's register
 entry declares S-11 via `declared_for`, but `deflate_group` keys on the STRATEGY ID
@@ -249,17 +260,18 @@ Consequences, stated so the readout cannot promise a metric it will not have:
   every frozen declaration was measured against. That is a declaration decision, not
   a drive-by edit inside a strategy PR.
 - If step 3 runs before either entry exists, the readout reports
-  `deflated_sharpe_not_computed` and decides on `expectancy_per_trade_pct` and
-  `profit_factor` alone — which is arm 1's actual, accepted position, not a new
-  concession.
+  `deflated_sharpe_not_computed`. ⚠ **Corrected by the `-v2` amendment**: it does NOT
+  then "decide on `expectancy_per_trade_pct` and `profit_factor` alone". The decision is
+  the eight-conjunct test in §"Statistical contract", of which the expectancy axis is
+  two conjuncts of four per arm; profit factor decides nothing and is reported. The
+  earlier sentence described arm 1's position and was left standing here by oversight.
 
-**Pass bar — a SIGN test with both legs required, no magnitude invented:**
-
-1. `expectancy_per_trade_pct` > 0 for S-12 in **both** quarantine arms (`masked`,
-   `admitted`) of the `worst_case` ambiguity arm; **and**
-2. S-12's figure exceeds S-4's in the same cell — the gate must beat its own control.
-   A gated subset that merely inherits S-4's edge has demonstrated nothing, and
-   because it trades less it would look better on pooled cost without the comparison.
+**Pass bar — the eight-conjunct intersection-union test in §"Statistical contract".**
+Superseded text, kept visible because a reader arriving from an earlier session will
+look for it: the original bar was `expectancy_per_trade_pct > 0` for S-12 in both
+quarantine arms **and** S-12's figure above S-4's in the same cell. That was two
+inequalities on point estimates — refused, twice, as the thing underneath two failed
+floor derivations. §"Statistical contract" is the replacement and is the only bar.
 
 Anything else is a FAIL. No cell, arm or regime is selectable after the look — a
 result carried by one cell is a fail, as it was for arm 1.
@@ -295,7 +307,358 @@ straddle is handled, at the signal level, by §5.2's own rule.
 ⚠ Do not compare against the 16 stored `survivorship_free` results: every leg of them
 was charged the maximum band and they are known-stale since `61ef6e47`.
 
-## Step 2's forward-shadow floor — still NOT derived, and the blocker has moved
+## Statistical contract
+
+Frozen under `sh-cheapest-band-price-gate-2026-09-20-v2`, before any look. Implemented
+as a pure evaluator in `app/services/strategy_s12_paired_trial.py`, for the reason
+`strategy_mt1_trial`'s own header gives: *"Keeping the statistic here allows the
+implementation to be reviewed before the trial register and sealed-outcome gate are
+opened."* Where a constant or a scheme choice is justified, the justification is in that
+module beside the constant and is not duplicated here.
+
+⚠⚠ **This section has itself been through Codex checkpoint 1 and was refused (54
+findings), and what follows is the corrected version — still NOT frozen.** The refusal
+is not recorded as history: the corrections it forced are the section, and the blockers
+it found that remain open are named in §"What this does not resolve". A reader should
+assume nothing here is settled until a checkpoint pass accepts it.
+
+### Why the old bar had to go, and what the two earlier refusals were about
+
+The original pass bar was two inequalities on point estimates. Two successive
+forward-shadow floor derivations were put through Codex checkpoint 1 and refused (22 and
+30 findings), and the second refusal located the cause above both attempts: the bar
+carried **no justified error control**, so `docs/proposals/ta/
+2026-08-11-portfolio-alpha-viability-plan.md` §5's planning expression — which presumes
+an acceptance rule with an error rate — had no `critical_value` to draw on that the
+contract itself supplied.
+
+⚠ Narrower than the earlier wording, which said the inequalities "are not a test": they
+do have statistics and rejection regions. What they lacked is justified error control.
+
+§5 also rejected the old bar on its own terms: admission needs *"a preregistered
+date-clustered/block or studentized bootstrap lower bound on the portfolio net return
+distribution, not a z interval on per-trade means"*, and *"A positive mean alone cannot
+pass."* Leg 1 was a positive mean.
+
+### The estimands — two axes, because two documents require different units
+
+1. **Portfolio.** Daily after-cost sleeve returns, `equity[t]/equity[t-1] - 1`, on the
+   run's shared in-sample panel axis. This is §5's literal unit. The pairing needs no
+   alignment step: `backtest_run._measure` sets `dates = corpus.in_sample_axis` for
+   every strategy in one invocation. ⚠ The estimand starts at the FIRST AXIS DATE'S
+   CLOSE — `equity[0]` is that close, so any date-zero activity sits inside the base
+   rather than in a return. Declared, because the evaluator cannot verify date zero was
+   inert.
+2. **Per-trade expectancy, clustered by entry fill date.** The decision metric
+   `.claude/skills/quant/cost-aware-viability.md` mandates. Cluster key and its reason
+   are `block_bootstrap.cluster_by_date`'s, unchanged.
+
+Both are required. Neither substitutes for the other, and choosing between them after
+the look is not available.
+
+⚠ **A positive arithmetic mean daily return is not realised profitability**, and the
+readout must say "mean" rather than "made money": a positive mean need not imply a
+positive compounded terminal return. ⚠ The two axes also cover slightly different
+economic exposure — portfolio inference excludes date-zero P&L while the expectancy axis
+can include a date-zero entry — so they are not two views of one identical population.
+
+⚠ The expectancy legs resample the **union** of the two strategies' cluster dates, not
+the intersection. Intersecting would restrict S-4 to the dates S-12 traded and so
+silently re-scope the control, whose estimand is its own full population.
+
+⚠⚠ **Axis 2 is NOT the unit `ForwardShadowFloor` counts, and the two must not be
+equated.** The live gate counts one strategy's distinct resolved SIGNAL-BAR dates
+(`strategy_live_gate.py:392-395`); this axis is two strategies' union of ENTRY-FILL
+dates, after trade selection and position supersession. A count in one is not a count in
+the other, and the floor cannot be read off this axis without a conversion nobody has
+derived.
+
+### The test
+
+A **paired circular block bootstrap** over each axis: one set of resampled block indices
+per replication, applied to BOTH strategies, with the difference formed inside the
+replication. That is `strategy_mt1_trial`'s construction (*"All four arms use identical
+resampled month indices in every replication"*) on this trial's axes.
+
+⚠⚠ **This is what makes blocker 1 not bind on the acceptance rule**, and the checkpoint
+pass confirmed it independently: *"Pairing correctly removes any need for pre-look
+covariance estimation for acceptance."* The binding leg compares `mean₁₂ − mean₄`, whose
+variance needs S-12's dispersion and the covariance, neither of which exists before S-12
+runs. The pairing does not estimate the covariance in advance; it removes the need to,
+because the sampling distribution of the difference is produced directly at the look.
+Borrowing S-4's marginal standard error, which a refused draft did, bounds the
+difference's SE in neither direction.
+
+Decision quantity, per axis: the **lower end of the two-sided 95% percentile interval**
+(`block_bootstrap.CONFIDENCE`, imported so the two constructions cannot drift). ⚠ That
+endpoint is a **nominal one-sided α = 0.025**, not 0.05, and *nominal* is the operative
+word: a percentile bootstrap's actual tail error is approximate, BCa is not computed,
+and no calibration evidence is offered. The threshold is **zero**, which is §5's own
+acceptance clause (*"the … lower confidence bound on net expectancy is positive"*) and
+both repo precedents' — `strategy_mt1_trial` tests `primary_interval.low > 0.0`.
+
+### Derived, and declared — the split stated rather than blurred
+
+The checkpoint pass refused the first cut of this section for presenting two DECLARED
+choices as derivations: a block length "fixed by construction" at `MAX_HOLD_BARS`, and
+an axis floor of 170 obtained by inverting `optimal_block_length`'s `b_max` tuning cap.
+Both were the defect that killed the two earlier drafts, wearing a new costume.
+`.claude/CLAUDE.md` permits a choice where no published formulation exists, on condition
+it is *said* to be one and frozen in a version hash.
+
+**DERIVED — published formulations, used as published.**
+
+- **Block length** — `block_bootstrap.optimal_block_length`, Politis & White (2004) with
+  the Patton, Politis & White (2009) `4/3` circular correction, measured off the series'
+  own autocovariance. ⚠⚠ **The first cut's reason for pinning it instead was wrong twice
+  over.** Freezing a SELECTOR freezes the algorithm, not its output — the same standing
+  the bootstrap's own covariance estimate already has in this contract. And a fixed
+  block does not merely "contain" the dependence: an ordinary block scheme attenuates
+  lag-`k` covariance by roughly `1 − k/b`, so pinning `b` at the dependence length
+  recovers about two thirds of the long-run variance and reports an interval NARROWER
+  than the truth — an error in the PASSING direction. The hold cap was also never a
+  bound on the dependence: S-4's 100-bar compression window, recursive ATR, persistent
+  regimes and repeated issuers all outlive it.
+- **Circular blocks** — Politis & Romano (1992), for `block_bootstrap`'s own stated
+  reason on this axis shape.
+- **Percentile interval** — Efron & Tibshirani (1993) ch. 13.
+- **The pairing** — `strategy_mt1_trial`'s identical-index construction.
+- **The conjunction** — an intersection-union test, Berger (1982), *Multiparameter
+  hypothesis testing and acceptance sampling*, Technometrics 24(4):295-300: rejecting
+  only when every component rejects at level α gives the combination size at most α,
+  under no assumption about dependence between components. ⚠ Conditional on each
+  component being a VALID level-α test — the IUT confers nothing on a miscalibrated one.
+
+**DECLARED — choices, frozen in `TRIAL_EVALUATOR_VERSION`, not derivations.**
+
+- One block length for both axes, measured on the portfolio paired-difference series
+  because that is the PRIMARY estimand. ⚠ An earlier draft justified it as "the only
+  series defined on every panel date", which is false — both marginal return series are
+  defined there too. ⚠⚠ The transfer is NOT validated, in two reproduced directions:
+  common serial dependence CANCELS in the difference, so a difference-selected block can
+  be far shorter than the treatment series alone would select (`b=1` against `42` in one
+  probe) and the own-return leg is then under-blocked; and the expectancy ratio's
+  relevant linearised series is `(return_sum − mean × count)/E[count]`, whose dependence
+  the portfolio difference need not capture at all. ⚠ A third coupling follows and is
+  declared here: changing the TRADE-date population can shorten the block and so tighten
+  the PORTFOLIO interval, with both equity paths unchanged.
+  ⚠ The cluster axis holds ACTIVE dates only, so `b` clusters span at least `b` panel
+  dates **for a non-wrapping run of `b` distinct active dates** — `b` adjacent dates span
+  `b−1` elapsed intervals, and a circular block that crosses the boundary has no ordinary
+  chronological span at all. None of this makes over-spanning safe; longer blocks are not
+  automatically conservative.
+- ⚠ "Politis & White optimal" is also a transfer between objectives: their criterion
+  targets long-run VARIANCE estimation, not the coverage of these percentile endpoints,
+  and certainly not of a ratio difference. Another application choice, not a coverage
+  derivation.
+- 10,000 replications, the frozen seed, the union cluster axis, and the first-close
+  estimand start. Each is argued beside its constant in the module.
+
+**No sample-size floor certifying 2.5%-tail coverage is derivable here, and none is
+invented.** ⚠ The floor actually applied is `block_bootstrap.MIN_CLUSTERS = 2`, and it
+is **this repository's computability guard, not a published statistical floor** — an
+earlier draft called it "the only published floor available", which supplies neither a
+publication nor an adequacy result. It is applied to EACH strategy's own supporting
+dates rather than to the union, because a six-date treatment against a dense control
+satisfies a union check and supports nothing.
+
+⚠⚠ **And it admits a grossly miscalibrated test, measured.** With two IID continuous
+symmetric zero-mean observations the percentile lower bound is effectively their
+minimum, so the rejection probability is about **25%, not 2.5%** — reproduced at
+checkpoint 1 at 96 of 400 null samples, and duplicating such books across both declared
+arms defeats the whole conjunction. So clearing this precondition establishes only that
+the arithmetic ran. ⚠ The per-strategy correction narrows the earlier six-date example's
+STARVATION, not its inferential weakness: six supporting dates still clear the floor.
+
+### Pass bar — eight conjuncts, all required
+
+Per quarantine arm (`masked`, `admitted`) of the `worst_case` ambiguity arm, and per
+axis (portfolio, expectancy):
+
+1. the lower bound on **S-12's own** mean is > 0; **and**
+2. the lower bound on the **paired difference** (S-12 − S-4) is > 0.
+
+2 arms × 2 axes × 2 legs = **8 inequalities, every one required**. Leg 1 is not
+redundant: S-12 can beat S-4 while losing money. Leg 2 is not redundant either: a gated
+subset that merely inherits S-4's edge has demonstrated nothing about the gate.
+
+⚠ Both arms are checked BY NAME against the contract's declared pair, not merely
+counted — reporting a pass from one arm, or from two arms under other names, would be
+selecting an experiment after the look.
+
+### Relevance horizon and planning effect — both DECLARED, neither derived
+
+- **Relevance horizon: 24 months.** ⚠ An earlier draft of this section cited this to §5.
+  That was wrong: the figure appears at line 504 under **§8, "Build order and stop
+  conditions"** (*"the feasibility census projects time-to-power beyond the candidate's
+  declared relevance/retention horizon (24 months for current quote evidence)"*).
+  Adopting a current-quote-evidence horizon for historical strategy-return evidence is a
+  **choice this contract declares** because the gate's threshold is quote-calibrated
+  (`cost_model.BANDS`, a p75 round-trip spread calibrated 2026-08-07). It is not an
+  automatic inheritance. ⚠ Its start date and its recalibration/reset semantics are
+  **not** specified here, and that is an open gap.
+- **Planning effect: a declared standardised paired effect `d = 0.5`,** power 0.8. Cohen
+  (1988) describes 0.2/0.5/0.8 explicitly as **conventions**, not as economic
+  thresholds, and `strategy_mt1_trial` declares 0.5 for its own paired trial. So this is
+  a convention adopted by declaration. ⚠⚠ It is **not** §5's minimum net effect, which
+  §5 defines as improvement over F-0 after the mandate's risk penalty — a quantity this
+  `falsification_only` trial has no capital context to compute.
+
+⚠⚠ **Three corrections to the first cut's reasoning about that effect, all of which
+reversed a claim.**
+
+1. **"A standardised effect sidesteps the unobtainable variance" is the wrong way
+   round.** An ABSOLUTE economic effect can be declared with no variance at all; the
+   variance is what converts either form into a sample size. Standardising removes the
+   scale, not the need for the dependence adjustment, the cluster-weight behaviour, or
+   the conversion into decision dates and weeks. ⚠ Slightly narrower than a first
+   statement of this correction: a FULLY specified standardised effect plus a sampling
+   model CAN determine a sample size without an absolute variance. What blocks it here is
+   the missing denominator and the unspecified alternatives below, not an absolute
+   requirement for variance in every case.
+2. **`d`'s denominator is undefined here.** Daily paired-difference SD, long-run SD,
+   per-trade SD and cluster influence-function SD are four different quantities, and a
+   difference of ratios over unequal trade populations has no automatic "paired
+   observation SD". Until the denominator is named, `n = ceil(((z + z)/d)²) = 32` is
+   arithmetic without a unit.
+3. **One effect does not specify eight alternatives.** Own-return and difference legs, on
+   two axes and two arms, each need their own alternative for power. A positive
+   improvement says nothing about how far own expectancy sits from zero.
+
+⚠ The mechanism's own measured cost saving (≈0.29 pp of charged round trip per fire) is
+**not** used as the effect, and could not be: it is a difference of charge COEFFICIENTS,
+not of net expectancies. ⚠ The reason given in earlier sessions — *"the two coincide only
+if the strategies' gross expectancies agree"* — is **mathematically wrong** and is
+corrected here: the drag on net expectancy is `E[(1+g)·c]`, which involves the scale of
+the gross multiple AND the covariance between gross return and charge, so equal gross
+MEANS are neither sufficient nor necessary for the two differences to agree.
+
+### §5 obligations: which are met, which are scoped out, and which are simply GAPS
+
+⚠ An earlier draft called the last group "exemptions". Two of them are not.
+
+**Legitimately out of scope.** *"the mandate-level portfolio frontier improves"* and the
+F-0 comparison are admission clauses for a **capital candidate**. This declaration is
+`falsification_only`, allocates nothing and has no frontier to move. ⚠ That is a scope
+limitation on what a PASS could mean; it does not make the rest of the rule
+"§5-compliant" generally, and it does not remove §5's economic planning inputs.
+
+**Open gaps, named as gaps.**
+
+- *"Random-entry, simpler single-input and core/no-trade challengers are mandatory."*
+  §5 says mandatory and they are ABSENT. The run set's fixity (`run_backtest`'s singular
+  `strategy_id`) explains why one convenient invocation cannot add them; it does not
+  prevent constructing separate aligned challenger books, and S-4/S-8/S-11 do not stand
+  in for a random-entry or core/no-trade control.
+- *"Heavy-tailed candidates additionally require resampled order/cost/missed-fill
+  simulations and explicit jump scenarios."* Not satisfied. S-8's stored skew of 36 and
+  kurtosis of 1,976 establish that this family is a concern; they do not establish
+  S-12's own tail law, and deferring the capital-stress clause does not validate the
+  percentile bounds now.
+- *"Nearby-parameter robustness"*, issuer-dependence, and §5's full reporting set
+  (capacity, expected shortfall, drawdown, worst gap, losing streak, exposures, results
+  by year and liquidity tier) have **no stated mapping** onto what this harness already
+  produces. Some of it exists in `strategy_result`; the mapping is not written down.
+- ⚠ `worst_case` ambiguity is **not** adverse-execution robustness. Choosing the
+  unfavourable OHLC touch order says nothing about cost uncertainty, missed fills,
+  market impact or jumps.
+
+### What this resolves, and what it does not
+
+**Resolved.** The acceptance rule now has a construction whose error control is argued
+rather than assumed; the binding leg's variance is not needed before the look, confirmed
+independently at checkpoint 1; the multiplicity model is declared with a published zero
+correction; and no coefficient arithmetic appears in the bar, so the charge-coefficient
+confusion is gone. The evaluator enforces the declared arm set, the shared axis, cluster
+membership on it, per-strategy support, and the marginal/difference distinction on a
+degenerate bootstrap.
+
+**Not resolved, and not papered over.**
+
+1. **No power calculation, for any conjunct or for the conjunction.** An IUT's power is
+   bounded above by its weakest component's — ⚠ bounded ABOVE, which is not the same as
+   "the conjunction needs strictly more than one component": perfectly dependent
+   rejection events make the two equal. ⚠ Nor is it true that no rule exists: the union
+   bound gives `P(all pass) ≥ 1 − Σβⱼ`, so marginal powers of 0.975 would suffice for
+   0.8 jointly. What blocks the calculation is the missing assumptions above — the
+   undefined `d` denominator and the eight unspecified alternatives — not the absence of
+   a formulation.
+2. **"Zero correction" covers these eight conjuncts only.** It says nothing about the
+   earlier strategy selection, the successive arms of #2840, repeated looks, or future
+   validations. §5 separately requires historical-search accounting (the trial register)
+   and a prospective family-wise alpha budget, and neither is discharged here.
+3. ⚠⚠ **The prospective experiment the floor would power is still undefined — and this
+   is now the binding blocker.** The historical bar requires BOTH quarantine arms and
+   BOTH strategies' books; production carries only `masked` (`price_masked_bars`), and
+   this `strategy_version` cannot run in the scan universe at all. So there is no
+   forward instrument that computes this bar, and a floor cannot be sized for an
+   experiment that has not been specified. That is a strictly sharper statement than the
+   previous session's *"arm 2 may not be preregisterable"*, and it names what would fix
+   it: specify the forward instrument first.
+4. **A FAIL is not calibrated falsification.** Missing data, a refusal and a failure to
+   reject all collapse into FAIL operationally. Without power that is a stopping policy,
+   not evidence of absence — and symmetrically, "a PASS is strong evidence" overstates
+   what historically-selected data can carry.
+5. **The frozen artefact does not bind the whole evaluator.** `PreregDeclaration` hashes
+   a contract STRING, not this document's bytes or the module's. The module hashes only
+   itself while importing live `CONFIDENCE`; no expected evaluator digest is checked, and
+   the corpus-version assertion promised in §"Readout and abort bar" names a field
+   `PreregDeclaration` does not carry.
+6. **Evidence identity is unrepresentable in the evaluator's inputs.** `PairedBooks`
+   carries no strategy version, run id, namespace, ambiguity arm, cost basis, sizing
+   rule or corpus version, so gross books, a `best_case` arm or two curves from
+   different runs would all pass its structural checks. The wiring step owns those
+   checks and must be written to own them explicitly.
+7. **A sparse-axis refusal is partly draw luck.** A replication that selects no trade for
+   one strategy is refused; whether one occurs depends on the seed and the replication
+   count. The deterministic guard is the per-strategy support precondition, and the
+   absence of an empty draw establishes nothing on its own.
+8. **Nothing computes this statistic inside a run yet.** The evaluator is pure and
+   reviewed; wiring it to a run's two books per quarantine arm is step-3 work.
+9. **The bootstrap's regularity assumptions are unspecified.** Stationarity (or a stated
+   alternative), weak dependence, sufficient moments and stable cluster-count behaviour
+   are all substantive here rather than finite-sample caveats: §"Measured premise" and the
+   supply census both document large era and activity changes across the 58.9-year panel,
+   and the CIRCULAR scheme joins the latest period to the earliest inside a single block.
+10. **A block merely CLOSE to its axis length is unguarded.** The exactly-degenerate
+    configuration is refused; no derivable threshold separates "nearly the whole axis"
+    from "enough blocks", and none is invented.
+11. **Permitting a degenerate DIFFERENCE is blanket.** Collapse can come from periodic
+    block sums, quantile collapse or numerical loss as well as from a constant paired
+    advantage, and the evaluator cannot tell those apart. ⚠ Even a constant OBSERVED
+    advantage establishes only empirical-bootstrap degeneracy, not zero population
+    sampling uncertainty. ⚠ The refusal on a degenerate MARGINAL is likewise a declared
+    policy, not a derivation — this evaluator computes no design effect, so the imported
+    module's undefined-ESS rationale does not transfer automatically.
+12. **The two quarantine arms are validated independently**, so two arms carrying
+    different date windows can enter one trial result, and matching the declared NAMES
+    cannot establish actual `masked`/`admitted` provenance. Another identity check the
+    wiring step owns.
+13. **The version hash binds less than it looks.** `TRIAL_EVALUATOR_VERSION` hashes the
+    evaluator's own bytes while importing live `CONFIDENCE`, `MIN_CLUSTERS` and
+    `optimal_block_length` — all three now change outcomes — and NumPy/RNG behaviour has
+    no recorded provenance either. No expected-dependency digest is checked.
+14. **Extreme finite inputs can still escape.** The imported selector can raise
+    `OverflowError` during its autocovariance powers, and sufficiently small scaling can
+    change the selected block by underflow. Neither is routed through the refusal
+    vocabulary.
+15. **Test coverage is incomplete, and the gaps are listed rather than implied**: control
+    starvation, both-books-empty, disjoint cluster dates, an actual zero-trade resample,
+    minimum-size acceptance, a clipped block, the circular wrap and truncation against an
+    independent oracle, expectancy-axis pairing (the pairing tests are portfolio-only),
+    unequal treatment/control cluster weights, near-constant marginals, mutated clusters,
+    an exact-zero lower bound, identical strategies, and full-result reproducibility.
+
+## Step 2's forward-shadow floor — still NOT derived, and its blocker has MOVED, not gone
+
+⚠⚠ **Read the whole section as HISTORY up to §"What this left", then read that.** What
+follows records two refused derivations and the reasons they were refused; several
+sentences below describe the OLD pass bar and remain true of it and false of the current
+one. Where a statement says the bar has no test statistic, no rejection region or no
+significance model, it is about the superseded inequalities — the current bar is
+§"Statistical contract" above, whose limits are stated there. ⚠ A heading in an earlier
+draft said the blocker was "amended away"; that was wrong, and §"What this left" says
+where it actually sits.
 
 `ForwardShadowFloor` takes no default and `sql/333` CHECKs both numbers `> 0`, so step
 2 cannot proceed without deriving them. A first derivation was written on 2026-09-20,
@@ -426,16 +789,63 @@ moves that comparison without changing prospective feasibility. §5 asks whether
 evidence can reach the requirement inside a declared relevance horizon, and arm 2
 declares no such horizon either.
 
-**What this leaves, stated so the next session does not re-derive it.** The floor is
-blocked on a contract amendment, not on a measurement, and the amendment is not small:
-the pass bar must become a test with an error model — the §5-mandated date-clustered
-block-bootstrap lower bound on the paired difference — and the contract must declare a
-relevance horizon and a minimum meaningful effect that is not the mechanism's own cost
-saving. ⚠ Even then, blocker 1 remains: the paired difference's variance is unobtainable
-until S-12 runs. **A floor that cannot be derived before the run, for an experiment whose
-declaration must be frozen before the run, is a real possibility that has to be faced
-rather than engineered around** — and the honest reading of that outcome is that arm 2
-may not be preregisterable under #2829 in its current form.
+**What this left, what was done about it, and where the blocker sits now.** The floor was
+blocked on a contract amendment, not on a measurement. That amendment is
+§"Statistical contract" above, landed 2026-09-20 and still unfrozen: the pass bar is a
+preregistered paired date-clustered block-bootstrap intersection-union test, the
+relevance horizon is DECLARED at 24 months, and the planning effect is a DECLARED
+standardised `d = 0.5`. ⚠ Read against §5, the pass THRESHOLD is zero and the effect
+would size a forward requirement — a narrowing of the handoff's own wording, argued
+there.
+
+⚠⚠ **Blocker 1 splits in two, and only one half survives.** For the ACCEPTANCE RULE it
+is gone, confirmed at checkpoint 1: identical resampled indices produce the difference's
+sampling distribution at the look, so no pre-run covariance is needed. For POWER it
+stands — and the reason is NOT that no formulation exists (the union bound supplies one:
+`P(all pass) ≥ 1 − Σβⱼ`). It stands because `d`'s denominator is undefined for a
+difference of ratios over unequal trade populations, and because eight conjuncts need
+eight alternatives, of which one declared effect specifies at most one.
+
+⚠⚠ **And the binding blocker has moved again, to something sharper than "arm 2 may not
+be preregisterable".** A floor sizes a FORWARD instrument, and there is no forward
+instrument here to size:
+
+1. The eight-conjunct bar requires BOTH quarantine arms; production carries only
+   `masked`, on purpose (`price_masked_bars`).
+2. It requires BOTH strategies' books; a forward shadow accumulates one strategy's
+   signals.
+3. This `strategy_version` cannot run in `SCAN_UNIVERSE` at all — `s12_signals` refuses
+   it — which the section below already records.
+4. The evaluator's cluster axis counts two strategies' union of ENTRY-FILL dates, while
+   `strategy_live_gate` counts one strategy's resolved SIGNAL-BAR dates. **They are not
+   the same quantity**, so the amended bar does NOT hand the floor a readout unit, and
+   an earlier draft of this paragraph claiming it did was wrong.
+
+**So the next step is not a third floor derivation. It is to SPECIFY the forward
+instrument, and that specification is larger than naming four things.** It needs: the
+strategy identity and universe; synchronised CONTROL collection (S-4's forward book, on
+the same dates); a portfolio construction and sizing rule, since one axis of the bar is
+portfolio-level; executable nominal-price inputs, which is what forced `survivor_only`
+out in the first place; a cost model; a treatment for still-unresolved outcomes; an
+accrual model; a stopping and look schedule; and an alpha allocation against §5's
+prospective family-wise budget. ⚠ Two narrowings on the four bullets above, both from
+checkpoint 1: *"a forward shadow accumulates one strategy"* describes the live gate's
+current QUERY (`strategy_live_gate.py:435` aggregates one identity per call), not a
+prohibition on collecting two — the missing thing is a paired instrument, not a
+capability. And `forward_decision_dates` is weaker than "complete evidence dates": ONE
+resolved signal makes a date count even while that day's other signals are unresolved, so
+any conversion inherits that looseness too.
+
+⚠ Both family-B precedents could skip all of this because their forward
+instrument was the same STRATEGY, measured forward; arm 2's forward instrument is not
+even the same statistic. ⚠ Narrower than an earlier draft, which said both predecessors
+used "the same forward instrument" — arm 1's own freeze script is explicit that its
+confirmatory instrument runs under `SCAN_UNIVERSE` and is therefore a DIFFERENT
+`strategy_version` with its own declaration, which the section below quotes. The
+difference that matters for arm 2 is that its bar needs two strategies and two quarantine
+arms at once, which no forward instrument in this repo produces.
+
+⚠ Nothing about that sequencing is operator-gated.
 
 ### What the attempt DID establish, and is worth keeping
 
@@ -632,7 +1042,10 @@ the three the refusal added:
 ⚠ Three edges are not code refusals and are handled by construction. **Unequal arm
 coverage** is reported rather than refused (`N_masked <= N_admitted` is expected).
 **Corpus or vendor drift between the census and the run** is caught downstream — the
-run's `corpus_version` is asserted against the declaration at readout, per §"Readout and
+run's `corpus_version` is asserted against the declaration at readout — ⚠ **a promise
+this repo cannot currently keep: `PreregDeclaration` carries no corpus-version field, so
+the assertion has to be made by the step-3 readout against the census artefact, not by
+the declaration.** Recorded as a gap rather than left as a claim. Per §"Readout and
 abort bar". **Same-day concentration** is reported on every cell, and it is mild here.
 
 ## Sequencing — why the declaration is NOT in this PR
@@ -643,8 +1056,9 @@ invalidated by any review comment touching the module, and `sql/333` bars UPDATE
 DELETE — recovery would mean a new strategy version and a second charge on the shared
 trial register.
 
-1. **this PR** — the strategy exists, is registered, is tested, and the census that
-   sized it is reproducible;
+1. **this PR** — the strategy exists, is registered, is tested, the census that sized it
+   is reproducible, and (added by the `-v2` amendment) the declared statistic exists as a
+   reviewed pure evaluator, `strategy_mt1_trial`'s own sequencing;
 2. add the `DeclaredTrial` register entry, then freeze the declaration against the
    merged `strategy_version`, `falsification_only` — for arm 1's reason and one of its
    own: no stored corpus window can CONFIRM a hypothesis formed off stored cohorts,
@@ -730,6 +1144,35 @@ Pure tier, no DB.
 
 *Basis coupling*
 - `BACKTEST_UNIVERSE`'s pinned archive earns `as_traded` (guard 1).
+
+*The declared statistic* (`tests/test_2840_s12_paired_trial.py`)
+- The block length is MEASURED, not pinned: two series with different serial structure
+  get different block lengths, and the only sample floor asserted is
+  `block_bootstrap.MIN_CLUSTERS`.
+- A uniform per-observation advantage passes all four of an arm's bounds; beating the
+  control while losing money fails leg 1; making money without beating the control fails
+  leg 2; ⚠ **an expectancy conjunct alone can fail the arm** — without that case,
+  dropping the expectancy legs from the decision would leave the suite green while the
+  decision metric stopped deciding. One failing arm fails the trial.
+- ⚠⚠ **The pairing is asserted against a built alternative, not against a width claim.**
+  A treatment equal to the control plus a constant makes every replication's difference
+  exactly that constant, so the paired interval collapses to a point — and the test
+  CONSTRUCTS the unpaired version (two independent resamples, differenced afterwards)
+  and shows it is wide there. An earlier version asserted a width ratio without ever
+  building the alternative it was contrasting with.
+- ⚠ **The expectancy estimator is trade-weighted**, shown on a deliberately unbalanced
+  fixture (20 trades on one date against 1 on another). Every earlier fixture put one
+  trade per date, under which a wrongly equal-weighted cluster mean is indistinguishable
+  from the ratio estimator.
+- The union axis keeps a control-only date: the control's point estimate equals its own
+  full-population expectancy.
+- Refusals: the arm set not being the contract's declared pair (no arm, one arm, invented
+  names, a repeat); a non-ascending or repeating date axis; a cluster date absent from
+  the shared axis; a book supported by too few decision dates, refused BEFORE any draw;
+  a degenerate marginal (while a degenerate DIFFERENCE is allowed, which is the state the
+  pairing test relies on); a ruined, non-finite or scalar equity path; two books on
+  different-length axes.
+- Same input → identical bounds and identical block length.
 
 *Manifest wiring*
 - Present, non-retired, `per_series`, entry-only, S-4's exit regime (40-bar cap,
