@@ -107,9 +107,13 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         MODEL_TESTS,
         [
             (
-                'COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max'
+                # ⚠ Re-anchored by #3238 (v3 -> v4). Third time this anchor has
+                # had to move — #2695 found it stranded on `-v1` since the v2
+                # split, which is why `audit_probe_anchors` now fails at push
+                # time instead of letting it rot in silence.
+                'COST_MODEL_ID = "static-p75-insession-v4+archive-basis-band'
                 '+carry-fx-structural-zero-long-x1-real-usd"',
-                'COST_MODEL_ID = "static-p75-v4"',
+                'COST_MODEL_ID = "static-p75-v5"',
             )
         ],
         "test_the_cost_model_id_is_the_frozen_one",

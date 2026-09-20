@@ -141,6 +141,7 @@ def compositions() -> int:
         wealth_closes_by_instrument=closes_by_instrument,
         lo=lo,
         hi=hi,
+        price_basis=corpus.cost_price_basis,
     )
     n_legs = len(book)
     date_count = hi - lo + 1

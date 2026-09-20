@@ -32,18 +32,35 @@ outright — ``assert_no_existing_results`` blocks a second row at an identity t
 
 THE BAND SENSITIVITY, AND WHAT IT IS NOT
 ----------------------------------------
-Every backtest trade is charged the ``<$5`` band (1.450% round trip) whatever its
-price, because ``cost_band_for`` refuses to let a split-adjusted price select a
-nominal threshold (``cost_model``: *"an adverse sensitivity suitable for
-falsification, not a claim that the resulting cost is the historical quote"*). So
-the reported net is priced at the DEAREST calibrated band for the whole panel.
-The table below re-prices the measured gross population at each band.
+⚠⚠ THIS SECTION SAID SOMETHING FALSE UNTIL #3238, and the correction is the
+point. It read: *"Every backtest trade is charged the ``<$5`` band (1.450% round
+trip) whatever its price, because ``cost_band_for`` refuses to let a
+split-adjusted price select a nominal threshold … A cheaper band is only
+reachable by knowing each entry's NOMINAL price, which this corpus does not
+carry."*
 
-⚠⚠ THOSE ROWS ARE A SENSITIVITY, NOT A RESULT. A cheaper band is only reachable
-by knowing each entry's NOMINAL price, which this corpus does not carry. Quoting a
-cheaper-band figure as the strategy's performance is fitting the cost model to the
-answer, which ``cost-aware-viability.md`` names as the thing not to do. What the
-row is FOR is bounding how much of the verdict the band rule owns.
+The effect was real; the stated cause was wrong for half the corpus. Which band
+a trade is charged depends on the universe's PINNED ARCHIVE:
+
+- ``survivor_only`` is ``split_adjusted``, so every entry still takes the
+  ``<$5`` band. There the old paragraph is exactly right, and the refusal is
+  earned — an adjusted level cannot select a nominal threshold.
+- ``survivorship_free`` is pinned to ``icyDenev/Intrader``, whose
+  ``adjustment_basis`` is ``unadjusted``. Its opens ARE nominal, so each entry
+  selects its own band. The run held the price the whole time and told the cost
+  model it did not.
+
+So this script no longer asserts what was charged — it READS it, from the arm's
+own measured ``half_spreads``, and marks those rows. The table below re-prices
+the measured gross population at every band regardless, which is still the thing
+a reader needs.
+
+⚠⚠ THOSE ROWS ARE A SENSITIVITY, NOT A RESULT. Re-pricing a whole population at
+one band is a bound on how much of the verdict the band rule owns, not a claim
+about what any trade cost — even on the archive that CAN band, where the answer
+varies trade by trade. Quoting a cheaper-band figure as the strategy's
+performance is fitting the cost model to the answer, which
+``cost-aware-viability.md`` names as the thing not to do.
 
 Usage::
 
@@ -75,7 +92,7 @@ from app.services.backtest_run import (
     load_corpus,
     runnable_strategies,
 )
-from app.services.cost_model import BANDS, COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
+from app.services.cost_model import BANDS, COST_MODEL_ID
 from app.services.result_ledger import HoldoutAccess, record_holdout_access
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import ResultNamespace
@@ -234,29 +251,35 @@ def _print_arm(summary: Summary) -> None:
     )
 
 
-def _print_band_table(label: str, gross: Sequence[float]) -> None:
+def _print_band_table(label: str, gross: Sequence[float], charged_half_spreads: Sequence[float]) -> None:
     """Re-price one arm's measured gross population at every calibrated band.
 
-    ⚠⚠ A SENSITIVITY, NOT A RESULT — see the module header. The corpus cannot
-    say which band a trade belonged to; this bounds how much of the verdict the
-    max-band rule owns, and nothing more.
+    ⚠⚠ A SENSITIVITY, NOT A RESULT — see the module header. Re-pricing a whole
+    population at ONE band is a bound on how much of the verdict the band rule
+    owns; it is not what any trade cost.
+
+    ⚠ ``charged_half_spreads`` IS MEASURED AND NOT ASSUMED (#3238). It is the
+    ``half_spreads`` census the run itself produced, so the ``<- charged``
+    markers say what the population actually paid. This used to read
+    ``UNKNOWN_NOMINAL_PRICE_BAND.label`` — a correct marker on a split-adjusted
+    corpus and a false one on ``survivorship_free``, where entries select their
+    own bands and MORE THAN ONE row is marked.
     """
-    print(f"\n  band sensitivity on {label} (SENSITIVITY, not a result — the corpus cannot assign a band):")
+    charged = {float(value) for value in charged_half_spreads}
+    print(f"\n  band sensitivity on {label} (SENSITIVITY, not a result — one band re-priced over the whole set):")
     print(f"    {'band':12}{'round trip%':>13}{'exp%/trade':>12}{'PF':>8}")
-    # The band every split-adjusted entry is actually charged, resolved once.
-    # ⚠ Read off `UNKNOWN_NOMINAL_PRICE_BAND` rather than re-derived from a max
-    # over BANDS: that constant IS what `cost_band_for` returns, so a future
-    # change to the selection rule moves the marker with it instead of leaving a
-    # second, silently-diverging copy of the choice here.
-    charged = UNKNOWN_NOMINAL_PRICE_BAND.label
     for band in sorted(BANDS, key=lambda item: item.p75_spread_pct):
         repriced = _repriced(gross, half_spread=float(band.half_spread))
         pf = _profit_factor(repriced)
         pf_text = f"{pf:.3f}" if pf is not None else "n/a"
-        marker = "  <- charged" if band.label == charged else ""
+        marker = "  <- charged" if float(band.half_spread) in charged else ""
         print(
             f"    {band.label:12}{float(band.p75_spread_pct):>13.3f}{_expectancy(repriced):>12.3f}{pf_text:>8}{marker}"
         )
+    if not charged:
+        print("    ⚠ this population realised no leg, so no band was charged")
+    elif len(charged) > 1:
+        print(f"    ⚠ {len(charged)} bands were charged across this set — no single row describes what it paid")
 
 
 def main() -> int:
@@ -341,13 +364,21 @@ def main() -> int:
                 flush=True,
             )
             pooled: list[float] = []
+            # #3238 — the bands the pooled population actually paid, accumulated
+            # beside the returns they were charged on rather than assumed.
+            pooled_half_spreads: set[float] = set()
             for arm in arms:
                 for measurement in arm.namespaces.values():
                     label = f"{arm.label}/{measurement.namespace}"
                     _print_arm(_summarise(label, measurement))
                     pooled.extend(measurement.gross_returns)
+                    pooled_half_spreads.update(measurement.half_spreads)
             if pooled:
-                _print_band_table(f"{strategy_id} (all arms pooled, {len(pooled)} trades)", pooled)
+                _print_band_table(
+                    f"{strategy_id} (all arms pooled, {len(pooled)} trades)",
+                    pooled,
+                    sorted(pooled_half_spreads),
+                )
         # ⚠ The MEASUREMENT is read-only; the access records above are not, and
         # were committed deliberately before the look. This discards the read
         # transaction only. Stated because the connection context manager

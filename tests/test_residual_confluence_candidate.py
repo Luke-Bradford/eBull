@@ -55,8 +55,14 @@ def test_definition_is_complete_stable_and_contains_no_measured_result() -> None
     # ⚠ Moved by #2720 (cost_model_id is a definition input; the carry/FX
     # structural closure is a new model, so the candidate version moves with
     # it — that is the pin doing its job, not collateral).
-    assert definition_hash() == "6173442ec8ed4c8518b9e8f9baea9e3aaf5d92b2cb2f58f7fce776e9c800ccc8"
-    assert CANDIDATE_VERSION == "residual-confluence-v1+6173442ec8ed"
+    # ⚠ Moved again by #3238, same reason and the same verdict: v4 charges a
+    # ``survivorship_free`` leg its own nominal band instead of the maximum one,
+    # which is a change to what is charged and therefore a new model. Nothing
+    # is stranded — `strategy_signals`, `strategy_results_store` and
+    # `strategy_preregistration_declarations` hold 0 rows on any
+    # `residual-confluence%` version.
+    assert definition_hash() == "022ee19d4fe654ad3854305b5b55706a04bd5634165d7eca1d5dae689e29d8a6"
+    assert CANDIDATE_VERSION == "residual-confluence-v1+022ee19d4fe6"
     assert DEFINITION.market_vol_long_lookback == 252
     assert DEFINITION.model_features == MODEL_FEATURE_NAMES
     assert "expectancy" not in payload

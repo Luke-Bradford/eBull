@@ -3,6 +3,7 @@ from datetime import date, timedelta
 import numpy as np
 import pytest
 
+from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.equity_curve import LegBook, build_equity_curve
 from app.services.position_builder import Window
 from app.services.strategy_result import HOLDOUT_BOUNDARY
@@ -69,6 +70,7 @@ def test_legacy_cohort_ab_arm_runs_the_declared_member_count() -> None:
             SeriesPlacement(
                 panel=np.arange(len(axis), dtype=np.int64),
                 adjusted_open=prices,
+                half_spread=np.full(len(prices), float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)),
                 holds=np.asarray([2], dtype=np.int64),
                 marks=prices,
                 marks_first=0,
@@ -144,6 +146,7 @@ def test_the_legacy_arm_refuses_a_member_that_drops_a_declared_trade(
             SeriesPlacement(
                 panel=np.arange(len(axis), dtype=np.int64),
                 adjusted_open=prices,
+                half_spread=np.full(len(prices), float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)),
                 holds=np.asarray([2], dtype=np.int64),
                 marks=prices,
                 marks_first=0,

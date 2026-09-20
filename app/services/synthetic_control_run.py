@@ -112,6 +112,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date
+from decimal import Decimal
 from multiprocessing import get_context
 from multiprocessing.shared_memory import SharedMemory
 from typing import Final, Protocol
@@ -119,7 +120,7 @@ from typing import Final, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND
+from app.services.cost_model import PriceBasis, cost_band_for
 from app.services.equity_curve import LegBook, SharedMarkLegBook, build_equity_curve
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import Window
@@ -163,13 +164,26 @@ HOLDOUT_CONTROL_REASON: Final = (
     "access log exists to keep rare; the control is computed for the in_sample namespace only"
 )
 
-#: The half-spread every leg of this corpus carries. ⚠ NOT a simplification:
-#: ``cost_band_for(..., price_basis="split_adjusted")`` returns
-#: ``UNKNOWN_NOMINAL_PRICE_BAND`` for EVERY price, because a split-adjusted
-#: historical price cannot select a nominal band. The real sleeve is costed on
-#: exactly that constant, so reading it here is sharing the cost model rather
-#: than assuming one.
-_HALF_SPREAD: Final = float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)
+
+def _half_spread_for(bar_open: Decimal, *, price_basis: PriceBasis) -> float:
+    """The band this eligible fill bar's NOMINAL open selects (#3238).
+
+    ⚠⚠ THIS USED TO BE A MODULE CONSTANT, and the premise that justified it is
+    gone. It read *"the half-spread every leg of this corpus carries"* —
+    ``cost_band_for(..., price_basis="split_adjusted")`` answers
+    ``UNKNOWN_NOMINAL_PRICE_BAND`` for every price, so one scalar was the whole
+    corpus. That is still true of ``survivor_only``, and false of
+    ``survivorship_free``, which is pinned to an ``unadjusted`` archive whose
+    opens are as-traded nominal prices. A null costed at a flat maximum band
+    against a sleeve costed per band is not a null — it is a handicap.
+
+    ⚠ The basis comes from the run, so on a split-adjusted corpus every bar
+    still answers the same maximum band and the cohort is bit-identical to the
+    old constant. The sharing-the-cost-model property the constant had is kept:
+    the selector is ``cost_band_for`` either way, never a literal.
+    """
+    return float(cost_band_for(bar_open, price_basis=price_basis).half_spread)
+
 
 #: A resource bound, not an estimator parameter. Eight workers leave two physical
 #: cores on the ten-core development host for the jobs daemon. Collector arrays
@@ -411,10 +425,17 @@ class SeriesPlacement:
     """One instrument's eligible fill bars, and the holds to permute into them.
 
     ⚠ ONE ``adjusted_open`` ARRAY AND NOT TWO PRICE ARRAYS. The net buy and sell
-    prices are the same number times ``(1 ± h)`` with ``h`` constant over this
-    corpus, so storing both would double a per-eligible-bar array over 5,266
-    series to hold a scalar multiple. The multiply happens per member, where it
-    is vectorised anyway.
+    prices are the same number times ``(1 ± h)``, so storing both would double a
+    per-eligible-bar array over 5,266 series to hold a multiple. The multiply
+    happens per member, where it is vectorised anyway.
+
+    ⚠⚠ ``half_spread`` IS A SECOND ARRAY AND USED TO BE A SCALAR (#3238). The
+    sentence above once ended *"with ``h`` constant over this corpus"*, which
+    was a property of ``split_adjusted`` costing rather than of the corpus: on
+    the ``unadjusted`` ``survivorship_free`` archive each bar's own nominal open
+    selects its own band. It is held per ELIGIBLE FILL BAR — the same shape as
+    ``adjusted_open``, which is far smaller than ``marks`` — and not per leg,
+    because the permutation decides which bars become legs.
 
     ⚠ ``marks`` IS THE RUN'S OWN ARRAY, SHARED NOT COPIED. ``evaluate_arm``
     already retains the total-return close array per instrument to build the
@@ -427,6 +448,13 @@ class SeriesPlacement:
     #: That bar's open, already carried onto the total-return basis by the same
     #: ``wealth_close / raw_close`` factor ``_absorb`` applies to a real leg.
     adjusted_open: npt.NDArray[np.float64]
+    #: The band that bar's NOMINAL open selects, positionally parallel to
+    #: ``adjusted_open``. ⚠ Selected from the RAW open and charged against the
+    #: total-return-carried one, exactly as ``_absorb`` does for a real leg:
+    #: ``(1 ± h)`` is multiplicative, so the fractional charge is unchanged by
+    #: the ``wealth/raw`` rescale, while a band read off the rescaled number
+    #: would be #2400.
+    half_spread: npt.NDArray[np.float64]
     #: The realised holds to permute, in ELIGIBLE-ORDINAL units.
     holds: npt.NDArray[np.int64]
     #: Total-return closes, panel-aligned from ``marks_first``.
@@ -442,6 +470,24 @@ class SeriesPlacement:
     def __post_init__(self) -> None:
         if self.panel.size != self.adjusted_open.size:
             raise ValueError(f"{self.panel.size} eligible bars against {self.adjusted_open.size} prices")
+        # ⚠⚠ ASSERTED, BECAUSE THE SHARED-MEMORY PACKING RELIES ON IT. Workers
+        # cut ``half_spread`` with the SAME ``panel_start`` / ``panel_size``
+        # slice as ``panel`` and ``adjusted_open``; a placement whose spread
+        # array were shorter would silently hand the next placement's bands to
+        # this one rather than raise. Size parity here is what makes that slice
+        # correct rather than merely plausible.
+        if self.panel.size != self.half_spread.size:
+            raise ValueError(f"{self.panel.size} eligible bars against {self.half_spread.size} half-spreads")
+        if self.panel.ndim != 1 or self.adjusted_open.ndim != 1 or self.half_spread.ndim != 1:
+            raise ValueError("a placement's panel, prices and half-spreads must each be one-dimensional")
+        # ``cost_model``'s ``0 < h < 1`` contract, re-checked at the boundary
+        # where Decimals become float64: ``buy_price`` / ``sell_price`` enforce
+        # it per position, and nothing downstream of here is a ``Decimal`` any
+        # more, so the NumPy pricing path would otherwise never see the rule.
+        if self.half_spread.size and not bool(
+            np.all(np.isfinite(self.half_spread) & (self.half_spread > 0.0) & (self.half_spread < 1.0))
+        ):
+            raise ValueError("every placement half-spread must be finite and in (0, 1)")
 
 
 @dataclass
@@ -457,6 +503,11 @@ class CohortCollector:
     """
 
     window: Window
+    #: #3238 — the run's resolved cost basis (``_Corpus.cost_price_basis``).
+    #: ⚠ The default is the FAIL-CLOSED one for the same reason it is on
+    #: ``_Corpus``: a collector built without saying so charges the maximum band,
+    #: which is the null's old behaviour and never the cheaper direction.
+    price_basis: PriceBasis = "split_adjusted"
     placements: list[SeriesPlacement] = field(default_factory=list)
     #: Realised positions the permutation cannot reproduce, by reason.
     unmatchable: Counter[str] = field(default_factory=Counter)
@@ -483,7 +534,7 @@ class CohortCollector:
         # arm, so building it twice is a second full dict per series for nothing
         # (review bot NITPICK, PR #2619).
         bar_of = {when: index for index, when in enumerate(series.dates)}
-        eligible_bar, panel, adjusted = _eligible_fill_bars(
+        eligible_bar, panel, adjusted, half_spreads = _eligible_fill_bars(
             rows=rows,
             series=series,
             bar_of=bar_of,
@@ -492,6 +543,7 @@ class CohortCollector:
             raw_closes=raw_closes,
             wealth_closes=wealth_closes,
             first_axis_index=first_axis_index,
+            price_basis=self.price_basis,
         )
         if not eligible_bar:
             _count_unmatchable(costed, self.unmatchable)
@@ -509,6 +561,7 @@ class CohortCollector:
             SeriesPlacement(
                 panel=np.asarray(panel, dtype=np.int64),
                 adjusted_open=np.asarray(adjusted, dtype=np.float64),
+                half_spread=np.asarray(half_spreads, dtype=np.float64),
                 holds=held,
                 marks=np.asarray(wealth_closes, dtype=np.float64),
                 marks_first=first_axis_index,
@@ -530,7 +583,8 @@ def _eligible_fill_bars(
     raw_closes: Sequence[float],
     wealth_closes: Sequence[float],
     first_axis_index: int,
-) -> tuple[list[int], list[int], list[float]]:
+    price_basis: PriceBasis,
+) -> tuple[list[int], list[int], list[float], list[float]]:
     """The four clauses in the header, applied in order. Returns parallel lists.
 
     ⚠ KEYED ON THE ENTRY LEG ONLY. An exit-leg verdict says nothing about
@@ -558,6 +612,7 @@ def _eligible_fill_bars(
     eligible_bar: list[int] = []
     panel: list[int] = []
     adjusted: list[float] = []
+    half_spreads: list[float] = []
     for fill_index in sorted(fills):
         when = series.dates[fill_index]
         if not window.contains(when):
@@ -577,14 +632,26 @@ def _eligible_fill_bars(
         wealth_close = wealth_closes[offset]
         if not _usable(raw_close) or not _usable(wealth_close):
             continue
+        carried = float(bar_open) * wealth_close / raw_close
+        if not _usable(carried):
+            # ⚠ The inputs are each checked above, but their PRODUCT is what a
+            # member prices against: a finite open over a tiny raw close can
+            # still overflow, and an inf entry price would reach the equity
+            # curve as a silently excluded or infinite leg rather than raise.
+            continue
         eligible_bar.append(fill_index)
         panel.append(slot)
         # The same carry ``_absorb`` applies to a real leg: the net price is
         # scaled by that bar's own total-return factor, so the two are on one
         # basis and the cohort is not comparing an adjusted sleeve with an
         # unadjusted null.
-        adjusted.append(float(bar_open) * wealth_close / raw_close)
-    return eligible_bar, panel, adjusted
+        adjusted.append(carried)
+        # ⚠⚠ SELECTED FROM ``bar_open``, THE RAW ONE — the line above is the
+        # only place the nominal price still exists, and it is consumed there.
+        # ``carried`` is a total-return level; banding it would be #2400 even
+        # on an unadjusted archive, because the dividend factor is still in it.
+        half_spreads.append(_half_spread_for(bar_open, price_basis=price_basis))
+    return eligible_bar, panel, adjusted, half_spreads
 
 
 def _usable(value: float) -> bool:
@@ -823,6 +890,8 @@ class _SharedMemberInputs:
     panel_size: int
     adjusted_open_name: str
     adjusted_open_size: int
+    half_spread_name: str
+    half_spread_size: int
     holds_name: str
     holds_size: int
     marks_name: str
@@ -844,16 +913,26 @@ def _copy_to_shared(values: npt.NDArray[np.generic]) -> SharedMemory:
 
 @contextmanager
 def _shared_member_inputs(inputs: _MemberInputs) -> Iterator[_SharedMemberInputs]:
-    """Pack four contiguous immutable arrays and release them after the pool."""
+    """Pack five contiguous immutable arrays and release them after the pool.
+
+    ⚠ ``half_spread`` is concatenated in the SAME placement order and with the
+    same per-placement length as ``panel`` and ``adjusted_open``, which is why
+    the slices below carry no cursor of their own: ``SeriesPlacement`` asserts
+    all three sizes equal, so ``panel_start`` / ``panel_size`` addresses the
+    spread array correctly by that invariant rather than by coincidence.
+    """
     panel = np.concatenate([placement.panel for placement in inputs.placements]).astype(np.int64, copy=False)
     adjusted = np.concatenate([placement.adjusted_open for placement in inputs.placements]).astype(
+        np.float64, copy=False
+    )
+    half_spread = np.concatenate([placement.half_spread for placement in inputs.placements]).astype(
         np.float64, copy=False
     )
     holds = np.concatenate([placement.holds for placement in inputs.placements]).astype(np.int64, copy=False)
     marks = np.concatenate([placement.marks for placement in inputs.placements]).astype(np.float64, copy=False)
     shared_handles: list[SharedMemory] = []
     try:
-        for values in (panel, adjusted, holds, marks):
+        for values in (panel, adjusted, half_spread, holds, marks):
             shared_handles.append(_copy_to_shared(values))
         panel_cursor = holds_cursor = marks_cursor = 0
         slices: list[_PlacementSlice] = []
@@ -877,9 +956,11 @@ def _shared_member_inputs(inputs: _MemberInputs) -> Iterator[_SharedMemberInputs
             panel_size=int(panel.size),
             adjusted_open_name=shared_handles[1].name,
             adjusted_open_size=int(adjusted.size),
-            holds_name=shared_handles[2].name,
+            half_spread_name=shared_handles[2].name,
+            half_spread_size=int(half_spread.size),
+            holds_name=shared_handles[3].name,
             holds_size=int(holds.size),
-            marks_name=shared_handles[3].name,
+            marks_name=shared_handles[4].name,
             marks_size=int(marks.size),
             placements=tuple(slices),
             axis=inputs.axis,
@@ -897,19 +978,27 @@ def _attach_shared_member_inputs(shared: _SharedMemberInputs) -> _MemberInputs:
     global _WORKER_SHARED_HANDLES
     handles = tuple(
         SharedMemory(name=name, track=False)
-        for name in (shared.panel_name, shared.adjusted_open_name, shared.holds_name, shared.marks_name)
+        for name in (
+            shared.panel_name,
+            shared.adjusted_open_name,
+            shared.half_spread_name,
+            shared.holds_name,
+            shared.marks_name,
+        )
     )
     _WORKER_SHARED_HANDLES = handles
     panel = np.ndarray((shared.panel_size,), dtype=np.int64, buffer=handles[0].buf)
     adjusted = np.ndarray((shared.adjusted_open_size,), dtype=np.float64, buffer=handles[1].buf)
-    holds = np.ndarray((shared.holds_size,), dtype=np.int64, buffer=handles[2].buf)
-    marks = np.ndarray((shared.marks_size,), dtype=np.float64, buffer=handles[3].buf)
-    for values in (panel, adjusted, holds, marks):
+    half_spread = np.ndarray((shared.half_spread_size,), dtype=np.float64, buffer=handles[2].buf)
+    holds = np.ndarray((shared.holds_size,), dtype=np.int64, buffer=handles[3].buf)
+    marks = np.ndarray((shared.marks_size,), dtype=np.float64, buffer=handles[4].buf)
+    for values in (panel, adjusted, half_spread, holds, marks):
         values.setflags(write=False)
     placements = tuple(
         SeriesPlacement(
             panel=panel[item.panel_start : item.panel_start + item.panel_size],
             adjusted_open=adjusted[item.panel_start : item.panel_start + item.panel_size],
+            half_spread=half_spread[item.panel_start : item.panel_start + item.panel_size],
             holds=holds[item.holds_start : item.holds_start + item.holds_size],
             marks=marks[item.marks_start : item.marks_start + item.marks_size],
             marks_first=item.marks_first,
@@ -1109,7 +1198,11 @@ def _measure_member(index: int, inputs: _MemberInputs) -> MemberOutcome:
 
 def _shared_input_bytes(inputs: _MemberInputs) -> int:
     return sum(
-        placement.panel.nbytes + placement.adjusted_open.nbytes + placement.holds.nbytes + placement.marks.nbytes
+        placement.panel.nbytes
+        + placement.adjusted_open.nbytes
+        + placement.half_spread.nbytes
+        + placement.holds.nbytes
+        + placement.marks.nbytes
         for placement in inputs.placements
     )
 
@@ -1418,9 +1511,19 @@ def _place_member(
     exit_dates: list[date] = []
     for placement in placements:
         entries, permuted = place_entries(rng, eligible=int(placement.panel.size), holds=placement.holds)
-        entry_price = net_entry_prices(placement.adjusted_open[entries], np.full(entries.size, _HALF_SPREAD))
+        # ⚠⚠ KEYED ON ``entries`` ON BOTH SIDES, NEVER ON ``exit_slot`` (#3238).
+        # §5.1 fixes the band on the ENTRY price for the life of the position —
+        # ``cost_model.half_spread_for``: *"a position that crosses a band
+        # boundary mid-hold does not re-key"* — so the exit charge is the entry
+        # bar's ``h`` applied to the exit PRICE. The exit line below indexes
+        # ``adjusted_open`` with ``exit_slot`` one argument earlier, which makes
+        # ``half_spread[exit_slot]`` the natural-looking and wrong thing to
+        # write: it would pass every shape check and re-key the cost on the
+        # outcome bar.
+        member_half = placement.half_spread[entries]
+        entry_price = net_entry_prices(placement.adjusted_open[entries], member_half)
         exit_slot = entries + permuted
-        exit_price = net_exit_prices(placement.adjusted_open[exit_slot], np.full(entries.size, _HALF_SPREAD))
+        exit_price = net_exit_prices(placement.adjusted_open[exit_slot], member_half)
         entry_panel = placement.panel[entries]
         exit_panel = placement.panel[exit_slot]
         mark_base = -placement.marks_first
@@ -1432,7 +1535,14 @@ def _place_member(
                 exit_index=exit_index,
                 entry_price=float(entry_price[leg]),
                 exit_price=float(exit_price[leg]),
-                half_spread=_HALF_SPREAD,
+                # ⚠ THIS LEG'S OWN ``h``, not a corpus scalar. ``LegBook``'s
+                # half-spread is not decoration: ``build_equity_curve`` charges
+                # it again on every REBALANCE (``equity_curve.py`` — the
+                # ``charge``/``spend`` arithmetic), so leaving a constant here
+                # while the endpoint prices moved would make the scalar and
+                # compact paths disagree on portfolio metrics while agreeing on
+                # trade returns.
+                half_spread=float(member_half[leg]),
                 realised=True,
                 marks=placement.marks[mark_base + entry_index : mark_base + exit_index + 1].tolist(),
             )
@@ -1461,6 +1571,10 @@ def _place_member_compact(
     exit_index = np.empty(size, dtype=np.int64)
     entry_prices = np.empty(size, dtype=np.float64)
     exit_prices = np.empty(size, dtype=np.float64)
+    #: #3238 — per LEG, filled placement by placement from the entry bars this
+    #: member drew. ⚠ NOT ``np.concatenate`` of the placements' own arrays:
+    #: those are per ELIGIBLE BAR and every member selects a different subset.
+    half_spreads = np.empty(size, dtype=np.float64)
     mark_source = np.empty(size, dtype=np.int32)
     returns: array[float] = array("d")
     entry_dates: list[date] = []
@@ -1470,15 +1584,19 @@ def _place_member_compact(
         entries, permuted = place_entries(rng, eligible=int(placement.panel.size), holds=placement.holds)
         placed = int(entries.size)
         end = cursor + placed
-        net_entries = net_entry_prices(placement.adjusted_open[entries], np.full(placed, _HALF_SPREAD))
+        # ⚠⚠ ``entries`` ON BOTH SIDES — see ``_place_member``. The band is
+        # fixed on the entry bar and does not re-key at the exit.
+        member_half = placement.half_spread[entries]
+        net_entries = net_entry_prices(placement.adjusted_open[entries], member_half)
         exit_slot = entries + permuted
-        net_exits = net_exit_prices(placement.adjusted_open[exit_slot], np.full(placed, _HALF_SPREAD))
+        net_exits = net_exit_prices(placement.adjusted_open[exit_slot], member_half)
         entry_panel = placement.panel[entries]
         exit_panel = placement.panel[exit_slot]
         entry_index[cursor:end] = entry_panel
         exit_index[cursor:end] = exit_panel
         entry_prices[cursor:end] = net_entries
         exit_prices[cursor:end] = net_exits
+        half_spreads[cursor:end] = member_half
         mark_source[cursor:end] = source
         returns.extend(((net_exits - net_entries) / net_entries * 100.0).tolist())
         entry_dates.extend(axis[int(index)] for index in entry_panel)
@@ -1492,7 +1610,7 @@ def _place_member_compact(
             exit_index=exit_index,
             entry_price=entry_prices,
             exit_price=exit_prices,
-            half_spread=np.full(size, _HALF_SPREAD, dtype=np.float64),
+            half_spread=half_spreads,
             realised=np.ones(size, dtype=np.bool_),
             mark_source=mark_source,
             marks_by_source=tuple(placement.marks for placement in placements),

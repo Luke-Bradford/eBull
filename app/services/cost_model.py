@@ -80,11 +80,21 @@ from typing import Literal, get_args
 #: announce a change that did not happen, which is its own false signal.
 #: The line: a claim moves the id (#2720); ENFORCING a claim already made does
 #: not.
-COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max+carry-fx-structural-zero-long-x1-real-usd"
+#: ⚠⚠ v3 -> v4 (#3238). The BANDS below did not move and nothing was
+#: recalibrated; what moved is which band a given position selects. The
+#: ``survivorship_free`` corpus is pinned to an ``unadjusted`` archive, so its
+#: fills are as-traded nominal prices — and both backtest call sites passed the
+#: literal ``split_adjusted``, which made ``cost_band_for`` answer
+#: ``UNKNOWN_NOMINAL_PRICE_BAND`` for every leg of every run. Correcting the
+#: INPUT changes what a position is charged, and the line drawn above holds in
+#: the other direction too: a claim moves the id, and "every leg costs 1.450%"
+#: was a claim. The ``split-adjusted-max`` token additionally described the
+#: behaviour being removed, so leaving it would have been a false label.
+COST_MODEL_ID = "static-p75-insession-v4+archive-basis-band+carry-fx-structural-zero-long-x1-real-usd"
 
 #: Whether a price can honestly select a nominal-price spread band.  The
-#: research corpus is split-adjusted, not as-traded; treating those two as the
-#: same is #2400's two-sided cost-attribution error.
+#: ``survivor_only`` corpus is split-adjusted, not as-traded; treating those two
+#: as the same is #2400's two-sided cost-attribution error.
 PriceBasis = Literal["as_traded", "split_adjusted"]
 PRICE_BASES: frozenset[str] = frozenset(get_args(PriceBasis))
 
@@ -527,6 +537,28 @@ def cost_band_for(entry_fill_price: Decimal, *, price_basis: PriceBasis) -> Pric
     return band_for(entry_fill_price)
 
 
+def cost_price_basis(adjustment_basis: str | None) -> PriceBasis:
+    """The cost basis an archive's stored ``adjustment_basis`` earns (#3238).
+
+    The band table above is a NOMINAL-price table, so only an archive that
+    stores as-traded prices may select from it. ``unadjusted`` is the one stored
+    basis that means that.
+
+    ⚠ TOTAL AND FAIL-CLOSED. Anything else — ``split_adjusted``, an
+    unrecognised label, or ``None`` for a withheld provenance — answers
+    ``split_adjusted``, which ``cost_band_for`` turns into the maximum band. The
+    cheaper direction is never reachable by omission, only by a stored basis
+    that positively says the prices are as traded.
+
+    ⚠ Takes the stored basis as a PLAIN STRING and not an ``ArchivePolicy``.
+    This module must stay below the corpus-provenance layer: ``backtest_run``
+    and ``synthetic_control_run`` both need this decision, and the dependency
+    between those two already runs one way, so a shared selector can only live
+    somewhere neither of them imports from.
+    """
+    return "as_traded" if adjustment_basis == "unadjusted" else "split_adjusted"
+
+
 def buy_price(price: Decimal, *, half_spread: Decimal) -> Decimal:
     """§5.1's buy side: ``fill_price × (1 + h)``.
 
@@ -582,6 +614,7 @@ __all__ = [
     "band_for",
     "buy_price",
     "cost_band_for",
+    "cost_price_basis",
     "half_spread_for",
     "sell_price",
     "unmodelled_markers",
