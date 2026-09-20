@@ -1526,6 +1526,14 @@ def _dense_price_history(
     return series, first_axis_index, array("d", raw_closes), array("d", wealth_closes)
 
 
+#: The shared prefix of all three ``_resolve_liquidity_policy`` withholding
+#: warnings (review NITPICK, PR #3240). ⚠ Both halves are load-bearing and that
+#: is why they are one string: since #3238 a withheld policy is no longer only a
+#: missing diagnostic, it also charges every leg of the run the maximum band, so
+#: a message naming one consequence without the other would understate it.
+_WITHHELD_POLICY_WARNING = "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
+
+
 def _resolve_liquidity_policy(
     conn: psycopg.Connection[Any],
     *,
@@ -1558,16 +1566,15 @@ def _resolve_liquidity_policy(
     policy = archive_policy_for(vendor_for(universe))
     if policy is None:
         logger.warning(
-            "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
-            "the %s universe's pinned vendor %r carries no declared archive provenance",
+            _WITHHELD_POLICY_WARNING + "the %s universe's pinned vendor %r carries no declared archive provenance",
             universe,
             vendor_for(universe),
         )
         return None
     if not series_ids:
         logger.warning(
-            "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
-            "the %s universe admitted no series, so no stored adjustment basis can be asserted",
+            _WITHHELD_POLICY_WARNING + "the %s universe admitted no series, so no stored adjustment basis can be "
+            "asserted",
             universe,
         )
         return None
@@ -1580,8 +1587,7 @@ def _resolve_liquidity_policy(
     }
     if stored != {policy.adjustment_basis}:
         logger.warning(
-            "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
-            "admitted series carry adjustment bases %s against the %s archive's pinned %r",
+            _WITHHELD_POLICY_WARNING + "admitted series carry adjustment bases %s against the %s archive's pinned %r",
             sorted(stored),
             universe,
             policy.adjustment_basis,
