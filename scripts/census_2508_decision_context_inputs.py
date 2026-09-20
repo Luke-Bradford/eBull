@@ -127,7 +127,6 @@ SELECT s.signal_id,
        cls.provider_industry_id IS NOT NULL               AS has_industry,
        bar.close IS NOT NULL AND bar.close > 0            AS has_decision_close,
        unadj.series_id IS NOT NULL                        AS has_unadjusted_basis,
-       w.sessions                                          AS window_sessions,
        w.usable_sessions                                   AS window_usable_sessions,
        w.mean_share_volume                                 AS mean_share_volume,
        bar.volume IS NOT NULL                              AS has_decision_volume,
@@ -173,11 +172,11 @@ SELECT s.signal_id,
          LIMIT 1
   ) unadj ON TRUE
   LEFT JOIN LATERAL (
-        SELECT count(*)                                    AS sessions,
-               -- A session the baseline can USE needs both legs: dollar volume is
-               -- close x volume, so a NULL/non-positive close disqualifies the session
-               -- for the dollar legs exactly as a NULL volume does for the share legs.
-               count(*) FILTER (
+        -- A session the baseline can USE needs both legs: dollar volume is close x
+        -- volume, so a NULL/non-positive close disqualifies the session for the dollar
+        -- legs exactly as a NULL volume does for the share legs. Only the usable count
+        -- is returned — a raw row count answers no question this census asks.
+        SELECT count(*) FILTER (
                    WHERE win.volume IS NOT NULL AND win.close IS NOT NULL AND win.close > 0
                )                                           AS usable_sessions,
                avg(win.volume)                             AS mean_share_volume,

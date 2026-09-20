@@ -28,7 +28,6 @@ def row(**overrides: Any) -> dict[str, Any]:
         "has_industry": True,
         "has_decision_close": True,
         "has_unadjusted_basis": True,
-        "window_sessions": LOOKBACK,
         "window_usable_sessions": LOOKBACK,
         "mean_share_volume": Decimal("1000"),
         "has_decision_volume": True,
@@ -124,7 +123,7 @@ def test_the_vix_refusal_is_appended_under_its_typed_name() -> None:
 
 @pytest.mark.parametrize("sessions", [0, 1, LOOKBACK - 1])
 def test_a_short_window_refuses_every_volume_input(sessions: int) -> None:
-    names = missing_inputs(row(window_sessions=sessions, window_usable_sessions=sessions), vix_refusal=None)
+    names = missing_inputs(row(window_usable_sessions=sessions), vix_refusal=None)
     for name in (
         "trailing_mean_share_volume",
         "trailing_median_share_volume",
@@ -143,7 +142,7 @@ def test_a_full_window_with_one_unusable_session_still_refuses() -> None:
     a session the baseline cannot use — dollar volume needs both legs — and averaging
     over the remainder would silently shorten the declared lookback.
     """
-    names = missing_inputs(row(window_sessions=LOOKBACK, window_usable_sessions=LOOKBACK - 1), vix_refusal=None)
+    names = missing_inputs(row(window_usable_sessions=LOOKBACK - 1), vix_refusal=None)
     assert "trailing_mean_share_volume" in names
     assert "trailing_mean_dollar_volume" in names
 
