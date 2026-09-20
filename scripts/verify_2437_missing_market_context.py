@@ -44,6 +44,7 @@ from app.services.price_masked_bars import MASKED_REASON, load_masked_bars
 from app.services.price_segments import load_unresolved_breaks
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_segmented_evaluation import segmented_signals
 from app.services.strategy_signal_scan import SCAN_UNIVERSE
 
@@ -87,6 +88,7 @@ def dump_arm(conn: psycopg.Connection, path: str) -> None:
                 masked_reason=MASKED_REASON,
                 unresolved_breaks=breaks,
                 regime=regime,
+                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
             )
             bucket = per_strategy[strategy_id]
             counts: Counter = bucket["counts"]  # type: ignore[assignment]

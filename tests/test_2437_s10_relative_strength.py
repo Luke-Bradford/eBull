@@ -35,6 +35,7 @@ from app.services.strategies.s10_relative_strength_leader import (
     s10_rebalance_dates,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_registry import (
     CrossSectionalMember,
     StrategyInput,
@@ -431,6 +432,7 @@ class TestManifestAdaptersMatchTheDirectCalls:
             masked_reason=REASON,
             unresolved_breaks=(),
             regime=regime,
+            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
             leg=leg,  # type: ignore[arg-type]
         )
         if leg == "entry":
@@ -465,6 +467,7 @@ class TestManifestAdaptersMatchTheDirectCalls:
             unresolved_breaks=(),
             regime=_regime(),
             leg="exit",
+            price_basis=from_archive_basis("unadjusted", n_bars=len(_panel()[2])),
         )
         kinds = {verdict.kind for verdict in staged.verdicts if verdict is not None}
         assert kinds == {"exit"}

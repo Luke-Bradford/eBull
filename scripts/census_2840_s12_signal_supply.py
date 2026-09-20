@@ -201,6 +201,7 @@ from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
     S12_STRATEGY_ID,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_result import HOLDOUT_BOUNDARY
 from app.services.strategy_segmented_evaluation import segmented_signals
 
@@ -623,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:
                         masked_reason="quarantined_bar",
                         unresolved_breaks=breaks,
                         regime=regime,
+                        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
                     ):
                         if signal.kind != "entry":
                             continue

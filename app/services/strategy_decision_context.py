@@ -23,12 +23,18 @@ from app.services.cboe_vix import SOURCE_VERSION as CBOE_VIX_SOURCE_VERSION
 from app.services.cboe_vix import load_vix_close_as_known
 from app.services.market_calendar import us_market_status
 
+# ⚠ IMPORTED, not restated — ``sql/305``'s column and the #2840 carrier read one
+# vocabulary. It lives in ``strategy_price_basis`` so that the signal scan can
+# reach the carrier without reaching this module's ``market_calendar`` rule set;
+# see that module's comment on the type.
+from app.services.strategy_price_basis import AsTradedPriceBasis
+
 SecurityType = Literal["common_stock", "etf", "other", "unknown"]
 ListingMarket = Literal["nyse", "nasdaq", "other", "unknown"]
 CandidateVerdict = Literal["eligible", "refused"]
 PriceBand = Literal["under_5", "5_to_20", "20_to_50", "50_to_150", "150_plus"]
 DollarVolumeBand = Literal["under_1m", "1m_to_10m", "10m_to_25m", "25m_to_100m", "100m_plus"]
-AsTradedPriceBasis = Literal["observed_unadjusted", "reconstructed_unadjusted", "unknown"]
+
 AS_TRADED_PRICE_BASES: Final = frozenset({"observed_unadjusted", "reconstructed_unadjusted", "unknown"})
 
 

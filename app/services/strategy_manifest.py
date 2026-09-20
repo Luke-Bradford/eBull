@@ -172,6 +172,7 @@ from app.services.strategy_exit_levels_batch import (
     s8_exit_levels_batch,
     s9_exit_levels_batch,
 )
+from app.services.strategy_price_basis import PriceBasisSeries
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
     CrossSectionalMember,
@@ -220,6 +221,7 @@ class PerSeriesSignals(Protocol):
         universe: Universe,
         masked_reason: NotEvaluableReason,
         regime: RegimeSeries,
+        price_basis: PriceBasisSeries,
     ) -> list[StrategySignal]: ...
 
     # ⚠⚠ ``regime`` IS ON THE UNIFORM CALL, NOT ON THE STRATEGIES THAT USE IT.
@@ -235,6 +237,20 @@ class PerSeriesSignals(Protocol):
     # ⚠ Safe for identities: ``StrategyIdentity.version`` hashes
     # ``strategy_registry.py``, NOT this module (see the module docstring,
     # reason 1). Editing the manifest moves no stored strategy version.
+    #
+    # ⚠⚠ ``price_basis`` (#2840) JOINS FOR THE SAME REASON, and it is the second
+    # test of the decision above. S-1..S-11 ignore it; S-12 declares it as its
+    # FIRST ``StrategyInput``. The rejected alternative here was not a flag but
+    # an S-12-only keyword, which is worse: both runners dispatch through
+    # ``strategy_segmented_evaluation.segmented_signals``, whose single
+    # ``entry.signals(...)`` call cannot carry a per-strategy argument at all.
+    #
+    # ⚠ NO DEFAULT, on either protocol. A default would have to be either a
+    # certifying carrier — which silently admits every un-migrated call site,
+    # the exact fail-open ``strategy_price_basis`` exists to refuse — or a
+    # refusing one, which silently stops S-12 trading. Both are decisions
+    # wearing a convenience, so the argument is required and the 38 call sites
+    # were migrated by hand.
 
 
 class MemberStager(Protocol):
@@ -259,6 +275,7 @@ class MemberStager(Protocol):
         universe: Universe,
         masked_reason: NotEvaluableReason,
         regime: RegimeSeries,
+        price_basis: PriceBasisSeries,
     ) -> CrossSectionalMember: ...
 
 
@@ -462,6 +479,7 @@ def _s1_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-1 does not gate on regime
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     return s1_signals(series, universe=universe, close_reason=masked_reason)
 
@@ -472,6 +490,7 @@ def _s3_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-3 does not gate on regime
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     return s3_signals(series, universe=universe, close_reason=masked_reason)
 
@@ -482,6 +501,7 @@ def _s4_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-4 does not gate on regime
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     return s4_signals(series, universe=universe, masked_reason=masked_reason)
 
@@ -493,6 +513,7 @@ def _s2_member(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-2 does not gate on regime
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> CrossSectionalMember:
     return s2_member(
         series,
@@ -509,6 +530,7 @@ def _s10_entry_member(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> CrossSectionalMember:
     """S-10's entry leg is the first cross-sectional member that reads ``regime``."""
     return s10_entry_member(
@@ -527,6 +549,7 @@ def _s10_exit_member(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - deliberate: a missing benchmark must never refuse an exit (S-7's rule)
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> CrossSectionalMember:
     return s10_exit_member(
         series,
@@ -636,6 +659,7 @@ def _s11_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     """⚠ PASSES THE REGIME THROUGH. Copying ``_s4_signals`` — which drops it with
     a ``noqa: ARG001`` because S-4 does not gate — would silently un-gate S-11 and
@@ -691,6 +715,7 @@ def _s12_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-12 gates on price, not regime
+    price_basis: PriceBasisSeries,
 ) -> list[StrategySignal]:
     """⚠ DISCARDS the regime, unlike ``_s11_signals``, and that is correct here.
 
@@ -700,8 +725,15 @@ def _s12_signals(
     un-gating slip ``test_2840_manifest_adapter_gates`` exists to catch for S-11.
     ``test_2840_arm2_manifest_adapter_gates`` asserts the PRICE gate survives this
     adapter, which is the equivalent check for this strategy.
+
+    ⚠⚠ ``price_basis`` IS THE ONE UNIFORM ARGUMENT THIS ADAPTER FORWARDS (#2840).
+    S-12 is the only rule in the catalogue with an ABSOLUTE price threshold, so
+    it is the only one for which a re-based level changes the answer — every
+    other rule compares prices to prices. Carrying it on the uniform call rather
+    than as an S-12 keyword is ``regime``'s decision for ``regime``'s reason: an
+    S-12-only keyword is undeliverable through ``segmented_signals``.
     """
-    return s12_signals(series, universe=universe, masked_reason=masked_reason)
+    return s12_signals(series, universe=universe, masked_reason=masked_reason, price_basis=price_basis)
 
 
 def _s12_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
@@ -750,6 +782,7 @@ def _s9_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     return s9_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
 
@@ -785,6 +818,7 @@ def _s7_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     return s7_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
 
@@ -841,6 +875,7 @@ def _s8_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     return s8_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
 
@@ -883,6 +918,7 @@ def _s5_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     return s5_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
 
@@ -923,6 +959,7 @@ def _s6_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
 ) -> list[StrategySignal]:
     """S-6 is the first strategy that actually reads ``regime`` — passed through."""
     return s6_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)

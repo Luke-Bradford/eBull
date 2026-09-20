@@ -99,6 +99,7 @@ from app.services.strategies.s4_volatility_compression_breakout import (
     prior_high_close_series,
     s4_exit_bracket,
 )
+from app.services.strategy_price_basis import PRICE_BASIS_RULE_VERSION, PriceBasisSeries
 from app.services.strategy_registry import (
     NOT_EVALUABLE_REASONS,
     NotEvaluableReason,
@@ -232,6 +233,19 @@ S12_PARAMS: Mapping[str, object] = {
     "price_band_label": CHEAPEST_BAND.label,
     "price_band_lower": str(GATE_EDGE),
     "s4_source_hash": _s4_source_hash(),
+    # ⚠⚠ THE PRICE-BASIS RULE IS VERSIONED HERE AND NOT IN ``INPUT_RULE_SETS``
+    # (#2840). That mapping is hashed into EVERY ``StrategyIdentity``
+    # (``strategy_registry.py:279``), so installing a sixth entry would rotate all
+    # 11 strategies and detach their stored evidence across 24 identity-carrying
+    # tables — to version a rule with exactly one consumer.
+    #
+    # ⚠ This is an EXCEPTION to the registry's own preference, and it is bounded
+    # rather than argued away: ``INPUT_RULE_SETS`` exists because author-maintained
+    # per-strategy coverage drifts once a second consumer appears.
+    # ``test_s12_is_the_only_consumer_while_the_rule_stays_out_of_input_rule_sets``
+    # fails the moment another strategy imports the module, which is when the
+    # global entry has to be installed (#2840 §6 item 3).
+    "price_basis_rule": PRICE_BASIS_RULE_VERSION,
 }
 
 
@@ -293,6 +307,7 @@ def s12_signals(
     *,
     universe: Universe,
     masked_reason: NotEvaluableReason,
+    price_basis: PriceBasisSeries,
 ) -> list[StrategySignal]:
     """S-12's entry verdict for every bar. ENTRIES ONLY, as S-4.
 
@@ -304,15 +319,61 @@ def s12_signals(
     """
     if masked_reason not in NOT_EVALUABLE_REASONS:
         raise ValueError(f"unknown reason code {masked_reason!r}; must be one of {sorted(NOT_EVALUABLE_REASONS)}")
+    # ⚠⚠ THE LENGTH CHECK IS A BACKSTOP AND IT IS LOAD-BEARING (#2840, Codex
+    # checkpoint 1). ``evaluate`` returns ``no_fill_bar`` for the LAST bar before
+    # reading any input, so a carrier one element SHORT is never looked up and
+    # passes silently — the misalignment then shifts every certification by one
+    # with nothing raising. Production callers build the carrier at
+    # ``n_bars=len(series)`` so the class cannot arise there; this covers the
+    # hand-built caller, which is how S-12 is reached in tests and scripts.
+    if len(price_basis) != len(series):
+        raise ValueError(f"price_basis has {len(price_basis)} bars against {len(series)} price bars; they must align")
 
     # ⚠⚠ REFUSE EVERY BAR ON A UNIVERSE WHOSE PRICES ARE NOT AS TRADED, rather
     # than gate on a number that is not a nominal price. See AS_TRADED_UNIVERSES.
     # A refusal is the honest verdict and it is also the CHEAP one: the rows are
     # written, counted and reconciled exactly as any other refusal, so nothing
     # downstream has to learn about this strategy.
+    #
+    # ⚠ THIS GATE IS NOW THE OUTER HALF OF TWO, and it is the half that is going
+    # away. ``price_basis`` below carries the FACT this universe token stands in
+    # for; removing the token is the separate change that makes a certified
+    # forward series reachable from the scan (#2840 §6 item 3). Until then both
+    # fire, and on the scan this one fires first — which is why the 5,791 stored
+    # S-12 observations keep their content across the identity rotation.
     if universe not in AS_TRADED_UNIVERSES:
         return [
             StrategySignal(verdict="not_evaluable", signal_index=index, kind="entry", reason=PRICE_BASIS_REFUSAL_REASON)
+            for index in range(len(series))
+        ]
+
+    # ⚠⚠ SHORT-CIRCUIT, AND IT IS A COMPLEXITY FIX RATHER THAN A SECOND RULE.
+    # ``_unevaluable_reason_at`` tests ``index in series.not_evaluable_indices``
+    # on a TUPLE, so an all-refused carrier of n bars costs O(n²) — and n here is
+    # the whole corpus, on the new withheld-policy path. Widening that field to a
+    # set means editing ``strategy_registry``, whose bytes are hashed into EVERY
+    # strategy identity, so the short-circuit lives here instead.
+    #
+    # ⚠ It must not be able to diverge from the declared-input path:
+    # ``test_the_short_circuit_matches_the_declared_input_path`` asserts the two
+    # produce identical verdicts, because a fast path that disagrees with the
+    # rule is worse than the cost it saves.
+    #
+    # ⚠⚠ AND THE LAST BAR IS ``no_fill_bar``, NOT THE BASIS REFUSAL. ``evaluate``
+    # returns it BEFORE reading any input (``strategy_registry.py:474``), so a
+    # uniformly-refusing list would disagree with the path it replaces on
+    # exactly one bar per series. ⚠ The UNIVERSE gate above does refuse
+    # uniformly, including the last bar — that asymmetry is pre-existing and
+    # pinned; it never routes through ``evaluate``, so it has no path to agree
+    # with. This one does, so it agrees.
+    if price_basis.certifies_nothing():
+        return [
+            StrategySignal(
+                verdict="not_evaluable",
+                signal_index=index,
+                kind="entry",
+                reason="no_fill_bar" if index == len(series) - 1 else PRICE_BASIS_REFUSAL_REASON,
+            )
             for index in range(len(series))
         ]
 
@@ -322,6 +383,14 @@ def s12_signals(
     prior_high = prior_high_close_series(series, universe=universe)
 
     inputs = (
+        # ⚠⚠ FIRST, AND THE ORDER IS THE RULE RATHER THAN A STYLE (#2840).
+        # ``_unevaluable_reason_at`` returns the FIRST declared input's reason
+        # among competing data reasons, so a bar that is both quarantined and
+        # uncertified reports whichever is declared earlier. The basis belongs
+        # first: the other four say *this bar's data is unusable*, this one says
+        # *this rule may not read this corpus at all*, and the precondition is
+        # the more informative answer to store.
+        StrategyInput(series=price_basis, reason=PRICE_BASIS_REFUSAL_REASON),
         StrategyInput(series=_close_input(series, universe=universe), reason=masked_reason),
         StrategyInput(series=atr, reason=masked_reason),
         StrategyInput(series=compression, reason=masked_reason),

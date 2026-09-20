@@ -45,6 +45,7 @@ from app.services.strategies.s11_volatile_regime_gated_breakout import (
     s11_signals,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_registry import StrategySignal
 from app.services.technical_analysis import OHLCVRow
 
@@ -297,10 +298,18 @@ def test_the_manifest_adapter_passes_the_regime_through() -> None:
     entry = STRATEGY_MANIFEST[S11_STRATEGY_ID]
     assert entry.signals is not None
     quiet = entry.signals(
-        series, universe=UNIVERSE, masked_reason=REASON, regime=_regime(len(series), Regime.BULL_QUIET)
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        regime=_regime(len(series), Regime.BULL_QUIET),
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
     )
     volatile = entry.signals(
-        series, universe=UNIVERSE, masked_reason=REASON, regime=_regime(len(series), Regime.BULL_VOLATILE)
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        regime=_regime(len(series), Regime.BULL_VOLATILE),
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
     )
     assert not [s for s in quiet if s.verdict == "fired"]
     assert [s.signal_index for s in volatile if s.verdict == "fired"] == [FIRING_INDEX]

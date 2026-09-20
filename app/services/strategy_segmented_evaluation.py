@@ -10,6 +10,7 @@ from app.services.indicator_series import BarSeries, Universe
 from app.services.market_regime import RegimeSeries
 from app.services.price_segments import series_segment_bounds
 from app.services.strategy_manifest import StrategyEntry
+from app.services.strategy_price_basis import PriceBasisSeries
 from app.services.strategy_registry import (
     NotEvaluableReason,
     SignalKind,
@@ -27,6 +28,7 @@ def segmented_signals(
     masked_reason: NotEvaluableReason,
     unresolved_breaks: Sequence[date],
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,
 ) -> list[StrategySignal]:
     """Evaluate every per-series leg with fresh state inside each segment.
 
@@ -45,6 +47,8 @@ def segmented_signals(
         raise ValueError(f"{entry.strategy_id} has no per-series signal function")
     if len(regime) != len(series):
         raise ValueError(f"regime has {len(regime)} bars against {len(series)} price bars; they must align")
+    if len(price_basis) != len(series):
+        raise ValueError(f"price_basis has {len(price_basis)} bars against {len(series)} price bars; they must align")
     signals: list[StrategySignal] = []
     for start, end in series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
         segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
@@ -60,7 +64,13 @@ def segmented_signals(
                 kind=signal.kind,
                 reason=signal.reason,
             )
-            for signal in entry.signals(segment, universe=universe, masked_reason=masked_reason, regime=segment_regime)
+            for signal in entry.signals(
+                segment,
+                universe=universe,
+                masked_reason=masked_reason,
+                regime=segment_regime,
+                price_basis=price_basis.segment(start, end),
+            )
         )
     per_kind = Counter(signal.kind for signal in signals)
     if not per_kind or any(count != len(series) for count in per_kind.values()):
@@ -79,6 +89,7 @@ def segmented_member(
     masked_reason: NotEvaluableReason,
     unresolved_breaks: Sequence[date],
     regime: RegimeSeries,
+    price_basis: PriceBasisSeries,
     leg: SignalKind = "entry",
 ) -> StagedMember:
     """Stage one ranked member with fresh state inside each scale segment.
@@ -105,6 +116,8 @@ def segmented_member(
         raise ValueError(f"{entry.strategy_id} has no cross-sectional member function for the {leg!r} leg")
     if len(regime) != len(series):
         raise ValueError(f"regime has {len(regime)} bars against {len(series)} price bars; they must align")
+    if len(price_basis) != len(series):
+        raise ValueError(f"price_basis has {len(price_basis)} bars against {len(series)} price bars; they must align")
     verdicts: list[StrategySignal | None] = []
     scores: dict[date, float] = {}
     admissible: set[date] | None = None
@@ -120,6 +133,7 @@ def segmented_member(
                 universe=universe,
                 masked_reason=masked_reason,
                 regime=regime.segment(start, end),
+                price_basis=price_basis.segment(start, end),
             ),
             kind=leg,
         )

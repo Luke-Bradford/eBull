@@ -55,6 +55,7 @@ from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
 )
 from app.services.strategy_entry_liquidity import archive_policy_for
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_registry import StrategySignal
 from app.services.technical_analysis import OHLCVRow
 from app.services.universe_selection import vendor_for
@@ -155,7 +156,13 @@ def test_every_fixture_fires_s4_ungated(series_factory: object) -> None:
 
 
 def test_above_the_edge_the_s4_signal_passes_through() -> None:
-    signals = s12_signals(_above_edge(), universe=UNIVERSE, masked_reason=REASON)
+    series = _above_edge()
+    signals = s12_signals(
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+    )
     assert _fired(signals) == [FIRING_INDEX]
 
 
@@ -166,7 +173,13 @@ def test_the_edge_is_inclusive() -> None:
     gate that claims to admit that band has to admit that price.
     """
     assert band_for(SPEC_EDGE) is CHEAPEST_BAND
-    signals = s12_signals(_on_edge(), universe=UNIVERSE, masked_reason=REASON)
+    series = _on_edge()
+    signals = s12_signals(
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+    )
     assert _fired(signals) == [FIRING_INDEX]
 
 
@@ -174,7 +187,13 @@ def test_below_the_edge_is_not_fired_and_not_refused() -> None:
     """⚠ ``not_fired``, NOT ``not_evaluable``. The bar WAS judged — its price is
     known and simply is not one the strategy trades. Collapsing the two is the S-6
     bug, one level down from S-11's regime case."""
-    signals = s12_signals(_below_edge(), universe=UNIVERSE, masked_reason=REASON)
+    series = _below_edge()
+    signals = s12_signals(
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+    )
     assert not _fired(signals)
     assert _verdict_at(signals, FIRING_INDEX) == ("not_fired", None)
 
@@ -187,7 +206,12 @@ def test_s12_equals_s4_exactly_when_every_close_clears_the_edge() -> None:
         "fixture no longer sits entirely above the edge; the equality below would be vacuous"
     )
     s4 = s4_signals(series, universe=UNIVERSE, masked_reason=REASON)
-    s12 = s12_signals(series, universe=UNIVERSE, masked_reason=REASON)
+    s12 = s12_signals(
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+    )
     assert [(s.signal_index, s.verdict, s.reason) for s in s12] == [(s.signal_index, s.verdict, s.reason) for s in s4]
 
 
@@ -195,7 +219,16 @@ def test_s12_fired_set_is_a_subset_of_s4s_on_a_mixed_series() -> None:
     """A series straddling the edge: the gate can only ever remove."""
     series = _firing_series(plateau=99.0, breakout=101.0)
     s4 = set(_fired(s4_signals(series, universe=UNIVERSE, masked_reason=REASON)))
-    s12 = set(_fired(s12_signals(series, universe=UNIVERSE, masked_reason=REASON)))
+    s12 = set(
+        _fired(
+            s12_signals(
+                series,
+                universe=UNIVERSE,
+                masked_reason=REASON,
+                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            )
+        )
+    )
     assert s12 <= s4
 
 
@@ -208,14 +241,24 @@ def test_a_masked_bar_keeps_s4s_reason_even_above_the_edge() -> None:
     masked = list(series.rows)
     masked[FIRING_INDEX] = {"open": None, "high": None, "low": None, "close": None, "volume": 1_000}  # type: ignore[typeddict-item]
     series = BarSeries(dates=series.dates, rows=tuple(masked))
-    signals = s12_signals(series, universe=UNIVERSE, masked_reason=REASON)
+    signals = s12_signals(
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+    )
     assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", REASON)
 
 
 def test_a_warmup_bar_is_refused_whatever_the_price() -> None:
     """Index 0 is inside S-4's warm-up on any fixture, above the edge or below."""
     for series in (_above_edge(), _below_edge()):
-        signals = s12_signals(series, universe=UNIVERSE, masked_reason=REASON)
+        signals = s12_signals(
+            series,
+            universe=UNIVERSE,
+            masked_reason=REASON,
+            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        )
         verdict, reason = _verdict_at(signals, 0)
         assert verdict == "not_evaluable"
         assert reason == "insufficient_warmup"
@@ -232,13 +275,24 @@ def test_a_masked_bar_below_the_edge_is_still_a_refusal() -> None:
     masked = list(series.rows)
     masked[FIRING_INDEX] = {"open": None, "high": None, "low": None, "close": None, "volume": 1_000}  # type: ignore[typeddict-item]
     series = BarSeries(dates=series.dates, rows=tuple(masked))
-    signals = s12_signals(series, universe=UNIVERSE, masked_reason=REASON)
+    signals = s12_signals(
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+    )
     assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", REASON)
 
 
 def test_an_unknown_masked_reason_is_rejected() -> None:
+    series = _above_edge()
     with pytest.raises(ValueError, match="unknown reason code"):
-        s12_signals(_above_edge(), universe=UNIVERSE, masked_reason="not_a_reason")  # type: ignore[arg-type]
+        s12_signals(
+            series,
+            universe=UNIVERSE,
+            masked_reason="not_a_reason",  # type: ignore[arg-type]
+            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        )
 
 
 # -------------------------------------------------------------------- the threshold
@@ -396,7 +450,12 @@ def test_a_universe_whose_prices_are_not_as_traded_refuses_every_bar() -> None:
     it against a nominal edge would record a verdict about a price that never traded
     — and scan rows are terminal, so there is no later correction."""
     series = _above_edge()
-    signals = s12_signals(series, universe="survivor_only", masked_reason=REASON)
+    signals = s12_signals(
+        series,
+        universe="survivor_only",
+        masked_reason=REASON,
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+    )
     assert len(signals) == len(series)
     assert {(s.verdict, s.reason) for s in signals} == {("not_evaluable", PRICE_BASIS_REFUSAL_REASON)}
     assert [s.signal_index for s in signals] == list(range(len(series)))
@@ -408,7 +467,12 @@ def test_the_refusal_is_not_a_decline_even_where_s4_would_fire() -> None:
     a rule that looked and said no. S-4 fires on this bar under the same universe."""
     series = _above_edge()
     assert _fired(s4_signals(series, universe="survivor_only", masked_reason=REASON)) == [FIRING_INDEX]
-    signals = s12_signals(series, universe="survivor_only", masked_reason=REASON)
+    signals = s12_signals(
+        series,
+        universe="survivor_only",
+        masked_reason=REASON,
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+    )
     assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
 
 
@@ -462,11 +526,13 @@ def test_the_manifest_adapter_actually_gates_on_price() -> None:
     """⚠ THE POINT OF THIS FILE. The adapter takes a ``regime`` it discards, which
     makes it textually identical to ``_s4_signals`` — the copy that would leave the
     registered strategy un-gated while every test above still passed."""
+    series = _below_edge()
     signals = _entry().signals(  # type: ignore[attr-defined]
-        _below_edge(),
+        series,
         universe=UNIVERSE,
         masked_reason=REASON,
         regime=RegimeSeries(values=tuple([Regime.BULL_QUIET] * 175), not_evaluable_indices=()),
+        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
     )
     assert not _fired(signals)
     assert _verdict_at(signals, FIRING_INDEX) == ("not_fired", None)
@@ -482,6 +548,7 @@ def test_the_manifest_adapter_ignores_the_regime() -> None:
                 universe=UNIVERSE,
                 masked_reason=REASON,
                 regime=RegimeSeries(values=tuple([regime] * len(series)), not_evaluable_indices=()),
+                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
             )
         )
         for regime in Regime

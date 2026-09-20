@@ -33,6 +33,7 @@ from app.services.price_segments import series_segment_bounds
 from app.services.strategies.s5_support_bounce import PERMITTED_REGIMES as S5_REGIMES
 from app.services.strategies.s5_support_bounce import S5_STRATEGY_ID, s5_signals
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_registry import (
     OUR_ADDITIONAL_REASON_CODES,
     PARENT_REASON_CODES,
@@ -136,6 +137,7 @@ class TestSegmentRemapsTheRefusalSet:
             masked_reason="quarantined_bar",
             unresolved_breaks=(break_date,),
             regime=regime,
+            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
         )
         at_95 = next(s for s in signals if s.signal_index == 95)
         assert (at_95.verdict, at_95.reason) == ("not_evaluable", "missing_market_context")

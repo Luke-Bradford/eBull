@@ -91,6 +91,7 @@ from app.services.research_price_structure_store import (
 from app.services.signal_ledger import LedgerRow
 from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_regime_evidence import RegimeTradeObservation
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
@@ -2185,7 +2186,14 @@ class TestSeriesBreakBoundary:
 
         provider = _UniformRegimeProvider()
         entry = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
-        whole = _signals_for(entry, series, instrument_id=1, ranking=None, regime_provider=provider)  # type: ignore[arg-type]
+        whole = _signals_for(
+            entry,
+            series,
+            instrument_id=1,
+            ranking=None,
+            regime_provider=provider,  # type: ignore[arg-type]
+            archive_adjustment_basis="unadjusted",
+        )
         segmented = _signals_for(
             entry,
             series,
@@ -2193,6 +2201,7 @@ class TestSeriesBreakBoundary:
             ranking=None,
             unresolved_breaks=(dates[150],),
             regime_provider=provider,  # type: ignore[arg-type]
+            archive_adjustment_basis="unadjusted",
         )
         assert whole[200].verdict == "fired"
         assert (segmented[149].verdict, segmented[149].reason) == ("not_evaluable", "no_fill_bar")
@@ -2220,6 +2229,7 @@ class TestSeriesBreakBoundary:
             masked_reason="quarantined_bar",
             unresolved_breaks=(),
             regime=unconstrained_regime(len(series)),
+            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
         )
         segmented = segmented_member(
             entry,
@@ -2229,6 +2239,7 @@ class TestSeriesBreakBoundary:
             masked_reason="quarantined_bar",
             unresolved_breaks=(dates[300],),
             regime=unconstrained_regime(len(series)),
+            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
         )
         assert whole.verdicts[400] is None
         before_break = segmented.verdicts[299]

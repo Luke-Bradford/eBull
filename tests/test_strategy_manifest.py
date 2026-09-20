@@ -37,6 +37,7 @@ from app.services.strategy_manifest import (
     STRATEGY_MANIFEST,
     StrategyEntry,
 )
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.technical_analysis import OHLCVRow
 
 UNIVERSE = "survivor_only"
@@ -342,7 +343,11 @@ class TestUniformInvocationEqualsTheDirectCall:
         entry = STRATEGY_MANIFEST[strategy_id]
         assert entry.signals is not None
         via_manifest = entry.signals(
-            _bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON, regime=unconstrained_regime(len(_bars(_CLOSES)))
+            _bars(_CLOSES),
+            universe=UNIVERSE,
+            masked_reason=REASON,
+            regime=unconstrained_regime(len(_bars(_CLOSES))),
+            price_basis=from_archive_basis("unadjusted", n_bars=len(_bars(_CLOSES))),
         )
         expected = direct(_bars(_CLOSES), universe=UNIVERSE, close_reason=REASON)  # type: ignore[operator]
         assert via_manifest == expected
@@ -354,7 +359,11 @@ class TestUniformInvocationEqualsTheDirectCall:
         entry = STRATEGY_MANIFEST[SPEC_S4]
         assert entry.signals is not None
         via_manifest = entry.signals(
-            _bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON, regime=unconstrained_regime(len(_bars(_CLOSES)))
+            _bars(_CLOSES),
+            universe=UNIVERSE,
+            masked_reason=REASON,
+            regime=unconstrained_regime(len(_bars(_CLOSES))),
+            price_basis=from_archive_basis("unadjusted", n_bars=len(_bars(_CLOSES))),
         )
         assert via_manifest == s4_signals(_bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON)
 
@@ -371,6 +380,7 @@ class TestUniformInvocationEqualsTheDirectCall:
             universe=UNIVERSE,
             masked_reason=REASON,
             regime=unconstrained_regime(len(_bars(_HOLED_CLOSES))),
+            price_basis=from_archive_basis("unadjusted", n_bars=len(_bars(_HOLED_CLOSES))),
         )
         assert signals[0].verdict == "not_evaluable"
         assert signals[0].reason == REASON
@@ -388,6 +398,7 @@ class TestUniformInvocationEqualsTheDirectCall:
                 universe=UNIVERSE,
                 masked_reason=REASON,
                 regime=unconstrained_regime(len(_bars(_CLOSES))),
+                price_basis=from_archive_basis("unadjusted", n_bars=len(_bars(_CLOSES))),
             )
         }
         assert emitted == set(entry.signal_kinds)
@@ -404,6 +415,7 @@ class TestUniformInvocationEqualsTheDirectCall:
             universe=UNIVERSE,
             masked_reason=REASON,
             regime=unconstrained_regime(len(series)),
+            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
         )
         expected = s2_member(series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=REASON)
         assert via_manifest.dates == expected.dates

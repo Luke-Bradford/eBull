@@ -38,9 +38,10 @@ from app.services.strategies.s10_relative_strength_leader import (
 )
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_registry import SignalKind, StagedMember, resolve_participating_bar
 from app.services.strategy_segmented_evaluation import segmented_member
-from app.services.strategy_signal_scan import SCAN_UNIVERSE
+from app.services.strategy_signal_scan import SCAN_ARCHIVE_ADJUSTMENT_BASIS, SCAN_UNIVERSE
 
 S10 = "s10-relative-strength-leader"
 SELECTS = {"entry": s10_entry_select, "exit": s10_exit_select}
@@ -87,6 +88,11 @@ def main() -> int:
                 masked_reason="quarantined_bar",
                 unresolved_breaks=tuple(breaks.get(instrument_id, ())),
                 regime=regime,
+                # ⚠ THE SCAN'S OWN DECLARED BASIS, not a literal (#2840). This
+                # census exists to reproduce the production scan; a hand-picked
+                # carrier here would let the two diverge silently, which is the
+                # "two texts" defect #2840 already carries a prevention entry for.
+                price_basis=from_archive_basis(SCAN_ARCHIVE_ADJUSTMENT_BASIS, n_bars=len(series.dates)),  # type: ignore[attr-defined]
                 leg=leg,
             )
             staged_by_leg[leg][instrument_id] = staged
