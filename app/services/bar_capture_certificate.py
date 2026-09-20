@@ -222,11 +222,36 @@ UNVERIFIABLE_BUCKET: Final = "unverifiable_capture_semantics"
 #: open test is NECESSARY and not SUFFICIENT, and reading it as sufficient
 #: converts an unverified premise into an admission.
 #:
-#: That premise is unverified on purpose: ``91267518`` narrowed eToro's
-#: back-adjustment behaviour and did not resolve it, and the strong form would
-#: license reversing an assumed factor, which could MANUFACTURE ≥$100 gate
-#: eligibility. Until a confirmed split inside a reachable window settles it,
-#: this flag stays ``False`` and ``capture_certificate`` refuses everything.
+#: ⚠⚠ UPDATED — THE BACK-ADJUSTMENT HALF IS NO LONGER UNTESTED, AND IT CAME BACK
+#: POSITIVE. ``91267518`` left eToro's behaviour unresolved and named "a confirmed
+#: split inside a reachable window" as the unblock.
+#: ``scripts/probe_2840_confirmed_split_adjustment.py`` supplied one, from the SEC
+#: side (``ASC 260-10-55-12`` + ``SEC SAB Topic 4.C`` retroactive share-count
+#: re-denomination), and measured the delivered daily series across the whole
+#: register: **0 of 133 measurable events left a cliff at their own factor**, 0 of
+#: 110 of them at a factor of 4x or wider — with live and stored agreeing on all
+#: 115,073 overlapping bars. The provider DOES serve a re-based history.
+#: ⚠ Reproduce rather than trust this line:
+#: ``PYTHONPATH=. uv run python -m scripts.probe_2840_confirmed_split_adjustment``.
+#:
+#: ⚠ THAT MAKES THE FLAG MORE CLEARLY ``False``, NOT LESS — and it is NOT the fact
+#: the flag names. "The provider back-adjusts" does not give "the provider
+#: re-bases BEFORE the effective session's open", which is the only thing that
+#: would make the open test sufficient. Those are separate evidence states and
+#: only the first has been measured.
+#:
+#: ⚠⚠ AND THERE IS NOW A CONCRETE REASON TO EXPECT THE OPEN NOT TO BOUND IT.
+#: ``HON``'s 1-for-2 re-denomination (Form 10-Q, period 2026-06-30: *"every two
+#: shares ... were automatically combined into one share"*) took LEGAL effect at
+#: 00:02 ET on 2026-06-29 — before that session's open, and after the previous
+#: session's close. Legal effectiveness, first adjusted trading and the provider's
+#: own rewrite are three different clocks, and the open test only ever spoke to
+#: the second.
+#:
+#: The strong form would still license reversing an assumed factor, which could
+#: MANUFACTURE ≥$100 gate eligibility. So this stays ``False``, and what would
+#: move it is a bar CAPTURED between an effective instant and the following open,
+#: compared against the level that bar traded at.
 #:
 #: ⚠ FLIPPING THIS IS A RULE CHANGE. It does NOT need a manual version bump to be
 #: visible — this flag is a literal in this file and ``CAPTURE_CERTIFICATE_VERSION``

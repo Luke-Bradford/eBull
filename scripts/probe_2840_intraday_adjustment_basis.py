@@ -448,7 +448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cur.execute(_DAILY_CLOSES, {"instrument_id": target["instrument_id"], "since": since})
                 daily[int(target["instrument_id"])] = {row["price_date"]: float(row["close"]) for row in cur.fetchall()}
 
-    creds = _load_credentials()
+    creds = load_credentials()
     results: list[dict[str, Any]] = []
     with EtoroMarketDataProvider(api_key=creds[0], user_key=creds[1], env=settings.etoro_env) as provider:
         for target in targets:
@@ -482,7 +482,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _load_credentials() -> tuple[str, str]:
+def load_credentials() -> tuple[str, str]:
     """eToro credentials for ``settings.etoro_env`` — NOT necessarily demo.
 
     Imported lazily from the scheduler so this probe uses the same loader production does rather
@@ -508,4 +508,11 @@ if __name__ == "__main__":  # pragma: no cover - CLI
     raise SystemExit(main())
 
 
-__all__ = ["detect_step", "is_split_scale", "main", "reference_window_start", "session_ratios"]
+__all__ = [
+    "detect_step",
+    "is_split_scale",
+    "load_credentials",
+    "main",
+    "reference_window_start",
+    "session_ratios",
+]
