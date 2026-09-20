@@ -1,0 +1,329 @@
+# S-H arm 2 — the cheapest-cost-band price-gated compression breakout (#2840)
+
+Refs #2840, #2832, #2437, #3238. Depends on #2829 (the declaration freezes after this
+lands).
+
+Contract version: `sh-cheapest-band-price-gate-2026-09-20`. ⚠ That string is what the
+frozen declaration will carry in `PreregDeclaration.contract_version`, and it is how
+the readout rule in §"Readout and abort bar" becomes part of the declaration. The
+digest hashes the STRING, not this file's bytes (`prereg_contract.digest_payload`), so
+once the freeze runs this document is append-only: a correction is a new contract
+version and a new trial.
+
+Arm 2 of #2840, per the ticket's 2026-08-22 addendum. Arm 1
+(`s11-volatile-regime-gated-breakout`) is terminal — it FAILED its frozen bar on
+2026-08-23 under declaration 11.
+
+## What this ships
+
+The strategy module, the census that sized it, and their tests. **Not** the
+declaration and not a run — see §"Sequencing".
+
+## The rule
+
+    entry(t) := s4_entry(t)  and  close(t) >= CHEAPEST_BAND.lower
+
+S-4's rule, bracket, ATR multiples and 40-bar hold cap are IMPORTED unchanged: the
+gate conditions ENTRY, never the exit. S-4 is left byte-identical so its stored
+results stay interpretable as the control, exactly as for S-11.
+
+### Source rule
+
+Two decisions here are data-treatment decisions, and neither is invented:
+
+**1. That a price gate needs an as-traded level.** Settled in this repo by #2508 /
+#2400 and enforced in `sql/305_strategy_as_traded_price_provenance.sql`: a decision
+context is complete only when `as_traded_price_basis IN ('observed_unadjusted',
+'reconstructed_unadjusted')`, with the column comment stating *"split-adjusted
+research levels are not eligible for price/liquidity cohort attribution"*. This
+strategy is a price cohort in the entry rule rather than in a report, so the same
+invariant binds it.
+
+**2. Which band table.** The repo holds two price-band vocabularies and they are not
+interchangeable:
+
+| table | edges | purpose |
+| --- | --- | --- |
+| `strategy_decision_context.price_band_for` | 5 / 20 / 50 / 150 | REPORTING cohorts for decision contexts (#2508) |
+| `cost_model.BANDS` | 5 / 20 / 100 | the CHARGED p75 round-trip spread (calibrated 2026-08-07) |
+
+The hypothesis is *"trade only where the cost model charges least"*, so the gate must
+read the table that decides the charge. Using the reporting vocabulary would gate on
+an edge that no leg is ever charged at.
+
+**3. The threshold is never typed as a literal.** It is
+`min(BANDS, key=p75_spread_pct).lower` — the CHEAPEST charged band, mirroring
+`cost_model.UNKNOWN_NOMINAL_PRICE_BAND`'s own `max(BANDS, key=...)` idiom.
+
+⚠⚠ **NOT `BANDS[-1]`.** That is guaranteed to be the highest-PRICED band, not the
+cheapest-CHARGED one. They are the same band today (`>=$100`, 0.322% round trip
+against 0.509 / 0.571 / 1.450) and the module asserts at import that they still are,
+raising if a recalibration ever reorders the table or makes the cheapest band a
+bounded interval — because a `>=` gate would then no longer express the hypothesis.
+`.claude/CLAUDE.md` requires a published formulation or a rule fixed **by
+construction and frozen in a version hash**; there is no published formulation for a
+price-band entry filter, and this is the construction.
+
+### Why `close(t)` and not the fill's `open(t+1)` — and the proxy's measured cost
+
+The charged band keys on the entry FILL, which `signal_ledger.resolve_fills` puts at
+the next bar's open. `close(t)` is what is knowable when the decision is taken, so it
+is the causal choice and it inherits S-4's own next-open execution contract unchanged.
+
+It is therefore a **proxy in both directions**, and both are measured rather than
+asserted (`scripts/census_2840_price_gate.py`, 33,025,695 in-sample decision/fill
+pairs):
+
+| direction | pairs | share |
+| --- | ---: | --- |
+| admitted by the gate, charged a dearer band (`close >= 100`, next `open < 100`) | 6,815 | 0.67% of admitted |
+| rejected by the gate though the fill was cheap (`close < 100`, next `open >= 100`) | 7,579 | 0.02% of rejected |
+
+So the gate admits downward overnight crossers and rejects upward ones, which is a
+selection effect on the gap distribution and not only a cost leak. It is small and
+near-symmetric in absolute count. The readout reports the realised charged-band mix
+so the leak is re-measured on the legs that actually trade.
+
+⚠ **This does not make the historical experiment point-in-time.** The band table is a
+2026 snapshot applied to 1962-2021 prices — the strategy's own threshold is therefore
+not a quantity any 1990 trader could have read. That is one of several reasons the
+declaration is `falsification_only`; it is a limit on what a pass could mean, and it
+does not affect what a fail means.
+
+## The price basis this gate needs, and the two places the guard sits
+
+A `>= $100` gate is a nominal-price gate only if the prices are as traded.
+
+- **Backtest.** `BACKTEST_UNIVERSE` is `survivorship_free`, pinned by
+  `universe_selection.vendor_for` to `icyDenev/Intrader`, whose declared
+  `adjustment_basis` is `unadjusted` — measured, not assumed (that archive's
+  docstring records AAPL 2020-08-27 reading 500.04 pre-split against the HF archive's
+  125.01). #3238 made this the live cost basis at all four charge sites, so the gate
+  and the band selection now read the same kind of number.
+- **Live scan.** `SCAN_UNIVERSE` is `survivor_only` over `price_daily`, whose history
+  the provider **back-adjusts at fetch time** (`market_data.py:751`). ⚠ The claim
+  *"the gate reads only the latest bar, so back-adjustment cannot reach it"* is **not
+  made here**: this module is a callable that gates every bar it is handed, and a
+  replay or backfill through the scan path would gate on adjusted closes. Nothing in
+  arm 2 depends on the scan path — `BACKTEST_UNIVERSE` is what the exploration
+  measures — and the scan-universe identity is a SEPARATE `strategy_version` needing
+  its own declaration. Settling the scan path's basis is that declaration's problem,
+  and it is recorded here so it is not silently inherited.
+
+**Two guards, because one is not enough.** A configuration test alone would pass while
+the run it is supposed to protect charged every leg the maximum band, since
+`load_corpus` derives the basis from `_resolve_liquidity_policy` on the actually
+selected series and `cost_price_basis(None)` fails closed to `split_adjusted`
+(`backtest_run.py:2199`):
+
+1. **Config, at test time.** `cost_price_basis(archive_policy_for(vendor_for(
+   BACKTEST_UNIVERSE)).adjustment_basis) == "as_traded"`. Reds if the backtest corpus
+   ever moves to a split-adjusted archive.
+2. **Run, at measurement time.** The step-3 measurement script asserts the RUN's
+   `cost_price_basis` resolved to `as_traded` and refuses to open the outcomes
+   otherwise. A run whose provenance went missing is charged the maximum band on every
+   leg, which would test the gate against precisely the distortion the gate exists to
+   exploit — the same trap #3238 was filed for.
+
+Neither guard validates the PAYLOAD: a stored `unadjusted` label on rescaled or
+mixed-basis data would satisfy both. That is the corpus's own invariant to hold
+(`sql/249` / `sql/251`), not this strategy's, and it is named so the coverage is not
+overstated.
+
+## Identity
+
+`S12_PARAMS` carries S-4's seven parameters written out key by key (not merged —
+S-11's reasoning), plus:
+
+- `price_band_label` and `price_band_lower`, read from the cheapest band;
+- `s4_source_hash`, recomputed from S-4's module path. Load-bearing for S-11's reason:
+  this module IMPORTS S-4's rule, so an edit to S-4 changes what S-12 does, and
+  without the hash S-12's own `_source_hash()` would not move.
+
+⚠ The band hashing is **belt-and-braces, not the primary protection**. `cost_model`'s
+own module rule is that a change to what is charged is a new `COST_MODEL_ID`, and
+`COST_MODEL_ID` is hashed into every `StrategyIdentity` (criterion 11) — so a
+compliant recalibration already rotates every strategy version. What the params add is
+cover for a spread-only edit that moved a p75 without moving a label, and a statement
+in the identity itself of which threshold this rule used.
+
+## Measured premise — the gate is runnable, and its failure surface is arm 1's inverted
+
+`scripts/census_2840_price_gate.py`, read-only, over the 17,285 admitted
+`survivorship_free` series, in-sample `1962-01-02 .. < 2021-06-29`
+(`HOLDOUT_BOUNDARY`, exclusive). BARS only — no strategy evaluated, no outcome read,
+the same class of pre-declaration fact as arm 1's regime-day priors.
+
+| quantity | all | `close >= 100` | share |
+| --- | ---: | ---: | ---: |
+| usable bars | 33,040,536 | 1,025,067 | 3.10% |
+| distinct series | 14,841 | 1,672 | 11.27% |
+| distinct dates | 15,124 | 14,443 | **95.50%** |
+
+⚠ The series denominator is 14,841, not 17,285: **2,444 admitted series hold no usable
+in-sample bar at all** and are absent from the census rather than counted as ungated.
+"Usable" is `close > 0 AND open > 0` and neither non-finite — both legs, because the
+gate reads the close and the fill reads the next open.
+
+By decade the gated share is 21.6% (1960s, 6 series), 5.4%, 1.3%, 1.0%, 1.1%, 4.1%,
+7.9% (2020s, 912 series) — thin through the 1980s-2000s, thickening after 2010. The
+gate is therefore **not era-neutral**, which is one of the mechanism-attribution
+problems the readout has to separate.
+
+⚠⚠ **This is why arm 2 is not arm 1 wearing a different gate.** Arm 1's regime gate is
+MARKET-WIDE: one regime date fans out across hundreds of names, so its 6,616 trades
+were 104 decision dates and it died of date starvation. This gate is PER-NAME: 95.50%
+of in-sample dates carry at least one gated bar while only 11.27% of series ever do.
+Name-sparse, date-dense.
+
+⚠ **These are BAR counts, not S-4 SIGNAL counts, and the distinction is not
+cosmetic.** How many S-4 entries sit above the edge is unmeasured and stays unmeasured
+until the declaration is frozen. Bar supply is an upper bound on signal supply and
+nothing more: S-4 refuses a bar for warm-up, masked OHLC or a segmentation break, and
+its own docstring records that one masked bar can refuse the remaining tail. The
+claim made here is only that the gate is **runnable** — the corpus contains the
+population — not that any particular cohort will be populated.
+
+## Readout and abort bar
+
+Frozen under this contract version, before any look.
+
+**Selection.** `namespace = 'in_sample'`, pinned to the single `run_id` the
+exploration writes, with the strategy versions, `COST_MODEL_ID`, universe basis and
+corpus version asserted against the declaration rather than assumed. ⚠ `result_scope`
+is ALWAYS `'sleeve'` — a module constant at `backtest_run.py:312`; filtering on it for
+the in-sample/hold-out split returns 0 rows silently, which is how arm 1's first
+cohort read came back empty.
+
+**Run set: S-12, S-4 and S-11.** S-4 is the control the gate is measured against;
+keeping S-11 in keeps `deflated_sharpe.MIN_MEASURED_TRIALS` cleared. Narrowing to
+S-12 alone would write rows permanently refused with `deflated_sharpe_not_computed`.
+
+**Pass bar — a SIGN test with both legs required, no magnitude invented:**
+
+1. `expectancy_per_trade_pct` > 0 for S-12 in **both** quarantine arms (`masked`,
+   `admitted`) of the `worst_case` ambiguity arm; **and**
+2. S-12's figure exceeds S-4's in the same cell — the gate must beat its own control.
+   A gated subset that merely inherits S-4's edge has demonstrated nothing, and
+   because it trades less it would look better on pooled cost without the comparison.
+
+Anything else is a FAIL. No cell, arm or regime is selectable after the look — a
+result carried by one cell is a fail, as it was for arm 1.
+
+**Reported, and NOT part of the pass bar** (they characterise, they do not decide):
+
+- **Per-regime cohorts** from `strategy_result_regime_cohorts`, never pooled, with
+  `decision_date_count` beside `trade_count` on every row. Arm 1's headline figures
+  were a 4× arm-pooled double count and its abort bar was a fan-out count until it was
+  corrected pre-freeze.
+- **GROSS expectancy beside net.** Nominal price selects names, eras and price
+  trajectories as well as spread band, so a net improvement alone does not establish a
+  COST mechanism. Gross separates "the cheap names were better names" from "the same
+  edge survived a smaller charge".
+- **Realised charged-band mix of the legs that traded**, per the proxy table above.
+- **Mechanism leg: trade count and position count**, S-12 against S-4 on the same run.
+  ⚠ Reported as counts, which are unambiguous. The equity-curve `turnover` statistic
+  is reported beside them but not compared to the ~50%/month viability bar: arm 1
+  recorded 1.267 against S-4's 20.122 with the units undecoded, and that is still
+  true. Fewer trades is not automatically less capital turned over.
+- **Deflated Sharpe**, computed by the harness against the register. No threshold is
+  set here; inventing one is the constant this instruction set forbids.
+- **CAGR, Sharpe, Sortino and win rate are banned as decision metrics**
+  (`.claude/skills/quant/cost-aware-viability.md`).
+
+**Leakage.** No purge or embargo is specified here because the harness already
+implements one and specifying a second would be a competing rule:
+`strategy_result.namespace_for_signal` gives a signal whose bar is in-sample but whose
+FILL is on or after the boundary a **third verdict** — purged, belonging to neither
+side — and an open position is always `hold_out` whatever side its entry fell on. The
+straddle is handled, at the signal level, by §5.2's own rule.
+
+⚠ Do not compare against the 16 stored `survivorship_free` results: every leg of them
+was charged the maximum band and they are known-stale since `61ef6e47`.
+
+## Sequencing — why the declaration is NOT in this PR
+
+`PreregDeclaration.digest_payload` includes `strategy_version`, which for a manifest
+strategy IS the identity hash. A declaration frozen on this branch would be
+invalidated by any review comment touching the module, and `sql/333` bars UPDATE and
+DELETE — recovery would mean a new strategy version and a second charge on the shared
+trial register.
+
+1. **this PR** — the strategy exists, is registered, is tested, and the census that
+   sized it is reproducible;
+2. add the `DeclaredTrial` register entry, then freeze the declaration against the
+   merged `strategy_version`, `falsification_only` — for arm 1's reason and one of its
+   own: no stored corpus window can CONFIRM a hypothesis formed off stored cohorts,
+   and the threshold is a 2026 calibration applied to historical prices. The run this
+   authorises can only kill;
+3. explore in-sample (pre-2021-06-29), with the run-time basis guard above;
+4. forward-shadow confirmation, only if 3 passes. ⚠ Forward shadow is not
+   self-evidently confirmatory either: `cost_model` records that its quote sample is
+   concentrated in the closing hour with no volatile-regime observations, so that
+   instrument's timing, provenance, horizon and stopping rule are fixed in ITS
+   declaration, not assumed here.
+
+## Arm 1's spec is corrected by APPENDIX, not by edit
+
+`docs/proposals/ta/2026-08-22-sh-volatile-regime-gated-breakout.md` §"Arms 2 and 3"
+says the corpus cannot assign a cost band, so arm 2 is forward-shadow only. That
+premise was falsified on 2026-09-20 (#2840; census merged as `49f785df`):
+`survivorship_free` is pinned to an `unadjusted` archive and bands fine.
+
+That document is **append-only after its freeze**, by its own terms, and declaration
+11 is frozen. So the section is left exactly as written and a clearly scoped appendix
+is added pointing here. The appendix changes no term of arm 1's contract — arm 1's
+terms are about arm 1, and the falsified sentence was a forward-looking remark about
+a different arm.
+
+## Tests
+
+Pure tier, no DB.
+
+*The rule*
+- S-4 fires at `close >= edge` → S-12 fires; the same bar below the edge → `not_fired`.
+- The edge is INCLUSIVE, matching `PriceBand.contains`.
+- S-12 fires at least once and equals S-4 exactly when every close is above the edge —
+  a subset assertion alone is satisfied by a strategy that never fires.
+- S-12's fired set is a SUBSET of S-4's over a generated series.
+- The float comparison agrees with `band_for(Decimal(repr(close)))` across a grid
+  spanning all four bands. ⚠ What licenses a float compare at all is the corpus
+  proximity census `backtest_run.py:1479` cites — 0 of 75,972,669 open/close values
+  within 1e-9 of 5/20/100 without equalling one — and that is evidence about THESE
+  edges on THIS corpus, not a general precision guarantee.
+
+*Refusals*
+- Masked OHLC on a gated bar → S-4's `masked_reason`, never `not_fired`.
+- A bar inside S-4's warm-up → `insufficient_warmup`, whatever the price.
+- A bar below the edge that S-4 also refuses stays `not_evaluable` — the gate must not
+  convert a refusal into a decline.
+- ⚠ Unlike S-11 there is no new unevaluable INPUT: the close is already one of S-4's
+  four declared inputs, so a priced bar S-4 can evaluate is one S-12 can evaluate. The
+  gate is a body condition, which is legal here precisely because it introduces no
+  "there is no such input" state to collapse — the distinction S-11's docstring is
+  built around and the bug S-6 shipped.
+
+*Identity*
+- `S12_PARAMS["s4_source_hash"]` equals S-4's live `_source_hash()`.
+- Monkeypatching the S-4 hash changes `s12_identity(...).version`.
+- Changing the band edge changes the version.
+- Blank `cost_model_id` is rejected, as on S-4.
+- The import-time assertion fires when the cheapest band is not the open-above band.
+
+*Basis coupling*
+- `BACKTEST_UNIVERSE`'s pinned archive earns `as_traded` (guard 1).
+
+*Manifest wiring*
+- Present, non-retired, `per_series`, entry-only, S-4's exit regime (40-bar cap,
+  level-based), both `exit_levels` and `exit_levels_batch` registered.
+- The manifest's signals adapter actually gates — a copy of `_s4_signals` would
+  silently un-gate the strategy while every test of the module itself still passed.
+  Asserted directly, as `test_2840_manifest_adapter_gates` does for S-11.
+- Scalar and batch exit levels agree and equal S-4's for the same request.
+- The #2845 `KEPT` set grows to include `s12-…`.
+
+## What this is not
+
+Not a new TA idea — the standing order forbids another daily-bar variant. This is a
+declared conditioning of an EXISTING measured rule on the cost model's OWN band table,
+which is #2840's addendum as filed and phase 2 of the R5b queue.

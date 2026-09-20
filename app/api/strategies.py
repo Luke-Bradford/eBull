@@ -191,6 +191,7 @@ _TITLES = {
     "s9-squeeze-expansion": "Squeeze expansion",
     "s10-relative-strength-leader": "Relative-strength leader",
     "s11-volatile-regime-gated-breakout": "Volatility breakout (volatile markets only)",
+    "s12-cheapest-band-price-gated-breakout": "Volatility breakout (higher-priced shares only)",
 }
 
 _PRESENTATION = {
@@ -237,6 +238,11 @@ _PRESENTATION = {
     "s11-volatile-regime-gated-breakout": (
         "The same volatility-compression breakout, but it only trades while the wider "
         "market is volatile — the conditions where the rule has historically paid.",
+        "Up to 40 market days",
+    ),
+    "s12-cheapest-band-price-gated-breakout": (
+        "The same volatility-compression breakout, but it only trades shares priced "
+        "high enough to fall in the cheapest dealing-cost band.",
         "Up to 40 market days",
     ),
 }

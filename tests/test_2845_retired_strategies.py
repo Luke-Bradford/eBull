@@ -38,16 +38,18 @@ RETIRED = frozenset(
         "s10-relative-strength-leader",
     }
 )
-#: ⚠ THREE, not two. s4 and s8 are the survivors of the measured ten (#2827);
-#: s11 is #2840's research seat — S-4's rule gated to the two volatile regimes —
-#: which landed AFTER this retirement and is not one of the ten. It is listed
-#: here rather than excused by loosening the assertion below, so "the manifest
-#: minus the retired eight" stays an exact statement.
+#: ⚠ FOUR, not two. s4 and s8 are the survivors of the measured ten (#2827);
+#: s11 and s12 are #2840's research seats — S-4's rule gated to the two volatile
+#: regimes (arm 1) and to the cheapest charged cost band (arm 2) — which landed
+#: AFTER this retirement and are not among the ten. They are listed here rather
+#: than excused by loosening the assertion below, so "the manifest minus the
+#: retired eight" stays an exact statement.
 KEPT = frozenset(
     {
         "s4-volatility-compression-breakout",
         "s8-range-mean-reversion",
         "s11-volatile-regime-gated-breakout",
+        "s12-cheapest-band-price-gated-breakout",
     }
 )
 

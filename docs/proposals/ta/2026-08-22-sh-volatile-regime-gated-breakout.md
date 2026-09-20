@@ -288,3 +288,29 @@ Pure tier, no DB.
 Not a new TA idea. The standing order forbids another daily-bar variant, and this is not
 one: it is a declared conditioning of an EXISTING measured rule, which is #2840 as filed
 and phase 2 of the R5b queue.
+
+---
+
+## Appendix — post-freeze note, 2026-09-20 (NOT part of this contract)
+
+⚠ This document is append-only after its freeze (see the header) and declaration 11 is
+frozen. Nothing above is edited. This appendix changes no term of arm 1's contract: the
+sentence it corrects is a forward-looking remark about a DIFFERENT arm, and arm 1's own
+rule, pass bar and abort bar are untouched. It is recorded here only so a reader of
+§"Arms 2 and 3" is not misled.
+
+§"Arms 2 and 3" states that the corpus cannot assign a cost band because its prices are
+split-adjusted, so arm 2's nominal-price gate is a bounded sensitivity in backtest whose
+clean instrument is forward paper. **That premise was falsified on 2026-09-20** (#2840;
+census merged as `49f785df`). It is true of `survivor_only` and false of
+`survivorship_free`, which is `BACKTEST_UNIVERSE`: that universe is pinned to
+`icyDenev/Intrader`, whose stored `adjustment_basis` is `unadjusted` on all 17,285
+admitted series, so its prices are as traded and band directly. #3238 (`61ef6e47`) then
+made that the live cost basis at every charge site.
+
+Arm 2 therefore gained an in-sample backtest exploration the old premise had ruled out.
+Forward shadow remains its CONFIRMATORY instrument, for the reason that survived the
+falsification: live quotes carry an actual spread, while the corpus carries a p75
+estimated from 1,159 in-session quotes across nine summer dates.
+
+Arm 2's own spec: `docs/proposals/ta/2026-09-20-sh-top-band-price-gated-breakout.md`.
