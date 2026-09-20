@@ -1527,10 +1527,12 @@ def _dense_price_history(
 
 
 #: The shared prefix of all three ``_resolve_liquidity_policy`` withholding
-#: warnings (review NITPICK, PR #3240). ⚠ Both halves are load-bearing and that
-#: is why they are one string: since #3238 a withheld policy is no longer only a
-#: missing diagnostic, it also charges every leg of the run the maximum band, so
-#: a message naming one consequence without the other would understate it.
+#: warnings (review NITPICK on PR #3240, which fixes issue #3238 — the review
+#: bot read the bare "#3240" as a mistyped issue number, so both are named).
+#: ⚠ Both halves of the sentence are load-bearing, and that is why they are one
+#: string: since #3238 a withheld policy is no longer only a missing diagnostic,
+#: it also charges every leg of the run the maximum band, so a message naming
+#: one consequence without the other would understate it.
 _WITHHELD_POLICY_WARNING = "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
 
 
