@@ -37,8 +37,10 @@ def _row(index: int, *, close_masked: bool = False) -> OHLCVRow:
     #
     # ⚠ The ``type: ignore`` is this repo's existing idiom for a MASKED field —
     # ``OHLCVRow`` types ``close`` as a ``Decimal`` because a stored bar always
-    # has one, and the loader substitutes ``None`` after the fact. Same
-    # construction as ``tests/test_indicator_series.py:488``.
+    # has one, and ``price_masked_bars.load_masked_bars`` substitutes ``None``
+    # after the fact. ``tests/test_indicator_series.py`` builds a masked close
+    # the same way; cited without a line number deliberately, because a test
+    # file's line numbers move and a stale pointer is worse than none.
     base = Decimal(100 + index % 7)
     return {
         "open": base,
