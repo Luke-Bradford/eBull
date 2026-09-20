@@ -82,7 +82,14 @@ _NY: Final = ZoneInfo("America/New_York")
 _SESSION_OPEN: Final = time(9, 30)
 
 #: The stable name of the rule. Bumped on a RULE change, never on a comment.
-CAPTURE_CERTIFICATE_RULE_ID: Final = "bar-capture-certificate-v1"
+#:
+#: ⚠ v1 → v2 (#2840, Codex checkpoint 2). ``capture_certificate`` gained a required
+#: ``session_profile`` argument and a new verdict, ``non_nyse_trading_calendar``: a
+#: CONTRACT change, so this id moves with it. ``CAPTURE_CERTIFICATE_VERSION`` would have
+#: moved on the source hash regardless, but the id is the half a human reads in an audit
+#: record, and leaving it at v1 would show the same stable name for two materially
+#: different admission rules.
+CAPTURE_CERTIFICATE_RULE_ID: Final = "bar-capture-certificate-v2"
 
 
 def _tier_minutes_hash() -> str:
@@ -235,10 +242,26 @@ UNVERIFIABLE_BUCKET: Final = "unverifiable_capture_semantics"
 #: ``PYTHONPATH=. uv run python -m scripts.probe_2840_confirmed_split_adjustment``.
 #:
 #: ⚠ THAT MAKES THE FLAG MORE CLEARLY ``False``, NOT LESS — and it is NOT the fact
-#: the flag names. "The provider back-adjusts" does not give "the provider
-#: re-bases BEFORE the effective session's open", which is the only thing that
-#: would make the open test sufficient. Those are separate evidence states and
-#: only the first has been measured.
+#: the flag names. "The provider back-adjusts" does not give "the provider does
+#: NOT re-base before the effective session's open", which is the fact that would
+#: make the open test sufficient. Those are separate evidence states and only the
+#: first has been measured.
+#:
+#: ⚠⚠ THE DIRECTION IN THE PRECEDING SENTENCE WAS INVERTED WHEN THIS LANDED
+#: (``308d1e38``), AND IT SURVIVED A FULL REVIEW ROUND. It read *"does not give
+#: 'the provider re-bases BEFORE the open', which is the only thing that would
+#: make the open test sufficient"* — but an early re-base DEFEATS the open test;
+#: it is the failure mode, not the licence. What makes the test sufficient is the
+#: NEGATIVE: that no re-base precedes the open.
+#:
+#: It was invisible because the paragraph's VERDICT is correct — the flag does
+#: stay ``False`` either way — so nothing downstream ever contradicted the middle
+#: clause. The file already disagreed with itself in two places a reader would
+#: have to notice separately: this constant's NAME (``..._TIMING_VERIFIED`` — a
+#: verification, i.e. the negative established) and the unblock stated four
+#: paragraphs below (a bar whose level is compared *in* that window, which is an
+#: experiment that looks for an early re-base in order to RULE IT OUT).
+#: Found at Codex checkpoint 1 on the successor spec, not by any test.
 #:
 #: ⚠⚠ AND THERE IS NOW A CONCRETE REASON TO EXPECT THE OPEN NOT TO BOUND IT.
 #: ``HON``'s 1-for-2 re-denomination (Form 10-Q, period 2026-06-30: *"every two
@@ -268,6 +291,44 @@ PROVIDER_REWRITE_TIMING_VERIFIED: Final = False
 #: PROVIDER's behaviour, and conflating them would hide which evidence is
 #: missing when one of the two is eventually supplied.
 UNVERIFIED_PROVIDER_BUCKET: Final = "unverified_provider_rewrite_timing"
+
+#: ⚠⚠ THE UNDECLARED PRECONDITION OF EVERY VERDICT ABOVE: THE NYSE CALENDAR.
+#:
+#: ``next_session_open_utc`` reads ``market_calendar.us_market_status`` and
+#: ``_SESSION_OPEN`` is 09:30 America/New_York. Neither this module nor
+#: ``nominality_bucket`` takes any instrument identity, so until this constant
+#: existed the rule applied a NYSE session calendar to WHATEVER bar it was handed
+#: and said nothing about having done so.
+#:
+#: ⚠ NOT a live defect when it was found, and the measurement is the point rather
+#: than the reassurance: ``strategy_intraday_bars`` holds 8 instruments, all on
+#: exchanges 4/5 (AAPL CENN F IWM JPM KO QQQ SPY), so every stored bar really is
+#: NYSE-calendar. But ``instruments`` carries 873 rows on exchange 7 (``.L``), 520
+#: on 9 (``.PA``), 428 on 31 (``.ASX``) and more, and #2834's tilt candidates are
+#: all ``.L`` — so a foreign member joining the harvested panel is a configuration
+#: change, not a rewrite. The failure would be SILENT and FAIL-OPEN: an LSE bar
+#: whose 16:30 London close sits before 09:30 New York gets certified against a
+#: session that is not its own.
+#:
+#: ⚠ THE VOCABULARY IS NOT INVENTED HERE. ``app/api/instruments.py``'s
+#: ``SessionProfile`` / ``_SESSION_PROFILE_SQL`` is the repo's single source for
+#: resolving a listing to its session shape, and its own comment records the
+#: non-obvious half: exchange 33 is an RTH-only duplicate whose ``asset_class`` is
+#: still ``us_equity``, so the exchange check precedes the asset-class one. Both of
+#: those profiles — and only those — are the ones a NYSE calendar describes.
+#:
+#: ⚠ The PROFILE is a parameter and the DERIVATION stays at its existing home. A
+#: service importing from ``app.api`` would invert the layering, and re-deriving
+#: the CASE here would make the gate and the producer "two texts" — the exact shape
+#: the prevention log warns about. The caller resolves it and passes it;
+#: ``tests/test_2840_bar_capture_certificate.py`` pins this set against the
+#: producer's own Literal so the two cannot drift apart silently.
+NYSE_SESSION_PROFILES: Final = frozenset({"us_equity", "us_equity_rth"})
+
+#: A bar whose listing the NYSE calendar does not describe. Distinct from every
+#: other refusal here: those are about OUR stamp or the PROVIDER's behaviour, this
+#: one says the rule was asked about a market it does not speak for.
+FOREIGN_CALENDAR_BUCKET: Final = "non_nyse_trading_calendar"
 
 
 def capture_semantics_cutover(conn: psycopg.Connection[Any]) -> datetime | None:
@@ -314,6 +375,7 @@ def capture_certificate(
     *,
     timeframe: Timeframe = "30m",
     capture_semantics_from: datetime | None,
+    session_profile: str,
 ) -> str:
     """The ADMISSION verdict. ``nominality_bucket`` is only its arithmetic half.
 
@@ -332,7 +394,22 @@ def capture_certificate(
     ``None`` default. A caller must state which database it is talking about;
     passing ``None`` is the explicit "the migration is not applied here" answer
     and refuses everything, which is the fail-closed direction.
+
+    ⚠ ``session_profile`` is REQUIRED AND HAS NO DEFAULT for the same reason, and
+    it is checked FIRST. See ``NYSE_SESSION_PROFILES``: the arithmetic below is
+    NYSE-calendar arithmetic, and a default would let a caller inherit that
+    calendar for a listing it does not describe without ever saying so. Giving it
+    a ``"us_equity"`` default would be the whole defect with a value attached.
+
+    ⚠ ORDER MATTERS AND IS NOT INCIDENTAL. The calendar check precedes the
+    semantics check because a foreign bar's verdict must not depend on whether
+    ``sql/403`` happens to be applied — otherwise the same LSE bar reports
+    ``unverifiable_capture_semantics`` on one database and
+    ``non_nyse_trading_calendar`` on another, and a reader comparing the two would
+    conclude the migration fixed a calendar problem.
     """
+    if session_profile not in NYSE_SESSION_PROFILES:
+        return FOREIGN_CALENDAR_BUCKET
     if capture_semantics_from is None or captured_at < capture_semantics_from:
         return UNVERIFIABLE_BUCKET
     bucket = nominality_bucket(bar_time, captured_at, timeframe=timeframe)
@@ -346,6 +423,8 @@ def capture_certificate(
 
 __all__ = [
     "CAPTURE_SEMANTICS_RULE_ID",
+    "FOREIGN_CALENDAR_BUCKET",
+    "NYSE_SESSION_PROFILES",
     "PROVIDER_REWRITE_TIMING_VERIFIED",
     "UNVERIFIABLE_BUCKET",
     "UNVERIFIED_PROVIDER_BUCKET",

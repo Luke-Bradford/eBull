@@ -9335,3 +9335,75 @@ original, because the gate now *looked* like a bound.
 - ⚠ The tell was available and I read past it: **7 of the 9 surviving instruments shared the same event date.** A corporate-action register whose members cluster on one calendar day is describing the data pipeline, not the corporations.
 - Prevention: when corroborating event A with event B, state the width of B's window and the base rate of A, and compute what fraction of matches the null produces. **Test: if the corroborating window is wide enough that a randomly-placed A would usually fall inside it, the conjunction is not evidence — tighten the window or drop the source.** And before accepting a cross-source register, `GROUP BY` the event date: a spike on one day is a pipeline artefact until shown otherwise.
 - Enforced in: this entry; `scripts/probe_2840_confirmed_split_adjustment.py` measures level shifts as geometric means over 10 sessions each side, which a one-bar outlier cannot move past the band; `tests/test_2840_confirmed_split_adjustment.py::TestCliffProfile::test_a_single_corrupt_bar_is_NOT_a_cliff` pins exactly the 2025-12-09 shape.
+
+## A JOB'S FIRE COUNT is a fact about the scheduler, never about what the writer wrote
+
+- Symptom: #2840 (2026-09-20). I measured `daily_candle_refresh` firing **8-30 times a day
+  spanning 00:00Z-23:45Z** — i.e. straight through RTH — and wrote *"a daily bar is typically
+  first written partial, mid-session"*. A whole spec then hung off it: the proposed
+  `price_daily` provenance stamp used LAST-write semantics **specifically** to avoid
+  certifying the supposed partial observation.
+- Root cause: the writer does the opposite, and one grep would have shown it.
+  `market_data.py:748` (#2572) filters every forming candle before publication —
+  `bars = [bar for bar in bars if bar.price_date <= fresh_through]` — and the scheduler
+  passes `fresh_through=latest_completed_us_session(...)`. **Forming candles never reach
+  `price_daily` at all.** The fire count was real; the inference from it was invented.
+- ⚠ This is the CLAUDE.md "a sentence containing *typically* / *most* / *usually* about
+  source data is a measurement" rule, hit through a side door: I *had* run a query, so it
+  felt measured. The query answered a different question. A job-runs aggregate describes
+  dispatch; what a row contains is a question about the WRITE PATH and needs the write path.
+- Prevention: before asserting what a stored row contains, read the statement that writes it.
+  **Test: if the claim is about a row's content but the evidence is `job_runs`, `count(*)`
+  over a schedule, or any dispatch-side aggregate, the claim is unmeasured.** The cheap
+  discriminator is `rg 'INSERT INTO <table>'` and reading the filter above it.
+- Enforced in: this entry; `docs/proposals/ta/2026-09-20-2840-daily-level-write-provenance.md`
+  §1.2 records the falsified sentence and the line that refutes it.
+
+## A WRITE TIMESTAMP bounds the OBSERVATION and cannot establish the PAYLOAD was complete
+
+- Symptom: same spec. It proposed certifying a daily bar as complete when its write stamp
+  fell after the session close. Codex checkpoint 1: **fetch at 15:59, write at 16:01.** The
+  stamp clears the close, the payload is a partial bar, and the certificate admits it.
+- Root cause: `clock_timestamp()` at write is an upper bound on the *observation instant*,
+  which is exactly what makes it sound for `sql/402`'s purpose — a later stamp can only cause
+  a REFUSAL under the next-open rule. Completeness is a property of the payload, so the same
+  value is sound for one question and fail-OPEN for the other. I carried the soundness across
+  without re-deriving it.
+- ⚠ The direction is what makes this dangerous rather than merely wrong: the intraday
+  certifier's whole design note is that a stamp may only ever cause a refusal, and this reuse
+  would have made the same column cause an admission.
+- Prevention: when reusing a timestamp for a second rule, state which side it bounds and
+  check the new rule needs that side. **Test: ask "can this value being LATER than the truth
+  ever cause an ADMISSION?" If yes, it is the wrong bound for this rule.** Completion needs
+  evidence about the payload (a settled-bar flag, a provider finality contract), not about
+  when we stored it.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-20-2840-daily-level-write-provenance.md` §1.1.
+
+## A RULE THAT TAKES NO IDENTITY still assumes one — name the precondition or it fails OPEN
+
+- Symptom: #2840. `bar_capture_certificate` is NYSE arithmetic (`us_market_status`, 09:30
+  America/New_York) and took no instrument identity at all, so it applied that calendar to
+  whatever bar it was handed and recorded nothing about having done so. Found by attacking a
+  successor spec, not by any test, and it had passed a full review round.
+- ⚠ Zero rows were affected, and that is the trap rather than the mitigation: the intraday
+  store holds 8 instruments, all on exchanges 4/5, so the assumption was TRUE and would have
+  gone on looking true. `instruments` carries 873 rows on exchange 7 (`.L`), 520 on 9
+  (`.PA`), 428 on 31 (`.ASX`); #2834's tilt candidates are all `.L`. Adding a foreign member
+  to the harvested panel is a CONFIG change, and an LSE bar whose 16:30 London close precedes
+  09:30 New York would then be certified against a session that is not its own — silently.
+- Prevention: when a rule hardcodes a market, timezone, currency or calendar, that is a
+  precondition on its INPUT; make the caller state it and refuse what the rule does not
+  describe. **Test: if a function's arithmetic names a specific venue but its signature does
+  not, the precondition is undeclared.** Take the discriminator as a required argument with
+  NO default — a default is the assumption with a value attached.
+- ⚠ And do not re-derive the vocabulary: `app/api/instruments.py::_SESSION_PROFILE_SQL`
+  already resolves a listing to its session shape (including exchange 33, an RTH-only
+  duplicate whose `asset_class` is still `us_equity`). Pass the resolved value in rather than
+  copying the `CASE` into a service — a second copy is the "two texts" shape, and a service
+  importing from `app.api` inverts the layering.
+- Enforced in: this entry; `app/services/bar_capture_certificate.NYSE_SESSION_PROFILES` +
+  `FOREIGN_CALENDAR_BUCKET`;
+  `tests/test_2840_bar_capture_certificate.py::TestTheNyseCalendarIsAPreconditionAndNowSaysSo`,
+  whose last case pins the accepted set against the producer's own `Literal` so the two
+  cannot drift.

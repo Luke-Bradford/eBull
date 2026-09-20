@@ -109,11 +109,21 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row, tuple_row
 
+# ⚠ THE PRODUCER'S OWN SQL, IMPORTED RATHER THAN MIRRORED (Codex checkpoint 2, P2).
+# An earlier revision of this file COPIED the CASE expression. The copy type-checked, ran,
+# and agreed with the original — and the drift test beside it compared only the profile
+# VOCABULARY, so a change to which exchange maps to which profile would have left the census
+# admitting bars the canonical resolver refuses, with every gate green. That is the "two
+# texts" shape recorded in the prevention log, committed in the same diff that cites it.
+# Importing a private name across the boundary is the lesser cost: a script sits above both
+# layers, and there is exactly one derivation.
+from app.api.instruments import _SESSION_PROFILE_SQL
 from app.config import settings
 from app.services.bar_capture_certificate import (
     CAPTURE_CERTIFICATE_VERSION,
     CERTIFIED_BUCKET,
     IMPOSSIBLE_BUCKET,
+    NYSE_SESSION_PROFILES,
     capture_certificate,
     capture_semantics_cutover,
     next_session_open_utc,
@@ -1131,9 +1141,35 @@ def _report(payload: Mapping[str, Any], *, as_of: datetime) -> str:
     return "\n".join(out)
 
 
-_CAPTURE_CERTIFICATE_SQL = """
-    SELECT timeframe, bar_time, captured_at
-    FROM strategy_intraday_bars
+# ⚠ THE SESSION PROFILE IS RESOLVED HERE AND NOT IN THE RULE. ``capture_certificate``
+# refuses any listing the NYSE calendar does not describe, and takes the profile as a
+# required argument rather than deriving it — a service reaching into ``app.api`` would
+# invert the layering.
+#
+# ⚠ The CASE is INTERPOLATED FROM THE PRODUCER, not restated. It expects the aliases ``i``
+# (instruments) and ``e`` (exchanges), which is why they are named that way below. It
+# already handles the half that is easy to get wrong: exchange 33 is an RTH-only duplicate
+# whose ``asset_class`` is still ``us_equity``, so its test precedes the asset-class one.
+#
+# ⚠⚠ BOTH JOINS ARE ``LEFT`` AND THAT IS THE LOAD-BEARING PART, NOT TIDINESS. This query
+# feeds a CENSUS whose entire output is a set of counts, so an inner join would silently
+# shrink the denominator: a bar whose instrument or exchange row is missing would vanish
+# from ``scanned`` instead of being reported, and the census would present a subset as the
+# whole population. Measured today (dev DB, 2026-09-20): ZERO bars lack an ``instruments``
+# row and ZERO instruments lack an ``exchanges`` row — which is exactly why the inner form
+# would have looked correct indefinitely and then quietly stopped being so.
+#
+# With ``LEFT``, a missing row yields NULL, the ``ELSE`` resolves it to ``continuous``, and
+# ``capture_certificate`` refuses it under ``non_nyse_trading_calendar``. The population
+# stays fixed and the unknown becomes a visible refusal instead of an absence.
+_CAPTURE_CERTIFICATE_SQL = f"""
+    SELECT b.timeframe,
+           b.bar_time,
+           b.captured_at,
+           {_SESSION_PROFILE_SQL}
+    FROM strategy_intraday_bars b
+    LEFT JOIN instruments i ON i.instrument_id = b.instrument_id
+    LEFT JOIN exchanges e ON e.exchange_id = i.exchange
 """
 
 
@@ -1166,7 +1202,7 @@ def _bucket_table(by_timeframe: Mapping[str, Counter[str]]) -> list[str]:
 
 
 def capture_certificate_report(
-    rows: Iterable[tuple[str, datetime, datetime]], *, capture_semantics_from: datetime | None
+    rows: Iterable[tuple[str, datetime, datetime, str]], *, capture_semantics_from: datetime | None
 ) -> str:
     """Every stored bar under ``bar_capture_certificate``, and what the withdrawn proxy cost.
 
@@ -1184,11 +1220,14 @@ def capture_certificate_report(
     arithmetic_by_timeframe: dict[str, Counter[str]] = defaultdict(Counter)
     disagreements: Counter[tuple[bool, bool]] = Counter()
     impossible_excluded = 0
+    non_nyse_excluded = 0
     # ⚠ Counted as we go rather than ``len(rows)``: the caller streams a
     # server-side cursor, so the sequence is consumed once and has no length.
     scanned = 0
-    for timeframe_text, bar_time, captured_at in rows:
+    profiles: Counter[str] = Counter()
+    for timeframe_text, bar_time, captured_at, session_profile in rows:
         scanned += 1
+        profiles[session_profile] += 1
         # ⚠ VALIDATED, NOT CAST. The column is a TEXT with its own CHECK, and a cast would
         # turn a tier added to the table but not to INTRADAY_TIERS into a KeyError several
         # frames away instead of a named refusal here.
@@ -1196,9 +1235,27 @@ def capture_certificate_report(
             raise ValueError(f"stored timeframe {timeframe_text!r} is not a declared tier")
         timeframe = cast("Timeframe", timeframe_text)
         bucket = capture_certificate(
-            bar_time, captured_at, timeframe=timeframe, capture_semantics_from=capture_semantics_from
+            bar_time,
+            captured_at,
+            timeframe=timeframe,
+            capture_semantics_from=capture_semantics_from,
+            session_profile=session_profile,
         )
         by_timeframe[timeframe][bucket] += 1
+        # ⚠⚠ NON-NYSE ROWS STOP HERE (Codex checkpoint 2, P2). The ADMISSION table above is
+        # total over the population — it has a bucket for them and must keep counting them.
+        # The two blocks BELOW are not: both call ``nominality_bucket``, which is NYSE
+        # arithmetic, so feeding a foreign bar into them would compute "did a NEW YORK open
+        # intervene" for a listing that does not trade on that calendar and then print the
+        # answer as "certified by the RULE". That is precisely the fail-open the
+        # ``session_profile`` gate was added to close, reintroduced one frame later in the
+        # reporting — the gate would read as enforced while the headline figures ignored it.
+        #
+        # ⚠ Counted rather than skipped. A silently smaller denominator in the arithmetic
+        # table is the same defect in the other direction, so the count is printed.
+        if session_profile not in NYSE_SESSION_PROFILES:
+            non_nyse_excluded += 1
+            continue
         # ⚠ The proxy comparison is against the ARITHMETIC half deliberately. It
         # asks "does the same-NY-date proxy agree with the session-open rule",
         # which is a question about the calendar and not about whether this
@@ -1226,6 +1283,13 @@ def capture_certificate_report(
         # semantics are already active, and naming 402 would misdiagnose it.
         f"  capture semantics trustworthy from: "
         f"{capture_semantics_from or 'UNKNOWN — sql/403 cutover marker unavailable; nothing admissible'}",
+        # ⚠ PRINTED, because the NYSE-calendar precondition is otherwise invisible. Every
+        # bar in the store is US-listed today, so the refusal below is a no-op and would
+        # stay silently a no-op after a foreign member joined the harvested panel — the
+        # bucket table only shows a profile once one appears in it. This line shows the
+        # composition of the population the rule was applied to, whatever it is.
+        "  session profiles scanned: "
+        + (", ".join(f"{profile}={count:,}" for profile, count in sorted(profiles.items())) or "none"),
         "",
     ]
     out.append("ADMISSION verdict (capture_certificate) — what a consumer may use:")
@@ -1237,7 +1301,10 @@ def capture_certificate_report(
     # for. A command that no longer computes the figure its prose points at is the
     # defect the prevention log records under "a rewritten formatter silently falsifies
     # every claim made about its output elsewhere".
-    out.append("ARITHMETIC only (nominality_bucket) — did an open intervene, ignoring the cutover:")
+    out.append(
+        f"ARITHMETIC only (nominality_bucket) — did an open intervene, ignoring the cutover"
+        f" [NYSE-calendar listings only; {non_nyse_excluded:,} bars excluded]:"
+    )
     out.extend(_bucket_table(arithmetic_by_timeframe))
     out.append("")
     out.append("withdrawn proxy vs the ARITHMETIC rule (ignores the sql/402 cutover, by design):")
@@ -1282,7 +1349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scan.execute(_CAPTURE_CERTIFICATE_SQL)
                 print(
                     capture_certificate_report(
-                        cast("Iterable[tuple[str, datetime, datetime]]", scan),
+                        cast("Iterable[tuple[str, datetime, datetime, str]]", scan),
                         capture_semantics_from=cutover,
                     )
                 )

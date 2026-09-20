@@ -204,7 +204,10 @@ class TestAdmissionRefusesWhatTheArithmeticCannotSpeakFor:
         # The arithmetic says the bar is clean...
         assert nominality_bucket(self.BAR, self.CAPTURE) == CERTIFIED_BUCKET
         # ...and admission still refuses it, because the stamp predates sql/402.
-        assert capture_certificate(self.BAR, self.CAPTURE, capture_semantics_from=cutover) == UNVERIFIABLE_BUCKET
+        assert (
+            capture_certificate(self.BAR, self.CAPTURE, capture_semantics_from=cutover, session_profile="us_equity")
+            == UNVERIFIABLE_BUCKET
+        )
 
     def test_a_row_after_the_cutover_passes_THIS_gate_and_meets_the_next(self) -> None:
         """⚠ It does NOT become ``before_next_open``: the provider-rewrite gate
@@ -219,7 +222,9 @@ class TestAdmissionRefusesWhatTheArithmeticCannotSpeakFor:
         )
 
         cutover = datetime(2026, 9, 18, tzinfo=UTC)
-        verdict = capture_certificate(self.BAR, self.CAPTURE, capture_semantics_from=cutover)
+        verdict = capture_certificate(
+            self.BAR, self.CAPTURE, capture_semantics_from=cutover, session_profile="us_equity"
+        )
         assert verdict != UNVERIFIABLE_BUCKET
         assert verdict == UNVERIFIED_PROVIDER_BUCKET
 
@@ -227,7 +232,10 @@ class TestAdmissionRefusesWhatTheArithmeticCannotSpeakFor:
         """``None`` is the explicit "not applied here" answer, and it fails closed."""
         from app.services.bar_capture_certificate import UNVERIFIABLE_BUCKET, capture_certificate
 
-        assert capture_certificate(self.BAR, self.CAPTURE, capture_semantics_from=None) == UNVERIFIABLE_BUCKET
+        assert (
+            capture_certificate(self.BAR, self.CAPTURE, capture_semantics_from=None, session_profile="us_equity")
+            == UNVERIFIABLE_BUCKET
+        )
 
     def test_admission_still_refuses_a_late_capture_after_the_cutover(self) -> None:
         """The cutover admits a row to JUDGEMENT; it does not certify it."""
@@ -235,7 +243,9 @@ class TestAdmissionRefusesWhatTheArithmeticCannotSpeakFor:
 
         late = datetime(2026, 9, 22, 14, 0, tzinfo=UTC)
         cutover = datetime(2026, 9, 18, tzinfo=UTC)
-        assert capture_certificate(self.BAR, late, capture_semantics_from=cutover).startswith("after_")
+        assert capture_certificate(
+            self.BAR, late, capture_semantics_from=cutover, session_profile="us_equity"
+        ).startswith("after_")
 
 
 class TestTheOpenBoundsEconomicEffectNotTheProvidersRewrite:
@@ -263,7 +273,10 @@ class TestTheOpenBoundsEconomicEffectNotTheProvidersRewrite:
         cutover = datetime(2026, 9, 18, tzinfo=UTC)
 
         assert nominality_bucket(bar, capture) == CERTIFIED_BUCKET
-        assert capture_certificate(bar, capture, capture_semantics_from=cutover) == UNVERIFIED_PROVIDER_BUCKET
+        assert (
+            capture_certificate(bar, capture, capture_semantics_from=cutover, session_profile="us_equity")
+            == UNVERIFIED_PROVIDER_BUCKET
+        )
 
     def test_only_the_certifying_verdict_is_downgraded(self) -> None:
         """``after_n_opens`` keeps its count — it is how many opportunities a
@@ -273,7 +286,10 @@ class TestTheOpenBoundsEconomicEffectNotTheProvidersRewrite:
         bar = datetime(2026, 9, 18, 19, 30, tzinfo=UTC)
         late = datetime(2026, 9, 22, 14, 0, tzinfo=UTC)
         cutover = datetime(2026, 9, 18, tzinfo=UTC)
-        assert capture_certificate(bar, late, capture_semantics_from=cutover) == "after_2_opens"
+        assert (
+            capture_certificate(bar, late, capture_semantics_from=cutover, session_profile="us_equity")
+            == "after_2_opens"
+        )
 
     def test_the_two_refusals_are_distinguishable(self) -> None:
         """Conflating them would hide which evidence is still missing."""
@@ -320,3 +336,119 @@ def test_the_version_hashes_this_modules_own_source() -> None:
     assert f"+{source_hash}+" in CAPTURE_CERTIFICATE_VERSION
     # ...and the flag really is a literal in that file, so editing it changes those bytes.
     assert "PROVIDER_REWRITE_TIMING_VERIFIED: Final = False" in Path(module.__file__).read_text()
+
+
+class TestTheNyseCalendarIsAPreconditionAndNowSaysSo:
+    """The rule is NYSE arithmetic and took no instrument identity (#2840).
+
+    ``next_session_open_utc`` reads ``us_market_status`` and ``_SESSION_OPEN`` is
+    09:30 America/New_York, so every verdict already assumed a NYSE listing
+    without a caller ever stating one. Not a live defect when found — the store
+    is US-only — but a SILENT, FAIL-OPEN one: an LSE bar whose 16:30 London close
+    precedes 09:30 New York would be certified against a session that is not its
+    own.
+    """
+
+    BAR = datetime(2026, 9, 18, 19, 30, tzinfo=UTC)
+    CAPTURE = datetime(2026, 9, 18, 20, 5, tzinfo=UTC)
+    CUTOVER = datetime(2026, 9, 18, tzinfo=UTC)
+
+    def test_a_foreign_listing_is_refused_by_name(self) -> None:
+        from app.services.bar_capture_certificate import FOREIGN_CALENDAR_BUCKET, capture_certificate
+
+        for profile in ("foreign_equity", "continuous"):
+            assert (
+                capture_certificate(
+                    self.BAR, self.CAPTURE, capture_semantics_from=self.CUTOVER, session_profile=profile
+                )
+                == FOREIGN_CALENDAR_BUCKET
+            )
+
+    def test_both_us_profiles_reach_the_next_gate(self) -> None:
+        """Exchange 33 is an RTH-only duplicate and is still a NYSE-calendar
+        listing; excluding it would refuse the ``.RTH`` rows the composed panel
+        is actually built from."""
+        from app.services.bar_capture_certificate import (
+            FOREIGN_CALENDAR_BUCKET,
+            capture_certificate,
+        )
+
+        for profile in ("us_equity", "us_equity_rth"):
+            verdict = capture_certificate(
+                self.BAR, self.CAPTURE, capture_semantics_from=self.CUTOVER, session_profile=profile
+            )
+            assert verdict != FOREIGN_CALENDAR_BUCKET
+
+    def test_the_calendar_refusal_precedes_the_semantics_refusal(self) -> None:
+        """Order is not incidental. If the semantics check ran first, the SAME
+        foreign bar would report ``unverifiable_capture_semantics`` on a database
+        without ``sql/403`` and ``non_nyse_trading_calendar`` on one with it — and
+        a reader comparing the two would conclude the migration fixed a calendar
+        problem."""
+        from app.services.bar_capture_certificate import FOREIGN_CALENDAR_BUCKET, capture_certificate
+
+        assert (
+            capture_certificate(self.BAR, self.CAPTURE, capture_semantics_from=None, session_profile="foreign_equity")
+            == FOREIGN_CALENDAR_BUCKET
+        )
+
+    def test_the_accepted_set_has_not_drifted_from_its_producer(self) -> None:
+        """⚠ THE ANTI-"TWO TEXTS" PIN. The vocabulary is produced by
+        ``app/api/instruments.py::SessionProfile``; this module only names which
+        members the NYSE calendar describes. If a profile is added or renamed
+        there, this fails rather than silently refusing a listing that should be
+        admitted (or admitting one that should not)."""
+        from typing import get_args
+
+        from app.api.instruments import SessionProfile
+        from app.services.bar_capture_certificate import NYSE_SESSION_PROFILES
+
+        produced = set(get_args(SessionProfile))
+        assert NYSE_SESSION_PROFILES <= produced, (
+            f"{NYSE_SESSION_PROFILES - produced} is not a profile the producer can emit"
+        )
+        assert produced - NYSE_SESSION_PROFILES == {"foreign_equity", "continuous"}
+
+
+class TestTheCensusDoesNotApplyNyseArithmeticToAForeignBar:
+    """Codex checkpoint 2, P2. The gate was enforced one frame too late.
+
+    ``capture_certificate`` refuses a foreign listing, but the census then passed
+    the SAME row to ``nominality_bucket`` and to the proxy comparison — both NYSE
+    arithmetic — so a foreign bar could be printed as "certified by the RULE" off
+    a New York open it never traded against. The gate would have read as enforced
+    while the headline tables ignored it.
+
+    ⚠ Synthetic rows, deliberately. The store is 100% ``us_equity`` today, so the
+    live census exercises none of this and would keep reporting ``0 bars
+    excluded`` however wrong the handling was.
+    """
+
+    BAR = datetime(2026, 9, 18, 19, 30, tzinfo=UTC)
+    CAPTURE = datetime(2026, 9, 18, 20, 5, tzinfo=UTC)
+    CUTOVER = datetime(2026, 9, 18, tzinfo=UTC)
+
+    def _report(self, *profiles: str) -> str:
+        from scripts.census_2840_forward_daily_provenance import capture_certificate_report
+
+        return capture_certificate_report(
+            [("30m", self.BAR, self.CAPTURE, profile) for profile in profiles],
+            capture_semantics_from=self.CUTOVER,
+        )
+
+    def test_a_foreign_bar_is_excluded_from_the_arithmetic_table_and_counted(self) -> None:
+        report = self._report("foreign_equity", "continuous")
+
+        assert "2 bars excluded" in report
+        # The ADMISSION table is total and still sees both.
+        assert "over 2 stored bars" in report
+        assert "non_nyse_trading_calendar" in report
+
+    def test_the_admission_table_still_counts_them(self) -> None:
+        """Excluding them from the ARITHMETIC table must not shrink the census's
+        own denominator — a silently smaller population is the same defect in the
+        other direction."""
+        report = self._report("us_equity", "foreign_equity")
+
+        assert "over 2 stored bars" in report
+        assert "1 bars excluded" in report
