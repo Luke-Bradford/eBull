@@ -7,7 +7,6 @@ is general and the gate is S-12's alone.
 
 from __future__ import annotations
 
-import inspect
 from datetime import date
 from pathlib import Path
 
@@ -201,24 +200,61 @@ def test_the_scan_declares_no_source() -> None:
     assert "SCAN_ARCHIVE_ADJUSTMENT_BASIS" not in source
 
 
-def test_no_member_adapter_forwards_the_carrier() -> None:
+def test_no_member_adapter_READS_the_carrier() -> None:
     """⚠ Keeps the CROSS-SECTIONAL path out of scope by test rather than by inspection.
 
     S-12 is ``per_series`` with no ``member``, so ``segmented_member`` never dispatches
-    it, and every cross-sectional adapter discards ``price_basis``. If one starts
-    forwarding it, ``stage_cross_sectional_member``'s pre-input terminal refusal becomes
-    reachable for a basis reason and needs its own analysis — plus that is a second
-    consumer, so ``INPUT_RULE_SETS`` is owed its sixth entry.
+    it, and every cross-sectional adapter discards ``price_basis``. If one starts reading
+    it, ``stage_cross_sectional_member``'s pre-input terminal refusal becomes reachable
+    for a basis reason and needs its own analysis — plus that is a second consumer, so
+    ``INPUT_RULE_SETS`` is owed its sixth entry.
+
+    ⚠⚠ ASSERTED BEHAVIOURALLY, NOT BY A SOURCE SUBSTRING (review bot NITPICK on the
+    first version, and it was right). That version looked for the literal
+    ``"price_basis=price_basis"`` in ``inspect.getsource``, which a multiline call or a
+    reordered kwarg defeats — a textual gate that passes on a technicality is worse than
+    no gate, because it reads as coverage. Here every member adapter is CALLED twice,
+    once with a fully certified carrier and once with one that certifies nothing, and the
+    two results must be identical. An adapter that reads the carrier cannot satisfy that
+    however it is formatted.
+
+    ⚠ Detection power probed rather than assumed, in both directions:
+    ``CrossSectionalMember`` equality is structural (same input → equal, so the assertion
+    is not identity-vacuous), both real adapters compare equal across the two carriers,
+    and a wrapper that stages from a different view when ``certifies_nothing()`` IS
+    flagged.
+
+    ⚠ Residual limit: an adapter that reads the carrier and happens to produce an
+    identical ``CrossSectionalMember`` either way is undetected. That is far narrower
+    than the substring version's limit, and such an adapter is not yet a consumer in the
+    sense ``INPUT_RULE_SETS`` cares about — its verdicts do not depend on the rule.
     """
     entry = STRATEGY_MANIFEST[S12_STRATEGY_ID]
     assert entry.strategy_class == "per_series"
     assert entry.member is None
-    forwarding = sorted(
-        strategy_id
-        for strategy_id, other in STRATEGY_MANIFEST.items()
-        if other.member is not None and "price_basis=price_basis" in inspect.getsource(other.member)
-    )
-    assert forwarding == [], f"{forwarding} now forward the carrier through a MemberStager"
+
+    series = _above_edge()
+    panel_dates = frozenset(series.dates)
+    members = {
+        strategy_id: other.member for strategy_id, other in STRATEGY_MANIFEST.items() if other.member is not None
+    }
+    assert members, "no MemberStager in the manifest — this test would be vacuous"
+    reading: list[str] = []
+    for strategy_id, member in members.items():
+        staged = [
+            member(
+                series,
+                panel_decision_dates=panel_dates,
+                universe=UNIVERSE,
+                masked_reason=REASON,
+                regime=unconstrained_regime(len(series)),
+                price_basis=basis,
+            )
+            for basis in (_certified(series), _withheld(series))
+        ]
+        if staged[0] != staged[1]:
+            reading.append(strategy_id)
+    assert reading == [], f"{reading} now read the carrier through a MemberStager"
 
 
 def test_a_carrier_built_under_another_rule_version_raises() -> None:
