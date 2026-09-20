@@ -154,12 +154,20 @@ _INSERT_DAILY_COUNT = """
     )
 """
 
+# ⚠⚠ ``captured_at`` IS WRITTEN EXPLICITLY AND IS STILL NOT A PARAMETER (#2840).
+# ``sql/402`` moves the column default from ``now()`` to ``clock_timestamp()`` because a
+# transaction timestamp can PRECEDE the observation, and
+# ``bar_capture_certificate.nominality_bucket`` reads this column to decide whether a
+# session open could have re-based the bar — a stamp that is too early certifies a bar it
+# must refuse. Naming it here too means the writer does not depend on a default a later
+# migration could move back; keeping it a SQL literal rather than a bound parameter means a
+# caller still cannot supply it.
 _INSERT_INTRADAY_BAR = """
     INSERT INTO strategy_intraday_bars (
-        timeframe, bar_time, instrument_id, open, high, low, close, volume, source
+        timeframe, bar_time, instrument_id, open, high, low, close, volume, source, captured_at
     ) VALUES (
         %(timeframe)s, %(bar_time)s, %(instrument_id)s,
-        %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s, %(source)s
+        %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s, %(source)s, clock_timestamp()
     )
 """
 

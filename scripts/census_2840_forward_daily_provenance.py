@@ -40,9 +40,15 @@ reachable window has been tested. Four claims that must not share a sentence: *t
 re-bases a stored row* (established) · *the provider does not re-base intraday history* (NOT
 established) · *these backfilled bars ARE re-based* (also NOT established — and the strong form
 would license reversing an assumed factor, which could MANUFACTURE gate eligibility) · *a bar
-captured before the next open had no opportunity to be re-based* (arithmetic, below, and the
-only one this script measures). The operative policy is the same either way: nominality
-unverified for a backfilled bar, so exclude it from an absolute-price gate.
+captured before the next open had no opportunity to be re-based* (arithmetic, and the only one
+this script measures). The operative policy is the same either way: nominality unverified for
+a backfilled bar, so exclude it from an absolute-price gate.
+
+⚠ THAT FOURTH RULE NOW LIVES IN ``app/services/bar_capture_certificate.py`` and this script
+IMPORTS it rather than carrying its own copy. #2840's carrier work needs it as an ADMISSION
+input, and a rule living in a census script is reachable by a census and by nothing on a
+production path. The behaviour is unchanged — ``tests/test_2840_forward_daily_provenance.py``
+still exercises it through here, which is the regression evidence for the move.
 
 Only the third is available without a provider experiment, so it is the only one measured.
 A US split takes effect at a session OPEN, so a bar whose every constituent was captured
@@ -92,23 +98,32 @@ from __future__ import annotations
 
 import argparse
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, cast
 from zoneinfo import ZoneInfo
 
 import psycopg
-from psycopg.rows import dict_row
+from psycopg.rows import dict_row, tuple_row
 
 from app.config import settings
+from app.services.bar_capture_certificate import (
+    CAPTURE_CERTIFICATE_VERSION,
+    CERTIFIED_BUCKET,
+    IMPOSSIBLE_BUCKET,
+    capture_certificate,
+    capture_semantics_cutover,
+    next_session_open_utc,
+    nominality_bucket,
+)
 from app.services.indicator_series import BarSeries
 from app.services.market_calendar import us_market_status
 from app.services.strategies import s4_volatility_compression_breakout as s4
 from app.services.strategies.s12_cheapest_band_price_gated_breakout import PRICE_FLOOR
-from app.services.strategy_observation_storage import INTRADAY_TIERS
+from app.services.strategy_observation_storage import INTRADAY_TIERS, Timeframe
 from app.services.technical_analysis import OHLCVRow
 from app.workers.scheduler import SCHEDULED_JOBS
 
@@ -194,21 +209,6 @@ def scan_deadline_utc(day: date) -> datetime:
         time(cadence.hour, cadence.minute),
         tzinfo=UTC,
     )
-
-
-def next_session_open_utc(day: date, *, horizon_days: int = 30) -> datetime | None:
-    """The next session's 09:30 ET in UTC — the first instant a split could re-base a bar.
-
-    ``None`` when no session is found inside ``horizon_days``, which the caller must treat
-    as "not determinable" rather than as "no open".
-    """
-    cursor = day + timedelta(days=1)
-    limit = day + timedelta(days=horizon_days)
-    while cursor <= limit:
-        if expected_bars(cursor):
-            return datetime.combine(cursor, _SESSION_OPEN, tzinfo=_NY).astimezone(UTC)
-        cursor += timedelta(days=1)
-    return None
 
 
 def first_evaluable_series_length(*, limit: int = 200) -> int:
@@ -351,30 +351,6 @@ def compose_day(
         available_before_next_scan=available,
         last_captured_at=last_capture,
     )
-
-
-def nominality_bucket(bar_time: datetime, captured_at: datetime, *, timeframe: str = TIMEFRAME) -> str:
-    """Whether a split had an OPEN at which it could have re-based this bar before capture.
-
-    ``before_next_open`` is the only bucket in which no opportunity existed. ``after_n_opens``
-    counts how many session opens the capture sits beyond — it is NOT a defect label, it is
-    the number of opportunities a split check would have to rule out.
-    """
-    minutes = INTRADAY_TIERS[timeframe].minutes_per_bar  # type: ignore[index]
-    completed_at = bar_time.astimezone(UTC) + timedelta(minutes=minutes)
-    captured = captured_at.astimezone(UTC)
-    if captured < completed_at:
-        return "impossible"
-    day = bar_time.astimezone(_NY).date()
-    opens = 0
-    cursor = day
-    while opens < 3:
-        next_open = next_session_open_utc(cursor)
-        if next_open is None or captured < next_open:
-            break
-        opens += 1
-        cursor = next_open.astimezone(_NY).date()
-    return "before_next_open" if opens == 0 else f"after_{min(opens, 3)}_opens"
 
 
 def absence_attribution(
@@ -1155,6 +1131,129 @@ def _report(payload: Mapping[str, Any], *, as_of: datetime) -> str:
     return "\n".join(out)
 
 
+_CAPTURE_CERTIFICATE_SQL = """
+    SELECT timeframe, bar_time, captured_at
+    FROM strategy_intraday_bars
+"""
+
+
+def _bucket_table(by_timeframe: Mapping[str, Counter[str]]) -> list[str]:
+    """One rendered table per bucket vocabulary, totals included."""
+    buckets = sorted({bucket for counts in by_timeframe.values() for bucket in counts})
+    # ⚠ The header's widths are the SAME format specs as the data rows below, not
+    # literals that happen to match. "timeframe" is nine characters, so the literal
+    # lined up by coincidence and would have silently skewed the moment the word or
+    # the column width changed.
+    rows = ["  " + f"{'timeframe':>9}" + "  " + "  ".join(f"{bucket:>30}" for bucket in buckets) + f"  {'total':>9}"]
+    for timeframe in sorted(by_timeframe):
+        counts = by_timeframe[timeframe]
+        rows.append(
+            f"  {timeframe:>9}  "
+            + "  ".join(f"{counts[bucket]:>30,}" for bucket in buckets)
+            + f"  {sum(counts.values()):>9,}"
+        )
+    totals: Counter[str] = Counter()
+    for counts in by_timeframe.values():
+        totals.update(counts)
+    rows.append(
+        "  "
+        + "all".rjust(9)
+        + "  "
+        + "  ".join(f"{totals[bucket]:>30,}" for bucket in buckets)
+        + f"  {sum(totals.values()):>9,}"
+    )
+    return rows
+
+
+def capture_certificate_report(
+    rows: Iterable[tuple[str, datetime, datetime]], *, capture_semantics_from: datetime | None
+) -> str:
+    """Every stored bar under ``bar_capture_certificate``, and what the withdrawn proxy cost.
+
+    ⚠ COMPUTED, NEVER TYPED. The population moves with every harvest, so the module
+    docstrings and the proposal cite THIS command instead of freezing a count — the
+    ``.claude/CLAUDE.md`` rule that a derived statistic in prose must be computed or
+    accompanied by the command that reproduces it.
+
+    The second block is the reason the rule beat the proxy: ``same NY calendar date`` is a
+    proxy for ``no session open intervened`` and refuses bars the mechanism certifies. It is
+    reported as a DISAGREEMENT COUNT IN BOTH DIRECTIONS, because a one-sided figure cannot
+    show that the error is one-directional.
+    """
+    by_timeframe: dict[str, Counter[str]] = defaultdict(Counter)
+    arithmetic_by_timeframe: dict[str, Counter[str]] = defaultdict(Counter)
+    disagreements: Counter[tuple[bool, bool]] = Counter()
+    impossible_excluded = 0
+    # ⚠ Counted as we go rather than ``len(rows)``: the caller streams a
+    # server-side cursor, so the sequence is consumed once and has no length.
+    scanned = 0
+    for timeframe_text, bar_time, captured_at in rows:
+        scanned += 1
+        # ⚠ VALIDATED, NOT CAST. The column is a TEXT with its own CHECK, and a cast would
+        # turn a tier added to the table but not to INTRADAY_TIERS into a KeyError several
+        # frames away instead of a named refusal here.
+        if timeframe_text not in INTRADAY_TIERS:
+            raise ValueError(f"stored timeframe {timeframe_text!r} is not a declared tier")
+        timeframe = cast("Timeframe", timeframe_text)
+        bucket = capture_certificate(
+            bar_time, captured_at, timeframe=timeframe, capture_semantics_from=capture_semantics_from
+        )
+        by_timeframe[timeframe][bucket] += 1
+        # ⚠ The proxy comparison is against the ARITHMETIC half deliberately. It
+        # asks "does the same-NY-date proxy agree with the session-open rule",
+        # which is a question about the calendar and not about whether this
+        # database's stamps are trustworthy. Comparing it to the admission
+        # verdict instead makes every cell zero the moment a store predates
+        # sql/402 — a dead output block that still reads like a clean result.
+        arithmetic = nominality_bucket(bar_time, captured_at, timeframe=timeframe)
+        arithmetic_by_timeframe[timeframe][arithmetic] += 1
+        # ⚠ ``impossible`` rows are EXCLUDED from the directional comparison, not
+        # counted as "refused by the rule". They are same-NY-date by construction
+        # (a capture before the bar completed is the same afternoon), so leaving
+        # them in makes the must-be-zero cell non-zero for a reason that has
+        # nothing to do with the proxy. The schema has no completion-time CHECK,
+        # so they are reachable rather than hypothetical.
+        if arithmetic != IMPOSSIBLE_BUCKET:
+            same_ny_date = captured_at.astimezone(_NY).date() == bar_time.astimezone(_NY).date()
+            disagreements[(arithmetic == CERTIFIED_BUCKET, same_ny_date)] += 1
+        else:
+            impossible_excluded += 1
+
+    out = [
+        f"capture certificate ({CAPTURE_CERTIFICATE_VERSION}) over {scanned:,} stored bars",
+        # ⚠ "marker unavailable" and NOT "sql/402 not applied". The two come apart
+        # in a staged deployment where 402 has run and 403 has not: the new
+        # semantics are already active, and naming 402 would misdiagnose it.
+        f"  capture semantics trustworthy from: "
+        f"{capture_semantics_from or 'UNKNOWN — sql/403 cutover marker unavailable; nothing admissible'}",
+        "",
+    ]
+    out.append("ADMISSION verdict (capture_certificate) — what a consumer may use:")
+    out.extend(_bucket_table(by_timeframe))
+    out.append("")
+    # ⚠ BOTH TABLES ARE EMITTED, AND THE SECOND IS NOT REDUNDANT. Every stored bar
+    # currently predates sql/403, so the admission table above is one column wide and
+    # cannot reproduce the per-timeframe distribution the proposal cites this command
+    # for. A command that no longer computes the figure its prose points at is the
+    # defect the prevention log records under "a rewritten formatter silently falsifies
+    # every claim made about its output elsewhere".
+    out.append("ARITHMETIC only (nominality_bucket) — did an open intervene, ignoring the cutover:")
+    out.extend(_bucket_table(arithmetic_by_timeframe))
+    out.append("")
+    out.append("withdrawn proxy vs the ARITHMETIC rule (ignores the sql/402 cutover, by design):")
+    out.append(f"  certified by BOTH                        {disagreements[(True, True)]:,}")
+    out.append(
+        f"  certified by the RULE, refused by proxy  {disagreements[(True, False)]:,}  <- evidence the proxy discards"
+    )
+    out.append(
+        f"  certified by the PROXY, refused by rule  {disagreements[(False, True)]:,}"
+        "  <- must be 0; the error is one-directional"
+    )
+    out.append(f"  refused by both                          {disagreements[(False, False)]:,}")
+    out.append(f"  excluded as 'impossible' (capture before bar completion)  {impossible_excluded:,}")
+    return "\n".join(out)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1162,11 +1261,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="ISO instant; sessions whose close is after it are excluded. Defaults to now.",
     )
+    parser.add_argument(
+        "--capture-certificate",
+        action="store_true",
+        help="Report every stored intraday bar under bar_capture_certificate, and nothing else.",
+    )
     args = parser.parse_args(argv)
     as_of = datetime.fromisoformat(args.as_of).astimezone(UTC) if args.as_of else datetime.now(UTC)
     with psycopg.connect(settings.database_url) as conn:
         conn.read_only = True
         conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+        if args.capture_certificate:
+            # ⚠ A SERVER-SIDE (named) CURSOR, not ``fetchall()``. The report only
+            # reduces rows into counters, and at the declared tier caps and
+            # retention this table reaches millions of rows — materialising it
+            # would make the census die on the corpus it exists to measure.
+            cutover = capture_semantics_cutover(conn)
+            with conn.cursor(name="capture_certificate_scan", row_factory=tuple_row) as scan:
+                scan.itersize = 10_000
+                scan.execute(_CAPTURE_CERTIFICATE_SQL)
+                print(
+                    capture_certificate_report(
+                        cast("Iterable[tuple[str, datetime, datetime]]", scan),
+                        capture_semantics_from=cutover,
+                    )
+                )
+            return 0
         payload = _fetch(conn, as_of=as_of)
     print(_report(payload, as_of=as_of))
     return 0
