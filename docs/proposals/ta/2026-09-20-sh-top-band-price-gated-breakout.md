@@ -295,6 +295,159 @@ straddle is handled, at the signal level, by §5.2's own rule.
 ⚠ Do not compare against the 16 stored `survivorship_free` results: every leg of them
 was charged the maximum band and they are known-stale since `61ef6e47`.
 
+## Step 2's forward-shadow floor — what is settled, and the one thing that is not
+
+`ForwardShadowFloor` takes no default and `sql/333` CHECKs both numbers `> 0`, so step
+2 cannot proceed without deriving them. A first derivation was written on 2026-09-20,
+put through Codex checkpoint 1, and **refused on two structural grounds**. It is not
+recorded here, because a refuted formula left in a design document is how it gets
+re-adopted by whoever reads it next. What the pass established is below.
+
+### Settled — the floor's unit, read from the consumer rather than from precedent
+
+`strategy_live_gate.py:392-395` computes `forward_decision_dates` as
+`count(DISTINCT s.signal_bar_date)` over forward signals **that resolved with a
+`gross_return_pct`** — deliberately not the looser population, *"an unresolved signal
+is not evidence, so it is not a decision date either"*. `:700-706` compares that to
+`min_independent_decision_dates`, and `forward_days` to `7 × min_calendar_weeks`.
+
+So the unit is **distinct dates on which this strategy fired a signal that later
+resolved**, and the floor's function is that same-day fan-out cannot inflate it
+(`prereg_contract.py:127-132`). Nothing about the unit is open to choice, and the
+previous session's worry that *"the floor's unit may not be decision dates at all"* is
+answered: it is, unconditionally.
+
+### Settled — `masked` is the production arm, and `admitted` is not
+
+The live scan reads `price_masked_bars`, which carries ONE arm on purpose: *"criterion
+9's `admitted` arm is a sensitivity measurement that has no place in a scan"*
+(`price_masked_bars.py` module header). Any claim about what a FORWARD window would
+supply therefore reads the masked figures. ⚠ The refused derivation asserted the
+opposite — that forward reads nothing masked — and built its conversion rate on it.
+That premise would have been frozen into an immutable row.
+
+⚠ Relatedly, and narrower than it is tempting to write: masking cannot ADD S-12 fires,
+because a masked field propagates to `not_evaluable` (`indicator_series.py:467` — ATR
+terminates at the first missing input). So `N_masked ≤ N_admitted` — *no larger*, not
+*smaller*, and it is a fact about S-12's inputs rather than about masking in general.
+
+### Settled — why both previously-named candidate readout units are rejected
+
+1. **The in-sample `bear_volatile` date count.** The rule contains no regime condition
+   (`s12_signals` reads close, ATR, compression rank and prior high — no regime input),
+   and the per-regime cohorts are `Reported, and NOT part of the pass bar`. So that
+   cohort supplies no declared sizing target. ⚠ Note the narrow form: "the rule has no
+   regime condition" is a code fact; "S-12 fires in every regime" would be a
+   measurement, and is not claimed.
+2. **The gated-name supply per date.** ⚠ NOT rejected because "a name is not a date" —
+   a count divided by a count-per-date is exactly a valid conversion, and the first
+   draft's reason was wrong. It is rejected because gated BARS are not fired, filled or
+   resolved entries: the spec's own §"Measured premise" says bar supply is an upper
+   bound on signal supply and nothing more, and the order-of-magnitude claim made
+   against it rested on no measured signal count at all.
+
+### Settled — no power calculation is available, and what one would need
+
+`docs/review-prevention-log.md`'s #2614 entry requires checking the candidate's own
+contract first. Arm 2's pass bar is a pair of **inequalities on mean expectancy** (not,
+as the first draft called it, a sign test — there is no significance level, power
+target or multiplicity model attached to it), with no declared magnitude.
+
+⚠ "No power calculation exists" is therefore true of arm 2 SPECIFICALLY, and the first
+draft over-generalised it to the precedents: #2582 uses planning assumptions and
+`freeze_2437_mt1` a *declared* standardised effect of 0.5, neither of which is an
+observed estimate with measured dispersion. The repo also carries a general
+formulation — `docs/proposals/ta/2026-08-11-portfolio-alpha-viability-plan.md` §5,
+*"planning SE target <= minimum net effect / (critical_value + z_power)"*, power 0.8
+unless justified, and `data_infeasible` as the declared answer when the available
+independent dates cannot reach it. Instantiating it for arm 2 needs three things the
+contract does not yet contain: a **minimum net effect**, a **critical value from a
+declared multiplicity and sampling model**, and a variance estimate matching the
+dependence and tail shape. None may be invented here.
+
+### NOT settled — the required count, which is a CONTRACT gap and not a measurement gap
+
+Both family-B precedents size their floor from a quantity their contract declared
+BEFORE the floor existed: arm 1 from the `bear_volatile` date supply its pass leg rests
+on, #2837 from *"the 3 worst drawdowns"* its §9 readout names. **Arm 2's contract
+declares no such quantity** — it has a pass bar but, unlike arm 1, no abort bar on
+cohort `n`.
+
+The first draft filled that gap with "reproduce the whole in-sample supply", and that
+is the second ground it was refused on: the pass bar states no such minimum, so the
+requirement is a design choice wearing a derivation's clothes — and it is keyed to an
+accident of corpus length. A longer archive would RAISE the floor and a shorter one
+would LOWER it, neither of which follows from the hypothesis.
+
+**The question, in one sentence:** what required count does arm 2's contract declare
+that a forward confirmation must reach — i.e. what is arm 2's abort bar on `n`, the
+quantity playing the role of arm 1's 14 dates and #2837's 3 drawdowns?
+
+**The two routes that could settle it, neither operator-gated:**
+
+1. **Instantiate §5's statistical contract** by declaring a minimum net effect and a
+   sampling model in this document before the freeze. For a COST-mechanism hypothesis
+   the minimum net effect has a candidate anchor that is read rather than chosen — the
+   charged round-trip spread the gate buys down — but the multiplicity model and the
+   variance estimate still have to be declared, and §5's own `data_infeasible` verdict
+   is an admissible outcome rather than a failure to derive.
+2. **Declare an abort bar on `n` the way arm 1 declared its 508** — *"the largest
+   independent cohort the lead itself rests on, i.e. an upper bound on available
+   evidence, explicitly NOT a power calculation"*. Arm 2's lead is the #2840 addendum's
+   re-pricing of S-4's 189,076 measured trades at the cheapest band; that re-pricing is
+   a sensitivity over ALL trades and does not publish the cheapest-band subset, which
+   is the missing number. `scripts/census_2840_s12_signal_supply.py` bounds it from
+   above with S-12's own in-sample fired count.
+
+### The measurement that exists, and the bounds it does NOT establish
+
+`scripts/census_2840_s12_signal_supply.py` evaluates the merged rule over the in-sample
+`survivorship_free` corpus and reports, per strategy and per quarantine arm, the fired
+count, the distinct signal-bar dates, the span and the same-day concentration. It loads
+no bar on or after `HOLDOUT_BOUNDARY`, reads no return and writes no row.
+
+⚠ **A fired count is an UPPER bound on a trade count**, in both arms: an unusable fill
+open, a `superseded_open_position` collapse, and `namespace_for_signal`'s purge of a
+pre-boundary signal whose FILL crosses the boundary all sit between a fire and a costed
+trade. Any future derivation must carry that direction rather than call a fire a trade.
+
+⚠ **Two bound directions the first draft claimed are NOT established** and are recorded
+here so they are not re-asserted: that a dates floor built on fires is a lower bound
+(fires bound trades from ABOVE, which pushes that component the other way), and that a
+weeks floor built on the corpus's own arrival rate is a lower bound (a historical
+average is neither a maximum future rate nor a guaranteed waiting time, and this gate
+is measurably era-dependent — 1.0% of bars in the 1990s against 7.9% in the 2020s).
+
+⚠ **The clock convention is undecided.** First-fire to last-fire excludes leading and
+trailing silence, warm-up and resolution delay, and is not the consumer's own clock —
+`forward_days` is `(paper_at or observed_at) - forward_at`, a stage-entry-to-stage-exit
+elapsed time (`strategy_live_gate.py:551`). Whichever is used has to be declared.
+
+### ⚠⚠ And a framing problem the floor inherits either way
+
+**This `strategy_version` cannot accumulate forward decision dates at all.** The scan
+runs `SCAN_UNIVERSE` = `survivor_only`, and `s12_signals` refuses every bar on any
+universe outside `AS_TRADED_UNIVERSES` = `{survivorship_free}`. A forward shadow of
+this hypothesis is a DIFFERENT identity with its own declaration — which this document
+already says under §"The price basis this gate needs".
+
+That does not make the floor pointless and it is not new: arm 1's freeze script records
+the same structure (*"the confirmatory instrument is forward shadow, which runs under
+`SCAN_UNIVERSE` — a different `strategy_version`, hence its own declaration, made when
+that evidence exists"*). The floor states what a forward confirmation of THIS hypothesis
+would require. It should be frozen saying so, rather than implying this row will ever
+clear it.
+
+### Edge contracts any derivation must state before it is frozen
+
+Zero fires in either arm; zero distinct dates; a single date giving a zero span; every
+fire unfillable or unresolved; unequal arm coverage; corpus or vendor version drift
+between the census and the run; and same-day concentration high enough that a date count
+overstates the independent evidence behind it. `sql/333`'s `> 0` CHECKs establish none
+of these — they only stop the most obvious one reaching the table.
+
+
+
 ## Sequencing — why the declaration is NOT in this PR
 
 `PreregDeclaration.digest_payload` includes `strategy_version`, which for a manifest
