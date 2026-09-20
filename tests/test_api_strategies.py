@@ -933,4 +933,6 @@ def test_overview_declares_exactly_the_manifest_strategies_with_exit_adapters_as
         "s10-relative-strength-leader": False,
         # #2840's S-11 carries S-4's bracket, so it resolves forward like S-4.
         "s11-volatile-regime-gated-breakout": True,
+        # #2840 arm 2's S-12 carries the same bracket, for the same reason.
+        "s12-cheapest-band-price-gated-breakout": True,
     }

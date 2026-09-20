@@ -158,6 +158,12 @@ from app.services.strategies.s11_volatile_regime_gated_breakout import (
     s11_identity,
     s11_signals,
 )
+from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
+    S12_STRATEGY_ID,
+    s12_exit_bracket,
+    s12_identity,
+    s12_signals,
+)
 from app.services.strategy_exit_levels_batch import (
     s4_exit_levels_batch,
     s5_exit_levels_batch,
@@ -679,6 +685,65 @@ def _s11_exit_levels(
     return scalar
 
 
+def _s12_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-12 gates on price, not regime
+) -> list[StrategySignal]:
+    """⚠ DISCARDS the regime, unlike ``_s11_signals``, and that is correct here.
+
+    S-12's gate reads the bar's own close. Passing the regime through would not
+    change a verdict — ``s12_signals`` takes no such argument — but the ``noqa``
+    is the honest marker that the omission is deliberate rather than the
+    un-gating slip ``test_2840_manifest_adapter_gates`` exists to catch for S-11.
+    ``test_2840_arm2_manifest_adapter_gates`` asserts the PRICE gate survives this
+    adapter, which is the equivalent check for this strategy.
+    """
+    return s12_signals(series, universe=universe, masked_reason=masked_reason)
+
+
+def _s12_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
+    """S-12's exits are S-4's — the gate conditions entry only."""
+    _reject_decision_dates(S12_STRATEGY_ID, decision_dates)
+    return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=S4_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s12_exit_levels(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> ExitLevels | UnresolvedReason:
+    """S-12's bracket is S-4's, so the S-4 batch factory is its oracle too.
+
+    ⚠ ``s12_exit_bracket`` is called rather than ``s4_exit_bracket`` even though it
+    delegates: the comparison has to be against the factory the MANIFEST registered
+    for this strategy, or a future divergence in S-12's bracket would pass a check
+    that only ever looked at S-4's.
+    """
+    (batched,) = s4_exit_levels_batch(
+        series,
+        requests=((signal_index, entry_price),),
+        universe=universe,
+    )
+    if batched == "unorderable_exit_levels":
+        return batched
+
+    target, stop, max_hold = s12_exit_bracket(
+        series,
+        signal_index=signal_index,
+        entry_price=entry_price,
+        universe=universe,
+    )
+    scalar = ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+    if scalar != batched:
+        raise RuntimeError("S-12 scalar and batch exit-level factories disagree")
+    return scalar
+
+
 def _s9_signals(
     series: BarSeries,
     *,
@@ -1122,6 +1187,27 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             decision_calendar=_no_decision_calendar,
             signals=_s11_signals,
             exit_levels=_s11_exit_levels,
+            exit_levels_batch=s4_exit_levels_batch,
+        ),
+        #: #2840 arm 2 (R5 candidate S-H). S-4's rule gated to the cheapest
+        #: CHARGED cost band — a research seat, NOT one of the ten, and not
+        #: retired for S-11's reason: it exists to produce new evidence, which is
+        #: what retirement forbids. Its bracket is S-4's, hence the shared batch
+        #: factory.
+        S12_STRATEGY_ID: StrategyEntry(
+            strategy_id=S12_STRATEGY_ID,
+            #: ⚠ ``harness_validation``, never ``capital_candidate`` — S-11's
+            #: reasoning, plus one of its own: the band table is a 2026
+            #: calibration applied to 1962-2021 prices, so no run on this corpus
+            #: can promote. The matching preregistration is ``falsification_only``.
+            purpose="harness_validation",
+            identity=s12_identity,
+            strategy_class="per_series",
+            signal_kinds=frozenset({"entry"}),
+            exit_regime=_s12_exit_regime,
+            decision_calendar=_no_decision_calendar,
+            signals=_s12_signals,
+            exit_levels=_s12_exit_levels,
             exit_levels_batch=s4_exit_levels_batch,
         ),
     }

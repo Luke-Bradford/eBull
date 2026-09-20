@@ -38,16 +38,18 @@ RETIRED = frozenset(
         "s10-relative-strength-leader",
     }
 )
-#: ⚠ THREE, not two. s4 and s8 are the survivors of the measured ten (#2827);
-#: s11 is #2840's research seat — S-4's rule gated to the two volatile regimes —
-#: which landed AFTER this retirement and is not one of the ten. It is listed
-#: here rather than excused by loosening the assertion below, so "the manifest
-#: minus the retired eight" stays an exact statement.
+#: ⚠ FOUR, not two. s4 and s8 are the survivors of the measured ten (#2827);
+#: s11 and s12 are #2840's research seats — S-4's rule gated to the two volatile
+#: regimes (arm 1) and to the cheapest charged cost band (arm 2) — which landed
+#: AFTER this retirement and are not among the ten. They are listed here rather
+#: than excused by loosening the assertion below, so "the manifest minus the
+#: retired eight" stays an exact statement.
 KEPT = frozenset(
     {
         "s4-volatility-compression-breakout",
         "s8-range-mean-reversion",
         "s11-volatile-regime-gated-breakout",
+        "s12-cheapest-band-price-gated-breakout",
     }
 )
 
@@ -94,11 +96,16 @@ def test_all_ten_stay_in_the_manifest_and_keep_resolving() -> None:
     resolving it, and `/strategies` loses it entirely — the "vanished" outcome the
     acceptance criteria forbid.
     """
-    # ⚠ ELEVEN. The ten stay; #2840's S-11 research seat was added afterwards.
-    # Derived from RETIRED | KEPT rather than restated, so the next addition
-    # updates one place.
-    assert len(STRATEGY_MANIFEST) == len(RETIRED | KEPT) == 11
+    # ⚠ THE LITERAL COUNT IS GONE (was 11, then would have been 12). The comment
+    # beside it already claimed the assertion was "derived rather than restated, so
+    # the next addition updates one place" — and it was not: the literal was a
+    # second copy that the next addition had to edit too, which is the hardcoded
+    # derived statistic `.claude/CLAUDE.md` says to compute or omit. The set
+    # identity below is strictly stronger than any count and needs no number: it
+    # catches an entry that vanished, one that appeared, and one that was renamed,
+    # none of which a length comparison can tell apart.
     assert RETIRED | KEPT == set(STRATEGY_MANIFEST)
+    assert not RETIRED & KEPT, "a strategy cannot be both retired and kept"
     assert set(current_result_versions()) == set(STRATEGY_MANIFEST)
 
 

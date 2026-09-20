@@ -59,6 +59,9 @@ SPEC_S10 = "s10-relative-strength-leader"
 #: reason every "ten" below reads eleven. Written out for the same reason as the
 #: rest: the bridge to the source is ``test_the_spec_ids_are_the_modules_ids``.
 SPEC_S11 = "s11-volatile-regime-gated-breakout"
+#: #2840 arm 2's research seat: S-4's rule gated to the cheapest CHARGED cost band.
+#: ⚠ Also not one of the ten, and the second reason every "ten" below reads twelve.
+SPEC_S12 = "s12-cheapest-band-price-gated-breakout"
 
 #: Spec §3's table, verbatim, as ``(signal_pair, level_based, max_hold_bars,
 #: has_rebalance_dates)``. ⚠ Written out for the reason in the module docstring:
@@ -84,6 +87,9 @@ SPEC_EXIT_REGIMES: dict[str, tuple[bool, bool, int | None, bool]] = {
     #: S-11's exits ARE S-4's — the gate conditions entry only — so this row is a
     #: deliberate duplicate of SPEC_S4's, not a copy-paste slip.
     SPEC_S11: (False, True, 40, False),
+    #: S-12's likewise. Two duplicates of one row is what "the gate conditions
+    #: entry only" looks like when it is true twice.
+    SPEC_S12: (False, True, 40, False),
 }
 
 #: The legs each strategy emits — §4: S-1 and S-3 have an exit rule, S-2 closes
@@ -100,6 +106,7 @@ SPEC_SIGNAL_KINDS: dict[str, frozenset[str]] = {
     SPEC_S9: frozenset({"entry"}),
     SPEC_S10: frozenset({"entry", "exit"}),
     SPEC_S11: frozenset({"entry"}),
+    SPEC_S12: frozenset({"entry"}),
 }
 
 SPEC_CLASSES: dict[str, str] = {
@@ -114,6 +121,7 @@ SPEC_CLASSES: dict[str, str] = {
     SPEC_S9: "per_series",
     SPEC_S10: "cross_sectional",
     SPEC_S11: "per_series",
+    SPEC_S12: "per_series",
 }
 
 SPEC_PURPOSES = {
@@ -130,6 +138,7 @@ SPEC_PURPOSES = {
         SPEC_S9,
         SPEC_S10,
         SPEC_S11,
+        SPEC_S12,
     )
 }
 
@@ -205,7 +214,9 @@ class TestManifestIsComplete:
         forever. Pin that it is actually reading the modules it claims to — the
         prevention-log lesson from a probe that matched nothing."""
         declared = self._declared_strategy_ids()
-        assert len(declared) == 11, f"expected the ten catalogue modules plus #2840's S-11, walked {sorted(declared)}"
+        assert len(declared) == 12, (
+            f"expected the ten catalogue modules plus #2840's S-11 and S-12, walked {sorted(declared)}"
+        )
         assert declared["s1_time_series_momentum.py"] == SPEC_S1
 
     def test_every_strategy_module_is_registered(self) -> None:
@@ -243,6 +254,7 @@ class TestManifestIsComplete:
             SPEC_S9,
             SPEC_S10,
             SPEC_S11,
+            SPEC_S12,
         }
 
 

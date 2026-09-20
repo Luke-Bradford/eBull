@@ -51,6 +51,7 @@ from app.services.runtime_config import (
     get_runtime_config,
     update_runtime_config,
 )
+from app.services.strategies.s12_cheapest_band_price_gated_breakout import CHEAPEST_BAND as S12_BAND
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION
 from app.services.strategy_base_currency import (
@@ -191,6 +192,7 @@ _TITLES = {
     "s9-squeeze-expansion": "Squeeze expansion",
     "s10-relative-strength-leader": "Relative-strength leader",
     "s11-volatile-regime-gated-breakout": "Volatility breakout (volatile markets only)",
+    "s12-cheapest-band-price-gated-breakout": f"Volatility breakout (shares over ${S12_BAND.lower})",
 }
 
 _PRESENTATION = {
@@ -237,6 +239,22 @@ _PRESENTATION = {
     "s11-volatile-regime-gated-breakout": (
         "The same volatility-compression breakout, but it only trades while the wider "
         "market is volatile — the conditions where the rule has historically paid.",
+        "Up to 40 market days",
+    ),
+    #: ⚠ The band is INTERPOLATED, not described. Review flagged the first draft's
+    #: "higher-priced shares only": a recalibration that moved the cheapest band's
+    #: edge would leave the copy importable, true-ish and stale, which is the
+    #: hardcoded-derived-statistic rule applied to operator-facing text. The
+    #: strategy refuses to import unless that band is open-above, so "$``lower`` or
+    #: more" is accurate by construction whatever the edge becomes.
+    #:
+    #: ⚠ ``lower`` AND NOT ``label``. The label already carries its own comparator
+    #: (``>=$100``), so interpolating it after the word "priced" rendered
+    #: "priced >=$100 or more" — the comparator stated twice. The bound is the
+    #: number; the prose supplies the relation.
+    "s12-cheapest-band-price-gated-breakout": (
+        f"The same volatility-compression breakout, but it only trades shares priced at ${S12_BAND.lower} "
+        f"or more — the cheapest dealing-cost band we charge ({S12_BAND.p75_spread_pct}% round trip).",
         "Up to 40 market days",
     ),
 }
