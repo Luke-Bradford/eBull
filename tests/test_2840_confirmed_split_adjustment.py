@@ -8,6 +8,7 @@ direction of this probe's own conclusion.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
@@ -22,6 +23,7 @@ from scripts.probe_2840_confirmed_split_adjustment import (
     SHARE_RATIO_TOLERANCE,
     Redenomination,
     cliff_profile,
+    intersect_bracket,
 )
 from scripts.probe_2840_intraday_adjustment_basis import is_split_scale
 
@@ -194,3 +196,43 @@ class TestTheShareToleranceIsTighterThanThePriceOne:
 
     def test_a_non_ratio_is_still_rejected_at_the_tight_band(self) -> None:
         assert is_split_scale(1.4142, limit=30, tolerance=SHARE_RATIO_TOLERANCE) is None
+
+
+class TestTheBracketMergeIsAnIntersectionAndIsOrderIndependent:
+    """⚠ Review WARNING, and chasing it found the merge was the wrong DIRECTION too.
+
+    The predecessor kept a new pair only when it dominated on BOTH ends, so two brackets each
+    wider on a different side kept whichever arrived first. And widening is wrong anyway:
+    ``docs/specs/ingest/2026-08-03-2231-split-adjustment.md`` settles the treatment as
+    INTERSECTION — an event that genuinely describes one split must contain that split's true
+    effective date, so the brackets can be intersected.
+    """
+
+    @staticmethod
+    def _with(old: date, new: date) -> Redenomination:
+        return replace(_event(0.5), old_filed=old, new_filed=new)
+
+    def test_the_result_is_the_intersection(self) -> None:
+        a = self._with(date(2025, 1, 1), date(2026, 6, 1))
+        b = self._with(date(2025, 6, 1), date(2026, 12, 1))
+        merged = intersect_bracket(a, b)
+        assert (merged.old_filed, merged.new_filed) == (date(2025, 6, 1), date(2026, 6, 1))
+
+    def test_neither_bracket_dominating_no_longer_depends_on_arrival_order(self) -> None:
+        """The exact shape the dominance test mishandled: each is wider on a different side."""
+        a = self._with(date(2025, 1, 1), date(2026, 6, 1))
+        b = self._with(date(2025, 6, 1), date(2026, 12, 1))
+        forwards = intersect_bracket(a, b)
+        backwards = intersect_bracket(b, a)
+        assert (forwards.old_filed, forwards.new_filed) == (backwards.old_filed, backwards.new_filed)
+
+    def test_a_disjoint_pair_yields_an_inverted_bracket_the_register_then_drops(self) -> None:
+        """⚠ #2231 names empty intersections as its known failure (130 there), so they are COUNTED.
+
+        Two genuine events at the same ratio, merged into one cluster, produce exactly this — and
+        silently widening back would invent a bracket that describes neither.
+        """
+        a = self._with(date(2025, 1, 1), date(2025, 3, 1))
+        b = self._with(date(2026, 1, 1), date(2026, 3, 1))
+        merged = intersect_bracket(a, b)
+        assert merged.old_filed > merged.new_filed

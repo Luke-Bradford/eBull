@@ -116,10 +116,18 @@ From `financial_facts_raw` alone — filings only, blind to price:
   `is_split_scale`'s 1% default: that is calibrated on price noise, and a share count is a reported
   integer. At 1% and `limit=30` an exact 7:4 has three matches and is rejected as ambiguous;
 - restating filing on/after 2025-09-01, instrument tradable;
-- collapsed to one entry per `(instrument, ratio)`, keeping the widest bracket.
+- collapsed to one entry per `(instrument, ratio)`, **intersecting** the brackets.
 
-**1,760 raw restatement pairs → 315 events**, with **673 pairs rejected** as not a simple ratio.
-Nothing is sampled. It contains the independently recognisable events as a sanity read: `TPL` 3:1,
+⚠ **Intersecting, not widening** — #2231's settled treatment: *"an event that genuinely describes
+one split must contain that split's true effective date, so the brackets can be intersected"*, and
+it measured the gain (median 637d per instrument, 363d per consecutive pair, **273d intersected**).
+The first version kept whichever pair dominated on both ends, which is order-dependent when
+neither does (review WARNING) — and widening was the wrong direction anyway. An intersection can
+**empty**, which #2231 names as its known failure; those clusters are counted and dropped, never
+silently widened back.
+
+**1,760 raw restatement pairs → 310 events**, with **673 pairs rejected** as not a simple ratio and
+**5 clusters dropped on an empty intersection**. Nothing is sampled. It contains the independently recognisable events as a sanity read: `TPL` 3:1,
 `TSCO` 5:1, `WRB.US` 3:2, `TLRY` 1:10, `STEM` 1:20, `VERU` 1:10, and `HON` 1:2.
 
 ## 5. The measurement
@@ -141,10 +149,10 @@ into "a cliff, but not at the expected one", because a sub-dollar small-cap rout
 | --- | ---: |
 | `cliff_at_expected_factor` (nominal delivery) | **0** |
 | `cliff_at_other_factor` | 4 |
-| `no_cliff` | **129** |
-| `insufficient_bars` | 182 |
+| `no_cliff` | **138** |
+| `insufficient_bars` | 168 |
 
-⚠ **182 of 315 are reported as unmeasurable and are never counted as `no_cliff`** — that is the
+⚠ **168 of 310 are reported as unmeasurable and are never counted as `no_cliff`** — that is the
 direction that would inflate this probe's own conclusion, and most of them come from a
 precondition added at Codex checkpoint 2: the series must cover the WHOLE bracket. If history
 begins after `old_filed`, the event may sit before the first bar and the flat remainder would read
@@ -155,21 +163,24 @@ ratio would be a threshold with no published basis:
 
 | expected price factor | delivered NOMINALLY |
 | --- | ---: |
-| `x>=4` or `<=1/4` | **0 of 110** |
-| `x2 .. x4` | **0 of 13** |
+| `x>=4` or `<=1/4` | **0 of 118** |
+| `x2 .. x4` | **0 of 14** |
 | `x1.5 .. x2` | **0 of 5** |
 | under `x1.5` | **0 of 5** |
 
-**Zero of 133 measurable events left a cliff at their own factor**, at any magnitude.
+**Zero of 142 measurable events left a cliff at their own factor**, at any magnitude. The named
+events read correctly: `TPL` 3:1 expects `x0.3333` and its largest level shift is `x1.33`; `TSCO`
+5:1 expects `x0.20` against `x1.08`; `WRB.US` 3:2 expects `x0.667` against `x0.896`.
 
 ⇒ **the provider serves a back-adjusted history.**
 
 ### The live arm, and why the stored verdicts are the delivered-series verdicts
 
 `--live` refetches `get_daily_candles(count=1000)` per instrument and compares every overlapping
-bar. **0 mismatching closes out of 115,073 overlapping bars, across all 315 events, 0 fetch
-failures.** So `price_daily` and the delivered series are the same numbers here, and the table
-above is a statement about what eToro serves, not about what we happen to have stored.
+bar. **0 mismatching closes out of 113,323 overlapping bars, across all 310 events, 0 fetch
+failures — and every verdict is identical to the stored arm** (0 / 4 / 138 / 168). So `price_daily`
+and the delivered series are the same numbers here, and the table above is a statement about what
+eToro serves, not about what we happen to have stored.
 
 ### ⛔ Two checkpoint-2 defects, both in the direction of my own conclusion
 

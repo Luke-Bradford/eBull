@@ -8,7 +8,7 @@ probe takes the SEC route and measures the answer.
 ⚠ INFORMATIONAL BROKER READS ONLY. ``get_daily_candles`` is a candle fetch;
 ``app/security/unattended_guard.py`` refuses broker MUTATIONS from a linked worktree and
 deliberately leaves informational calls reachable (#2645). No order, no position, no kill switch.
-⚠ NOT WRITE-FREE: ``_load_credentials`` commits a credential-access audit row per load (its own
+⚠ NOT WRITE-FREE: ``load_credentials`` commits a credential-access audit row per load (its own
 docstring says so). The measurement queries are read-only; the credential path is not.
 
 THE TEST
@@ -96,7 +96,7 @@ import argparse
 import math
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Final
 
@@ -105,7 +105,7 @@ from psycopg.rows import dict_row
 
 from app.config import settings
 from app.providers.implementations.etoro import EtoroMarketDataProvider
-from scripts.probe_2840_intraday_adjustment_basis import _load_credentials, is_split_scale
+from scripts.probe_2840_intraday_adjustment_basis import is_split_scale, load_credentials
 
 #: ⚠ NOT the price tolerance, and the difference is the point. ``is_split_scale``'s 1% default is
 #: calibrated on the intraday-versus-daily close noise of a RATIO OF RATIOS. A share count is a
@@ -202,6 +202,22 @@ class Register:
     events: list[Redenomination]
     raw_pairs: int
     rejected_not_simple_ratio: int
+    empty_intersections: int
+
+
+def intersect_bracket(current: Redenomination, event: Redenomination) -> Redenomination:
+    """Latest lower bound, earliest upper bound — the #2231 treatment, and ORDER-INDEPENDENT.
+
+    ⚠ The predecessor was a dominance test (``keep the new one only if it is wider on BOTH ends``),
+    so two brackets each wider on a different side kept whichever arrived first. Extracted as its
+    own function precisely so that property can be pinned by a test rather than asserted in a
+    docstring.
+    """
+    return replace(
+        current,
+        old_filed=max(current.old_filed, event.old_filed),
+        new_filed=min(current.new_filed, event.new_filed),
+    )
 
 
 def redenomination_register(
@@ -213,17 +229,30 @@ def redenomination_register(
 ) -> Register:
     """Every tradable instrument with a simple-ratio retroactive share-count re-denomination.
 
-    ⚠ ONE ROW PER (instrument, ratio), keeping the WIDEST bracket. An instrument re-files the
-    same period many times, so the raw pair count over-represents chatty filers by an order of
-    magnitude; collapsing on the ratio keeps one entry per distinct re-denomination while a
-    second genuine event at a different ratio stays separate.
+    ONE ROW PER (instrument, ratio). An instrument re-files the same period many times, so the raw
+    pair count over-represents chatty filers by an order of magnitude; collapsing on the ratio
+    keeps one entry per distinct re-denomination while a second genuine event at a different ratio
+    stays separate.
+
+    ⚠⚠ THE BRACKETS ARE INTERSECTED, NOT WIDENED — and the first version did neither properly.
+    It kept whichever pair "dominated" on BOTH ends, so two brackets each wider on a different side
+    silently kept whichever arrived first (review WARNING). Chasing that found the real defect:
+    widening is the wrong DIRECTION. ``docs/specs/ingest/2026-08-03-2231-split-adjustment.md``
+    settles this treatment — *"an event that genuinely describes one split must contain that
+    split's true effective date, so the brackets can be intersected"* — and measured the gain
+    (median bracket 637d per instrument, 363d per consecutive pair, **273d intersected**).
+
+    ⚠ Intersecting can EMPTY, which #2231 names as its known failure mode (130 empty intersections
+    there) — a scale artefact, or two genuine events at the same ratio merged into one cluster.
+    Those are counted and dropped rather than silently widened back, because an empty intersection
+    means the cluster does not describe a single event and no bracket for it is honest.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_REGISTER_SQL, {"min_log_ratio": MIN_LOG_RATIO, "since": since})
         rows = cur.fetchall()
 
     rejected = 0
-    best: dict[tuple[int, tuple[int, int]], Redenomination] = {}
+    clusters: dict[tuple[int, tuple[int, int]], Redenomination] = {}
     for row in rows:
         ratio = float(row["new_val"]) / float(row["old_val"])
         pq = is_split_scale(ratio, limit=limit, tolerance=tolerance)
@@ -242,13 +271,15 @@ def redenomination_register(
             old_val=float(row["old_val"]),
             new_val=float(row["new_val"]),
         )
-        current = best.get(key)
-        if current is None or (event.old_filed <= current.old_filed and event.new_filed >= current.new_filed):
-            best[key] = event
+        current = clusters.get(key)
+        clusters[key] = event if current is None else intersect_bracket(current, event)
+
+    kept = [event for event in clusters.values() if event.old_filed <= event.new_filed]
     return Register(
-        events=sorted(best.values(), key=lambda e: (e.symbol, e.ratio_pq)),
+        events=sorted(kept, key=lambda e: (e.symbol, e.ratio_pq)),
         raw_pairs=len(rows),
         rejected_not_simple_ratio=rejected,
+        empty_intersections=len(clusters) - len(kept),
     )
 
 
@@ -367,7 +398,8 @@ def _report(
         "",
         f"register: {built.raw_pairs} raw restatement pairs -> {len(built.events)} events "
         f"after collapsing on (instrument, ratio); {built.rejected_not_simple_ratio} pairs "
-        f"rejected as not a simple ratio within {SHARE_RATIO_TOLERANCE:.3%}",
+        f"rejected as not a simple ratio within {SHARE_RATIO_TOLERANCE:.3%}, "
+        f"{built.empty_intersections} clusters dropped on an EMPTY bracket intersection",
         f"measured this run: {register_size}",
         "",
         "verdict distribution:",
@@ -483,12 +515,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     with ExitStack() as stack:
         provider = None
         if args.live:
-            creds = _load_credentials()
+            creds = load_credentials()
             provider = stack.enter_context(
                 EtoroMarketDataProvider(api_key=creds[0], user_key=creds[1], env=settings.etoro_env)
             )
 
-        live_cache: dict[int, dict[date, float] | None] = {}
+        # ⚠ THE FAILURE REASON IS CACHED WITH THE FAILURE, not written once at the call site.
+        # An instrument can carry several register events; stamping the reason only on the event
+        # that happened to trigger the fetch left every later one reporting ``fetch_failed`` with
+        # no explanation, which reads as an unexplained gap in the population (review NITPICK).
+        live_cache: dict[int, tuple[dict[date, float] | None, str | None]] = {}
         for event in register:
             entry: dict[str, Any] = {
                 "symbol": event.symbol,
@@ -502,17 +538,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if event.instrument_id not in live_cache:
                     try:
                         bars = provider.get_daily_candles(event.instrument_id, args.count)
-                        live_cache[event.instrument_id] = {
-                            bar.price_date: float(bar.close)
-                            for bar in bars
-                            if bar.close is not None and float(bar.close) > 0
-                        }
+                        live_cache[event.instrument_id] = (
+                            {
+                                bar.price_date: float(bar.close)
+                                for bar in bars
+                                if bar.close is not None and float(bar.close) > 0
+                            },
+                            None,
+                        )
                     except Exception as exc:  # noqa: BLE001 - one failure must not sink the probe
-                        live_cache[event.instrument_id] = None
-                        entry["reason"] = f"{type(exc).__name__}: {exc}"
-                fetched = live_cache[event.instrument_id]
+                        live_cache[event.instrument_id] = (None, f"{type(exc).__name__}: {exc}")
+                fetched, failure = live_cache[event.instrument_id]
                 if fetched is None:
                     entry["verdict"] = FETCH_FAILED
+                    entry["reason"] = failure
                     results.append(entry)
                     continue
                 overlap = sorted(set(fetched) & set(series))
@@ -553,6 +592,7 @@ __all__ = [
     "SHARE_RATIO_TOLERANCE",
     "Redenomination",
     "cliff_profile",
+    "intersect_bracket",
     "main",
     "redenomination_register",
 ]
