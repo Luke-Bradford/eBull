@@ -9515,3 +9515,30 @@ original, because the gate now *looked* like a bound.
   association.
 - Enforced in: this entry;
   `docs/proposals/ta/2026-09-20-2840-the-forward-announcement-source.md` §3.
+
+## An hour-of-day histogram is not a CADENCE — group by DATE before writing "already happens"
+
+- Symptom: #2840, 2026-09-20, and it shipped before it was caught. I measured captures before
+  09:30 ET, got **10,127 bars over 8 instruments**, aggregated by clock-HOUR, and wrote *"pre-open
+  capture already happens on this box"* into a proposal doc, a PR body, two issue comments and a
+  memory file. Grouped by capture DATE the same 10,127 rows are **two bursts a few minutes long**
+  — 7,082 on Monday 2026-08-10 between 09:05 and 09:08 ET, and 3,045 on **Sunday** 2026-09-13 at
+  07:37 ET. Backfills, not a schedule, and one of them on a day with no following open. The
+  routine harvester runs inside market hours (`strategy_intraday_harvest`, last 14 days:
+  1,958 `skipped` / 325 `success` / 2 `failure`).
+- ⚠⚠ An hour-of-day histogram DELIBERATELY destroys the date axis, which is the axis a recurrence
+  claim lives on. It answers "at what times of day has this ever happened", and reads like an
+  answer to "does this happen daily". Two events a month apart and two thousand events a day
+  produce the same shape.
+- ⚠ Two further numbers were wrong in the direction that flattered the claim, which is the usual
+  pattern: the quoted "hour 9 = 9,519" was the WHOLE-DAY hour-9 bucket including post-09:30
+  captures (the pre-open part is 7,082), and no weekday/weekend split was taken at all, so a
+  Sunday burst counted as pre-open capture.
+- Prevention: any sentence with a present-tense recurrence verb — "already happens", "runs
+  nightly", "is being collected" — is a claim about DATES. Group by date and read the first and
+  last, or count distinct dates, BEFORE writing it. ⚠ And when the thing has a scheduler, check
+  the scheduler: `job_runs` status mix over a window answers "does it run" directly, and a
+  `skipped`-dominated mix is the tell that a job fires without doing anything.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-20-2840-the-forward-announcement-source.md` §0.1 (the withdrawn
+  version is kept beside the correction, with both wrong numbers named).

@@ -30,27 +30,42 @@ identified **retrospectively**, which is exactly what `308d1e38`'s register alre
 filings alone. The forward calendar only makes the capture *cheaper* (targeted rather than
 broad). It was never the gate.
 
-### 0.1 And the corrected route is already live here, not hypothetical
+### 0.1 The corrected route is REACHABLE — but it is not running, and my first version of this section said it was
 
-Measured read-only on the dev DB, 2026-09-20:
+⚠⚠ **CORRECTED 2026-09-20, same day, after this document had already merged as `cbfd8144`.**
+The first version of this section quoted *"10,127 bars, 8 instruments"* captured before 09:30 ET
+and concluded that **"pre-open capture already happens on this box"**. The count is right and
+the conclusion is wrong, because I aggregated by clock-hour and never grouped by DATE.
 
-```sql
-SELECT count(*), count(DISTINCT instrument_id)
-  FROM strategy_intraday_bars
- WHERE (captured_at AT TIME ZONE 'America/New_York')::time < time '09:30';
--- 10,127 bars, 8 instruments
-```
+Grouped by capture date, the whole 10,127 is **two bursts, each a few minutes long**:
 
-Capture-hour histogram (America/New_York): hour 7 carries **3,045** bars, hour 9 **9,519**,
-then 2,500–2,900 per hour to 15, and 442 at 16.
+| capture date | ET window | bars | instruments |
+| --- | --- | ---: | ---: |
+| 2026-08-10 (Mon) | 09:05 → 09:08 | 7,082 | 8 |
+| 2026-09-13 (Sun) | 07:37 → 07:37 | 3,045 | 8 |
 
-⇒ pre-open capture **already happens on this box**. The gap is not knowing *when* to capture; it
-is **breadth** — 8 instruments is a panel, and the chance that one of those eight re-denominates
-in any given window is small. That is a capture-breadth question with a cost, not a
-source-discovery question with a blocker. ⚠ The 09:30 boundary is a filter, not a claim about
-the flag: a bar *captured* pre-open is a candidate observation, and whether it satisfies the
-certificate additionally depends on the bar's own timestamp and the event's effective instant,
-which this query does not test.
+Those are **backfills, not a cadence**, and one of the two is a Sunday, when the "following
+open" is two days away. There is **no recurring pre-open capture**. The routine harvester runs
+inside market hours: `strategy_intraday_harvest` over the last 14 days is **1,958 `skipped`,
+325 `success`, 2 `failure`**, last success 2026-09-18 20:21Z, and the latest capture of any kind
+is 2026-09-18 20:05Z.
+
+⚠ Two specific numbers in the withdrawn version were also wrong in the way that flatters the
+claim. *"hour 9 = 9,519"* was the **whole-day** hour-9 bucket including post-09:30 captures; the
+pre-open part of it is **7,082**. And the weekday/weekend split was never taken, so a Sunday
+burst was being counted as pre-open capture.
+
+**What survives, and it is the part the refusal rests on:** a pre-open fetch across the panel
+**executed successfully on a trading day** — 09:05–09:08 ET on Monday 2026-08-10, 8 instruments.
+So the mechanism is reachable and nothing blocks it; there is simply no job asking for it on a
+schedule. Finding 58 is unaffected — it says advance knowledge is not *necessary*, and a
+buildable capture cadence is exactly the alternative route it names.
+
+⇒ the corrected gap is **cadence first, then breadth**, not breadth alone.
+
+⚠ The 09:30 boundary remains a filter, not a claim about the flag: a bar *captured* pre-open is
+a candidate observation, and whether it satisfies the certificate additionally depends on the
+bar's own timestamp and the event's effective instant, which none of these queries test.
 
 ## 1. What was verified about the source rules, and what that changed
 
@@ -161,11 +176,12 @@ measurement that will not be used is the opposite of the skill's *"download only
 
 ## 6. Next, with the blocker removed rather than restated
 
-- 🎯 **The capture-breadth question, which is now the real one.** Pre-open capture already runs
-  (§0.1). What is missing is breadth: 8 instruments. The next ticket sizes the panel needed for a
-  reasonable chance of catching a re-denomination in-window, against the intraday rate budget —
-  and joins whatever it catches to `308d1e38`'s retrospective register. **No forward calendar,
-  no new source, no operator gate.**
+- 🎯 **Pre-open capture CADENCE, then breadth** (corrected — see §0.1). There is no recurring
+  pre-open capture; the two bursts on record are backfills, one of them on a Sunday. What exists
+  is proof the fetch works in the window (8 instruments, 09:05–09:08 ET, 2026-08-10). The next
+  ticket asks `strategy_intraday_harvest` for a pre-open run on trading days, then sizes the
+  panel against the intraday rate budget, then joins what it catches to `308d1e38`'s
+  retrospective register. **No forward calendar, no new source, no operator gate.**
 - ⚠ **Do not re-open "which 8-K item carries forward notice" from the form text.** §1 shows two
   structural readings falsified by one counterexample filing each. If that question ever matters
   again it is an empirical one over filings, and it is not on the critical path.
