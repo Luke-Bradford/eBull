@@ -573,3 +573,26 @@ class TestTheNumericalEdges:
                     control_clusters=_clusters(days, np.zeros(len(days))),
                 )
             )
+
+    def test_a_count_total_just_over_a_whole_number_is_not_masked(self) -> None:
+        # ⚠ Review NITPICK, PR #3245. ``int(sum)`` truncated before comparing, so a
+        # float count array summing to 250.4 against a declared 250 passed the very
+        # invariant the check exists for.
+        control = _noise(69)
+        days = _dates(_AXIS + 1)[1:]
+        clusters = _clusters(days, np.full(len(days), 0.5))
+        inflated = clusters.trade_counts.astype(np.float64)
+        inflated[0] = 1.4
+        object.__setattr__(clusters, "trade_counts", inflated)
+        assert int(inflated.sum()) == clusters.trade_count
+        with pytest.raises(S12PairedTrialRefused, match="different nominal counts"):
+            evaluate_arm(
+                PairedBooks(
+                    arm="masked",
+                    dates=_dates(_AXIS + 1),
+                    treatment_equity=_equity(control + 0.004),
+                    control_equity=_equity(control),
+                    treatment_clusters=clusters,
+                    control_clusters=_clusters(days, np.zeros(len(days))),
+                )
+            )

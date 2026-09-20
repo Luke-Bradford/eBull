@@ -427,10 +427,14 @@ def _union_axis(
                 f"a cluster axis is ragged: {len(clusters.dates)} dates, {len(clusters.trade_counts)} counts, "
                 f"{len(clusters.return_sums)} sums"
             )
-        pooled = int(clusters.trade_counts.sum())
+        # ⚠ NOT ``int(...)`` AROUND THE SUM (review NITPICK, PR #3245). Truncating
+        # first masks the mismatch it is meant to catch: a float count array summing
+        # to 250.4 against a declared 250 truncates to 250 and passes. Compared
+        # untruncated, an int64 axis is exact and a float axis refuses.
+        pooled = clusters.trade_counts.sum()
         if pooled != clusters.trade_count:
             raise S12PairedTrialRefused(
-                f"a cluster axis holds {pooled} trades but declares {clusters.trade_count} — the point estimate "
+                f"a cluster axis holds {pooled!r} trades but declares {clusters.trade_count} — the point estimate "
                 "and the declared population would divide by different nominal counts"
             )
         for day, count, total in zip(clusters.dates, clusters.trade_counts, clusters.return_sums):
