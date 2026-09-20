@@ -138,6 +138,12 @@ resolver asserts, and not on this comparison. The comparison is a sanity check.
 
 Nothing here is built yet. Ordered so that no step can ship a flattering partial.
 
+⚠ **Steps 1-4 are RESOLVED by "Resolved design" below (2026-09-20, later session) and
+that section is what gets built.** The open fork in step 2 — *"carry the raw open for
+band selection, or declare the comparator conservative"* — is settled: the first option
+is not a new rule, it is what the strategy path has always done. Step 5 is unchanged and
+still out of scope. Everything below is kept as the record of what was known before.
+
 **Step 1 — one basis decision, three consumers.** A single helper keyed on the
 already-resolved `_Corpus.liquidity_policy`:
 
@@ -207,3 +213,368 @@ Recorded so nobody re-derives them:
 - The band calibration itself remains a small, mostly closing-hour quote sample across
   nine summer dates, applied to next-open historical fills including dead names. A
   correctly selected band is not a validated historical execution cost.
+
+---
+
+# Resolved design (2026-09-20, later session) — steps 1-4
+
+## Source rule
+
+Unchanged from above and still not inferred: `cost_model.cost_band_for`'s own declared
+contract — *"`as_traded` may use the price thresholds. `split_adjusted` cannot"*. No new
+constant, threshold or window is introduced by anything below.
+
+## The finding that settles step 2
+
+Step 2 was recorded as an open fork because the comparator and the control cost on
+total-return levels while the bands are nominal. **The strategy path already resolves
+that fork and has since it shipped.** `_absorb` (`app/services/backtest_run.py:1875`):
+
+```python
+entry_price = float(row.entry_price_net) * entry_wealth_mark / entry_raw
+exit_price  = float(row.exit_price_net)  * exit_wealth_mark  / exit_raw
+```
+
+`row.entry_price_net` is the **nominal** t+1 open times `(1 + h)`; the total-return
+factor is applied **after**. So production **selects the band from a nominal price and
+carries the charge onto a total-return level**, and that is arithmetically sound because
+`h` enters multiplicatively — rescaling a price by `wealth/raw` leaves the fractional
+charge unchanged.
+
+Consequence: there is no "either/or" in step 2. The comparator and the synthetic control
+are the two paths that are **out of step with the shipped semantic**, not the two paths
+that need a novel rule. Both adopt what `_absorb` does: band on the nominal price, charge
+the ratio, keep the mark on the total-return basis.
+
+⚠ This does **not** make banding a total-return level acceptable anywhere. Neither
+consumer will band `entry_wealth` or `adjusted_open`. Both already hold the raw price
+they need, one line before they throw it away.
+
+## Step 1 — one selector, four consumers
+
+New in `app/services/cost_model.py`, beside `cost_band_for`:
+
+```python
+def cost_price_basis(adjustment_basis: str | None) -> PriceBasis:
+    """The cost basis an archive's stored adjustment basis earns."""
+    return "as_traded" if adjustment_basis == "unadjusted" else "split_adjusted"
+```
+
+Total, no raise, fail-closed by construction: anything that is not a declared
+`unadjusted` archive — including `None` — keeps `split_adjusted`, i.e. the maximum band.
+
+⚠ It takes a **plain string**, not an `ArchivePolicy`. `cost_model` must not import the
+corpus-ingest layer, and `synthetic_control_run` cannot import `backtest_run` (the
+dependency already runs the other way). A string keeps one selector reachable from all
+three modules with no cycle.
+
+`_Corpus` gains a resolved field, set once in `load_corpus` from the policy it already
+resolves:
+
+```python
+cost_price_basis: PriceBasis = "split_adjusted"
+```
+
+⚠ **The default is the fail-closed value on purpose.** A construction site that forgets
+the field gets the maximum band; reaching the cheaper basis requires an explicit act.
+That is the invariant that makes a derived field safe to carry beside its source.
+
+### What "fail closed" costs, stated rather than assumed
+
+Checkpoint 1 was right that fail-closed here means *"charge the maximum calibrated
+band"* and not *"refuse"*, and that the reason a run fell back is then lost — stored
+columns cannot distinguish a withheld policy from a genuinely split-adjusted universe.
+
+Not fixed by a stored column, and that is a decision rather than an omission:
+
+- Raising instead would convert a data anomaly into the loss of a multi-hour run, and
+  the maximum band **is** the cost model's declared treatment for an unknown basis.
+- The withheld set is empty by construction today. Full-population on the dev corpus:
+  `research_price_series` partitions cleanly by vendor — `icyDenev/Intrader` 22,879 rows
+  all `unadjusted`, `paperswithbacktest/Stocks-Daily-Price` 7,693 all `split_adjusted`.
+  `_resolve_liquidity_policy` withholds only on a basis disagreement, an undeclared
+  vendor, or an empty admitted set.
+- What IS added: `_resolve_liquidity_policy` currently warns *"entry-liquidity
+  diagnostic withheld"* on one of its three withholding paths and is silent on the other
+  two. All three now log, and the message names the cost consequence, because the
+  consequence changed — a withheld policy is no longer only a missing diagnostic.
+
+Storing the resolved basis per result row is a migration and is **out of scope**,
+recorded here so nobody re-derives it.
+
+## Step 2a — the comparator (`_benchmark_book`, `backtest_run.py:1449`)
+
+The nominal price is already computed and already validated, and is then used for
+nothing:
+
+```python
+entry_close  = float(window[entry_offset])        # RAW close — nominal on this archive
+entry_wealth = float(wealth_window[entry_offset]) # total-return level
+```
+
+Change: `half = cost_band_for(Decimal(repr(entry_close)), price_basis=basis).half_spread`,
+with `basis` threaded from `corpus.cost_price_basis`. The charge still lands on
+`entry_wealth` / `exit_wealth`, unchanged. The comment asserting *"The corpus OHLC is
+split-adjusted"* is deleted — it is false for this universe and is the sentence that hid
+the defect.
+
+⚠ **An asymmetry to state, not to fix.** A strategy leg bands on its entry **open** (the
+t+1 fill); a comparator leg bands on its entry **close**, because the comparator's entry
+*is* that close by construction. Banding must key on the price the leg transacts at, so
+the two keying prices differ for the same reason the two entries differ. No change.
+
+⚠ `Decimal(repr(...))` and not `Decimal(...)` on a float — the repo's existing idiom two
+lines below (`Decimal(repr(entry_wealth))`), and the one that does not carry binary float
+noise into a threshold comparison.
+
+## Step 2b — the synthetic control (`synthetic_control_run.py`)
+
+Same shape, same availability. `_eligible_fill_bars` reads the raw open and multiplies it
+away on the next line:
+
+```python
+bar_open = series.rows[fill_index].get("open")   # RAW open — nominal on this archive
+...
+adjusted.append(float(bar_open) * wealth_close / raw_close)
+```
+
+Changes:
+
+1. `_eligible_fill_bars` takes `price_basis` and returns a fourth parallel list — the
+   per-bar `half_spread` selected from `bar_open`.
+2. `SeriesPlacement` gains `half_spread: npt.NDArray[np.float64]`, parallel to
+   `adjusted_open`; `__post_init__` asserts the parity it already asserts for `panel`.
+3. `CohortCollector` takes the run's `price_basis` and passes it down.
+4. `np.full(n, _HALF_SPREAD)` becomes `placement.half_spread[entries]` at all four sites
+   (`_place_member` ×2, `_place_member_compact` ×2), and
+   `SharedMarkLegBook(half_spread=np.full(size, _HALF_SPREAD))` becomes the concatenated
+   per-leg array.
+5. `_shared_member_inputs` / `_attach_shared_member_inputs` pack and attach a fifth
+   array. It reuses `panel_start` / `panel_size` — the dataclass already asserts
+   `panel.size == adjusted_open.size`, so the same slice is correct by that invariant.
+
+⚠⚠ **Both sides key on `entries`, never on `exit_slot`.** §5.1 fixes the band on the
+entry price and explicitly does not re-key mid-hold (`cost_model.half_spread_for`). The
+exit line reads `placement.adjusted_open[exit_slot]` for the *price*, so writing
+`placement.half_spread[exit_slot]` beside it is the one-character defect this change most
+invites, it would pass every shape check, and it would silently re-key the band on the
+outcome bar.
+
+⚠ `SeriesPlacement`'s docstring — *"ONE `adjusted_open` ARRAY AND NOT TWO PRICE ARRAYS …
+`h` constant over this corpus"* — records a premise that this change **ends**. It is
+rewritten to say why the second array now exists rather than left contradicting the code.
+Likewise `_HALF_SPREAD`'s comment (*"the half-spread every leg of this corpus carries"*)
+and `_NamespaceBook.half_spreads`'s (*"on the research corpus it is [single-valued]"*).
+
+⚠ Memory. `adjusted_open` is per **eligible fill bar**, not per corpus bar; `marks` (a
+full per-series total-return span, ~200 MB over the corpus by its own comment) dominates
+the placement footprint. One added `float64` parallel to `adjusted_open` is therefore
+expected to be a small fraction — but that is a prediction, so it is **measured** via the
+existing `shared_input_bytes` / `_placement_bytes`, reported in the PR, and not asserted.
+
+## Step 3 — `COST_MODEL_ID` moves
+
+From
+`static-p75-insession-v3+split-adjusted-max+carry-fx-structural-zero-long-x1-real-usd`
+to
+`static-p75-insession-v4+archive-basis-band+carry-fx-structural-zero-long-x1-real-usd`.
+
+The module's own rule is that a change to what is charged is a new model; the `#2833`
+no-bump precedent turned on nothing being charged differently, which is not true here.
+The `split-adjusted-max` token is additionally now a false description. Without the bump
+`assert_no_existing_results` (`backtest_run.py:3790`) cannot tell an old row from a
+corrected one.
+
+## Step 4 — the full-population A/B
+
+`scripts/ab_3238_cost_basis.py`. Both arms are the **real runner** over the **full**
+admitted `survivorship_free` set — no `limit`, no reconstruction, no direct
+`cost_position` call.
+
+- **Treatment** — `load_corpus` as shipped. `cost_price_basis` comes from the resolver,
+  so the arm exercises the thing under test rather than a hardcoded `as_traded`.
+- **Control** — `dataclasses.replace(corpus, cost_price_basis="split_adjusted")`. This
+  touches the cost basis and **nothing else**; in particular `liquidity_policy` is left
+  alone, so the entry-liquidity and exit-gap diagnostics are identical across arms and
+  cannot be confused with the effect being measured. `cost_price_basis(split_adjusted)`
+  is exactly the literal being removed, so the control is the old behaviour reproduced by
+  the shipped code path rather than simulated.
+
+Comparison is **keyed per leg**, on `(name_key, strategy_id, namespace, entry_fill_date,
+exit_date)` — `name_key` and not `instrument_id`, because an unlinked dead series carries
+a negative in-pass key and matching on instrument id alone would drop exactly the
+survivorship-relevant half of the corpus.
+
+Asserted identical across arms — the gate is that **only the charge moves**:
+
+- the leg population itself (added / removed must both be 0),
+- entry and exit fill **bars**, and hold lengths,
+- **gross** returns (`_NamespaceBook.gross_returns`),
+- every `excluded` / `uncosted_reason` / `terminations` count.
+
+Measured and expected to move:
+
+- per-leg `half_spread` and the `half_spreads` census cardinality (1 → >1),
+- net expectancy per trade and profit factor, per namespace **and per regime cohort**,
+- the band mix over realised **legs** — the per-trade figure the census could not give,
+  which is the number this ticket has owed since it was filed.
+
+Metric: **distinct legs and distinct name keys**, never row counts. The **gain side is
+inspected** — a sample of legs whose band moved off `<$5` is read against the archive's
+raw open for that bar, to confirm the band was selected from a price that is actually
+nominal and not from a wealth mark.
+
+⚠ Metrics are read from the production path (`_measure_namespace` / the books), never by
+reducing `CostedPosition.net_return_pct` — that field uses raw prices, so reducing it
+directly would read a split as an investment loss.
+
+⚠ Expected direction, declared before the run: net expectancy **rises** on the treatment
+arm for the strategy, its benchmark **and** its null, because all three are overcharged
+today. A run in which the strategy improves against an unchanged benchmark is a **failed**
+A/B — it would mean a consumer was missed — and not a promising result.
+
+## Step 5 — unchanged
+
+The 16 stored `survivorship_free` results become known-stale. Re-running a sealed
+preregistered trial is a #2829/#2599 declaration decision and is **not** part of this fix.
+
+---
+
+# Checkpoint 1 on the resolved design — 37 findings, and what each changed
+
+Run against the "Resolved design" section above. Triaged rather than accepted
+wholesale; the ones that changed the build are marked **CHANGED**.
+
+## Corrections to the spec's own claims
+
+**CHANGED — the central claim was overstated and is now narrowed.** The spec said
+production *already selects a nominal band*. It does not: both call sites pass
+`split_adjusted` today, so what `_absorb` proves is that the `wealth/raw` rescale is
+CHARGE-PRESERVING, not that the band-selection policy is already shipped. Checkpoint 1
+supplied the algebra that does settle the fork — with `Fₜ = wealth_closeₜ/raw_closeₜ`,
+net entry is `openₑ·Fₑ·(1+h)` and net exit is `exitₓ·Fₓ·(1−h)`, so
+`1+R_net = (1+R_gross)·(1−h)/(1+h)` **even when the two factors differ**. The charge is
+therefore basis-invariant under the rescale and banding-on-nominal is arithmetically
+coherent. That, not "production already does it", is the argument.
+
+**Independently traced and confirmed:** Intrader ingest stores CSV open/close unchanged,
+`_apply_arm` only masks, `_to_series` copies, `_dense_price_history` converts to float.
+Nothing adjusts the comparator's or the control's inputs upstream, so "raw" is archive
+raw. "Nominal" still rests on the stored per-series basis, as the spec already said.
+
+**Citation corrected:** `archive_policy_for` lives in `strategy_entry_liquidity.py`, not
+where the spec implied; `_placement_bytes` does not exist — the accounting is the inline
+sum in `_shared_input_bytes`.
+
+## Defects in the plan, fixed before any of it was written
+
+**CHANGED — a fifth charge site was missing.** The spec listed the four price-array
+sites and missed `_place_member`'s `book.add(half_spread=_HALF_SPREAD)`. `LegBook`'s
+half-spread is charged AGAIN on every rebalance by `build_equity_curve`, so leaving it
+scalar would have made the scalar and compact paths agree on trade returns and disagree
+on portfolio metrics — the hardest class of bug to attribute. Now per leg, and
+`test_the_scalar_and_compact_paths_agree_under_varying_bands` covers it.
+
+**CHANGED — `SeriesPlacement` needed more than size parity.** It did not require
+one-dimensional arrays, and nothing enforced `cost_model`'s `0 < h < 1` on the NumPy side
+(the `Decimal` guards are upstream of the placement). `__post_init__` now checks size
+parity against `panel`, dimensionality, and finite `h` in `(0, 1)`.
+
+**CHANGED — `_shared_input_bytes` had to learn the fifth array**, or the pilot and canary
+would under-report the memory they exist to bound.
+
+**CHANGED — `_eligible_fill_bars` validated its inputs but not their product.** A finite
+open over a tiny raw close can overflow the carried price; an infinite entry price would
+have reached the curve rather than raised. The carried value is now `_usable`-checked.
+
+## Full-population answers to two open questions
+
+**`Decimal(repr(float))` at a band edge — measured, not argued.** The comparator bands
+from a float array, so a stored value within a double-epsilon of 5/20/100 could round
+across. Max scale on `research_price_daily` is **22 decimal places over 75,972,669
+rows**, which looks alarming until the values are read: `32.54649353027344` is the exact
+decimal expansion of a **float32**. These NUMERICs *originate* as floats, so the
+`Decimal → float64` conversion is exact.
+
+```sql
+select count(*) filter (where open_at_risk), count(*) filter (where close_at_risk), count(*)
+from (select (open <> 5 and abs(open - 5) < 1e-9) or (open <> 20 and abs(open - 20) < 1e-9)
+           or (open <> 100 and abs(open - 100) < 1e-9) as open_at_risk, ... from research_price_daily) t
+--  (0, 0, 75972669)
+```
+
+**0 of 75,972,669** open/close values sit within `1e-9` of a band edge without being
+equal to it. ⚠ The synthetic control does not have this exposure at all — `OHLCVRow.open`
+is a `Decimal` and `cost_band_for` receives it unconverted.
+
+**The `COST_MODEL_ID` bump rotates every strategy identity** (`entry.identity(...,
+cost_model_id=COST_MODEL_ID)`), which the spec had not costed. Measured with the existing
+`scripts/census_3031_identity_rotation.py` — built for exactly this question, so it was
+reused rather than rewritten:
+
+| table | rows | on current identity (what a rotation detaches) |
+|---|---:|---:|
+| `strategy_signals` | 59,135 | **424** |
+| `strategy_signals` (fired, unresolved) | 58,413 | **362** |
+| `strategy_scan_watermark` | 35 | **3** |
+| `strategy_results_store` | 580 | 0 |
+| `strategy_preregistration_declarations` | 7 | 0 |
+| `strategy_holdout_accesses` | 560 | 0 |
+| `strategy_deployments` / `strategy_promotions` | 0 | 0 |
+
+⚠ **The three registry-hashed frozen declarations are ALREADY detached** — declared
+`mt1 …+32970feefa00`, `mt1-s8 …+b83c3e4fc997`, `s11 …+d5f25fd08376` against current
+`+5d6f02df1b74` / `+bd7c7f003679` / `+0ab5cc7895a3`. The other four carry hand-named
+versions with no registry hash and cannot move. So the bump's marginal cost to the
+declaration register is **zero**; that they are already detached is a pre-existing
+condition and not this change's doing.
+
+⚠⚠ **It cannot pause the live demo sleeve.** `strategy_paper_runtime` selects paper
+candidates by `entry.purpose == "capital_candidate"`, and after #2845 retired the dead
+eight **every manifest strategy is `harness_validation`** — the filter yields an empty
+version list today. `strategy_position_ownership` keys on `strategy_trade_id`, not
+`strategy_version`, so the SPY.RTH position is untouched either way. The real marginal
+cost is the 362 unresolved harness-validation fills that leave `run_outcome_resolution`'s
+current-identity drain, and the 3 scan watermarks that restart.
+
+## Accepted and applied to the A/B
+
+Keyed on `(quarantine, ambiguity)` as well as namespace (identical name/date tuples recur
+across arms); per-leg comparison by **element-wise `gross_returns` equality** over the
+whole ordered tuple rather than a set difference, which also catches reordering and
+duplicate-value swaps; exclusions compared via `position_count` (which counts uncosted
+positions) plus `termination_census` and the label windows rather than a bare total;
+`half_spreads` cardinality reported and **not** gated on, since a correct run may hold one
+band or none; the runner driven at `evaluate_level_arms` / `evaluate_arm` — `run_backtest`
+loads its own corpus and persists, so it is not an injection point; the `gross_returns`
+equality doubles as the detector for bar data moving between arms.
+
+## Accepted and recorded as a scope bound, not built
+
+- **`evaluate_arm`'s call site is not exercised by any survivorship-free run.** A
+  non-empty termination map routes every strategy through `evaluate_level_arms`, and
+  `evaluate_arm` explicitly refuses such a corpus. The `:2601` fix is therefore
+  correct-but-dormant: it is reachable only on `survivor_only`, which is split-adjusted
+  and cannot change basis. The A/B prints `evaluate_arm_site_exercised: false` rather
+  than implying coverage it does not have.
+- **The same model id still cannot distinguish a resolved basis from a withheld one.**
+  Storing the resolved basis per result row is a migration and stays out of scope; the
+  three withholding paths now all log, which is the bounded half of the answer.
+- **`band_crossings` is still never called in production.** Nominal banding makes that
+  diagnostic meaningful for the first time. Noted, not wired.
+- **The band calibration remains a small, mostly closing-hour quote sample** across nine
+  summer dates. A correctly selected band is not a validated historical execution cost,
+  and nothing here changes that.
+- **Raw split jumps can still contaminate signals** on the unadjusted archive
+  (`s2_cross_sectional_momentum.py:62` and the S-10 notes assume split-adjusted OHLC).
+  Pre-existing; cheaper costs must not be read as validating those signals.
+
+## Rejected
+
+- *"Cardinality must move 1 → >1"* was in the first draft and is wrong as a gate; it is
+  now a reported diagnostic. Checkpoint 1 is right that a benchmark can legitimately keep
+  one band while the strategy's opens span several.
+- *"Retain the original `Decimal` in the comparator"* — declined on the measurement above.
+  `_dense_price_history` builds a compact `array("d")` deliberately, and carrying
+  `Decimal`s through it to close a gap measured at zero occurrences would cost the memory
+  that array exists to save.

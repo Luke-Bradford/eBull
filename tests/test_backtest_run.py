@@ -59,7 +59,13 @@ from app.services.backtest_run import (
     run_backtest,
     runnable_strategies,
 )
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELLED, UNKNOWN_NOMINAL_PRICE_BAND
+from app.services.cost_model import (
+    CARRY_UNMODELLED,
+    COST_MODEL_ID,
+    FX_UNMODELLED,
+    UNKNOWN_NOMINAL_PRICE_BAND,
+    cost_band_for,
+)
 from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
@@ -1030,6 +1036,77 @@ class TestShiftedLegBook:
         assert shifted.entry_price is book.entry_price
 
 
+class TestTheComparatorIsBandedOnItsNominalEntry:
+    """#3238 — the buy-and-hold comparator bands on the RAW close it enters at.
+
+    ⚠⚠ THE COMPARATOR USED TO HARDCODE THE MAXIMUM BAND under the comment
+    *"The corpus OHLC is split-adjusted"*, which is false for
+    ``survivorship_free``. Left alone while the strategy side was corrected, it
+    would have made every strategy cheaper than its own benchmark — the one
+    failure mode that manufactures a promotion instead of measuring one.
+    """
+
+    #: Raw (nominal) closes in FOUR different bands, against total-return marks
+    #: carried x10 away from them. ⚠ The x10 is the point: every carried value
+    #: lands in a band its own nominal price does not, so a comparator that
+    #: banded ``entry_wealth`` would pick a visibly different answer.
+    @staticmethod
+    def _raw() -> dict[int, tuple[int, array[float]]]:
+        return {
+            1: (0, array("d", [3.0, 3.5])),
+            2: (0, array("d", [12.0, 13.0])),
+            3: (0, array("d", [45.0, 46.0])),
+            4: (0, array("d", [250.0, 260.0])),
+        }
+
+    @classmethod
+    def _wealth(cls) -> dict[int, tuple[int, array[float]]]:
+        return {
+            key: (first, array("d", [value * 10.0 for value in values])) for key, (first, values) in cls._raw().items()
+        }
+
+    def _book(self, price_basis: str) -> LegBook:
+        return _benchmark_book(
+            instruments=frozenset({1, 2, 3, 4}),
+            raw_closes_by_instrument=self._raw(),
+            wealth_closes_by_instrument=self._wealth(),
+            lo=0,
+            hi=1,
+            price_basis=price_basis,  # type: ignore[arg-type]
+        )
+
+    def test_each_leg_takes_the_band_of_its_own_raw_entry_close(self) -> None:
+        book = self._book("as_traded")
+        expected = [
+            float(cost_band_for(Decimal(price), price_basis="as_traded").half_spread)
+            for price in ("3", "12", "45", "250")
+        ]
+        assert list(book.half_spread) == expected
+        assert len(set(book.half_spread)) == 4
+
+    def test_the_charge_lands_on_the_total_return_mark_not_on_the_raw_close(self) -> None:
+        """⚠ The band comes from the raw close; the ``(1 ± h)`` is applied to the
+        WEALTH level. Both halves matter: a band off the wealth level is #2400,
+        and a charge on the raw level would put the leg on the wrong basis."""
+        book = self._book("as_traded")
+        h = float(cost_band_for(Decimal("250"), price_basis="as_traded").half_spread)
+        assert book.entry_price[3] == pytest.approx(2500.0 * (1.0 + h))
+        assert book.exit_price[3] == pytest.approx(2600.0 * (1.0 - h))
+
+    def test_a_split_adjusted_corpus_still_charges_every_leg_the_maximum_band(self) -> None:
+        """The ``survivor_only`` regression guard: unchanged from before #3238."""
+        book = self._book("split_adjusted")
+        assert set(book.half_spread) == {float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)}
+
+    def test_banding_the_wealth_level_would_have_picked_different_bands(self) -> None:
+        """⚠ Makes the fixture's own discriminating power explicit rather than
+        assumed: if the carried prices happened to share bands with the raw
+        ones, every assertion above would pass on the defective code too."""
+        raw_bands = [cost_band_for(Decimal(p), price_basis="as_traded").label for p in ("3", "12", "45", "250")]
+        wealth_bands = [cost_band_for(Decimal(p), price_basis="as_traded").label for p in ("30", "120", "450", "2500")]
+        assert raw_bands != wealth_bands
+
+
 class TestBenchmarkBook:
     """Criterion 7's twelfth metric, clipped to one namespace's axis."""
 
@@ -1048,6 +1125,7 @@ class TestBenchmarkBook:
             wealth_closes_by_instrument=self._closes(),
             lo=0,
             hi=9,
+            price_basis="split_adjusted",
         )
         assert len(book) == 1
 
@@ -1097,6 +1175,7 @@ class TestBenchmarkBook:
             wealth_closes_by_instrument=self._closes(),
             lo=3,
             hi=6,
+            price_basis="split_adjusted",
         )
         assert len(book) == 2
         # Instrument 1 straddles the lower bound: it opens at index 3 (offset 0
@@ -1115,6 +1194,7 @@ class TestBenchmarkBook:
                 wealth_closes_by_instrument=self._closes(),
                 lo=7,
                 hi=9,
+                price_basis="split_adjusted",
             )
 
     def test_a_missing_opportunity_history_is_refused(self) -> None:
@@ -1125,6 +1205,7 @@ class TestBenchmarkBook:
                 wealth_closes_by_instrument={1: self._closes()[1]},
                 lo=0,
                 hi=5,
+                price_basis="split_adjusted",
             )
 
     def test_raw_and_wealth_axes_must_match(self) -> None:
@@ -1135,6 +1216,7 @@ class TestBenchmarkBook:
                 wealth_closes_by_instrument={1: (1, array("d", [10.0, 11.0]))},
                 lo=0,
                 hi=2,
+                price_basis="split_adjusted",
             )
 
     def test_a_single_usable_bar_is_refused(self) -> None:
@@ -1145,6 +1227,7 @@ class TestBenchmarkBook:
                 wealth_closes_by_instrument={1: (0, array("d", [10.0, math.nan, math.nan]))},
                 lo=0,
                 hi=2,
+                price_basis="split_adjusted",
             )
 
     def test_the_benchmark_is_charged_the_same_cost_model(self) -> None:
@@ -1156,6 +1239,7 @@ class TestBenchmarkBook:
             wealth_closes_by_instrument=self._closes(),
             lo=0,
             hi=5,
+            price_basis="split_adjusted",
         )
         assert book.entry_price[0] > 10.0
         assert book.exit_price[0] < 15.0
@@ -1168,6 +1252,7 @@ class TestBenchmarkBook:
             wealth_closes_by_instrument={1: (0, array("d", [100.0, 120.0]))},
             lo=0,
             hi=1,
+            price_basis="split_adjusted",
         )
         assert book.entry_price[0] > 100.0
         assert book.exit_price[0] < 120.0
@@ -1182,6 +1267,7 @@ class TestBenchmarkBook:
                 wealth_closes_by_instrument={1: (0, array("d", [100.0, math.inf, 120.0]))},
                 lo=0,
                 hi=2,
+                price_basis="split_adjusted",
             )
 
     @pytest.mark.parametrize("invalid", [0.0, -1.0, math.inf])
@@ -1193,6 +1279,7 @@ class TestBenchmarkBook:
                 wealth_closes_by_instrument={1: (0, array("d", [100.0, 110.0, 120.0]))},
                 lo=0,
                 hi=2,
+                price_basis="split_adjusted",
             )
 
     def test_a_missing_raw_interior_gap_is_allowed(self) -> None:
@@ -1202,6 +1289,7 @@ class TestBenchmarkBook:
             wealth_closes_by_instrument={1: (0, array("d", [100.0, math.nan, 120.0]))},
             lo=0,
             hi=2,
+            price_basis="split_adjusted",
         )
         assert len(book) == 1
         assert book.marks[0] == 100.0

@@ -176,6 +176,11 @@ def _legacy_first_index_last_index_measurement(
             wealth_closes_by_instrument=wealth_closes_by_instrument,
             lo=lo,
             hi=hi,
+            # ⚠ #3238 — the legacy arm takes the RUN'S basis, not a literal.
+            # This helper exists to difference the metric AXIS against
+            # production; charging its comparator differently would attribute a
+            # cost change to the axis.
+            price_basis=corpus.cost_price_basis,
         ),
         date_count=len(dates),
     )

@@ -43,7 +43,7 @@ import numpy as np
 import pytest
 
 from app.services import synthetic_control_run
-from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND
+from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND, cost_band_for
 from app.services.equity_curve import LegBook, build_equity_curve
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import Position, Window
@@ -58,9 +58,16 @@ from app.services.synthetic_control_run import (
     CohortCollector,
     LaunchPilotReport,
     ScaleBudgetExceeded,
+    SeriesPlacement,
     SyntheticControlScaleBudget,
     WorkerCanaryBudgetExceeded,
     WorkerCanaryConfig,
+    _attach_shared_member_inputs,
+    _half_spread_for,
+    _MemberInputs,
+    _place_member,
+    _place_member_compact,
+    _shared_member_inputs,
     run_cohort,
     run_launch_pilot,
     run_worker_canary,
@@ -1067,3 +1074,141 @@ class TestSealedEvaluatorsDeclareTheirControl:
                 f"{path} declares not_applicable with no reason — 'not applicable' without one is indistinguishable "
                 "from 'not thought about'"
             )
+
+
+class TestTheNullIsChargedPerBand:
+    """#3238 — the null's ``h`` is per eligible fill bar, not a corpus scalar.
+
+    ⚠⚠ THE FIXTURES ABOVE CANNOT CATCH ANY OF THIS. Every series there opens
+    between $50 and $55 and drifts gently, so all of its bars sit in one band
+    and a per-bar array is indistinguishable from the constant it replaced —
+    which is exactly the shape that lets an entry/exit keying error or a
+    shared-memory ordering error pass a full green suite. These placements are
+    built to span bands instead.
+    """
+
+    @staticmethod
+    def _placement(opens: list[str], *, holds: list[int], marks_first: int = 0) -> SeriesPlacement:
+        """One placement whose bars carry the bands their own opens select.
+
+        ⚠ ``adjusted_open`` is deliberately NOT equal to the nominal open: it
+        carries a x2 total-return factor, so a band read off the CARRIED price
+        would land in a different band for every one of these values. That is
+        the #2400 error this fixture exists to make visible.
+        """
+        nominal = [Decimal(value) for value in opens]
+        return SeriesPlacement(
+            panel=np.arange(len(nominal), dtype=np.int64),
+            adjusted_open=np.asarray([float(value) * 2.0 for value in nominal], dtype=np.float64),
+            half_spread=np.asarray(
+                [float(cost_band_for(value, price_basis="as_traded").half_spread) for value in nominal],
+                dtype=np.float64,
+            ),
+            holds=np.asarray(list(holds), dtype=np.int64),
+            marks=np.asarray([float(value) * 2.0 for value in nominal], dtype=np.float64),
+            marks_first=marks_first,
+        )
+
+    def test_each_eligible_bar_carries_the_band_its_own_nominal_open_selects(self) -> None:
+        placement = self._placement(["3", "12", "45", "250"], holds=[1])
+        assert [round(value * 200, 3) for value in placement.half_spread.tolist()] == [1.450, 0.571, 0.509, 0.322]
+
+    def test_the_charge_is_keyed_on_the_entry_bar_and_never_on_the_exit_bar(self) -> None:
+        """⚠⚠ THE ONE-CHARACTER DEFECT THIS CHANGE INVITES.
+
+        The exit price indexes ``adjusted_open[exit_slot]``, so writing
+        ``half_spread[exit_slot]`` beside it type-checks, shapes-checks and
+        re-keys the cost on the OUTCOME bar — which §5.1 forbids precisely
+        because it would make the charge depend on how the trade went.
+
+        Two eligible bars in opposite extreme bands with a single one-bar hold
+        forces entry at ordinal 0 and exit at ordinal 1, so the leg's charge is
+        unambiguous: the $250 entry's band, never the $3 exit's.
+        """
+        placement = self._placement(["250", "3"], holds=[1])
+        entry_h = float(cost_band_for(Decimal("250"), price_basis="as_traded").half_spread)
+        exit_h = float(cost_band_for(Decimal("3"), price_basis="as_traded").half_spread)
+        assert entry_h != exit_h
+
+        book, returns, _, _ = _place_member(np.random.default_rng(0), [placement], axis=AXIS)
+        assert list(book.half_spread) == [entry_h]
+        # The exit side is the ENTRY band's h applied to the EXIT price:
+        # 500 * (1 + h) in, 6 * (1 - h) out.
+        assert book.entry_price[0] == pytest.approx(500.0 * (1.0 + entry_h))
+        assert book.exit_price[0] == pytest.approx(6.0 * (1.0 - entry_h))
+        assert returns[0] == pytest.approx((book.exit_price[0] - book.entry_price[0]) / book.entry_price[0] * 100.0)
+
+    def test_the_scalar_and_compact_paths_agree_under_varying_bands(self) -> None:
+        """⚠ Both paths must carry the SAME per-leg h, including into the
+        ``LegBook``'s own ``half_spread`` — which ``build_equity_curve`` charges
+        again on every rebalance, so a scalar left behind there would diverge on
+        portfolio metrics while trade returns still matched."""
+        placements = [
+            self._placement(["3", "250", "12", "45", "7"], holds=[1, 2]),
+            self._placement(["120", "4", "30", "9"], holds=[1]),
+        ]
+        scalar_book, scalar_returns, scalar_entries, scalar_exits = _place_member(
+            np.random.default_rng(7), placements, axis=AXIS
+        )
+        compact_book, compact_returns, compact_entries, compact_exits = _place_member_compact(
+            np.random.default_rng(7), placements, axis=AXIS
+        )
+        assert list(compact_book.half_spread) == list(scalar_book.half_spread)
+        assert list(compact_book.entry_price) == pytest.approx(list(scalar_book.entry_price))
+        assert list(compact_book.exit_price) == pytest.approx(list(scalar_book.exit_price))
+        assert list(compact_returns) == pytest.approx(list(scalar_returns))
+        assert (compact_entries, compact_exits) == (scalar_entries, scalar_exits)
+        # And the bands genuinely vary, or the assertions above are vacuous.
+        assert len(set(scalar_book.half_spread)) > 1
+
+    def test_the_shared_memory_slice_keeps_each_placements_own_bands(self) -> None:
+        """⚠ Placements of UNEQUAL length, with distinguishable bands, because
+        the packing addresses ``half_spread`` with ``panel_start``/``panel_size``
+        — a slice that is only correct because ``SeriesPlacement`` asserts all
+        three arrays are the same length. Equal-length placements would pass
+        even if the cursor were wrong."""
+        placements = [
+            self._placement(["3", "3", "3"], holds=[1]),
+            self._placement(["250", "250"], holds=[1]),
+            self._placement(["12", "12", "12", "12"], holds=[2]),
+        ]
+        inputs = _MemberInputs(placements=tuple(placements), axis=AXIS, benchmark=None, expected_trade_count=3)
+        with _shared_member_inputs(inputs) as shared:
+            attached = _attach_shared_member_inputs(shared)
+        for original, restored in zip(placements, attached.placements, strict=True):
+            assert list(restored.half_spread) == list(original.half_spread)
+            assert list(restored.adjusted_open) == list(original.adjusted_open)
+
+    def test_a_placement_whose_bands_do_not_match_its_bars_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="half-spreads"):
+            SeriesPlacement(
+                panel=np.arange(3, dtype=np.int64),
+                adjusted_open=np.ones(3, dtype=np.float64),
+                half_spread=np.full(2, _HALF_SPREAD),
+                holds=np.asarray([1], dtype=np.int64),
+                marks=np.ones(3, dtype=np.float64),
+                marks_first=0,
+            )
+
+    @pytest.mark.parametrize("bad", [0.0, 1.0, -0.001, float("nan"), float("inf")])
+    def test_a_half_spread_outside_the_cost_models_contract_is_refused(self, bad: float) -> None:
+        """``cost_model`` requires ``0 < h < 1`` and enforces it on ``Decimal``s.
+        Nothing downstream of the placement is a ``Decimal``, so the NumPy
+        pricing path would otherwise never see the rule."""
+        with pytest.raises(ValueError, match=r"finite and in \(0, 1\)"):
+            SeriesPlacement(
+                panel=np.arange(2, dtype=np.int64),
+                adjusted_open=np.ones(2, dtype=np.float64),
+                half_spread=np.asarray([_HALF_SPREAD, bad], dtype=np.float64),
+                holds=np.asarray([1], dtype=np.int64),
+                marks=np.ones(2, dtype=np.float64),
+                marks_first=0,
+            )
+
+    def test_a_split_adjusted_corpus_still_charges_exactly_the_old_constant(self) -> None:
+        """⚠ THE REGRESSION GUARD. ``survivor_only`` is split-adjusted, so every
+        bar must still answer the maximum band — the scalar ``_HALF_SPREAD``
+        this change removed. A cheaper charge there would be #2400."""
+        for price in ("0.5", "3", "12", "45", "250", "9999"):
+            assert _half_spread_for(Decimal(price), price_basis="split_adjusted") == _HALF_SPREAD
+        assert _half_spread_for(Decimal("250"), price_basis="as_traded") != _HALF_SPREAD

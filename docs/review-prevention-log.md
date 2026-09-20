@@ -9084,3 +9084,71 @@ original, because the gate now *looked* like a bound.
   `tests/test_3236_identity_sequence.py`;
   `tests/test_3236_blockholder_link_sweep_db.py`;
   `scripts/probe_3236_parser_drift.py`; `scripts/accept_3236_link_sweep.py`.
+
+## 2026-09-20 — #3238: the cost basis was a literal, and correcting it on ONE consumer would have been worse than leaving it
+
+- ⚠⚠ **A cost correction applied to the strategy but NOT to its benchmark and its
+  null manufactures promotions rather than measuring them, and is strictly worse than a
+  uniform overcharge.** `backtest_run.py` passed a hardcoded `price_basis="split_adjusted"`
+  at both `cost_positions` call sites, so `cost_band_for` returned the maximum band
+  (`<$5`, 1.450% round trip) for every leg of every run. Correct for `survivor_only`,
+  whose archive really is split-adjusted; wrong for `survivorship_free`, pinned to an
+  `unadjusted` archive whose opens are as-traded nominal prices. The two-line fix was one
+  `git commit` away and would have left `_benchmark_book` and `synthetic_control_run`'s
+  `_HALF_SPREAD` at the maximum band — so `return_vs_buy_and_hold_pct` and
+  `synthetic_control_passed` would both have improved for a reason nobody measured.
+  Measured here: correcting all three moved the comparator's own
+  `buy_and_hold_return_pct` from **3896.97 to 3930.97**, i.e. the benchmark got cheaper
+  too, and `return_vs_buy_and_hold_pct` moved **AGAINST** the strategy. Prevention: when a
+  charge, a filter or a normalisation is corrected, **enumerate every consumer of it and
+  gate on ALL of them moving** — `scripts/ab_3238_cost_basis.py::_charge_moved` /
+  `_null_moved` exit 1 when any one does not, and a revert probe confirms they red on
+  exactly the strategy-only patch.
+- ⚠ **A comment justifying a constant can state a property of ONE population as a property
+  of "the corpus".** Three did: `_benchmark_book`'s *"The corpus OHLC is split-adjusted"*,
+  `_HALF_SPREAD`'s *"the half-spread every leg of this corpus carries"*, and
+  `_NamespaceBook.half_spreads`' *"on the research corpus it is [single-valued]"*. All
+  three were true of `survivor_only` and false of `survivorship_free`, and each one read
+  as a settled fact rather than as an assumption. Prevention: when a comment says "the
+  corpus", "always" or "every", name WHICH corpus — and if the codebase has two, the
+  sentence is a measurement (`CLAUDE.md`'s quantifier rule) and needs the query.
+- ⚠⚠ **Bumping a versioned identifier rotates every identity that hashes it — measure the
+  cost with the existing census, do not assume it either way.** `COST_MODEL_ID` is an
+  input to `entry.identity(...)`, so v3 → v4 moves every `strategy_version`.
+  `scripts/census_3031_identity_rotation.py` exists for exactly this question and was
+  reused: 424 fired `strategy_signals` (362 unresolved) and 3 `strategy_scan_watermark`
+  rows detach; results, declarations, deployments and promotions are all **0** on the
+  current identity. It also cannot pause the live sleeve — `strategy_paper_runtime`
+  filters on `purpose == "capital_candidate"` and after #2845 every manifest strategy is
+  `harness_validation`, so that list is already empty. Prevention: before claiming a
+  version bump is cheap OR expensive, run the rotation census; "it touches the live path"
+  by grep and "it degrades the live path" by measurement are different claims.
+- ⚠ **A mutation-probe anchor pinned to a literal breaks by construction when the literal
+  legitimately moves — that is the anchor working.** `probe_2240_cost_model.py` has now
+  been re-anchored three times (#2695 found it stranded on `-v1` since the v2 split); the
+  same bump also invalidated `verify_2900_point_in_time.py`'s P4, which required exactly
+  two `price_basis="split_adjusted"` occurrences — a claim this change deliberately
+  deletes. Prevention: `bash scripts/check_probe_anchors.sh` runs in pre-push AND CI, so
+  the anchor cannot rot silently; when re-anchoring, re-point it at the NEW invariant
+  (`price_basis=corpus.cost_price_basis`, the selector's body) rather than deleting the
+  probe.
+- ⚠ **A float round-trip at a threshold is a real mechanism and still worth measuring
+  before engineering around it.** The comparator bands from an `array("d")`, so a stored
+  price within a double-epsilon of 5/20/100 could round across. Max scale on
+  `research_price_daily` is 22 dp over 75,972,669 rows — alarming until the values are
+  read: `32.54649353027344` is the exact decimal expansion of a float32, so the
+  `Decimal → float64` conversion is exact. **0 of 75,972,669** values sit within `1e-9` of
+  a band edge without equalling it. Prevention: cite the query and its two numbers; the
+  remedy (carrying `Decimal`s through a compact array built to save memory) would have
+  cost more than the risk it removed.
+- Enforced in: this entry; `app/services/cost_model.py` (`cost_price_basis`,
+  `COST_MODEL_ID`); `app/services/backtest_run.py` (`_Corpus.cost_price_basis`,
+  `load_corpus`, `_resolve_liquidity_policy`, `_benchmark_book`);
+  `app/services/synthetic_control_run.py` (`_half_spread_for`,
+  `SeriesPlacement.half_spread`, `_place_member`, `_place_member_compact`,
+  `_shared_member_inputs`); `scripts/ab_3238_cost_basis.py`;
+  `scripts/measure_2827_gross_vs_net.py::_print_band_table`;
+  `scripts/probe_2240_cost_model.py`; `scripts/verify_2900_point_in_time.py` (P4);
+  `tests/test_cost_model.py::TestBandLookup`;
+  `tests/test_backtest_run.py::TestTheComparatorIsBandedOnItsNominalEntry`;
+  `tests/test_synthetic_control_run.py::TestTheNullIsChargedPerBand`.

@@ -39,6 +39,7 @@ from app.services.cost_model import (
     band_for,
     buy_price,
     cost_band_for,
+    cost_price_basis,
     half_spread_for,
     sell_price,
 )
@@ -58,7 +59,14 @@ SPEC_BANDS: tuple[tuple[str, str | None, str | None, str, int], ...] = (
     (">=$100", "100", None, "0.322", 210),
 )
 
-SPEC_COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max+carry-fx-structural-zero-long-x1-real-usd"
+SPEC_COST_MODEL_ID = "static-p75-insession-v4+archive-basis-band+carry-fx-structural-zero-long-x1-real-usd"
+
+#: The id every stored ``survivorship_free`` result carries, kept as a LITERAL
+#: rather than deleted (#3238). Those 16 rows were charged the maximum band on
+#: every leg while holding bandable nominal prices, so a reader who meets this
+#: string in a stored row needs it to still mean something — and the assertion
+#: below is what stops a later edit quietly reusing it.
+SUPERSEDED_COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max+carry-fx-structural-zero-long-x1-real-usd"
 
 #: ⚠ THE LANE, RESTATED AS LITERALS AND NOT IMPORTED — the same second-copy
 #: rule as ``SPEC_BANDS``. These are also, field for field, the literals
@@ -76,6 +84,17 @@ class TestTheFrozenTable:
         """⚠ A recalibration is a NEW id (§5.1), and a new id moves every
         strategy version. This assertion is what makes that a deliberate act."""
         assert COST_MODEL_ID == SPEC_COST_MODEL_ID
+
+    def test_the_superseded_id_is_not_reused(self) -> None:
+        """#3238 — v3 named the behaviour it charged (``split-adjusted-max``).
+
+        v4 charges a ``survivorship_free`` leg its own nominal band, so the two
+        ids must never be the same string: 16 stored results carry v3 and were
+        costed at the maximum band throughout, and ``assert_no_existing_results``
+        distinguishes an old row from a corrected one by exactly this field.
+        """
+        assert COST_MODEL_ID != SUPERSEDED_COST_MODEL_ID
+        assert "split-adjusted-max" not in COST_MODEL_ID
 
     def test_every_band_matches_the_frozen_calibration(self) -> None:
         assert len(BANDS) == len(SPEC_BANDS)
@@ -135,6 +154,37 @@ class TestBandLookup:
 
     def test_as_traded_price_can_select_its_nominal_band(self) -> None:
         assert cost_band_for(Decimal("500"), price_basis="as_traded").label == ">=$100"
+
+    @pytest.mark.parametrize(
+        ("adjustment_basis", "expected"),
+        [
+            ("unadjusted", "as_traded"),
+            ("split_adjusted", "split_adjusted"),
+            (None, "split_adjusted"),
+            ("", "split_adjusted"),
+            ("total_return", "split_adjusted"),
+            ("UNADJUSTED", "split_adjusted"),
+            ("unadjusted ", "split_adjusted"),
+        ],
+    )
+    def test_only_a_declared_unadjusted_archive_earns_nominal_banding(
+        self, adjustment_basis: str | None, expected: str
+    ) -> None:
+        """#3238 — the selector is TOTAL and fail-closed in one direction only.
+
+        ⚠ The cases that matter are the ones that are NOT ``unadjusted``: a
+        withheld provenance, an unrecognised label, and near-misses of the
+        literal all keep the maximum band. The cheaper direction is reachable
+        only by a stored basis that positively says the prices are as traded,
+        which is why a case-fold or a strip would be a defect here and not a
+        kindness — both would let a malformed label buy a cheaper charge.
+        """
+        assert cost_price_basis(adjustment_basis) == expected
+
+    def test_the_selector_answers_a_basis_the_band_selector_accepts(self) -> None:
+        """The two halves must agree, or a resolved basis raises at the charge."""
+        for adjustment_basis in ("unadjusted", "split_adjusted", None):
+            cost_band_for(Decimal("50"), price_basis=cost_price_basis(adjustment_basis))
 
     def test_an_unknown_basis_is_refused(self) -> None:
         with pytest.raises(ValueError, match="unknown price basis"):

@@ -233,9 +233,25 @@ _PROBE_ANCHORS: Final[Mapping[str, tuple[SourceAnchor, ...]]] = {
         SourceAnchor("app/services/price_quarantine.py", "def rule_b4(prev: Bar, bar: Bar, nxt: Bar", maximum=1),
         SourceAnchor("app/services/price_quarantine.py", "next_close / close", maximum=1),
     ),
+    # ⚠ RE-ANCHORED BY #3238, because the claim it pinned stopped being true.
+    # It required the two literal ``price_basis="split_adjusted"`` call sites —
+    # which asserted "the corpus cannot band, so every leg pays the maximum".
+    # That holds for ``survivor_only`` and was never true of
+    # ``survivorship_free``, whose pinned archive is ``unadjusted``. The
+    # invariant now worth pinning is that neither site carries a LITERAL at all:
+    # both read the basis the corpus resolved, and the resolver is fail-closed.
     "P4": (
         SourceAnchor("app/services/research_corpus_ingest.py", 'ADJUSTMENT_BASIS = "split_adjusted"', maximum=1),
-        SourceAnchor("app/services/backtest_run.py", 'price_basis="split_adjusted"', minimum=2, maximum=2),
+        # ⚠ FOUR, not the old two. The literal it replaces appeared at the two
+        # ``cost_positions`` sites only; the resolved basis is read by every
+        # charge consumer — those two, ``_benchmark_book`` and the §9 collector.
+        # Pinning all four is the stronger invariant and is the one #3238 is
+        # about: a cost correction that reaches the strategy but not its
+        # comparator or its null flatters the comparison, so "they all read the
+        # same resolved basis" is exactly what must not silently regress.
+        SourceAnchor("app/services/backtest_run.py", "price_basis=corpus.cost_price_basis", minimum=4, maximum=4),
+        SourceAnchor("app/services/cost_model.py", "def cost_price_basis(adjustment_basis: str | None)", maximum=1),
+        SourceAnchor("app/services/cost_model.py", 'return "as_traded" if adjustment_basis == "unadjusted"', maximum=1),
     ),
     "P5": (
         SourceAnchor(

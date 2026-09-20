@@ -67,7 +67,9 @@ from app.services.cost_model import (
     CARRY_UNMODELLED,
     COST_MODEL_ID,
     FX_UNMODELLED,
-    UNKNOWN_NOMINAL_PRICE_BAND,
+    PriceBasis,
+    cost_band_for,
+    cost_price_basis,
 )
 from app.services.deflated_sharpe import (
     MIN_MEASURED_TRIALS,
@@ -1174,10 +1176,20 @@ class _NamespaceBook:
     gross_returns: array[float] = field(default_factory=lambda: array("d"))
     #: Every distinct ``h`` this book charged. ⚠ A CENSUS AND NOT A SCALAR. The
     #: gross-vs-net gap above reads as "one round trip" only if the charge is
-    #: single-valued, and on the research corpus it is — ``cost_band_for`` gives
-    #: every ``split_adjusted`` entry the maximum band, so no position selects a
-    #: nominal threshold. Measuring it is what turns that from an inference
-    #: about the code into a fact about the run.
+    #: single-valued — which it is on a SPLIT-ADJUSTED corpus, where
+    #: ``cost_band_for`` gives every entry the maximum band because no
+    #: split-adjusted price can select a nominal threshold.
+    #:
+    #: ⚠⚠ #3238 ENDED THAT AS A PROPERTY OF "the research corpus". The
+    #: ``survivorship_free`` universe is pinned to an ``unadjusted`` archive, so
+    #: its entries DO select nominal bands and this set is routinely larger than
+    #: one. ``scripts/measure_2827_gross_vs_net.py`` already guards on
+    #: ``len(half_spreads) == 1`` before using the closed-form gap, which is why
+    #: measuring the set rather than asserting a scalar was the right call.
+    #:
+    #: ⚠ Its CARDINALITY is not an acceptance test in either direction. It
+    #: records realised included legs only, so a correct run may hold one band
+    #: (every entry in the same band) or none (no realised leg).
     half_spreads: set[float] = field(default_factory=set)
     entry_dates: list[date] = field(default_factory=list)
     #: Positionally parallel to `entry_dates`; `TradeReturns` enforces that.
@@ -1382,6 +1394,7 @@ def _benchmark_book(
     wealth_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
     lo: int,
     hi: int,
+    price_basis: PriceBasis,
 ) -> LegBook:
     """Criterion 7's one-leg-per-opportunity-name comparator on the fixed axis.
 
@@ -1444,9 +1457,26 @@ def _benchmark_book(
         exit_wealth = float(wealth_window[exit_offset])
         if not all(math.isfinite(value) and value > 0.0 for value in (entry_close, entry_wealth, exit_wealth)):
             raise RuntimeError(f"opportunity name {instrument_id} has invalid comparator endpoints")
-        # The corpus OHLC is split-adjusted and has no point-in-time split
-        # factors.  It cannot honestly choose a nominal-price cost band (#2400).
-        half = UNKNOWN_NOMINAL_PRICE_BAND.half_spread
+        # ⚠ BANDED ON ``entry_close``, CHARGED ON ``entry_wealth`` (#3238).
+        # The two are different numbers and that is the point: a band is a
+        # statement about the price the leg TRANSACTS at, while the charge is a
+        # ratio that rides whatever basis the mark is on. ``_absorb`` does the
+        # same thing for a strategy leg — it bands the nominal fill and then
+        # rescales the charged price by ``wealth/raw`` — and ``(1 ± h)`` is
+        # multiplicative, so the fractional cost survives that rescale intact.
+        # Banding ``entry_wealth`` itself would be #2400: a total-return level
+        # is not a nominal price even inside an unadjusted archive.
+        #
+        # ⚠ On a SPLIT-ADJUSTED corpus ``price_basis`` is ``split_adjusted`` and
+        # ``cost_band_for`` returns the maximum band for every leg, which is
+        # exactly the constant this line used to hardcode. The behaviour there
+        # is unchanged; what changed is that it is now DERIVED from the pinned
+        # archive rather than asserted about every corpus.
+        #
+        # ⚠ A comparator leg bands on its entry CLOSE where a strategy leg bands
+        # on its entry OPEN, because the comparator's entry IS that close. The
+        # asymmetry is in the fills, not in the banding rule.
+        half = cost_band_for(Decimal(repr(entry_close)), price_basis=price_basis).half_spread
         book.add(
             entry_index=start + entry_offset - lo,
             exit_index=start + exit_offset - lo,
@@ -1507,9 +1537,31 @@ def _resolve_liquidity_policy(
     when the stored basis disagrees with the archive literal. Picking one basis
     out of several would put a number the corpus does not support into an
     immutable record.
+
+    ⚠⚠ #3238 GAVE THIS A SECOND CONSUMER AND A BIGGER CONSEQUENCE. It used to
+    withhold only a diagnostic; it now also decides ``_Corpus.cost_price_basis``,
+    so a ``None`` here charges every leg of the run the MAXIMUM band. That is
+    the right adverse default — an unknown basis cannot select a nominal
+    threshold — but it is no longer a quiet one, so ALL THREE withholding paths
+    log and each names the cost consequence. Two of them used to be silent,
+    which would have made a whole run's 2x overcharge look like a decision
+    nobody took.
     """
     policy = archive_policy_for(vendor_for(universe))
-    if policy is None or not series_ids:
+    if policy is None:
+        logger.warning(
+            "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
+            "the %s universe's pinned vendor %r carries no declared archive provenance",
+            universe,
+            vendor_for(universe),
+        )
+        return None
+    if not series_ids:
+        logger.warning(
+            "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
+            "the %s universe admitted no series, so no stored adjustment basis can be asserted",
+            universe,
+        )
         return None
     stored = {
         row[0]
@@ -1520,8 +1572,8 @@ def _resolve_liquidity_policy(
     }
     if stored != {policy.adjustment_basis}:
         logger.warning(
-            "entry-liquidity diagnostic withheld: admitted series carry adjustment bases %s "
-            "against the %s archive's pinned %r",
+            "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
+            "admitted series carry adjustment bases %s against the %s archive's pinned %r",
             sorted(stored),
             universe,
             policy.adjustment_basis,
@@ -1978,6 +2030,23 @@ class _Corpus:
     #: is WITHHOLDING and never eligibility: ``sql/305`` refuses an undeclared
     #: adjustment basis exactly as it refuses a split-adjusted one.
     liquidity_policy: ArchivePolicy | None = None
+    #: #3238 — the cost basis this run's PINNED archive earns, resolved once
+    #: from ``liquidity_policy`` and read by every charge site: both
+    #: ``cost_positions`` calls, ``_benchmark_book`` and the §9 collector.
+    #:
+    #: ⚠⚠ THE DEFAULT IS THE FAIL-CLOSED VALUE ON PURPOSE. A construction that
+    #: forgets this field charges the MAXIMUM band; reaching the cheaper basis
+    #: takes a stored ``unadjusted`` provenance and an explicit act. The
+    #: dangerous direction is the one that needs saying out loud, which is what
+    #: makes a field derived from ``liquidity_policy`` safe to carry beside it.
+    #:
+    #: ⚠ ``load_corpus`` is the only production setter and it derives both
+    #: fields from one resolution. The one other legitimate writer is the #3238
+    #: A/B (``scripts/ab_3238_cost_basis.py``), which replaces THIS field alone
+    #: to build its control — leaving ``liquidity_policy`` untouched so the
+    #: entry-liquidity and exit-gap diagnostics are identical across arms and
+    #: cannot be mistaken for the effect being measured.
+    cost_price_basis: PriceBasis = "split_adjusted"
     opportunity_records: Mapping[ResultNamespace, ResultUniverseRecord] = field(default_factory=dict)
 
     @property
@@ -2111,6 +2180,7 @@ def load_corpus(
         termination=termination,
         selection=selection,
         liquidity_policy=liquidity_policy,
+        cost_price_basis=cost_price_basis(liquidity_policy.adjustment_basis if liquidity_policy is not None else None),
         opportunity_records=opportunity_records,
     )
 
@@ -2343,6 +2413,7 @@ def _measure_namespace(
             wealth_closes_by_instrument=wealth_closes_by_instrument,
             lo=lo,
             hi=hi,
+            price_basis=corpus.cost_price_basis,
         ),
         date_count=len(dates),
     )
@@ -2598,7 +2669,7 @@ def evaluate_arm(
             regime=regime,
             window=corpus.window,
         )
-        costed = list(cost_positions(built.positions, price_basis="split_adjusted"))
+        costed = list(cost_positions(built.positions, price_basis=corpus.cost_price_basis))
         _absorb(
             costed,
             series=series,
@@ -2695,7 +2766,7 @@ def _collector_for(
     """
     if cohort_size is None or CONTROL_NAMESPACE not in namespaces:
         return None
-    return CohortCollector(window=corpus.window)
+    return CohortCollector(window=corpus.window, price_basis=corpus.cost_price_basis)
 
 
 def _run_cohort_for(
@@ -2990,7 +3061,7 @@ def evaluate_level_arms(
                     evidence=termination_evidence,
                     ambiguity_arm=ambiguity,
                 )
-            costed = list(cost_positions(positions, price_basis="split_adjusted"))
+            costed = list(cost_positions(positions, price_basis=corpus.cost_price_basis))
             _absorb(
                 costed,
                 series=series,

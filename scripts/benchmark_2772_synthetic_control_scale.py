@@ -22,6 +22,7 @@ from typing import Final, Literal
 
 import numpy as np
 
+from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.equity_curve import build_equity_curve
 from app.services.random_entry_cohort import member_seed
 from app.services.strategy_statistics import DatedEquityCurve, TradeReturns, compute_metrics
@@ -79,10 +80,16 @@ def _fixture(*, series_count: int, trades_per_series: int) -> tuple[_MemberInput
             dtype=np.float64,
         )
         holds = np.ones(trades_per_series, dtype=np.int64)
+        # #3238 — the per-bar band array. Held at the MAXIMUM band so the
+        # arithmetic is identical to the pre-#3238 scalar and past runs stay
+        # comparable under the same ``BENCHMARK_ID``; the array's shape and
+        # bytes are what this fixture exists to measure.
+        half_spread = np.full(bars, float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread), dtype=np.float64)
         placements.append(
             SeriesPlacement(
                 panel=panel,
                 adjusted_open=marks,
+                half_spread=half_spread,
                 holds=holds,
                 marks=marks,
                 marks_first=0,
