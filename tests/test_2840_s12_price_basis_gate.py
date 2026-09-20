@@ -200,7 +200,7 @@ def test_the_scan_declares_no_source() -> None:
     assert "SCAN_ARCHIVE_ADJUSTMENT_BASIS" not in source
 
 
-def test_no_member_adapter_READS_the_carrier() -> None:
+def test_no_member_adapter_reads_the_carrier() -> None:
     """⚠ Keeps the CROSS-SECTIONAL path out of scope by test rather than by inspection.
 
     S-12 is ``per_series`` with no ``member``, so ``segmented_member`` never dispatches
