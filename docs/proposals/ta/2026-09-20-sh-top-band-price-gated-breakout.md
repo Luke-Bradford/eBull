@@ -239,7 +239,11 @@ trial against `MIN_MEASURED_TRIALS = 2` and write rows permanently refused with
 ⚠⚠ **The deflated Sharpe is refused TODAY, and clearing `MIN_MEASURED_TRIALS` is not
 what fixes it.** `deflate_group` (`backtest_run.py:3417`) computes
 `set(measured) - TRIAL_REGISTER.trial_ids` and returns `(None, reason)` for the
-WHOLE GROUP if that difference is non-empty — one undeclared strategy nulls the
+WHOLE GROUP if that difference is non-empty. ⚠ Narrower than earlier wording: the set
+difference is taken AFTER filtering to `usable` measurements carrying moments and an
+effective sample size, so it is not an unconditional rejection whenever any measured
+strategy is undeclared (`backtest_run.py:3438-3453`). Within that filtered set, one
+undeclared strategy nulls the
 deflation for every strategy measured beside it. On `main` at `61ef6e47` that
 difference is already `['s11-volatile-regime-gated-breakout']`: arm 1's register
 entry declares S-11 via `declared_for`, but `deflate_group` keys on the STRATEGY ID
@@ -352,6 +356,12 @@ pass."* Leg 1 was a positive mean.
 Both are required. Neither substitutes for the other, and choosing between them after
 the look is not available.
 
+⚠ **A positive arithmetic mean daily return is not realised profitability**, and the
+readout must say "mean" rather than "made money": a positive mean need not imply a
+positive compounded terminal return. ⚠ The two axes also cover slightly different
+economic exposure — portfolio inference excludes date-zero P&L while the expectancy axis
+can include a date-zero entry — so they are not two views of one identical population.
+
 ⚠ The expectancy legs resample the **union** of the two strategies' cluster dates, not
 the intersection. Intersecting would restrict S-4 to the dates S-12 traded and so
 silently re-scope the control, whose estimand is its own full population.
@@ -421,19 +431,44 @@ it is *said* to be one and frozen in a version hash.
 
 **DECLARED — choices, frozen in `TRIAL_EVALUATOR_VERSION`, not derivations.**
 
-- One block length for both axes, measured on the portfolio paired-difference series.
-  ⚠ The cluster axis holds ACTIVE dates only, so `b` clusters span **at least** `b`
-  panel dates and usually more. The direction is stated because it is the one a reader
-  assumes wrongly; it is not a claim that over-spanning is safe, and longer blocks are
-  not automatically conservative.
+- One block length for both axes, measured on the portfolio paired-difference series
+  because that is the PRIMARY estimand. ⚠ An earlier draft justified it as "the only
+  series defined on every panel date", which is false — both marginal return series are
+  defined there too. ⚠⚠ The transfer is NOT validated, in two reproduced directions:
+  common serial dependence CANCELS in the difference, so a difference-selected block can
+  be far shorter than the treatment series alone would select (`b=1` against `42` in one
+  probe) and the own-return leg is then under-blocked; and the expectancy ratio's
+  relevant linearised series is `(return_sum − mean × count)/E[count]`, whose dependence
+  the portfolio difference need not capture at all. ⚠ A third coupling follows and is
+  declared here: changing the TRADE-date population can shorten the block and so tighten
+  the PORTFOLIO interval, with both equity paths unchanged.
+  ⚠ The cluster axis holds ACTIVE dates only, so `b` clusters span at least `b` panel
+  dates **for a non-wrapping run of `b` distinct active dates** — `b` adjacent dates span
+  `b−1` elapsed intervals, and a circular block that crosses the boundary has no ordinary
+  chronological span at all. None of this makes over-spanning safe; longer blocks are not
+  automatically conservative.
+- ⚠ "Politis & White optimal" is also a transfer between objectives: their criterion
+  targets long-run VARIANCE estimation, not the coverage of these percentile endpoints,
+  and certainly not of a ratio difference. Another application choice, not a coverage
+  derivation.
 - 10,000 replications, the frozen seed, the union cluster axis, and the first-close
   estimand start. Each is argued beside its constant in the module.
 
 **No sample-size floor certifying 2.5%-tail coverage is derivable here, and none is
-invented.** The only published floor available is `block_bootstrap.MIN_CLUSTERS = 2`,
-and it is used as such — as a precondition on EACH strategy's own supporting dates, not
-on the union, because a six-trade treatment against a dense control satisfies a union
-check and supports nothing.
+invented.** ⚠ The floor actually applied is `block_bootstrap.MIN_CLUSTERS = 2`, and it
+is **this repository's computability guard, not a published statistical floor** — an
+earlier draft called it "the only published floor available", which supplies neither a
+publication nor an adequacy result. It is applied to EACH strategy's own supporting
+dates rather than to the union, because a six-date treatment against a dense control
+satisfies a union check and supports nothing.
+
+⚠⚠ **And it admits a grossly miscalibrated test, measured.** With two IID continuous
+symmetric zero-mean observations the percentile lower bound is effectively their
+minimum, so the rejection probability is about **25%, not 2.5%** — reproduced at
+checkpoint 1 at 96 of 400 null samples, and duplicating such books across both declared
+arms defeats the whole conjunction. So clearing this precondition establishes only that
+the arithmetic ran. ⚠ The per-strategy correction narrows the earlier six-date example's
+STARVATION, not its inferential weakness: six supporting dates still clear the floor.
 
 ### Pass bar — eight conjuncts, all required
 
@@ -476,7 +511,11 @@ reversed a claim.**
    round.** An ABSOLUTE economic effect can be declared with no variance at all; the
    variance is what converts either form into a sample size. Standardising removes the
    scale, not the need for the dependence adjustment, the cluster-weight behaviour, or
-   the conversion into decision dates and weeks.
+   the conversion into decision dates and weeks. ⚠ Slightly narrower than a first
+   statement of this correction: a FULLY specified standardised effect plus a sampling
+   model CAN determine a sample size without an absolute variance. What blocks it here is
+   the missing denominator and the unspecified alternatives below, not an absolute
+   requirement for variance in every case.
 2. **`d`'s denominator is undefined here.** Daily paired-difference SD, long-run SD,
    per-trade SD and cluster influence-function SD are four different quantities, and a
    difference of ratios over unequal trade populations has no automatic "paired
@@ -488,8 +527,11 @@ reversed a claim.**
 
 ⚠ The mechanism's own measured cost saving (≈0.29 pp of charged round trip per fire) is
 **not** used as the effect, and could not be: it is a difference of charge COEFFICIENTS,
-not of net expectancies, and the two coincide only if the strategies' gross expectancies
-agree — which is part of what the experiment is for.
+not of net expectancies. ⚠ The reason given in earlier sessions — *"the two coincide only
+if the strategies' gross expectancies agree"* — is **mathematically wrong** and is
+corrected here: the drag on net expectancy is `E[(1+g)·c]`, which involves the scale of
+the gross multiple AND the covariance between gross return and charge, so equal gross
+MEANS are neither sufficient nor necessary for the two differences to agree.
 
 ### §5 obligations: which are met, which are scoped out, and which are simply GAPS
 
@@ -573,8 +615,50 @@ degenerate bootstrap.
    absence of an empty draw establishes nothing on its own.
 8. **Nothing computes this statistic inside a run yet.** The evaluator is pure and
    reviewed; wiring it to a run's two books per quarantine arm is step-3 work.
+9. **The bootstrap's regularity assumptions are unspecified.** Stationarity (or a stated
+   alternative), weak dependence, sufficient moments and stable cluster-count behaviour
+   are all substantive here rather than finite-sample caveats: §"Measured premise" and the
+   supply census both document large era and activity changes across the 58.9-year panel,
+   and the CIRCULAR scheme joins the latest period to the earliest inside a single block.
+10. **A block merely CLOSE to its axis length is unguarded.** The exactly-degenerate
+    configuration is refused; no derivable threshold separates "nearly the whole axis"
+    from "enough blocks", and none is invented.
+11. **Permitting a degenerate DIFFERENCE is blanket.** Collapse can come from periodic
+    block sums, quantile collapse or numerical loss as well as from a constant paired
+    advantage, and the evaluator cannot tell those apart. ⚠ Even a constant OBSERVED
+    advantage establishes only empirical-bootstrap degeneracy, not zero population
+    sampling uncertainty. ⚠ The refusal on a degenerate MARGINAL is likewise a declared
+    policy, not a derivation — this evaluator computes no design effect, so the imported
+    module's undefined-ESS rationale does not transfer automatically.
+12. **The two quarantine arms are validated independently**, so two arms carrying
+    different date windows can enter one trial result, and matching the declared NAMES
+    cannot establish actual `masked`/`admitted` provenance. Another identity check the
+    wiring step owns.
+13. **The version hash binds less than it looks.** `TRIAL_EVALUATOR_VERSION` hashes the
+    evaluator's own bytes while importing live `CONFIDENCE`, `MIN_CLUSTERS` and
+    `optimal_block_length` — all three now change outcomes — and NumPy/RNG behaviour has
+    no recorded provenance either. No expected-dependency digest is checked.
+14. **Extreme finite inputs can still escape.** The imported selector can raise
+    `OverflowError` during its autocovariance powers, and sufficiently small scaling can
+    change the selected block by underflow. Neither is routed through the refusal
+    vocabulary.
+15. **Test coverage is incomplete, and the gaps are listed rather than implied**: control
+    starvation, both-books-empty, disjoint cluster dates, an actual zero-trade resample,
+    minimum-size acceptance, a clipped block, the circular wrap and truncation against an
+    independent oracle, expectancy-axis pairing (the pairing tests are portfolio-only),
+    unequal treatment/control cluster weights, near-constant marginals, mutated clusters,
+    an exact-zero lower bound, identical strategies, and full-result reproducibility.
 
-## Step 2's forward-shadow floor — still NOT derived; its blocker is now amended away
+## Step 2's forward-shadow floor — still NOT derived, and its blocker has MOVED, not gone
+
+⚠⚠ **Read the whole section as HISTORY up to §"What this left", then read that.** What
+follows records two refused derivations and the reasons they were refused; several
+sentences below describe the OLD pass bar and remain true of it and false of the current
+one. Where a statement says the bar has no test statistic, no rejection region or no
+significance model, it is about the superseded inequalities — the current bar is
+§"Statistical contract" above, whose limits are stated there. ⚠ A heading in an earlier
+draft said the blocker was "amended away"; that was wrong, and §"What this left" says
+where it actually sits.
 
 `ForwardShadowFloor` takes no default and `sql/333` CHECKs both numbers `> 0`, so step
 2 cannot proceed without deriving them. A first derivation was written on 2026-09-20,
@@ -738,9 +822,28 @@ instrument here to size:
    an earlier draft of this paragraph claiming it did was wrong.
 
 **So the next step is not a third floor derivation. It is to SPECIFY the forward
-instrument** — which strategy identity, which universe, which arms, which statistic —
-and only then to size it. Both family-B precedents could skip that because their forward
-instrument was the same rule they had just run; arm 2's is not, and cannot be.
+instrument, and that specification is larger than naming four things.** It needs: the
+strategy identity and universe; synchronised CONTROL collection (S-4's forward book, on
+the same dates); a portfolio construction and sizing rule, since one axis of the bar is
+portfolio-level; executable nominal-price inputs, which is what forced `survivor_only`
+out in the first place; a cost model; a treatment for still-unresolved outcomes; an
+accrual model; a stopping and look schedule; and an alpha allocation against §5's
+prospective family-wise budget. ⚠ Two narrowings on the four bullets above, both from
+checkpoint 1: *"a forward shadow accumulates one strategy"* describes the live gate's
+current QUERY (`strategy_live_gate.py:435` aggregates one identity per call), not a
+prohibition on collecting two — the missing thing is a paired instrument, not a
+capability. And `forward_decision_dates` is weaker than "complete evidence dates": ONE
+resolved signal makes a date count even while that day's other signals are unresolved, so
+any conversion inherits that looseness too.
+
+⚠ Both family-B precedents could skip all of this because their forward
+instrument was the same STRATEGY, measured forward; arm 2's forward instrument is not
+even the same statistic. ⚠ Narrower than an earlier draft, which said both predecessors
+used "the same forward instrument" — arm 1's own freeze script is explicit that its
+confirmatory instrument runs under `SCAN_UNIVERSE` and is therefore a DIFFERENT
+`strategy_version` with its own declaration, which the section below quotes. The
+difference that matters for arm 2 is that its bar needs two strategies and two quarantine
+arms at once, which no forward instrument in this repo produces.
 
 ⚠ Nothing about that sequencing is operator-gated.
 
@@ -939,7 +1042,10 @@ the three the refusal added:
 ⚠ Three edges are not code refusals and are handled by construction. **Unequal arm
 coverage** is reported rather than refused (`N_masked <= N_admitted` is expected).
 **Corpus or vendor drift between the census and the run** is caught downstream — the
-run's `corpus_version` is asserted against the declaration at readout, per §"Readout and
+run's `corpus_version` is asserted against the declaration at readout — ⚠ **a promise
+this repo cannot currently keep: `PreregDeclaration` carries no corpus-version field, so
+the assertion has to be made by the step-3 readout against the census artefact, not by
+the declaration.** Recorded as a gap rather than left as a claim. Per §"Readout and
 abort bar". **Same-day concentration** is reported on every cell, and it is mild here.
 
 ## Sequencing — why the declaration is NOT in this PR
