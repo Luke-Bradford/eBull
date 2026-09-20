@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS strategy_intraday_reobservations (
                                           'not_attempted',
                                           'fetch_failed',
                                           'invalid_response',
+                                          'capture_failed',
                                           'comparison_skipped',
                                           'no_overlap',
                                           'no_baseline',
@@ -122,11 +123,11 @@ CREATE TABLE IF NOT EXISTS strategy_intraday_reobservations (
     CONSTRAINT strategy_intraday_reobservations_failure_shape
         CHECK ((failure_class IS NOT NULL)
                = (outcome IN ('not_attempted', 'fetch_failed', 'invalid_response',
-                              'comparison_skipped'))),
+                              'capture_failed', 'comparison_skipped'))),
     -- No response was usable, so no bar can have been in an overlap set.
     CONSTRAINT strategy_intraday_reobservations_barren_outcomes
         CHECK (outcome NOT IN ('unresolved_member', 'not_attempted', 'fetch_failed',
-                               'invalid_response', 'comparison_skipped')
+                               'invalid_response', 'capture_failed', 'comparison_skipped')
                OR overlap_bars = 0),
     CONSTRAINT strategy_intraday_reobservations_compared_outcome
         CHECK ((outcome = 'compared') = (compared_bars > 0)),

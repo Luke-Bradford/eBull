@@ -318,3 +318,46 @@ def test_an_out_of_range_value_does_not_poison_the_transaction(
     assert second.failures == ()
     assert second.compared == 2
     assert _calls(ebull_test_conn)[1][1:6] == ("compared", 3, 2, 2, 0)
+
+
+def test_a_db_error_stays_local_to_one_member(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raw DB error must not poison the recovery write, the cursor, or later members.
+
+    PostgreSQL leaves the enclosing transaction ABORTED after any error, so on a
+    non-autocommit connection an uncontained failure breaks the outcome insert AND
+    ``_advance_cursor`` AND every member after it. Each risky region runs inside
+    ``conn.transaction()`` so the rollback is scoped to one savepoint.
+    """
+    _activate_test_universe(ebull_test_conn, instrument_id=2_840_011, include_missing=True)
+
+    def _db_error(*_args: object, **_kwargs: object) -> None:
+        ebull_test_conn.execute("SELECT * FROM a_table_that_does_not_exist")
+
+    monkeypatch.setattr(strategy_intraday_harvest, "store_intraday_bars", _db_error)
+    report = run_intraday_harvest(ebull_test_conn, _provider(), observed_at=_OBSERVED, max_requests=2)
+
+    # The unresolved peer still ran, so the loop was not broken by the first member.
+    assert {failure.symbol for failure in report.failures} == {"HARVEST", "MISSING-HARVEST"}
+    assert {row[1] for row in _calls(ebull_test_conn)} == {"capture_failed", "unresolved_member"}
+    assert ebull_test_conn.execute(
+        "SELECT failure_class FROM strategy_intraday_reobservations WHERE outcome = 'capture_failed'"
+    ).fetchone() == ("UndefinedTable",)
+
+
+def test_capture_failure_and_comparison_failure_are_distinguishable(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Collapsing them would make the recorded row unable to say which layer broke."""
+    _activate_test_universe(ebull_test_conn, instrument_id=2_840_012)
+
+    def _explode(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(strategy_intraday_harvest, "record_comparison", _explode)
+    _fire(ebull_test_conn, _provider())
+    monkeypatch.setattr(strategy_intraday_harvest, "store_intraday_bars", _explode)
+    _fire(ebull_test_conn, _provider())
+
+    assert [row[1] for row in _calls(ebull_test_conn)] == ["comparison_skipped", "capture_failed"]

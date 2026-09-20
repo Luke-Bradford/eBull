@@ -364,39 +364,61 @@ corporate action effective at `T` with following open `O`, a bracket is decisive
 
 ## 10. Dev-verify — the real path, on the dev DB, against the live provider
 
-`sql/404` applied to dev; four real harvest slices run with the live eToro provider
-(`get_intraday_candles` is informational — no broker mutation, and the unattended guard
-permits it). 2026-09-20, market closed since the 18th.
+`sql/404` applied to dev; four real harvest slices of 6 members run with the live eToro
+provider (`get_intraday_candles` is informational — no broker mutation, and the unattended
+guard permits it). 2026-09-21, market closed since the 18th.
 
-| slice | fetched | completed RTH | **written** | **compared** | diverged |
-| --- | --- | --- | --- | --- | --- |
-| 1 (6 members) | 630 | 354 | 0 | **354** | 0 |
-| 2 (6 members) | 2,670 | 1,296 | 0 | **1,296** | 0 |
-| 3 (6 members) | 4,418 | 2,055 | 0 | **2,055** | 1 |
-| 4 (wraps to members 1-6) | — | — | 0 | **354** | 0 |
+| slice | **written** | **compared** | diverged | failures |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | 1,322 | 0 | 0 |
+| 2 | 0 | 2,106 | **5** | 0 |
+| 3 | 0 | 359 | 0 | 0 |
+| 4 | 0 | 1,322 | 0 | 0 |
 
-**`written = 0` on every slice and `compared = 4,059` is the whole finding.** Nothing new
-existed to capture; 4,059 bars of re-observation evidence were delivered and, before this
-change, discarded.
+**`written = 0` on every slice against `compared = 5,109` is the whole finding** — nothing
+new existed to capture, and 5,109 bars of re-observation evidence were delivered and,
+before this change, discarded. All 24 calls returned `outcome = 'compared'`;
+`missing_baseline` and `invalid_baseline` were zero throughout.
 
-Verified in the same pass:
+⚠ These counts are **not** stable across runs and must not be quoted as a fixed figure:
+which bars get compared depends on where the round-robin cursor sits and how far each
+member's watermark lags. The tables measure it; this row is one sample of it.
 
-- **A real bracket exists.** Slice 4 wrote 354 rows with
-  `baseline_source = 'prior_reobservation'` — e.g. SPY 2026-09-18 19:30Z, left edge
-  `22:55:02.544072Z` (slice 1's `requested_at`), right edge `22:55:55.601557Z` (slice 4's
-  `received_at`). Two real committed rows, conservative side of each bound.
-- **Per-call bounds are real, not the job clock.** `received_at - requested_at` ranged
-  163ms to 1.25s across the six slice-1 calls; all 6/6 satisfy `received_at >= requested_at`.
-- **Counters reconcile.** Every call returned `outcome = 'compared'` with
-  `overlap = compared` and `missing_baseline = invalid_baseline = 0`.
-- ⚠⚠ **One genuine divergence, on first contact.** CENN `5m` bar 2026-08-21 16:20Z:
-  stored `high 3.86 / volume 12`, provider now says `high 3.84 / volume 1`; open, low and
-  close unchanged. So **the provider does silently rewrite stored intraday bars.**
-  That is a late trade cancellation or correction in shape, *not* a split re-base — the
-  distinction §4.3 insists on, now with a live instance. Its baseline is `stored_bar`
-  (`captured_at` 2026-08-21 16:58:30Z, 38 minutes after the bar), so by §6.1 it is
-  **evidence of a rewrite and not a decisive bracket**, and the design records it as
-  exactly that rather than dressing it up.
+**A real bracket exists.** 1,322 rows carry `baseline_source = 'prior_reobservation'`, so
+their left edge is a prior call's `requested_at` rather than a `captured_at` upper bound.
+Per-call `received_at - requested_at` ranged 163ms to 1.25s — real bounds, not the job clock.
+
+### ⚠⚠ The provider does silently rewrite stored intraday bars
+
+Five divergences, all CENN `5m`, and the **shape is close-dominant**:
+
+| bar | moved | detail |
+| --- | --- | --- |
+| 2026-08-31 19:35Z | H, C | `H 3.97→4.00`, `C 3.97→4.00`; O, L, volume unchanged |
+| 2026-09-02 17:35Z | C only | `C 3.90→3.95`; volume identical at 15,968 |
+| 2026-09-02 18:00Z | C only | `C 4.04→3.96`; volume identical at 23,939 |
+| 2026-09-02 18:10Z | C only | `C 3.93→4.05`; volume identical at 24,135 |
+| 2026-09-02 18:15Z | C only | `C 3.93→4.05`; volume identical at 19,388 |
+
+⚠ **This is emphatically NOT a re-basing, and the distinction is the reason §4.3 insists on
+it.** A split re-base scales **all** of O/H/L/C together and changes volume. Here volume is
+**identical to the unit** on all four close-only cases while the close moves in both
+directions. That is the shape of a closing-print or consolidated-tape correction.
+
+⚠ All five baselines are `stored_bar`, so by §6.1 they are **evidence of a rewrite and not
+decisive brackets** — `captured_at` bounds the baseline observation from above only. The
+design records them as exactly that rather than dressing them up.
+
+⇒ The substantive result for #2840: **re-observation detects real provider rewrites on this
+panel at a usable rate**, so the pre-open re-observation fires the experiment needs are now
+worth running. They were not, while nothing recorded a comparison at all.
+
+### Incidental, not this ticket
+
+Three consecutive CENN 5m bars (17:35, 18:00, 18:10) carry an identical `high = 4.10` and
+`low = 3.86`. That may be genuine for a volatile microcap, or it may be a session-level
+extremum leaking into per-bar fields. **Not measured, not acted on here** — noted so it is
+not lost, and it touches the capture path rather than this comparison.
 
 ## 11. Reproduction
 

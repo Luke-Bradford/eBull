@@ -45,7 +45,7 @@ from app.providers.market_data import IntradayBar as ProviderBar
 UNCALLED_OUTCOMES: Final = frozenset({"unresolved_member", "not_attempted"})
 
 #: Outcomes that record a call which happened but yielded no comparison.
-FAILED_CALL_OUTCOMES: Final = frozenset({"fetch_failed", "invalid_response", "comparison_skipped"})
+FAILED_CALL_OUTCOMES: Final = frozenset({"fetch_failed", "invalid_response", "capture_failed", "comparison_skipped"})
 
 
 class ReobservationMember(Protocol):
@@ -260,9 +260,16 @@ def record_failed_call(
     """Record a call that happened but produced no comparison.
 
     ``fetch_failed`` (the provider raised), ``invalid_response`` (the response was
-    refused by ``_completed_rth_bars``) or ``comparison_skipped`` (the response was
-    usable but the capture or the comparison itself raised).  All three keep the real
-    request/response bounds, because the call really did occupy that interval.
+    refused by ``_completed_rth_bars``), ``capture_failed`` (the response was usable but
+    storing the new bars raised) or ``comparison_skipped`` (the capture succeeded and the
+    comparison itself raised).
+
+    ⚠ The last two are deliberately distinct outcomes.  Collapsing them would make a
+    capture-path defect and a comparison-path defect indistinguishable from the recorded
+    row, which is the opposite of what this table is for.
+
+    All four keep the real request/response bounds, because the call really did occupy
+    that interval.
     """
     if outcome not in FAILED_CALL_OUTCOMES:
         raise ValueError(f"{outcome!r} is not a failed-call outcome")

@@ -345,8 +345,16 @@ def _harvest_member(
     # Provider messages can contain request URLs, identifiers or upstream response
     # fragments. Persist the stable exception class for diagnosis without copying
     # those internals into job_runs.
+    # ⚠⚠ EVERY risky region below runs inside ``conn.transaction()``, not just the ones
+    # that write. A DB error leaves the enclosing transaction ABORTED, and on a
+    # non-autocommit connection that poisons everything after it — the recovery write,
+    # the cursor advance, and every later member in the loop. ``conn.transaction()``
+    # rolls back to its own savepoint, so the failure stays local to one member. The
+    # scheduler's connection is autocommit, but this service's tests and direct callers
+    # supply their own, so correctness cannot rest on the caller's mode.
     try:
-        watermark = _watermark(conn, member)
+        with conn.transaction():
+            watermark = _watermark(conn, member)
     except Exception as exc:
         failure_class = type(exc).__name__
         failures.append(HarvestFailure(member.timeframe, member.symbol, failure_class))
@@ -409,24 +417,25 @@ def _harvest_member(
         return _MemberResult(fetched=len(provider_bars), failures=tuple(failures))
 
     try:
-        new = [bar for bar in rth if watermark is None or bar.timestamp.astimezone(UTC) > watermark]
-        gaps = _gap_ranges([bar.timestamp for bar in new], timeframe=member.timeframe, watermark=watermark)
-        rows = [
-            IntradayBar(
-                timeframe=member.timeframe,
-                bar_time=bar.timestamp.astimezone(UTC),
-                instrument_id=member.instrument_id,
-                open=Decimal(bar.open),
-                high=Decimal(bar.high),
-                low=Decimal(bar.low),
-                close=Decimal(bar.close),
-                volume=None if bar.volume is None else Decimal(bar.volume),
-                source=f"etoro/{version}/nyse_rth",
-            )
-            for bar in new
-        ]
-        stored = store_intraday_bars(conn, rows, observed_at=observed_at)
-        gaps_recorded = _record_gaps(conn, member=member, gaps=gaps, observed_at=observed_at.astimezone(UTC))
+        with conn.transaction():
+            new = [bar for bar in rth if watermark is None or bar.timestamp.astimezone(UTC) > watermark]
+            gaps = _gap_ranges([bar.timestamp for bar in new], timeframe=member.timeframe, watermark=watermark)
+            rows = [
+                IntradayBar(
+                    timeframe=member.timeframe,
+                    bar_time=bar.timestamp.astimezone(UTC),
+                    instrument_id=member.instrument_id,
+                    open=Decimal(bar.open),
+                    high=Decimal(bar.high),
+                    low=Decimal(bar.low),
+                    close=Decimal(bar.close),
+                    volume=None if bar.volume is None else Decimal(bar.volume),
+                    source=f"etoro/{version}/nyse_rth",
+                )
+                for bar in new
+            ]
+            stored = store_intraday_bars(conn, rows, observed_at=observed_at)
+            gaps_recorded = _record_gaps(conn, member=member, gaps=gaps, observed_at=observed_at.astimezone(UTC))
     except Exception as exc:
         failure_class = type(exc).__name__
         failures.append(HarvestFailure(member.timeframe, member.symbol, failure_class))
@@ -436,7 +445,7 @@ def _harvest_member(
                 member=member,
                 requested_at=requested_at,
                 received_at=received_at,
-                outcome="comparison_skipped",
+                outcome="capture_failed",
                 failure_class=failure_class,
             ),
             member=member,
@@ -450,14 +459,15 @@ def _harvest_member(
     # bars that were collected correctly.
     compared = diverged = 0
     try:
-        reobservation = record_comparison(
-            conn,
-            member=member,
-            rth_bars=rth,
-            watermark=watermark,
-            requested_at=requested_at,
-            received_at=received_at,
-        )
+        with conn.transaction():
+            reobservation = record_comparison(
+                conn,
+                member=member,
+                rth_bars=rth,
+                watermark=watermark,
+                requested_at=requested_at,
+                received_at=received_at,
+            )
         compared, diverged = reobservation.compared_bars, reobservation.diverged_bars
     except Exception as exc:
         failure_class = type(exc).__name__
