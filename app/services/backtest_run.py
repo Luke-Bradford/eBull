@@ -167,6 +167,7 @@ from app.services.strategy_exit_gap import (
     summarise as summarise_exit_gap,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
+from app.services.strategy_price_basis import from_archive_basis
 from app.services.strategy_promotion_evidence_measure import (
     LedgerMeasurements,
     RealisedLedger,
@@ -1533,7 +1534,15 @@ def _dense_price_history(
 #: string: since #3238 a withheld policy is no longer only a missing diagnostic,
 #: it also charges every leg of the run the maximum band, so a message naming
 #: one consequence without the other would understate it.
-_WITHHELD_POLICY_WARNING = "entry-liquidity diagnostic withheld and every leg will be charged the maximum cost band: "
+#: ⚠ NAMES THREE CONSEQUENCES, NOT TWO (#2840, Codex checkpoint 2). A withheld
+#: policy now ALSO refuses every price-basis-gated entry signal — S-12 today —
+#: because ``_signals_for`` builds its carrier from this same resolution. Without
+#: the third clause an operator reading this warning sees a cost note and cannot
+#: explain why a strategy took zero trades on an otherwise eligible universe.
+_WITHHELD_POLICY_WARNING = (
+    "entry-liquidity diagnostic withheld, every leg will be charged the maximum cost band, and every "
+    "price-basis-gated strategy (S-12) will refuse every bar as missing_market_context: "
+)
 
 
 def _resolve_liquidity_policy(
@@ -2634,6 +2643,9 @@ def evaluate_arm(
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
             regime_provider=regime_provider,
             universe=corpus.universe_basis,
+            archive_adjustment_basis=(
+                corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None
+            ),
         )
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
@@ -3003,6 +3015,9 @@ def evaluate_level_arms(
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
             regime_provider=regime_provider,
             universe=corpus.universe_basis,
+            archive_adjustment_basis=(
+                corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None
+            ),
         )
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
@@ -3189,6 +3204,7 @@ def _signals_for(
     unresolved_breaks: Sequence[date] = (),
     regime_provider: MarketRegimeProvider,
     universe: Universe = BACKTEST_UNIVERSE,
+    archive_adjustment_basis: str | None,
 ) -> list[StrategySignal]:
     """One instrument's whole-series verdicts, per-series or cross-sectional.
 
@@ -3201,7 +3217,24 @@ def _signals_for(
     permissive regime would fabricate market conditions; a pre-1993 regime
     would need a different benchmark (the S&P 500 index itself) and a new
     ``spy_chain`` version.
+
+    ⚠⚠ ``archive_adjustment_basis`` IS THE STRING, NOT A BUILT CARRIER (#2840).
+    The ``PriceBasisSeries`` is constructed HERE, at ``n_bars=len(series)``, so a
+    length mismatch cannot arise on any production path. Handing this function a
+    pre-built carrier would reopen the silent class Codex found at checkpoint 1:
+    ``evaluate`` returns ``no_fill_bar`` for the last bar before reading any
+    input, so a carrier one element short is never looked up and shifts every
+    certification by one with nothing raising.
+
+    ⚠ It is ``corpus.liquidity_policy.adjustment_basis`` and NOT
+    ``corpus.cost_price_basis``. The second is a CHARGING policy that
+    ``ab_3238_cost_basis`` deliberately substitutes (``:355``) — gating signals on
+    it would stop that A/B's control arm trading instead of charging it
+    differently. The first is the root the same script leaves untouched by
+    design (``:30``). ⚠ ``None`` is the WITHHELD state and refuses every bar,
+    which is ``archive_policy_for``'s own posture, not a new one.
     """
+    price_basis = from_archive_basis(archive_adjustment_basis, n_bars=len(series))
     if entry.signals is not None:
         return segmented_signals(
             entry,
@@ -3210,6 +3243,7 @@ def _signals_for(
             masked_reason="quarantined_bar",
             unresolved_breaks=unresolved_breaks,
             regime=regime_provider.for_dates(series.dates),
+            price_basis=price_basis,
         )
     assert entry.member is not None and ranking is not None
     signals: list[StrategySignal] = []
@@ -3222,6 +3256,7 @@ def _signals_for(
             masked_reason="quarantined_bar",
             unresolved_breaks=unresolved_breaks,
             regime=regime_provider.for_dates(series.dates),
+            price_basis=price_basis,
             leg=leg,
         )
         for index, verdict in enumerate(staged.verdicts):
@@ -3368,6 +3403,10 @@ def _rank_cross_section(
             masked_reason="quarantined_bar",
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
             regime=regime_provider.for_dates(series.dates),
+            price_basis=from_archive_basis(
+                corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None,
+                n_bars=len(series),
+            ),
             leg=leg,
         )
         for when, value in staged.scores.items():
