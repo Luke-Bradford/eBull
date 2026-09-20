@@ -62,16 +62,64 @@ denominated in distinct dates rather than signals (``prereg_contract.py:127-132`
 supply that arrives 70 names at a time on a handful of dates is not the evidence a
 per-date count implies.
 
-Refs #2840, #2832, #2437, #2829.
+WHAT THE SECOND PASS ADDS (#2840 step 2, route 1)
+-------------------------------------------------
+Route 1 instantiates ``2026-08-11-portfolio-alpha-viability-plan.md`` §5, whose
+``minimum net effect`` for a COST-mechanism hypothesis is the charged round trip the
+gate buys down. That number is not in the repo: #3238 measured **0.7057%
+bar-weighted** and its own note forbids quoting it per trade. So this pass also
+records, for every fire, the band its FILL would select, which is the per-decision
+quantity §5 needs. Three facts make that outcome-free:
+
+1. the fill is ``open(signal_index + 1)`` unconditionally (``resolve_fills``);
+2. the band keys on the ENTRY fill and is frozen for the hold
+   (``cost_model``'s module docstring: *"a caller cannot accidentally re-key
+   mid-hold"*), so one band per position prices BOTH legs;
+3. the charged round trip is therefore ``2h / (1 + h)`` — gross is multiplied by
+   ``(1 - h) / (1 + h)`` — a function of the entry band alone, with no return in it.
+
+⚠⚠ THE GATE READS ``close(t)`` AND THE CHARGE READS ``open(t+1)``, so S-12 is NOT
+guaranteed the cheapest band. The spec's §"Why ``close(t)``" measured that leak at the
+BAR level (6,815 of 1,025,067 gated bars gap below the edge overnight). Measured here
+on the legs that actually fire, which is the population the effect size is denominated
+in.
+
+⚠ FIRES ARE NOT TRADES, and this pass does not pretend otherwise. It reports the band
+mix under TWO weightings and the derivation must carry both:
+
+- ``all_fires`` — every fire, which over-counts by the ``superseded_open_position``
+  collapse (≈2.80 fires/trade on S-4's stored in-sample cell, and that ratio must NOT
+  be transferred to S-12: the gate deliberately breaks runs).
+- ``max_hold_collapse`` — a greedy pass that, after accepting a fillable fire at index
+  ``i``, refuses every fire through ``i + MAX_HOLD_BARS``. A real position exits at or
+  BEFORE the hold cap (stop, target or cap — ``s4_exit_bracket``), so this quarantine
+  is the longest one any position can impose and the arm OVER-collapses by
+  construction. ⚠ It is a second WEIGHTING, not a bracket: greedy sets under different
+  quarantine lengths are not nested, so the true trade-weighted mix is not arithmetically
+  trapped between the two. What agreement between them buys is evidence that the band
+  mix is insensitive to the collapse, which is the only claim made from it.
+
+⚠ PER-BAR FORWARD RETURN DISPERSION IS MEASURED, gated against ungated, because the
+variance input §5 needs is S-12's and the only stored bootstrap CI is S-4's. Whether
+that proxy is conservative is a DIRECTION, and a direction is measurable: this reports
+``sd(close-to-close return | close >= GATE_EDGE) / sd(close-to-close return)`` so the
+derivation inflates the borrowed SE by ``max(1, ratio)`` rather than asserting which
+way it leans. ⚠ It is a price fact about the corpus — the same class as arm 1's regime
+priors — and reads no strategy outcome, no fill and no position.
+
+Refs #2840, #2832, #2437, #2829, #3238.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Final
 
 import psycopg
@@ -84,14 +132,34 @@ from app.services.backtest_run import (
     _to_series,
     load_corpus,
 )
+from app.services.cost_model import COST_MODEL_ID, PriceBasis, cost_band_for
 from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.research_price_structure_store import load_arms
-from app.services.strategies.s12_cheapest_band_price_gated_breakout import S12_STRATEGY_ID
+from app.services.strategies.s4_volatility_compression_breakout import MAX_HOLD_BARS, S4_PARAMS
+from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
+    CHEAPEST_BAND,
+    GATE_EDGE,
+    S12_PARAMS,
+    S12_STRATEGY_ID,
+)
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import HOLDOUT_BOUNDARY
 from app.services.strategy_segmented_evaluation import segmented_signals
 
 S4_STRATEGY_ID: Final = "s4-volatility-compression-breakout"
+
+#: ⚠ ASSERTED, NOT ASSUMED. The collapse arm quarantines ``MAX_HOLD_BARS`` bars after
+#: an accepted fire, and that cap is only the longest possible hold if BOTH strategies
+#: carry it — S-12 delegates ``s4_exit_bracket`` today, so they do, and this raises at
+#: import if a later edit gives either its own cap. Reading it from the two params
+#: mappings rather than from the one module is the point: the params are what the
+#: identity hashes, so a divergence that moves a strategy version also reds this.
+if not (S4_PARAMS["max_hold_bars"] == S12_PARAMS["max_hold_bars"] == MAX_HOLD_BARS):
+    raise RuntimeError(
+        f"S-4 and S-12 no longer share a hold cap (S-4 {S4_PARAMS['max_hold_bars']!r}, "
+        f"S-12 {S12_PARAMS['max_hold_bars']!r}, module {MAX_HOLD_BARS!r}) — the collapse arm "
+        "quarantines one cap for both strategies and would over- or under-collapse one of them"
+    )
 
 #: ⚠ ORDER MATTERS ONLY FOR THE REPORT. The derivation names each arm explicitly;
 #: it does not read "the first arm".
@@ -132,6 +200,193 @@ def _concentration(dates: Mapping[date, int]) -> dict[str, int]:
     }
 
 
+#: The two weightings the charged-band mix is reported under. ⚠ Neither is the
+#: trade-weighted mix and they are NOT a bracket around it — see the module docstring.
+WEIGHTINGS: Final[tuple[str, ...]] = ("all_fires", "max_hold_collapse")
+
+#: The gate edge as a float, for the numpy pass only. The gate itself already runs on
+#: floats (``PRICE_FLOOR``) under a measured licence — 0 of 75,972,669 stored prices
+#: sit within 1e-9 of a band edge without equalling it (#3238) — and the BAND
+#: selection below stays on ``Decimal`` regardless, because that is what is charged.
+_GATE_EDGE_FLOAT: Final[float] = float(GATE_EDGE)
+
+
+def _round_trip_drag(half_spread: Decimal) -> Decimal:
+    """The charged round trip as a fraction of the gross multiple: ``2h / (1 + h)``.
+
+    A buy fills at ``P(1 + h)`` and the matching sell at ``Q(1 - h)``, so the net
+    multiple is the gross one times ``(1 - h) / (1 + h)`` and the drag is what that
+    removes. ⚠ NOT ``2h``, and NOT ``p75_spread_pct``: both are the first-order
+    approximation and it errs CHEAP, which is the one direction a cost must not.
+    """
+    return 2 * half_spread / (1 + half_spread)
+
+
+@dataclass
+class _Dispersion:
+    """Count / mean / M2 over one population of close-to-close returns.
+
+    ⚠ WELFORD, MERGED IN CHUNKS (Chan et al.), not ``sum`` and ``sumsq``. The
+    population is tens of millions of returns whose tails reach several hundred
+    percent, and a naive second moment is the one place this script could quietly
+    lose precision. The merge form lets each series be reduced in numpy and folded
+    in once.
+    """
+
+    count: int = 0
+    mean: float = 0.0
+    m2: float = 0.0
+
+    def merge(self, *, count: int, mean: float, m2: float) -> None:
+        if count == 0:
+            return
+        if self.count == 0:
+            self.count, self.mean, self.m2 = count, mean, m2
+            return
+        total = self.count + count
+        delta = mean - self.mean
+        self.m2 += m2 + delta * delta * self.count * count / total
+        self.mean += delta * count / total
+        self.count = total
+
+    @property
+    def sd(self) -> float | None:
+        """The sample SD, or ``None`` below two observations — never 0.0 by default."""
+        return math.sqrt(self.m2 / (self.count - 1)) if self.count > 1 else None
+
+    def as_json(self) -> dict[str, object]:
+        return {"count": self.count, "mean": self.mean, "sd": self.sd}
+
+
+@dataclass
+class _BandMix:
+    """The charged-band tally over one (strategy, arm, weighting) cell."""
+
+    fires: int = 0
+    #: A successor bar exists but cannot be filled on (``resolve_fills`` refusal 2).
+    unusable_fill_price: int = 0
+    #: No successor bar at all (refusal 1). Should be 0 — the registry already stamps
+    #: the final bar ``not_evaluable`` — so a non-zero count is a finding, not noise.
+    no_fill_bar: int = 0
+    by_band: Counter[str] = field(default_factory=Counter)
+    drag_total: Decimal = Decimal(0)
+    #: ⚠ FILL dates, not signal dates, and the distinction is the reason this exists.
+    #: ``block_bootstrap.cluster_by_date`` clusters on ``trades.entry_fill_date``, so
+    #: the stored ``bootstrap_cluster_count`` — the denominator any borrowed standard
+    #: error is measured at — is a FILL-date count. The floor's own unit is
+    #: ``signal_bar_date`` (``strategy_live_gate.py:392-395``). Reporting both makes
+    #: the conversion between them measurable instead of assumed, and lets S-4's
+    #: collapsed fill-date count be compared against its stored cluster count, which
+    #: is the only available check on whether the collapse arm over-collapses as
+    #: claimed.
+    fill_dates: Counter[date] = field(default_factory=Counter)
+
+    def as_json(self) -> dict[str, object]:
+        charged = sum(self.by_band.values())
+        return {
+            "fires": self.fires,
+            "charged_legs": charged,
+            "unusable_fill_price": self.unusable_fill_price,
+            "no_fill_bar": self.no_fill_bar,
+            "distinct_fill_dates": len(self.fill_dates),
+            "concentration": _concentration(self.fill_dates),
+            "by_band": dict(sorted(self.by_band.items())),
+            # ⚠ Denominated in CHARGED legs, not in fires: a fire with no usable fill
+            # opens no position and pays nothing, so averaging it in as a zero would
+            # understate the charge the mechanism buys down.
+            "mean_round_trip_charge_pct": (float(self.drag_total / charged * 100) if charged else None),
+            "cheapest_band_share": (self.by_band[CHEAPEST_BAND.label] / charged if charged else None),
+        }
+
+
+def _absorb_bands(
+    *,
+    fired_indices: Sequence[int],
+    series: object,
+    price_basis: PriceBasis,
+    mixes: Mapping[str, _BandMix],
+) -> None:
+    """Tally the band each fire's FILL selects, under both weightings.
+
+    The collapse arm is a greedy quarantine: after a FILLABLE fire at ``i`` nothing
+    through ``i + MAX_HOLD_BARS`` is accepted, because a position opened at ``i + 1``
+    can still be open at ``i + 1 + MAX_HOLD_BARS`` and every fire whose own fill lands
+    inside that span is ``superseded_open_position``.
+
+    ⚠ ONLY A FILLABLE FIRE QUARANTINES. A fire whose successor cannot be priced opens
+    no position, so it supersedes nothing — treating it as if it did would drop real
+    later entries from the collapse arm.
+    """
+    rows = series.rows  # type: ignore[attr-defined]
+    dates = series.dates  # type: ignore[attr-defined]
+    quarantined_until: int | None = None
+    for index in sorted(fired_indices):
+        collapsible = quarantined_until is None or index > quarantined_until
+        cells = [mixes["all_fires"]] + ([mixes["max_hold_collapse"]] if collapsible else [])
+        for cell in cells:
+            cell.fires += 1
+        fill_index = index + 1
+        if fill_index >= len(rows):
+            for cell in cells:
+                cell.no_fill_bar += 1
+            continue
+        fill_open = rows[fill_index].get("open")
+        # ⚠ `<= 0`, not `== 0` — `resolve_fills`'s own two-sided test, copied rather
+        # than approximated so this census refuses exactly what the run refuses.
+        if fill_open is None or fill_open <= 0:
+            for cell in cells:
+                cell.unusable_fill_price += 1
+            continue
+        band = cost_band_for(fill_open, price_basis=price_basis)
+        drag = _round_trip_drag(band.half_spread)
+        for cell in cells:
+            cell.by_band[band.label] += 1
+            cell.drag_total += drag
+            cell.fill_dates[dates[fill_index]] += 1
+        if collapsible:
+            quarantined_until = index + MAX_HOLD_BARS
+
+
+def _absorb_dispersion(series: object, *, dispersion: Mapping[tuple[str, str], _Dispersion], arm: str) -> None:
+    """Fold one series' close-to-close returns into the two dispersion populations.
+
+    The split is on the LEFT bar's close against the gate edge — i.e. the forward
+    one-bar return CONDITIONAL on the decision bar clearing the gate, which is the
+    conditioning the borrowed variance has to survive.
+
+    ⚠ IT CONDITIONS ON THE PRICE LEVEL, NOT ON THE RULE. S-12 fires on compression
+    and a breakout as well, so this is not "the dispersion of S-12's trades" and must
+    not be reported as one. What it answers is narrower and is the only thing the
+    derivation asks of it: does restricting to the cheapest band raise or lower
+    per-bar dispersion, and by how much.
+
+    ⚠ A masked close arrives as NaN through ``array_closes``, and every NaN
+    comparison is False, so masked bars drop out of BOTH populations without a
+    branch — the same treatment the strategy gives them.
+    """
+    closes = series.array_closes  # type: ignore[attr-defined]
+    if closes.size < 2:
+        return
+    previous, following = closes[:-1], closes[1:]
+    usable = (previous > 0) & (following > 0)
+    if not usable.any():
+        return
+    base = previous[usable]
+    returns = following[usable] / base - 1.0
+    for population, sample in (("all", returns), ("gated", returns[base >= _GATE_EDGE_FLOAT])):
+        if sample.size == 0:
+            continue
+        dispersion[(arm, population)].merge(
+            count=int(sample.size),
+            mean=float(sample.mean()),
+            # ⚠ ddof=0 here ON PURPOSE: `merge` accumulates M2 (the sum of squared
+            # deviations), and the sample correction is applied once at the end in
+            # `_Dispersion.sd`. Passing a corrected variance per chunk would apply it
+            # once per series instead.
+            m2=float(sample.var() * sample.size),
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -155,6 +410,10 @@ def main(argv: list[str] | None = None) -> int:
     fired: Counter[tuple[str, str]] = Counter()
     verdicts: Counter[tuple[str, str, str]] = Counter()
     signal_dates: dict[tuple[str, str], Counter[date]] = {(s, a): Counter() for s in STRATEGIES for a in ARMS}
+    band_mix: dict[tuple[str, str, str], _BandMix] = {
+        (s, a, w): _BandMix() for s in STRATEGIES for a in ARMS for w in WEIGHTINGS
+    }
+    dispersion: dict[tuple[str, str], _Dispersion] = {(a, p): _Dispersion() for a in ARMS for p in ("all", "gated")}
     entries = {strategy_id: STRATEGY_MANIFEST[strategy_id] for strategy_id in STRATEGIES}
 
     with psycopg.connect(settings.database_url) as conn:
@@ -183,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             -series_id for series_id in opportunity.evaluated_series_ids
         }
         corpus_window_end = corpus.window.end
+        corpus_price_basis = corpus.cost_price_basis
         total = len(corpus.pairs)
         evaluated = 0
         for series_seen, (name_key, series_id) in enumerate(corpus.pairs, start=1):
@@ -200,7 +460,9 @@ def main(argv: list[str] | None = None) -> int:
                 if len(series) < 2:
                     continue
                 regime = regime_provider.for_dates(series.dates)
+                _absorb_dispersion(series, dispersion=dispersion, arm=arm)
                 for strategy_id, entry in entries.items():
+                    fired_indices: list[int] = []
                     for signal in segmented_signals(
                         entry,
                         series,
@@ -220,6 +482,16 @@ def main(argv: list[str] | None = None) -> int:
                         if signal.verdict == "fired":
                             fired[(strategy_id, arm)] += 1
                             signal_dates[(strategy_id, arm)][when] += 1
+                            fired_indices.append(signal.signal_index)
+                    # ⚠ PER SERIES AND PER ARM. The collapse quarantine is a property
+                    # of one instrument's own bar index; carrying it across series
+                    # would let one name's position supersede another's entry.
+                    _absorb_bands(
+                        fired_indices=fired_indices,
+                        series=series,
+                        price_basis=corpus.cost_price_basis,
+                        mixes={w: band_mix[(strategy_id, arm, w)] for w in WEIGHTINGS},
+                    )
             evaluated += 1
         conn.rollback()
 
@@ -240,14 +512,38 @@ def main(argv: list[str] | None = None) -> int:
             },
         }
 
+    def _dispersion_report(arm: str) -> dict[str, object]:
+        everything, gated = dispersion[(arm, "all")], dispersion[(arm, "gated")]
+        sd_all, sd_gated = everything.sd, gated.sd
+        return {
+            "all_bars": everything.as_json(),
+            "gated_bars": gated.as_json(),
+            # ⚠ The ratio is the whole point: >= 1 means the borrowed S-4 standard
+            # error UNDERSTATES S-12's and the derivation must inflate it; < 1 means
+            # the borrow is conservative. Neither direction is assumed anywhere.
+            "sd_ratio_gated_over_all": (sd_gated / sd_all if sd_all and sd_gated else None),
+        }
+
     report: dict[str, object] = {
         "universe": BACKTEST_UNIVERSE,
         "holdout_boundary": HOLDOUT_BOUNDARY.isoformat(),
         "evaluation_window_end": corpus_window_end.isoformat(),
         "production_arm": "masked",
+        "cost_price_basis": corpus_price_basis,
+        "cost_model_id": COST_MODEL_ID,
+        "gate_edge": str(GATE_EDGE),
+        "cheapest_band": CHEAPEST_BAND.label,
+        "max_hold_bars": MAX_HOLD_BARS,
         "limited_to_series": args.limit,
         "series_evaluated": evaluated,
         "supply": {f"{strategy_id}/{arm}": _supply(strategy_id, arm) for strategy_id in STRATEGIES for arm in ARMS},
+        "charged_band_mix": {
+            f"{strategy_id}/{arm}/{weighting}": band_mix[(strategy_id, arm, weighting)].as_json()
+            for strategy_id in STRATEGIES
+            for arm in ARMS
+            for weighting in WEIGHTINGS
+        },
+        "bar_return_dispersion": {arm: _dispersion_report(arm) for arm in ARMS},
     }
     if args.limit is not None:
         report["WARNING"] = (
@@ -261,4 +557,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["ARMS", "S4_STRATEGY_ID", "STRATEGIES", "main"]
+__all__ = ["ARMS", "S4_STRATEGY_ID", "STRATEGIES", "WEIGHTINGS", "main"]
