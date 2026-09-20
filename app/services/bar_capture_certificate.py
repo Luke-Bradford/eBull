@@ -228,8 +228,14 @@ UNVERIFIABLE_BUCKET: Final = "unverifiable_capture_semantics"
 #: eligibility. Until a confirmed split inside a reachable window settles it,
 #: this flag stays ``False`` and ``capture_certificate`` refuses everything.
 #:
-#: ⚠ FLIPPING THIS IS A RULE CHANGE: bump ``CAPTURE_CERTIFICATE_RULE_ID`` in the
-#: same commit, because every prior verdict was computed under the refusal.
+#: ⚠ FLIPPING THIS IS A RULE CHANGE. It does NOT need a manual version bump to be
+#: visible — this flag is a literal in this file and ``CAPTURE_CERTIFICATE_VERSION``
+#: hashes this file's bytes, so editing it moves the version automatically. Bumping
+#: ``CAPTURE_CERTIFICATE_RULE_ID`` as well is about READABILITY: the id is the half a
+#: human reads, and "v1 refused everything / v2 can certify" is worth saying out loud.
+#: ⚠ The earlier wording here implied the version would otherwise stay put, and a
+#: reviewer read it exactly that way. The automatic half is pinned by
+#: ``tests/test_2840_bar_capture_certificate.py::test_the_version_hashes_this_modules_own_source``.
 PROVIDER_REWRITE_TIMING_VERIFIED: Final = False
 
 #: What the refusal above is called when it fires. Distinct from

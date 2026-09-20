@@ -299,3 +299,24 @@ class TestImpossibleIsNamedBecauseItMustBeExcluded:
         capture = bar + timedelta(minutes=10)
         assert nominality_bucket(bar, capture) == IMPOSSIBLE_BUCKET
         assert capture.astimezone(_NY).date() == bar.astimezone(_NY).date()
+
+
+def test_the_version_hashes_this_modules_own_source() -> None:
+    """Any literal in this file — including the provider flag — moves the version.
+
+    Pinned because a reviewer read the provider flag's comment as meaning a
+    manual ``CAPTURE_CERTIFICATE_RULE_ID`` bump was the ONLY thing that would
+    move the version. It is not: the source hash covers every constant declared
+    here, so flipping ``PROVIDER_REWRITE_TIMING_VERIFIED`` or changing
+    ``CAPTURE_SEMANTICS_RULE_ID`` rotates the string on its own.
+    """
+    import hashlib
+    from pathlib import Path
+
+    from app.services import bar_capture_certificate as module
+    from app.services.bar_capture_certificate import CAPTURE_CERTIFICATE_VERSION
+
+    source_hash = hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()[:12]
+    assert f"+{source_hash}+" in CAPTURE_CERTIFICATE_VERSION
+    # ...and the flag really is a literal in that file, so editing it changes those bytes.
+    assert "PROVIDER_REWRITE_TIMING_VERIFIED: Final = False" in Path(module.__file__).read_text()

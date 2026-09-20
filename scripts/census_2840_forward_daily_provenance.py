@@ -1140,13 +1140,17 @@ _CAPTURE_CERTIFICATE_SQL = """
 def _bucket_table(by_timeframe: Mapping[str, Counter[str]]) -> list[str]:
     """One rendered table per bucket vocabulary, totals included."""
     buckets = sorted({bucket for counts in by_timeframe.values() for bucket in counts})
-    rows = ["  timeframe  " + "  ".join(f"{bucket:>30}" for bucket in buckets) + "  total"]
+    # ⚠ The header's widths are the SAME format specs as the data rows below, not
+    # literals that happen to match. "timeframe" is nine characters, so the literal
+    # lined up by coincidence and would have silently skewed the moment the word or
+    # the column width changed.
+    rows = ["  " + f"{'timeframe':>9}" + "  " + "  ".join(f"{bucket:>30}" for bucket in buckets) + f"  {'total':>9}"]
     for timeframe in sorted(by_timeframe):
         counts = by_timeframe[timeframe]
         rows.append(
             f"  {timeframe:>9}  "
             + "  ".join(f"{counts[bucket]:>30,}" for bucket in buckets)
-            + f"  {sum(counts.values()):,}"
+            + f"  {sum(counts.values()):>9,}"
         )
     totals: Counter[str] = Counter()
     for counts in by_timeframe.values():
@@ -1156,7 +1160,7 @@ def _bucket_table(by_timeframe: Mapping[str, Counter[str]]) -> list[str]:
         + "all".rjust(9)
         + "  "
         + "  ".join(f"{totals[bucket]:>30,}" for bucket in buckets)
-        + f"  {sum(totals.values()):,}"
+        + f"  {sum(totals.values()):>9,}"
     )
     return rows
 
