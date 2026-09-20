@@ -413,6 +413,26 @@ def _union_axis(
     for slot, clusters in enumerate((treatment, control)):
         if not np.all(np.isfinite(clusters.return_sums)):
             raise S12PairedTrialRefused("a cluster carries a non-finite return sum")
+        # ⚠⚠ RE-CHECK ``DateClusters``'s OWN INVARIANTS, DO NOT TRUST THEM. It is a
+        # frozen dataclass wrapped around WRITABLE NumPy arrays, so every check in
+        # its ``__post_init__`` describes the moment of construction and nothing
+        # later. Codex checkpoint 2 reproduced the consequence: setting
+        # ``trade_counts[0] = 101`` after construction leaves ``trade_count`` at
+        # 250 while the array sums to 350, and the pooled point estimate moved from
+        # 0.50 to 0.357 with the arm still PASSING. The class itself records why the
+        # two counts must agree — *"the design effect and the point estimate would
+        # then divide by different nominal counts"*.
+        if len(clusters.trade_counts) != len(clusters.dates) or len(clusters.return_sums) != len(clusters.dates):
+            raise S12PairedTrialRefused(
+                f"a cluster axis is ragged: {len(clusters.dates)} dates, {len(clusters.trade_counts)} counts, "
+                f"{len(clusters.return_sums)} sums"
+            )
+        pooled = int(clusters.trade_counts.sum())
+        if pooled != clusters.trade_count:
+            raise S12PairedTrialRefused(
+                f"a cluster axis holds {pooled} trades but declares {clusters.trade_count} — the point estimate "
+                "and the declared population would divide by different nominal counts"
+            )
         for day, count, total in zip(clusters.dates, clusters.trade_counts, clusters.return_sums):
             # ⚠ ``DateClusters`` is a frozen dataclass around MUTABLE arrays, and
             # its own validation accepts a fractional count such as 1.5 — which

@@ -506,7 +506,12 @@ class TestTheNumericalEdges:
         control_daily = _noise(63)
         days = _dates(_AXIS + 1)[1:]
         clusters = _clusters(days, np.full(len(days), 0.3))
-        object.__setattr__(clusters, "trade_counts", np.full(len(days), 1.5))
+        # ⚠ Two entries moved so the TOTAL still matches ``trade_count`` — otherwise
+        # the count-total refusal fires first and this case never reaches the
+        # integrality check it exists for.
+        fractional = clusters.trade_counts.astype(np.float64)
+        fractional[0], fractional[1] = 1.5, 0.5
+        object.__setattr__(clusters, "trade_counts", fractional)
         with pytest.raises(S12PairedTrialRefused, match="whole number of"):
             evaluate_arm(
                 PairedBooks(
@@ -546,3 +551,25 @@ class TestTheNumericalEdges:
         assert verdict.treatment_supporting_dates == _AXIS
         assert verdict.control_supporting_dates == _AXIS
         assert verdict.portfolio_own.replication_variance > 0.0
+
+    def test_a_mutated_cluster_count_total_is_refused(self) -> None:
+        # ⚠⚠ Codex checkpoint 2, P2. ``DateClusters`` is frozen around WRITABLE
+        # arrays, so its constructor checks describe construction and nothing
+        # later. Mutating one count to 101 leaves ``trade_count`` at 250 while the
+        # array sums to 350 — the pooled point estimate moved 0.50 -> 0.357 and the
+        # arm still PASSED.
+        control = _noise(68)
+        days = _dates(_AXIS + 1)[1:]
+        clusters = _clusters(days, np.full(len(days), 0.5))
+        clusters.trade_counts[0] = 101
+        with pytest.raises(S12PairedTrialRefused, match="different nominal counts"):
+            evaluate_arm(
+                PairedBooks(
+                    arm="masked",
+                    dates=_dates(_AXIS + 1),
+                    treatment_equity=_equity(control + 0.004),
+                    control_equity=_equity(control),
+                    treatment_clusters=clusters,
+                    control_clusters=_clusters(days, np.zeros(len(days))),
+                )
+            )
