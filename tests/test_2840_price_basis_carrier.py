@@ -24,6 +24,7 @@ from app.services.strategy_price_basis import (
     PRICE_BASIS_RULE_VERSION,
     PriceBasisSeries,
     from_archive_basis,
+    from_undeclared_source,
 )
 from app.services.strategy_registry import StrategyInput, evaluate
 
@@ -252,3 +253,47 @@ def test_s12_is_the_only_consumer_while_the_rule_stays_out_of_input_rule_sets() 
         f"{importers} now read the price-basis rule; a second consumer means INPUT_RULE_SETS must carry "
         "PRICE_BASIS_RULE_VERSION, which rotates every strategy identity — see the spec's §7"
     )
+
+
+# ------------------------------------------------- the undeclared-source constructor
+
+
+@pytest.mark.parametrize("n_bars", [0, 1, 200])
+def test_an_undeclared_source_certifies_nothing(n_bars: int) -> None:
+    """⚠⚠ THE SCAN'S CONSTRUCTOR, and it replaces a ``str | None`` MODULE CONSTANT.
+
+    Once #2840 §6 item 3 removed S-12's universe token,
+    ``strategy_signal_scan.SCAN_ARCHIVE_ADJUSTMENT_BASIS`` was the only thing between
+    the live scan and a nominal ``>= $100`` gate on back-adjusted ``price_daily``
+    levels — and it was one token edit from ``None`` to ``"unadjusted"``. There is no
+    token here.
+    """
+    carrier = from_undeclared_source(n_bars=n_bars)
+    assert len(carrier) == n_bars
+    assert carrier.certifies_nothing()
+    assert carrier.not_evaluable_indices == tuple(range(n_bars))
+    assert set(carrier.values) <= {None}
+
+
+@pytest.mark.parametrize("n_bars", [0, 1, 200])
+def test_the_undeclared_source_equals_a_withheld_archive_basis(n_bars: int) -> None:
+    """⚠ Pinned so the two cannot drift into disagreeing about the withheld case.
+
+    ``from_undeclared_source`` is the value ``from_archive_basis(None, ...)`` already
+    returned; asserting the equality is what keeps a later edit to either one from
+    making the scan's carrier quietly different from the backtest's withheld carrier.
+    """
+    assert from_undeclared_source(n_bars=n_bars) == from_archive_basis(None, n_bars=n_bars)
+
+
+def test_both_constructors_refuse_a_negative_length() -> None:
+    """⚠ The one input that distinguished them before the guard (Codex checkpoint 1).
+
+    ``from_archive_basis`` raised at ``n_bars < 0`` while a naive
+    ``from_undeclared_source`` returned an EMPTY carrier — and an empty carrier passes
+    ``certifies_nothing()``, so the equality above would have held nowhere useful and
+    failed exactly where a length bug lives.
+    """
+    for build in (from_undeclared_source, lambda *, n_bars: from_archive_basis(None, n_bars=n_bars)):
+        with pytest.raises(ValueError, match="n_bars must be non-negative"):
+            build(n_bars=-1)

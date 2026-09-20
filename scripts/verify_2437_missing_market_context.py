@@ -44,7 +44,7 @@ from app.services.price_masked_bars import MASKED_REASON, load_masked_bars
 from app.services.price_segments import load_unresolved_breaks
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST
-from app.services.strategy_price_basis import from_archive_basis
+from app.services.strategy_price_basis import from_undeclared_source
 from app.services.strategy_segmented_evaluation import segmented_signals
 from app.services.strategy_signal_scan import SCAN_UNIVERSE
 
@@ -88,7 +88,11 @@ def dump_arm(conn: psycopg.Connection, path: str) -> None:
                 masked_reason=MASKED_REASON,
                 unresolved_breaks=breaks,
                 regime=regime,
-                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                # ⚠ NO PINNED ARCHIVE ON THIS PATH, SO NO ARCHIVE BASIS TO PASS (#2840). This
+                # used to read a literal ``"unadjusted"`` and was only safe because S-12's
+                # ``AS_TRADED_UNIVERSES`` token refused every bar first; with the token gone the
+                # literal would have certified a back-adjusted level against a nominal gate.
+                price_basis=from_undeclared_source(n_bars=len(series)),
             )
             bucket = per_strategy[strategy_id]
             counts: Counter = bucket["counts"]  # type: ignore[assignment]

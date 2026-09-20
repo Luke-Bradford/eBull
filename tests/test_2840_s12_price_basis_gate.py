@@ -7,15 +7,24 @@ is general and the gate is S-12's alone.
 
 from __future__ import annotations
 
+from datetime import date
+from pathlib import Path
+
 import pytest
 
 from app.services.indicator_series import BarSeries
+from app.services.market_regime import unconstrained_regime
+from app.services.price_segments import series_segment_bounds
 from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
     PRICE_BASIS_REFUSAL_REASON,
     S12_PARAMS,
+    S12_STRATEGY_ID,
     s12_signals,
 )
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_price_basis import PRICE_BASIS_RULE_VERSION, PriceBasisSeries, from_archive_basis
+from app.services.strategy_registry import StrategySignal
+from app.services.strategy_segmented_evaluation import segmented_signals
 from tests.test_2840_cheapest_band_price_gated_breakout import (
     FIRING_INDEX,
     REASON,
@@ -136,16 +145,208 @@ def test_a_misaligned_carrier_raises_in_both_directions(delta: int) -> None:
         )
 
 
-def test_the_universe_gate_still_fires_first_on_the_scan_universe() -> None:
-    """``AS_TRADED_UNIVERSES`` stays until #2840 §6 item 3 removes it.
+def test_a_certified_carrier_evaluates_on_the_scan_universe() -> None:
+    """⚠⚠ THE INVERSION, and the single test the whole of #2840 §6 item 3 reads off.
 
-    That is what keeps the 5,791 stored ``survivor_only`` observations reproducible
-    across the identity rotation: their content is this refusal, and it is unmoved.
+    Until this change ``AS_TRADED_UNIVERSES`` refused every ``survivor_only`` bar by
+    NAME, whatever the carrier said. The verdict now follows the BASIS: a certified
+    carrier fires here exactly as it would on the backtest universe.
+
+    ⚠ This does NOT mean the live scan is certified. The production scan builds its
+    carrier with ``from_undeclared_source`` and still refuses every bar — see
+    ``test_the_scan_declares_no_source``. What moved is which fact decides.
     """
     series = _above_edge()
     signals = s12_signals(series, universe="survivor_only", masked_reason=REASON, price_basis=_certified(series))
-    assert {(s.verdict, s.reason) for s in signals} == {("not_evaluable", PRICE_BASIS_REFUSAL_REASON)}
+    assert _verdict_at(signals, FIRING_INDEX) == ("fired", None)
+    on_backtest_universe = s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=_certified(series))
+    assert [(s.verdict, s.reason) for s in signals] == [(s.verdict, s.reason) for s in on_backtest_universe]
+
+
+def test_an_uncertified_carrier_refuses_on_the_backtest_universe() -> None:
+    """⚠ The other half of the pair, and together they prove the verdict follows the
+    BASIS and not the universe: same universe as the fire above, opposite carrier,
+    opposite verdict.
+
+    ⚠ The last bar is ``no_fill_bar`` rather than the basis refusal — the
+    short-circuit routes through ``evaluate``, which stamps a segment's final bar
+    before reading any input. The removed universe token refused uniformly and so
+    disagreed with ``evaluate`` on exactly that bar.
+    """
+    series = _above_edge()
+    signals = s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=_withheld(series))
+    assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
+    assert (signals[-1].verdict, signals[-1].reason) == ("not_evaluable", "no_fill_bar")
+
+
+def test_the_scan_declares_no_source() -> None:
+    """⚠⚠ THE TRIPWIRE §3 OF THE SPEC RESTS ON, and its limit is stated there.
+
+    Removing the universe token left ``SCAN_ARCHIVE_ADJUSTMENT_BASIS`` as the only
+    thing between the live scan and a nominal gate on back-adjusted ``price_daily``
+    levels — one token edit away. That constant is gone; the scan reaches the carrier
+    through ``from_undeclared_source``, which has no token to flip.
+
+    ⚠ It does NOT prevent an inline ``PriceBasisSeries(values=("observed_unadjusted",)
+    * n)``, which is public and structural (Codex checkpoint 1). This catches the
+    cheap mistake, not a determined one.
+    """
+    source = Path("app/services/strategy_signal_scan.py").read_text()
+    assert "from_undeclared_source" in source
+    assert "from_archive_basis" not in source, (
+        "the scan has no pinned archive; building its carrier from an archive basis is the "
+        "misdeclaration #2840 §6 item 3 removed"
+    )
+    assert "SCAN_ARCHIVE_ADJUSTMENT_BASIS" not in source
+
+
+def test_no_member_adapter_reads_the_carrier() -> None:
+    """⚠ Keeps the CROSS-SECTIONAL path out of scope by test rather than by inspection.
+
+    S-12 is ``per_series`` with no ``member``, so ``segmented_member`` never dispatches
+    it, and every cross-sectional adapter discards ``price_basis``. If one starts reading
+    it, ``stage_cross_sectional_member``'s pre-input terminal refusal becomes reachable
+    for a basis reason and needs its own analysis — plus that is a second consumer, so
+    ``INPUT_RULE_SETS`` is owed its sixth entry.
+
+    ⚠⚠ ASSERTED BEHAVIOURALLY, NOT BY A SOURCE SUBSTRING (review bot NITPICK on the
+    first version, and it was right). That version looked for the literal
+    ``"price_basis=price_basis"`` in ``inspect.getsource``, which a multiline call or a
+    reordered kwarg defeats — a textual gate that passes on a technicality is worse than
+    no gate, because it reads as coverage. Here every member adapter is CALLED twice,
+    once with a fully certified carrier and once with one that certifies nothing, and the
+    two results must be identical. An adapter that reads the carrier cannot satisfy that
+    however it is formatted.
+
+    ⚠ Detection power probed rather than assumed, in both directions:
+    ``CrossSectionalMember`` equality is structural (same input → equal, so the assertion
+    is not identity-vacuous), both real adapters compare equal across the two carriers,
+    and a wrapper that stages from a different view when ``certifies_nothing()`` IS
+    flagged.
+
+    ⚠ Residual limit: an adapter that reads the carrier and happens to produce an
+    identical ``CrossSectionalMember`` either way is undetected. That is far narrower
+    than the substring version's limit, and such an adapter is not yet a consumer in the
+    sense ``INPUT_RULE_SETS`` cares about — its verdicts do not depend on the rule.
+    """
+    entry = STRATEGY_MANIFEST[S12_STRATEGY_ID]
+    assert entry.strategy_class == "per_series"
+    assert entry.member is None
+
+    series = _above_edge()
+    panel_dates = frozenset(series.dates)
+    members = {
+        strategy_id: other.member for strategy_id, other in STRATEGY_MANIFEST.items() if other.member is not None
+    }
+    assert members, "no MemberStager in the manifest — this test would be vacuous"
+    reading: list[str] = []
+    for strategy_id, member in members.items():
+        staged = [
+            member(
+                series,
+                panel_decision_dates=panel_dates,
+                universe=UNIVERSE,
+                masked_reason=REASON,
+                regime=unconstrained_regime(len(series)),
+                price_basis=basis,
+            )
+            for basis in (_certified(series), _withheld(series))
+        ]
+        if staged[0] != staged[1]:
+            reading.append(strategy_id)
+    assert reading == [], f"{reading} now read the carrier through a MemberStager"
+
+
+def test_a_carrier_built_under_another_rule_version_raises() -> None:
+    """⚠⚠ The identity CLAIMS a rule version; the input must be that version.
+
+    ``S12_PARAMS["price_basis_rule"]`` hashes ``PRICE_BASIS_RULE_VERSION`` in, so a
+    stale carrier would have its verdicts stored under a version asserting a rule that
+    did not produce them. It RAISES rather than refusing: a caller holding a stale
+    carrier has a wiring bug, and a refusal would write that bug into the ledger as a
+    data condition.
+    """
+    series = _above_edge()
+    stale = PriceBasisSeries(
+        values=("observed_unadjusted",) * len(series),
+        rule_set_version="price-basis-carrier-v0+deadbeefcafe+archives-deadbeefcafe",
+    )
+    with pytest.raises(ValueError, match="stale carrier cannot certify"):
+        s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=stale)
 
 
 def test_the_rule_version_is_carried_in_the_identity_params() -> None:
     assert S12_PARAMS["price_basis_rule"] == PRICE_BASIS_RULE_VERSION
+
+
+# ----------------------------------------------------------------- segment mechanics
+
+
+def _segmented(series: BarSeries, *, breaks: tuple[date, ...], certified: bool) -> list[StrategySignal]:
+    """S-12 through the production dispatcher, which slices per price-scale segment."""
+    basis = _certified(series) if certified else _withheld(series)
+    return segmented_signals(
+        STRATEGY_MANIFEST[S12_STRATEGY_ID],
+        series,
+        universe=UNIVERSE,
+        masked_reason=REASON,
+        unresolved_breaks=breaks,
+        regime=unconstrained_regime(len(series)),
+        price_basis=basis,
+    )
+
+
+def _terminus_indices(series: BarSeries, breaks: tuple[date, ...]) -> list[int]:
+    return [end - 1 for _, end in series_segment_bounds(series, unresolved_breaks=breaks)]
+
+
+@pytest.mark.parametrize(
+    "break_offsets",
+    [
+        pytest.param((1,), id="singleton-first-segment"),
+        pytest.param((40, 120), id="two-boundaries"),
+        pytest.param((len(_above_edge()) - 1,), id="singleton-last-segment"),
+    ],
+)
+def test_every_segment_terminus_is_no_fill_bar_not_the_basis_refusal(break_offsets: tuple[int, ...]) -> None:
+    """⚠⚠ "LAST BAR" MEANS THE SEGMENT'S LAST BAR, and that is the one verdict this
+    change moves (#2840 §6 item 3).
+
+    The removed universe token refused uniformly; the carrier short-circuit routes
+    through ``evaluate``, which stamps a segment terminus ``no_fill_bar`` before reading
+    any input. A segment terminus is a MID-SERIES bar, so unlike the series end it can
+    fall inside the scan's write window. Measured before the removal: 0 of the 5,791
+    stored S-12 observations sit at one.
+    """
+    series = _above_edge()
+    breaks = tuple(series.dates[offset] for offset in break_offsets)
+    signals = _segmented(series, breaks=breaks, certified=False)
+    termini = _terminus_indices(series, breaks)
+    assert len(termini) == len(break_offsets) + 1
+    for index, signal in enumerate(signals):
+        expected = "no_fill_bar" if index in termini else PRICE_BASIS_REFUSAL_REASON
+        assert (signal.verdict, signal.reason) == ("not_evaluable", expected), f"bar {index}"
+
+
+def test_a_break_between_delivered_dates_cuts_at_the_bisect_position() -> None:
+    """⚠ ``series_segment_bounds`` cuts at ``bisect_left(dates, break_date)``, so a break
+    on a NON-TRADING day still lands — at the first delivered bar at or after it. Pinned
+    because the terminus is then the bar BEFORE a date that is not in the series at all,
+    which is the case a reader is most likely to get wrong.
+    """
+    # ⚠ The fixture's dates are CONSECUTIVE, so an absent date has to be made: drop
+    # bar 60 and break on the date it used to hold. Without the drop, "the day before
+    # bar 60" is itself bar 59 and the test would be the ordinary aligned case wearing
+    # this test's name.
+    full = _above_edge()
+    absent = full.dates[60]
+    gapped = BarSeries(
+        dates=full.dates[:60] + full.dates[61:],
+        rows=full.rows[:60] + full.rows[61:],
+    )
+    assert absent not in gapped.dates
+    assert _terminus_indices(gapped, (absent,)) == [59, len(gapped) - 1]
+    signals = _segmented(gapped, breaks=(absent,), certified=False)
+    assert (signals[59].verdict, signals[59].reason) == ("not_evaluable", "no_fill_bar")
+    assert (signals[58].verdict, signals[58].reason) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
+    assert (signals[60].verdict, signals[60].reason) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)

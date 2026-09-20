@@ -1,16 +1,20 @@
 """The per-series price-basis CARRIER (#2840) — per-bar, declared, fail-closed.
 
-WHAT THIS REPLACES
-------------------
-``s12_cheapest_band_price_gated_breakout`` refuses every bar when ``universe not
-in AS_TRADED_UNIVERSES``. That is a **universe token standing in for a
-price-basis fact**, and it is wrong in both directions: the live scan
-(``survivor_only``) is refused unconditionally — all 5,791 stored S-12
-observations are that one refusal — while a ``survivorship_free`` run whose
-archive policy was WITHHELD passes with no refusal anywhere, because
+WHAT THIS REPLACED, AND IT IS NOW GONE
+--------------------------------------
+``s12_cheapest_band_price_gated_breakout`` used to refuse every bar when
+``universe not in AS_TRADED_UNIVERSES`` — a **universe token standing in for a
+price-basis fact**, wrong in both directions: the live scan (``survivor_only``)
+was refused unconditionally, all 5,791 stored S-12 observations being that one
+refusal, while a ``survivorship_free`` run whose archive policy was WITHHELD
+passed with no refusal anywhere, because
 ``backtest_run._resolve_liquidity_policy`` returns ``None`` rather than blocking.
 
-This module carries the fact itself, per bar, so a rule can declare it.
+This module carries the fact itself, per bar, so a rule can declare it. The token
+was removed once it did (#2840 §6 item 3), so this carrier is now S-12's SOLE
+price-provenance gate — which is why ``s12_signals`` also checks
+``rule_set_version`` and why the scan reaches this module through
+``from_undeclared_source`` rather than through a ``str | None`` constant.
 
 WHY IT IS AN ``EvaluableSeries`` AND NOT A MASK
 -----------------------------------------------
@@ -96,8 +100,15 @@ CERTIFIED_PRICE_BASES: Final[frozenset[str]] = frozenset(get_args(AsTradedPriceB
 #: members and the other three (``split_adjusted``,
 #: ``split_and_dividend_adjusted``, ``unknown``) are all rescaled or undeclared.
 #: A fifth member added to that CHECK is refused here until somebody states why
-#: it is as traded — which is ``AS_TRADED_UNIVERSES``' own declared posture,
+#: it is as traded — which was ``AS_TRADED_UNIVERSES``' own declared posture,
 #: moved off the universe name and onto the fact.
+#:
+#: ⚠ ``sql/249``'s CHECK is a VOCABULARY, not an evidence standard. The rule that
+#: makes a level eligible for a NOMINAL-price gate is ``sql/305``'s — a directly
+#: observed unadjusted level, or a point-in-time reconstruction. ``unadjusted`` is
+#: the one stored label we treat as satisfying it, and that mapping is an
+#: operational assumption inherited from ingest, not a schema guarantee: see
+#: ``from_archive_basis``' note on the two AAPL bars it rests on.
 CERTIFYING_ARCHIVE_BASES: Final[frozenset[str]] = frozenset({"unadjusted"})
 
 _RULE_SET_ID: Final[str] = "price-basis-carrier-v1"
@@ -276,6 +287,48 @@ def from_archive_basis(adjustment_basis: str | None, *, n_bars: int) -> PriceBas
     return PriceBasisSeries(values=(None,) * n_bars, not_evaluable_indices=tuple(range(n_bars)))
 
 
+def from_undeclared_source(*, n_bars: int) -> PriceBasisSeries:
+    """The carrier for a path with NO DECLARED as-traded provenance source — refuses every bar.
+
+    ⚠⚠ A POLICY, STATED AS ONE, AND NOT AN INFERENCE FROM THE SCHEMA. It would be
+    easy to write "``price_daily`` has no adjustment-basis column, therefore no
+    certificate is possible", and ``9246f77c`` expressly withdrew that step: a
+    missing column does not imply missing evidence. What is true is narrower and
+    sufficient — **no source of as-traded provenance has been declared for this
+    path** — and an undeclared basis is refused exactly as ``sql/305`` and
+    ``archive_policy_for`` already refuse one.
+
+    ⚠⚠ THIS EXISTS BECAUSE A MODULE CONSTANT IS THE WRONG SHAPE FOR THE FACT.
+    It replaces ``strategy_signal_scan.SCAN_ARCHIVE_ADJUSTMENT_BASIS``, a
+    ``str | None`` that only ever held ``None``: once S-12's universe token was
+    removed (#2840 §6 item 3) that constant was the ONLY thing standing between
+    the scan and a nominal ``>= $100`` gate on ``price_daily``, whose history the
+    provider back-adjusts at fetch time and whose #2066 split-cliff guard HEALS a
+    mixed series onto the back-adjusted basis (``market_data.py:751``). One token
+    edit would have certified all of it. There is no token here.
+
+    ⚠ AND THAT IS THE WHOLE OF THE CLAIM (Codex checkpoint 1). It does NOT make
+    certifying the scan require a real source: ``PriceBasisSeries`` is public and
+    structural, so a caller can still write ``values=("observed_unadjusted",) * n``
+    inline. What this buys is that the dangerous change is a visible constructor
+    call rather than a ``None`` in a ``str | None`` slot a reader could take for a
+    measured fact.
+
+    ⚠ ALSO THE RIGHT CALLEE FOR A PATH WITH NO ARCHIVE. ``from_archive_basis``
+    names a pinned archive; the live scan has none. Four verification scripts had
+    been passing it a literal ``"unadjusted"`` for exactly that reason and were
+    only safe because S-12's universe token refused them first.
+
+    ⚠ Equal to ``from_archive_basis(None, n_bars=n)`` at every ``n``, including the
+    raise at ``n < 0`` — pinned by
+    ``tests/test_2840_price_basis_carrier.py`` so the two cannot drift into
+    disagreeing about the withheld case.
+    """
+    if n_bars < 0:
+        raise ValueError(f"n_bars must be non-negative, got {n_bars}")
+    return PriceBasisSeries(values=(None,) * n_bars, not_evaluable_indices=tuple(range(n_bars)))
+
+
 __all__ = [
     "AsTradedPriceBasis",
     "CERTIFIED_PRICE_BASES",
@@ -283,4 +336,5 @@ __all__ = [
     "PRICE_BASIS_RULE_VERSION",
     "PriceBasisSeries",
     "from_archive_basis",
+    "from_undeclared_source",
 ]

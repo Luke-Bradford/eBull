@@ -61,7 +61,7 @@ from app.services.strategies.s2_cross_sectional_momentum import s2_member
 from app.services.strategies.s3_mean_reversion_in_trend import s3_signals
 from app.services.strategies.s4_volatility_compression_breakout import s4_signals
 from app.services.strategy_manifest import STRATEGY_MANIFEST
-from app.services.strategy_price_basis import from_archive_basis
+from app.services.strategy_price_basis import from_undeclared_source
 from app.services.technical_analysis import OHLCVRow
 
 REPO = Path(__file__).resolve().parent.parent
@@ -197,7 +197,11 @@ def equivalence() -> bool:
                     universe=UNIVERSE,
                     masked_reason=MASKED_REASON,
                     regime=unconstrained_regime(len(series)),
-                    price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                    # ⚠ NO PINNED ARCHIVE ON THIS PATH, SO NO ARCHIVE BASIS TO PASS (#2840). This
+                    # used to read a literal ``"unadjusted"`` and was only safe because S-12's
+                    # ``AS_TRADED_UNIVERSES`` token refused every bar first; with the token gone the
+                    # literal would have certified a back-adjusted level against a nominal gate.
+                    price_basis=from_undeclared_source(n_bars=len(series)),
                 )
                 want = direct(series, universe=UNIVERSE, close_reason=MASKED_REASON)
                 if got != want:
@@ -212,7 +216,7 @@ def equivalence() -> bool:
                 universe=UNIVERSE,
                 masked_reason=MASKED_REASON,
                 regime=unconstrained_regime(len(series)),
-                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                price_basis=from_undeclared_source(n_bars=len(series)),
             )
             if got_s4 != s4_signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON):
                 mismatches.append(f"s4-volatility-compression-breakout series {series_id}")
@@ -229,7 +233,7 @@ def equivalence() -> bool:
                 universe=UNIVERSE,
                 masked_reason=MASKED_REASON,
                 regime=unconstrained_regime(len(series)),
-                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                price_basis=from_undeclared_source(n_bars=len(series)),
             )
             want_member = s2_member(series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=MASKED_REASON)
             if (

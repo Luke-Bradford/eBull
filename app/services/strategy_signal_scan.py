@@ -66,7 +66,7 @@ from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
 from app.services.strategy_observation_storage import store_strategy_observations
-from app.services.strategy_price_basis import from_archive_basis
+from app.services.strategy_price_basis import from_undeclared_source
 from app.services.strategy_registry import (
     SignalKind,
     StrategyIdentity,
@@ -90,23 +90,6 @@ logger = logging.getLogger(__name__)
 #: to make a number look better — that would widen the population without
 #: changing the label, which is worse than the bias."*
 SCAN_UNIVERSE: Universe = "survivor_only"
-
-#: The as-traded provenance DECLARED for the live scan path — none (#2840).
-#:
-#: ⚠⚠ A POLICY, STATED AS ONE, AND NOT AN INFERENCE FROM THE SCHEMA. It would be
-#: easy to write "``price_daily`` has no adjustment-basis column, therefore no
-#: certificate is possible", and ``9246f77c`` expressly withdrew that step: a
-#: missing column does not imply missing evidence. What is true is narrower and
-#: sufficient — **no source of as-traded provenance has been declared for this
-#: path**, and an undeclared basis is refused exactly as ``sql/305`` and
-#: ``archive_policy_for`` already refuse one.
-#:
-#: ⚠ Today this changes no verdict: S-12's ``AS_TRADED_UNIVERSES`` gate refuses
-#: every ``survivor_only`` bar before the carrier is read. It stops being inert
-#: when that universe gate is removed (#2840 §6 item 3), which is exactly when a
-#: fail-open here would start admitting uncertified levels. Declared now, while
-#: it is cheap to get right.
-SCAN_ARCHIVE_ADJUSTMENT_BASIS: str | None = None
 
 #: Spec §3's completeness floor: the modal last-bar date must be held by at least
 #: this share of the loadable universe or the scan refuses the day.
@@ -998,7 +981,10 @@ def _scan_per_series(
         masked_reason=MASKED_REASON,
         unresolved_breaks=unresolved_breaks,
         regime=regime_provider.for_dates(series.dates),
-        price_basis=from_archive_basis(SCAN_ARCHIVE_ADJUSTMENT_BASIS, n_bars=len(series)),
+        # ⚠ NO AS-TRADED PROVENANCE SOURCE IS DECLARED FOR THIS PATH (#2840). Not an
+        # inference from ``price_daily``'s columns — see ``from_undeclared_source``,
+        # which carries the policy and cannot be flipped by editing a token.
+        price_basis=from_undeclared_source(n_bars=len(series)),
     )
     windowed = [signal for signal in signals if signal.signal_index in window]
     out.extend(resolve_fills(windowed, series=series, identity=plan.identity, instrument_id=instrument_id))
@@ -1038,7 +1024,10 @@ def _stage_cross_sectional(
         masked_reason=MASKED_REASON,
         unresolved_breaks=unresolved_breaks,
         regime=regime_provider.for_dates(series.dates),
-        price_basis=from_archive_basis(SCAN_ARCHIVE_ADJUSTMENT_BASIS, n_bars=len(series)),
+        # ⚠ NO AS-TRADED PROVENANCE SOURCE IS DECLARED FOR THIS PATH (#2840). Not an
+        # inference from ``price_daily``'s columns — see ``from_undeclared_source``,
+        # which carries the policy and cannot be flipped by editing a token.
+        price_basis=from_undeclared_source(n_bars=len(series)),
         leg=leg,
     )
 

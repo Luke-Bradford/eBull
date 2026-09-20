@@ -46,21 +46,41 @@ shipped. The close is ALREADY one of S-4's four declared inputs, so a priced bar
 can evaluate is one S-12 can evaluate and the gate introduces no new unevaluable
 state. It can only turn a ``fired`` into a ``not_fired``, never a refusal into either.
 
-⚠⚠ THE PRICE MUST BE AS TRADED, AND THAT IS ENFORCED HERE BY DECLARATION.
-A ``>= $100`` gate is a nominal-price gate only on an as-traded corpus, so
-``AS_TRADED_UNIVERSES`` names the universes this rule may read and ``s12_signals``
-refuses EVERY bar on any other — see that constant for why the set is declared
-rather than derived from ``vendor_for``, and why a refusal beats excluding the
-strategy from the scan.
+⚠⚠ THE PRICE MUST BE AS TRADED, AND THAT IS ENFORCED BY THE ``price_basis`` INPUT.
+A ``>= $100`` gate is a nominal-price gate only on an as-traded corpus, so a
+``PriceBasisSeries`` is declared FIRST among this rule's inputs and ``evaluate``
+refuses an uncertified bar before the body runs.
 
-⚠ THE DECLARATION IS NOT THE WHOLE GUARD, because it cannot see a RUN. A universe
-in the set is still served by whichever series the corpus loader resolved, and
-``load_corpus`` fails closed to ``split_adjusted`` when an archive's provenance is
-missing — so the step-3 measurement script asserts the run's own
-``cost_price_basis`` before opening any outcome, and a config test pins the pinned
-archive. Neither validates the PAYLOAD: a stored ``unadjusted`` label on rescaled
-data satisfies all three. That is the corpus's invariant (``sql/249``, ``sql/251``),
-and the spec's "price basis" section states the division.
+⚠⚠ IT USED TO BE A UNIVERSE TOKEN, AND THE TOKEN IS GONE (#2840 §6 item 3).
+``AS_TRADED_UNIVERSES = {"survivorship_free"}`` refused every bar on any other
+universe — a SERIES-LEVEL NAME standing in for a PER-BAR FACT, wrong in both
+directions. It refused the live scan unconditionally (all 5,791 stored S-12
+observations are that one refusal) while a ``survivorship_free`` run whose archive
+policy was WITHHELD passed with no refusal anywhere, because
+``backtest_run._resolve_liquidity_policy`` returns ``None`` rather than blocking.
+The carrier reads the fact the name stood in for, so the name is not needed.
+
+⚠ WHAT THE TOKEN WAS ALSO DOING, and where that work moved. On the scan path
+``survivor_only`` is served by ``price_daily``, whose history the provider
+back-adjusts at fetch time and whose #2066 split-cliff guard HEALS a mixed series
+onto the back-adjusted basis rather than preserving the traded one
+(``market_data.py:751``). That fact has not gone away — it is now the reason the
+scan declares NO source at all (``strategy_price_basis.from_undeclared_source``),
+which is a statement about the provenance rather than about the universe's name.
+
+⚠ WHY A REFUSAL AND NOT AN EXCLUSION FROM THE SCAN. S-12 is the first strategy in
+this package with an ABSOLUTE price threshold — every other rule compares prices to
+prices, so a uniformly re-based series gives it the same answer and back-adjustment
+is invisible to it. A scan catching up across a split would hand this rule pre-split
+bars on the post-split scale, and scan rows are terminal. So the bar is refused
+rather than judged: no wrong verdict is recorded, the strategy stays non-retired
+(retirement would also remove it from the BACKTEST, which is the evidence #2840
+arm 2 actually needs), and the scan keeps running.
+
+⚠ NO GATE HERE VALIDATES THE PAYLOAD. A stored ``unadjusted`` label on rescaled
+data satisfies the carrier, ``cost_price_basis`` and the config test alike. That is
+the corpus's invariant (``sql/249``, ``sql/251``, ``sql/305``), and the spec's
+"price basis" section states the division.
 
 ⚠ ``s4_source_hash`` IS IN ``S12_PARAMS`` AND IS LOAD-BEARING, for S-11's reason
 verbatim: this module imports S-4's rule, so an edit to S-4 changes what S-12 DOES,
@@ -155,34 +175,6 @@ def _check_gate_is_expressible(band: PriceBand) -> Decimal:
 #: The edge itself, in the table's own type. Hashed into ``S12_PARAMS``.
 GATE_EDGE: Decimal = _check_gate_is_expressible(CHEAPEST_BAND)
 
-#: ⚠⚠ THE UNIVERSES WHOSE PRICES THIS RULE MAY READ AS NOMINAL. A DECLARED SET,
-#: hashed into the identity, NOT a mapping from universe to archive.
-#:
-#: ``survivorship_free`` is ``BACKTEST_UNIVERSE``, pinned to an archive whose
-#: stored ``adjustment_basis`` is ``unadjusted`` — its closes ARE the as-traded
-#: level. ``survivor_only`` is excluded for a DIFFERENT reason than a reader would
-#: guess: on the scan path it is not served by that universe's archive at all but
-#: by ``price_daily``, whose history the provider back-adjusts at fetch time, and
-#: whose #2066 split-cliff guard HEALS a mixed series onto the back-adjusted basis
-#: rather than preserving the traded one (``market_data.py:751``). Deriving the set
-#: from ``vendor_for(universe)`` would reach the right answer today by the wrong
-#: route, and would go silently wrong the first time a universe changed how it is
-#: served.
-#:
-#: ⚠ FAIL-CLOSED BY CONSTRUCTION: a universe added later is refused until somebody
-#: states why its prices are as traded. That is the direction that has to need
-#: saying out loud.
-#:
-#: ⚠ WHY A REFUSAL AND NOT AN EXCLUSION FROM THE SCAN. S-12 is the first strategy
-#: in this package with an ABSOLUTE price threshold — every other rule compares
-#: prices to prices, so a uniformly re-based series gives it the same answer and
-#: back-adjustment is invisible to it. A scan catching up across a split hands this
-#: rule pre-split bars on the post-split scale, and scan rows are terminal. So the
-#: bar is refused rather than judged: no wrong verdict is ever recorded, the
-#: strategy stays non-retired (retirement would also remove it from the BACKTEST,
-#: which is the evidence #2840 arm 2 actually needs), and the scan keeps running.
-AS_TRADED_UNIVERSES: frozenset[str] = frozenset({"survivorship_free"})
-
 #: ⚠ ``missing_market_context`` and not a new code. It is one of OUR four reasons
 #: (``OUR_ADDITIONAL_REASON_CODES``), so its meaning is ours to state: the bar
 #: exists and its fields are present, but the CONTEXT this rule needs — a price on
@@ -229,7 +221,6 @@ S12_PARAMS: Mapping[str, object] = {
     "atr_stop_multiple": ATR_STOP_MULTIPLE,
     "atr_target_multiple": ATR_TARGET_MULTIPLE,
     "max_hold_bars": MAX_HOLD_BARS,
-    "as_traded_universes": tuple(sorted(AS_TRADED_UNIVERSES)),
     "price_band_label": CHEAPEST_BAND.label,
     "price_band_lower": str(GATE_EDGE),
     "s4_source_hash": _s4_source_hash(),
@@ -243,8 +234,20 @@ S12_PARAMS: Mapping[str, object] = {
     # rather than argued away: ``INPUT_RULE_SETS`` exists because author-maintained
     # per-strategy coverage drifts once a second consumer appears.
     # ``test_s12_is_the_only_consumer_while_the_rule_stays_out_of_input_rule_sets``
-    # fails the moment another strategy imports the module, which is when the
-    # global entry has to be installed (#2840 §6 item 3).
+    # fails the moment another strategy imports the module.
+    #
+    # ⚠⚠ THE TRIGGER IS A SECOND CONSUMER, NOT "#2840 §6 item 3" — CORRECTED HERE.
+    # Both this comment and that test used to name item 3 (this change, which
+    # removed ``AS_TRADED_UNIVERSES``) as the moment the global entry was owed. It
+    # is not: item 3 added no reader. Every other ``PerSeriesSignals`` /
+    # ``MemberStager`` adapter takes ``price_basis`` and DISCARDS it (12 of them
+    # carry ``noqa: ARG001`` in ``strategy_manifest``), and ``segmented_signals`` /
+    # ``segmented_member`` only slice it. The consumer set is still {S-12}.
+    #
+    # ⚠ What IS still owed, and is not this: the carrier's SOURCE SELECTION sits
+    # outside every identity hash, so rewiring which constructor the scan calls
+    # moves verdicts without moving this version. Pre-existing (#2840's carrier
+    # shipped it); the spec's §8 records it open.
     "price_basis_rule": PRICE_BASIS_RULE_VERSION,
 }
 
@@ -328,24 +331,23 @@ def s12_signals(
     # hand-built caller, which is how S-12 is reached in tests and scripts.
     if len(price_basis) != len(series):
         raise ValueError(f"price_basis has {len(price_basis)} bars against {len(series)} price bars; they must align")
-
-    # ⚠⚠ REFUSE EVERY BAR ON A UNIVERSE WHOSE PRICES ARE NOT AS TRADED, rather
-    # than gate on a number that is not a nominal price. See AS_TRADED_UNIVERSES.
-    # A refusal is the honest verdict and it is also the CHEAP one: the rows are
-    # written, counted and reconciled exactly as any other refusal, so nothing
-    # downstream has to learn about this strategy.
+    # ⚠⚠ THE CARRIER'S RULE VERSION MUST BE THE ONE THIS IDENTITY CLAIMS (#2840,
+    # Codex checkpoint 1). ``S12_PARAMS["price_basis_rule"]`` hashes
+    # ``PRICE_BASIS_RULE_VERSION`` into the identity, so a carrier built under an
+    # older rule would execute under a version that asserts the newer one — the
+    # stored verdict would name a rule that did not produce it. Now that this is
+    # the SOLE gate the mismatch is not survivable, so it raises rather than
+    # refusing: a caller holding a stale carrier has a wiring bug, and a refusal
+    # would write that bug into the ledger as a data condition.
     #
-    # ⚠ THIS GATE IS NOW THE OUTER HALF OF TWO, and it is the half that is going
-    # away. ``price_basis`` below carries the FACT this universe token stands in
-    # for; removing the token is the separate change that makes a certified
-    # forward series reachable from the scan (#2840 §6 item 3). Until then both
-    # fire, and on the scan this one fires first — which is why the 5,791 stored
-    # S-12 observations keep their content across the identity rotation.
-    if universe not in AS_TRADED_UNIVERSES:
-        return [
-            StrategySignal(verdict="not_evaluable", signal_index=index, kind="entry", reason=PRICE_BASIS_REFUSAL_REASON)
-            for index in range(len(series))
-        ]
+    # ⚠ Length equality does NOT bind a carrier to THIS instrument, its dates or
+    # its payload. That remains open and needs the per-bar source; the spec's §8
+    # records it rather than implying this check covers it.
+    if price_basis.rule_set_version != PRICE_BASIS_RULE_VERSION:
+        raise ValueError(
+            f"price_basis was built under rule {price_basis.rule_set_version!r} but this identity claims "
+            f"{PRICE_BASIS_RULE_VERSION!r}; a stale carrier cannot certify a bar for the current rule"
+        )
 
     # ⚠⚠ SHORT-CIRCUIT, AND IT IS A COMPLEXITY FIX RATHER THAN A SECOND RULE.
     # ``_unevaluable_reason_at`` tests ``index in series.not_evaluable_indices``
@@ -362,10 +364,17 @@ def s12_signals(
     # ⚠⚠ AND THE LAST BAR IS ``no_fill_bar``, NOT THE BASIS REFUSAL. ``evaluate``
     # returns it BEFORE reading any input (``strategy_registry.py:474``), so a
     # uniformly-refusing list would disagree with the path it replaces on
-    # exactly one bar per series. ⚠ The UNIVERSE gate above does refuse
-    # uniformly, including the last bar — that asymmetry is pre-existing and
-    # pinned; it never routes through ``evaluate``, so it has no path to agree
-    # with. This one does, so it agrees.
+    # exactly one bar per series.
+    #
+    # ⚠⚠ "LAST BAR" IS THE LAST BAR OF THE **SEGMENT**, NOT OF THE SERIES.
+    # ``segmented_signals`` calls this once per price-scale segment with a fresh
+    # ``BarSeries`` indexed from zero, so this stamps ``no_fill_bar`` at every
+    # segment terminus. That is what every peer strategy already stores there —
+    # and it is the one verdict the removed ``AS_TRADED_UNIVERSES`` gate got
+    # wrong, since it refused uniformly and never routed through ``evaluate`` at
+    # all. Measured before removing it: 0 of the 5,791 stored S-12 observations
+    # sit at a segment terminus (anti-join on ``price_series_break`` at the bar
+    # after each one), so the correction moved no stored row.
     if price_basis.certifies_nothing():
         return [
             StrategySignal(
@@ -413,7 +422,6 @@ def s12_signals(
 
 
 __all__ = [
-    "AS_TRADED_UNIVERSES",
     "ATR_PERIOD",
     "GATE_EDGE",
     "PRICE_BASIS_REFUSAL_REASON",
