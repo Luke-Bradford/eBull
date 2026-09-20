@@ -295,13 +295,15 @@ straddle is handled, at the signal level, by §5.2's own rule.
 ⚠ Do not compare against the 16 stored `survivorship_free` results: every leg of them
 was charged the maximum band and they are known-stale since `61ef6e47`.
 
-## Step 2's forward-shadow floor — what is settled, and the one thing that is not
+## Step 2's forward-shadow floor — still NOT derived, and the blocker has moved
 
 `ForwardShadowFloor` takes no default and `sql/333` CHECKs both numbers `> 0`, so step
 2 cannot proceed without deriving them. A first derivation was written on 2026-09-20,
 put through Codex checkpoint 1, and **refused on two structural grounds**. It is not
 recorded here, because a refuted formula left in a design document is how it gets
-re-adopted by whoever reads it next. What the pass established is below.
+re-adopted by whoever reads it next. What that pass established is below, followed by a
+SECOND derivation — route 1, a fresh artefact rather than a re-check — which was also
+refused, and by what that refusal found underneath both.
 
 ### Settled — the floor's unit, read from the consumer rather than from precedent
 
@@ -363,9 +365,103 @@ unless justified, and `data_infeasible` as the declared answer when the availabl
 independent dates cannot reach it. Instantiating it for arm 2 needs three things the
 contract does not yet contain: a **minimum net effect**, a **critical value from a
 declared multiplicity and sampling model**, and a variance estimate matching the
-dependence and tail shape. None may be invented here.
+dependence and tail shape. None may be invented. Route 1 below attempted to
+supply all three from measurements and published formulations, and was refused — the
+reason is that this section's own opening sentence understates the problem: arm 2 has no
+power calculation because it has **no test**.
 
-### NOT settled — the required count, which is a CONTRACT gap and not a measurement gap
+### Route 1 was attempted and REFUSED — the blocker is the PASS BAR, not the floor
+
+A second derivation was written on 2026-09-20 instantiating §5, put through Codex
+checkpoint 1, and **refused — 30 findings, verdict "I would not freeze this
+derivation"**. That is two refusals in a row on the same number, which
+`.claude/CLAUDE.md` names as the signal to question the MODEL rather than try a third
+key. Doing so found one root cause underneath both.
+
+⚠ The refused arithmetic is deliberately not reproduced here, for the reason draft 1's
+was not: a refuted formula left in a design document is how it gets re-adopted.
+
+**The root cause: arm 2's pass bar is not a test, so there is nothing to power.**
+§5's planning expression — *"planning SE target <= minimum net effect / (critical_value
++ z_power)"* — presumes an acceptance rule with an error rate. §"Readout and abort bar"
+declares two point-estimate inequalities and no significance level, rejection region or
+test statistic. Any `critical_value` therefore has to be imported from a test the
+contract does not contain, which is the same defect that killed draft 1 in a different
+costume: a design choice wearing a derivation's clothes.
+
+⚠⚠ **And the pass bar is not §5-compliant on its own terms.** §5's acceptance clause
+requires *"a preregistered date-clustered/block or studentized bootstrap lower bound on
+the portfolio net return distribution, not a z interval on per-trade means"*, and adds
+that *"A positive mean alone cannot pass."* The pass bar's leg 1 is a positive mean. So
+the document that supplies the floor's formulation also rejects the rule the floor would
+be sizing. Route 1 could not have succeeded against this contract.
+
+**Three further blockers, each independent of the first:**
+
+1. **The binding leg's variance is not obtainable before the look.** Leg 2 compares
+   S-12 against S-4, so the quantity to power is `Var(mean₁₂ − mean₄)` — which needs
+   S-12's dispersion and the covariance between the two. S-12 has no stored result and
+   must not acquire one before the freeze. The draft borrowed S-4's *marginal* standard
+   error and inflated it; a marginal SE bounds the difference's SE in neither direction,
+   because the covariance is unsigned. ⚠ Nor is S-12's trade set a subset of S-4's:
+   the gate can admit an entry on a date S-4 is already holding a superseded position,
+   so the two trade populations differ in composition as well as in size.
+2. **The effect was a difference of charge COEFFICIENTS, not of net expectancies.** The
+   drag on a round trip is `2h/(1+h)` of the gross MULTIPLE, so in return points it is
+   `(1+g)·2h/(1+h)`. The difference of two average coefficients equals the difference of
+   two net expectancies only if the two strategies' gross expectancies agree — which is
+   part of what the experiment is meant to find out.
+3. **Only two of the pass bar's four required inequalities were powered**, and only the
+   `masked` arm was sized at all. A conjunction's power is a property of the whole
+   conjunction; S-12 can beat S-4 while staying negative, and the `admitted` arm has
+   neither its own variance nor its own requirement.
+
+⚠ Two claims the refused draft made are also recorded as WRONG so they are not reused.
+The staleness adjustment was labelled an exact bound: a per-trade SD scales by exactly
+`(1-h)/(1+h)` only under a COMMON multiplier, and re-costing assigns different
+multipliers to different trades, which adds band variance and a covariance with gross
+returns. And the `data_infeasible` verdict compared the requirement against the whole
+58.9-year archive — the archive-keying that killed draft 1, since adding older dates
+moves that comparison without changing prospective feasibility. §5 asks whether *recent*
+evidence can reach the requirement inside a declared relevance horizon, and arm 2
+declares no such horizon either.
+
+**What this leaves, stated so the next session does not re-derive it.** The floor is
+blocked on a contract amendment, not on a measurement, and the amendment is not small:
+the pass bar must become a test with an error model — the §5-mandated date-clustered
+block-bootstrap lower bound on the paired difference — and the contract must declare a
+relevance horizon and a minimum meaningful effect that is not the mechanism's own cost
+saving. ⚠ Even then, blocker 1 remains: the paired difference's variance is unobtainable
+until S-12 runs. **A floor that cannot be derived before the run, for an experiment whose
+declaration must be frozen before the run, is a real possibility that has to be faced
+rather than engineered around** — and the honest reading of that outcome is that arm 2
+may not be preregisterable under #2829 in its current form.
+
+### What the attempt DID establish, and is worth keeping
+
+The measurements survive the refusal — they are charged-band and supply facts, taken
+outcome-free, and any future derivation needs them. They are in
+`scripts/census_2840_s12_signal_supply.py`; nothing in this repo now computes a floor
+from them.
+
+⚠ **The gate buys down roughly 0.29 percentage points of charged round trip per fire**
+(masked, in-sample: S-4 0.6153% against S-12 0.3225%). That is a real, measured
+property of the mechanism and it is the right order of magnitude to reason about. It is
+NOT an effect size, for blocker 2 above, and it must not be re-adopted as one.
+
+⚠ **S-12 does not pay the cheapest band on every trade.** 251 of 44,842 fires (0.56%)
+fill in `$20-100` and 2 in `$5-20`, because the gate reads `close(t)` and the charge
+reads `open(t+1)`. The spec's §"Why `close(t)`" measured that leak at the BAR level;
+this is the same leak on the legs that actually fire.
+
+⚠ **S-12's per-date dispersion is HIGHER than S-4's despite calmer names, and the
+direction is the surprise.** Its decision bars have a trailing-return SD of 1.2553%
+against S-4's 3.2420% — but it fires on 9.12 names per date against 89.83, so it
+averages far less within a date. Under within-date independence the per-date figure is
+`sd / sqrt(names)`, which reverses the comparison: 0.387 per name becomes 1.215 per
+date. Any future variance argument has to carry both terms.
+
+### Why route 2 was not taken
 
 Both family-B precedents size their floor from a quantity their contract declared
 BEFORE the floor existed: arm 1 from the `bear_volatile` date supply its pass leg rests
@@ -389,28 +485,25 @@ universe … the window opens where the data does"*. So arm 2's in-sample window
 archive's extent, and a floor keyed to it is archive-keyed however it is phrased. The
 whole family of "reproduce the exploration window" derivations inherits the defect.
 
-**The question, in one sentence:** what required count does arm 2's contract declare
-that a forward confirmation must reach — i.e. what is arm 2's abort bar on `n`, the
-quantity playing the role of arm 1's 14 dates and #2837's 3 drawdowns?
+**The question that left open:** what required count does arm 2's contract declare that a
+forward confirmation must reach — i.e. what is arm 2's abort bar on `n`, the quantity
+playing the role of arm 1's 14 dates and #2837's 3 drawdowns?
 
-**The two routes that could settle it, neither operator-gated:**
+Route 1 answers it by **adding the missing declaration** rather than by reverse-engineering
+one: §5's three inputs are now stated above, in this document, before the freeze. That is
+the repair the prevention entry asked for — *"if the contract declares no such quantity,
+say so and fix the CONTRACT"* — and it is available precisely because a declaration is
+still editable until it is frozen.
 
-1. **Instantiate §5's statistical contract** by declaring a minimum net effect and a
-   sampling model in this document before the freeze. For a COST-mechanism hypothesis
-   the minimum net effect has a candidate anchor that is read rather than chosen — the
-   charged round-trip spread the gate buys down — but the multiplicity model and the
-   variance estimate still have to be declared, and §5's own `data_infeasible` verdict
-   is an admissible outcome rather than a failure to derive.
-2. **Declare an abort bar on `n` the way arm 1 declared its 508** — *"the largest
-   independent cohort the lead itself rests on, i.e. an upper bound on available
-   evidence, explicitly NOT a power calculation"*. ⚠ This route is WEAKER than it
-   looks and route 1 should be tried first: arm 1's 508 was read off cohort figures
-   that already existed because S-11 had been run, and arm 2 is pre-look by
-   construction. Its lead is the #2840 addendum's re-pricing of S-4's 189,076 measured
-   trades at the cheapest band — a sensitivity over ALL trades that does not publish
-   the cheapest-band subset. `scripts/census_2840_s12_signal_supply.py` bounds that
-   subset from above at **44,842** fires over **4,916** dates (`masked`), which is a
-   supply figure and still not a declared requirement.
+**Route 2 — declare an abort bar on `n` the way arm 1 declared its 508** — was not taken,
+and would not have been better. Arm 1's 508 was *"the largest independent cohort the lead
+itself rests on, i.e. an upper bound on available evidence, explicitly NOT a power
+calculation"*, and it could be read off cohort figures that existed only because S-11 had
+already been run. Arm 2 is pre-look by construction: its lead is the addendum's re-pricing
+of S-4's measured trades, a sensitivity over ALL trades that never publishes the
+cheapest-band subset. The nearest available figure — S-12's 44,842 fires over 4,916 dates —
+is a SUPPLY count, and sizing a requirement from the supply is the archive-keyed defect
+above wearing one more costume.
 
 ### The measurement that exists, and the bounds it does NOT establish
 
@@ -457,11 +550,49 @@ here so they are not re-asserted: that a dates floor built on fires is a lower b
 weeks floor built on the corpus's own arrival rate is a lower bound (a historical
 average is neither a maximum future rate nor a guaranteed waiting time, and this gate
 is measurably era-dependent — 1.0% of bars in the 1990s against 7.9% in the 2020s).
+Both directions remain unestablished, and the refused route-1 draft did not need them
+— which is worth recording, because its successor might.
 
-⚠ **The clock convention is undecided.** First-fire to last-fire excludes leading and
-trailing silence, warm-up and resolution delay, and is not the consumer's own clock —
-`forward_days` is `(paper_at or observed_at) - forward_at`, a stage-entry-to-stage-exit
-elapsed time (`strategy_live_gate.py:551`). Whichever is used has to be declared.
+**The charged-band mix, and the second weighting** (masked, in-sample). ⚠ The last
+column's difference is the charge the gate buys down. It is a measured property of the
+mechanism and it is NOT an effect size — see §"Route 1 was attempted and REFUSED",
+blocker 2:
+
+| | fires | fill-date clusters | `>=$100` share | mean round trip |
+| --- | ---: | ---: | ---: | ---: |
+| S-12, every fire | 44,842 | 4,916 | 99.44% | 0.3225% |
+| S-12, max-hold collapse | 8,579 | 2,699 | 97.94% | 0.3253% |
+| S-4, every fire | 1,043,493 | 11,620 | 4.30% | 0.6153% |
+| S-4, max-hold collapse | 242,610 | 10,170 | 3.29% | 0.6640% |
+
+⚠ **The collapse arm's direction is checked, not asserted.** It greedily refuses every
+fire through `i + MAX_HOLD_BARS - 1` after an accepted one, so it must over-collapse — a
+real position exits at or before the cap. S-4's collapsed fill-date count is **10,170**
+against the **10,691** clusters its stored bootstrap actually used, i.e. 4.9% fewer,
+which is the predicted side. ⚠ It remains a second WEIGHTING and not a bracket: greedy
+sets under different quarantine lengths are not nested, so the true trade-weighted mix
+is not arithmetically trapped between the two rows. What the pair buys is that the mix
+barely moves (0.3225 → 0.3253 and 0.6153 → 0.6640), so the charge difference is not an
+artefact of the weighting.
+
+⚠ **The `- 1` is load-bearing and was wrong in the first cut** (Codex ckpt-1, finding
+20). `position_builder` supersedes on `entry.fill_bar_date < open_until`, strictly
+before, and records the rule beside it: *"A closed position whose close date equals a
+later entry's fill bar does NOT suppress it — rule 4, exit before entry."* The
+one-bar error suppressed 2,235 S-4 and 93 S-12 fires and 10 / 9 fill dates.
+
+⚠ **0 fires in either strategy or either arm had an unusable fill open, and 0 had no
+successor bar** — so the fire→trade gap here is the collapse and the boundary purge
+alone, not a pricing gap.
+
+**The clock convention is still undeclared, and the candidate is named so the next
+attempt does not re-derive it.** S-12's own realised in-sample arrival rate is its
+21,497-day span over `4,916 - 1` intervals = 4.3738 days per decision date, which is the
+convention both #2616 floors used. ⚠ It is a convention and not a bound: it excludes
+leading and trailing silence, warm-up and resolution delay, and it is not the consumer's
+own clock — `forward_days` is `(paper_at or observed_at) - forward_at`, a
+stage-entry-to-stage-exit elapsed time (`strategy_live_gate.py:551`). Whichever is used
+has to be declared explicitly.
 
 ### ⚠⚠ And a framing problem the floor inherits either way
 
@@ -480,13 +611,29 @@ clear it.
 
 ### Edge contracts any derivation must state before it is frozen
 
-Zero fires in either arm; zero distinct dates; a single date giving a zero span; every
-fire unfillable or unresolved; unequal arm coverage; corpus or vendor version drift
-between the census and the run; and same-day concentration high enough that a date count
-overstates the independent evidence behind it. `sql/333`'s `> 0` CHECKs establish none
-of these — they only stop the most obvious one reaching the table.
+`sql/333`'s `> 0` CHECKs establish none of these — they only stop the most obvious one
+reaching the table. The refused route-1 draft implemented refusals for the first seven
+and they went with it; they are listed because the next attempt needs the same set, plus
+the three the refusal added:
 
+| edge | why it must be refused rather than handled |
+| --- | --- |
+| a census run with `--limit` | a timing slice is not a population figure |
+| a corpus that failed closed to the maximum band | the recorded bands would be the `UNKNOWN_NOMINAL_PRICE_BAND` fallback, not a charged mix |
+| a cell that charged no leg | every fire unfillable is a finding, not a zero |
+| the gate buys down nothing, or costs more | squaring hides a sign: a negative effect otherwise yields a plausible finite floor |
+| fewer than two decision dates | no arrival rate exists |
+| no dispersion on a rule's own fires | the variance transfer would have no measured direction |
+| more than one stored row for a borrowed cell | picking either is a silent choice between measurements |
+| a zero, negative or non-finite cluster count, interval width or dispersion | each produces a plausible positive floor after squaring (Codex ckpt-1, finding 28) |
+| a reversed interval (`ci_high < ci_low`) | the same, and `sql/265` only CHECKs it on the stored row |
+| missing provenance on the census artefact | corpus version, strategy hashes, universe, boundary and `cost_model_id` are not checked today; an immutable judgement needs them pinned (finding 27) |
 
+⚠ Three edges are not code refusals and are handled by construction. **Unequal arm
+coverage** is reported rather than refused (`N_masked <= N_admitted` is expected).
+**Corpus or vendor drift between the census and the run** is caught downstream — the
+run's `corpus_version` is asserted against the declaration at readout, per §"Readout and
+abort bar". **Same-day concentration** is reported on every cell, and it is mild here.
 
 ## Sequencing — why the declaration is NOT in this PR
 

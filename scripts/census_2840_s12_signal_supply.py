@@ -1,7 +1,9 @@
 """Census for #2840 arm 2 step 2 — S-12's in-sample SIGNAL supply, to derive the floor.
 
 Read-only. Evaluates the RULE over the corpus and counts verdicts. It reads no
-``gross_return_pct``, resolves no fill, computes no expectancy and writes no row —
+``gross_return_pct``, resolves no fill, computes no expectancy and writes no row. ⚠ It
+DOES compute bar returns, for the dispersion populations below; what it never computes
+is a return attributable to a position —
 the same class of pre-freeze fact as #2582's *"963 clean 13D events over 331 distinct
 public filing dates"*, which ``docs/review-prevention-log.md``'s #2614 entry names as
 the outcome-free half of a derived forward-shadow floor.
@@ -24,8 +26,10 @@ the declaration is frozen"* is superseded here and only here, because a floor no
 measured is the #2600 padded floor this contract exists to forbid.
 
 ⚠⚠ NO HOLD-OUT BAR IS LOADED, LET ALONE EVALUATED. The corpus window ends the day
-BEFORE ``HOLDOUT_BOUNDARY`` and ``through_date`` follows it, so the rule is never run
-over a withheld bar. Filtering post-boundary VERDICTS after computing them would give
+BEFORE ``HOLDOUT_BOUNDARY``, and ``through_date`` follows it on BOTH readers — the price
+arms and ``MarketRegimeProvider.load_research``, whose default of ``None`` silently
+loaded the whole benchmark chain until Codex ckpt-1 finding 26 — so the rule is never
+run over a withheld bar. Filtering post-boundary VERDICTS after computing them would give
 the same counts — every indicator here is causal — but "the numbers would have come out
 the same" is not the access rule, and a census that opens the hold-out to discard it is
 one edit away from reporting it (Codex ckpt-1, finding 21).
@@ -62,14 +66,24 @@ denominated in distinct dates rather than signals (``prereg_contract.py:127-132`
 supply that arrives 70 names at a time on a handful of dates is not the evidence a
 per-date count implies.
 
-WHAT THE SECOND PASS ADDS (#2840 step 2, route 1)
--------------------------------------------------
-Route 1 instantiates ``2026-08-11-portfolio-alpha-viability-plan.md`` §5, whose
-``minimum net effect`` for a COST-mechanism hypothesis is the charged round trip the
-gate buys down. That number is not in the repo: #3238 measured **0.7057%
-bar-weighted** and its own note forbids quoting it per trade. So this pass also
-records, for every fire, the band its FILL would select, which is the per-decision
-quantity §5 needs. Three facts make that outcome-free:
+WHAT THE SECOND PASS ADDS — AND WHAT IT DID NOT BUY (#2840 step 2)
+------------------------------------------------------------------
+⚠⚠ READ THIS BEFORE REUSING THE FIGURES. These measurements were taken to instantiate
+``2026-08-11-portfolio-alpha-viability-plan.md`` §5 — route 1 of the step-2 floor — and
+**that derivation was refused at Codex checkpoint 1, the second refusal in a row.** The
+root cause is not in this file: arm 2's pass bar is a pair of point-estimate
+inequalities with no error model, so there is no test to power, and the leg that binds
+compares TWO strategies, whose difference has a variance no pre-look measurement can
+supply. See the spec's §"Route 1 was attempted and REFUSED".
+
+The measurements below stand on their own — they are charged-band and supply facts, and
+any future derivation needs them — but **nothing here sizes a floor, and the charge
+difference must not be re-adopted as an effect size without the contract first
+declaring a test.**
+
+The per-fire charged band is the one quantity that did not exist in the repo: #3238
+measured **0.7057% bar-weighted** and its own note forbids quoting it per trade. Three
+facts make recording it outcome-free:
 
 1. the fill is ``open(signal_index + 1)`` unconditionally (``resolve_fills``);
 2. the band keys on the ENTRY fill and is frozen for the hold
@@ -91,7 +105,7 @@ mix under TWO weightings and the derivation must carry both:
   collapse (≈2.80 fires/trade on S-4's stored in-sample cell, and that ratio must NOT
   be transferred to S-12: the gate deliberately breaks runs).
 - ``max_hold_collapse`` — a greedy pass that, after accepting a fillable fire at index
-  ``i``, refuses every fire through ``i + MAX_HOLD_BARS``. A real position exits at or
+  ``i``, refuses every fire through ``i + MAX_HOLD_BARS - 1``. A real position exits at or
   BEFORE the hold cap (stop, target or cap — ``s4_exit_bracket``), so this quarantine
   is the longest one any position can impose and the arm OVER-collapses by
   construction. ⚠ It is a second WEIGHTING, not a bracket: greedy sets under different
@@ -99,13 +113,23 @@ mix under TWO weightings and the derivation must carry both:
   trapped between the two. What agreement between them buys is evidence that the band
   mix is insensitive to the collapse, which is the only claim made from it.
 
-⚠ PER-BAR FORWARD RETURN DISPERSION IS MEASURED, gated against ungated, because the
-variance input §5 needs is S-12's and the only stored bootstrap CI is S-4's. Whether
-that proxy is conservative is a DIRECTION, and a direction is measurable: this reports
-``sd(close-to-close return | close >= GATE_EDGE) / sd(close-to-close return)`` so the
-derivation inflates the borrowed SE by ``max(1, ratio)`` rather than asserting which
-way it leans. ⚠ It is a price fact about the corpus — the same class as arm 1's regime
-priors — and reads no strategy outcome, no fill and no position.
+⚠ RETURN DISPERSION IS MEASURED IN TWO PLACES, because the variance input §5 needs is
+S-12's and the only stored bootstrap CI is S-4's. Whether that borrow is conservative is
+a DIRECTION, and a direction is measurable rather than assertable:
+
+- ``decision_bar_dispersion`` — the TRAILING return at each fire, per strategy and arm.
+  This is the like-for-like pair the derivation uses: the two rules' own decision bars,
+  not the corpus at large.
+- ``bar_return_dispersion`` — the unconditional close-to-close population, split on the
+  gate edge. Kept as a secondary reading, and ⚠ it is NOT a good comparator on its own:
+  measured over the full corpus its ``all_bars`` standard deviation is dominated by raw
+  bar-return tails on names neither strategy trades.
+
+⚠⚠ TRAILING, NOT FORWARD, AND THAT IS WHAT KEEPS IT OUTCOME-FREE. ``close(i)/close(i-1)``
+at a fire is the move INTO the decision bar, which the rule already has. The forward
+return at a fire would be the first bar of that position's own P&L — the thing a
+pre-freeze census must not open. ⚠ The unconditional population is a plain price fact
+about the corpus, the same class as arm 1's regime priors.
 
 Refs #2840, #2832, #2437, #2829, #3238.
 """
@@ -216,8 +240,11 @@ def _round_trip_drag(half_spread: Decimal) -> Decimal:
 
     A buy fills at ``P(1 + h)`` and the matching sell at ``Q(1 - h)``, so the net
     multiple is the gross one times ``(1 - h) / (1 + h)`` and the drag is what that
-    removes. ⚠ NOT ``2h``, and NOT ``p75_spread_pct``: both are the first-order
-    approximation and it errs CHEAP, which is the one direction a cost must not.
+    removes. ⚠ NOT ``2h`` and NOT ``p75_spread_pct``: both are the first-order
+    approximation, and the direction is the opposite of what it first looks —
+    ``2h > 2h/(1+h)``, so the approximation errs DEAR. The exact form is used because
+    it is the one the charge actually takes, not because it is the safer rounding
+    (Codex ckpt-1, finding 30, which corrected this comment).
     """
     return 2 * half_spread / (1 + half_spread)
 
@@ -253,6 +280,10 @@ class _Dispersion:
     def sd(self) -> float | None:
         """The sample SD, or ``None`` below two observations — never 0.0 by default."""
         return math.sqrt(self.m2 / (self.count - 1)) if self.count > 1 else None
+
+    def add(self, value: float) -> None:
+        """One observation. The merge form with a single-element chunk."""
+        self.merge(count=1, mean=value, m2=0.0)
 
     def as_json(self) -> dict[str, object]:
         return {"count": self.count, "mean": self.mean, "sd": self.sd}
@@ -305,6 +336,7 @@ def _absorb_bands(
     series: object,
     price_basis: PriceBasis,
     mixes: Mapping[str, _BandMix],
+    decision_bar_dispersion: _Dispersion,
 ) -> None:
     """Tally the band each fire's FILL selects, under both weightings.
 
@@ -316,11 +348,24 @@ def _absorb_bands(
     ⚠ ONLY A FILLABLE FIRE QUARANTINES. A fire whose successor cannot be priced opens
     no position, so it supersedes nothing — treating it as if it did would drop real
     later entries from the collapse arm.
+
+    ⚠⚠ THE DISPERSION TAKEN AT A FIRE IS THE TRAILING RETURN, ``close(i)/close(i-1)``,
+    AND THE DIRECTION IS THE WHOLE POINT. It is the move INTO the decision bar —
+    information the rule itself already has at decision time — so conditioning on a
+    fire adds no look-ahead and reads no outcome. The FORWARD return at a fire would
+    be the first bar of the position's own P&L, which is exactly the thing that must
+    not be opened before the declaration is frozen.
     """
     rows = series.rows  # type: ignore[attr-defined]
     dates = series.dates  # type: ignore[attr-defined]
+    closes = series.array_closes  # type: ignore[attr-defined]
     quarantined_until: int | None = None
     for index in sorted(fired_indices):
+        if index >= 1:
+            previous, current = closes[index - 1], closes[index]
+            # NaN (a masked close) fails both comparisons, so it drops out untested.
+            if previous > 0 and current > 0:
+                decision_bar_dispersion.add(float(current / previous - 1.0))
         collapsible = quarantined_until is None or index > quarantined_until
         cells = [mixes["all_fires"]] + ([mixes["max_hold_collapse"]] if collapsible else [])
         for cell in cells:
@@ -344,7 +389,15 @@ def _absorb_bands(
             cell.drag_total += drag
             cell.fill_dates[dates[fill_index]] += 1
         if collapsible:
-            quarantined_until = index + MAX_HOLD_BARS
+            # ⚠ `- 1`, and it is not cosmetic (Codex ckpt-1, finding 20). A position
+            # opened here fills at `index + 1` and, at the cap, closes at
+            # `index + 1 + MAX_HOLD_BARS`. `position_builder` supersedes on
+            # `entry.fill_bar_date < open_until` — STRICTLY before — and states the
+            # rule beside it: *"A closed position whose close date equals a later
+            # entry's fill bar does NOT suppress it — rule 4, exit before entry."* So
+            # the fire at `index + MAX_HOLD_BARS`, whose fill lands exactly on that
+            # close, is NOT superseded, and the quarantine must end one bar earlier.
+            quarantined_until = index + MAX_HOLD_BARS - 1
 
 
 def _absorb_dispersion(series: object, *, dispersion: Mapping[tuple[str, str], _Dispersion], arm: str) -> None:
@@ -414,6 +467,11 @@ def main(argv: list[str] | None = None) -> int:
         (s, a, w): _BandMix() for s in STRATEGIES for a in ARMS for w in WEIGHTINGS
     }
     dispersion: dict[tuple[str, str], _Dispersion] = {(a, p): _Dispersion() for a in ARMS for p in ("all", "gated")}
+    #: The trailing return at each FIRE, per strategy and arm — the like-for-like
+    #: comparator the unconditional populations above cannot be. See `_absorb_bands`.
+    decision_bar_dispersion: dict[tuple[str, str], _Dispersion] = {
+        (s, a): _Dispersion() for s in STRATEGIES for a in ARMS
+    }
     entries = {strategy_id: STRATEGY_MANIFEST[strategy_id] for strategy_id in STRATEGIES}
 
     with psycopg.connect(settings.database_url) as conn:
@@ -436,7 +494,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"corpus cost_price_basis resolved to {corpus.cost_price_basis!r}, not 'as_traded' — "
                 "the pinned archive's provenance is missing and S-12's nominal gate is not measurable here"
             )
-        regime_provider = MarketRegimeProvider.load_research(conn)
+        # ⚠⚠ `through_date` IS REQUIRED HERE AND WAS MISSING (Codex ckpt-1, finding 26).
+        # `load_research` defaults it to None, which loads and CLASSIFIES the whole
+        # benchmark chain — including every post-boundary bar. Neither S-4 nor S-12
+        # reads the regime input, so no number this script printed was contaminated;
+        # the claim in the header ("no hold-out bar is loaded") was nonetheless false,
+        # and a rule that later took a regime condition would have been handed withheld
+        # data with nothing to say so.
+        regime_provider = MarketRegimeProvider.load_research(conn, through_date=corpus.window.end)
         opportunity = corpus.opportunity_records["in_sample"]
         opportunity_keys = set(opportunity.evaluated_instrument_ids) | {
             -series_id for series_id in opportunity.evaluated_series_ids
@@ -491,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
                         series=series,
                         price_basis=corpus.cost_price_basis,
                         mixes={w: band_mix[(strategy_id, arm, w)] for w in WEIGHTINGS},
+                        decision_bar_dispersion=decision_bar_dispersion[(strategy_id, arm)],
                     )
             evaluated += 1
         conn.rollback()
@@ -544,6 +610,14 @@ def main(argv: list[str] | None = None) -> int:
             for weighting in WEIGHTINGS
         },
         "bar_return_dispersion": {arm: _dispersion_report(arm) for arm in ARMS},
+        # ⚠ THE COMPARATOR THE DERIVATION USES. The two populations above are
+        # unconditional and the corpus's raw bar-return tails dominate them; these are
+        # conditioned on the two rules' own fires, which is the like-for-like pair.
+        "decision_bar_dispersion": {
+            f"{strategy_id}/{arm}": decision_bar_dispersion[(strategy_id, arm)].as_json()
+            for strategy_id in STRATEGIES
+            for arm in ARMS
+        },
     }
     if args.limit is not None:
         report["WARNING"] = (
