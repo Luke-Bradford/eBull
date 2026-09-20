@@ -109,11 +109,21 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row, tuple_row
 
+# ⚠ THE PRODUCER'S OWN SQL, IMPORTED RATHER THAN MIRRORED (Codex checkpoint 2, P2).
+# An earlier revision of this file COPIED the CASE expression. The copy type-checked, ran,
+# and agreed with the original — and the drift test beside it compared only the profile
+# VOCABULARY, so a change to which exchange maps to which profile would have left the census
+# admitting bars the canonical resolver refuses, with every gate green. That is the "two
+# texts" shape recorded in the prevention log, committed in the same diff that cites it.
+# Importing a private name across the boundary is the lesser cost: a script sits above both
+# layers, and there is exactly one derivation.
+from app.api.instruments import _SESSION_PROFILE_SQL
 from app.config import settings
 from app.services.bar_capture_certificate import (
     CAPTURE_CERTIFICATE_VERSION,
     CERTIFIED_BUCKET,
     IMPOSSIBLE_BUCKET,
+    NYSE_SESSION_PROFILES,
     capture_certificate,
     capture_semantics_cutover,
     next_session_open_utc,
@@ -1134,15 +1144,12 @@ def _report(payload: Mapping[str, Any], *, as_of: datetime) -> str:
 # ⚠ THE SESSION PROFILE IS RESOLVED HERE AND NOT IN THE RULE. ``capture_certificate``
 # refuses any listing the NYSE calendar does not describe, and takes the profile as a
 # required argument rather than deriving it — a service reaching into ``app.api`` would
-# invert the layering, and a second copy of the CASE would be the "two texts" shape.
+# invert the layering.
 #
-# ⚠ THE CASE IS ``app/api/instruments.py::_SESSION_PROFILE_SQL``, MIRRORED DOWN TO THE
-# BRANCH ORDER, including the half that is easy to get wrong: exchange 33 is an RTH-only
-# duplicate whose ``asset_class`` is still ``us_equity``, so the exchange test must precede
-# the asset-class test or every ``.RTH`` row resolves to plain ``us_equity``. Both are in
-# ``NYSE_SESSION_PROFILES``, so the bucket is unchanged either way today — but the census
-# prints the profile split, and getting it wrong would misreport WHICH listing kind the
-# store holds.
+# ⚠ The CASE is INTERPOLATED FROM THE PRODUCER, not restated. It expects the aliases ``i``
+# (instruments) and ``e`` (exchanges), which is why they are named that way below. It
+# already handles the half that is easy to get wrong: exchange 33 is an RTH-only duplicate
+# whose ``asset_class`` is still ``us_equity``, so its test precedes the asset-class one.
 #
 # ⚠⚠ BOTH JOINS ARE ``LEFT`` AND THAT IS THE LOAD-BEARING PART, NOT TIDINESS. This query
 # feeds a CENSUS whose entire output is a set of counts, so an inner join would silently
@@ -1155,17 +1162,11 @@ def _report(payload: Mapping[str, Any], *, as_of: datetime) -> str:
 # With ``LEFT``, a missing row yields NULL, the ``ELSE`` resolves it to ``continuous``, and
 # ``capture_certificate`` refuses it under ``non_nyse_trading_calendar``. The population
 # stays fixed and the unknown becomes a visible refusal instead of an absence.
-_CAPTURE_CERTIFICATE_SQL = """
+_CAPTURE_CERTIFICATE_SQL = f"""
     SELECT b.timeframe,
            b.bar_time,
            b.captured_at,
-           CASE
-               WHEN i.exchange = '33' THEN 'us_equity_rth'
-               WHEN e.asset_class = 'us_equity' THEN 'us_equity'
-               WHEN e.asset_class IN ('eu_equity', 'uk_equity', 'asia_equity', 'mena_equity')
-                   THEN 'foreign_equity'
-               ELSE 'continuous'
-           END AS session_profile
+           {_SESSION_PROFILE_SQL}
     FROM strategy_intraday_bars b
     LEFT JOIN instruments i ON i.instrument_id = b.instrument_id
     LEFT JOIN exchanges e ON e.exchange_id = i.exchange
@@ -1219,6 +1220,7 @@ def capture_certificate_report(
     arithmetic_by_timeframe: dict[str, Counter[str]] = defaultdict(Counter)
     disagreements: Counter[tuple[bool, bool]] = Counter()
     impossible_excluded = 0
+    non_nyse_excluded = 0
     # ⚠ Counted as we go rather than ``len(rows)``: the caller streams a
     # server-side cursor, so the sequence is consumed once and has no length.
     scanned = 0
@@ -1240,6 +1242,20 @@ def capture_certificate_report(
             session_profile=session_profile,
         )
         by_timeframe[timeframe][bucket] += 1
+        # ⚠⚠ NON-NYSE ROWS STOP HERE (Codex checkpoint 2, P2). The ADMISSION table above is
+        # total over the population — it has a bucket for them and must keep counting them.
+        # The two blocks BELOW are not: both call ``nominality_bucket``, which is NYSE
+        # arithmetic, so feeding a foreign bar into them would compute "did a NEW YORK open
+        # intervene" for a listing that does not trade on that calendar and then print the
+        # answer as "certified by the RULE". That is precisely the fail-open the
+        # ``session_profile`` gate was added to close, reintroduced one frame later in the
+        # reporting — the gate would read as enforced while the headline figures ignored it.
+        #
+        # ⚠ Counted rather than skipped. A silently smaller denominator in the arithmetic
+        # table is the same defect in the other direction, so the count is printed.
+        if session_profile not in NYSE_SESSION_PROFILES:
+            non_nyse_excluded += 1
+            continue
         # ⚠ The proxy comparison is against the ARITHMETIC half deliberately. It
         # asks "does the same-NY-date proxy agree with the session-open rule",
         # which is a question about the calendar and not about whether this
@@ -1285,7 +1301,10 @@ def capture_certificate_report(
     # for. A command that no longer computes the figure its prose points at is the
     # defect the prevention log records under "a rewritten formatter silently falsifies
     # every claim made about its output elsewhere".
-    out.append("ARITHMETIC only (nominality_bucket) — did an open intervene, ignoring the cutover:")
+    out.append(
+        f"ARITHMETIC only (nominality_bucket) — did an open intervene, ignoring the cutover"
+        f" [NYSE-calendar listings only; {non_nyse_excluded:,} bars excluded]:"
+    )
     out.extend(_bucket_table(arithmetic_by_timeframe))
     out.append("")
     out.append("withdrawn proxy vs the ARITHMETIC rule (ignores the sql/402 cutover, by design):")

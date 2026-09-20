@@ -408,3 +408,47 @@ class TestTheNyseCalendarIsAPreconditionAndNowSaysSo:
             f"{NYSE_SESSION_PROFILES - produced} is not a profile the producer can emit"
         )
         assert produced - NYSE_SESSION_PROFILES == {"foreign_equity", "continuous"}
+
+
+class TestTheCensusDoesNotApplyNyseArithmeticToAForeignBar:
+    """Codex checkpoint 2, P2. The gate was enforced one frame too late.
+
+    ``capture_certificate`` refuses a foreign listing, but the census then passed
+    the SAME row to ``nominality_bucket`` and to the proxy comparison — both NYSE
+    arithmetic — so a foreign bar could be printed as "certified by the RULE" off
+    a New York open it never traded against. The gate would have read as enforced
+    while the headline tables ignored it.
+
+    ⚠ Synthetic rows, deliberately. The store is 100% ``us_equity`` today, so the
+    live census exercises none of this and would keep reporting ``0 bars
+    excluded`` however wrong the handling was.
+    """
+
+    BAR = datetime(2026, 9, 18, 19, 30, tzinfo=UTC)
+    CAPTURE = datetime(2026, 9, 18, 20, 5, tzinfo=UTC)
+    CUTOVER = datetime(2026, 9, 18, tzinfo=UTC)
+
+    def _report(self, *profiles: str) -> str:
+        from scripts.census_2840_forward_daily_provenance import capture_certificate_report
+
+        return capture_certificate_report(
+            [("30m", self.BAR, self.CAPTURE, profile) for profile in profiles],
+            capture_semantics_from=self.CUTOVER,
+        )
+
+    def test_a_foreign_bar_is_excluded_from_the_arithmetic_table_and_counted(self) -> None:
+        report = self._report("foreign_equity", "continuous")
+
+        assert "2 bars excluded" in report
+        # The ADMISSION table is total and still sees both.
+        assert "over 2 stored bars" in report
+        assert "non_nyse_trading_calendar" in report
+
+    def test_the_admission_table_still_counts_them(self) -> None:
+        """Excluding them from the ARITHMETIC table must not shrink the census's
+        own denominator — a silently smaller population is the same defect in the
+        other direction."""
+        report = self._report("us_equity", "foreign_equity")
+
+        assert "over 2 stored bars" in report
+        assert "1 bars excluded" in report

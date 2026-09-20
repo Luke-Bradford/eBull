@@ -82,7 +82,14 @@ _NY: Final = ZoneInfo("America/New_York")
 _SESSION_OPEN: Final = time(9, 30)
 
 #: The stable name of the rule. Bumped on a RULE change, never on a comment.
-CAPTURE_CERTIFICATE_RULE_ID: Final = "bar-capture-certificate-v1"
+#:
+#: ⚠ v1 → v2 (#2840, Codex checkpoint 2). ``capture_certificate`` gained a required
+#: ``session_profile`` argument and a new verdict, ``non_nyse_trading_calendar``: a
+#: CONTRACT change, so this id moves with it. ``CAPTURE_CERTIFICATE_VERSION`` would have
+#: moved on the source hash regardless, but the id is the half a human reads in an audit
+#: record, and leaving it at v1 would show the same stable name for two materially
+#: different admission rules.
+CAPTURE_CERTIFICATE_RULE_ID: Final = "bar-capture-certificate-v2"
 
 
 def _tier_minutes_hash() -> str:
