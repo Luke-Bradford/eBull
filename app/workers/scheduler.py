@@ -6437,6 +6437,7 @@ def strategy_intraday_harvest() -> None:
         tracker.note = (
             f"universe={report.universe_version} selected={report.selected} fetched={report.fetched} "
             f"completed_rth={report.completed_rth} written={report.written} "
+            f"compared={report.compared} diverged={report.diverged} "
             f"gaps={report.gaps_recorded} quote_expected={quote_report.expected} "
             f"quote_observed={quote_report.observed} quote_missing={quote_report.missing} "
             f"quote_invalid={quote_report.invalid} quote_written={quote_report.rows_written} "
