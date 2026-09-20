@@ -131,6 +131,38 @@ return at a fire would be the first bar of that position's own P&L — the thing
 pre-freeze census must not open. ⚠ The unconditional population is a plain price fact
 about the corpus, the same class as arm 1's regime priors.
 
+WHAT THE THIRD PASS ADDS — THE NAME-DAY DENOMINATOR (#2840 step 1, sizing)
+--------------------------------------------------------------------------
+Step 1's open item is SIZING, and it is not "how many names": the pass bar's axes are
+daily sleeve returns and entry-fill-date CLUSTERS, so two names can generate many dates
+and a thousand names can generate one. The question is how many clusters a forward
+``<= 50``-name panel accrues per unit time, and that needs a FIRE RATE PER NAME-DAY.
+
+⚠ HALF THE SCOPING THIS INHERITED WAS ALREADY BUILT. The handoff asked for two new
+counters — name-days evaluated, and name-days at or above the gate. The first already
+existed: ``segmented_signals`` emits exactly one entry verdict per bar and RAISES
+otherwise (``strategy_segmented_evaluation.py:66-70``), so the ``verdicts`` tally IS a
+name-day count over precisely the population the fires came from. Only the second was
+missing, and the nearest-looking substitute is not it — ``bar_return_dispersion``'s
+``gated_bars`` count is a RETURN-PAIR population that requires a usable successor bar
+and includes bars the rule could not evaluate.
+
+⚠ AND IT CANNOT BE READ OFF THE VERDICTS. S-12's gate is a bare ``return False`` inside
+``entry(index)``; it stamps no reason, so a gate rejection and a failed breakout are
+both plain ``not_fired``. The counter has to be taken where the verdict is.
+
+``name_day_supply`` therefore reports, per ``(strategy, arm)`` and per calendar YEAR:
+``evaluable``, ``gate_clearing_evaluable``, ``fired``, ``fired_gate_clearing`` and the
+distinct signal-date count. Two identities make it self-checking — S-12's
+``fired_gate_clearing`` must equal its ``fired`` (its gate admits nothing else), and
+S-4's must equal S-12's ``fired`` exactly (S-12 IS S-4 and the gate).
+
+⚠ THE YEAR KEY IS NOT DECORATION. A single 58.9-year rate would hand a forward 24-month
+projection a stationarity assumption with nowhere to state it. ⚠⚠ AND NO RATE IS
+DIVIDED HERE: counts only, for the reason the floor arithmetic was taken out — a rate
+carries a homogeneity-across-names assumption, and an assumption belongs where the
+projection is made. ``scripts/project_2840_panel_accrual.py`` owns that arithmetic.
+
 Refs #2840, #2832, #2437, #2829, #3238.
 """
 
@@ -164,6 +196,7 @@ from app.services.strategies.s4_volatility_compression_breakout import MAX_HOLD_
 from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
     CHEAPEST_BAND,
     GATE_EDGE,
+    PRICE_FLOOR,
     S12_PARAMS,
     S12_STRATEGY_ID,
 )
@@ -229,11 +262,44 @@ def _concentration(dates: Mapping[date, int]) -> dict[str, int]:
 #: trade-weighted mix and they are NOT a bracket around it — see the module docstring.
 WEIGHTINGS: Final[tuple[str, ...]] = ("all_fires", "max_hold_collapse")
 
-#: The gate edge as a float, for the numpy pass only. The gate itself already runs on
-#: floats (``PRICE_FLOOR``) under a measured licence — 0 of 75,972,669 stored prices
-#: sit within 1e-9 of a band edge without equalling it (#3238) — and the BAND
-#: selection below stays on ``Decimal`` regardless, because that is what is charged.
-_GATE_EDGE_FLOAT: Final[float] = float(GATE_EDGE)
+#: ⚠ THE STRATEGY'S OWN FLOAT GATE, IMPORTED — not a local ``float(GATE_EDGE)``.
+#: This file used to carry its own copy, which is a second definition of the rule's
+#: threshold sitting in the script that measures the rule. It happened to agree, and
+#: a recalibration that moved one and not the other would have produced a census of a
+#: gate nobody declared. The licence for comparing on floats at all is a measurement
+#: rather than an assumption — 0 of 75,972,669 stored prices sit within 1e-9 of a band
+#: edge without equalling it (#3238) — and the BAND selection below stays on
+#: ``Decimal`` regardless, because that is what is charged.
+#:
+#: ⚠ A masked close arrives as NaN and every NaN comparison is False, so a masked bar
+#: fails ``>= PRICE_FLOOR`` untested — the same treatment the strategy gives it.
+#:
+#: There is deliberately no module-local alias: an alias is the same second definition
+#: with a shorter lifetime, so the two call sites below read ``PRICE_FLOOR`` directly.
+
+#: The per-(strategy, arm, year) name-day tallies. ⚠ THE DENOMINATOR AND THE NUMERATOR
+#: COME OFF THE SAME EVALUATOR CALL, which is the whole reason they live here rather
+#: than in a standalone query: ``segmented_signals`` emits exactly one entry verdict per
+#: bar and RAISES otherwise (``strategy_segmented_evaluation.py:66-70``), so a verdict
+#: count IS a name-day count over precisely the population the fires came from.
+#: Reconstructing either half separately is the "a subtraction is not a gap count"
+#: error — a previous attempt put 18,865,624 name-days over 4,593 series against this
+#: census's 14,260 evaluated, which are different populations.
+NAME_DAY_METRICS: Final[tuple[str, ...]] = (
+    # Bars the rule could judge — every verdict that is not ``not_evaluable``.
+    "evaluable",
+    # …of those, the ones clearing S-12's gate: the population S-12 can fire on at all.
+    # ⚠ NOT obtainable from the verdict stream: the gate is a bare ``return False``
+    # inside ``entry(index)`` and stamps no reason, so a gate rejection and a failed
+    # breakout are both plain ``not_fired``.
+    "gate_clearing_evaluable",
+    "fired",
+    # ⚠ A CONSISTENCY CHECK, not a new fact. S-12 is S-4 AND the gate, so S-4's fires
+    # restricted to gate-clearing bars must equal S-12's fired count exactly, and
+    # S-12's own ``fired_gate_clearing`` must equal its ``fired``. Two identities for
+    # one counter; the projection script refuses if either fails.
+    "fired_gate_clearing",
+)
 
 
 def _round_trip_drag(half_spread: Decimal) -> Decimal:
@@ -427,7 +493,7 @@ def _absorb_dispersion(series: BarSeries, *, dispersion: Mapping[tuple[str, str]
         return
     base = previous[usable]
     returns = following[usable] / base - 1.0
-    for population, sample in (("all", returns), ("gated", returns[base >= _GATE_EDGE_FLOAT])):
+    for population, sample in (("all", returns), ("gated", returns[base >= PRICE_FLOOR])):
         if sample.size == 0:
             continue
         dispersion[(arm, population)].merge(
@@ -463,6 +529,19 @@ def main(argv: list[str] | None = None) -> int:
 
     fired: Counter[tuple[str, str]] = Counter()
     verdicts: Counter[tuple[str, str, str]] = Counter()
+    #: ``(strategy_id, arm, calendar_year, metric)`` — see ``NAME_DAY_METRICS``. ⚠ KEYED
+    #: BY YEAR because the projection it feeds is about a FORWARD 24-month window, and a
+    #: single 58.9-year rate would hand that projection a stationarity assumption with
+    #: nowhere to state it. Per-year counts make the spread of the rate a measurement.
+    name_days: Counter[tuple[str, str, int, str]] = Counter()
+    #: Every distinct bar date the corpus carries, per arm. ⚠ THE HORIZON'S UNIT,
+    #: MEASURED. A projection over "24 months" has to turn that into panel NAME-DAYS,
+    #: and the obvious 252-trading-days convention is an invented constant of exactly
+    #: the kind "source-rule before design" forbids. Counting the dates the rates were
+    #: measured ON keeps numerator, denominator and horizon on one population.
+    #: ⚠ Not S-4's ``distinct_signal_dates``, which is a FIRE-date count and a lower
+    #: bound: 11,616 over 58.9 years is ~197/year, well under any session count.
+    bar_dates: dict[str, set[date]] = {arm: set() for arm in ARMS}
     signal_dates: dict[tuple[str, str], Counter[date]] = {(s, a): Counter() for s in STRATEGIES for a in ARMS}
     band_mix: dict[tuple[str, str, str], _BandMix] = {
         (s, a, w): _BandMix() for s in STRATEGIES for a in ARMS for w in WEIGHTINGS
@@ -509,6 +588,9 @@ def main(argv: list[str] | None = None) -> int:
         }
         corpus_window_end = corpus.window.end
         corpus_price_basis = corpus.cost_price_basis
+        # ⚠ The RUN's universe, not ``BACKTEST_UNIVERSE`` re-imported: the identity has
+        # to describe what this pass evaluated, and the universe sits inside it.
+        corpus_universe = corpus.universe_basis
         total = len(corpus.pairs)
         evaluated = 0
         for series_seen, (name_key, series_id) in enumerate(corpus.pairs, start=1):
@@ -527,6 +609,11 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 regime = regime_provider.for_dates(series.dates)
                 _absorb_dispersion(series, dispersion=dispersion, arm=arm)
+                bar_dates[arm].update(series.dates)
+                # ⚠ Bound once per (series, arm): the gate test below runs on every
+                # evaluable bar of both strategies, so re-reading the property per
+                # signal would double the array lookups for nothing.
+                series_closes = series.array_closes
                 for strategy_id, entry in entries.items():
                     fired_indices: list[int] = []
                     for signal in segmented_signals(
@@ -545,6 +632,20 @@ def main(argv: list[str] | None = None) -> int:
                         # filter it used to be.
                         assert when < HOLDOUT_BOUNDARY
                         verdicts[(strategy_id, arm, signal.verdict)] += 1
+                        # ⚠ The gate is tested ONLY on bars the rule could judge. A
+                        # ``not_evaluable`` bar is not a name-day either strategy could
+                        # have fired on, so counting it would inflate the denominator
+                        # and understate the rate — and a masked bar's close is NaN,
+                        # which would silently fail the comparison anyway.
+                        if signal.verdict != "not_evaluable":
+                            clears_gate = bool(series_closes[signal.signal_index] >= PRICE_FLOOR)
+                            name_days[(strategy_id, arm, when.year, "evaluable")] += 1
+                            if clears_gate:
+                                name_days[(strategy_id, arm, when.year, "gate_clearing_evaluable")] += 1
+                            if signal.verdict == "fired":
+                                name_days[(strategy_id, arm, when.year, "fired")] += 1
+                                if clears_gate:
+                                    name_days[(strategy_id, arm, when.year, "fired_gate_clearing")] += 1
                         if signal.verdict == "fired":
                             fired[(strategy_id, arm)] += 1
                             signal_dates[(strategy_id, arm)][when] += 1
@@ -579,6 +680,33 @@ def main(argv: list[str] | None = None) -> int:
             },
         }
 
+    def _name_day_supply(strategy_id: str, arm: str) -> dict[str, object]:
+        """Name-day counts for one cell, in total and by calendar year.
+
+        ⚠ COUNTS ONLY — no rate is divided here, deliberately. The module header's
+        rule that this census measures and the downstream script owns the arithmetic
+        binds a fire RATE exactly as it binds a floor: a rate is a projection input
+        with a homogeneity assumption attached, and the assumption has to be stated
+        where the projection is made, not buried in a report key.
+        """
+        years = sorted({year for (sid, a, year, _metric) in name_days if sid == strategy_id and a == arm})
+        # ⚠ Iterating a date-keyed Counter yields DISTINCT dates, which is the unit the
+        # floor is denominated in (``prereg_contract.py:127-132``) — not its fire count.
+        dates_by_year: Counter[int] = Counter(when.year for when in signal_dates[(strategy_id, arm)])
+        return {
+            "totals": {
+                metric: sum(name_days[(strategy_id, arm, year, metric)] for year in years)
+                for metric in NAME_DAY_METRICS
+            },
+            "by_year": {
+                str(year): {
+                    **{metric: name_days[(strategy_id, arm, year, metric)] for metric in NAME_DAY_METRICS},
+                    "distinct_signal_dates": dates_by_year[year],
+                }
+                for year in years
+            },
+        }
+
     def _dispersion_report(arm: str) -> dict[str, object]:
         everything, gated = dispersion[(arm, "all")], dispersion[(arm, "gated")]
         sd_all, sd_gated = everything.sd, gated.sd
@@ -603,12 +731,44 @@ def main(argv: list[str] | None = None) -> int:
         "max_hold_bars": MAX_HOLD_BARS,
         "limited_to_series": args.limit,
         "series_evaluated": evaluated,
+        # ⚠⚠ THE IDENTITY OF WHAT WAS ACTUALLY RUN, so a downstream reader can tell a
+        # stale census from a current one. ``gate_edge`` and ``max_hold_bars`` are the
+        # two parameters a consumer is most likely to check, and neither moves when S-4's
+        # body, S-12's body or the shared indicator code changes — so a census taken
+        # before such an edit would pass every other provenance test and publish its
+        # rates under the current strategy names. ``StrategyIdentity.version`` hashes the
+        # registry module, the source hash, the params, the universe and the cost model
+        # together, which is exactly the set that has to move.
+        "strategy_versions": {
+            strategy_id: entry.identity(universe=corpus_universe, cost_model_id=COST_MODEL_ID).version
+            for strategy_id, entry in entries.items()
+        },
         "supply": {f"{strategy_id}/{arm}": _supply(strategy_id, arm) for strategy_id in STRATEGIES for arm in ARMS},
         "charged_band_mix": {
             f"{strategy_id}/{arm}/{weighting}": band_mix[(strategy_id, arm, weighting)].as_json()
             for strategy_id in STRATEGIES
             for arm in ARMS
             for weighting in WEIGHTINGS
+        },
+        # ⚠⚠ THE DENOMINATOR THE SIZING QUESTION NEEDS, AND THE REASON IT IS NOT THE
+        # ``gated_bars`` COUNT BELOW. ``bar_return_dispersion``'s gated population is a
+        # RETURN-PAIR count: it requires a usable SUCCESSOR bar and it includes bars the
+        # rule could not evaluate. Close to this, and not the same population — which is
+        # the one property a fire-rate denominator has to have.
+        # ⚠ The horizon's unit, measured on the same population as the rates. See
+        # ``bar_dates``. A year here is a CALENDAR year of the corpus, so the first and
+        # last are partial and a projection must not read them as full years.
+        "corpus_bar_dates": {
+            arm: {
+                "total": len(bar_dates[arm]),
+                "by_year": {
+                    str(year): count for year, count in sorted(Counter(d.year for d in bar_dates[arm]).items())
+                },
+            }
+            for arm in ARMS
+        },
+        "name_day_supply": {
+            f"{strategy_id}/{arm}": _name_day_supply(strategy_id, arm) for strategy_id in STRATEGIES for arm in ARMS
         },
         "bar_return_dispersion": {arm: _dispersion_report(arm) for arm in ARMS},
         # ⚠ THE COMPARATOR THE DERIVATION USES. The two populations above are
@@ -632,4 +792,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["ARMS", "S4_STRATEGY_ID", "STRATEGIES", "WEIGHTINGS", "main"]
+__all__ = ["ARMS", "NAME_DAY_METRICS", "S4_STRATEGY_ID", "STRATEGIES", "WEIGHTINGS", "main"]
