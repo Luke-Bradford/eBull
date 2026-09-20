@@ -220,9 +220,14 @@ is ALWAYS `'sleeve'` — a module constant at `backtest_run.py:312`; filtering o
 the in-sample/hold-out split returns 0 rows silently, which is how arm 1's first
 cohort read came back empty.
 
-**Run set: S-12, S-4 and S-11.** S-4 is the control the gate is measured against;
-keeping S-11 in keeps `deflated_sharpe.MIN_MEASURED_TRIALS` cleared. Narrowing to
-S-12 alone would write rows permanently refused with `deflated_sharpe_not_computed`.
+**Run set: every runnable strategy — S-12, S-4, S-8 and S-11. This is not a choice.**
+`run_backtest`'s `strategy_id` parameter is SINGULAR (`backtest_run.py:3915`), so an
+invocation runs the whole runnable set or exactly one strategy. There is no
+`{S-12, S-4, S-8}` option. Naming S-4 as "the control that must be in the set" and S-11
+as "kept in to clear `MIN_MEASURED_TRIALS`" would describe a lever that does not exist;
+both are simply present. Passing `strategy_id` to isolate S-12 would leave ONE measured
+trial against `MIN_MEASURED_TRIALS = 2` and write rows permanently refused with
+`deflated_sharpe_not_computed`.
 
 ⚠⚠ **The deflated Sharpe is refused TODAY, and clearing `MIN_MEASURED_TRIALS` is not
 what fixes it.** `deflate_group` (`backtest_run.py:3417`) computes
@@ -304,7 +309,31 @@ trial register.
    merged `strategy_version`, `falsification_only` — for arm 1's reason and one of its
    own: no stored corpus window can CONFIRM a hypothesis formed off stored cohorts,
    and the threshold is a 2026 calibration applied to historical prices. The run this
-   authorises can only kill;
+   authorises can only kill.
+
+   ⚠ **ONE trial, keyed on the STRATEGY ID.** `sharpe_variance` and `deflate_group`
+   both key by `trial_id` and are handed strategy ids, so a trial named after the
+   contract (arm 1's `sh-volatile-regime-gate-2026-08-22`) is invisible to them — that
+   is precisely why S-11 does not resolve. Minting a SECOND trial keyed on the strategy
+   id would count one search twice in `M`. So arm 2's single entry takes
+   `trial_id = "s12-cheapest-band-price-gated-breakout"` with
+   `declared_for = ("s12-cheapest-band-price-gated-breakout", "<merged version>")`, and
+   the declaration carries the contract string in `contract_version` — which does not
+   have to equal a `trial_id`; arm 1's freeze script equates them only because it looks
+   its trial up that way, and arm 2's script looks its own up by `declared_for`.
+
+   ⚠ **Adding the trial IS the supersession** (`trial_register.py:118-129`): a new entry
+   strands every stored deflation via `trial_register_superseded` whether or not
+   `TRIAL_REGISTER_VERSION` moves, and *"declining to add one to protect old rows is the
+   flattering direction this module is built against"*. Follow r8's and r9's own
+   precedent — run the stranding query recorded beside that constant and write what it
+   stranded into the bump comment, rather than arguing it.
+
+   ⚠ **Freeze close to the run.** `strategy_version` hashes `COST_MODEL_ID`, so a cost
+   model bump rotates it and strands the declaration — which is exactly what happened to
+   arm 1: its entry pins S-11 at `strategy-registry-v1+d5f25fd08376` while the current
+   version is `c00e00ce79bb`, moved by #3238's v3 → v4. S-12's merged version is
+   `strategy-registry-v1+f6100a890599` under `COST_MODEL_ID` v4;
 3. explore in-sample (pre-2021-06-29), with the run-time basis guard above;
 4. forward-shadow confirmation, only if 3 passes. ⚠ Forward shadow is not
    self-evidently confirmatory either: `cost_model` records that its quote sample is
