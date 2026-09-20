@@ -481,8 +481,9 @@ def test_the_smallest_panel_can_express_every_declared_share() -> None:
     for share in SUB_GATE_SHARE_GRID:
         above, below = _split_panel(MIN_PANEL_SIZE, share)
         assert above >= 1 and below >= 1 and above + below == MIN_PANEL_SIZE
-    # …and it is the SMALLEST such size: one share below it cannot be expressed.
-    assert MIN_PANEL_SIZE >= 2
+    # …and it is the SMALLEST such size: one share below it cannot be expressed. This
+    # raise IS the minimality check — a `>= 2` guard beside it would be satisfied by the
+    # `range(2, ...)` search that defines the constant and would verify nothing.
     with pytest.raises(ProjectionRefused, match="must straddle"):
         for share in SUB_GATE_SHARE_GRID:
             _split_panel(MIN_PANEL_SIZE - 1, share)
