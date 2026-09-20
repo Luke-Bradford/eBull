@@ -144,8 +144,16 @@ SUB_GATE_SHARE_GRID: Final[tuple[float, ...]] = (0.25, 0.5, 0.75)
 #: shorter one, not to select between them.
 RECENT_YEARS: Final = 10
 
-#: Below this the panel cannot straddle at all — one name sits on one side of the gate.
-MIN_PANEL_SIZE: Final = 2
+#: ⚠ DERIVED FROM THE GRID, not typed. The smallest panel that can express EVERY declared
+#: share with whole names on both sides of the gate. A literal floor of 2 was accepted at
+#: the CLI and then blew up inside the loop on the 0.75 share (review WARNING 3), which is
+#: a crash rather than a refusal and drops the answerable grid points with it. Tying the
+#: floor to the grid means adding a more extreme share moves the floor with it.
+MIN_PANEL_SIZE: Final[int] = next(
+    size
+    for size in range(2, MAX_PANEL_INSTRUMENTS + 1)
+    if all(1 <= math.ceil(size * share) <= size - 1 for share in SUB_GATE_SHARE_GRID)
+)
 
 
 class ProjectionRefused(ValueError):
@@ -387,6 +395,30 @@ def _occupied_dates(*, rate: float, names: int, days: float) -> float:
     return days * (1.0 - math.pow(1.0 - min(rate, 1.0), names))
 
 
+def _expected_fires(
+    *,
+    above: int,
+    below: int,
+    horizon_days: float,
+    evaluability: float,
+    rate_above_candidate: float,
+    rate_above_control: float,
+    rate_below: float,
+) -> tuple[float, float]:
+    """Expected fires for the two books on one panel. Linearity only — no independence.
+
+    ⚠⚠ THE TWO ABOVE-GATE RATES ARE SEPARATE PARAMETERS ON PURPOSE. They are equal by
+    identity on any census that clears ``_check_arm`` — S-12 IS S-4 AND the gate — but
+    taking them as one argument is what made the degenerate-end check tautological
+    (review WARNING 1): with ``below = 0`` the control's second term vanishes, so a
+    single shared rate meant two expressions in one variable were being compared.
+    Separate parameters make the check a real comparison, and make it TESTABLE by
+    passing rates that disagree.
+    """
+    above_days, below_days = above * horizon_days * evaluability, below * horizon_days * evaluability
+    return above_days * rate_above_candidate, above_days * rate_above_control + below_days * rate_below
+
+
 def _split_panel(panel_size: int, share: float) -> tuple[int, int]:
     """Whole names either side of the gate. ⚠ A panel holds names, not fractions.
 
@@ -416,11 +448,30 @@ def _project_arm(report: dict[str, Any], *, arm: str, panel_size: int, horizon_m
     # exposure by everything the rule cannot judge — warm-up, holes, quarantined bars.
     # ⚠ Measured from this census, and it is CONSERVATIVE for a continuing panel: a
     # 113-bar warm-up is paid once per series here and once ever by a live panel.
-    verdicts = report["supply"][f"{S12_STRATEGY_ID}/{arm}"]["verdicts"]
-    name_days_seen = sum(verdicts.values())
+    # ⚠ The FULL verdict sum is checked across both strategies, not just the ``evaluable``
+    # sub-count (review WARNING 2). ``_check_arm`` asserts the evaluable halves agree;
+    # this ratio's denominator is the whole tally, so a census whose two strategies saw
+    # different bar counts would have one strategy's evaluability applied to both.
+    seen = {
+        strategy_id: sum(report["supply"][f"{strategy_id}/{arm}"]["verdicts"].values())
+        for strategy_id in (S12_STRATEGY_ID, S4_STRATEGY_ID)
+    }
+    if seen[S12_STRATEGY_ID] != seen[S4_STRATEGY_ID]:
+        raise ProjectionRefused(
+            f"{arm}: the two strategies saw different name-day counts ({seen}); segmented_signals emits one "
+            "entry verdict per bar for each, so a disagreement means they did not evaluate the same series"
+        )
+    name_days_seen = seen[S12_STRATEGY_ID]
     evaluability = totals12["evaluable"] / name_days_seen
 
-    rate_above = totals12["fired"] / totals12["gate_clearing_evaluable"]
+    # ⚠⚠ EACH BOOK'S ABOVE-GATE RATE COMES FROM ITS OWN COUNTS, and that is what gives
+    # the degenerate-end check below any content (review WARNING 1). Reusing one shared
+    # `rate_above` for both made the check tautological — with no sub-gate name the
+    # control's second term is zero, so two expressions built on the same variable were
+    # compared and could not differ. Derived separately, the check compares the census's
+    # candidate counts against its control counts and can actually fail.
+    rate_above_candidate = totals12["fired"] / totals12["gate_clearing_evaluable"]
+    rate_above_control = totals4["fired_gate_clearing"] / totals4["gate_clearing_evaluable"]
     below_name_days = totals4["evaluable"] - totals4["gate_clearing_evaluable"]
     rate_below = (totals4["fired"] - totals4["fired_gate_clearing"]) / below_name_days
 
@@ -445,14 +496,27 @@ def _project_arm(report: dict[str, Any], *, arm: str, panel_size: int, horizon_m
     collapse12, collapse4 = _collapse(S12_STRATEGY_ID), _collapse(S4_STRATEGY_ID)
 
     def _fires(above: int, below: int) -> tuple[float, float]:
-        """Expected fires for the two books on one panel. Linearity only — no independence."""
-        above_days, below_days = above * horizon_days * evaluability, below * horizon_days * evaluability
-        return above_days * rate_above, above_days * rate_above + below_days * rate_below
+        return _expected_fires(
+            above=above,
+            below=below,
+            horizon_days=horizon_days,
+            evaluability=evaluability,
+            rate_above_candidate=rate_above_candidate,
+            rate_above_control=rate_above_control,
+            rate_below=rate_below,
+        )
 
     # ⚠⚠ THE DEGENERATE-END IDENTITY, ASSERTED. With no sub-gate name the gate rejects
     # nothing and the two books ARE the same book, so the two fire projections must
     # coincide exactly. The first draft's denominators failed this and the failure was
     # hidden by excluding the endpoint from the grid.
+    # ⚠ THIS IS A STRUCTURAL GUARD, NOT A DATA ONE, and the distinction is worth stating
+    # plainly: ``_check_arm`` already refuses any census whose two strategies disagree on
+    # the gate-clearing counts, so on data that reaches here the two rates are equal by
+    # identity and this cannot fire. What it catches is a CODE change — splitting the two
+    # rates apart is the obvious "improvement" and would pass every count check while
+    # silently breaking the estimand. The repo has the same shape at the census's
+    # import-time hold-cap assertion, which also cannot fire today.
     all_above = _fires(panel_size, 0)
     if not math.isclose(all_above[0], all_above[1], rel_tol=1e-12):
         raise ProjectionRefused(
@@ -465,8 +529,13 @@ def _project_arm(report: dict[str, Any], *, arm: str, panel_size: int, horizon_m
         above, below = _split_panel(panel_size, share)
         fires12, fires4 = _fires(above, below)
         positions12, positions4 = fires12 * collapse12, fires4 * collapse4
-        rate12 = rate_above * evaluability * collapse12
-        rate4 = (above * rate_above + below * rate_below) / panel_size * evaluability * collapse4
+        rate12 = rate_above_candidate * evaluability * collapse12
+        # ⚠ A PANEL-AVERAGE per-name rate over two structurally different sub-populations
+        # (review NITPICK). ``_occupied_dates`` already assumes one shared per-name rate;
+        # for the control that assumption is compounded here, because its panel genuinely
+        # holds names of two kinds. The candidate's rate has no such blend — its names are
+        # all above the gate — so only the control's occupancy figure carries this.
+        rate4 = (above * rate_above_control + below * rate_below) / panel_size * evaluability * collapse4
         dates12 = _occupied_dates(rate=rate12, names=above, days=horizon_days)
         dates4 = _occupied_dates(rate=rate4, names=panel_size, days=horizon_days)
         grid.append(
@@ -509,7 +578,9 @@ def _project_arm(report: dict[str, Any], *, arm: str, panel_size: int, horizon_m
         "corpus_sub_gate_share_of_evaluable_name_days": 1.0
         - totals12["gate_clearing_evaluable"] / totals12["evaluable"],
         "rates": {
-            "fires_per_gate_clearing_evaluable_name_day": rate_above,
+            # ⚠ ONE key, because the two are an identity rather than two measurements —
+            # and ``_check_arm`` plus the degenerate-end assertion both enforce it.
+            "fires_per_gate_clearing_evaluable_name_day": rate_above_candidate,
             "s4_fires_per_sub_gate_evaluable_name_day": rate_below,
             "s12_positions_per_fillable_fire": collapse12,
             "s4_positions_per_fillable_fire": collapse4,

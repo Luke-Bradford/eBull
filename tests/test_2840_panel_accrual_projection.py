@@ -41,6 +41,7 @@ from scripts.project_2840_panel_accrual import (
     PRODUCTION_ARM,
     SUB_GATE_SHARE_GRID,
     ProjectionRefused,
+    _expected_fires,
     _occupied_dates,
     _sessions_per_year,
     _split_panel,
@@ -439,6 +440,56 @@ def test_the_stationarity_diagnostic_covers_the_rate_that_is_actually_projected(
     # Every synthetic year is identical, so the spread collapses onto the pooled rate.
     assert spread["s4_fires_per_sub_gate_evaluable_name_day"]["median"] == pytest.approx(0.03)
     assert spread["fires_per_gate_clearing_evaluable_name_day"]["median"] == pytest.approx(0.01)
+
+
+def test_the_degenerate_end_check_compares_two_independently_derived_rates() -> None:
+    """⚠⚠ REVIEW WARNING 1 — the first cut's assertion was tautological.
+
+    ``_expected_fires`` took ONE shared above-gate rate, so with no sub-gate name the
+    control's second term vanished and the check compared two expressions in the same
+    variable. It could not fail. Taking the two rates as separate parameters makes the
+    comparison real — and testable, which is what this proves: feed rates that disagree
+    and the degenerate end diverges.
+    """
+
+    def at_zero_sub_gate_share(control_rate: float) -> tuple[float, float]:
+        return _expected_fires(
+            above=10,
+            below=0,
+            horizon_days=500.0,
+            evaluability=1.0,
+            rate_above_candidate=0.01,
+            rate_above_control=control_rate,
+            rate_below=0.03,
+        )
+
+    candidate, control = at_zero_sub_gate_share(0.01)
+    assert candidate == pytest.approx(control)
+    candidate, control = at_zero_sub_gate_share(0.02)
+    assert candidate != pytest.approx(control)
+
+
+def test_the_smallest_panel_can_express_every_declared_share() -> None:
+    """⚠ REVIEW WARNING 3 — a literal floor of 2 was accepted and then crashed at 0.75.
+
+    The floor is derived from the grid, so adding a more extreme share moves it.
+    """
+    assert MIN_PANEL_SIZE == 4
+    for share in SUB_GATE_SHARE_GRID:
+        above, below = _split_panel(MIN_PANEL_SIZE, share)
+        assert above >= 1 and below >= 1 and above + below == MIN_PANEL_SIZE
+
+
+def test_a_census_whose_strategies_saw_different_bar_counts_is_refused(tmp_path: Path) -> None:
+    """⚠ REVIEW WARNING 2 — the evaluability ratio's denominator is the FULL verdict sum.
+
+    ``_check_arm`` asserts the ``evaluable`` halves agree, which leaves the denominator
+    unchecked: one strategy's evaluability would then be applied to both projections.
+    """
+    payload = report()
+    payload["supply"][f"{S4}/{PRODUCTION_ARM}"]["verdicts"]["not_fired"] += 5
+    with pytest.raises(ProjectionRefused, match="different name-day counts"):
+        run(tmp_path, payload)
 
 
 def test_the_two_books_coincide_when_the_panel_stops_straddling(tmp_path: Path) -> None:
