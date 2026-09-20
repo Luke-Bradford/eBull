@@ -106,6 +106,16 @@ STRATEGIES: Final[tuple[str, ...]] = (S12_STRATEGY_ID, S4_STRATEGY_ID)
 #: supply" is a design choice the pass bar never declared), and a measurement script
 #: that ships a refuted formula is how the formula gets re-adopted by whoever reads it
 #: next. The census measures; the freeze script owns the arithmetic, once there is one.
+
+
+def _positive_int(raw: str) -> int:
+    """An argparse type that refuses 0 and negatives, naming the argument."""
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
 def _concentration(dates: Mapping[date, int]) -> dict[str, int]:
     """Fires per distinct signal date — max, median and the top date's share.
 
@@ -130,7 +140,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="evaluate only the first N admitted series — a TIMING SLICE, never a population figure",
     )
-    parser.add_argument("--progress-every", type=int, default=500, help="series between progress lines")
+    parser.add_argument(
+        "--progress-every",
+        # ⚠ VALIDATED AT PARSE TIME, not guarded at the modulo. `0` is the value a
+        # reader reaches for to mean "no progress lines" and it would raise
+        # ZeroDivisionError thirty minutes into a full-corpus pass — the worst place
+        # for an argument error to surface (review NITPICK, PR #3243).
+        type=_positive_int,
+        default=500,
+        help="series between progress lines; must be >= 1",
+    )
     args = parser.parse_args(argv)
 
     fired: Counter[tuple[str, str]] = Counter()
@@ -242,4 +261,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["ARMS", "S4_STRATEGY_ID", "STRATEGIES", "_concentration", "main"]
+__all__ = ["ARMS", "S4_STRATEGY_ID", "STRATEGIES", "main"]
