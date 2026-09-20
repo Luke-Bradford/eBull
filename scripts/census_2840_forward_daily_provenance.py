@@ -30,12 +30,19 @@ large recent window and reaches back well before its own run. If the provider ad
 intraday history at fetch time the way the daily path does, a bar captured long after it
 completed carries the adjustment that stood at CAPTURE.
 
-⚠⚠ THAT PREMISE IS UNVERIFIED AND IS NOT ASSERTED HERE. ``app/services/market_data.py:751``
-records back-adjustment for the DAILY provider path; it says nothing about
-``get_intraday_candles``, about every interval, or about every instrument variant. Three
-claims that must not share a sentence: *this writer never re-bases a stored row*
-(established), *the provider does not re-base intraday history* (UNTESTED), *a bar whose
-capture is close to its completion had no opportunity to be re-based* (arithmetic, below).
+⚠⚠ THAT PREMISE IS STILL UNVERIFIED — NARROWED, NOT RESOLVED. See
+``scripts/probe_2840_intraday_adjustment_basis.py``. Daily and intraday ARE the same endpoint
+with the interval as a path slot (``app/providers/implementations/etoro.py:305-341``), so
+intraday would have to be adjusted PER INTERVAL to differ — but shared routing is not shared
+adjustment, ``market_data.py:751`` is a repair-heuristic comment rather than a provider
+contract, and eToro's candle docs are silent on adjustment. No confirmed split inside a
+reachable window has been tested. Four claims that must not share a sentence: *this writer never
+re-bases a stored row* (established) · *the provider does not re-base intraday history* (NOT
+established) · *these backfilled bars ARE re-based* (also NOT established — and the strong form
+would license reversing an assumed factor, which could MANUFACTURE gate eligibility) · *a bar
+captured before the next open had no opportunity to be re-based* (arithmetic, below, and the
+only one this script measures). The operative policy is the same either way: nominality
+unverified for a backfilled bar, so exclude it from an absolute-price gate.
 
 Only the third is available without a provider experiment, so it is the only one measured.
 A US split takes effect at a session OPEN, so a bar whose every constituent was captured

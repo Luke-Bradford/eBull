@@ -347,4 +347,135 @@ pass and the row is reachable).
 panel. That was the same error the refusal named: declaring membership for an experiment whose
 instrument does not exist.
 
+## Appendix A — the untested premise, NARROWED not resolved (2026-09-20, same session)
+
+§8 step 2 said the next measurement was *"test the provider's intraday adjustment behaviour"*.
+Attempted, by `scripts/probe_2840_intraday_adjustment_basis.py`. **It does not settle the
+question, and a first draft of this appendix claimed it did.** What follows is what the
+evidence supports.
+
+⚠ The probe is not write-free. `scheduler._load_etoro_credentials` states in its own docstring
+that *"Each credential load is committed individually so audit rows are durable"*, so running it
+**commits credential-access audit rows**. Its measurement queries are read-only; the credential
+path is not. The environment follows `settings.etoro_env`. No order, no position, no kill switch.
+
+### What is established
+
+**Daily and intraday are the same endpoint**, with the interval as a path slot
+(`app/providers/implementations/etoro.py:305-341`) — and the intraday docstring says so:
+*"Same URL family as `get_daily_candles` but the interval slot is variable … Raw response shape
+mirrors the daily endpoint exactly."*
+
+### ⚠⚠ What that does NOT establish
+
+- **Shared routing is not shared adjustment.** One handler can select a different store, cache
+  or adjustment rule per interval. "There is no separate endpoint" is no evidence against it.
+  The inference available is only that intraday would have to be adjusted **per interval** to
+  differ from daily.
+- **The daily-side evidence is a comment, not a contract.** `app/services/market_data.py:751`
+  explains a repair heuristic — the surrounding function refetches when an overlap close
+  mismatches by ≥1.2× — and establishes neither that mismatch's economic cause nor endpoint-wide
+  semantics.
+- **The docs are silent, which is narrower than "no rule exists".** Per the eToro-API skill's
+  live-portal protocol, `…/market-data/get-instrument-candle-history` and
+  `…/get-historical-closing-prices` were fetched (2026-09-20): neither mentions splits, corporate
+  actions or adjustment. That means *those two pages specify no rule*. ⚠ It does not exhaust
+  eToro's documentation, and the interval enum and 1,000-bar cap those pages confirm were
+  **already** in `docs/etoro-api-reference.md:408-410` (OpenAPI-derived) — a first draft called
+  the fetch a "first published confirmation", which is wrong.
+
+### ⇒ The conclusion, in the only form the evidence supports
+
+**Nominality is UNVERIFIED for a backfilled bar, so exclude it from an absolute-price gate.**
+
+⚠ That is deliberately *not* "these bars are non-nominal". A provider that back-adjusts still
+returns nominal bars for any window in which no adjustment intervened, so the stronger claim is
+unestablished — and it is not merely pedantic: the strong form would license *reversing an
+assumed factor*, which could **manufacture** ≥$100 eligibility. The admission policy is the same
+either way; the licence it grants is not.
+
+⚠ And the exclusion is not costless in one direction only. It protects the gate, and it also
+biases the usable population toward periods when the collector was reliable. §1's 16/29 is
+therefore **conditional on this admission policy**, not a permanent ceiling — an earlier draft
+called it *"not a conservatism that further measurement will relax"*, which overreaches:
+event-specific verification would relax it.
+
+### The empirical run, and why it decides nothing
+
+Three instruments with an `adjustment_heal` in the last 120 days (EPOW, NCT.US, MPU — detected
+2026-09-16..18) plus AAPL as a control **asserted** to have zero recent heals, `ThirtyMinutes`,
+1,000 bars each, paired span 2026-06-01 .. 2026-09-18 (control 2026-08-19 .. 2026-09-18):
+
+| name | ratio range | max \|ratio−1\| | largest adjacent jump | persistent simple-ratio shift? |
+| --- | --- | ---: | ---: | --- |
+| EPOW | 1.00000000 .. 1.00000000 | 0.00e+00 | 0.000000 | none |
+| NCT.US | 1.00000000 .. 1.03243243 | 3.24e-02 | 0.032432 | none (2 jumps, neither a simple ratio) |
+| MPU | 1.00000000 .. 1.00000000 | 0.00e+00 | 0.000000 | none |
+| AAPL (control) | 0.99249944 .. 1.00452675 | 7.50e-03 | 0.010573 | none |
+
+EPOW and MPU agree with the rewritten daily series to **float exactness** on all 77 paired
+sessions. ⚠ **That has at least four explanations and the probe separates none of them**: one
+shared adjusted feed; both resolutions reporting the same ordinary closing observation
+independently of adjustment; a heal that repaired a forming or bad candle rather than a basis;
+or a shared stale value. Session alignment is a fifth partial explanation — exact agreement
+appears on thin names, as §4 found for IWM and CENN, while AAPL (which has an exchange-33 twin)
+does not reach it in this window.
+
+⚠ `sql/387` states that *"`adjustment_heal` does not mean 'split'"*, so every candidate here is a
+candidate for a basis event, not a confirmed one. **A flat ratio is evidence only when a
+confirmed event falls inside the paired span, and none is confirmed.**
+
+⚠ Candidate selection is **biased by construction**: it takes the latest `adjustment_heal`
+branches, so it misses events ingested through initial or forced backfill and any adjustment
+below the repair's ≥1.2× trigger.
+
+### ⚠ "No confirmed split is available" was also wrong — three routes exist and none was used
+
+A first draft asserted no instrument with both a confirmed split and a reachable intraday window
+exists. Not established. Unused routes in this repo:
+
+1. `app/services/alpaca_delayed_sip_probe.py` carries a corporate-action API lookup.
+2. `sql/152_finra_short_interest.sql` carries split flags.
+3. `docs/proposals/ta/2026-09-18-decided-bar-revision-census.md` names revision candidates
+   directly.
+
+**That is the next step for this sub-question**, and it is cheap relative to what it settles.
+
+### ⚠⚠ Two defects in the probe itself, and the CONTROL caught the first
+
+1. **The estimator was wrong.** It took the **median** of each session's bars, on the stated
+   reasoning that "a split ratio dwarfs alignment noise". It does not dwarf *that* noise: a
+   median bar sits inside the day's range, so on a volatile small-cap the ratio wandered
+   **0.86 .. 1.21** — wider than a 1.15× reverse split would move it. The tell was that **AAPL,
+   with no heal at all, tripped the same verdict as every candidate.** Switching to the session's
+   **last** bar dropped the control's largest jump from 0.0219 to 0.0106 and every candidate's
+   flat stretch to float-exact 1.0.
+   ⚠ The estimator's justification also imported the wrong bound: the ≤14 bps figure came from
+   comparing against the **exchange-33 variant**, while this probe compares against the *same*
+   instrument's daily close, where §4 reports much larger discrepancies and withdraws their
+   attribution.
+2. **The classifier was wrong five ways across two review rounds.** ckpt-1: it matched factors
+   against a **whitelist** of round ratios (2, 3, 4, 5, 10 and reciprocals), which classifies a
+   clean **3:2** split and a **15:1** reverse split as ordinary disagreement; it classified **only
+   the largest jump**, so on `[2.0, 1.0, 0.13]` the genuine 0.5× transition is discarded; and it
+   had **no persistence check**, so `[1, 2, 1]` — a bad print — received the categorical nominal
+   verdict.
+
+   ckpt-2 then caught the two fixes over-correcting. Tightening the factor tolerance to **20 bps**
+   to control ratio-space density **broke detection**: the factor is a *ratio of ratios*, carrying
+   the intraday-versus-daily mismatch on both sides, and the control's measured noise is ~1% — so a
+   real 2:1 transition distorted by 0.5% gives 0.4975 and matched nothing. And checking persistence
+   only **forward** let a spike's **return edge** pass: on `[1, 2, 1, 1]` the 2→1 edge sees the tail
+   `[1, 1]`, holds, matches 1:2, and the bad print becomes a positive result.
+
+   Now: every above-tolerance jump is classified; the factor tolerance sits at the measured noise
+   floor and **ambiguity** rejects a match rather than tightness (`19/17` is refused because `9:8`
+   is also within 1%, while `2.0` has no near neighbour and survives realistic distortion); and a
+   jump counts only with a **settled level on both sides** of one transition. A third ckpt-2 fix:
+   an unresolvable control symbol now raises instead of silently running the candidates without the
+   noise floor the report claims calibrated them.
+
+**The transferable lesson: a probe whose control also fires has a broken threshold, not a
+finding.** Run the control first and set the tolerance from its noise.
+
 Refs #2840. Refs #2437. Refs #2477.
