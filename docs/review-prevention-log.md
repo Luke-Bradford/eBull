@@ -9820,3 +9820,57 @@ original, because the gate now *looked* like a bound.
   convenience.
 - Enforced in: this entry;
   `docs/proposals/ta/2026-09-21-2840-carrier-source-route-declaration.md` §4.
+
+## A whole-file hash makes every edit to that module an identity rotation (#2840, 2026-09-21)
+
+- Symptom: a round proposed adding `certification_state()` — a pure, verdict-neutral helper —
+  to `app/services/strategy_price_basis.py`, beside the vocabulary it reads. Zero behaviour
+  change, so no evidence-disposition cost was recorded in the spec.
+- It is not zero. `PRICE_BASIS_RULE_VERSION` is composed from **this module's own bytes**:
+  `f"{_RULE_SET_ID}+{hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]}+archives-{_archives_hash()}"`
+  (`strategy_price_basis.py:138-140`). S-12 hashes it into `S12_PARAMS["price_basis_rule"]`
+  (`s12_cheapest_band_price_gated_breakout.py:251`), which enters `strategy_version`, and
+  `strategy_scan_watermark` is keyed on `(strategy_id, strategy_version)`. ⇒ adding a
+  docstring, a helper or a type alias to that file **cold-starts S-12 and detaches its stored
+  observations**, exactly as `b9b2a1e5` recorded for S-12 and the 09-21 census recorded for
+  S-4 / S-8 / S-11.
+- ⚠ The trap is that the idiom is CORRECT and is there on purpose — the composed hash exists
+  so a rule whose verdict depends on something it does not own cannot drift silently. What is
+  missing is that it makes the module's *file boundary* a versioning boundary, so "where do I
+  put this helper" stops being a style question.
+- Prevention: before adding anything to a module, grep it for
+  `Path(__file__).read_bytes()` / `_module_hash()` / a `*_RULE_VERSION` built from its own
+  source. If one is there, either put the addition in a **different** module that imports the
+  vocabulary (watching the import-closure rule in the `TYPE_CHECKING` entry above), or state
+  the rotation and its detach cost in the spec's evidence disposition. In this repo the
+  affected identities are found with
+  `rg -n 'RULE_VERSION' app/services/strategies/` — anything hashing the constant into its
+  params rotates.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-21-2840-price-basis-state-recording.md` §3.
+
+## A column cannot distinguish two populations that cannot both have rows in that table (#2840, 2026-09-21)
+
+- Symptom: to make an undeclared→certified price-basis swap visible, a spec put a
+  `price_basis_state` column on `strategy_signals` so `_ATTRIBUTION_SQL`'s
+  `GROUP BY s.strategy_id, s.strategy_version` (`strategy_monitoring.py:260`) could stop
+  pooling the two sides. `strategy_signals` stores **fired rows only** — measured, 59,230 of
+  59,230 — because `store_strategy_observations` splits the batch at
+  `strategy_observation_storage.py:398`, and the query additionally filters
+  `WHERE s.verdict = 'fired'`. The pre-swap side of the very transition being detected
+  contributes **zero** rows, so there was never a mixture there to label.
+- ⚠ Second half, and it is the part worth the entry: **the handoff comment on the ticket
+  already said this**, as its refutation 1, and it was read at the start of the round. It did
+  not survive into the design because it had been read as *context about the last round*
+  rather than as *a constraint on this one*. A refutation inherited on a ticket is a premise
+  with an author's confidence attached (working-order step 3c) — and the failure mode here is
+  not disbelieving it, it is agreeing with it and then not applying it.
+- Prevention: before proposing a column to separate populations A and B, write the query that
+  would read it and state, per table, **whether A and B can both produce rows there** — one
+  `select <discriminator>, count(*) … group by 1` settles it. If one side is structurally
+  absent, the column labels a homogeneous population and the discrimination must move to a
+  table that holds both. And when a ticket's own handoff already refutes part of the design,
+  carry each refutation into the new spec as a NAMED constraint with the check that retires
+  it, rather than as prose recording that the last round failed.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-21-2840-price-basis-state-recording.md` §2.1.
