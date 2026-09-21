@@ -202,18 +202,28 @@ def derive(conn: psycopg.Connection[Any]) -> int:
                     # at scale 1 is invariant by construction, so measuring it
                     # would be comparing a number to itself 50 million times.
                     #
-                    # ⚠⚠ THE SKIP IS COUNTED. A zero or absent volume makes the
-                    # relative error undefined, and a band table whose shares do
-                    # not sum to 100% reads as full coverage when it is not —
-                    # the silent-truncation defect. Excluded, named, printed.
-                    raw = close * Decimal(volume) if volume else Decimal(0)
-                    if raw:
+                    # ⚠⚠ THE SKIP IS COUNTED, AND ITS TWO CAUSES ARE COUNTED
+                    # SEPARATELY. A zero turnover makes the relative error
+                    # undefined, and a band table whose shares do not sum to
+                    # 100% reads as full coverage when it is not — the
+                    # silent-truncation defect.
+                    #
+                    # ⚠ Volume and close are DISTINCT causes and an earlier
+                    # draft reported both as "zero or absent volume" (review-bot
+                    # NITPICK). `close` is NOT NULL but not positive-constrained:
+                    # `select count(*) from research_price_daily where close <= 0`
+                    # returns 2. Naming the wrong cause for an exclusion is the
+                    # same defect as not naming it, one step smaller.
+                    if not volume:
+                        totals["turnover_undefined_volume"] += 1
+                    elif not close:
+                        totals["turnover_undefined_close"] += 1
+                    else:
+                        raw = close * Decimal(volume)
                         left = corrected_price(close, scale)
                         right = corrected_volume(volume, scale)
                         assert left is not None and right is not None
                         turnover_bands[_band(abs(left * right - raw) / abs(raw))] += 1
-                    else:
-                        totals["turnover_undefined"] += 1
 
                 # Arm 4: corroboration on the dividend-free suffix only.
                 if clean_suffix and adj_close is not None and adj_close > 0:
@@ -271,9 +281,12 @@ def derive(conn: psycopg.Connection[Any]) -> int:
             share = 100.0 * count / denominator if denominator else 0.0
             print(f"    {band:>10s}  {count:>12,}  {share:6.2f}%")
 
-    measured = totals["bars_moved"] - totals["turnover_undefined"]
+    excluded = totals["turnover_undefined_volume"] + totals["turnover_undefined_close"]
+    measured = totals["bars_moved"] - excluded
     _report("=== arm 3: corrected turnover vs raw turnover, on moved bars ===", turnover_bands, measured)
-    print(f"  excluded (zero or absent volume, error undefined): {totals['turnover_undefined']:,}")
+    print(f"  excluded, turnover zero so the relative error is undefined: {excluded:,}")
+    print(f"    zero or absent volume  {totals['turnover_undefined_volume']:>12,}")
+    print(f"    non-positive close     {totals['turnover_undefined_close']:>12,}")
     print("  ⚠ The residual is the QUOTIENT'S ROUNDING, not a defect — see the module docstring.")
 
     _report("=== arm 4: corroboration against the vendor's own adj_close ===", band_hits, totals["corroborable"])

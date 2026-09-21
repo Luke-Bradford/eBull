@@ -232,9 +232,15 @@ avoided, which needs a return-window measurement.
 
 11,906,203 of 11,906,203 measured bars agree to within 1e-12 (100.00%), which is the
 quotient's rounding and not exactness — see §4. **640,024 moved bars are EXCLUDED and
-named**: their volume is zero or absent, so the relative error is undefined. A band
-table whose shares do not sum to 100% reads as full coverage when it is not, so the
-exclusion is printed rather than left to be inferred from the arithmetic.
+named**, their turnover being zero so the relative error is undefined. A band table
+whose shares do not sum to 100% reads as full coverage when it is not, so the exclusion
+is printed rather than left to be inferred from the arithmetic.
+
+⚠ The two causes are counted separately after a review-bot NITPICK, because a zero
+`close` reaches the same branch as a zero volume and the first draft reported both under
+the volume label. Measured on the moved bars: **640,024 zero or absent volume, 0
+non-positive close.** The mislabelled path was reachable and empty — which the label
+could not have told you, and now does.
 
 ### Arm 4 — corroboration against the vendor's own `adj_close`
 
