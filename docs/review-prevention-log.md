@@ -10731,3 +10731,49 @@ copies this silently, because the bare form reads as correct.
 - ⚠ Owed and NOT shipped here: the `<> ''`/NULL rule belongs in
   `.claude/skills/engineering/sql-correctness.md`, which is write-refused from a loop
   worktree. Text parked on #2403 for the operator to apply.
+
+### 3. A new write site records only what the early returns ABOVE it let through — and an in-flight status is transient only if something terminalises it
+
+Caught by Codex ckpt-2 on the same branch, and it is the sharper of the three.
+
+I instrumented the fixed-exit repair arm at both of its outcomes and believed the
+coverage complete. It was not: `_resume_operation` runs at the TOP of
+`manage_owned_position` and returns before the arm, so an ownership with an unresolved
+operation never reaches either site. The worst case was therefore the *only* one
+unrecordable — which is the reliable shape of this defect, because an early return exists
+precisely for the states that are already anomalous.
+
+Compounding it, I assumed `submitted` was transient. It is not:
+`strategy_position_manager.py`'s last resume branch returns
+`("pending", "broker_edit_pending")` and **leaves the row `submitted` forever** when the
+levels never arrive. `idx_strategy_position_one_unresolved_operation` then blocks any
+fresh repair. So mapping `submitted` to "episode over" produced a permanently naked
+position with a **zero** streak and a frozen `last_checked_at` — the exact failure the
+ticket was written to catch, shipped under a docstring asserting it was safe.
+
+⚠ **Two mechanical checks, neither needing a reviewer:**
+
+1. **Before adding a write site inside a function, `rg` every `return` ABOVE it and ask
+   which states reach your code.** A site added at the bottom of a funnel instruments the
+   happy path. Here the answer was "everything with an unresolved operation", i.e. the
+   population of interest.
+2. **For any status you are treating as transient, find the line that writes its terminal
+   status.** If no branch terminalises it under the failing condition, it is not
+   transient — it is a permanent state with an optimistic name. `submitted`, `pending`,
+   `in_flight` and `submitting` all read as temporary and none of them promise it.
+
+⚠ Third time on #3284 that a justification phrased as *what a function would do* was
+wrong (after the `resume_core_submission` replay claim and the "no such row can exist"
+guard). The existing rule — *open the function that path runs and read what it calls* —
+is correct and was not applied to a path I had already written a docstring about. **A
+docstring asserting safety is the least reliable place to discover you did not check:
+writing the justification down makes it feel verified.**
+
+- Enforced in: `app/services/strategy_position_repair_streak.py` (only `applied` /
+  `no_change` clear a streak — broker-confirmed state, never acknowledgement);
+  `app/services/strategy_position_manager.py::_record_resumed_repair_visit` (the third
+  site, on the resume path, filtered to `fixed_exit_repair`);
+  `tests/test_strategy_position_manager.py::test_an_accepted_edit_that_never_lands_keeps_accruing_refusals`
+  (drives the real manager, because the defect was the wiring — probe-verified: reverting
+  the `pending` mapping makes it assert `(0, None) == (2, 'broker_edit_pending')`);
+  `tests/test_3284_repair_refusal_streak.py::test_only_broker_confirmed_state_clears_a_streak`.
