@@ -218,12 +218,23 @@ def derive(conn: psycopg.Connection[Any]) -> int:
                     # close would fall through and be measured as an ordinary
                     # bar under a branch whose sibling claims to exclude
                     # "non-positive close". `abs()` in the error term would have
-                    # hidden it. Measured corpus-wide: 3 bars have `close <= 0`
+                    # hidden it.
+                    #
+                    # Measured 2026-09-21: 3 bars corpus-wide have `close <= 0`
                     # (one Intrader, two on the other vendor) and all three are
                     # exactly 0 with volume 0 — so the negative case is
                     # UNPOPULATED here, which is why a falsy check passed every
                     # figure it produced. A guard that is right by accident is
                     # still a guard that is wrong.
+                    #
+                    # ⚠ An earlier revision of this comment said 2, quoted from
+                    # `s2_cross_sectional_momentum`'s docstring rather than run.
+                    # Re-running the query that docstring itself supplies gives
+                    # 3: it is a hardcoded derived statistic that went stale.
+                    # Not corrected there — `_source_hash()` hashes that module,
+                    # so the edit rotates every stored s2 identity (owed to
+                    # slice C). Quoting a neighbouring docstring is not a
+                    # measurement.
                     if not volume:
                         totals["turnover_undefined_volume"] += 1
                     elif close <= 0:

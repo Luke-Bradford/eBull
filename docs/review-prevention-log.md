@@ -10316,11 +10316,25 @@ original, because the gate now *looked* like a bound.
   sibling claims to have excluded it, and `abs()` in the error term would have kept the
   result looking sane.
 - ⚠⚠ **The reason this survives review is that the negative case is almost always
-  unpopulated.** Measured here: `select count(*) from research_price_daily where close <= 0`
-  returns 3, and all three are exactly `0`. So every figure the falsy check produced was
-  correct, the tests passed, and the full-population run agreed — because the data never
-  exercised the gap. **A guard that is right by accident is still wrong**, and the accident
-  is a property of today's corpus, not of the rule.
+  unpopulated.** Measured 2026-09-21: `select count(*) from research_price_daily where
+  close <= 0` returns **3**, and all three are exactly `0` with volume `0`. So every figure
+  the falsy check produced was correct, the tests passed, and the full-population run
+  agreed — because the data never exercised the gap. **A guard that is right by accident is
+  still wrong**, and the accident is a property of today's corpus, not of the rule.
+- ⚠ **A second lesson fell out of getting that number wrong once.** The first draft of the
+  code comment said "returns 2", taken from
+  `s2_cross_sectional_momentum`'s docstring — *"Measured 2026-08-06 on the full population:
+  two `research_price_daily` bars have `close <= 0`"*. Re-running the query the docstring
+  itself supplies returns 3. The docstring is a **hardcoded derived statistic that went
+  stale silently**, which is the failure `.claude/CLAUDE.md` already forbids ("never
+  hardcode a derived statistic into prose — compute it, or omit it"), and it went stale in
+  the place a reader trusts most: next to the reproduction command that falsifies it.
+  ⚠ It is NOT corrected here — `_source_hash()` hashes that whole module, so editing the
+  docstring rotates every stored s2 identity. Owed to the slice that mints the new id
+  (#2834 §7 item 2 slice C), with the two other stale claims in the same file.
+- ⚠ Test to apply, second half: **quoting a figure from a neighbouring docstring is not a
+  measurement.** If the docstring carries the query, run it; a stored number's age is
+  invisible and its neighbours make it look fresh.
 - ⚠ Same family as `sql/405`'s `split_factor > 0` admitting `NaN` and `Infinity` in Postgres
   (slice A, Codex ckpt-2), and the two fail in OPPOSITE directions — `> 0` is too permissive
   at the top, `not x` is too permissive at the bottom. Neither is a spelling of "positive".

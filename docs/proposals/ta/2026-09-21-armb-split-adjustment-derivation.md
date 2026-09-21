@@ -343,13 +343,20 @@ identity, so it belongs to the slice that mints the new id.
 | §7 item 3 — what `MIN_CLOSE` reads on the corrected basis | A strategy-definition question that rotates s2's identity. `--floor` measures its inputs without deciding it. |
 | §4 rule 11 — the new strategy id | Owed by the slice where a strategy's DATA CONTRACT changes, i.e. where a consumer starts dividing. Nothing reads `research_split_adjustment` on this branch, so no identity moves and none may be minted. |
 
-⚠ One correction is owed and deliberately not taken here. `s2_cross_sectional_momentum`'s
-`MIN_CLOSE` comment says *"Unadjusting would need per-series split factors the corpus does
-not store"*. Since `fc72804b` that is FALSE. It also carries the third instance of the
-cross-vendor error (it cites `sql/251`, the HF archive, for a floor applied to the
-Intrader corpus). Both must be fixed — but `_source_hash()` hashes the whole module, so
-editing either is an identity rotation, and an identity rotation belongs to the slice that
-mints the new id rather than to one that changes no verdict.
+⚠ **Three corrections to `s2_cross_sectional_momentum` are owed and deliberately not
+taken here**, because `_source_hash()` hashes that whole module — editing any of them
+rotates every stored s2 identity, which belongs to the slice that mints the new id rather
+than to one that changes no verdict:
+
+1. the `MIN_CLOSE` comment says *"Unadjusting would need per-series split factors the
+   corpus does not store"*. Since `fc72804b` that is **false**;
+2. the same comment carries the third instance of the cross-vendor error, citing
+   `sql/251` — the HF archive — for a floor applied to the Intrader corpus;
+3. its non-positive-guard docstring says *"Measured 2026-08-06 on the full population: two
+   `research_price_daily` bars have `close <= 0`"*. Re-running the query that docstring
+   itself supplies returns **3**. A hardcoded derived statistic that went stale beside its
+   own reproduction command — found because an earlier draft of this PR quoted it instead
+   of running it.
 
 ## 8. Rung
 
