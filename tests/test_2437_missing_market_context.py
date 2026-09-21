@@ -137,7 +137,7 @@ class TestSegmentRemapsTheRefusalSet:
             masked_reason="quarantined_bar",
             unresolved_breaks=(break_date,),
             regime=regime,
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            price_basis=from_archive_basis("unadjusted", series=series),
         )
         at_95 = next(s for s in signals if s.signal_index == 95)
         assert (at_95.verdict, at_95.reason) == ("not_evaluable", "missing_market_context")

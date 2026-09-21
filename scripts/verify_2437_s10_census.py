@@ -99,7 +99,7 @@ def main() -> int:
                 # exists to reproduce the production scan; a hand-picked carrier here
                 # would let the two diverge silently, which is the "two texts" defect
                 # #2840 already carries a prevention entry for.
-                price_basis=from_undeclared_source(n_bars=len(series)),
+                price_basis=from_undeclared_source(series=series),
                 leg=leg,
             )
             staged_by_leg[leg][instrument_id] = staged

@@ -302,14 +302,14 @@ def test_the_manifest_adapter_passes_the_regime_through() -> None:
         universe=UNIVERSE,
         masked_reason=REASON,
         regime=_regime(len(series), Regime.BULL_QUIET),
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     volatile = entry.signals(
         series,
         universe=UNIVERSE,
         masked_reason=REASON,
         regime=_regime(len(series), Regime.BULL_VOLATILE),
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     assert not [s for s in quiet if s.verdict == "fired"]
     assert [s.signal_index for s in volatile if s.verdict == "fired"] == [FIRING_INDEX]

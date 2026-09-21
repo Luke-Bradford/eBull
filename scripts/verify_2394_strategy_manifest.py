@@ -201,7 +201,7 @@ def equivalence() -> bool:
                     # used to read a literal ``"unadjusted"`` and was only safe because S-12's
                     # ``AS_TRADED_UNIVERSES`` token refused every bar first; with the token gone the
                     # literal would have certified a back-adjusted level against a nominal gate.
-                    price_basis=from_undeclared_source(n_bars=len(series)),
+                    price_basis=from_undeclared_source(series=series),
                 )
                 want = direct(series, universe=UNIVERSE, close_reason=MASKED_REASON)
                 if got != want:
@@ -216,7 +216,7 @@ def equivalence() -> bool:
                 universe=UNIVERSE,
                 masked_reason=MASKED_REASON,
                 regime=unconstrained_regime(len(series)),
-                price_basis=from_undeclared_source(n_bars=len(series)),
+                price_basis=from_undeclared_source(series=series),
             )
             if got_s4 != s4_signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON):
                 mismatches.append(f"s4-volatility-compression-breakout series {series_id}")
@@ -233,7 +233,7 @@ def equivalence() -> bool:
                 universe=UNIVERSE,
                 masked_reason=MASKED_REASON,
                 regime=unconstrained_regime(len(series)),
-                price_basis=from_undeclared_source(n_bars=len(series)),
+                price_basis=from_undeclared_source(series=series),
             )
             want_member = s2_member(series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=MASKED_REASON)
             if (

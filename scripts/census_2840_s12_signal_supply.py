@@ -624,7 +624,7 @@ def main(argv: list[str] | None = None) -> int:
                         masked_reason="quarantined_bar",
                         unresolved_breaks=breaks,
                         regime=regime,
-                        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                        price_basis=from_archive_basis("unadjusted", series=series),
                     ):
                         if signal.kind != "entry":
                             continue

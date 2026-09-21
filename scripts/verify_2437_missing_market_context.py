@@ -92,7 +92,7 @@ def dump_arm(conn: psycopg.Connection, path: str) -> None:
                 # used to read a literal ``"unadjusted"`` and was only safe because S-12's
                 # ``AS_TRADED_UNIVERSES`` token refused every bar first; with the token gone the
                 # literal would have certified a back-adjusted level against a nominal gate.
-                price_basis=from_undeclared_source(n_bars=len(series)),
+                price_basis=from_undeclared_source(series=series),
             )
             bucket = per_strategy[strategy_id]
             counts: Counter = bucket["counts"]  # type: ignore[assignment]

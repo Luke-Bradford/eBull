@@ -432,7 +432,7 @@ class TestManifestAdaptersMatchTheDirectCalls:
             masked_reason=REASON,
             unresolved_breaks=(),
             regime=regime,
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            price_basis=from_archive_basis("unadjusted", series=series),
             leg=leg,  # type: ignore[arg-type]
         )
         if leg == "entry":
@@ -458,16 +458,21 @@ class TestManifestAdaptersMatchTheDirectCalls:
 
     def test_the_exit_leg_carries_exit_kind_throughout(self) -> None:
         entry = STRATEGY_MANIFEST[S10]
+        # ⚠ ONE series object, not two ``_panel()`` calls. The carrier now binds to
+        # the bars it was built from (#2840 §8b), and two independent builds of an
+        # equal-valued panel would still bind — but reusing the object is what the
+        # production call sites do and is what this test should exercise.
+        series = _panel()[2]
         staged = segmented_member(
             entry,
-            _panel()[2],
+            series,
             panel_decision_dates=frozenset({DECISION}),
             universe=UNIVERSE,
             masked_reason=REASON,
             unresolved_breaks=(),
             regime=_regime(),
             leg="exit",
-            price_basis=from_archive_basis("unadjusted", n_bars=len(_panel()[2])),
+            price_basis=from_archive_basis("unadjusted", series=series),
         )
         kinds = {verdict.kind for verdict in staged.verdicts if verdict is not None}
         assert kinds == {"exit"}

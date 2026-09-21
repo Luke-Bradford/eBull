@@ -326,9 +326,9 @@ def s12_signals(
     # checkpoint 1). ``evaluate`` returns ``no_fill_bar`` for the LAST bar before
     # reading any input, so a carrier one element SHORT is never looked up and
     # passes silently — the misalignment then shifts every certification by one
-    # with nothing raising. Production callers build the carrier at
-    # ``n_bars=len(series)`` so the class cannot arise there; this covers the
-    # hand-built caller, which is how S-12 is reached in tests and scripts.
+    # with nothing raising. Production callers build the carrier FROM this series
+    # so the class cannot arise there; this covers the hand-built caller, which is
+    # how S-12 is reached in tests and scripts.
     if len(price_basis) != len(series):
         raise ValueError(f"price_basis has {len(price_basis)} bars against {len(series)} price bars; they must align")
     # ⚠⚠ THE CARRIER'S RULE VERSION MUST BE THE ONE THIS IDENTITY CLAIMS (#2840,
@@ -340,14 +340,27 @@ def s12_signals(
     # refusing: a caller holding a stale carrier has a wiring bug, and a refusal
     # would write that bug into the ledger as a data condition.
     #
-    # ⚠ Length equality does NOT bind a carrier to THIS instrument, its dates or
-    # its payload. That remains open and needs the per-bar source; the spec's §8
-    # records it rather than implying this check covers it.
     if price_basis.rule_set_version != PRICE_BASIS_RULE_VERSION:
         raise ValueError(
             f"price_basis was built under rule {price_basis.rule_set_version!r} but this identity claims "
             f"{PRICE_BASIS_RULE_VERSION!r}; a stale carrier cannot certify a bar for the current rule"
         )
+    # ⚠⚠ LENGTH EQUALITY DOES NOT BIND A CARRIER TO THESE BARS (#2840 §8b, closed
+    # here). Measured before the fix: a carrier built at ``n_bars=len(series_B)``
+    # was accepted against series A and this rule FIRED on it —
+    # ``Counter({'not_evaluable': 114, 'not_fired': 60, 'fired': 1})``. The length
+    # check above cannot see it, and neither can the two dispatchers'.
+    #
+    # ⚠ It is a SECOND check, not a replacement: the length message documents the
+    # off-by-one hazard (``evaluate`` returns ``no_fill_bar`` for the last bar
+    # before reading any input, so a one-short carrier is never looked up), and
+    # deleting it because a stronger check subsumes it would lose that reasoning.
+    #
+    # ⚠ It RAISES rather than refusing, for the same reason the rule-version
+    # mismatch does: a caller holding a foreign carrier has a wiring bug, and a
+    # refusal would write that bug into the ledger as a data condition.
+    if (mismatch := price_basis.binding_mismatch(series)) is not None:
+        raise ValueError(mismatch)
 
     # ⚠⚠ SHORT-CIRCUIT, AND IT IS A COMPLEXITY FIX RATHER THAN A SECOND RULE.
     # ``_unevaluable_reason_at`` tests ``index in series.not_evaluable_indices``

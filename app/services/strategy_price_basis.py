@@ -54,11 +54,14 @@ Refs #2840, #2437.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Final, Literal, get_args
 
+from app.services.indicator_series import BarSeries
 from app.services.research_corpus_ingest import RESEARCH_ARCHIVES
+from app.services.technical_analysis import OHLCVRow
 
 #: The provenance of a nominal price level — ``sql/305``'s CHECK, executable.
 #:
@@ -137,6 +140,65 @@ PRICE_BASIS_RULE_VERSION: Final[str] = (
 )
 
 
+#: The bar fields a binding covers — #2840 §8 obligation (b).
+#:
+#: ⚠ Extra keys in a row ``dict`` are DROPPED, and that is a stated limit rather
+#: than a proof. No inspected consumer reads a field outside this tuple, so a
+#: dropped key has no demonstrated effect; nothing here establishes that none
+#: ever will.
+_BOUND_FIELDS: Final = ("open", "high", "low", "close", "volume")
+
+_BINDING_SEP: Final = "|"
+
+
+def bind_bar(day: date, row: OHLCVRow) -> str:
+    """One bar, encoded so a carrier can be checked against the bars it certifies.
+
+    ⚠⚠ ``repr`` PER FIELD, AND EVERY CHEAPER FORM WAS REFUSED AT CHECKPOINT 1.
+    Three designs died here, each by counterexample rather than by argument:
+
+    * **carrying the ``BarSeries``** — ``OHLCVRow`` is a plain mutable ``dict``,
+      so carrier and series alias the same objects and ``rows[i]["close"] = …``
+      moves both sides while equality still passes. A reference is not a snapshot.
+    * **reusing ``corpus_generation``'s encoder** — its injectivity proof is
+      bounded to ``numeric`` columns (not ``int`` volume, not float fixtures), it
+      renders ``Decimal("0.1")`` and ``0.1`` alike, and using it as an ENFORCEMENT
+      gate would invalidate ``_NOT_IDENTITY_INPUTS``' own reason for keeping
+      ``CORPUS_GENERATION_RULE_VERSION`` out of strategy identity (*"never affects
+      what a strategy decides"*).
+    * **a tuple of the raw values** — measured in this interpreter:
+      ``(Decimal("1.50"),) == (Decimal("1.5"),)`` is ``True`` (scale collapses),
+      ``(Decimal("1.5"),) == (1.5,)`` is ``True`` (type collapses), a SHARED
+      ``Decimal("NaN")`` compares equal through tuple comparison's identity
+      shortcut while two independently built ones do not, and
+      ``hash((Decimal("sNaN"),))`` raises. Acceptance would have depended on
+      whether the loader happened to share an object.
+
+    ``repr`` separates all of them: ``Decimal('1.50')`` ≠ ``Decimal('1.5')``,
+    ``Decimal('1.5')`` ≠ ``1.5``, ``1`` ≠ ``True``, ``None`` ≠ ``Decimal('0')``,
+    and two independently built ``Decimal("NaN")`` encode EQUAL — deterministic,
+    with no identity dependence. The result is a ``str``: always hashable, always
+    immutable, with no mutable leaf left to validate.
+
+    ⚠ ``row.get``, NEVER ``row[…]``. S-12 tolerates a missing OHLC key today
+    through its own ``.get()`` consumers, so indexing would raise ``KeyError`` on
+    a bar the strategy currently evaluates (reproduced for each of open / high /
+    low / close). A missing field encodes ``'None'``, which is what a masked field
+    encodes, and masked fields ARE ``None`` in production by design.
+
+    ⚠ ``str(Decimal)`` — which ``repr`` wraps — is context-dependent only through
+    ``capitals``, which turns ``E`` into ``e`` in exponent form. It cannot make two
+    different values render alike, so a context change can only produce a spurious
+    MISMATCH. Fail-closed.
+    """
+    return _BINDING_SEP.join((day.isoformat(), *(repr(row.get(field_name)) for field_name in _BOUND_FIELDS)))
+
+
+def bindings_for(series: BarSeries) -> tuple[str, ...]:
+    """Every bar of ``series`` bound — see :func:`bind_bar`."""
+    return tuple(bind_bar(day, row) for day, row in zip(series.dates, series.rows, strict=True))
+
+
 @dataclass(frozen=True)
 class PriceBasisSeries:
     """Per-bar as-traded price basis, aligned to the input bars.
@@ -167,8 +229,39 @@ class PriceBasisSeries:
     #: positions — see the class docstring.
     not_evaluable_indices: tuple[int, ...] = ()
     rule_set_version: str = PRICE_BASIS_RULE_VERSION
+    #: The bars this carrier was built from, encoded per :func:`bind_bar` — #2840
+    #: §8 obligation (b). Empty when nothing is certified.
+    #:
+    #: ⚠⚠ DEFAULTED, AND THAT IS FAIL-CLOSED RATHER THAN A CONVENIENCE.
+    #: ``__post_init__`` refuses a carrier that certifies anything without
+    #: full-length bindings, so the default can only ever produce the harmless
+    #: all-uncertified shape — which is exactly what ``from_undeclared_source``
+    #: returns. Requiring it would have forced ``bar_bindings=()`` onto ten
+    #: existing refusal-path constructions for no safety gain.
+    #:
+    #: ⚠ ``repr=False``: a carrier's ``repr`` must not print a whole price history.
+    bar_bindings: tuple[str, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
+        # ⚠⚠ THE TUPLE CHECKS ARE RUNTIME AND NOT DECORATION (#2840, Codex
+        # checkpoint 1, reproduced). ``frozen=True`` freezes the ATTRIBUTE, never
+        # a mutable object bound to it, and these fields were only ANNOTATED as
+        # tuples. The exploit: build an all-uncertified carrier from LISTS with
+        # no bindings, then append a certification and drop its refusal index —
+        # the ``certifies_nothing`` short-circuit accepts it and S-12 fires on an
+        # unbound certificate. Pre-existing for ``values`` and
+        # ``not_evaluable_indices``; closed here because ``bar_bindings`` would
+        # otherwise inherit it.
+        for name, value in (
+            ("values", self.values),
+            ("not_evaluable_indices", self.not_evaluable_indices),
+            ("bar_bindings", self.bar_bindings),
+        ):
+            if not isinstance(value, tuple):
+                raise TypeError(f"{name} must be a tuple, got {type(value).__name__}; a frozen dataclass does not")
+        for index, binding in enumerate(self.bar_bindings):
+            if not isinstance(binding, str):
+                raise TypeError(f"bar_bindings[{index}] must be a str, got {type(binding).__name__}")
         seen: set[int] = set()
         previous = -1
         for index in self.not_evaluable_indices:
@@ -203,6 +296,25 @@ class PriceBasisSeries:
                     f"index {index} carries basis {value!r}, which is not one of {sorted(CERTIFIED_PRICE_BASES)}; "
                     f"{UNCERTIFIED_BASIS!r} is spelled None plus a not_evaluable index"
                 )
+        # ⚠ LAST, and the order is deliberate: ``values`` is validated as a
+        # vocabulary before it is treated as a set of certifications. Checking the
+        # binding first made an off-vocabulary value report a missing binding.
+        #
+        # ⚠⚠ ONE-DIRECTIONAL, AND THE *IFF* WAS REFUSED AT CHECKPOINT 1. "Bound
+        # exactly when something is certified" makes legitimate segmentation raise:
+        # slicing the uncertified suffix of a mixed carrier leaves full bindings
+        # with nothing certified, which ``segment`` must be allowed to produce. So
+        # a certification REQUIRES bindings; the converse is not required.
+        if self.bar_bindings and len(self.bar_bindings) != len(self.values):
+            raise ValueError(
+                f"bar_bindings has {len(self.bar_bindings)} entries against {len(self.values)} bars; "
+                "a binding covers every bar of the carrier or none of them"
+            )
+        if not self.bar_bindings and any(value is not None for value in self.values):
+            raise ValueError(
+                "this carrier certifies a bar but carries no bar_bindings; a certification that is not bound "
+                "to the bars it certifies can be handed to another series of the same length (#2840 §8b)"
+            )
 
     def __len__(self) -> int:
         return len(self.values)
@@ -240,10 +352,64 @@ class PriceBasisSeries:
             values=self.values[start:end],
             not_evaluable_indices=tuple(index - start for index in self.not_evaluable_indices if start <= index < end),
             rule_set_version=self.rule_set_version,
+            # ⚠ Sliced, never re-derived — the segment has no bars to derive from,
+            # which is also why the binding CHECK lives at the two dispatchers and
+            # at ``s12_signals`` rather than here.
+            bar_bindings=self.bar_bindings[start:end],
         )
 
+    def binding_mismatch(self, series: BarSeries) -> str | None:
+        """Why this carrier does not belong to ``series`` — ``None`` when it does.
 
-def from_archive_basis(adjustment_basis: str | None, *, n_bars: int) -> PriceBasisSeries:
+        ⚠⚠ THIS EXISTS BECAUSE LENGTH EQUALITY IS NOT A BINDING (#2840 §8b).
+        Measured before the fix, on a carrier built for series B and handed to a
+        same-length series A: ``Counter({'not_evaluable': 114, 'not_fired': 60,
+        'fired': 1})`` — accepted, and S-12 FIRED on it. Three length checks
+        existed and none of them could see it.
+
+        ⚠⚠ EVERY BAR IS BOUND, NOT ONLY THE CERTIFIED ONES, AND THE NARROWER
+        VERSION WAS EXPLOITABLE. An uncertified bar's OHLC still feeds ATR,
+        compression and prior-high for later bars (this module's own header says
+        so), so binding only certifications leaves the inputs that PRODUCE a
+        certified verdict unbound: certify every bar but 169, change bar 169's
+        close, and bar 170 flips ``not_fired`` → ``fired`` with every binding
+        still passing. Moving an uncertified DATE across a break shifts the
+        segment bounds for the same reason.
+
+        ⚠ An empty ``bar_bindings`` is not a hole. A carrier that certifies
+        nothing refuses every bar whatever series it came from, and the one
+        length-dependent difference — ``no_fill_bar`` at the last index — is
+        covered by the caller's length check, which runs first.
+
+        ⚠ It is a BINDING, not a certification of the payload: two instruments
+        with identical dates and OHLCV bind to each other. That is the accepted
+        residual of leaving instrument identity out (it is not on ``BarSeries``),
+        recorded rather than claimed impossible.
+
+        ⚠ It cannot see a desynchronised ``BarSeries`` CACHE. ``float_closes`` and
+        friends are ``cached_property`` state outside ``dates``/``rows``: populate
+        the cache, change the raw close, and the snapshot matches while the
+        strategy reads the stale float. Detectable in principle by binding the
+        consumed arrays — deliberately not done here, because the defect belongs
+        to ``BarSeries`` (tuple fields, frozen semantics, mutable caches) and a
+        carrier-side patch would cover S-12's three caches and leave every other
+        consumer of the same object exposed. Open on #2840.
+        """
+        if len(series) != len(self.values):
+            return f"price_basis covers {len(self.values)} bars against {len(series)} price bars; they must align"
+        if not self.bar_bindings:
+            return None
+        for index, (bound, day, row) in enumerate(zip(self.bar_bindings, series.dates, series.rows, strict=True)):
+            if bound != bind_bar(day, row):
+                return (
+                    f"price_basis was built for different bars: index {index} is bound to {bound!r} "
+                    f"but this series carries {bind_bar(day, row)!r}; a certification cannot be moved "
+                    "to another series (#2840 §8b)"
+                )
+        return None
+
+
+def from_archive_basis(adjustment_basis: str | None, *, series: BarSeries) -> PriceBasisSeries:
     """The carrier for a run served by a PINNED research archive.
 
     ``adjustment_basis`` is ``_Corpus.liquidity_policy.adjustment_basis``, or
@@ -279,15 +445,25 @@ def from_archive_basis(adjustment_basis: str | None, *, n_bars: int) -> PriceBas
     ⚠ ``308d1e38``'s split probe is NOT evidence here. It measured eToro's
     delivered history, not this archive. Two vendors; citing one for the other is
     the coincidence-window error #2840 already carries a prevention entry for.
+
+    ⚠⚠ TAKES THE SERIES, NOT ``n_bars`` (#2840 §8b). A count cannot bind a
+    certification to anything: a carrier built at ``n_bars=len(series_B)`` was
+    accepted against series A and S-12 fired on it. The series is what the
+    certification is ABOUT, so it is what the constructor reads.
+
+    ⚠ This REMOVES the old ``n_bars < 0`` raise, and the removal takes nothing
+    with it — that guard existed because an ``int`` can be negative and a
+    ``BarSeries`` cannot, so the class is now unconstructible rather than refused.
     """
-    if n_bars < 0:
-        raise ValueError(f"n_bars must be non-negative, got {n_bars}")
     if adjustment_basis in CERTIFYING_ARCHIVE_BASES:
-        return PriceBasisSeries(values=("observed_unadjusted",) * n_bars)
-    return PriceBasisSeries(values=(None,) * n_bars, not_evaluable_indices=tuple(range(n_bars)))
+        return PriceBasisSeries(
+            values=("observed_unadjusted",) * len(series),
+            bar_bindings=bindings_for(series),
+        )
+    return PriceBasisSeries(values=(None,) * len(series), not_evaluable_indices=tuple(range(len(series))))
 
 
-def from_undeclared_source(*, n_bars: int) -> PriceBasisSeries:
+def from_undeclared_source(*, series: BarSeries) -> PriceBasisSeries:
     """The carrier for a path with NO DECLARED as-traded provenance source — refuses every bar.
 
     ⚠⚠ A POLICY, STATED AS ONE, AND NOT AN INFERENCE FROM THE SCHEMA. It would be
@@ -319,14 +495,17 @@ def from_undeclared_source(*, n_bars: int) -> PriceBasisSeries:
     been passing it a literal ``"unadjusted"`` for exactly that reason and were
     only safe because S-12's universe token refused them first.
 
-    ⚠ Equal to ``from_archive_basis(None, n_bars=n)`` at every ``n``, including the
-    raise at ``n < 0`` — pinned by
+    ⚠ Equal to ``from_archive_basis(None, series=s)`` at every ``s`` — pinned by
     ``tests/test_2840_price_basis_carrier.py`` so the two cannot drift into
     disagreeing about the withheld case.
+
+    ⚠ It binds NOTHING, and that is correct rather than an omission (#2840 §8b).
+    A carrier that certifies no bar cannot certify a foreign one: every verdict is
+    the basis refusal whatever series produced it. So the live scan — the hot path
+    — pays no binding cost at all, and the cost lands on the archive path, where
+    certification actually happens.
     """
-    if n_bars < 0:
-        raise ValueError(f"n_bars must be non-negative, got {n_bars}")
-    return PriceBasisSeries(values=(None,) * n_bars, not_evaluable_indices=tuple(range(n_bars)))
+    return PriceBasisSeries(values=(None,) * len(series), not_evaluable_indices=tuple(range(len(series))))
 
 
 __all__ = [
@@ -335,6 +514,8 @@ __all__ = [
     "CERTIFYING_ARCHIVE_BASES",
     "PRICE_BASIS_RULE_VERSION",
     "PriceBasisSeries",
+    "bind_bar",
+    "bindings_for",
     "from_archive_basis",
     "from_undeclared_source",
 ]

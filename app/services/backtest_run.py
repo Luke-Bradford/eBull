@@ -3219,9 +3219,10 @@ def _signals_for(
     ``spy_chain`` version.
 
     ⚠⚠ ``archive_adjustment_basis`` IS THE STRING, NOT A BUILT CARRIER (#2840).
-    The ``PriceBasisSeries`` is constructed HERE, at ``n_bars=len(series)``, so a
-    length mismatch cannot arise on any production path. Handing this function a
-    pre-built carrier would reopen the silent class Codex found at checkpoint 1:
+    The ``PriceBasisSeries`` is constructed HERE, from THIS series, so neither a
+    length mismatch nor a foreign binding can arise on any production path.
+    Handing this function a pre-built carrier would reopen the silent class Codex
+    found at checkpoint 1:
     ``evaluate`` returns ``no_fill_bar`` for the last bar before reading any
     input, so a carrier one element short is never looked up and shifts every
     certification by one with nothing raising.
@@ -3234,7 +3235,7 @@ def _signals_for(
     design (``:30``). ⚠ ``None`` is the WITHHELD state and refuses every bar,
     which is ``archive_policy_for``'s own posture, not a new one.
     """
-    price_basis = from_archive_basis(archive_adjustment_basis, n_bars=len(series))
+    price_basis = from_archive_basis(archive_adjustment_basis, series=series)
     if entry.signals is not None:
         return segmented_signals(
             entry,
@@ -3405,7 +3406,7 @@ def _rank_cross_section(
             regime=regime_provider.for_dates(series.dates),
             price_basis=from_archive_basis(
                 corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None,
-                n_bars=len(series),
+                series=series,
             ),
             leg=leg,
         )

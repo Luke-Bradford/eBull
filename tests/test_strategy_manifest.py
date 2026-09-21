@@ -347,7 +347,7 @@ class TestUniformInvocationEqualsTheDirectCall:
             universe=UNIVERSE,
             masked_reason=REASON,
             regime=unconstrained_regime(len(_bars(_CLOSES))),
-            price_basis=from_archive_basis("unadjusted", n_bars=len(_bars(_CLOSES))),
+            price_basis=from_archive_basis("unadjusted", series=_bars(_CLOSES)),
         )
         expected = direct(_bars(_CLOSES), universe=UNIVERSE, close_reason=REASON)  # type: ignore[operator]
         assert via_manifest == expected
@@ -363,7 +363,7 @@ class TestUniformInvocationEqualsTheDirectCall:
             universe=UNIVERSE,
             masked_reason=REASON,
             regime=unconstrained_regime(len(_bars(_CLOSES))),
-            price_basis=from_archive_basis("unadjusted", n_bars=len(_bars(_CLOSES))),
+            price_basis=from_archive_basis("unadjusted", series=_bars(_CLOSES)),
         )
         assert via_manifest == s4_signals(_bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON)
 
@@ -380,7 +380,7 @@ class TestUniformInvocationEqualsTheDirectCall:
             universe=UNIVERSE,
             masked_reason=REASON,
             regime=unconstrained_regime(len(_bars(_HOLED_CLOSES))),
-            price_basis=from_archive_basis("unadjusted", n_bars=len(_bars(_HOLED_CLOSES))),
+            price_basis=from_archive_basis("unadjusted", series=_bars(_HOLED_CLOSES)),
         )
         assert signals[0].verdict == "not_evaluable"
         assert signals[0].reason == REASON
@@ -398,7 +398,7 @@ class TestUniformInvocationEqualsTheDirectCall:
                 universe=UNIVERSE,
                 masked_reason=REASON,
                 regime=unconstrained_regime(len(_bars(_CLOSES))),
-                price_basis=from_archive_basis("unadjusted", n_bars=len(_bars(_CLOSES))),
+                price_basis=from_archive_basis("unadjusted", series=_bars(_CLOSES)),
             )
         }
         assert emitted == set(entry.signal_kinds)
@@ -415,7 +415,7 @@ class TestUniformInvocationEqualsTheDirectCall:
             universe=UNIVERSE,
             masked_reason=REASON,
             regime=unconstrained_regime(len(series)),
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            price_basis=from_archive_basis("unadjusted", series=series),
         )
         expected = s2_member(series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=REASON)
         assert via_manifest.dates == expected.dates
