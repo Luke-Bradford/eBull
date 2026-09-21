@@ -2,6 +2,20 @@
 
 Status: verdict + narrow fix · 2026-09-13 · Refs #2965, #2961, #2962, #2602, #2844, #2949
 
+> ⛔ **Two claims below are STALE as of 2026-09-21 and were quoted forward as current,
+> costing a design.** See `2026-09-21-closed-execution-ownership-claim.md`.
+>
+> 1. **"`reconcile_backlog` excludes core outright … The window is unbounded"** (under
+>    "Rejected design A") — the exclusion was **removed by #2962**. The backlog now covers
+>    both arms on the 5-minute strategy cycle; see
+>    `strategy_order_reconciliation.py:1041-1045`.
+> 2. **"both release paths require that *we* authored the close"** —
+>    `release_exact_position` needs only an active pair and a reason. The real gap is that
+>    it has **no production caller**.
+>
+> The blocked verdict itself still stands, re-derived against the live portal on
+> 2026-09-21: the page documents no partial-fill representation.
+
 Two designs for #2965 were written and both were killed at Codex checkpoint 1. The
 reasons are the substance of this document; the shipped change is the small,
 separable part that survived.
