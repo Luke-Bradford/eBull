@@ -192,10 +192,19 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     # negatively for the same reason as "sterling figure" above.
     assert "carried through unchanged" not in response.household_currency_caveat
     assert "broker's own label" not in response.household_currency_caveat
-    # What replaced it names the conversion as ours and refuses to imply the rate is
-    # one anything traded at -- it is a display rate, as stale as the last FX refresh.
+    # What replaced it names the conversion as ours. ⚠ Its two qualifiers are each the
+    # narrowest form Codex ckpt-1 would allow, and both were drafted wider:
+    #  - "nothing was transacted at" is a universal historical negative this route
+    #    cannot establish (funding, withdrawal or a broker conversion may have used
+    #    the same published rate). Only THIS READ's behaviour is checkable.
+    #  - "only as fresh as the last FX refresh" was wrong in the unsafe direction:
+    #    `sse_quotes._load_display_context` snapshots rates once per connection, so a
+    #    live cell can be OLDER than the last refresh.
     assert "this engine's own conversion" in response.household_currency_caveat
-    assert "nothing was transacted at" in response.household_currency_caveat
+    assert "this read does not transact at" in response.household_currency_caveat
+    assert "can be older than the last FX refresh" in response.household_currency_caveat
+    assert "nothing was transacted at" not in response.household_currency_caveat
+    assert "only as fresh as" not in response.household_currency_caveat
     # Names the excluded cost specifically. "does not include" alone would still
     # pass if the sentence stopped identifying WHICH cost is outside the ceiling.
     assert "Converting when you fund or withdraw" in response.household_currency_caveat

@@ -9970,6 +9970,33 @@ original, because the gate now *looked* like a bound.
     the PRODUCER, not the assignment**. Mechanical form — `rg -n '^from app\.' <route file>`
     first, then search the converting vocabulary across every file that returns, before
     writing any "carried through" / "unconverted" / "only converting call" sentence.
+- ⚠⚠⚠ **The fix for occurrence 4 committed occurrence 5 against itself, and this is the part
+  worth reading.** The correction replaced "ONE converting call on this route" with "**TWO**
+  converting paths" — the same unestablished exhaustive claim with a different integer — and
+  ckpt-1 produced a third within one pass: `app/api/sse_quotes.py`, which `StrategyPositions.tsx`
+  subscribes to itself and which overrides the CURRENT and GAIN/LOSS cells at a rate snapshotted
+  per connection. **It is invisible to every grep of the route's imports, because the route does
+  not import it — the component fetches it.** Two more sites (`load_owned_pnl` ×
+  `open_conversion_rate`, the mark substitution × `close_conversion_rate`) are bare
+  multiplications that no `convert(`-shaped search finds.
+  - Three more claims in the same commit failed the same way and were cut before push: a cited
+    function name that does not exist (`_position_from_payload`; it is `_parse_direct_position`
+    — **grep-before-cite, violated while writing the entry about not citing loosely**), "the
+    broker never sends a currency on a position at all" (we can only say our parser maps none;
+    `raw_payload` would retain it), and "a rate nothing was transacted at" (a universal
+    historical negative — a household funding or withdrawal may have used the same published
+    rate). A fourth, "only as fresh as the last FX refresh", was wrong in the **unsafe
+    direction**: the SSE snapshot makes a cell potentially OLDER than that.
+  - **The generalisation: replacing a wrong count with a right-sounding count is not a fix, it
+    is the same defect re-armed.** A count is a claim about the whole search space; the reason
+    the first one was wrong is that nobody had bounded that space, and writing "two" does not
+    bound it either. Prose that survives says **"the paths established so far"** and names who
+    would have to draw the boundary — or states no count at all.
+  - ⚠ Note what caught it: **Codex ckpt-1 on the FRAMING, on a diff the ladder scores as
+    narrow** (one string constant, two comments, test pins, two docs). The rung is right about
+    the CODE risk and blind to the artefact — the deliverable here was a factual claim, and
+    that is the judgement-artefact rung however few lines carry it. When the thing being
+    shipped is a sentence asserting something about the system, rung by CLAIM, not by diff size.
 - Enforced in: this entry; `app/api/strategies.py::CoreSleeveResponse.household_currency_caveat`
   (comment + the negative test pins in `tests/test_2603_core_mandate_api.py`); the inline
   comment at the `currency=broker_position.currency` site itself; the rewritten "conversion

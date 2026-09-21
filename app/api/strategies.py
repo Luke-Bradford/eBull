@@ -1109,17 +1109,19 @@ class CoreSleeveResponse(BaseModel):
     #: failure ``docs/review-prevention-log.md`` records under "A negative claim
     #: is only as wide as the thing you grepped". Re-run the checks named there.
     #: ⚠ #3274 asked whether the broker's `GBP` label is correct for a USD-quoted
-    #: instrument. Measured 2026-09-21: it is, and the third retraction below is
-    #: the fallout. The broker never sends a currency on a position at all --
-    #: `_position_from_payload` (`app/providers/implementations/etoro_broker.py`)
-    #: reads no such key -- so `£` here is OURS, from `get_runtime_config`.
+    #: instrument. Measured 2026-09-21: it is, and the third retraction in the doc
+    #: is the fallout. `£` here is OURS -- `display_currency` from
+    #: `get_runtime_config` -- because `_parse_direct_position`
+    #: (`app/providers/implementations/etoro_broker.py:1840`) maps no currency key
+    #: off the position payload. ⚠ That is a statement about OUR PARSER, not about
+    #: what eToro sends; anything it does send survives only in `raw_payload`.
     household_currency_caveat: str = (
-        "Sterling is not the unit here. Where the core sleeve holds a USD-quoted "
-        "instrument, a household measuring it in GBP carries GBP/USD exposure on the "
-        "whole position value and not only on its return, and this engine does not "
-        "hedge it. Where the positions table shows £, the figure is this engine's own "
-        "conversion of that USD-quoted holding, at a stored GBP/USD rate that is only "
-        "as fresh as the last FX refresh and that nothing was transacted at. "
+        "Sterling is not the unit this sleeve is run in. Where the core sleeve holds a "
+        "USD-quoted instrument, a household measuring it in GBP carries GBP/USD exposure "
+        "on the whole position value and not only on its return, and this engine does "
+        "not hedge it. Where the positions table shows £ against that holding, the "
+        "figure is this engine's own conversion, at a stored rate of GBP per USD that "
+        "this read does not transact at and that can be older than the last FX refresh. "
         "Converting when you fund or withdraw is a household cost that the "
         "preregistered ceiling, which prices round-trip spread, does not include."
     )
@@ -3361,8 +3363,14 @@ def get_strategy_owned_positions(
                 # `app/api/portfolio.py`: `display_currency` from `get_runtime_config`
                 # on success, the instrument's native currency only on an FX degrade.
                 # Every money field on this row has been converted to match it there.
-                # The `"USD"` arm is unreachable as a LABEL -- `valuation_available`
-                # is False in that branch and all six money fields are None.
+                # ⚠ The `"USD"` arm labels nothing the FE RENDERS -- `valuation_available`
+                # is False in that branch and all seven money fields (`assigned_value`,
+                # `current_value`, `unrealised_pnl`, `open_rate`, `current_price`,
+                # `stop_loss_rate`, `take_profit_rate`) are None, so every cell is a dash.
+                # It is still serialised, so a non-FE consumer can read it as observed.
+                # ⚠ The REST figures are not the whole story either: `StrategyPositions.tsx`
+                # overrides `current_price` with the SSE tick, converted independently in
+                # `app/api/sse_quotes.py` at a rate snapshotted when the stream opened.
                 currency=broker_position.currency if broker_position is not None else "USD",
                 trade_status=cast(Literal["open", "closing", "reconcile_required"], row["trade_status"]),
                 valuation_available=broker_position is not None,
