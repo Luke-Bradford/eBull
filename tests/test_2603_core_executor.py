@@ -387,6 +387,26 @@ def test_an_unusable_exit_anchor_refuses_before_durable_order_authority(price: D
     assert "broker_submit" not in events
 
 
+def test_an_anchor_too_small_to_quantize_a_stop_refuses_rather_than_raising() -> None:
+    """Under two cents the stop quantizes DOWN to 0.00 and `core_exit_levels` raises.
+
+    Unreachable for SPY, reachable for a configurable mandate instrument — and an
+    executor that raises where it could refuse turns a bad candidate into a failed
+    attended request rather than a reported one.
+    """
+    result, events = _run(
+        BrokerCoreOrderSubmission(
+            broker_order_ref="9001",
+            reference_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+            response_digest="a" * 64,
+        ),
+        preflight_price=Decimal("0.01"),
+    )
+
+    assert (result.state, result.reason_code) == ("refused", "core_exit_levels_underivable")
+    assert "persist_order" not in events
+
+
 def test_acceptance_identity_is_persisted_after_authority_commits() -> None:
     result, events = _run(
         BrokerCoreOrderSubmission(

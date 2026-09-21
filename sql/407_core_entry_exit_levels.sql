@@ -5,14 +5,33 @@
 -- leaves one window open: a NEW core entry is still born naked and protected only by
 -- the NEXT cycle.  This table is what closes it.
 --
--- WHY A TABLE AND NOT A COMPUTATION AT SUBMIT TIME.  `load_core_resume_authority`
--- re-reads the durable authority after a crash and replays THE SAME `request_id`.
--- eToro's open body takes ABSOLUTE rates, and those rates are anchored on a quote --
--- so recomputing them at submit time would send a DIFFERENT body under an
--- already-accepted idempotency key.  The rates therefore have to be part of the
--- committed authority, exactly as `requested_amount` already is.  `orders` carries no
--- SL/TP columns (`raw_payload_json` is written NULL on this path), so the authority
--- needs a store of its own.
+-- WHY A TABLE AND NOT JUST A LOCAL VARIABLE AT SUBMIT TIME.  Two reasons, and the
+-- FIRST draft of this comment gave a third that is FALSE -- recorded here because a
+-- later reader would otherwise inherit it.  It claimed the resume path re-reads the
+-- authority and replays the same `request_id`, so recomputing the rates would send a
+-- different body under an accepted idempotency key.  `resume_core_submission`
+-- RECONCILES and never resubmits (its own docstring: "without ever retrying its
+-- mutation"), so that path does not exist.  Codex checkpoint 2 caught it.
+--
+-- The two real reasons:
+--
+--   1. ORDERING.  Deriving the rates BEFORE the `orders` INSERT is what makes an
+--      underivable anchor refuse while there is still nothing durable to refuse
+--      against.  A derivation that happens at the broker call instead can only fail
+--      after an authority exists, and a failed authority blocks every later core entry.
+--   2. PROVENANCE.  This row is the only record of what the OPEN BODY claimed.  The
+--      five-minute repair re-anchors on `broker_positions.open_price` (the true fill)
+--      and will write a DIFFERENT pair within minutes of any entry; without the
+--      submitted pair stored, that first repair is unexplainable after the fact.  That
+--      is not hypothetical -- reconstructing the 2026-09-21 level incident depended
+--      entirely on `prior_stop_rate` having been recorded on each operation row.
+--
+-- ⚠ It also holds the line if the resume path is ever ALLOWED to resubmit: the rates
+-- would then have to be reproducible from committed state, and they already are.  That
+-- is a consequence, not the justification.
+--
+-- `orders` carries no SL/TP columns (`raw_payload_json` is written NULL on this path),
+-- so this is a store of its own rather than two columns on an existing table.
 --
 -- SHAPE PRECEDENT: `strategy_entry_preflights` (the signal arm) already persists
 -- `stop_loss_rate` / `take_profit_rate` inside the authority transaction, before the
@@ -46,9 +65,19 @@
 -- ⚠ NO BACKFILL, and the population is why: at the time of writing this repo holds
 -- exactly ONE core order (`order_id` 2) and it is `resolved`, so
 -- `load_core_resume_authority`'s `state NOT IN ('resolved','rejected')` filter cannot
--- return it.  There is nothing to backfill and nothing to strand.  A future legacy row
--- without a level row is handled in code by RAISING ("core resume authority is
--- incomplete"), never by skipping it and never by submitting without rates.
+-- return it.  Reproduce with `SELECT state.order_id, state.state FROM
+-- strategy_order_reconciliation_state state JOIN strategy_trade_orders link USING
+-- (order_id) JOIN strategy_trades t USING (strategy_trade_id) WHERE
+-- t.core_rebalance_intent_id IS NOT NULL`.
+--
+-- ⚠⚠ "Zero rows today" is NOT the safety argument, and treating it as one is the
+-- documented failure mode (prevention log, 2026-09-21, "a guard justified by no such
+-- row can exist today").  A pre-`sql/407` authority LOADS NORMALLY with NULL rates:
+-- the only thing that can still happen to it is `resume_core_submission`, which
+-- reconciles and never resubmits, so it needs no rates.  What it cannot do is reach
+-- `_submit_core_authority_locked`, which raises on a NULL pair.  The refusal is at the
+-- submit site, not the load site -- a guard at the load site would have made exactly
+-- those authorities unreconcilable, which is the first draft this comment replaces.
 
 CREATE TABLE IF NOT EXISTS strategy_core_entry_exit_levels (
     order_id             BIGINT PRIMARY KEY

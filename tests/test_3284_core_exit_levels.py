@@ -25,6 +25,7 @@ from app.services.core_exit_levels import (
 )
 from app.services.strategy_core_executor import (
     StrategyCoreExecutionError,
+    _submit_core_authority_locked,
     load_core_resume_authority,
 )
 from app.services.strategy_core_preflight import CORE_MAX_QUOTE_AGE_SECONDS
@@ -252,6 +253,32 @@ def test_the_declared_percentages_are_the_ones_the_operator_chose() -> None:
     assert (CORE_STOP_LOSS_PCT, CORE_TAKE_PROFIT_PCT) == (Decimal("50"), Decimal("200"))
 
 
+def _authority_row(stop: Decimal | None, take: Decimal | None) -> tuple[object, ...]:
+    """One `load_core_resume_authority` row, varying only the two exit-level columns."""
+    return (
+        11,
+        21,
+        31,
+        3417,
+        Decimal("49.9"),
+        UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+        None,
+        7,
+        UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"),
+        UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"),
+        UUID("f7306e0b-9494-415e-85fd-97874510cc83"),
+        stop,
+        take,
+    )
+
+
+def _conn_returning(row: tuple[object, ...] | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        execute=lambda *_a, **_k: SimpleNamespace(fetchone=lambda: row),
+        commit=lambda: None,
+    )
+
+
 class TestItem1NoNakedOpen:
     """#3284 item 1 — the shape and the resume path, the two places a naked core
     order could still be constructed once the derivation is correct."""
@@ -293,35 +320,36 @@ class TestItem1NoNakedOpen:
                 take_profit_rate=Decimal("379.93"),
             )
 
-    def test_an_authority_with_no_committed_levels_raises_rather_than_resuming(self) -> None:
-        """The LEFT JOIN's NULL must be loud.
+    def test_a_pre_migration_authority_loads_so_it_can_still_be_reconciled(self) -> None:
+        """A levels-less authority must LOAD.  Raising here was a real defect.
 
-        An INNER JOIN would have reported "nothing to resume" while a durable authority
-        sat unresolved — the silent direction. Raising is the correct one: the only
-        two acceptable outcomes for a levels-less authority are 'reported' and
-        'repaired', never 'submitted' and never 'skipped'.
+        An authority committed before `sql/407` has no levels row, and the only action
+        left for it is `resume_core_submission`, which RECONCILES and never resubmits.
+        A raise at the load site would 500 `GET /core-sleeve` and
+        `POST /core-sleeve/rebalance` and leave that authority permanently unresolvable
+        — a guard against submitting naked that blocks the one path incapable of
+        submitting anything. Caught at Codex checkpoint 2.
         """
-        row = (
-            11,
-            21,
-            31,
-            3417,
-            Decimal("49.9"),
-            UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
-            None,
-            7,
-            UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"),
-            UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"),
-            UUID("f7306e0b-9494-415e-85fd-97874510cc83"),
-            None,
-            None,
-        )
-        conn = SimpleNamespace(
-            execute=lambda *_a, **_k: SimpleNamespace(fetchone=lambda: row),
-            commit=lambda: None,
-        )
-        with pytest.raises(StrategyCoreExecutionError, match="incomplete"):
-            load_core_resume_authority(conn)  # type: ignore[arg-type]
+        authority = load_core_resume_authority(_conn_returning(_authority_row(None, None)))  # type: ignore[arg-type]
+        assert authority is not None
+        assert (authority.stop_loss_rate, authority.take_profit_rate) == (None, None)
+
+    def test_an_authority_without_levels_cannot_reach_the_broker(self) -> None:
+        """...and the refusal that DOES matter sits at the submit site instead.
+
+        Unreachable today — `_submit_core_authority` is only entered from
+        `execute_core_rebalance`, which derives the rates in the same lock hold. It is
+        kept because a caller added later that submits a LOADED authority is precisely
+        the change that would reintroduce the naked open this ticket closed.
+        """
+        authority = load_core_resume_authority(_conn_returning(_authority_row(None, None)))  # type: ignore[arg-type]
+        assert authority is not None
+        with pytest.raises(StrategyCoreExecutionError, match="no committed exit levels"):
+            _submit_core_authority_locked(
+                _conn_returning(None),  # type: ignore[arg-type]
+                broker=SimpleNamespace(),  # type: ignore[arg-type]
+                authority=authority,
+            )
 
     def test_a_complete_authority_carries_its_levels_through(self) -> None:
         row = (

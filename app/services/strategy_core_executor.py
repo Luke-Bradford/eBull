@@ -119,14 +119,22 @@ class CoreResumeAuthority:
     operator_id: UUID
     api_key_credential_id: UUID
     user_key_credential_id: UUID
-    stop_loss_rate: Decimal
-    take_profit_rate: Decimal
-    """#3284 item 1.  Part of the AUTHORITY, not of the submission, and the resume path
-    is why: it replays the same ``request_id``, and eToro's open body takes absolute
-    rates anchored on a quote.  Re-deriving them at submit time would send a different
-    body under an already-accepted idempotency key.  Read back from
-    ``strategy_core_entry_exit_levels``; an authority that has no row there is
-    incomplete and raises rather than submitting naked."""
+    stop_loss_rate: Decimal | None
+    take_profit_rate: Decimal | None
+    """#3284 item 1.  The exit levels this authority was committed with, read back from
+    ``strategy_core_entry_exit_levels``.
+
+    ⚠ ``None`` IS A LEGAL VALUE, and making it illegal was a real defect caught at Codex
+    checkpoint 2.  An authority committed before ``sql/407`` has no levels row, and the
+    ONLY thing that can still happen to it is :func:`resume_core_submission` --  which
+    RECONCILES and never resubmits (see its docstring).  Raising here would 500 both
+    ``GET /core-sleeve`` and ``POST /core-sleeve/rebalance`` and make that authority
+    permanently unreconcilable: a guard against submitting naked, blocking the one action
+    that cannot submit anything at all.
+
+    ⚠ The refusal that matters therefore lives at the SUBMIT site
+    (:func:`_submit_core_authority_locked`), not at the load site.  "No committed levels"
+    must stop a submission; it must not stop a read."""
 
 
 def _result(
@@ -230,12 +238,13 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
     conn.commit()
     if row is None:
         return None
-    # ⚠ LEFT JOIN plus an explicit raise, never an INNER JOIN.  An INNER JOIN would make
-    # a levels-less authority INVISIBLE -- it would report "no authority to resume" while
-    # a durable one sat unresolved, which is the silent direction of this failure.  The
-    # loud one is correct: an authority whose exit levels were never committed must be
-    # reported, not skipped and not submitted naked (#3284 item 1).
-    if row[0] is None or row[4] is None or row[5] is None or row[11] is None or row[12] is None:
+    # ⚠ LEFT JOIN, and the exit levels are deliberately NOT in the completeness check
+    # below.  An INNER JOIN would make a pre-`sql/407` authority INVISIBLE, and adding
+    # NULL rates to this raise would make it UNLOADABLE -- both break the only action
+    # such an authority can still take, which is reconciliation.  The submit path is
+    # where missing levels have to stop something, and that is where they do
+    # (`_submit_core_authority_locked`).  #3284 item 1, Codex checkpoint 2.
+    if row[0] is None or row[4] is None or row[5] is None:
         raise StrategyCoreExecutionError("core resume authority is incomplete")
     return CoreResumeAuthority(
         intent_id=int(row[0]),
@@ -249,8 +258,8 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
         operator_id=row[8],
         api_key_credential_id=row[9],
         user_key_credential_id=row[10],
-        stop_loss_rate=Decimal(str(row[11])),
-        take_profit_rate=Decimal(str(row[12])),
+        stop_loss_rate=None if row[11] is None else Decimal(str(row[11])),
+        take_profit_rate=None if row[12] is None else Decimal(str(row[12])),
     )
 
 
@@ -498,6 +507,21 @@ def _submit_core_authority_locked(
     # already precedes this either way, so the callback bought only the unattended
     # guard and body construction, and it was not the last client-side instant
     # anyway (`ResilientClient` throttles after it).
+    # ⚠ #3284 item 1, and BEFORE the marker deliberately.  This is where "no committed
+    # exit levels" has to stop something: a marked authority reads as "may have reached
+    # the broker", so refusing after the marker would cost the order its own provenance
+    # to prevent a call that has not happened yet.
+    #
+    # ⚠ Unreachable today and kept anyway.  `_submit_core_authority` is only entered from
+    # `execute_core_rebalance`, which derives the rates in this same lock hold -- so a
+    # `None` here means a caller was added that submits a LOADED authority, which is
+    # exactly the change that would otherwise reintroduce the naked open this ticket
+    # closed.  A raise rather than a refusal because it is a caller-contract breach, not
+    # a state of the world.
+    if authority.stop_loss_rate is None or authority.take_profit_rate is None:
+        raise StrategyCoreExecutionError(
+            f"core authority {authority.order_id} has no committed exit levels and must not be submitted"
+        )
     mark_core_submission_entered(conn, order_id=authority.order_id)
     try:
         submission = broker.place_demo_core_order(
@@ -836,7 +860,15 @@ def execute_core_rebalance(
             # cycle, the alternative is an unguarded `None` reaching the INSERT.
             if anchor_rate is None or not anchor_rate.is_finite() or anchor_rate <= 0 or anchor_quoted_at is None:
                 return _result("refused", "core_exit_anchor_unavailable", intent_id=intent_id)
-            exit_levels = core_exit_levels(anchor_rate)
+            try:
+                exit_levels = core_exit_levels(anchor_rate)
+            except ValueError:
+                # ⚠ A REFUSAL, not an exception, and the case is real rather than defensive:
+                # `core_exit_levels` quantizes the stop DOWN to a cent, so any anchor under
+                # two cents derives a stop of 0.00 and raises.  SPY cannot reach there, but
+                # the mandate instrument is configurable and an executor that raises where
+                # it could refuse turns a bad candidate into a failed attended request.
+                return _result("refused", "core_exit_levels_underivable", intent_id=intent_id)
 
             amount = broker_verdict.amount
             request_id = uuid4()

@@ -10510,30 +10510,61 @@ written CONFIDENTLY and each failed silently in the reassuring direction.
   `tests/test_3284_core_exit_levels.py::test_the_live_position_reproduces_the_levels_the_operator_set_by_hand`
   (asserts the pair READ BACK from `broker_positions`, and says so).
 
+## 2026-09-21 — a design justified by a path that does not exist produces a guard that breaks the path that does (#3284 item 1)
+
+- Where it bit: the core open body must carry `stopLossRate` / `takeProfitRate`, and I
+  justified persisting them with "`load_core_resume_authority` replays the same
+  `request_id`, so re-deriving at submit time would send a different body under an
+  already-accepted idempotency key". That hazard is real in shape and **the path does not
+  exist**: `resume_core_submission` calls `_reconcile_core_authority` and its own docstring
+  says "without ever retrying its mutation". `place_demo_core_order` is only ever reached
+  from `execute_core_rebalance`, with rates derived moments earlier in the same lock hold.
+- **The harm was not the wrong rationale, it was the guard the rationale implied.** Believing
+  the loaded authority would be resubmitted, I made NULL rates an incompleteness error in
+  `load_core_resume_authority`. A pre-migration authority has no levels row — so the loader
+  raised, which 500s `GET /core-sleeve` and `POST /core-sleeve/rebalance` and leaves that
+  authority **permanently unreconcilable**. A guard against submitting naked, blocking the one
+  action structurally incapable of submitting anything. Caught at Codex checkpoint 2.
+- **Test to apply: before writing a guard for a path, open the function that path runs and
+  read what it actually calls.** One `rg` for the caller set would have settled it
+  (`rg -n "load_core_resume_authority|_submit_core_authority\("` returns four lines). The tell
+  is a justification phrased in terms of what a function *would* do — "the resume replays…",
+  "the retry resubmits…" — rather than a line you have read.
+- ⚠ Corollary on WHERE a refusal belongs: **"this value is missing" must stop the action that
+  needs it, not every action that can see it.** Missing exit levels must stop a SUBMIT; they
+  must not stop a READ. Moving the check from the load site to
+  `_submit_core_authority_locked` keeps the same safety property and costs nothing.
+- ⚠ The design survived the falsification, with different reasons, and both are worth having:
+  deriving before the `orders` INSERT is what lets an underivable anchor refuse while there is
+  still nothing durable to refuse against; and the stored pair is the only record of what the
+  open body claimed, which the five-minute repair diverges from within minutes.
+- Enforced in: `sql/407_core_entry_exit_levels.sql` (the false premise named as false, so a
+  later reader does not re-inherit it); `app/services/strategy_core_executor.py`
+  (`CoreResumeAuthority.stop_loss_rate` documents `None` as legal; the raise sits before
+  `mark_core_submission_entered`);
+  `tests/test_3284_core_exit_levels.py::TestItem1NoNakedOpen::test_a_pre_migration_authority_loads_so_it_can_still_be_reconciled`.
+
 ## 2026-09-21 — a value that an idempotent REPLAY must reproduce belongs to the committed authority, never to the submission (#3284 item 1)
 
-- Where it bit: the core sleeve's open body has to carry `stopLossRate` / `takeProfitRate`
-  so no position is ever born naked. The obvious implementation is to derive them from a
-  quote at submit time, next to the call that uses them. That is wrong here, and the reason
-  is not visible from the submit site: `load_core_resume_authority` re-reads a crashed
-  authority and **replays the same `request_id`**. eToro's rates are ABSOLUTE and anchored on
-  a quote, so a fresh derivation on the resume path sends a **different body under an
-  already-accepted idempotency key** — the one thing an idempotency key exists to forbid.
-- The shape that is safe: derive BEFORE the durable write, persist the derived values in the
-  same transaction as the authority (`sql/407`, `strategy_core_entry_exit_levels`), and have
-  the submit path READ them. The submission then becomes a pure function of committed state,
-  so first attempt and replay are byte-identical by construction rather than by care.
+- ⚠ Read the entry ABOVE this one first: in #3284's own case the replay path turned out not
+  to exist, and the guard derived from assuming it did was itself the defect. What follows is
+  the rule for the case where the replay path is REAL — verify that it is before applying it.
+- The shape that is safe when a replay genuinely resubmits: derive BEFORE the durable write,
+  persist the derived values in the same transaction as the authority (`sql/407`,
+  `strategy_core_entry_exit_levels`), and have the submit path READ them. The submission is
+  then a pure function of committed state, so first attempt and replay are byte-identical by
+  construction rather than by care.
 - **The general test, and it is cheap: for every field in a request body, ask "would a replay
   recompute this to the same value?"** A constant (`leverage`, `orderCurrency`) is safe. A
   value read from the authority row (`requested_amount`) is safe. Anything derived from a
   CLOCK, a QUOTE, a random source or current market state is NOT, and must be captured at the
   moment the authority commits. ⚠ The tell is that the unsafe version looks *better* at the
   submit site — fresher data, fewer columns, no migration.
-- ⚠ Second half, on reading it back: join the store with a **LEFT JOIN plus an explicit
-  raise**, never an INNER JOIN. An INNER JOIN makes an authority whose values were never
-  committed *invisible* — the loader reports "nothing to resume" while a durable unresolved
-  order sits at the broker. Both are failures, but only one is silent, and the silent one is
-  the one a monitoring dashboard agrees with.
+- ⚠ Second half, on reading it back: join the store with a **LEFT JOIN**, never an INNER
+  JOIN. An INNER JOIN makes an authority whose values were never committed *invisible* — the
+  loader reports "nothing to resume" while a durable unresolved order sits at the broker,
+  and a monitoring dashboard agrees with it. ⚠ LEFT JOIN, and then let the NULL through:
+  put the refusal at the site that needs the value, per the entry above.
 - ⚠ Third half, on the shape: make the new fields **REQUIRED on the dataclass, never
   optional-with-a-default**. Required fields turn the type checker into the enumerator of
   every construction site — pyright listed all 11 immediately. A default compiles silently at
