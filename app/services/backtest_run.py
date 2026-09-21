@@ -166,8 +166,13 @@ from app.services.strategy_exit_gap import (
 from app.services.strategy_exit_gap import (
     summarise as summarise_exit_gap,
 )
-from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
-from app.services.strategy_price_basis import from_archive_basis
+from app.services.strategy_manifest import (
+    PRICE_BASIS_CONSUMERS,
+    STRATEGY_MANIFEST,
+    StrategyEntry,
+    StrategyPurpose,
+)
+from app.services.strategy_price_basis import from_archive_basis, from_undeclared_source
 from app.services.strategy_promotion_evidence_measure import (
     LedgerMeasurements,
     RealisedLedger,
@@ -3219,9 +3224,10 @@ def _signals_for(
     ``spy_chain`` version.
 
     ⚠⚠ ``archive_adjustment_basis`` IS THE STRING, NOT A BUILT CARRIER (#2840).
-    The ``PriceBasisSeries`` is constructed HERE, at ``n_bars=len(series)``, so a
-    length mismatch cannot arise on any production path. Handing this function a
-    pre-built carrier would reopen the silent class Codex found at checkpoint 1:
+    The ``PriceBasisSeries`` is constructed HERE, from THIS series, so neither a
+    length mismatch nor a foreign binding can arise on any production path.
+    Handing this function a pre-built carrier would reopen the silent class Codex
+    found at checkpoint 1:
     ``evaluate`` returns ``no_fill_bar`` for the last bar before reading any
     input, so a carrier one element short is never looked up and shifts every
     certification by one with nothing raising.
@@ -3234,7 +3240,21 @@ def _signals_for(
     design (``:30``). ⚠ ``None`` is the WITHHELD state and refuses every bar,
     which is ``archive_policy_for``'s own posture, not a new one.
     """
-    price_basis = from_archive_basis(archive_adjustment_basis, n_bars=len(series))
+    # ⚠⚠ THE CERTIFYING CARRIER IS BUILT ONLY FOR A DECLARED CONSUMER (#2840 §8b,
+    # Codex checkpoint 2). This function runs per strategy per quarantine arm, and
+    # binding every bar costs ~0.8 µs to encode plus ~0.8 µs to re-check at the
+    # dispatcher (measured) — which eleven of the twelve adapters would pay to
+    # discard. ``PRICE_BASIS_CONSUMERS`` names the ones whose verdicts depend on it.
+    #
+    # ⚠ Everyone still RECEIVES a carrier and every alignment check still runs;
+    # only the certification is withheld. A non-consumer that started reading it
+    # would refuse every bar — visibly wrong, never silently certified — and two
+    # tests fail before that can ship.
+    price_basis = (
+        from_archive_basis(archive_adjustment_basis, series=series)
+        if entry.strategy_id in PRICE_BASIS_CONSUMERS
+        else from_undeclared_source(series=series)
+    )
     if entry.signals is not None:
         return segmented_signals(
             entry,
@@ -3403,9 +3423,29 @@ def _rank_cross_section(
             masked_reason="quarantined_bar",
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
             regime=regime_provider.for_dates(series.dates),
-            price_basis=from_archive_basis(
-                corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None,
-                n_bars=len(series),
+            # ⚠ The same consumer routing as ``_signals_for`` (#2840 §8b). The
+            # RANKING pass reaches ``segmented_member``, whose two callers — S-2
+            # and S-10 — both discard the carrier, so certifying here would pay
+            # the full per-bar binding and an immediate re-check for nothing.
+            #
+            # ⚠⚠ THE CERTIFYING BRANCH IS UNREACHABLE TODAY AND IS KEPT DELIBERATELY
+            # (review NITPICK on PR #3264, and it is correct). ``PRICE_BASIS_CONSUMERS``
+            # holds only S-12, which is ``per_series`` with no ``member``, so it never
+            # reaches this function. Writing the routing as a bare
+            # ``from_undeclared_source`` instead would be smaller and WRONG in the
+            # dangerous direction: the next cross-sectional consumer would silently
+            # inherit an all-refusing carrier with no branch to notice, and the guard
+            # that catches it (``test_only_the_declared_consumers_verdicts_depend_on_
+            # the_carrier``) only covers the per-series adapters. Same expression at
+            # both call sites is the invariant; that one of them is currently dead is
+            # a property of today's manifest, not of the rule.
+            price_basis=(
+                from_archive_basis(
+                    corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None,
+                    series=series,
+                )
+                if entry.strategy_id in PRICE_BASIS_CONSUMERS
+                else from_undeclared_source(series=series)
             ),
             leg=leg,
         )

@@ -133,7 +133,7 @@ def test_the_same_fixture_fires_under_a_certified_carrier() -> None:
         masked_reason=MASKED_REASON,
         unresolved_breaks=(),
         regime=_provider(series).for_dates(series.dates),
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
 
     assert signals, "the fixture produced no signals; the comparison below would be vacuous"

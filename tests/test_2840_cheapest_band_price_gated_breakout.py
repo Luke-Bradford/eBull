@@ -160,7 +160,7 @@ def test_above_the_edge_the_s4_signal_passes_through() -> None:
         series,
         universe=UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     assert _fired(signals) == [FIRING_INDEX]
 
@@ -177,7 +177,7 @@ def test_the_edge_is_inclusive() -> None:
         series,
         universe=UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     assert _fired(signals) == [FIRING_INDEX]
 
@@ -191,7 +191,7 @@ def test_below_the_edge_is_not_fired_and_not_refused() -> None:
         series,
         universe=UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     assert not _fired(signals)
     assert _verdict_at(signals, FIRING_INDEX) == ("not_fired", None)
@@ -209,7 +209,7 @@ def test_s12_equals_s4_exactly_when_every_close_clears_the_edge() -> None:
         series,
         universe=UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     assert [(s.signal_index, s.verdict, s.reason) for s in s12] == [(s.signal_index, s.verdict, s.reason) for s in s4]
 
@@ -224,7 +224,7 @@ def test_s12_fired_set_is_a_subset_of_s4s_on_a_mixed_series() -> None:
                 series,
                 universe=UNIVERSE,
                 masked_reason=REASON,
-                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                price_basis=from_archive_basis("unadjusted", series=series),
             )
         )
     )
@@ -244,7 +244,7 @@ def test_a_masked_bar_keeps_s4s_reason_even_above_the_edge() -> None:
         series,
         universe=UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", REASON)
 
@@ -256,7 +256,7 @@ def test_a_warmup_bar_is_refused_whatever_the_price() -> None:
             series,
             universe=UNIVERSE,
             masked_reason=REASON,
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            price_basis=from_archive_basis("unadjusted", series=series),
         )
         verdict, reason = _verdict_at(signals, 0)
         assert verdict == "not_evaluable"
@@ -278,7 +278,7 @@ def test_a_masked_bar_below_the_edge_is_still_a_refusal() -> None:
         series,
         universe=UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", REASON)
 
@@ -290,7 +290,7 @@ def test_an_unknown_masked_reason_is_rejected() -> None:
             series,
             universe=UNIVERSE,
             masked_reason="not_a_reason",  # type: ignore[arg-type]
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            price_basis=from_archive_basis("unadjusted", series=series),
         )
 
 
@@ -461,7 +461,7 @@ def test_a_series_with_no_declared_basis_refuses_every_bar() -> None:
         series,
         universe=BACKTEST_UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_undeclared_source(n_bars=len(series)),
+        price_basis=from_undeclared_source(series=series),
     )
     assert len(signals) == len(series)
     assert {(s.verdict, s.reason) for s in signals[:-1]} == {("not_evaluable", PRICE_BASIS_REFUSAL_REASON)}
@@ -483,7 +483,7 @@ def test_the_refusal_is_not_a_decline_even_where_s4_would_fire() -> None:
         series,
         universe=BACKTEST_UNIVERSE,
         masked_reason=REASON,
-        price_basis=from_undeclared_source(n_bars=len(series)),
+        price_basis=from_undeclared_source(series=series),
     )
     assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
 
@@ -553,7 +553,7 @@ def test_the_manifest_adapter_actually_gates_on_price() -> None:
         universe=UNIVERSE,
         masked_reason=REASON,
         regime=RegimeSeries(values=tuple([Regime.BULL_QUIET] * 175), not_evaluable_indices=()),
-        price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+        price_basis=from_archive_basis("unadjusted", series=series),
     )
     assert not _fired(signals)
     assert _verdict_at(signals, FIRING_INDEX) == ("not_fired", None)
@@ -569,7 +569,7 @@ def test_the_manifest_adapter_ignores_the_regime() -> None:
                 universe=UNIVERSE,
                 masked_reason=REASON,
                 regime=RegimeSeries(values=tuple([regime] * len(series)), not_evaluable_indices=()),
-                price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+                price_basis=from_archive_basis("unadjusted", series=series),
             )
         )
         for regime in Regime

@@ -984,7 +984,7 @@ def _scan_per_series(
         # ⚠ NO AS-TRADED PROVENANCE SOURCE IS DECLARED FOR THIS PATH (#2840). Not an
         # inference from ``price_daily``'s columns — see ``from_undeclared_source``,
         # which carries the policy and cannot be flipped by editing a token.
-        price_basis=from_undeclared_source(n_bars=len(series)),
+        price_basis=from_undeclared_source(series=series),
     )
     windowed = [signal for signal in signals if signal.signal_index in window]
     out.extend(resolve_fills(windowed, series=series, identity=plan.identity, instrument_id=instrument_id))
@@ -1027,7 +1027,7 @@ def _stage_cross_sectional(
         # ⚠ NO AS-TRADED PROVENANCE SOURCE IS DECLARED FOR THIS PATH (#2840). Not an
         # inference from ``price_daily``'s columns — see ``from_undeclared_source``,
         # which carries the policy and cannot be flipped by editing a token.
-        price_basis=from_undeclared_source(n_bars=len(series)),
+        price_basis=from_undeclared_source(series=series),
         leg=leg,
     )
 

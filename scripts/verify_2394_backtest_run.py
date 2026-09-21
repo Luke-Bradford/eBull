@@ -544,7 +544,7 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
                 # used to read a literal ``"unadjusted"`` and was only safe because S-12's
                 # ``AS_TRADED_UNIVERSES`` token refused every bar first; with the token gone the
                 # literal would have certified a back-adjusted level against a nominal gate.
-                price_basis=from_undeclared_source(n_bars=len(series)),
+                price_basis=from_undeclared_source(series=series),
             )
             rows = resolve_fills(signals, series=series, identity=identity, instrument_id=int(instrument_id))
             entries, exits = _fills(rows, int(instrument_id))

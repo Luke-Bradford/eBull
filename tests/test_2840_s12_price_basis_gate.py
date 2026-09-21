@@ -7,8 +7,10 @@ is general and the gate is S-12's alone.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -21,10 +23,17 @@ from app.services.strategies.s12_cheapest_band_price_gated_breakout import (
     S12_STRATEGY_ID,
     s12_signals,
 )
-from app.services.strategy_manifest import STRATEGY_MANIFEST
-from app.services.strategy_price_basis import PRICE_BASIS_RULE_VERSION, PriceBasisSeries, from_archive_basis
+from app.services.strategy_manifest import PRICE_BASIS_CONSUMERS, STRATEGY_MANIFEST
+from app.services.strategy_price_basis import (
+    PRICE_BASIS_RULE_VERSION,
+    PriceBasisSeries,
+    bindings_for,
+    from_archive_basis,
+    from_undeclared_source,
+)
 from app.services.strategy_registry import StrategySignal
 from app.services.strategy_segmented_evaluation import segmented_signals
+from app.services.technical_analysis import OHLCVRow
 from tests.test_2840_cheapest_band_price_gated_breakout import (
     FIRING_INDEX,
     REASON,
@@ -35,11 +44,11 @@ from tests.test_2840_cheapest_band_price_gated_breakout import (
 
 
 def _certified(series: BarSeries) -> PriceBasisSeries:
-    return from_archive_basis("unadjusted", n_bars=len(series))
+    return from_archive_basis("unadjusted", series=series)
 
 
 def _withheld(series: BarSeries) -> PriceBasisSeries:
-    return from_archive_basis(None, n_bars=len(series))
+    return from_archive_basis(None, series=series)
 
 
 def test_a_withheld_archive_policy_refuses_every_bar() -> None:
@@ -73,7 +82,9 @@ def test_a_certified_archive_leaves_the_verdicts_byte_identical() -> None:
             series,
             universe=UNIVERSE,
             masked_reason=REASON,
-            price_basis=PriceBasisSeries(values=("observed_unadjusted",) * len(series)),
+            price_basis=PriceBasisSeries(
+                values=("observed_unadjusted",) * len(series), bar_bindings=bindings_for(series)
+            ),
         )
     ]
     assert any(s.verdict == "fired" for s in certified), "fixture must still fire, or the equality is vacuous"
@@ -100,6 +111,7 @@ def test_the_short_circuit_matches_the_declared_input_path() -> None:
     nearly_all = PriceBasisSeries(
         values=tuple("observed_unadjusted" if index == 0 else None for index in range(n)),
         not_evaluable_indices=tuple(range(1, n)),
+        bar_bindings=bindings_for(series),
     )
     declared = s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=nearly_all)
 
@@ -121,6 +133,7 @@ def test_the_basis_refusal_wins_over_a_masked_bar() -> None:
     basis = PriceBasisSeries(
         values=tuple(None if index == FIRING_INDEX else "observed_unadjusted" for index in range(len(masked_series))),
         not_evaluable_indices=(FIRING_INDEX,),
+        bar_bindings=bindings_for(masked_series),
     )
     signals = s12_signals(masked_series, universe=UNIVERSE, masked_reason=REASON, price_basis=basis)
     assert _verdict_at(signals, FIRING_INDEX) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
@@ -136,12 +149,25 @@ def test_a_misaligned_carrier_raises_in_both_directions(delta: int) -> None:
     it directly.
     """
     series = _above_edge()
+    # ⚠ The carrier is built from a DIFFERENT-LENGTH series, because the constructor
+    # now takes the series rather than a count (#2840 §8b) — a miscounted ``n_bars``
+    # is no longer expressible, so the misalignment has to come from a genuinely
+    # different series. The length check must still fire BEFORE the binding check,
+    # whose message would otherwise mask it.
+    end = len(series) + delta
+    misaligned = (
+        BarSeries(dates=series.dates[:end], rows=series.rows[:end])
+        if delta < 0
+        else BarSeries(
+            dates=(*series.dates, series.dates[-1] + timedelta(days=1)), rows=(*series.rows, series.rows[-1])
+        )
+    )
     with pytest.raises(ValueError, match="price_basis has .* bars against"):
         s12_signals(
             series,
             universe=UNIVERSE,
             masked_reason=REASON,
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series) + delta),
+            price_basis=from_archive_basis("unadjusted", series=misaligned),
         )
 
 
@@ -270,6 +296,7 @@ def test_a_carrier_built_under_another_rule_version_raises() -> None:
     stale = PriceBasisSeries(
         values=("observed_unadjusted",) * len(series),
         rule_set_version="price-basis-carrier-v0+deadbeefcafe+archives-deadbeefcafe",
+        bar_bindings=bindings_for(series),
     )
     with pytest.raises(ValueError, match="stale carrier cannot certify"):
         s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=stale)
@@ -350,3 +377,151 @@ def test_a_break_between_delivered_dates_cuts_at_the_bisect_position() -> None:
     assert (signals[59].verdict, signals[59].reason) == ("not_evaluable", "no_fill_bar")
     assert (signals[58].verdict, signals[58].reason) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
     assert (signals[60].verdict, signals[60].reason) == ("not_evaluable", PRICE_BASIS_REFUSAL_REASON)
+
+
+# ------------------------------------------------- the binding (#2840 §8 obligation b)
+
+
+def _foreign(series: BarSeries, *, at: int) -> BarSeries:
+    """``series`` with ONE close changed — same length, same dates, different bars."""
+    rows = list(series.rows)
+    rows[at] = cast(OHLCVRow, {**rows[at], "close": Decimal("7.77")})
+    return BarSeries(dates=series.dates, rows=tuple(rows))
+
+
+def test_a_carrier_built_for_another_series_of_the_same_length_raises() -> None:
+    """⚠⚠ THE DEFECT #2840 §8 RECORDED, closed here, and it was REACHABLE.
+
+    Codex refused "not reachable today" by constructing it. Measured before this
+    change, with the carrier built at ``n_bars=len(series_B)`` and handed to
+    series A: ``Counter({'not_evaluable': 114, 'not_fired': 60, 'fired': 1})`` —
+    accepted, and S-12 FIRED on a certificate that was never about these bars.
+
+    ⚠ Asserted through BOTH consumers. ``s12_signals`` is the direct call; the
+    scan reaches it through ``segmented_signals``, which slices the carrier and is
+    the last point that still holds the series to check against.
+    """
+    mine = _above_edge()
+    theirs = _foreign(mine, at=FIRING_INDEX - 40)
+    carrier = from_archive_basis("unadjusted", series=theirs)
+    assert len(carrier) == len(mine), "the counterexample is a SAME-LENGTH carrier, not a misaligned one"
+
+    with pytest.raises(ValueError, match="built for different bars"):
+        s12_signals(mine, universe=UNIVERSE, masked_reason=REASON, price_basis=carrier)
+    with pytest.raises(ValueError, match="built for different bars"):
+        segmented_signals(
+            STRATEGY_MANIFEST[S12_STRATEGY_ID],
+            mine,
+            universe=UNIVERSE,
+            masked_reason=REASON,
+            unresolved_breaks=(),
+            regime=unconstrained_regime(len(mine)),
+            price_basis=carrier,
+        )
+
+
+def test_an_UNCERTIFIED_bar_is_bound_too_because_it_feeds_the_certified_verdict() -> None:
+    """⚠⚠ THE EXPLOIT THAT KILLED "BIND ONLY THE CERTIFIED BARS" (Codex checkpoint 1).
+
+    An uncertified bar's OHLC still feeds ATR, compression and prior-high for later
+    bars — this module's own header says so — so binding only certifications leaves
+    the inputs that PRODUCE a certified verdict unbound. Reproduced on this fixture:
+    changing bar 169's close alone flips bar 170 from ``fired`` to ``not_fired``,
+    and under the narrower rule every binding still passed.
+
+    The fix is that a carrier binds EVERY bar whenever it certifies ANY, so this
+    now raises instead of returning a different verdict.
+    """
+    mine = _above_edge()
+    hole = FIRING_INDEX - 1
+    built_for = _foreign(mine, at=hole)
+    partial = PriceBasisSeries(
+        values=tuple(None if index == hole else "observed_unadjusted" for index in range(len(mine))),
+        not_evaluable_indices=(hole,),
+        bar_bindings=bindings_for(built_for),
+    )
+    with pytest.raises(ValueError, match="built for different bars"):
+        s12_signals(mine, universe=UNIVERSE, masked_reason=REASON, price_basis=partial)
+
+
+def test_mutating_a_row_after_construction_is_caught() -> None:
+    """⚠⚠ WHY THE BINDING IS A SNAPSHOT AND NOT A REFERENCE (Codex checkpoint 1).
+
+    ``OHLCVRow`` is a plain mutable ``dict``. An earlier design carried the
+    ``BarSeries`` itself, so carrier and series aliased the same objects and
+    ``rows[i]["close"] = …`` moved both sides while equality still passed. The
+    encoded snapshot is taken at construction, so it does not move.
+
+    ⚠ It does NOT cover a desynchronised ``BarSeries`` CACHE — see
+    ``binding_mismatch``'s docstring. That is open on #2840.
+    """
+    rows = [dict(row) for row in _above_edge().rows]
+    series = BarSeries(dates=_above_edge().dates, rows=cast(tuple[OHLCVRow, ...], tuple(rows)))
+    carrier = from_archive_basis("unadjusted", series=series)
+    assert carrier.binding_mismatch(series) is None
+
+    rows[FIRING_INDEX]["close"] = Decimal("7.77")
+    with pytest.raises(ValueError, match="built for different bars"):
+        s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=carrier)
+
+
+def test_the_scans_undeclared_carrier_is_unbound_and_still_refuses_every_bar() -> None:
+    """⚠ The hot path pays NOTHING, and that is safe rather than an omission: a
+    carrier that certifies no bar cannot certify a foreign one. Asserted as the
+    pair — unbound AND uniformly refusing — because either half alone is vacuous.
+    """
+    series = _above_edge()
+    carrier = from_undeclared_source(series=series)
+    assert carrier.bar_bindings == ()
+    signals = s12_signals(series, universe=UNIVERSE, masked_reason=REASON, price_basis=carrier)
+    assert signals, "an empty verdict list would make the set assertion below vacuous"
+    assert {s.verdict for s in signals} == {"not_evaluable"}
+
+
+def test_only_the_declared_consumers_verdicts_depend_on_the_carrier() -> None:
+    """⚠⚠ THE PIN UNDER ``PRICE_BASIS_CONSUMERS``, asserted BEHAVIOURALLY.
+
+    ``backtest_run._signals_for`` builds a CERTIFYING carrier only for the
+    strategies in that set, because binding every bar costs ~0.8 µs to encode plus
+    ~0.8 µs to re-check (measured) and eleven of the twelve adapters discard the
+    carrier. That routing is only sound while the set is exactly the strategies
+    whose verdicts move with it.
+
+    So every per-series adapter is CALLED TWICE — once with a fully certified
+    carrier, once with one that certifies nothing — and:
+
+    * a strategy IN the set must DISAGREE (or the set has a passenger, and the
+      assertion below would be vacuous);
+    * a strategy OUTSIDE it must AGREE (or it is an undeclared consumer that the
+      backtest is now silently handing an all-refusing carrier).
+
+    ⚠ Not a source substring. The cross-sectional sibling above records why: a
+    textual gate is defeated by a multiline call or a reordered kwarg, and one
+    that passes on a technicality is worse than none because it reads as coverage.
+    """
+    series = _above_edge()
+    regime = unconstrained_regime(len(series))
+    certified = _certified(series)
+    undeclared = from_undeclared_source(series=series)
+
+    disagreed: set[str] = set()
+    checked = 0
+    for strategy_id, entry in sorted(STRATEGY_MANIFEST.items()):
+        if entry.signals is None:
+            continue
+        checked += 1
+        both = [
+            entry.signals(series, universe=UNIVERSE, masked_reason=REASON, regime=regime, price_basis=carrier)
+            for carrier in (certified, undeclared)
+        ]
+        if [(s.signal_index, s.verdict, s.reason) for s in both[0]] != [
+            (s.signal_index, s.verdict, s.reason) for s in both[1]
+        ]:
+            disagreed.add(strategy_id)
+
+    assert checked >= 10, f"only {checked} per-series adapters were exercised; the comparison must not be near-empty"
+    assert disagreed == set(PRICE_BASIS_CONSUMERS), (
+        f"{sorted(disagreed)} have verdicts that move with the carrier but PRICE_BASIS_CONSUMERS is "
+        f"{sorted(PRICE_BASIS_CONSUMERS)}; backtest_run routes the certifying carrier by that set, so a "
+        "strategy missing from it is handed an all-refusing carrier and refuses every bar"
+    )

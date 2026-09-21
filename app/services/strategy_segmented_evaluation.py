@@ -49,6 +49,13 @@ def segmented_signals(
         raise ValueError(f"regime has {len(regime)} bars against {len(series)} price bars; they must align")
     if len(price_basis) != len(series):
         raise ValueError(f"price_basis has {len(price_basis)} bars against {len(series)} price bars; they must align")
+    # ⚠⚠ THE BINDING IS CHECKED HERE AND NOT IN ``PriceBasisSeries.segment``
+    # (#2840 §8b). This is where a carrier is re-indexed against a series, and it
+    # is the last point that still HOLDS the series — ``segment`` gets two integers
+    # and has nothing to check against. An equal-length foreign carrier passes the
+    # length check above and every check inside ``segment``.
+    if (mismatch := price_basis.binding_mismatch(series)) is not None:
+        raise ValueError(f"{entry.strategy_id}: {mismatch}")
     signals: list[StrategySignal] = []
     for start, end in series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
         segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
@@ -118,6 +125,12 @@ def segmented_member(
         raise ValueError(f"regime has {len(regime)} bars against {len(series)} price bars; they must align")
     if len(price_basis) != len(series):
         raise ValueError(f"price_basis has {len(price_basis)} bars against {len(series)} price bars; they must align")
+    # ⚠ Same guard as ``segmented_signals``, and it is here for the same reason —
+    # see that function. S-2 and S-10 are the callers; both discard the carrier
+    # today, so this is the boundary guard for the NEXT consumer rather than for a
+    # current one (#2840 §8b).
+    if (mismatch := price_basis.binding_mismatch(series)) is not None:
+        raise ValueError(f"{entry.strategy_id}: {mismatch}")
     verdicts: list[StrategySignal | None] = []
     scores: dict[date, float] = {}
     admissible: set[date] | None = None

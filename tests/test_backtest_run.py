@@ -2229,7 +2229,7 @@ class TestSeriesBreakBoundary:
             masked_reason="quarantined_bar",
             unresolved_breaks=(),
             regime=unconstrained_regime(len(series)),
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            price_basis=from_archive_basis("unadjusted", series=series),
         )
         segmented = segmented_member(
             entry,
@@ -2239,7 +2239,7 @@ class TestSeriesBreakBoundary:
             masked_reason="quarantined_bar",
             unresolved_breaks=(dates[300],),
             regime=unconstrained_regime(len(series)),
-            price_basis=from_archive_basis("unadjusted", n_bars=len(series)),
+            price_basis=from_archive_basis("unadjusted", series=series),
         )
         assert whole.verdicts[400] is None
         before_break = segmented.verdicts[299]
