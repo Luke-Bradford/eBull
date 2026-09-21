@@ -185,9 +185,17 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     # The owned-positions table prints £ for this sleeve, so that was false on the
     # page rendering it. Pinned negatively so it cannot come back.
     assert "sterling figure" not in response.household_currency_caveat
-    # What replaced it is a claim about provenance, which IS checkable here:
-    # `currency=broker_position.currency`, and no amount is converted.
-    assert "carried through unchanged" in response.household_currency_caveat
+    # ⚠ The second shipped version claimed the £ was "the broker's own label carried
+    # through unchanged, not a conversion this engine performed". Also false (#3274):
+    # eToro sends no currency on a position at all, and `app/api/portfolio.py` converts
+    # every money field USD->`display_currency` before this route reads it. Pinned
+    # negatively for the same reason as "sterling figure" above.
+    assert "carried through unchanged" not in response.household_currency_caveat
+    assert "broker's own label" not in response.household_currency_caveat
+    # What replaced it names the conversion as ours and refuses to imply the rate is
+    # one anything traded at -- it is a display rate, as stale as the last FX refresh.
+    assert "this engine's own conversion" in response.household_currency_caveat
+    assert "nothing was transacted at" in response.household_currency_caveat
     # Names the excluded cost specifically. "does not include" alone would still
     # pass if the sentence stopped identifying WHICH cost is outside the ceiling.
     assert "Converting when you fund or withdraw" in response.household_currency_caveat

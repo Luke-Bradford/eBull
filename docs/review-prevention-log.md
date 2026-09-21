@@ -9946,5 +9946,32 @@ original, because the gate now *looked* like a bound.
   `getByText` assertion, not a grep — which is exactly what the loop's own FE-QA step
   exists for, and it worked here only because the pass ran after the merge rather than not
   at all.
+- ⚠⚠ **FOURTH occurrence, 2026-09-21 (#3274) — and it is the sharpest one, because the fix
+  for occurrence 3 embedded the too-narrow grep as its own verification recipe.** The
+  surviving sentence became *"a £ sign in the positions table is the broker's own label
+  carried through unchanged, not a conversion this engine performed"*, justified by the
+  assignment site `app/api/strategies.py:3362`, `currency=broker_position.currency`. Both
+  halves are false. `_position_from_payload` reads **no** currency key off eToro's position
+  payload; the value is `display_currency` from `get_runtime_config`, and
+  `app/api/portfolio.py`'s `if native_ccy != display_currency:` block converts all seven
+  money fields before this route ever sees them. Measured: stored `open_rate 759.86` USD ×
+  stored `0.74939` = the `569.43` the route returns.
+  - **The doc written to prevent recurrence shipped the command that hid it** —
+    `rg … app/api/strategies.py app/services/account_equity_evidence.py`, which names only
+    the two files the claim was written from, under a heading asserting one converting call
+    on the whole route. A search scoped to the sources that agree with a claim cannot
+    falsify it; it launders the claim into evidence.
+  - **The new tell, one level past the grammatical one above:** the evidence's subject was a
+    single ASSIGNMENT EXPRESSION (`x=y.z`), and the claim's subject was the VALUE. `y.z` is
+    a passthrough of `y`, never of `y`'s ultimate source. Reading `x=y.z` as "unchanged"
+    requires following `y` to where it was built — here two files away, in another router's
+    service function that `/strategies` imports at line 19.
+  - Prevention, in addition to "render it and read it": for a claim about a value, **name
+    the PRODUCER, not the assignment**. Mechanical form — `rg -n '^from app\.' <route file>`
+    first, then search the converting vocabulary across every file that returns, before
+    writing any "carried through" / "unconverted" / "only converting call" sentence.
 - Enforced in: this entry; `app/api/strategies.py::CoreSleeveResponse.household_currency_caveat`
-  (comment + the negative test pins in `tests/test_2603_core_mandate_api.py`); issue #3274.
+  (comment + the negative test pins in `tests/test_2603_core_mandate_api.py`); the inline
+  comment at the `currency=broker_position.currency` site itself; the rewritten "conversion
+  boundary" section of `docs/proposals/ta/2026-09-21-core-sleeve-currency-caveat.md`;
+  issue #3274.
