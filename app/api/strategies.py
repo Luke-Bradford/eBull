@@ -1100,48 +1100,17 @@ class CoreSleeveResponse(BaseModel):
         "Compare an ISA elsewhere using personal tax, FX and dealing costs, and expected turnover; "
         "#2915's £50,000 sensitivity was mixed, not a universal ISA advantage."
     )
-    #: #2833's caveat (b), not carried verbatim. "On a GBP account" is dropped
-    #: because the evidence cannot support it: the NULL-``account_currency_id``
-    #: rows of ``broker_account_equity_snapshots`` are the assumed ``'USD'``
-    #: literal ``sql/341`` exists to stop us reading as evidence. ⚠ That makes the
-    #: clause UNSUPPORTABLE, not false, so both of its claims are kept. Why the
-    #: opening is conditional, and the rest of the rationale, on PR #3272.
+    #: #2833's caveat (b), not carried verbatim. What each clause rests on, the
+    #: two claims already retracted from it, and the conversion boundary on this
+    #: route: ``docs/proposals/ta/2026-09-21-core-sleeve-currency-caveat.md``.
     #:
-    #: ⚠⚠ The sentence about the £ sign is here because the FIRST version of this
-    #: caveat claimed the engine "reports no sterling figure", which is FALSE on
-    #: the page that renders it: the owned-positions table prints £ for this very
-    #: sleeve. The claim was checked by grepping ``StrategyPortfolioLens.tsx``
-    #: alone and reading an empty result as a property of the whole page -- the
-    #: label is formatted one component down, in ``StrategyPositions.tsx`` from
-    #: ``position.currency``. What IS checkable is the provenance: this module
-    #: sets ``currency=broker_position.currency`` straight from the broker
-    #: payload and converts no amount, so the label is the broker's and not ours.
-    #: ⚠ Whether that label is CORRECT is a separate defect (#3274); this sentence
-    #: deliberately claims only what we do, not what is true of the number.
-    #:
-    #: ⚠⚠ The clause is scoped to the POSITIONS TABLE, and the narrowing is the
-    #: point. A first correction said "no amount on this page has been converted
-    #: by us", which is false as well -- ``local_eod_value_in_account_currency``
-    #: is a conversion we perform and the account-evidence panel renders it on
-    #: this same route. Three claims in a row were scoped wider than the site that
-    #: was checked; see ``docs/review-prevention-log.md``.
-    #:
-    #: So that a later widening has a boundary to check rather than re-derive:
-    #: ``account_equity_evidence._convert_local_total`` is the ONLY converting
-    #: call reachable from this route, and it feeds exactly four rendered fields
-    #: -- ``local_eod_value_in_account_currency``,
-    #: ``local_eod_value_at_official_marks`` (that value plus the mark
-    #: correction), and the ``difference`` / ``tolerance`` derived from them. Every
-    #: other money field here is carried through in the currency its source
-    #: reported. ⚠ Confirm by re-running ``rg -n 'in_account_currency|_convert_'``
-    #: over ``app/api/strategies.py`` and ``app/services/account_equity_evidence.py``
-    #: before widening the sentence -- do NOT widen it on the strength of this
-    #: comment, which is the mistake the paragraph above records.
-    #:
-    #: The cost clause is the declaration's ``all_in_cost_rule``
-    #: (``docs/proposals/ta/2026-08-24-core-selection-declaration.json``): p75
-    #: round-trip spread plus a documented 0 bps entry-sizing markup, so funding
-    #: and withdrawal conversion sits outside it.
+    #: ⚠ Do not widen this sentence from that page or from this comment. Both
+    #: retractions were scope claims taken on someone's word, which is the
+    #: failure ``docs/review-prevention-log.md`` records under "A negative claim
+    #: is only as wide as the thing you grepped". Re-run the checks named there.
+    #: ⚠ Whether the broker's currency label is CORRECT is a separate defect
+    #: (#3274) -- this sentence claims only what we do, never what is true of the
+    #: number.
     household_currency_caveat: str = (
         "Sterling is not the unit here. Where the core sleeve holds a USD-quoted "
         "instrument, a household measuring it in GBP carries GBP/USD exposure on the "
