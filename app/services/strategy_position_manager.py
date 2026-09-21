@@ -40,6 +40,7 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
 )
 from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
+from app.services.strategy_position_repair_streak import record_repair_visit
 
 _RATE_QUANTUM = Decimal("0.000001")
 _ADVISORY_HASH_SEED = 0
@@ -955,6 +956,81 @@ def _submit_close(
     )
 
 
+def _repair_fixed_exit(
+    conn: psycopg.Connection[Any],
+    *,
+    broker: BrokerProvider,
+    owned: _OwnedPosition,
+    observed_at: datetime,
+    current_stop: Decimal | None,
+    desired_stop: Decimal,
+    desired_take: Decimal | None,
+    max_quote_age_seconds: int,
+) -> PositionManagerResult:
+    """Close one observed gap between a position's exit levels and the desired pair.
+
+    Extracted from ``manage_owned_position`` unchanged (#3284 item 4a) so that every
+    outcome -- including every refusal added later -- passes through a single
+    ``record_repair_visit`` call at the caller.  The gap detection stays with the caller
+    because it is the part that differs between the core and signal arms.
+    """
+    eligibility = _eligibility_for_owned(broker, owned)
+    arms = [
+        arm
+        for arm in eligibility.leverage_configs
+        if arm.settlement_type.lower() == "real" and arm.direction.upper() == "LONG"
+    ]
+    if len(arms) != 1 or arms[0].allow_edit_stop_loss is not True or arms[0].allow_edit_take_profit is not True:
+        return PositionManagerResult(
+            owned.strategy_trade_id, owned.broker_position_id, "rejected", "broker_fixed_exit_edit_not_allowed"
+        )
+    # ⚠ ``max_quote_age_seconds`` is the arm-selected bound, NOT
+    # ``owned.max_quote_age_seconds`` -- that column is NULL on the core arm,
+    # which has no execution policy to carry it.  Reading the column here
+    # would raise `TypeError` inside `timedelta` on the first core repair.
+    if (
+        owned.quote_bid is None
+        or owned.quoted_at is None
+        or owned.quoted_at < observed_at - timedelta(seconds=max_quote_age_seconds)
+        or owned.quoted_at > observed_at + timedelta(seconds=5)
+        or desired_stop >= owned.quote_bid
+    ):
+        return PositionManagerResult(
+            owned.strategy_trade_id, owned.broker_position_id, "rejected", "fixed_exit_quote_unsafe"
+        )
+    prior = _prior_same_edit(
+        conn,
+        owned=owned,
+        operation_type="fixed_exit_repair",
+        desired_stop=desired_stop,
+        desired_take=desired_take,
+        bar=None,
+    )
+    conn.commit()
+    if prior is not None:
+        return prior
+    with conn.transaction():
+        operation_id, request_id = _persist_edit_intent(
+            conn,
+            owned=owned,
+            operation_type="fixed_exit_repair",
+            trigger_code="entry_exit_gap",
+            prior_stop=current_stop,
+            desired_stop=desired_stop,
+            desired_take=desired_take,
+            bar=None,
+        )
+    return _submit_edit(
+        conn,
+        broker=broker,
+        owned=owned,
+        operation_id=operation_id,
+        request_id=request_id,
+        desired_stop=desired_stop,
+        desired_take=desired_take,
+    )
+
+
 def manage_owned_position(
     conn: psycopg.Connection[Any],
     *,
@@ -1090,62 +1166,44 @@ def manage_owned_position(
             max_quote_age_seconds = owned.max_quote_age_seconds
             stop_gap = position.is_no_stop_loss or current_stop is None or current_stop < owned.entry_stop
             take_gap = position.is_no_take_profit or position.take_profit_rate != desired_take
+        # ⚠⚠ THE TWO `record_repair_visit` CALLS ARE THE WHOLE OF #3284 ITEM 4a, and the
+        # arm above is extracted into `_repair_fixed_exit` PRECISELY so there is exactly
+        # ONE of them on the repair side.  Before this, both refusals returned straight
+        # out of this function without writing anything and the caller
+        # (`run_strategy_paper_cycle`) discarded the result -- so a position refusing
+        # repair on every visit was indistinguishable from one that needed none.  Adding
+        # a third refusal inside the extracted arm is now counted automatically; four
+        # separate call sites would not have that property.
         if stop_gap or take_gap:
-            eligibility = _eligibility_for_owned(broker, owned)
-            arms = [
-                arm
-                for arm in eligibility.leverage_configs
-                if arm.settlement_type.lower() == "real" and arm.direction.upper() == "LONG"
-            ]
-            if len(arms) != 1 or arms[0].allow_edit_stop_loss is not True or arms[0].allow_edit_take_profit is not True:
-                return PositionManagerResult(
-                    strategy_trade_id, broker_position_id, "rejected", "broker_fixed_exit_edit_not_allowed"
-                )
-            # ⚠ ``max_quote_age_seconds`` is the arm-selected bound, NOT
-            # ``owned.max_quote_age_seconds`` -- that column is NULL on the core arm,
-            # which has no execution policy to carry it.  Reading the column here
-            # would raise `TypeError` inside `timedelta` on the first core repair.
-            if (
-                owned.quote_bid is None
-                or owned.quoted_at is None
-                or owned.quoted_at < observed_at - timedelta(seconds=max_quote_age_seconds)
-                or owned.quoted_at > observed_at + timedelta(seconds=5)
-                or desired_stop >= owned.quote_bid
-            ):
-                return PositionManagerResult(
-                    strategy_trade_id, broker_position_id, "rejected", "fixed_exit_quote_unsafe"
-                )
-            prior = _prior_same_edit(
-                conn,
-                owned=owned,
-                operation_type="fixed_exit_repair",
-                desired_stop=desired_stop,
-                desired_take=desired_take,
-                bar=None,
-            )
-            conn.commit()
-            if prior is not None:
-                return prior
-            with conn.transaction():
-                operation_id, request_id = _persist_edit_intent(
-                    conn,
-                    owned=owned,
-                    operation_type="fixed_exit_repair",
-                    trigger_code="entry_exit_gap",
-                    prior_stop=current_stop,
-                    desired_stop=desired_stop,
-                    desired_take=desired_take,
-                    bar=None,
-                )
-            return _submit_edit(
+            result = _repair_fixed_exit(
                 conn,
                 broker=broker,
                 owned=owned,
-                operation_id=operation_id,
-                request_id=request_id,
+                observed_at=observed_at,
+                current_stop=current_stop,
                 desired_stop=desired_stop,
                 desired_take=desired_take,
+                max_quote_age_seconds=max_quote_age_seconds,
             )
+            record_repair_visit(
+                conn,
+                ownership_id=owned.ownership_id,
+                state=result.state,
+                reason_code=result.reason_code,
+                observed_at=observed_at,
+            )
+            return result
+
+        # The position is observed carrying both levels: the episode, if there was one,
+        # is over.  Recorded rather than skipped, because a streak that is never reset is
+        # a stale alarm waiting for the next unrelated gap.
+        record_repair_visit(
+            conn,
+            ownership_id=owned.ownership_id,
+            state="no_change",
+            reason_code="position_protected",
+            observed_at=observed_at,
+        )
 
         if ratchet_bar is None or owned.ratchet_variant_id is None:
             return PositionManagerResult(strategy_trade_id, broker_position_id, "no_change", "position_protected")
