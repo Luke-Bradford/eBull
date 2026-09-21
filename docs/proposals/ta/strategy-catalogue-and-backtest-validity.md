@@ -996,6 +996,21 @@ Issue #2260 exists because a plausible number met none of these and was believed
     signals/fills/levels while `adj_close` governs strategy wealth and the
     buy-and-hold hurdle (#2429). `price_series_break` segments (402 rows) are
     `not_evaluable`, never spanned.
+    ⚠⚠ **CORRECTED 2026-09-21 (#2834): the `price_series_break` clause is about
+    `price_daily` ONLY and does not reach the research corpus.** `sql/246:103`
+    keys that table on `instrument_id REFERENCES instruments`, while the research
+    corpus is keyed on `series_id` precisely because part of it has no
+    `instruments` row — **12,116 of the 17,285 admitted `survivorship_free`
+    series (70.10%) have none**. The research rule set *does* evaluate T3 ("this
+    level break is not a return") into `research_transition_quarantine`
+    (`sql/251:111`), but its only readers are the ingest writer and the census
+    view: `backtest_run.py:4170-4175` names the evaluation phase's three reads
+    and that table is not among them. So on `survivorship_free` there is no
+    level-break containment behind the price basis, and an uncorrected split
+    reaches the score directly. Same cross-corpus shape as the adjustment
+    correction below — a guard stated corpus-wide, implemented on one corpus.
+    **Correction-policy verdict:**
+    `docs/proposals/ta/2026-09-21-armb-correction-policy-verdict.md`.
     ⚠⚠ **CORRECTED 2026-09-21 (#2834): "the research corpus supplies
     split-adjusted OHLC" is true of ONE of its two vendors.** It holds for
     `paperswithbacktest/Stocks-Daily-Price` (sql/251, and not uniformly even

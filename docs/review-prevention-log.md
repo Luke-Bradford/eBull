@@ -10137,3 +10137,50 @@ original, because the gate now *looked* like a bound.
   control row in the dispute cross-tab, `TOLERANCES` pinned to the predecessor's
   `_EVENT_TOLERANCE`, `SecFact.is_instant`, and the removal of the era filter);
   `docs/proposals/ta/2026-09-21-armb-sec-adjudicator-verdict.md` §3.1 and §5.3.
+
+## A guard cited corpus-wide may be keyed to ONE corpus — check the KEY before relying on it (#2834, 2026-09-21)
+
+- Symptom: a spec rule stated a containment as a property of the system —
+  `strategy-catalogue-and-backtest-validity.md` §4 rule 10, *"`price_series_break` segments
+  (402 rows) are `not_evaluable`, never spanned"*. An uncorrected split IS a level break, so
+  the rule appears to say the damage this ticket is about is already contained, and the
+  correction policy is cosmetic.
+- What was missing: the guard's KEY. `sql/246:103` declares
+  `instrument_id BIGINT NOT NULL REFERENCES instruments(instrument_id)`. The research corpus
+  is keyed on `series_id` *because* part of it has no `instruments` row at all — measured on
+  the admitted `survivorship_free` universe, **12,116 of 17,285 series (70.10%)** have none.
+  The guard cannot address 70% of the population it was quoted over, and no amount of reading
+  the rule's prose says so.
+- Second half, and the more dangerous one: the research rule set DOES produce the verdict.
+  T3 is evaluated over this corpus and stored in `research_transition_quarantine`
+  (`sql/251:111`) — **1,766 rows on this universe, 810 of them landing exactly on a stamped
+  split bar**. Its only readers anywhere are the ingest writer and a census view;
+  `backtest_run.py:4170-4175` names the evaluation phase's three reads and that table is not
+  among them. **A verdict that is computed, stored and displayed in a census can still be
+  unwired from the path that would act on it**, and the census makes it look wired.
+- **The generalisation: "the system already guards against X" is a claim about a JOIN, not
+  about a rule.** Before relying on an existing guard for a new population, check (a) what
+  column it is keyed on and whether your population has that key, and (b) whether any reader
+  on your path actually consumes it. Both are one grep; neither is visible in the prose that
+  cites the guard.
+- Test to apply: when a spec says a damage class is already contained, grep the containing
+  table's `CREATE TABLE` for its key column, and grep for a `FROM <table>` outside the writer.
+  If either check fails for your population, the containment does not exist for you.
+- ⚠ Same shape as this ticket's earlier lesson *"a source rule verified on one vendor is not a
+  source rule for another"* (#3278), one level up: there the sentence generalised across
+  VENDORS, here across CORPORA. Rule 10 has now been corrected twice for the same reason, so
+  the pattern is the file's, not the reader's — a rule written while one corpus existed keeps
+  its universal phrasing after the second arrives.
+- ⚠ A near-miss in the same pass worth its own line: an ad-hoc probe called
+  `params_for("equity")` to read T3's trigger magnitude and got **2**, because `'equity'` is
+  not a key in `_CLASS_PARAMS` and falls to the strict default. The real class is `us_equity`
+  (`research_corpus_ingest.py::ASSET_CLASS`) and its threshold is **5** — which changes the
+  reachable event population from "almost all" to **2,261 of 8,073**. A `dict.get` with a
+  default returns a plausible number for a key that does not exist. **Derive the constant
+  through the SAME call the production path makes**, never by passing a label you believe is
+  equivalent.
+- Enforced in: this entry; `scripts/measure_2834_armb_correction_policy.py`
+  (`containment_reachability`, and `_T3_TRIGGER_MAGNITUDE` derived via
+  `params_for(ASSET_CLASS)` rather than restated);
+  `docs/proposals/ta/2026-09-21-armb-correction-policy-verdict.md` §4;
+  `docs/proposals/ta/strategy-catalogue-and-backtest-validity.md` §4 rule 10.
