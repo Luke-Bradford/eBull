@@ -92,8 +92,33 @@ def _counting_init(self: BarSeries, *args: Any, **kwargs: Any) -> None:
     _CONSTRUCTIONS["bars"] += len(self.rows)
 
 
-def _digest(parts: list[str]) -> str:
-    return hashlib.sha256("\x1e".join(parts).encode()).hexdigest()[:16]
+class _RunningDigest:
+    """sha256 fed incrementally, because accumulating the parts does not fit.
+
+    ⚠ The first version built a `list[str]` per cell and joined at the end. On
+    the real population that reached **2.5 GB RSS within 2.5 minutes** and
+    extrapolated to ~48 GB — 5,797 instruments x 96 cells x one string per
+    emitted signal, plus one per corpus bar. Killed and rewritten rather than
+    left to swap; an A/B that OOMs halfway produces no evidence at all.
+
+    Order and multiplicity are still exact: parts are fed in emission order
+    with a separator, which is what a set-based comparison would have lost.
+    """
+
+    __slots__ = ("_hash", "count")
+
+    def __init__(self) -> None:
+        self._hash = hashlib.sha256()
+        self.count = 0
+
+    def update(self, parts: list[str]) -> None:
+        for part in parts:
+            self._hash.update(part.encode())
+            self._hash.update(b"\x1e")
+            self.count += 1
+
+    def hexdigest(self) -> str:
+        return self._hash.hexdigest()[:16]
 
 
 def _corpus_parts(series: BarSeries) -> list[str]:
@@ -152,9 +177,9 @@ def _member_parts(member: Any) -> list[str]:
 
 
 def _measure(limit: int) -> dict[str, Any]:
-    cells: dict[str, list[str]] = {}
+    cells: dict[str, _RunningDigest] = {}
     evaluated = Counter[str]()
-    corpus: list[str] = []
+    corpus = _RunningDigest()
 
     BarSeries.__init__ = _counting_init  # type: ignore[method-assign]
     try:
@@ -176,7 +201,7 @@ def _measure(limit: int) -> dict[str, Any]:
                 series = load_masked_bars(conn, instrument_id).series
                 if len(series) < 2:
                     continue
-                corpus.extend(_corpus_parts(series))
+                corpus.update(_corpus_parts(series))
                 regime = unconstrained_regime(len(series))
                 instrument_breaks = tuple(breaks.get(instrument_id, ()))
 
@@ -199,7 +224,7 @@ def _measure(limit: int) -> dict[str, Any]:
                                 seg = segmented_signals(entry, series, unresolved_breaks=instrument_breaks, **common)  # type: ignore[arg-type]
                                 for shape, produced in (("flat", flat), ("segmented", seg)):
                                     key = f"{sid}|{uni}|{route}|{shape}"
-                                    cells.setdefault(key, []).extend(_signal_parts(produced))
+                                    cells.setdefault(key, _RunningDigest()).update(_signal_parts(produced))
                                     evaluated[key] += 1
                             elif entry.member is not None:
                                 panel = frozenset(series.dates)
@@ -214,7 +239,7 @@ def _measure(limit: int) -> dict[str, Any]:
                                 for shape, member in (("flat", flat_m), ("segmented", seg_m)):
                                     key = f"{sid}|{uni}|{route}|{shape}"
                                     if member is not None:
-                                        cells.setdefault(key, []).extend(_member_parts(member))
+                                        cells.setdefault(key, _RunningDigest()).update(_member_parts(member))
                                     evaluated[key] += 1
                 if seen % 250 == 0:
                     logger.info("… %d/%d instruments", seen, len(eligible))
@@ -227,13 +252,14 @@ def _measure(limit: int) -> dict[str, Any]:
     }
     return {
         "eligible": len(eligible),
-        "corpus": _digest(corpus),
-        "corpus_bars": len(corpus),
+        "corpus": corpus.hexdigest(),
+        "corpus_bars": corpus.count,
         "indicator_series_rule_set": INPUT_RULE_SETS["indicator_series"],
         "price_basis_rule": _price_basis_rule(),
         "strategy_versions": versions,
         "attachment": _attachment_census(versions),
-        "cells": {key: _digest(parts) for key, parts in sorted(cells.items())},
+        "cells": {key: running.hexdigest() for key, running in sorted(cells.items())},
+        "cell_parts": {key: running.count for key, running in sorted(cells.items())},
         "evaluated": dict(sorted(evaluated.items())),
         "constructions": dict(_CONSTRUCTIONS),
     }

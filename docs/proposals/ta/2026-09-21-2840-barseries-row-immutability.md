@@ -5,11 +5,18 @@ Refs #2840. Refs #2437. Head named by `b9b2a1e5`'s close-out.
 Predecessor: `docs/proposals/ta/2026-09-21-2840-carrier-series-binding.md` (§ "Stated
 non-guarantees", item 1).
 
-**Revision 2.** Revision 1 was refused whole at Codex checkpoint 1 (28 findings — the
-seventeenth refusal on this ticket). It was refused on its **frame**, not its details:
-it claimed to make cache desynchronisation *impossible*, and six independent bypasses
-survive the design. Every one was reproduced in this interpreter before this revision
-was written; they are in §3, with their output. The disposition table is §9.
+**Revision 3.** Two checkpoint-1 refusals, 28 findings then 29 — the seventeenth and
+eighteenth on this ticket.
+
+* **Revision 1** was refused on its **frame**: it claimed to make cache desynchronisation
+  *impossible*, and six bypasses survive the design.
+* **Revision 2** fixed the frame and then **introduced two defects of its own** — a
+  `__setstate__` that destroyed a live instance on a bad payload, and a new public type
+  that copied an existing false non-null contract. It also asserted three dispositions
+  (`FIXED`, `MOOT`, `EMPTY DOMAIN`) that did not survive being checked.
+
+Everything below was reproduced in this interpreter or measured against the repo before
+being written. Disposition tables: §9 (28 findings) and §10 (29 findings).
 
 ---
 
@@ -95,12 +102,23 @@ Python 3.14.4:
 | 5 | a `dict` subclass whose `copy()` returns `self` defeats `MappingProxyType(r.copy())` | `proxy sees 42  LEAKS=True` |
 | 6 | subclassing `BarSeries` and overriding `__post_init__` without `super()` | leaves rows mutable |
 
-Bypasses 1-4 survive this design and are **named, not closed**. Each requires writing
-code whose only purpose is the bypass, which is exactly the line between an accident and
-a determined act. Bypass 5 **is** closed (§4). Bypass 6 **is** closed (§4).
+| 7 | the copy is SHALLOW — a `Decimal` subclass with a stateful `__float__` stays shared | live `99` vs cached `1.5` |
+| 8 | a preceding mixin whose `__init_subclass__` omits `super()` swallows the subclass refusal | `Child(Swallow, BarSeries)` builds with mutable rows |
 
-⚠ Consequently no test in §7 asserts "this is impossible", and no docstring will say
-so. The claim is "the ordinary alias-write is refused by two independent gates".
+Bypasses 1-4, 7 and 8 survive and are **named, not closed**. Bypass 5 **is** closed
+(§4.1). Bypass 6 is closed only for ordinary subclassing; 8 is its residue.
+
+⚠ **Revision 2 said each surviving bypass "needs code whose only purpose is the
+bypass". That is false, and ckpt-1 was right to refuse it.** `arr.shape = (n, 1)` is
+ordinary numpy — a helper that normalises shape in place would corrupt the shared
+cache's dimensions with no ill intent at all. The claim is not worth repairing: a
+control should be described by **the operations it refuses**, never by a guess at the
+caller's intent. §7 asserts operations, and the docstring lists them.
+
+⚠ **"Two independent gates" is also too broad.** pyright accepts
+`series.array_closes[0] = 999` with no diagnostic — numpy has no static write
+protection. The rows and the float tuples get two gates (pyright + runtime); **the
+arrays get one** (the runtime `WRITEABLE` flag). Stated per surface, not in aggregate.
 
 ## 4. The construction
 
@@ -166,13 +184,28 @@ fresh object no other reader holds.
 and mutate ordering or length after `__post_init__` has validated it. One line closes it:
 `object.__setattr__(self, "dates", tuple(self.dates))`, before the ordering walk.
 
-### 4.4 Subclassing is refused (ckpt-1 findings 6, 9, 14)
+### 4.4 Subclassing is refused — and the refusal is itself suppressible
 
-`__init_subclass__` raises. Nothing subclasses `BarSeries` in this repo. Refusing it
-closes bypass 6, closes the "subclass may set a non-field attribute" variant, and makes
-§4.5's two-field state provably complete rather than a hazard.
+`__init_subclass__` raises. Nothing subclasses `BarSeries` in this repo, so refusing
+ordinary subclassing costs nothing and closes §3 bypass 6.
 
-### 4.5 Serialization — preserved where it can be, and the loss named
+⚠⚠ **It is NOT a guarantee, and revision 2 leaned on it as one.** `__init_subclass__`
+only fires if every preceding class in the MRO cooperates. A mixin whose own hook omits
+`super()` swallows it — reproduced:
+
+```
+class Swallow:              def __init_subclass__(cls, **kw): pass
+class Child(Swallow, BarSeries):  def __post_init__(self): pass
+-> MRO subclass bypass <class 'dict'> [Decimal('123')] (999.0,)
+```
+
+Revision 2 used this guard to justify a hardcoded two-field `__getstate__`, and ckpt-1
+showed the consequence by construction: such a subclass with `extra=42` restored
+`extra=7` through copy, deepcopy **and** pickle. So the guard is kept as an accident
+control and **nothing else depends on it** — §4.5 enumerates `dataclasses.fields`
+instead. A test pins the gap so it cannot later be read as absolute.
+
+### 4.5 Serialization — preserved where it can be, and every loss named
 
 Measured, on a `BarSeries` whose rows are proxies:
 
@@ -193,160 +226,241 @@ why none of them may ship silently.
 `__getstate__` / `__setstate__` restore pickle **and** `deepcopy` (both route through
 these hooks):
 
-- `__getstate__` returns `dates` plus `tuple(dict(row) for row in rows)`, and
-  deliberately drops the warm caches. Today's default ships `self.__dict__`, which
-  includes whatever `cached_property` values were warm — derived data on the wire that
-  the receiver can recompute. Two fields are exhaustive because §4.4 forbids subclasses.
-- `__setstate__` does `self.__dict__.clear()` then `self.__init__(**state)`. Verified
-  this works on a frozen dataclass and clears the caches
-  (`__dict__.clear()+__init__ on frozen: OK, caches cleared=True`). Routing through
-  `__init__` rather than hand-installing fields is what makes ckpt-1 findings 10 and 11
-  answered rather than argued: the restored instance re-runs **the full length and
-  ordering validation and the freeze**, and a `__setstate__` called on an already-warm
-  instance cannot leave a stale cache behind.
+- `__getstate__` enumerates `dataclasses.fields(self)` and replaces `rows` with plain
+  dicts, dropping the warm caches. Today's default ships `self.__dict__`, which includes
+  whatever `cached_property` values were warm — derived data on the wire the receiver can
+  recompute. ⚠ Enumerating rather than hardcoding two names is the §4.4 fix: the
+  hardcoded version silently reverted a subclass field to its default.
+- `__setstate__` **builds the replacement first, and only then commits**:
+  `replacement = type(self)(**state)` → `self.__dict__.clear()` → copy the validated
+  fields across. Clearing drops any already-warm cache, which is the original desync
+  reached by another door.
 
-`asdict` / `astuple` are **not** restored. They walk fields directly and would need a
-`__deepcopy__`-shaped hack to fix. Named as a stated loss with the measurement that
-nothing uses them.
+⚠⚠ **Revision 2 had this backwards and it was a new defect, not an inherited one.** It
+cleared `__dict__` and *then* called `__init__`, so a malformed payload raised correctly
+and left an existing, previously valid instance **empty or length-inconsistent**.
+`__setstate__` is reachable on a live object, so a failed restore that destroys its
+target is worse than the incompatibility the hook exists to fix. Pinned by a
+parametrised test over three malformed payloads, each asserting the instance is intact
+afterwards.
 
-⚠ There are no persisted pickles to be compatible with: nothing in the repo writes one
-(grepped — the only `pickle` references are `multiprocessing`'s own, inside
-`synthetic_control_run`'s comments). So the old-payload compatibility question ckpt-1
-raised has an empty domain, stated as the grep rather than assumed.
+**Losses that remain, each measured and pinned by a test:**
+
+| loss | detail |
+| --- | --- |
+| `asdict` / `astuple` | raise on a non-empty series — they walk fields directly and never reach `__getstate__`. ⚠ They **succeed** on `BarSeries((), ())`: no proxy to choke on. Revision 2 claimed an unconditional raise; both halves are now pinned, as `hash` already was. |
+| pickling `series.rows` or a row **directly** | still fails — only the series-owned path is restored. |
+| `(series, series.array_closes)` as one graph | round-trips, but the cache **alias** is lost: the restored series recomputes. Values identical; identity not. |
+| an old **warm** pickle | fails with `unexpected keyword argument 'float_closes'`. An old **cold** pickle loads fine. |
+
+⚠ Revision 2 called old payloads an **EMPTY DOMAIN** on the strength of a grep. The grep
+shows no in-repo writer; it cannot show that no payload exists anywhere. The behaviour
+above is measured and accepted rather than assumed away.
 
 ### 4.6 Typing — a read-only TypedDict, not a cast (ckpt-1 finding 16)
 
 Revision 1 would have left `rows: tuple[OHLCVRow, ...]` advertising mutable rows and
-hidden the mismatch behind a `cast`. Instead the element type becomes a PEP 705
-read-only TypedDict declared in this module:
+hidden the mismatch behind a `cast`. Instead the element type is a PEP 705 read-only
+TypedDict, `ReadOnlyOHLCVRow`, declared in `technical_analysis.py` beside `OHLCVRow`
+(that module cannot import `indicator_series` — it would be a cycle).
 
-```python
-class ReadOnlyOHLCVRow(TypedDict):
-    open: ReadOnly[Decimal]
-    ...
-```
-
-This is strictly better than a runtime-only guard, because it moves the accident from a
-`TypeError` at run time to an **error in the pre-push gate**. Verified with the repo's
-own pyright:
+This moves the accident from a runtime `TypeError` to an error in the **pre-push gate**:
 
 ```
 error: Could not assign item in TypedDict
     "close" is a read-only key in "ReadOnlyOHLCVRow"
 ```
 
-and a `tuple[OHLCVRow, ...]` argument still assigns to a `tuple[ReadOnlyOHLCVRow, ...]`
-parameter with no error, so no construction site changes. `OHLCVRow` itself is **not**
-touched — it is used by writers all over the repo and narrowing it is a different round.
+⚠⚠ **Assignability runs ONE WAY, and revision 2 checked only the easy direction.**
+`OHLCVRow` → `ReadOnlyOHLCVRow` is fine, so **no construction site changes**. The
+reverse is not, so every consumer that takes `series.rows` and passes it to a
+mutable-typed parameter breaks. Revision 2 asserted this was `FIXED`; running pyright
+produced **8 errors**. They are all real and all one shape — readers demanding a write
+capability they never use — and the fix is to widen the reader, which accepts both
+types:
 
-So the accident is refused twice, by two independent mechanisms: pyright at push time,
-`TypeError` at run time.
+| site | change |
+| --- | --- |
+| `technical_analysis.atr` / `stochastic` / `compute_indicators` | `Sequence[OHLCVRow]` → `Sequence[ReadOnlyOHLCVRow]` (all three only read) |
+| `strategy_price_basis.bind_bar` | `row: OHLCVRow` → `ReadOnlyOHLCVRow` |
+| `verify_2240_s2_cross_sectional._window_usable` | `list[float \| None]` → `Sequence[float \| None]` (the float caches are tuples now) |
+
+⚠ Widening `bind_bar` is what adds **`PRICE_BASIS_RULE_VERSION` to the permitted-change
+set** (§5): that module's bytes are inside it. Repo pyright is at **0 errors** with
+these applied.
+
+⚠⚠ **The row schema keeps a contract that is KNOWN TO BE FALSE, deliberately.**
+`ReadOnlyOHLCVRow` mirrors `OHLCVRow` exactly, including `open: Decimal` rather than
+`Decimal | None`. Production does not honour that — `price_masked_bars` masks a
+quarantined field to `None`, which is why `_floats` and `closes` have always had `None`
+branches. Measured over 60 instruments / 60,626 bars from `load_masked_bars`:
+
+```
+volume None 16,661 · high 12 · low 12 · close 11 · open 2      (all five keys always present)
+```
+
+Declaring `Decimal | None` — **tried, not reasoned about** — produces **35 pyright
+errors** at sites that assume non-null. Every one is pre-existing; `OHLCVRow` has always
+made the same false promise. Correcting it is a real and separate round, and smuggling
+it in here would mix two changes and leave the A/B unable to attribute a difference to
+either. ⚠ ckpt-1 was right that copying a false contract into a new public type is a
+defect; the disposition is to **name it in the type's own docstring with the
+measurement**, not to pretend it is accurate.
 
 ## 5. Identity rotation and evidence disposition
 
 `RULE_SET_VERSION` hashes this module's own bytes, and
 `strategy_registry.INPUT_RULE_SETS["indicator_series"]` carries it, so **any** edit here
-rotates `strategy_version` for all 12 strategies — 12× the blast radius of the
+rotates `strategy_version` for all 12 strategies — 12x the blast radius of the
 carrier-module rotation in `b9b2a1e5`. That over-invalidation is the deliberate,
-inherited trade recorded at lines 61-63 and required by prevention-log entry #3017 (an
-indicator definition *is* the strategy's filter logic).
+inherited trade recorded at the module's lines 61-63 and required by prevention-log
+entry #3017 (an indicator definition *is* the strategy's filter logic).
 
-Measured read-only this session, with the queries:
+**The permitted-change set has three members**, each asserted by the A/B to have
+*actually* rotated — a rotation that did **not** happen would mean the edit never
+reached the identity, which is its own defect:
 
-```sql
--- ledger
-select strategy_id, strategy_version, count(*) from strategy_signals group by 1,2
-union all
-select strategy_id, strategy_version, count(*) from strategy_signal_observations group by 1,2;
--- watermarks
-select strategy_id, strategy_version, count(*) from strategy_scan_watermark group by 1,2;
-```
+1. `strategy_version`, all 12 strategies x both universes;
+2. `INPUT_RULE_SETS["indicator_series"]`;
+3. `PRICE_BASIS_RULE_VERSION` — because §4.6 widens `bind_bar`'s annotation and
+   `strategy_price_basis.py`'s bytes are inside it, which is inside S-12's params.
+   ⚠ Revision 2 named only the first.
 
-intersected against `STRATEGY_MANIFEST[sid].identity(universe=u).version` for all 12
-strategies × both universes:
+### ⚠⚠ The census must be taken from the BASELINE commit, and revision 2's was circular
 
-```
-ledger      : 982,051 rows / 39 (strategy_id, version) groups   ATTACHED to a current identity = 0
-watermarks  :              39 (strategy_id, version) groups     ATTACHED to a current identity = 0
-```
+`indicator_series` hashes its own source. So a census run from the **candidate** checkout
+reports zero attachment **by construction** — the edit has already detached everything —
+and cannot distinguish that from "nothing was ever attached". The question only the
+baseline arm can answer is *did this rotation detach evidence that was still live*.
 
-⚠ The watermark line is there because revision 1 **inferred** it from the ledger count
-and ckpt-1 finding 19 was right that this does not follow — `strategy_scan_watermark` is
-an independent table. It is now the query.
+The census therefore travels **inside the A/B measurement**, computed per arm against
+that arm's own identities and written into its JSON with its commit. It is not a loose
+figure quoted in prose.
 
-⇒ the rotation detaches nothing that was still attached, and the cold-start branch of
-`write_window_indices` (at most one eligible bar per instrument, no backfill) is
-*already* what the next scan of every strategy takes. This diff does not create that.
+⚠ Revision 2's §5 also published `entry.identity(universe=u)` as the procedure. That is
+not executable: it raises `TypeError`, because `cost_model_id` is required. The script
+uses `entry.identity(universe=u, cost_model_id=COST_MODEL_ID)`, and the published
+procedure is now the script plus its commit rather than a prose snippet.
 
-⚠ Both counts are re-run at merge time and recorded in the PR with the merge SHA — a
-scan between now and then can attach evidence.
+Tables censused: `strategy_signals`, `strategy_signal_observations`,
+`strategy_scan_watermark`. The last is there because revision 2 **inferred** watermark
+state from the ledger count and ckpt-1 was right that it does not follow — it is an
+independent table.
 
-## 6. Cost — measured end to end, not extrapolated
+### Disposition if the baseline census is non-zero
+
+`--compare` does **not** fail on non-zero attachment, because a rotation that detaches
+live evidence is a decision, not an error. It logs a warning naming the tables and
+counts, and the disposition is recorded on the PR before merge. Silence in that case
+would be the defect. ⚠ Revision 2 said only "re-run at merge" and never said what a
+non-zero answer would mean.
+
+## 6. Cost — measured end to end, with a decision rule fixed in advance
 
 ckpt-1 finding 28 is that a per-bar microbenchmark is not an end-to-end bound, because
-every sub-series construction re-copies. The full-population A/B in §7 therefore counts
-`BarSeries.__init__` invocations and bars copied, and the PR records:
+every sub-series construction re-copies. **It was right, and by a large factor.** The
+A/B counts `BarSeries.__init__` invocations; on the 3-instrument smoke:
 
-- constructions and bars-copied per instrument, over all 5,797 eligible instruments;
-- wall-clock for the sweep with and without the freeze;
-- peak RSS for both arms.
+```
+3 instruments · 3,217 corpus bars  ->  147 constructions · 157,633 bars copied
+```
 
-No cost claim is made in this document ahead of that measurement. What is fixed is the
-per-bar price: **0.060 µs from a dict, 0.275 µs from an already-frozen proxy**, against
-a current constructor cost of 0.034 µs/bar.
+That is ~49x the corpus size. ⚠ Most of it is the **harness**, which deliberately
+evaluates 96 cells per instrument (12 strategies x 2 universes x 2 routes x 2 shapes)
+where production evaluates one; the amplification is reported as the harness's, not as
+production's, and the two are not conflated.
 
-If the measured end-to-end regression is material, the fallback is a sanctioned
-sub-series constructor that skips the re-freeze because it knows the rows are already
-ours — which is a provenance the `__post_init__` type check cannot establish, but a
-dedicated method can. Not built speculatively.
+What the PR records, from the full-population run on both arms:
+
+- constructions and bars copied, per arm;
+- wall-clock per arm, same machine, back to back;
+- peak RSS per arm, measured per process (not an in-process lifetime peak, which cannot
+  isolate the second arm).
+
+**The decision rule, fixed before the numbers are read** — revision 2 left "material"
+undefined, so any regression would have satisfied it:
+
+| outcome | disposition |
+| --- | --- |
+| candidate wall-clock ≤ 1.25x baseline | ship as is |
+| 1.25x – 2x | ship, and record the figure in the module comment beside the per-bar cost |
+| > 2x | do **not** ship this construction; add a sanctioned sub-series constructor that skips the re-freeze because it knows the rows are already ours (a provenance `__post_init__` cannot establish but a dedicated method can), and re-measure |
+
+⚠ The per-bar prices remain: **0.060 µs from a dict, 0.275 µs from an already-frozen
+proxy**, against a current constructor cost of 0.034 µs/bar.
+
+⚠ Not covered, and named rather than implied: `price_segments.segment_for_index` can
+copy a whole segment per lookup, and the backtest and outcome paths construct
+sub-series at rates this scan-shaped sweep does not exercise. The cost conclusion is
+scoped to what was measured.
 
 ## 7. Acceptance
 
-Revision 1's acceptance was refused as partly vacuous (ckpt-1 findings 23, 24, 27): an
-assignment that raises does not establish that rows and caches agree, and a test that
-mutates a retained **list** proves nothing because that could never reach the series.
-Corrected:
+Revision 1's acceptance was partly vacuous; revision 2's was still weaker than it read.
+Corrected, with what each item is *guarding against* stated so it cannot be satisfied
+trivially:
 
-1. **Behaviour is unchanged.** Full-population A/B over the scan, both universes, the
-   certified and undeclared carrier routes, and the segmented dispatchers. Every
-   verdict, reason code and signal identical before and after. ⚠ The permitted-change
-   set is `strategy_version` **and** `input_rule_set_versions["indicator_series"]` —
-   revision 1 named only the first, which ckpt-1 finding 21 showed is literally wrong.
-   Coverage must be non-zero on each route, asserted, not assumed: S-12's live path uses
-   an undeclared carrier and short-circuits before arithmetic, so a sweep that only
-   exercises it proves nothing (finding 22).
-2. **The exploit of §2 is unreachable.** Run the four-step sequence; assert it raises at
-   step 3.
-3. **Consistency, not refusal.** For each of the seven surfaces (`rows[i][f]`, three
-   `float_*`, three `array_*`): attempt the write, then assert *both* that it raised and
-   that `rows` and every cache still agree — cold and warm. A refusal test alone passes
-   even under every bypass in §3.
-4. **The caller's retained *row dicts* cannot reach the series** — mutate the dicts (not
-   the list), cold and warm, and assert the series is unmoved.
+1. **Behaviour is unchanged.** Full-population A/B, `scripts/ab_2840_barseries_row_immutability.py`.
+   The arm is the **commit** — baseline run from a worktree at `origin/main`, candidate
+   from the branch, nothing simulated. Covers 12 strategies x both universes x
+   {undeclared, certified} carrier x {flat, segmented} = **96 cells**, compared as
+   **ordered digests with multiplicity** (a set would hide a duplicate-output
+   regression). Cross-sectional members are encoded **structurally** over
+   `dataclasses.fields`, so `scores`, `None` verdict slots, `admissible_dates` and
+   `mandatory_dates` are all included — a hand-written field list would have gone
+   silently incomplete.
+   - ⚠ The two arms cannot share a DB snapshot. Rather than claim one, each arm digests
+     **the input corpus it actually read**, and `--compare` **refuses outright** if they
+     differ. A concurrent write then surfaces as a refusal rather than as a finding
+     about this diff.
+   - ⚠ Permitted-change set: the three of §5, each asserted to have *actually* rotated.
+   - ⚠ Coverage asserted per cell, non-zero, because S-12's live route short-circuits
+     before arithmetic.
+   - ⚠ **Scope limit, named:** this is scan-shaped. It does not cover
+     `position_builder`, `outcome_resolver`, `residual_confluence_evaluation`, the
+     ledgers, or the backtest paths. Their protection is the type change (§4.6) plus
+     the fast tier, not this sweep.
+2. **The exploit of §2 is unreachable** — the four-step sequence on a real fixture, with
+   the baseline binding acceptance pinned first so a generic "it raised" cannot pass.
+3. **Consistency, not refusal.** For each surface (`rows[i][key]`, three `float_*`,
+   three `array_*`): attempt the write, then assert *both* that it raised and that rows
+   and every cache still agree — **cold and warm**. A refusal-only test passes under
+   every surviving bypass in §3, which is what made revision 1's version vacuous.
+4. **The caller's retained *row dicts* cannot reach the series** — the dicts, not the
+   list. ⚠ Mutating the retained *list* could never reach the series even before this
+   diff, so asserting on it would be vacuous.
 5. **Reconstruction matrix**: `dataclasses.replace`, `copy.copy`, `copy.deepcopy`,
-   `pickle` round-trip, and `__setstate__` onto an already-warm instance. Each asserts
-   the result is itself frozen and its caches agree with its rows — proving
-   `__setstate__` re-validates rather than trusting the payload.
-6. **Subclassing raises**, and **`asdict`/`astuple` raise** — the stated losses are
-   pinned so they cannot silently return later.
-7. **The slice idiom still produces a correct, independent sub-series** at all five
-   production sites: `price_segments.py:70`, `strategy_signal_scan.py:1035`,
-   `backtest_run.py:1044`, and both dispatchers in
-   `strategy_segmented_evaluation.py`. Assert independence, not just equal values.
-8. **`hash()` is asserted in both cases** — `hash(BarSeries((), ()))` succeeds (measured;
-   revision 1 missed this), a non-empty one raises `TypeError`. This pins the comment
-   correction below so the claim cannot rot again.
+   `pickle`, `__setstate__` onto an already-warm instance, and **three malformed
+   payloads** (length mismatch, non-ascending, duplicate dates). Each malformed case
+   asserts the raise **and that the target instance is intact** — the defect revision 2
+   introduced. Warm restoration uses *different* replacement data so a stale cache
+   cannot pass unnoticed.
+6. **The stated losses are pinned, with their conditions**: ordinary subclassing raises;
+   the mixin-MRO bypass is pinned as a *reproducing* test so the refusal is never read as
+   absolute; `asdict`/`astuple` raise on a non-empty series **and succeed on the empty
+   one**.
+7. **The sub-series idiom still produces a correct, INDEPENDENT sub-series.**
+   "Independent" is operational: the child's row objects are `is not` the parent's, and
+   a refused write on one leaves the other consistent. ⚠ Equality alone would pass for
+   two proxies over the same backing dict.
+8. **`hash()` asserted in both cases** — `hash(BarSeries((), ()))` succeeds, a non-empty
+   one raises. Pins the comment correction below.
+9. **The shapes production actually supplies**, not just the happy fixture: a masked bar
+   (`None` in an OHLC field) and a row **missing keys entirely**. Measured frequencies
+   in §4.6. Without these the `None` branch in `_floats` — the branch every masked bar
+   takes — is never exercised by the freeze tests.
 
 ⚠ **An existing test changes meaning and is revised deliberately, not repaired.**
-`tests/test_2840_s12_price_basis_gate.py:449::test_mutating_a_row_after_construction_is_caught`
-mutates a retained row dict and asserts the carrier *rejects* the series. After the copy,
-the mutation cannot reach the series at all, so the correct outcome becomes "series
-unmoved, binding passes" — it was ckpt-1's only selected-test failure against the
-prototype. Rewriting it to assert the new outcome would **defang** it: it is currently
-the only proof that the carrier's binding is a snapshot and not a reference. It is
-therefore split — the unreachability becomes acceptance item 4, and the carrier's
-snapshot property is re-proved against a separately built series carrying one changed
-value, which does not depend on aliasing.
+`tests/test_2840_s12_price_basis_gate.py::test_mutating_a_row_after_construction_is_caught`
+mutated a retained row dict and asserted the carrier *rejects* the series. The mutation
+can no longer reach the series, so there is nothing left to reject.
+
+⚠⚠ The obvious replacement — "build a changed series separately, assert the carrier
+rejects it" — **does not work**, and ckpt-1 refused it by construction: a carrier holding
+a live **reference** to the original series rejects that second series too, so the
+assertion cannot tell snapshot from reference. Revision 2 proposed exactly that. The test
+now pins `carrier.bar_bindings == bindings_for(series)` — the independently recomputed
+encoding — which a reference-backed carrier has nothing to satisfy.
 
 ### The comment at lines 143-144 is false and is corrected in the same diff
 
@@ -405,3 +519,54 @@ place a reader checking whether caching is safe would look.
 | 26 | an existing test needs revision | **ACCEPTED** — split rather than rewritten (§7) |
 | 27 | hash needs the empty case | **CONFIRMED** — `hash(BarSeries((),()))` succeeds (§7.8) |
 | 28 | cost omits repeated copies | **FIXED** — no claim ahead of the measurement (§6) |
+
+## 10. Checkpoint-1 disposition (revision 2 → revision 3)
+
+29 findings, the eighteenth refusal on this ticket. Every one checked against the
+interpreter or the repo before disposition — including the three of revision 2's own
+dispositions that did not survive.
+
+| # | finding | disposition |
+| --- | --- | --- |
+| 1 | `__init_subclass__` suppressible by a non-cooperative mixin — not `FIXED` | **CONFIRMED.** Guard kept as an accident control; nothing depends on it any more (§4.4) |
+| 2 | two-field state drops subclass fields — not `MOOT` | **CONFIRMED.** `__getstate__` enumerates `dataclasses.fields` (§4.5) |
+| 3 | typing migration not `FIXED` — 8 pyright errors | **CONFIRMED and FIXED in code.** Three readers widened; repo pyright at 0 (§4.6) |
+| 4 | the new row schema copies a false non-null contract | **CONFIRMED.** Measured (`None`: volume 16,661 / high 12 / low 12 / close 11 / open 2). Accurate typing costs 35 errors ⇒ named in the type's docstring, corrected in its own round (§4.6) |
+| 5 | "two gates" overclaimed — pyright allows `array_closes[0] = 999` | **CONFIRMED.** Stated per surface: rows and float tuples get two, arrays get one (§3) |
+| 6 | surviving bypasses do not all need bypass-only code | **CONFIRMED.** `arr.shape` is ordinary numpy; the intent claim is withdrawn, not repaired (§3) |
+| 7 | disposition 6 misstated where subclass leaves were named | **CONFIRMED.** Shallow-copy residue now listed explicitly as §3 bypass 7 |
+| 8 | `__setstate__` destructive on failure — NEW in revision 2 | **CONFIRMED.** Validate-then-commit; three malformed payloads pinned (§4.5, §7.5) |
+| 9 | clearing caches does not make *concurrent* restoration safe | ACCEPTED as a named limit. No concurrent caller exists; `__setstate__` is not synchronised and does not claim to be |
+| 10 | `EMPTY DOMAIN` stronger than the grep supports | **CONFIRMED.** Measured instead: old cold pickles load, old warm pickles fail (§4.5) |
+| 11 | pickle/deepcopy restoration limited to the series-owned path | **CONFIRMED.** Both residual losses tabulated (§4.5) |
+| 12 | `asdict`/`astuple` succeed on an empty series | **CONFIRMED.** Both halves pinned, as `hash` already was (§4.5, §7.6) |
+| 13 | the proposed test split cannot prove snapshot-vs-reference | **CONFIRMED by construction.** Test now pins the recomputed encoding (§7) |
+| 14 | round-trip + frozen output does not prove revalidation | **FIXED** — malformed payloads, warm replacement with *different* data (§7.5) |
+| 15 | the consistency oracle needs the real data shapes | **FIXED** — masked and missing-key fixtures, measured frequencies (§7.9) |
+| 16 | "raises at step 3" alone under-specifies the exploit | **FIXED** — baseline binding acceptance pinned first (§7.2) |
+| 17 | named fixes lack explicit regressions | **FIXED** — retained date list, `copy()->self`, mixin bypass each have one |
+| 18 | "independence" undefined for sub-series | **FIXED** — operational: `is not` on row objects plus cross-consistency (§7.7) |
+| 19 | non-zero route counts ≠ relevant execution | PARTIAL — per-cell coverage is asserted; post-warm-up body execution is not separately instrumented. Named, not claimed |
+| 20 | a scan A/B misses the non-strategy consumers | **CONFIRMED.** Scope limit named in §7.1 rather than implied away |
+| 21 | verdict equality omits `segmented_member`'s payload | **FIXED** — structural encoding over `dataclasses.fields` covers all of it (§7.1) |
+| 22 | the A/B protocol was unspecified | **FIXED** — baseline SHA, corpus digest with refusal-to-compare, per-process RSS (§7.1, §6) |
+| 23 | "scan, both universes" needs a concrete harness | **FIXED** — drives `STRATEGY_MANIFEST` directly; pure, writes nothing, not the live scan |
+| 24 | "material" regression had no threshold | **FIXED** — three-band decision rule fixed *before* reading the numbers (§6) |
+| 25 | a scan sweep does not bound backtest/outcome copy cost | **CONFIRMED.** Named as out of scope for the cost conclusion (§6) |
+| 26 | `identity(universe=u)` is not executable | **CONFIRMED** — hit this exact `TypeError`. `cost_model_id=COST_MODEL_ID` required; procedure is now the script (§5) |
+| 27 | a post-edit census is circular | **CONFIRMED, and the sharpest finding.** Census moved inside the A/B, per arm, per commit (§5) |
+| 28 | no disposition stated for non-zero attachment | **FIXED** — warns and requires a recorded disposition; does not fail (§5) |
+| 29 | permitted-change set incomplete once typing is fixed | **CONFIRMED.** `PRICE_BASIS_RULE_VERSION` added as the third member (§5) |
+
+### The one lesson worth the queue's attention
+
+Revision 1 was refused for claiming impossibility. Revision 2 corrected that and was
+refused for a **new** defect of the same family: `__setstate__` cleared before it
+validated, so the hook added to prevent a silent capability loss could destroy a live
+object instead. The pattern is not "the claims were too strong" — it is that **a fix
+written to close one failure mode is not itself examined for the failure modes it
+introduces**, and a destructive-on-error path reads as safe because the error is
+correctly raised. Three of revision 2's dispositions (`FIXED`, `MOOT`, `EMPTY DOMAIN`)
+also failed for one shared reason: each asserted a negative from an inventory or a grep
+rather than from an attempt. That is the rule this ticket has now re-learned at every
+round — **to write "X cannot happen", try to make it happen and report the output.**
