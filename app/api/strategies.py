@@ -1126,6 +1126,18 @@ class CoreSleeveResponse(BaseModel):
     #: this same route. Three claims in a row were scoped wider than the site that
     #: was checked; see ``docs/review-prevention-log.md``.
     #:
+    #: So that a later widening has a boundary to check rather than re-derive:
+    #: ``account_equity_evidence._convert_local_total`` is the ONLY converting
+    #: call reachable from this route, and it feeds exactly four rendered fields
+    #: -- ``local_eod_value_in_account_currency``,
+    #: ``local_eod_value_at_official_marks`` (that value plus the mark
+    #: correction), and the ``difference`` / ``tolerance`` derived from them. Every
+    #: other money field here is carried through in the currency its source
+    #: reported. ⚠ Confirm by re-running ``rg -n 'in_account_currency|_convert_'``
+    #: over ``app/api/strategies.py`` and ``app/services/account_equity_evidence.py``
+    #: before widening the sentence -- do NOT widen it on the strength of this
+    #: comment, which is the mistake the paragraph above records.
+    #:
     #: The cost clause is the declaration's ``all_in_cost_rule``
     #: (``docs/proposals/ta/2026-08-24-core-selection-declaration.json``): p75
     #: round-trip spread plus a documented 0 bps entry-sizing markup, so funding
