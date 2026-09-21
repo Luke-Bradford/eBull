@@ -28,6 +28,11 @@ from app.providers.broker import (
     BrokerPositionMutationUncertain,
     BrokerProvider,
 )
+from app.services.core_exit_levels import (
+    CORE_EXIT_MAX_QUOTE_AGE_SECONDS,
+    core_exit_level_satisfied,
+    core_exit_levels,
+)
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -471,6 +476,43 @@ def _persist_order_response(conn: psycopg.Connection[Any], *, order_id: int, raw
         )
 
 
+def _edit_landed(
+    *,
+    owned: _OwnedPosition,
+    position: BrokerPosition | None,
+    desired_stop: Any,
+    desired_take: Any,
+) -> bool:
+    """Did the broker's exact position reach the rates this operation intended?
+
+    ⚠⚠ **The comparison must use the SAME satisfaction rule the arm evaluates with**,
+    and on the core arm that rule carries a one-cent tolerance
+    (``core_exit_level_satisfied``).  Comparing with exact equality here while deciding
+    with a tolerance there is not a stricter check, it is an INCONSISTENT one, and
+    Codex checkpoint 2 traced both of its outcomes: an ``intent_persisted`` edit whose
+    rates landed one cent off would be recorded ``reconcile_required`` although it
+    applied, and a ``submitted`` one would stay ``broker_edit_pending`` forever --
+    which, because ``_resume_operation`` runs BEFORE close handling, would also make
+    the position **unclosable**.  A tolerance that only one side of the system honours
+    is worse than no tolerance at all.
+
+    The signal arm keeps exact equality: its rates come from a stored preflight and it
+    has no tolerance to be inconsistent with.
+    """
+    if position is None:
+        return False
+    stop = Decimal(str(desired_stop))
+    if owned.is_core:
+        if not core_exit_level_satisfied(observed=position.stop_loss_rate, desired=stop):
+            return False
+        if desired_take is None:
+            return True
+        return core_exit_level_satisfied(observed=position.take_profit_rate, desired=Decimal(str(desired_take)))
+    if position.stop_loss_rate != stop:
+        return False
+    return desired_take is None or position.take_profit_rate == Decimal(str(desired_take))
+
+
 def _resume_operation(
     conn: psycopg.Connection[Any], *, broker: BrokerProvider, owned: _OwnedPosition
 ) -> PositionManagerResult | None:
@@ -488,30 +530,18 @@ def _resume_operation(
     if operation is None:
         return None
     operation_id = int(operation["position_operation_id"])
-    # ⚠⚠ THIS FUNCTION RUNS IMMEDIATELY AFTER LOAD, BEFORE ANY GATE, so the core
-    # exemption further down `manage_owned_position` cannot protect it.  A
-    # pending edit operation attached to a core ownership would otherwise resume
-    # a stop / take-profit mutation despite that exemption -- the exemption would
-    # hold on every fresh cycle and leak on exactly the crash-recovery path.
+    # ⚠⚠ A core edit operation USED TO BE REFUSED HERE, and #3284 is exactly why
+    # that refusal had to go rather than be kept as a safety net.  Its stated
+    # premise was "no such operation can be created today (nothing writes an edit
+    # on the core arm)", which `manage_owned_position` now falsifies: the core arm
+    # writes `fixed_exit_repair`.  Left standing, the refusal would have caught
+    # every core repair that crashed mid-flight and terminalised it as `rejected`
+    # -- including one the broker had already APPLIED, which is the one outcome
+    # that must never be recorded as rejected.
     #
-    # No such operation can be created today (nothing writes an edit on the core
-    # arm), so this is refused rather than handled: a row that cannot legitimately
-    # exist should stop the cycle for that position, not be interpreted.
-    if owned.is_core and operation["operation_type"] != "close":
-        with conn.transaction():
-            _terminal(
-                conn,
-                operation_id=operation_id,
-                status="rejected",
-                error_code="core_mandate_position_exempt",
-            )
-        return PositionManagerResult(
-            owned.strategy_trade_id,
-            owned.broker_position_id,
-            "rejected",
-            "core_mandate_position_exempt",
-            operation_id,
-        )
+    # Nothing replaces it.  The generic resume below compares the broker's exact
+    # position against the persisted intent, and that comparison is arm-agnostic:
+    # it asks what the broker did, not which arm asked.
     position = _exact_broker_position(broker, owned)
     if operation["status"] == "intent_persisted" and operation["operation_type"] == "close":
         # `mark_close_submitting` commits BEFORE the broker verb is entered, so a
@@ -554,14 +584,11 @@ def _resume_operation(
         # is no close lookup by request UUID, so what the broker did stays unknown.
         # That ambiguity is #2979's remaining half and is unresolved by design here
         # — it is not guessed at.
-        landed = (
-            operation["operation_type"] != "close"
-            and position is not None
-            and position.stop_loss_rate == Decimal(str(operation["desired_stop_rate"]))
-            and (
-                operation["desired_take_profit_rate"] is None
-                or position.take_profit_rate == Decimal(str(operation["desired_take_profit_rate"]))
-            )
+        landed = operation["operation_type"] != "close" and _edit_landed(
+            owned=owned,
+            position=position,
+            desired_stop=operation["desired_stop_rate"],
+            desired_take=operation["desired_take_profit_rate"],
         )
         with conn.transaction():
             if landed:
@@ -632,13 +659,11 @@ def _resume_operation(
             "exact_position_closed" if exact else "close_order_did_not_affect_exact_position",
             operation_id,
         )
-    landed = (
-        position is not None
-        and position.stop_loss_rate == Decimal(str(operation["desired_stop_rate"]))
-        and (
-            operation["desired_take_profit_rate"] is None
-            or position.take_profit_rate == Decimal(str(operation["desired_take_profit_rate"]))
-        )
+    landed = _edit_landed(
+        owned=owned,
+        position=position,
+        desired_stop=operation["desired_stop_rate"],
+        desired_take=operation["desired_take_profit_rate"],
     )
     if not landed:
         return PositionManagerResult(
@@ -704,6 +729,29 @@ def _prior_same_edit(
     desired_take: Decimal | None,
     bar: RatchetBar | None,
 ) -> PositionManagerResult | None:
+    # ⚠⚠ ON THE CORE ARM AN `applied` PRIOR OPERATION MUST NOT BLOCK, and that
+    # exclusion is what makes #3284 item 3 true rather than aspirational.  The desired
+    # rates are a pure function of the position's entry, so they are STABLE across
+    # cycles -- which means a repair that applied last week matches today's intent
+    # exactly.  Without this clause, the very scenario the ticket names as acceptance
+    # ("clearing the stop manually at the broker is detected on the next check and
+    # repaired") would find that applied row and return `rejected` /
+    # `prior_material_operation`, and the position would stay NAKED indefinitely while
+    # reporting a terminal state.  Codex checkpoint 2 found it; an add at an unchanged
+    # entry price is a second route to the same wedge.
+    #
+    # A `rejected` or `reconcile_required` prior still blocks, on both arms: the broker
+    # refused that exact edit, and re-entering the same verb every five minutes is
+    # hammering, not repair.
+    #
+    # ⚠ The SIGNAL arm is deliberately left as it was.  It has the same latent wedge --
+    # `max(current_stop, entry_stop)` also reproduces a stable pair -- but changing it
+    # alters alpha-arm behaviour that nothing in this ticket exercises.  Noted on the
+    # PR rather than fixed in passing.
+    #
+    # ⚠ Expressed as a PARAMETER, not an interpolated fragment: psycopg types
+    # ``execute`` to ``LiteralString``, so an f-string here fails pyright -- and the
+    # parameter form is the one that cannot become an injection site later.
     row = conn.execute(
         """
         SELECT position_operation_id, status,
@@ -713,6 +761,7 @@ def _prior_same_edit(
           AND desired_stop_rate=%s
           AND desired_take_profit_rate IS NOT DISTINCT FROM %s
           AND completed_bar_at IS NOT DISTINCT FROM %s
+          AND (status <> 'applied' OR NOT %s)
         ORDER BY position_operation_id DESC LIMIT 1
         """,
         (
@@ -721,6 +770,7 @@ def _prior_same_edit(
             desired_stop,
             desired_take,
             bar.completed_at if bar else None,
+            owned.is_core,
         ),
     ).fetchone()
     if row is None:
@@ -980,46 +1030,66 @@ def manage_owned_position(
                 trigger_code=close_reason or "timeout",
             )
 
-        # ⚠⚠ THE CORE RETURN MUST PRECEDE THIS LINE, not merely guard the
-        # `if stop_gap or take_gap` body: the two lines below already dereference
-        # ``entry_stop`` / ``entry_take_profit``, which are NULL on the core arm.
+        # ⚠⚠ THE CORE ARM USED TO RETURN "exempt" HERE.  Reversed by operator
+        # decision, 2026-09-21 (#3284): *"would expect a safety net of sl and tp in
+        # place at all times for this to safe guard spikes"*.  Every engine-held
+        # position now carries a broker-side stop and target.
         #
-        # What a core position is exempt FROM: stop-forcing, take-profit-forcing
-        # and ratcheting.  Each converts a mandate into a strategy.  A stop on a
-        # benchmark holding sells the benchmark into a drawdown -- and "return to
-        # core/cash" is the outcome the viability plan falls back TO, so a stop
-        # underneath it would be giving the fallback a fallback.
+        # The old exemption's reasoning is NOT refuted and is worth keeping in view,
+        # because it is the cost being paid: a stop on a benchmark holding sells the
+        # benchmark into a drawdown, and "return to core/cash" is what the viability
+        # plan falls back TO, so this gives the fallback a fallback.  The operator
+        # weighed that against spike risk and chose the stop.  `core_exit_levels`
+        # carries the accepted cost in full; read it before touching either constant.
         #
-        # What it is NOT exempt from, and this is what makes the exemption safe:
-        # it is still selected by the paper cycle's batch, loaded here,
-        # reconciled when the broker disagrees, and closable on an explicit
-        # close_reason.  Exempt from three behaviours, not absent from the system.
-        #
-        # ⚠ Its own reason code.  Reusing `position_protected` would assert that a
-        # stop exists and is adequate; on this arm there is no stop at all.
+        # ⚠ What stays exempt: AGE-OUT (guarded by its own `is_core` test above) and
+        # RATCHETING.  A core position reaches the ratchet block below with
+        # ``ratchet_variant_id`` NULL and returns `position_protected` there, so the
+        # ratchet is unreachable on this arm by data rather than by a second branch.
+        # That matters -- ratcheting a mandate holding's stop upward on strength is
+        # precisely the market-timing behaviour the price-only steer cut.
         if owned.is_core:
-            return PositionManagerResult(
-                strategy_trade_id, broker_position_id, "no_change", "core_mandate_position_exempt"
+            # The anchor is the position's OWN entry, read back from the broker, and
+            # that choice is what makes #3284 item 2 ("re-apply after every change")
+            # fall out with no extra machinery: eToro re-weights ``open_price`` when
+            # units are added, so the next cycle derives the new levels unprompted.
+            levels = core_exit_levels(position.open_price)
+            current_stop = position.stop_loss_rate
+            desired_stop = levels.stop_loss_rate
+            desired_take: Decimal | None = levels.take_profit_rate
+            max_quote_age_seconds = CORE_EXIT_MAX_QUOTE_AGE_SECONDS
+            # ⚠ NO `max(current_stop, ...)` CLAMP ON THIS ARM, deliberately.  The
+            # signal arm's clamp is a ratchet: a stop there only ever tightens.  A
+            # mandate stop is a pure function of the current weighted entry, and
+            # #3284 item 2 requires it to be re-applied to that value -- so an ADD at
+            # a lower price must be allowed to move the stop DOWN.  Clamping would
+            # silently keep a stop computed from a previous, higher entry.
+            stop_gap = position.is_no_stop_loss or not core_exit_level_satisfied(
+                observed=current_stop, desired=desired_stop
             )
-
-        # Past this point the signal arm is guaranteed by _LOAD_OWNED_SQL's
-        # witnesses: a loaded non-core position has a preflight and an execution
-        # policy, so these are non-null.
-        #
-        # ⚠ `raise`, NOT `assert`. `python -O` strips asserts, and this guard is
-        # what stands between a mis-witnessed load predicate and a `NoneType`
-        # comparison inside the stop/take-profit arithmetic below. Stripped, the
-        # failure mode is not "no check" but "a confusing TypeError three lines
-        # later, in the code that decides where a stop goes".
-        if owned.entry_stop is None or owned.entry_take_profit is None or owned.max_quote_age_seconds is None:
-            raise StrategyPositionManagerError(
-                "a non-core owned position must carry its entry preflight and execution policy"
+            take_gap = position.is_no_take_profit or not core_exit_level_satisfied(
+                observed=position.take_profit_rate, desired=desired_take
             )
-        current_stop = position.stop_loss_rate
-        desired_stop = max(current_stop, owned.entry_stop) if current_stop is not None else owned.entry_stop
-        desired_take = owned.entry_take_profit
-        stop_gap = position.is_no_stop_loss or current_stop is None or current_stop < owned.entry_stop
-        take_gap = position.is_no_take_profit or position.take_profit_rate != desired_take
+        else:
+            # Past this point the signal arm is guaranteed by _LOAD_OWNED_SQL's
+            # witnesses: a loaded non-core position has a preflight and an execution
+            # policy, so these are non-null.
+            #
+            # ⚠ `raise`, NOT `assert`. `python -O` strips asserts, and this guard is
+            # what stands between a mis-witnessed load predicate and a `NoneType`
+            # comparison inside the stop/take-profit arithmetic below. Stripped, the
+            # failure mode is not "no check" but "a confusing TypeError three lines
+            # later, in the code that decides where a stop goes".
+            if owned.entry_stop is None or owned.entry_take_profit is None or owned.max_quote_age_seconds is None:
+                raise StrategyPositionManagerError(
+                    "a non-core owned position must carry its entry preflight and execution policy"
+                )
+            current_stop = position.stop_loss_rate
+            desired_stop = max(current_stop, owned.entry_stop) if current_stop is not None else owned.entry_stop
+            desired_take = owned.entry_take_profit
+            max_quote_age_seconds = owned.max_quote_age_seconds
+            stop_gap = position.is_no_stop_loss or current_stop is None or current_stop < owned.entry_stop
+            take_gap = position.is_no_take_profit or position.take_profit_rate != desired_take
         if stop_gap or take_gap:
             eligibility = _eligibility_for_owned(broker, owned)
             arms = [
@@ -1031,10 +1101,14 @@ def manage_owned_position(
                 return PositionManagerResult(
                     strategy_trade_id, broker_position_id, "rejected", "broker_fixed_exit_edit_not_allowed"
                 )
+            # ⚠ ``max_quote_age_seconds`` is the arm-selected bound, NOT
+            # ``owned.max_quote_age_seconds`` -- that column is NULL on the core arm,
+            # which has no execution policy to carry it.  Reading the column here
+            # would raise `TypeError` inside `timedelta` on the first core repair.
             if (
                 owned.quote_bid is None
                 or owned.quoted_at is None
-                or owned.quoted_at < observed_at - timedelta(seconds=owned.max_quote_age_seconds)
+                or owned.quoted_at < observed_at - timedelta(seconds=max_quote_age_seconds)
                 or owned.quoted_at > observed_at + timedelta(seconds=5)
                 or desired_stop >= owned.quote_bid
             ):
@@ -1093,7 +1167,7 @@ def manage_owned_position(
         if (
             owned.quote_bid is None
             or owned.quoted_at is None
-            or owned.quoted_at < observed_at - timedelta(seconds=owned.max_quote_age_seconds)
+            or owned.quoted_at < observed_at - timedelta(seconds=max_quote_age_seconds)
             or owned.quoted_at > observed_at + timedelta(seconds=5)
             or candidate >= owned.quote_bid
         ):
