@@ -29,33 +29,38 @@ def test_the_live_position_reproduces_the_levels_the_operator_set_by_hand() -> N
     """The one anchored case, and the reason it is first.
 
     Position ``3601264304`` was opened at 759.86 on 2026-09-18 and hand-protected on
-    2026-09-21 at SL 569.90 / TP 1519.72 (#3284).  The derivation must land on those
-    numbers, because the hand-set pair is the only independent statement of intent that
-    exists — every other expectation in this file is computed by the same rule it is
-    testing.
+    2026-09-21 at **SL 379.93 / TP 2279.58** — read back from ``broker_positions`` on
+    dev, not copied from prose.  The derivation must land on those numbers, because the
+    hand-set pair is the only independent statement of intent that exists; every other
+    expectation in this file is computed by the same rule it is testing.
 
-    ⚠ The stop comes out at 569.89, NOT 569.90: 759.86 * 0.75 = 569.895 exactly, and
-    this module rounds a stop DOWN (away from entry).  The operator rounded half-up.
-    One cent apart, and ``CORE_EXIT_RATE_TOLERANCE`` is what stops that cent from being
-    read as a divergence on every cycle — asserted directly below.
+    ⚠⚠ **-50% / +200%, and an earlier version of this test asserted -25% / +100%.**  The
+    ticket BODY still describes the superseded levels; they were corrected the same day
+    once the operator asked whether they were realistic, because a -25% stop fires on
+    35.7% of entries and is therefore a bear-market exit rather than a spike guard.
+    Reading the body and not the correction is exactly how the wrong constants shipped.
+
+    ⚠ Both products are exact at 2dp (759.86 * 0.50 and * 3.00), so the derivation
+    matches the broker byte for byte and no tolerance is needed to reconcile them.
     """
     levels = core_exit_levels(Decimal("759.86"))
-    assert levels.stop_loss_rate == Decimal("569.89")
-    assert levels.take_profit_rate == Decimal("1519.72")
-    assert core_exit_level_satisfied(observed=Decimal("569.90"), desired=levels.stop_loss_rate)
-    assert core_exit_level_satisfied(observed=Decimal("1519.72"), desired=levels.take_profit_rate)
+    assert levels.stop_loss_rate == Decimal("379.93")
+    assert levels.take_profit_rate == Decimal("2279.58")
+    assert core_exit_level_satisfied(observed=Decimal("379.93"), desired=levels.stop_loss_rate)
+    assert core_exit_level_satisfied(observed=Decimal("2279.58"), desired=levels.take_profit_rate)
 
 
 @pytest.mark.parametrize(
     ("entry", "stop", "take"),
     [
-        (Decimal("100"), Decimal("75.00"), Decimal("200.00")),
-        (Decimal("759.86"), Decimal("569.89"), Decimal("1519.72")),
-        # Both halves need rounding, in opposite directions: 0.33 * 0.75 = 0.2475 and
-        # 0.33 * 2 = 0.66.  The stop truncates to 0.24, the target is already exact.
-        (Decimal("0.33"), Decimal("0.24"), Decimal("0.66")),
-        # A third-of-a-cent entry forces BOTH quantizations to bite at once.
-        (Decimal("1.005"), Decimal("0.75"), Decimal("2.01")),
+        (Decimal("100"), Decimal("50.00"), Decimal("300.00")),
+        (Decimal("759.86"), Decimal("379.93"), Decimal("2279.58")),
+        # The stop needs rounding, the target does not: 0.33 * 0.5 = 0.165 truncates to
+        # 0.16, while 0.33 * 3 = 0.99 is already exact.
+        (Decimal("0.33"), Decimal("0.16"), Decimal("0.99")),
+        # A third-of-a-cent entry forces the stop DOWN and the target UP at once:
+        # 1.005 * 0.5 = 0.5025 -> 0.50, and 1.005 * 3 = 3.015 -> 3.02.
+        (Decimal("1.005"), Decimal("0.50"), Decimal("3.02")),
     ],
 )
 def test_levels_quantize_away_from_the_entry_price(entry: Decimal, stop: Decimal, take: Decimal) -> None:
@@ -95,7 +100,7 @@ def test_a_non_positive_or_non_finite_anchor_is_refused(bad: Decimal) -> None:
 
 
 def test_the_tolerance_is_one_cent_and_is_inclusive_at_the_boundary() -> None:
-    desired = Decimal("569.89")
+    desired = Decimal("379.93")
     assert core_exit_level_satisfied(observed=desired, desired=desired)
     assert core_exit_level_satisfied(observed=desired + CORE_EXIT_RATE_TOLERANCE, desired=desired)
     assert core_exit_level_satisfied(observed=desired - CORE_EXIT_RATE_TOLERANCE, desired=desired)
@@ -111,7 +116,7 @@ def test_an_absent_or_unreadable_rate_is_never_satisfied(absent: Decimal | None)
     written without the finiteness guard would return False and read as "satisfied
     is False" by luck rather than by rule.  The guard makes it deliberate.
     """
-    assert not core_exit_level_satisfied(observed=absent, desired=Decimal("569.89"))
+    assert not core_exit_level_satisfied(observed=absent, desired=Decimal("379.93"))
 
 
 def _owned(*, is_core: bool) -> _OwnedPosition:
@@ -123,8 +128,8 @@ def _owned(*, is_core: bool) -> _OwnedPosition:
         instrument_id=3417,
         is_core=is_core,
         deployment_id=None if is_core else 7,
-        entry_stop=None if is_core else Decimal("569.89"),
-        entry_take_profit=None if is_core else Decimal("1519.72"),
+        entry_stop=None if is_core else Decimal("379.93"),
+        entry_take_profit=None if is_core else Decimal("2279.58"),
         max_position_age_seconds=None,
         max_quote_age_seconds=None if is_core else 750,
         ratchet_variant_id=None,
@@ -155,8 +160,8 @@ def test_a_core_edit_that_landed_one_cent_off_is_recognised_as_applied() -> None
     """The consistency bug Codex checkpoint 2 found, and the worse half of it.
 
     The core arm DECIDES with a one-cent tolerance, so the resume path must JUDGE with
-    the same rule.  With exact equality there instead, an edit that landed at 569.90
-    against an intent of 569.89 resolves as not-landed — and the two consequences are
+    the same rule.  With exact equality there instead, an edit that landed at 379.94
+    against an intent of 379.93 resolves as not-landed — and the two consequences are
     both bad in the quiet direction: an ``intent_persisted`` operation is recorded
     ``reconcile_required`` despite having applied, and a ``submitted`` one stays
     ``broker_edit_pending`` forever.  ``_resume_operation`` runs before close handling,
@@ -165,9 +170,9 @@ def test_a_core_edit_that_landed_one_cent_off_is_recognised_as_applied() -> None
     """
     landed = _edit_landed(
         owned=_owned(is_core=True),
-        position=_broker_position(stop=Decimal("569.90"), take=Decimal("1519.72")),
-        desired_stop=Decimal("569.89"),
-        desired_take=Decimal("1519.72"),
+        position=_broker_position(stop=Decimal("379.94"), take=Decimal("2279.58")),
+        desired_stop=Decimal("379.93"),
+        desired_take=Decimal("2279.58"),
     )
     assert landed is True
 
@@ -180,9 +185,9 @@ def test_the_signal_arm_keeps_exact_equality() -> None:
     """
     landed = _edit_landed(
         owned=_owned(is_core=False),
-        position=_broker_position(stop=Decimal("569.90"), take=Decimal("1519.72")),
-        desired_stop=Decimal("569.89"),
-        desired_take=Decimal("1519.72"),
+        position=_broker_position(stop=Decimal("379.94"), take=Decimal("2279.58")),
+        desired_stop=Decimal("379.93"),
+        desired_take=Decimal("2279.58"),
     )
     assert landed is False
 
@@ -193,15 +198,15 @@ def test_a_cleared_exit_never_reads_as_landed_on_either_arm(is_core: bool) -> No
     assert not _edit_landed(
         owned=_owned(is_core=is_core),
         position=_broker_position(stop=None, take=None),
-        desired_stop=Decimal("569.89"),
-        desired_take=Decimal("1519.72"),
+        desired_stop=Decimal("379.93"),
+        desired_take=Decimal("2279.58"),
     )
     # And a missing position is not evidence of anything.
     assert not _edit_landed(
         owned=_owned(is_core=is_core),
         position=None,
-        desired_stop=Decimal("569.89"),
-        desired_take=Decimal("1519.72"),
+        desired_stop=Decimal("379.93"),
+        desired_take=Decimal("2279.58"),
     )
 
 
@@ -238,4 +243,4 @@ def test_the_declared_percentages_are_the_ones_the_operator_chose() -> None:
     goes stale silently and in the place a reader trusts most, which is why the repo
     rule is to compute it or cite where it is computed — never to duplicate it.
     """
-    assert (CORE_STOP_LOSS_PCT, CORE_TAKE_PROFIT_PCT) == (Decimal("25"), Decimal("100"))
+    assert (CORE_STOP_LOSS_PCT, CORE_TAKE_PROFIT_PCT) == (Decimal("50"), Decimal("200"))
