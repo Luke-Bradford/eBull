@@ -9758,3 +9758,65 @@ original, because the gate now *looked* like a bound.
   `scripts/ab_2840_barseries_row_immutability.py::_attachment_census` (per arm, per
   commit, with the reason in its docstring);
   `docs/proposals/ta/2026-09-21-2840-barseries-row-immutability.md` §5.
+
+## An inventory of WHICH function is called does not constrain WHAT it is passed (#2840, 2026-09-21)
+
+- Symptom: a spec proposed closing #2840 §8 obligation (a) — the carrier's price source sits
+  outside every identity hash — by declaring the permitted carrier constructors per module,
+  digesting the declaration into `S12_PARAMS`, and pinning the declaration against an AST walk
+  that extracts every call to a constructor imported from `strategy_price_basis`. The walk was
+  attacked with seven evasions and caught five, including the two the prior session had named
+  as the construction's stated holes (alias import, wrapper indirection). It looked complete.
+- It is not. Codex checkpoint 1 produced an eighth evasion needing no trick at all: at
+  `backtest_run.py:3254`, substitute the literal `"unadjusted"` for
+  `archive_adjustment_basis`. The **constructor set is unchanged**, so the declaration matches
+  and the pin passes, while `from_archive_basis` flips from refuse-all to certify-all — 61 of
+  175 verdict labels move, including a new firing, under a byte-identical `strategy_version`.
+- ⚠ The general form: a call-site inventory keyed on the CALLEE is blind to the ARGUMENT, and
+  for any routing function the argument is usually where the routing lives. The same hole
+  admits reversing a branch condition, swapping branches, or changing the upstream resolver —
+  every constructor name intact.
+- ⚠ Second half, and it is the part that makes such a gate actively harmful: the attacks this
+  pin DID catch were already caught behaviourally by an existing test (`ac107806`'s
+  `tests/test_2840_carrier_source_selection.py`). A second gate on a class already covered,
+  which misses the class that matters, reads as coverage and is worse than no gate.
+- Prevention: before writing a gate that enumerates call sites, ask **what decides the
+  outcome at that call site** — the callee, the argument, the branch, or an upstream resolver
+  — and write down which of those the gate can see. If the answer is "only the callee", the
+  gate constrains naming and nothing else. Then check whether an existing test already covers
+  that same class; if it does, the new gate must be justified by the class it adds, not by the
+  class it repeats. Applies to every AST-walk gate in this repo, including
+  `tests/test_job_registry.py::TestOrchestratorAdapterSourceCoverage` (which is sound because
+  the `job_name` literal IS the routed value, not a function name).
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-21-2840-carrier-source-route-declaration.md` §3 and §5.
+
+## An `if TYPE_CHECKING:` import is still an import to an AST-based reachability walk (#2840/#3031, 2026-09-21)
+
+- Symptom: to make a forged certification unconstructible, a spec proposed narrowing
+  `strategy_price_basis.from_archive_basis` from `str | None` to `ArchivePolicy | None` — a
+  type minted only by `strategy_entry_liquidity.archive_policy_for()` over the pinned archive
+  register — so that `from_archive_basis("unadjusted", …)` becomes a pyright error at the
+  pre-push gate. The runtime cost was to be avoided by importing the type under
+  `if TYPE_CHECKING:`, which `from __future__ import annotations` makes free.
+- It is not free here. `tests/test_strategy_registry.py::TestTheEngineIsWalkedTooNotJust
+  TheStrategies._closure` walks the scan's import closure with `ast.walk`, so a type-only
+  import is an `ast.ImportFrom` like any other. Probed — add the import, run the test:
+  `AssertionError: these versioned rule sets are reachable from the signal scan but are hashed
+  into no strategy identity … ['app.services.market_calendar.RULE_SET_VERSION = …',
+  'app.services.strategy_entry_liquidity.ENTRY_LIQUIDITY_RULE_VERSION = …']`. That is #3031
+  verbatim — the defect `strategy_price_basis.py:68-78` records having just fixed by *stopping*
+  reaching `strategy_decision_context`.
+- ⚠ The trap is that `TYPE_CHECKING` reads as "costs nothing at runtime", which is true of the
+  interpreter and false of any static analysis keyed on imports — reachability walks, layering
+  lints, dependency-cycle checks, import-graph tests. Runtime cost and static visibility are
+  different questions and the idiom only answers the first.
+- Prevention: before adding ANY import to a module inside a guarded import closure — including
+  a `TYPE_CHECKING` one — run the closure test first and read what the new edge drags in. In
+  this repo that is one command:
+  `uv run pytest "tests/test_strategy_registry.py::TestTheEngineIsWalkedTooNotJustTheStrategies"`.
+  If the target module carries a `*_RULE_VERSION` or imports one transitively, the import is a
+  settled-decision question (hash it into every identity, or do not reach it), not a typing
+  convenience.
+- Enforced in: this entry;
+  `docs/proposals/ta/2026-09-21-2840-carrier-source-route-declaration.md` §4.
