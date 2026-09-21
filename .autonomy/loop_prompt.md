@@ -175,10 +175,13 @@ researched it enough to escalate — research it first.
       two and see whether the block was ever re-checked;
    3. **end the iteration and spend nothing further.** Sleeping is the correct output.
 
-   ⚠ **This rule is auditable and will be audited.** An iteration that reports a blocked
-   queue and then opens a board-fallback PR anyway is a rule violation visible in one
-   query — the run note says "blocked", the PR says otherwise. Say which queue ticket you
-   took, every time.
+   ⚠ **This rule is audited by a script, not by good intentions:**
+   `scripts/audit_loop_discipline.sh [days]` pairs each run's own verdict text against the
+   PRs it opened and exits non-zero on a contradiction — a run that reports a blocked queue
+   and opens a board-fallback PR anyway. It found two such iterations in the three days to
+   2026-09-21. **Say which queue ticket you took, every time**, and name the wake condition
+   on the ISSUE (the issue is the source of truth; the run note may summarise it in its own
+   words — no string matching is required).
 
    **Board fallback is NOT the default for a blocked queue.** It is allowed only when the
    queue is genuinely COMPLETE — every ticket closed, none parked. Measured 2026-09-18 →
@@ -251,6 +254,9 @@ researched it enough to escalate — research it first.
    line exists so the review bot and the operator can CONTEST it on the PR. A diff whose
    declared rung the bot disputes is treated as the HIGHER rung — re-run at that rung
    before merging, and say so in the resolution comment.
+   `scripts/audit_loop_discipline.sh` reports every merged PR that declared no rung at all.
+   ⚠ It cannot verify that a DECLARED rung was the right one — only a reader can. The
+   declaration exists to give that reader something specific to disagree with.
 
    ⚠ A ckpt-1 prompt names exact files and line ranges. An open-ended "also read
    `app/services/…`" makes Codex crawl the repo at high reasoning — those prompts measured
