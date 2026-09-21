@@ -78,6 +78,30 @@ logger = logging.getLogger("ab_2840_barseries")
 _UNIVERSES = ("survivor_only", "survivorship_free")
 _MASKED_REASON = "quarantined_bar"
 
+#: ⚠ Feeds EVERY cell digest once per instrument, before that instrument's
+#: parts and even when it produced none (Codex checkpoint 2, P2). Without it the
+#: digest is one undelimited stream, so "instrument A loses result M and
+#: instrument B gains the same M" hashes IDENTICALLY in both arms — and the
+#: `evaluated` / `cell_parts` counts stay equal too, so nothing else catches it.
+#: A per-item boundary is what makes a streamed digest a comparison of the
+#: sequence rather than of the concatenation.
+_MARK = "@{}"
+
+#: ⚠⚠ EXCLUDED FROM THE OUTPUT ENCODING BECAUSE THEY ARE THE PERMITTED CHANGE.
+#: ``CrossSectionalMember`` carries ``inputs``/``score``, which are
+#: ``IndicatorSeries``, which carry ``rule_set_version`` — and this diff rotates
+#: exactly that. The first run reported "VERDICTS MOVED in 8 cells", every one a
+#: `flat` cross-sectional cell, and the movement was the identity rotation
+#: appearing inside the payload rather than any change in behaviour. Per-series
+#: signals were unaffected because `_signal_parts` never touches provenance, and
+#: `StagedMember` has no `inputs` — which is why exactly the 8 cells that CAN
+#: carry it were the 8 that moved.
+#:
+#: ⚠ Excluding them is safe only because they are asserted SEPARATELY, in
+#: `_compare`, as having actually rotated. Dropping a field from a comparison
+#: without checking it elsewhere would be hiding it.
+_PROVENANCE_FIELDS = frozenset({"rule_set_version"})
+
 #: ⚠ Counts BarSeries construction and bars copied, so the cost claim is an
 #: end-to-end measurement rather than a per-bar microbenchmark extrapolated
 #: (ckpt-1 finding 28). Every sub-series build re-copies, and those are what a
@@ -121,14 +145,31 @@ class _RunningDigest:
         return self._hash.hexdigest()[:16]
 
 
-def _corpus_parts(series: BarSeries) -> list[str]:
-    """The INPUT, digested per bar. This is what makes the two arms comparable:
-    if a concurrent write moved a bar, these differ and the comparison refuses
-    rather than attributing the difference to the diff."""
+def _corpus_parts(instrument_id: int, series: BarSeries, breaks: tuple[date, ...]) -> list[str]:
+    """The INPUT, digested per instrument. This is what makes the two arms
+    comparable: if a concurrent write moved an input, these differ and the
+    comparison refuses rather than attributing the difference to the diff.
+
+    ⚠ THE UNRESOLVED BREAKS ARE PART OF THE INPUT, and the first version left
+    them out (Codex checkpoint 2, P2). They are not price data, so it is easy to
+    think of the bars as "the corpus" — but they are passed to
+    ``segmented_signals`` and ``segmented_member``, where they cut the series and
+    reset strategy state. A break created or resolved between the two snapshots
+    while the OHLCV rows stood still would have left the corpus digests MATCHING
+    and the outputs differing, which is precisely the drift this digest exists to
+    refuse.
+
+    ⚠ The instrument id leads, so the digest cannot absorb a shift across an
+    instrument boundary.
+    """
     return [
-        f"{day.isoformat()}|{row.get('open')!r}|{row.get('high')!r}|{row.get('low')!r}"
-        f"|{row.get('close')!r}|{row.get('volume')!r}"
-        for day, row in zip(series.dates, series.rows, strict=True)
+        f"@{instrument_id}",
+        "breaks:" + ",".join(day.isoformat() for day in breaks),
+        *(
+            f"{day.isoformat()}|{row.get('open')!r}|{row.get('high')!r}|{row.get('low')!r}"
+            f"|{row.get('close')!r}|{row.get('volume')!r}"
+            for day, row in zip(series.dates, series.rows, strict=True)
+        ),
     ]
 
 
@@ -158,7 +199,11 @@ def _encode(value: Any) -> str:
     if value is None or isinstance(value, bool | int | float | str | date):
         return repr(value)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        fields = ",".join(f"{f.name}={_encode(getattr(value, f.name))}" for f in dataclasses.fields(value))
+        fields = ",".join(
+            f"{f.name}={_encode(getattr(value, f.name))}"
+            for f in dataclasses.fields(value)
+            if f.name not in _PROVENANCE_FIELDS
+        )
         return f"{type(value).__name__}({fields})"
     if isinstance(value, frozenset | set):
         # Sorted by encoding, not by value — the members may not be orderable.
@@ -201,9 +246,9 @@ def _measure(limit: int) -> dict[str, Any]:
                 series = load_masked_bars(conn, instrument_id).series
                 if len(series) < 2:
                     continue
-                corpus.update(_corpus_parts(series))
                 regime = unconstrained_regime(len(series))
                 instrument_breaks = tuple(breaks.get(instrument_id, ()))
+                corpus.update(_corpus_parts(instrument_id, series, instrument_breaks))
 
                 for uni in _UNIVERSES:
                     for route in ("undeclared", "certified"):
@@ -224,7 +269,9 @@ def _measure(limit: int) -> dict[str, Any]:
                                 seg = segmented_signals(entry, series, unresolved_breaks=instrument_breaks, **common)  # type: ignore[arg-type]
                                 for shape, produced in (("flat", flat), ("segmented", seg)):
                                     key = f"{sid}|{uni}|{route}|{shape}"
-                                    cells.setdefault(key, _RunningDigest()).update(_signal_parts(produced))
+                                    cells.setdefault(key, _RunningDigest()).update(
+                                        [_MARK.format(instrument_id), *_signal_parts(produced)]
+                                    )
                                     evaluated[key] += 1
                             elif entry.member is not None:
                                 panel = frozenset(series.dates)
@@ -238,8 +285,12 @@ def _measure(limit: int) -> dict[str, Any]:
                                 )
                                 for shape, member in (("flat", flat_m), ("segmented", seg_m)):
                                     key = f"{sid}|{uni}|{route}|{shape}"
-                                    if member is not None:
-                                        cells.setdefault(key, _RunningDigest()).update(_member_parts(member))
+                                    cells.setdefault(key, _RunningDigest()).update(
+                                        [
+                                            _MARK.format(instrument_id),
+                                            *([] if member is None else _member_parts(member)),
+                                        ]
+                                    )
                                     evaluated[key] += 1
                 if seen % 250 == 0:
                     logger.info("… %d/%d instruments", seen, len(eligible))

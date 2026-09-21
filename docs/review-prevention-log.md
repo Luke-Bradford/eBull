@@ -9673,3 +9673,88 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry;
   `docs/proposals/ta/2026-09-21-2840-carrier-source-selection-tripwire.md` §5 (carries the
   reproduction and the corrected guard inventory).
+
+## A fix written to close one failure mode is not examined for the ones it INTRODUCES (#2840, 2026-09-21)
+
+- Symptom: revision 2 of a spec added `__getstate__` / `__setstate__` to `BarSeries`
+  because wrapping its rows in `MappingProxyType` would otherwise have broken `pickle`
+  and `copy.deepcopy` silently. The hook was added specifically to avoid a silent
+  capability loss — and it introduced a worse defect than the one it prevented:
+  `__setstate__` did `self.__dict__.clear()` and *then* `self.__init__(**state)`, so a
+  malformed payload raised correctly and left an **existing, previously valid instance**
+  empty or length-inconsistent. `__setstate__` is reachable on a live object, not only on
+  a fresh one being unpickled.
+- Root cause: a destructive-on-error path **reads as safe**, because the error is raised
+  and the raise is the thing under review. Nothing in the diff looks like data loss; the
+  loss is in what the object is left holding after the exception propagates. The whole
+  round's attention was on the failure mode being closed (silent breakage), so the new
+  one arrived unexamined.
+- Prevention: when a fix mutates state that already exists, **commit last**. Build and
+  validate the replacement, then install it — `replacement = type(self)(**state)` before
+  any `clear()`. Test prompt: for every raise a fix introduces, assert the target's state
+  *after* the raise, not just the raise. Grep tell: `clear()`, `del`, `= None` or
+  `object.__setattr__` appearing BEFORE the validation they depend on in the same method.
+- ⚠ Generalises past `__setstate__`: any in-place "replace the contents of X" routine has
+  this shape, and the ones reached from a deserialization hook are the least likely to be
+  exercised with a bad payload in a test.
+- Enforced in: this entry;
+  `app/services/indicator_series.py::BarSeries.__setstate__` (validate-then-commit, with
+  the reason in a comment);
+  `tests/test_2840_barseries_row_immutability.py::TestReconstruction::
+  test_a_malformed_payload_is_refused_AND_leaves_the_instance_intact` (three malformed
+  payloads, each asserting the instance survives);
+  `docs/proposals/ta/2026-09-21-2840-barseries-row-immutability.md` §4.5.
+
+## An accumulate-then-digest measurement is an OOM waiting for the full population (#2840, 2026-09-21)
+
+- Symptom: a full-population A/B built a `list[str]` per compared cell and joined it at
+  the end to take one sha256. It was correct, and it passed a 3-instrument smoke and a
+  5-instrument smoke. On the real population it reached **2.5 GB RSS within 2.5 minutes**
+  and was on track for ~48 GB — 5,797 instruments x 96 cells x one string per emitted
+  signal, plus one per corpus bar. Caught by watching `ps -o rss` on the running process,
+  not by any test.
+- Root cause: the smoke exercises correctness, not the term that grows. A digest looks
+  O(1) in the output and is O(n) in the accumulator, and the accumulator is invisible in
+  every small run. The rewrite — feed `hashlib.sha256` incrementally, one `update()` per
+  part with a separator — preserves order and multiplicity exactly and holds at **125 MB
+  over 200 instruments**.
+- ⚠ An A/B that OOMs halfway produces NO evidence, so this is not a performance nit: it
+  is the difference between having a corpus-rung result and having nothing. And it fails
+  late, after the expensive part, which is the worst time to discover it.
+- Prevention: before launching any full-population sweep, run a bounded slice under
+  `/usr/bin/time -l` and read **maximum resident set size**, not just wall-clock. If any
+  per-item structure is appended to and consumed only at the end, convert it to a running
+  aggregate first. Grep tell in a sweep script: `.append(` / `.extend(` into a dict of
+  lists inside the per-instrument loop, with the consumer after the loop.
+- Enforced in: this entry;
+  `scripts/ab_2840_barseries_row_immutability.py::_RunningDigest` (carries the measured
+  2.5 GB -> 125 MB figures in its docstring);
+  `docs/proposals/ta/2026-09-21-2840-barseries-row-immutability.md` §7.1.
+
+## A census against a SELF-HASHING module's "current" identity is circular after the first edit (#2840, 2026-09-21)
+
+- Symptom: a spec justified an identity rotation with *"982,051 stored rows, 0 attached to
+  any current identity — the rotation detaches nothing"*. The query was right and the
+  inference was not safe: `indicator_series.py` hashes **its own source** into
+  `RULE_SET_VERSION`, which `strategy_registry.INPUT_RULE_SETS` carries into every
+  `strategy_version`. So a census run from the **candidate** checkout reports zero
+  attachment *by construction* — the edit has already detached everything — and cannot be
+  distinguished from "nothing was ever attached".
+- ⚠ The same draft inferred watermark state from the ledger counts. It does not follow:
+  `strategy_scan_watermark` is an independent table and needs its own query. (The answer
+  happened to be the same; the reasoning did not establish it.)
+- ⚠ And the published procedure was not executable — `entry.identity(universe=u)` raises
+  `TypeError`, because `cost_model_id` is required. A disposition nobody can re-run is not
+  evidence.
+- Prevention: take the census **from the baseline commit**, and make it travel with the
+  measurement rather than being quoted loose in prose — the census belongs inside the A/B
+  harness, computed per arm against that arm's own identities and written into its JSON.
+  State in advance what a NON-zero answer means: here `--compare` warns and requires a
+  recorded disposition rather than failing, because a rotation that detaches live evidence
+  is a decision, not an error. ⚠ Affects every self-hashing constant in this repo:
+  `price_quarantine`, `price_structure`, `indicator_series`, `position_builder`,
+  `outcome_resolver`, `strategy_price_basis`, and each `s*_identity`.
+- Enforced in: this entry;
+  `scripts/ab_2840_barseries_row_immutability.py::_attachment_census` (per arm, per
+  commit, with the reason in its docstring);
+  `docs/proposals/ta/2026-09-21-2840-barseries-row-immutability.md` §5.

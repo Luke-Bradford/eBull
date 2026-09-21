@@ -326,26 +326,65 @@ reached the identity, which is its own defect:
    `strategy_price_basis.py`'s bytes are inside it, which is inside S-12's params.
    ⚠ Revision 2 named only the first.
 
-### ⚠⚠ The census must be taken from the BASELINE commit, and revision 2's was circular
+### ⚠⚠ Revision 2's census was WRONG, not merely circular — the rotation DOES detach evidence
 
-`indicator_series` hashes its own source. So a census run from the **candidate** checkout
-reports zero attachment **by construction** — the edit has already detached everything —
-and cannot distinguish that from "nothing was ever attached". The question only the
-baseline arm can answer is *did this rotation detach evidence that was still live*.
+Revisions 1 and 2 both claimed *"982,051 stored rows, 0 attached to any current
+identity ⇒ the rotation detaches nothing"*. **That is false.** Measured from the
+baseline commit `b9b2a1e5`, with a working identity call:
 
-The census therefore travels **inside the A/B measurement**, computed per arm against
-that arm's own identities and written into its JSON with its commit. It is not a loose
-figure quoted in prose.
+| table | rows | groups | **attached to a baseline identity** |
+| --- | ---: | ---: | ---: |
+| `strategy_signal_observations` | 922,821 | 39 | **17,278** |
+| `strategy_signals` | 59,230 | 28 | **95** |
+| `strategy_scan_watermark` | 39 | 39 | **3** |
 
-⚠ Revision 2's §5 also published `entry.identity(universe=u)` as the procedure. That is
-not executable: it raises `TypeError`, because `cost_model_id` is required. The script
-uses `entry.identity(universe=u, cost_model_id=COST_MODEL_ID)`, and the published
-procedure is now the script plus its commit rather than a prose snippet.
+and it is attached to exactly the three **non-retired** strategies that are still
+scanned:
 
-Tables censused: `strategy_signals`, `strategy_signal_observations`,
-`strategy_scan_watermark`. The last is there because revision 2 **inferred** watermark
-state from the ledger count and ckpt-1 was right that it does not follow — it is an
-independent table.
+```
+s11-volatile-regime-gated-breakout  +ecba35b65758   obs 5,791   watermark 1
+s4-volatility-compression-breakout  +380cda962c76   obs 5,719   signals 72   watermark 1
+s8-range-mean-reversion             +7e647ca87579   obs 5,768   signals 23   watermark 1
+```
+
+(S-12 contributes nothing: `b9b2a1e5` established its 5,791 rows already sit on a third
+version.)
+
+**How the wrong number was produced, because the mechanism matters more than the
+number.** The original census called `entry.identity(universe=u)`, which raises
+`TypeError` — `cost_model_id` is required. It was wrapped in a `try` that stored
+`"ERR:TypeError"` as the version, so **every** comparison key was a sentinel that could
+never match a stored row, and the intersection was empty **by construction**. The SQL was
+right; the thing it was intersected against was a list of error strings.
+
+⚠⚠ Checkpoint 1 *did* flag the non-executable call (finding 26) and I fixed the script
+while filing it as a documentation nit — I did not re-examine the measurement that the
+same call had produced. **A broken call reported as a documentation problem is still a
+broken measurement.** The harness census caught it on a 4-instrument smoke, which is the
+argument for putting the census inside the measurement rather than in prose.
+
+### Why the detachment is correct, and what it costs
+
+Detaching is the **deliberate inherited trade**, not a defect: `indicator_series.py`
+lines 61-63 say over-invalidation makes previously stored signals *"visibly stale rather
+than silently mixed"*, and prevention-log #3017 requires the indicator rule set to feed
+`strategy_version` precisely so this happens. A change to how an indicator is computed
+**is** a change to the strategy's filter logic.
+
+The operational cost is the three watermarks. A new `strategy_version` has no watermark,
+so the next scan of S-4, S-8 and S-11 takes `write_window_indices`' **cold-start branch**
+— at most one eligible bar per instrument, deliberately, because the spec forbids
+backfill. Their 17,278 observation rows remain readable under their old version; nothing
+is deleted and nothing is rewritten. ⚠ This is the same consequence `b9b2a1e5` recorded
+for S-12, now arriving for the other three.
+
+### The census must be taken from the BASELINE commit
+
+`indicator_series.py` hashes **its own source**. So a census run from the **candidate**
+checkout reports zero attachment *by construction* — the edit has already detached
+everything — and cannot be distinguished from "nothing was ever attached". The census
+therefore travels **inside** the A/B measurement, computed per arm against that arm's own
+identities and written into its JSON with its commit.
 
 ### Disposition if the baseline census is non-zero
 
