@@ -242,8 +242,15 @@ RatioBasisMethod = Literal["split_corrected", "vendor_already_adjusted"]
 # by an after-fetch slice — see the module docstring's first consequence.
 _FACTOR_SQL: Final = """
     SELECT d.bar_date,
-           d.split_factor
+           d.split_factor,
+           -- ⚠ READ IN THE SAME STATEMENT AS THE FACTORS (review bot, PR #3285).
+           -- Under READ COMMITTED two statements see two snapshots, so a
+           -- separate marker read could pair this series' bars with a marker
+           -- that no longer describes them — and the marker is the GATE on
+           -- whether dividing is defined at all. One statement, one snapshot.
+           s.corporate_action_stamps
     FROM research_price_daily d
+    JOIN research_price_series s ON s.series_id = d.series_id
     JOIN research_price_quarantine_coverage cov
       ON cov.series_id = d.series_id
      AND cov.rule_set_version = %(quarantine_version)s
@@ -252,8 +259,6 @@ _FACTOR_SQL: Final = """
       AND (%(through_date)s::date IS NULL OR d.bar_date <= %(through_date)s::date)
     ORDER BY d.bar_date
 """
-
-_MARKER_SQL: Final = "SELECT corporate_action_stamps FROM research_price_series WHERE series_id = %(series_id)s"
 
 
 @dataclass(frozen=True)
@@ -333,10 +338,13 @@ def load_split_factors(
         _FACTOR_SQL,
         {"series_id": series_id, "quarantine_version": QUARANTINE_RULE_SET_VERSION, "through_date": through_date},
     ).fetchall()
-    marker_row = conn.execute(_MARKER_SQL, {"series_id": series_id}).fetchone()
     dates = tuple(row[0] for row in rows)
     factors = tuple(row[1] for row in rows)
-    return dates, factors, (marker_row[0] if marker_row else None)
+    # ⚠ A series with no bars in range yields no rows and therefore no marker.
+    # `None` is refused by `require_correctable` with every other non-member,
+    # which is the right answer: an empty read certifies nothing.
+    marker = rows[0][2] if rows else None
+    return dates, factors, marker
 
 
 def _corrected_row(row: ReadOnlyOHLCVRow, scale: Decimal) -> tuple[OHLCVRow, Decimal | None]:

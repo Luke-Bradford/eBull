@@ -488,10 +488,7 @@ WITH bars AS (
            -- #2834 §7 slice C. ⚠ ROUTED, not COALESCEd: `split_factor` is NULL
            -- across every bar of the `split_adjusted` vendor, so a bare
            -- COALESCE(...,1) would read "this vendor ships no stamps"
-           -- identically to "no split on this bar". Only an `unadjusted` series
-           -- carrying `vendor_supplied` stamps is corrected; everything else
-           -- takes a literal 1, which is the same routing
-           -- `research_split_corrected_reader.ratio_basis_method_for` applies.
+           -- identically to "no split on this bar".
            CASE
                WHEN s.adjustment_basis = 'unadjusted' AND s.corporate_action_stamps = 'vendor_supplied'
                THEN d.split_factor
@@ -508,6 +505,25 @@ WITH bars AS (
      AND q.bar_date = d.bar_date
      AND q.rule_set_version = %(version)s
     WHERE d.series_id = ANY(%(ids)s)
+      -- ⚠⚠ THE REFUSAL IS A PREDICATE, NOT A FALL-THROUGH (review bot, PR #3285).
+      -- The CASE above sends every un-named shape to a literal 1, which for
+      -- `unadjusted` + `absent` means NO CORRECTION — while
+      -- `research_split_corrected_reader.ratio_basis_method_for` RAISES on
+      -- exactly that shape (as-traded bars whose corporate actions are
+      -- unknown: neither basis is a return). An oracle that silently scores a
+      -- series the production reader refuses is not an independent derivation
+      -- of the same rule, it is a different rule that happens to agree most of
+      -- the time. Restricting the population here makes the two arms disagree
+      -- LOUDLY on such a series — Python raises, and this returns no row for
+      -- it — instead of quietly.
+      --
+      -- ⚠ NOT expressible as `ELSE NULL`: SQL's `sum()` SKIPS nulls, so a
+      -- series with some null factors would silently sum the rest and return a
+      -- plausible scale. The predicate is the only form that cannot do that.
+      AND (
+            (s.adjustment_basis = 'unadjusted'     AND s.corporate_action_stamps = 'vendor_supplied')
+         OR (s.adjustment_basis = 'split_adjusted' AND s.corporate_action_stamps <> 'vendor_supplied')
+      )
 ),
 calendar AS (
     SELECT bar_date, lag(bar_date) OVER (ORDER BY bar_date) AS previous
