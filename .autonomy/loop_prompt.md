@@ -170,8 +170,15 @@ researched it enough to escalate — research it first.
       acceptance evidence for scenario B is posted on this issue", "wake after
       2026-09-24 when the 5 sessions have closed"). A block with no wake condition is
       re-discovered from scratch every cycle, and the re-discovery costs a full startup;
-   2. write the run note saying the queue is blocked and naming what would unblock it;
+   2. write the run note saying the queue is blocked and naming what would unblock it —
+      **the same wake condition text as on the issue**, so a later session can diff the
+      two and see whether the block was ever re-checked;
    3. **end the iteration and spend nothing further.** Sleeping is the correct output.
+
+   ⚠ **This rule is auditable and will be audited.** An iteration that reports a blocked
+   queue and then opens a board-fallback PR anyway is a rule violation visible in one
+   query — the run note says "blocked", the PR says otherwise. Say which queue ticket you
+   took, every time.
 
    **Board fallback is NOT the default for a blocked queue.** It is allowed only when the
    queue is genuinely COMPLETE — every ticket closed, none parked. Measured 2026-09-18 →
@@ -237,7 +244,15 @@ researched it enough to escalate — research it first.
    one-line authorisation or cost-constant edit is behavioural, a 300-line test-only diff
    is narrow.
 
-   ⚠ **A ckpt-1 prompt names exact files and line ranges.** An open-ended "also read
+   ⚠⚠ **DECLARE THE RUNG IN THE PR DESCRIPTION — one line, with the reason.** e.g.
+   *"Rung: narrow/mechanical — renames a local variable and its two call sites; no data
+   semantics, no authorisation surface, no corpus effect. No spec, no Codex."* The rung is
+   a self-classification, and a self-classification nobody can see is not reviewable: the
+   line exists so the review bot and the operator can CONTEST it on the PR. A diff whose
+   declared rung the bot disputes is treated as the HIGHER rung — re-run at that rung
+   before merging, and say so in the resolution comment.
+
+   ⚠ A ckpt-1 prompt names exact files and line ranges. An open-ended "also read
    `app/services/…`" makes Codex crawl the repo at high reasoning — those prompts measured
    1.3–2.0M input tokens each in two turns, and were 59M of the 115M spent in the five
    days to 09-18.
