@@ -61,7 +61,7 @@ from typing import Final, Literal, get_args
 
 from app.services.indicator_series import BarSeries
 from app.services.research_corpus_ingest import RESEARCH_ARCHIVES
-from app.services.technical_analysis import OHLCVRow
+from app.services.technical_analysis import ReadOnlyOHLCVRow
 
 #: The provenance of a nominal price level — ``sql/305``'s CHECK, executable.
 #:
@@ -151,7 +151,7 @@ _BOUND_FIELDS: Final = ("open", "high", "low", "close", "volume")
 _BINDING_SEP: Final = "|"
 
 
-def bind_bar(day: date, row: OHLCVRow) -> str:
+def bind_bar(day: date, row: ReadOnlyOHLCVRow) -> str:
     """One bar, encoded so a carrier can be checked against the bars it certifies.
 
     ⚠⚠ ``repr`` PER FIELD, AND EVERY CHEAPER FORM WAS REFUSED AT CHECKPOINT 1.
