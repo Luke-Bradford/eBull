@@ -192,15 +192,23 @@ _DIVIDEND_FIELD: Final[int] = _INTRADER_COLUMNS.index("dividend")
 #: The independent split-adjusted vendor Phase B validates against (sql/251).
 _REFERENCE_VENDOR: Final[str] = "paperswithbacktest/Stocks-Daily-Price"
 
+# ⚠ PUBLIC, and deliberately: the three constants below are the MEASUREMENT
+# CONTRACT this ticket's figures are comparable across. #3278's 15.00%, this
+# script's 14.30% and #2834's policy displacement table are only comparable
+# because all three score the same window with the same eligibility gate, so a
+# sibling measurement must IMPORT them rather than restate them. Underscoring
+# them would say "private", which would make the honest thing look like a
+# violation and the drift-prone copy look correct (#3281 review).
+
 #: s2's eligibility gate — the module ships both numbers literally (score from
 #: ``t-252``, refuse until 273 bars) and #3278 read it the same way.
-_ELIGIBILITY_BARS: Final[int] = 273
+ELIGIBILITY_BARS: Final[int] = 273
 
 #: Exploration window, IDENTICAL to #3278's so Phase C is comparable with the
 #: 15.00% it measured. Lower bound: first ``spy_chain_v1`` regime date.
 #: Upper bound clears every registered hold-out on this corpus.
-_WINDOW_START: Final[date] = date(1994, 1, 1)
-_WINDOW_END: Final[date] = date(2021, 6, 29)  # exclusive
+WINDOW_START: Final[date] = date(1994, 1, 1)
+WINDOW_END: Final[date] = date(2021, 6, 29)  # exclusive
 
 #: Phase B tolerance on ``|intrader_split / reference - 1|``. BY CONSTRUCTION:
 #: the two vendors round to different precisions (the reference stores 125.01
@@ -704,12 +712,12 @@ def measure_displacement(
     """Phase C — top-decile membership under raw close vs the split-only series."""
     params: dict[str, Any] = {
         "series_ids": list(names),
-        "window_start": _WINDOW_START,
-        "window_end": _WINDOW_END,
+        "window_start": WINDOW_START,
+        "window_end": WINDOW_END,
         "version": RULE_SET_VERSION,
         "skip": SKIP_BARS,
         "lookback": LOOKBACK_BARS,
-        "eligibility": _ELIGIBILITY_BARS,
+        "eligibility": ELIGIBILITY_BARS,
         "floor": MIN_CLOSE,
         "decile": DECILE,
         "min_cross_section": MIN_CROSS_SECTION,
@@ -989,9 +997,9 @@ def _uncorrected_pct(checks: list[EventCheck]) -> float:
 
 
 def _report_displacement(formations: list[Formation], *, stream: TextIO) -> float:
-    expected = expected_months(_WINDOW_START, _WINDOW_END)
+    expected = expected_months(WINDOW_START, WINDOW_END)
     print("\nPhase C — decile displacement, raw close vs split-only", file=stream)
-    print(f"  window     {_WINDOW_START} .. {_WINDOW_END} (exclusive)", file=stream)
+    print(f"  window     {WINDOW_START} .. {WINDOW_END} (exclusive)", file=stream)
     print(f"  quarantine {RULE_SET_VERSION}", file=stream)
     print(f"  formations {len(formations):,} of {expected:,} calendar months", file=stream)
     if not formations:
