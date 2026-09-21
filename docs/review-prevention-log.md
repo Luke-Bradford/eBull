@@ -10575,3 +10575,73 @@ written CONFIDENTLY and each failed silently in the reassuring direction.
   re-derived here" at the submit site);
   `tests/test_3284_core_exit_levels.py::TestItem1NoNakedOpen`;
   `tests/test_2603_core_executor.py::test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target`.
+
+## 2026-09-21 — a row absent from ONE table is not a loss until you have found every writer; a verdict-forking writer leaves holes by construction (#3288)
+
+- Symptom: a read-only measurement pass filed #3288 as *"every FIRED signal is dropped by the
+  scan writer — 753,331 observations, ZERO fired rows, and the fired bars are missing
+  entirely"*, and the operator promoted it to the head of Tier 1 with *"no LIVE claim about
+  signal frequency should be repeated until #3288 is fixed"*. It was measured carefully: the
+  production entry point `s8_signals()`, the production loader, 400 instruments, 31 in-window
+  fires, 0 rows for those bars in `strategy_signal_observations`, 0 downgraded. Every one of
+  those numbers is correct. **The conclusion is false, and nothing is broken.**
+- Cause: `store_strategy_observations` is a single entry point that **forks by verdict**
+  (#2448). `fired` rows go to `strategy_signals` — the durable, outcome-referenced ledger;
+  every other verdict goes to `strategy_signal_observations` — the 90-day retention
+  partition, which `store_signals` refuses to accept a `fired` row into and which the fork's
+  cross-table conflict check actively keeps disjoint. **So a fired bar leaves a hole in the
+  observations table by construction, and the hole is exactly the shape of the evidence that
+  was read as loss.** Full population at the time of filing: `strategy_signals` held
+  **59,325** fired rows, every one with a non-null `fill_bar_date` and `fill_price`; a LEFT
+  JOIN of all of them onto the observations table on the full logical key matched **0**; all
+  four of the ticket's named worked examples (instruments 1073/1011/1149/1159) were present,
+  filled and priced. `strategy_outcomes` held 805 resolved outcomes, so *"no forward evidence
+  has ever been collected"* was false too.
+- ⚠ **The documentation was already correct, already exact, and sitting on the object that was
+  queried.** `obj_description('strategy_signal_observations')` reads *"Non-fired/not-evaluable
+  signal detail retained for 90 days in monthly partitions. **Fired rows remain durable in
+  strategy_signals.** #2448."* One `\d+` in psql, or the query below, answers the whole ticket
+  before a single instrument is loaded.
+- **Prevention — the DB sibling of "never assert a CAUSE without checking whether the effect is
+  a settled decision".** That rule already says to read the docstring of the *function* that
+  produces a surprising effect. For an effect that is a missing ROW, the equivalent artefact is
+  the table's own comment and the writer's fan-out:
+
+  ```sql
+  select relname, obj_description(oid, 'pg_class')
+    from pg_class where relname = '<the table you think lost a row>';
+  ```
+  ```bash
+  rg -n "INSERT INTO <that table>|def store_" app/services/   # find EVERY writer, not the one you know
+  ```
+
+- ⚠ **The tell, and it is visible in the measurement itself: the missing rows all share one
+  field value.** Not scattered, not correlated with time, load or instrument — *every* absent
+  row was a fire and *no* fire was present. A write path that drops rows at random does not
+  produce that; a router does. **When the absent set is defined by a column's value, look for
+  a branch on that column before looking for a bug.**
+- ⚠ Second tell: the complete surface usually already exists, because whoever split the tiers
+  knew the split would hide something. Here `strategy_signal_daily_counts` is the durable
+  census over **both** tiers, and its sums reconcile exactly with each
+  (`select verdict, sum(row_count) from strategy_signal_daily_counts group by 1`). A "this
+  table is incomplete" finding that has not checked for an aggregate sibling is not finished.
+- ⚠ Third, on the quoted figure: `753,331` was reported as the size of
+  `strategy_signal_observations`. It is the `not_fired` half; the table also held 192,583
+  `not_evaluable`. **A count stated without its `group by` invites the reader to supply a
+  subject the query never had** — the same defect as the `1,282 / 395` Form 25 figure already
+  in this log. State the query.
+- ⚠ Fourth, and separable: `strategy_paper_cycle` reporting `evaluated=0` was read as
+  corroboration. It is not evidence about the ledger at all —
+  `_load_ranked_opportunities` reads `strategy_signals WHERE verdict='fired'`, i.e. the
+  correct tier, and returns nothing because `strategy_deployments` is **empty**: no strategy
+  is deployed to paper, so the query's first JOIN eliminates every row. **A downstream zero
+  is only corroboration once you have read which table it selects from.**
+- Enforced in: this prevention log; the `COMMENT ON TABLE` texts on `strategy_signals` /
+  `strategy_signal_observations` / `strategy_signal_daily_counts` (already correct — no edit
+  needed, which is the point); `app/services/strategy_observation_storage.py::store_strategy_observations`
+  (the fork and its cross-table conflict check); `app/services/signal_ledger.py::store_signals`
+  (raises on any non-`fired` row, so the boundary cannot be crossed by accident).
+  ⚠ #2448 is recorded in the table comments and those two docstrings, and **not** in
+  `docs/settled-decisions.md` (`grep -c 2448 docs/settled-decisions.md` → 0) — so working-order
+  step 2 alone would not have surfaced it, which is precisely why the `obj_description` check
+  above is the one that has to be mechanical.
