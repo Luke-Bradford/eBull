@@ -10347,3 +10347,37 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this prevention log;
   `scripts/measure_2834_split_adjustment.py::derive` (`elif close <= 0:` with the measured
   population note beside it).
+
+## 2026-09-21 — a docstring that records a decision NOT to change behaviour can be the thing that changes it (#2834 §7 slice C)
+
+- Symptom: §7 contract (a) settled that `price_quarantine` keeps reading the corpus as
+  printed rather than the split-corrected basis. The obvious home for that reasoning is
+  `price_quarantine.py`'s own module docstring — it is the module being decided about, and
+  a reader looking for "which basis do these rules read" looks there first. The edit was
+  written and was **pure prose, no logic touched**.
+- The defect: `price_quarantine.RULE_SET_VERSION` is `RULE_SET_ID + sha256(this file)`, and
+  `research_price_structure_store._LOAD_SQL` / `price_masked_bars._LOAD_SQL` both JOIN
+  `coverage.rule_set_version = %(quarantine_version)s`. That join is **fail-closed by
+  design**: a series evaluated at a stale version returns ZERO bars, not its raw bars. So a
+  docstring-only edit would have rotated the hash, matched none of the stored coverage rows
+  and silently emptied every masked read across the whole research corpus — until a
+  full-corpus quarantine re-run. Verified after reverting:
+  `select distinct rule_set_version from research_price_quarantine_coverage` returns exactly
+  the value the code computes.
+- ⚠ The direction of failure is the bad one. Nothing raises. `load_masked_series` returns an
+  empty series, which every caller already handles as "fail-closed empty" and COUNTS
+  (`run.empty_series`), so the census would have reported a plausible, fully-formed run over
+  an empty panel.
+- Test to apply: **before editing ANY module, grep it for `sha256(Path(__file__)`** (or
+  `_code_hash`, `RULE_SET_VERSION`, `_source_hash`). If the module hashes its own source,
+  its docstring is not free — a comment costs the same as a rewrite, and the cost is paid in
+  stored rows that no longer match. Decide then: is the edit worth a re-run, or does the
+  text belong in the module that RAISED the question rather than the one it is about?
+- ⚠ Same family as the already-logged `_source_hash()` note on `s2_cross_sectional_momentum`
+  (three stale claims deferred to the slice that pays the rotation anyway), and the general
+  shape is broader than either: **in this repo, source-hashed modules make documentation a
+  write to the database.** The two cases differ in blast radius — s2's rotation invalidates
+  one strategy's identities, the quarantine's empties every strategy's input.
+- Enforced in: this prevention log;
+  `app/services/research_split_corrected_reader.py` (the contract (a) decision lives there,
+  with the reason it is not in `price_quarantine` stated in the docstring itself).

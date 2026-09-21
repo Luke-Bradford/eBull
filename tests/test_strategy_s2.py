@@ -202,7 +202,12 @@ class TestRebalanceDates:
 def _member(closes: Sequence[float | None], dates: frozenset[date] | None = None):
     series = _bars(closes)
     rebals = dates if dates is not None else rebalance_dates(series.dates)
-    return series, s2_member(series, panel_rebalance_dates=rebals, universe=UNIVERSE, close_reason=REASON)
+    # These fixtures carry no split, so the two bases are the same bars and
+    # passing `series` twice is the declaration `s2_member` asks for. The
+    # correction's own behaviour is covered in TestRatioBasis below.
+    return series, s2_member(
+        series, ratio_basis=series, panel_rebalance_dates=rebals, universe=UNIVERSE, close_reason=REASON
+    )
 
 
 class TestMemberEligibility:
@@ -252,10 +257,100 @@ class TestMemberEligibility:
         with pytest.raises(ValueError, match="unknown reason code"):
             s2_member(
                 series,
+                ratio_basis=series,
                 panel_rebalance_dates=rebalance_dates(series.dates),
                 universe=UNIVERSE,
                 close_reason="made_up",  # type: ignore[arg-type]
             )
+
+
+class TestTwoBases:
+    """#2834 §7 slice C — the ratio and the floor read DIFFERENT series.
+
+    Both halves are asserted on the same fixture, because the whole decision is
+    that one input answers one question. A version that read one series for
+    both would pass exactly one of these two tests whichever series it chose.
+    """
+
+    @staticmethod
+    def _split_pair(factor: float, *, at: int) -> tuple[BarSeries, BarSeries]:
+        """As-traded bars carrying a split at ``at``, plus their ratio basis.
+
+        The as-traded path is flat in economic terms and steps by ``factor`` at
+        ``at`` — the archive's own shape. The ratio basis undoes the step, so a
+        correct reader scores this name as FLAT and an as-traded reader scores
+        the step.
+        """
+        as_traded = [100.0 if i < at else 100.0 / factor for i in range(BARS)]
+        corrected = [100.0 / factor] * BARS
+        return _bars(as_traded), _bars(corrected)
+
+    def test_the_ratio_reads_the_corrected_basis(self) -> None:
+        as_traded, ratio = self._split_pair(4.0, at=BARS - SKIP_BARS - 5)
+        member = s2_member(
+            as_traded,
+            ratio_basis=ratio,
+            panel_rebalance_dates=rebalance_dates(as_traded.dates),
+            universe=UNIVERSE,
+            close_reason=REASON,
+        )
+        last = len(as_traded) - 1
+        # Flat on the corrected basis: the split is not a return.
+        assert member.score.values[last] == pytest.approx(0.0)
+        # ...and reading the as-traded bars instead would have scored the split.
+        as_traded_score = momentum_series(as_traded, universe=UNIVERSE)
+        assert as_traded_score.values[last] == pytest.approx(-0.75)
+
+    def test_the_floor_reads_the_as_traded_basis(self) -> None:
+        """A pre-reverse-split penny name must FAIL the floor it failed at the time.
+
+        As-traded closes sit at $0.20; the corrected basis restates them to
+        $2.00 (a later 1-for-10). A floor reading the corrected level would
+        admit every one of these bars — which is §7 item 3's whole question,
+        and the direction its full-population measurement found larger.
+        """
+        as_traded = _bars([0.20] * BARS)
+        ratio = _bars([2.00] * BARS)
+        member = s2_member(
+            as_traded,
+            ratio_basis=ratio,
+            panel_rebalance_dates=rebalance_dates(as_traded.dates),
+            universe=UNIVERSE,
+            close_reason=REASON,
+        )
+        assert member.decision_indices == frozenset()
+        # The control: the same bars above the floor DO decide, so the empty set
+        # above is the floor and not some other refusal.
+        above = _bars([2.00] * BARS)
+        assert (
+            s2_member(
+                above,
+                ratio_basis=ratio,
+                panel_rebalance_dates=rebalance_dates(above.dates),
+                universe=UNIVERSE,
+                close_reason=REASON,
+            ).decision_indices
+            != frozenset()
+        )
+
+    def test_two_series_of_different_dates_are_refused(self) -> None:
+        series = _bars(_ramp(0.5))
+        other = _bars(_ramp(0.5), start=date(2021, 1, 1))
+        with pytest.raises(ValueError, match="the same bars on two bases"):
+            s2_member(
+                series,
+                ratio_basis=other,
+                panel_rebalance_dates=rebalance_dates(series.dates),
+                universe=UNIVERSE,
+                close_reason=REASON,
+            )
+
+    def test_a_panel_missing_a_ratio_member_is_refused(self) -> None:
+        """A dropped member would change N and therefore the decile cut."""
+        panel = _panel(12)
+        ratio = {key: series for key, series in panel.items() if key != 1}
+        with pytest.raises(ValueError, match="differ\\s+in key|differ in key"):
+            s2_signals(panel, ratio_panel=ratio, universe=UNIVERSE, close_reason=REASON)
 
 
 class TestSelection:
@@ -300,33 +395,38 @@ def _panel(count: int, *, n: int = BARS) -> dict[int, BarSeries]:
 
 class TestPanel:
     def test_one_leg_only(self) -> None:
-        signals = s2_signals(_panel(12), universe=UNIVERSE, close_reason=REASON)
+        signals = s2_signals(_panel(12), ratio_panel=_panel(12), universe=UNIVERSE, close_reason=REASON)
         assert {s.kind for member in signals.values() for s in member} == {"entry"}
 
     def test_one_verdict_per_bar_per_member(self) -> None:
         panel = _panel(12)
-        signals = s2_signals(panel, universe=UNIVERSE, close_reason=REASON)
+        signals = s2_signals(panel, ratio_panel=panel, universe=UNIVERSE, close_reason=REASON)
         assert signals.keys() == panel.keys()
         for key, series in panel.items():
             assert [s.signal_index for s in signals[key]] == list(range(len(series)))
 
     def test_the_top_decile_fires_and_nobody_else_does(self) -> None:
         panel = _panel(20)
-        signals = s2_signals(panel, universe=UNIVERSE, close_reason=REASON)
+        signals = s2_signals(panel, ratio_panel=panel, universe=UNIVERSE, close_reason=REASON)
         fired = {key: [s.signal_index for s in member if s.verdict == "fired"] for key, member in signals.items()}
         winners = {key for key, indices in fired.items() if indices}
         assert winners == {19, 20}
         assert fired[20] and fired[19] == fired[20]
 
     def test_a_thin_cross_section_is_refused_not_reported_as_not_fired(self) -> None:
-        signals = s2_signals(_panel(MIN_CROSS_SECTION - 1), universe=UNIVERSE, close_reason=REASON)
+        signals = s2_signals(
+            _panel(MIN_CROSS_SECTION - 1),
+            ratio_panel=_panel(MIN_CROSS_SECTION - 1),
+            universe=UNIVERSE,
+            close_reason=REASON,
+        )
         reasons = {s.reason for member in signals.values() for s in member if s.verdict == "not_evaluable"}
         assert "thin_cross_section" in reasons
         assert not [s for member in signals.values() for s in member if s.verdict == "fired"]
 
     def test_the_last_bar_of_every_member_has_no_fill(self) -> None:
         panel = _panel(12)
-        signals = s2_signals(panel, universe=UNIVERSE, close_reason=REASON)
+        signals = s2_signals(panel, ratio_panel=panel, universe=UNIVERSE, close_reason=REASON)
         for key, series in panel.items():
             last = signals[key][-1]
             assert (last.verdict, last.reason) == ("not_evaluable", "no_fill_bar")
@@ -339,7 +439,7 @@ class TestPanel:
         early = _bars(_ramp(0.1), start=date(2020, 1, 1))
         late = _bars(_ramp(0.9), start=date(2020, 2, 1))
         panel = {1: early, **{key: _bars(_ramp(0.1 * key)) for key in range(2, 12)}, 12: late}
-        signals = s2_signals(panel, universe=UNIVERSE, close_reason=REASON)
+        signals = s2_signals(panel, ratio_panel=panel, universe=UNIVERSE, close_reason=REASON)
         fired_dates = {
             key: {panel[key].dates[s.signal_index] for s in member if s.verdict == "fired"}
             for key, member in signals.items()
@@ -351,7 +451,7 @@ class TestPanel:
 
     def test_fills_resolve_to_the_next_bar_open(self) -> None:
         panel = _panel(20)
-        signals = s2_signals(panel, universe=UNIVERSE, close_reason=REASON)
+        signals = s2_signals(panel, ratio_panel=panel, universe=UNIVERSE, close_reason=REASON)
         identity = s2_identity(universe=UNIVERSE, cost_model_id=COST_MODEL)
         rows = resolve_fills(signals[20], series=panel[20], identity=identity, instrument_id=20)
         fired = [row for row in rows if row.verdict == "fired"]

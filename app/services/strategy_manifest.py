@@ -172,7 +172,7 @@ from app.services.strategy_exit_levels_batch import (
     s8_exit_levels_batch,
     s9_exit_levels_batch,
 )
-from app.services.strategy_price_basis import PriceBasisSeries
+from app.services.strategy_price_basis import CERTIFYING_ARCHIVE_BASES, PriceBasisSeries
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
     CrossSectionalMember,
@@ -513,10 +513,46 @@ def _s2_member(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-2 does not gate on regime
-    price_basis: PriceBasisSeries,  # noqa: ARG001 - uniform call; see PerSeriesSignals
+    price_basis: PriceBasisSeries,
 ) -> CrossSectionalMember:
+    # ⚠⚠ #2834 §7 slice C — THIS ADAPTER SERVES TWO CORPORA AND ONLY ONE OF
+    # THEM CAN DECLARE ``ratio_basis=series``. An earlier draft asserted the
+    # manifest path reads ``price_daily``; that is FALSE and Codex ckpt-2
+    # caught it. ``backtest_run`` reaches here through ``segmented_member``
+    # over ``research_price_daily`` via ``load_masked_series``, and the default
+    # survivorship-free corpus pins the `unadjusted` Intrader archive.
+    #
+    # * LIVE SCAN — ``price_daily`` through ``price_masked_bars``, carrier built
+    #   by ``from_undeclared_source`` so nothing is certified `unadjusted`.
+    #   eToro back-adjusts its candles, so those bars are already
+    #   split-consistent and a second correction would apply it twice.
+    #   ``ratio_basis=series`` is the right declaration.
+    # * RESEARCH BACKTEST on an `unadjusted` archive — the bars ARE as-traded,
+    #   so the 12-1 ratio is split-contaminated and needs
+    #   ``research_split_corrected_reader.load_ratio_basis``. This uniform call
+    #   has no connection and cannot build it.
+    #
+    # So it REFUSES rather than scoring a number it knows is wrong. The
+    # carrier is the evidence: ``from_archive_basis`` certifies bars as
+    # `unadjusted` only for a run pinned to such an archive, and
+    # ``CERTIFYING_ARCHIVE_BASES`` is that same set.
+    #
+    # ⚠ Fail-closed on purpose, and it is a REGRESSION IN REACH that is worth
+    # it: S-2 research backtests on the Intrader pin stop producing numbers
+    # until the runner supplies the corrected basis. Those numbers were
+    # split-contaminated — `008da625` measured S-2's momentum as basis-sensitive
+    # on exactly this corpus — so a loud refusal replaces a silent wrong score,
+    # which is this repo's standing trade.
+    if any(value in CERTIFYING_ARCHIVE_BASES for value in price_basis.values):
+        raise NotImplementedError(
+            "S-2 cannot be evaluated through the manifest on an as-traded archive: its 12-1 ratio needs the "
+            "split-corrected basis from research_split_corrected_reader.load_ratio_basis, which this uniform "
+            "call cannot build (it has no connection). Route the corrected series through the research runner "
+            "— #2834 §7 slice C, the named next step."
+        )
     return s2_member(
         series,
+        ratio_basis=series,
         panel_rebalance_dates=panel_decision_dates,
         universe=universe,
         close_reason=masked_reason,

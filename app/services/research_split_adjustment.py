@@ -199,9 +199,14 @@ def split_scales(factors: Sequence[Decimal | None], *, stamps_marker: str | None
        re-anchors the whole result to the slice's last bar, which is a different
        basis, not a subset of the same one.
     3. **Growth.** A later re-load that appends a NEW split changes the
-       corrected level of every earlier bar, and therefore floor membership and
-       every ratio computed across it. The corrected basis is a function of the
-       series as it stands, not a fixed property of a bar.
+       corrected LEVEL of every earlier bar. The corrected basis is a function
+       of the series as it stands, not a fixed property of a bar.
+       ⚠ An earlier draft added "and therefore … every ratio computed across
+       it", which is FALSE and contradicts the anchor-invariance identity in
+       ``research_split_corrected_reader``: a ratio whose two endpoints both
+       precede the new event is unchanged, because the new factor enters both
+       scales and cancels. Only ratios that SPAN the new event move — which is
+       the correction doing its job, not drift. Levels move unconditionally.
     """
     require_correctable(stamps_marker)
     scales: list[Decimal] = []

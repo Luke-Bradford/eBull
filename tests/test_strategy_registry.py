@@ -23,6 +23,8 @@ from app.services.indicator_series import (
 )
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
+from app.services.research_split_adjustment import SPLIT_ADJUSTMENT_RULE_VERSION
+from app.services.research_split_corrected_reader import SPLIT_CORRECTED_READER_RULE_VERSION
 from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.strategy_registry import (
     INPUT_RULE_SETS,
@@ -254,7 +256,25 @@ class TestIdentityCoversMoreThanSource:
             "series_termination": TERMINATION_RULE_VERSION,
             "universe_selection": UNIVERSE_SELECTION_RULE_VERSION,
             "price_quarantine": QUARANTINE_RULE_SET_VERSION,
+            "split_adjustment": SPLIT_CORRECTED_READER_RULE_VERSION,
         }
+
+    def test_the_split_adjustment_rule_set_changes_the_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#2834 §7 slice C. The research reader corrects a strategy's ratio
+        basis on this policy, so a change to it changes the numbers a strategy
+        scores on while every byte in the corpus stays put — the one input whose
+        drift is invisible in the data.
+
+        ⚠ The mapping is replaced wholesale with one differing ONLY in this
+        value, so a pass cannot come from some other member moving.
+        """
+        before = self._identity().version
+        monkeypatch.setattr(
+            strategy_registry,
+            "INPUT_RULE_SETS",
+            {**INPUT_RULE_SETS, "split_adjustment": "split-corrected-reader-v1+ffffffffffff"},
+        )
+        assert self._identity().version != before
 
     def test_the_quarantine_rule_set_changes_the_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """#3031. The live scan's loader masks bars on this rule set, so a
@@ -455,6 +475,15 @@ class TestTheEngineIsWalkedTooNotJustTheStrategies:
             "the superseded ambiguity policy, retained for stored results"
         ),
         "app.services.strategy_result.METRIC_AXIS_RULE_VERSION": "the result METRIC axis — a property of a result",
+        "app.services.research_split_adjustment.SPLIT_ADJUSTMENT_RULE_VERSION": (
+            "#2834 §7 slice C — COVERED, but nested rather than listed. The identity hashes "
+            "research_split_corrected_reader.SPLIT_CORRECTED_READER_RULE_VERSION, which is composed as "
+            "'<reader id>+<reader source hash>+' + THIS value, so any change here already moves the hashed "
+            "string. Listing it separately would hash the same bytes twice. ⚠ The nesting is what makes "
+            "this safe and it is asserted by test_the_reader_version_contains_the_adjustment_version below — "
+            "without that, breaking the composition would silently un-cover this constant while this "
+            "exclusion kept the guard quiet"
+        ),
     }
 
     _ROOT = "app.services.strategy_signal_scan"
@@ -534,6 +563,18 @@ class TestTheEngineIsWalkedTooNotJustTheStrategies:
         """
         strategy_imports = TestInputRuleSetsAreComplete._imported_service_modules()
         assert not [name for name, imported in strategy_imports.items() if "app.services.price_quarantine" in imported]
+
+    def test_the_reader_version_contains_the_adjustment_version(self) -> None:
+        """The composition that licenses the exclusion above, asserted not assumed.
+
+        ``SPLIT_ADJUSTMENT_RULE_VERSION`` is excluded from the identity walk
+        ONLY because it is a substring of the reader version the identity does
+        hash. If a refactor ever stops composing them, that exclusion would go
+        on silently suppressing a real gap — so the composition is a test and
+        not a comment.
+        """
+        assert SPLIT_ADJUSTMENT_RULE_VERSION in SPLIT_CORRECTED_READER_RULE_VERSION
+        assert INPUT_RULE_SETS["split_adjustment"] == SPLIT_CORRECTED_READER_RULE_VERSION
 
     def test_every_rule_set_the_engine_reaches_is_hashed_or_excluded(self) -> None:
         covered = self._covered_values()

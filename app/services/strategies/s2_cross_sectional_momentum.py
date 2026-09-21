@@ -59,11 +59,31 @@ next rebalance"*, a calendar fact, and approximating it as 21 bars would invent
 a parameter §4 does not give.
 
 ⚠ PRICE RETURNS, NOT TOTAL RETURNS — §4 says so explicitly, and the corpus
-agrees by construction: ``research_price_daily.close`` is the SPLIT-adjusted
-close that is consistent with OHLC, while the dividend-adjusted series lives in
-``adj_close`` (sql/251). Reading ``close`` is therefore the spec-conformant
-choice rather than a convenient one. It systematically understates high-yield
-names over an 11-month lookback, which §4 also says.
+agrees: the dividend-adjusted series lives in ``research_price_daily.adj_close``
+and nothing here reads it. Reading the price close is therefore the
+spec-conformant choice rather than a convenient one. It systematically
+understates high-yield names over an 11-month lookback, which §4 also says.
+
+⚠⚠ THE TWO CLOSES THIS MODULE READS ARE ON DIFFERENT BASES ON PURPOSE (#2834
+§7 slice C). An earlier version of this paragraph said ``close`` "is the
+SPLIT-adjusted close ... (sql/251)". That cited the WRONG VENDOR: `sql/251` is
+the `paperswithbacktest` archive, and the `icyDenev/Intrader` half of the same
+table is ``adjustment_basis = 'unadjusted'`` — 5,151 of the 10,415 series in the
+§4.0 universe, measured 2026-09-21. A ratio taken across a split on those bars
+is not a return, it IS the split.
+
+So the module takes two aligned series and reads a different one for each
+question, because they are different questions:
+
+* the momentum RATIO reads ``ratio_basis`` — split-corrected, and point-in-time
+  safe because the anchor's future factors cancel in a quotient
+  (``research_split_corrected_reader``, which proves it);
+* the ``MIN_CLOSE`` floor and every evaluability test read the AS-TRADED bars,
+  because a corrected level embeds future events and is not a price anyone
+  quoted. See ``MIN_CLOSE``.
+
+A caller whose corpus is already split-adjusted passes the same series twice,
+and that is a declaration rather than a shortcut.
 """
 
 from __future__ import annotations
@@ -111,14 +131,82 @@ ELIGIBILITY_BARS = 273
 #: the top decile. It is hashed into the identity, so reversing it later is a new
 #: strategy version rather than a silent redefinition.
 #:
-#: ⚠ ON SPLIT-ADJUSTED CLOSES THIS IS AN ADJUSTED-PRICE FLOOR, NOT A NOMINAL ONE,
-#: and the deviation runs one way. sql/251: the corpus's OHLC carry the split
-#: adjustment, so a name that traded at $0.20 and later did a 1-for-10 reverse
-#: split appears at $2.00 in these bars and passes a floor it would have failed
-#: at the time — and reverse splits happen *because* a price fell under $1, so
-#: the names it lets through are exactly the distressed ones. Unadjusting would
-#: need per-series split factors the corpus does not store. Stated rather than
-#: quietly enjoyed; the count the floor DOES reject is measured by ``--census``.
+#: ⚠⚠ THE FLOOR READS THE AS-TRADED CLOSE, NEVER THE SPLIT-CORRECTED ONE —
+#: #2834 §7 item 3, settled here. Two independent reasons, either sufficient:
+#:
+#: 1. **THE CORRECTED LEVEL THIS CORPUS PRODUCES IS LOOK-AHEAD.**
+#:    ``research_split_corrected_reader`` anchors every series at the END of the
+#:    loaded window, so for any earlier bar ``scale(d)`` is a product over
+#:    events AFTER ``d``. Comparing that level against a constant tests
+#:    something no observer knew at ``d`` — including that the name would later
+#:    reverse-split, the most informative single fact about a distressed penny
+#:    stock. A corrected RATIO is safe because the anchor cancels; the level is
+#:    not, and this constant is the level test.
+#:    ⚠ Narrower than "a restated level is never point-in-time", which is false
+#:    — a level restated using only events known by ``t`` is available at ``t``.
+#:    The claim is about the anchor we actually build.
+#: 2. **§9 Q3 IS WRITTEN AS A QUOTED-DOLLAR RULE.** *"close >= $1, evaluated
+#:    as-of each decision date"* — a dollar amount as-of a date is the amount
+#:    that was quoted on it. The estimand names the basis; the basis is not
+#:    inferred from a mechanism.
+#:
+#: ⚠⚠ A REG NMS RULE 612 CITATION STOOD HERE AND IS WITHDRAWN (Codex ckpt-1,
+#: 2026-09-21). The argument was that #2266's tick-quantisation evidence is
+#: keyed on the quoted price because Rule 612 sets a $0.01 minimum increment at
+#: or above $1.00 and $0.0001 below. Every clause of that is true and the
+#: INFERENCE does not hold:
+#:
+#: * Rule 612 governs quotations, orders and indications of interest — not
+#:    archive rounding, and not every execution price (sub-penny executions are
+#:    permitted). So it cannot establish that the artefact #2266 MEASURED
+#:    originated in regulated quote ticks rather than in vendor rounding, bad
+#:    prints or residual split error.
+#: * Relative tick coarseness does not jump the way the argument needs: just
+#:    below $1.00 the minimum increment is ~0.01% of price, at $1.00 it is ~1%.
+#:    The rule does not say "below $1 is coarser" at the boundary at all.
+#: * Its compliance date is 2006-01-31 and its scope is NMS stock, so it reaches
+#:    neither the corpus's pre-2006 bars nor its non-NMS instruments. (The
+#:    half-cent amendment is 2024, not 2025 as the withdrawn note said.)
+#:
+#: This is precisely the failure `docs/review-prevention-log.md` already records
+#: for this same rule — *a correct citation aimed at a question it does not
+#: govern*, which reads as source-rule compliance to every reader including the
+#: author. It is recorded rather than deleted because the log's own test ("did a
+#: reg get cited for the right question?") passed on the way in, and the thing
+#: that caught it was an adversarial read, not the checklist.
+#:
+#: Reason 1 does not depend on any of it and is sufficient on its own.
+#:
+#: Measured consequence, full population, 50,134,060 bars — reproduce with
+#: ``PYTHONPATH=. uv run python -m scripts.measure_2834_split_adjustment --floor``:
+#: reading the corrected close instead would move 1,196,262 bar-slots (2.386%)
+#: across this threshold — **949,062 admitted-that-are-now-rejected against
+#: 247,200 the other way**, so BOTH directions are populated and the corrected
+#: basis is the more permissive one on net.
+#: ⚠ BAR-SLOTS ARE NOT DECISIONS. They overweight long histories and are not
+#: rebalance-eligible bars, evaluable names or decile members, and a change in
+#: one name's eligibility moves every other name's rank. Treat this as the
+#: blast radius of the basis choice, never as its strategy impact — that number
+#: is owed by the per-regime readout and does not exist yet.
+#:
+#: ⚠ ONE HALF OF THE CORPUS CANNOT HONOUR THIS AND THAT IS NOT FIXED HERE.
+#: ``research_price_series`` carries 5,264 `split_adjusted` series in the §4.0
+#: universe against 5,151 `unadjusted` ones (measured 2026-09-21). On the
+#: `split_adjusted` half the stored close IS restated and no as-traded close
+#: exists, so a name that traded at $0.20 before a 1-for-10 reverse split
+#: appears at $2.00 and passes a floor it would have failed at the time.
+#: ⚠ An earlier draft said that bias "runs one way". It does not: a REVERSE
+#: split admits history the as-traded basis would reject, a FORWARD split
+#: rejects history it would admit, and the corpus has both. What is true is
+#: only that the reverse direction is the larger one on the measured counts
+#: above. The bias is unchanged by this decision either way; it is stated
+#: rather than quietly enjoyed, and the count the floor DOES reject is measured
+#: by ``--census``.
+#:
+#: ⚠ The prior version of this note cited `sql/251` for "the corpus's OHLC carry
+#: the split adjustment" and said "unadjusting would need per-series split
+#: factors the corpus does not store". Both were wrong for the `unadjusted`
+#: half: `sql/251` is the OTHER vendor, and `fc72804b` stores the factors.
 MIN_CLOSE = 1.0
 
 #: The smallest cross-section a decile is defined on — **by construction, not
@@ -278,8 +366,16 @@ def _close_input(series: BarSeries, *, universe: Universe) -> IndicatorSeries:
     )
 
 
-def momentum_series(series: BarSeries, *, universe: Universe) -> IndicatorSeries:
+def momentum_series(ratio_basis: BarSeries, *, universe: Universe) -> IndicatorSeries:
     """``close(t-21) / close(t-252) - 1`` per bar, refused before 273 bars.
+
+    ⚠⚠ ``ratio_basis`` IS THE SPLIT-CORRECTED SERIES, NOT THE AS-TRADED ONE
+    (#2834 §7 slice C) — the parameter is named for it so a call site that
+    passes the wrong one reads wrong. On an `unadjusted` series a window
+    spanning a 4:1 split returns a ratio four times too small, which ranks a
+    flat name in the bottom decile on the split alone. Passing the as-traded
+    series is CORRECT only where it is already split-adjusted, which is a
+    property of the vendor and not of this function.
 
     Two kinds of absence, kept apart because criterion 8 needs them apart:
 
@@ -290,20 +386,28 @@ def momentum_series(series: BarSeries, *, universe: Universe) -> IndicatorSeries
       reason code.
 
     ⚠ THE NON-POSITIVE GUARD IS NOT HYPOTHETICAL AND IS NOT REACHED THROUGH THE
-    MASKED LOADER. Measured 2026-08-06 on the full population: two
-    ``research_price_daily`` bars have ``close <= 0`` and **both are already
-    quarantined** (``return_usable = false``), so ``load_masked_series`` hands
-    this function ``None`` for them; ``price_daily`` has 154, which a raw-bar
-    caller such as the ``--equivalence`` arm does reach. Reproduce with::
+    MASKED LOADER. **Every** ``research_price_daily`` bar with ``close <= 0`` is
+    already quarantined (``return_usable = false``), so ``load_masked_series``
+    hands this function ``None`` for all of them; ``price_daily`` carries a much
+    larger population that a raw-bar caller such as the ``--equivalence`` arm
+    does reach. Run the queries rather than trusting a count here — an earlier
+    draft wrote "two ... bars" beside these very commands and the answer had
+    moved to three by 2026-09-21, which is what a hand-written derived statistic
+    does next to its own reproduction step::
 
         select count(*) from research_price_daily where close <= 0;
         select count(*) from price_daily where close <= 0;
+        -- the claim above, as a query that returns zero when it holds:
+        select count(*) from research_price_daily d
+          left join research_bar_quarantine q
+            on q.series_id = d.series_id and q.bar_date = d.bar_date
+         where d.close <= 0 and coalesce(q.return_usable, true);
 
     A zero denominator would be a ``ZeroDivisionError`` and a negative one a
     sign-flipped return that ranks like a winner, which is the worse failure of
     the two — it is a plausible number.
     """
-    closes = series.float_closes
+    closes = ratio_basis.float_closes
     values: list[float | None] = []
     unevaluable: list[int] = []
     for index in range(len(closes)):
@@ -323,11 +427,25 @@ def momentum_series(series: BarSeries, *, universe: Universe) -> IndicatorSeries
 def s2_member(
     series: BarSeries,
     *,
+    ratio_basis: BarSeries,
     panel_rebalance_dates: Set[date],
     universe: Universe,
     close_reason: NotEvaluableReason,
 ) -> CrossSectionalMember:
     """One instrument's contribution to the ranked panel.
+
+    ``series`` is the AS-TRADED bars and ``ratio_basis`` the split-corrected
+    ones (``research_split_corrected_reader.CorrectedSeries`` carries both,
+    aligned). Every level test below — the floor, the evaluability declaration,
+    the dates — reads ``series``; only the momentum ratio reads ``ratio_basis``.
+    The module docstring says why the split is not cosmetic.
+
+    ⚠ ``ratio_basis`` IS KEYWORD-ONLY AND HAS NO DEFAULT, deliberately, for the
+    reason ``research_split_adjustment.split_scales`` gives about
+    ``stamps_marker``: a default would let a caller inherit the as-traded basis
+    silently, which is the failure this parameter exists to make impossible. A
+    caller on an already-split-adjusted corpus passes ``ratio_basis=series``
+    and has thereby declared it.
 
     ``close_reason`` is the code recorded when a close is missing and comes from
     the caller because only the caller knows why: bars from
@@ -342,9 +460,19 @@ def s2_member(
     """
     if close_reason not in NOT_EVALUABLE_REASONS:
         raise ValueError(f"unknown reason code {close_reason!r}; must be one of {sorted(NOT_EVALUABLE_REASONS)}")
+    # ⚠ Dates, not lengths. Two series of equal length drawn from different
+    # windows would index-align silently and score a name on another name's
+    # calendar; `decision_indices` below indexes `series.dates` while `score`
+    # indexes `ratio_basis`, so the two must be the same bars and not merely
+    # the same count.
+    if series.dates != ratio_basis.dates:
+        raise ValueError(
+            f"the as-traded series carries {len(series.dates)} bars and the ratio basis "
+            f"{len(ratio_basis.dates)}, or they differ in date; they must be the same bars on two bases"
+        )
 
     closes = series.float_closes
-    score = momentum_series(series, universe=universe)
+    score = momentum_series(ratio_basis, universe=universe)
     return CrossSectionalMember(
         dates=series.dates,
         inputs=(
@@ -394,10 +522,17 @@ def s2_select(when: date, scores: Mapping[int, float]) -> frozenset[int]:
 def s2_signals(
     panel: Mapping[int, BarSeries],
     *,
+    ratio_panel: Mapping[int, BarSeries],
     universe: Universe,
     close_reason: NotEvaluableReason,
 ) -> dict[int, list[StrategySignal]]:
     """S-2 over a whole panel: one entry verdict per member per bar.
+
+    ``ratio_panel`` is the split-corrected counterpart of ``panel``, keyed
+    identically — see ``s2_member``. Required and undefaulted for the same
+    reason, and checked key-for-key here because a panel is the one place a
+    missing member would otherwise drop a name from the cross-section
+    (changing ``N`` and therefore the decile cut) rather than raise.
 
     ⚠ THIS HOLDS THE WHOLE PANEL IN MEMORY and is the right entry point for a
     bounded one (a watchlist, a test, one sector). A full-corpus sweep must not
@@ -407,10 +542,26 @@ def s2_signals(
     through the same functions, via the contract's own ``StagedMember``, rather
     than re-implementing the staging pass.
     """
+    if panel.keys() != ratio_panel.keys():
+        raise ValueError(
+            f"the as-traded panel has {len(panel)} members and the ratio panel {len(ratio_panel)}, or they differ "
+            "in key; a member present in one and not the other would silently change the cross-section size N "
+            "and therefore the decile cut"
+        )
+    # ⚠ The calendar comes from the AS-TRADED panel. The two bases carry
+    # identical dates by construction (`s2_member` enforces it per member), so
+    # this is a choice of source and not of content — stated because a reader
+    # checking causality should not have to establish that for themselves.
     calendar = {when for series in panel.values() for when in series.dates}
     dates = rebalance_dates(calendar)
     members = {
-        key: s2_member(series, panel_rebalance_dates=dates, universe=universe, close_reason=close_reason)
+        key: s2_member(
+            series,
+            ratio_basis=ratio_panel[key],
+            panel_rebalance_dates=dates,
+            universe=universe,
+            close_reason=close_reason,
+        )
         for key, series in panel.items()
     }
     return evaluate_cross_sectional(

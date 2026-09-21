@@ -45,6 +45,7 @@ from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_R
 from app.services.indicator_series import IndicatorSeries, MultiIndicatorSeries, Universe
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
+from app.services.research_split_corrected_reader import SPLIT_CORRECTED_READER_RULE_VERSION
 from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION
 
@@ -139,6 +140,34 @@ INPUT_RULE_SETS: Mapping[str, str] = MappingProxyType(
         # over-invalidation ``universe_selection`` above accepts, and the thing
         # that makes the corrected row storable at all.
         "price_quarantine": QUARANTINE_RULE_SET_VERSION,
+        # ⚠ #2834 §7 slice C — the FIFTH hand-maintained entry, and THE MINT
+        # ITSELF. §4 rule 11 makes identity `code + config + data contract`;
+        # this is the data-contract half. A strategy that starts scoring on a
+        # split-corrected ratio is reading different numbers off the same
+        # bytes, and nothing else in this identity moves when the correction
+        # policy does: `SPLIT_CORRECTION_POLICY` lives in another module, and
+        # the strategies do not import it — `research_split_corrected_reader`,
+        # the ENGINE's loader, does. That is the same shape as the quarantine
+        # entry above, and the same reason it is hand-maintained rather than
+        # import-detected: `TestInputRuleSetsAreComplete`'s walk starts from
+        # the strategy modules, which import neither.
+        #
+        # ⚠⚠ THE READER'S VERSION, NOT `SPLIT_ADJUSTMENT_RULE_VERSION` — Codex
+        # ckpt-2. The adjustment module owns the policy and the arithmetic; the
+        # READER owns which series are corrected, over which bars, into what.
+        # Hashing only the former would let a routing or SQL fix change every
+        # corrected score under an unchanged identity. The reader's constant
+        # composes both, so this entry moves when either does.
+        #
+        # Pinned by `test_the_stored_mapping_is_the_hashed_one`.
+        #
+        # ⚠ Registry-wide, so it rotates EVERY strategy identity and not only
+        # S-2's — including strategies still reading a single basis. That is
+        # the over-invalidation every entry in this mapping accepts, and here
+        # it is the honest direction: the correction changes which bars any
+        # research consumer COULD see, and a stale identity that reads as
+        # current is the failure this mapping exists to prevent.
+        "split_adjustment": SPLIT_CORRECTED_READER_RULE_VERSION,
     }
 )
 
