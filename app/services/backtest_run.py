@@ -3427,6 +3427,18 @@ def _rank_cross_section(
             # RANKING pass reaches ``segmented_member``, whose two callers — S-2
             # and S-10 — both discard the carrier, so certifying here would pay
             # the full per-bar binding and an immediate re-check for nothing.
+            #
+            # ⚠⚠ THE CERTIFYING BRANCH IS UNREACHABLE TODAY AND IS KEPT DELIBERATELY
+            # (review NITPICK on PR #3264, and it is correct). ``PRICE_BASIS_CONSUMERS``
+            # holds only S-12, which is ``per_series`` with no ``member``, so it never
+            # reaches this function. Writing the routing as a bare
+            # ``from_undeclared_source`` instead would be smaller and WRONG in the
+            # dangerous direction: the next cross-sectional consumer would silently
+            # inherit an all-refusing carrier with no branch to notice, and the guard
+            # that catches it (``test_only_the_declared_consumers_verdicts_depend_on_
+            # the_carrier``) only covers the per-series adapters. Same expression at
+            # both call sites is the invariant; that one of them is currently dead is
+            # a property of today's manifest, not of the rule.
             price_basis=(
                 from_archive_basis(
                     corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None,
