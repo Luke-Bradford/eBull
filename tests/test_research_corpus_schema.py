@@ -204,3 +204,95 @@ class TestCensusDrift:
                 "WHERE series_id = %s",
                 (series_id,),
             )
+
+
+@pytest.mark.db
+class TestCorporateActionStamps:
+    """sql/405 — the two states a split scale must be able to tell apart.
+
+    ONE test per genuinely-new mechanism: the positivity CHECK (because the
+    derivation divides by these) and the closed marker vocabulary (because the
+    marker is what makes NULL mean 'unknown' rather than 'no event').
+    """
+
+    def test_a_non_positive_split_factor_is_rejected(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """0 is a division by zero and a negative flips every prior price.
+
+        The parser already reads both as absent, so this CHECK cannot fire from
+        today's loader. It is the guard for the NEXT writer — the one that
+        bulk-inserts from somewhere else and never reads this file.
+        """
+        series_id = _new_series(ebull_test_conn, "STAMPCHK")
+        for bad in ("0", "-2"):
+            with pytest.raises(psycopg.errors.CheckViolation):
+                ebull_test_conn.execute(
+                    "INSERT INTO research_price_daily (series_id, bar_date, close, split_factor)"
+                    " VALUES (%s, '2023-01-05', 1.25, %s)",
+                    (series_id, bad),
+                )
+            ebull_test_conn.rollback()
+
+    def test_an_absent_split_factor_is_legal_and_is_not_a_unit_factor(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """NULL has to be storable: the Parquet archive ships no stamp column.
+
+        And it must not be readable as 1 — which is exactly what
+        ``COALESCE(split_factor, 1)`` does, so the series-level marker is the
+        only thing that separates them. The assertion is on the marker's
+        DEFAULT, because a series nobody has re-loaded is 'absent' and saying
+        so is the migration's safe direction.
+        """
+        series_id = _new_series(ebull_test_conn, "STAMPNULL")
+        ebull_test_conn.execute(
+            "INSERT INTO research_price_daily (series_id, bar_date, close) VALUES (%s, '2023-01-05', 1.25)",
+            (series_id,),
+        )
+        ebull_test_conn.commit()
+        row = ebull_test_conn.execute(
+            """
+            SELECT d.split_factor, d.dividend, s.corporate_action_stamps
+            FROM research_price_daily d
+            JOIN research_price_series s ON s.series_id = d.series_id
+            WHERE d.series_id = %s
+            """,
+            (series_id,),
+        ).fetchone()
+        assert row == (None, None, "absent")
+
+    def test_the_marker_vocabulary_is_closed(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Two states, spelled one way each.
+
+        A third spelling ('yes', 'partial', 'unknown') is how a reader ends up
+        with a marker it does not recognise and defaults to trusting.
+        """
+        series_id = _new_series(ebull_test_conn, "STAMPVOCAB")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            ebull_test_conn.execute(
+                "UPDATE research_price_series SET corporate_action_stamps = 'partial' WHERE series_id = %s",
+                (series_id,),
+            )
+        ebull_test_conn.rollback()
+        ebull_test_conn.execute(
+            "UPDATE research_price_series SET corporate_action_stamps = 'vendor_supplied' WHERE series_id = %s",
+            (series_id,),
+        )
+        ebull_test_conn.commit()
+
+    @pytest.mark.parametrize("bad", ["NaN", "Infinity"])
+    def test_a_non_finite_split_factor_is_rejected(self, ebull_test_conn: psycopg.Connection[tuple], bad: str) -> None:
+        """`> 0` alone admits both, because Postgres orders NaN above everything.
+
+        Measured on this cluster: ``select 'NaN'::numeric > 0`` returns **true**,
+        and so does ``'Infinity'::numeric > 0``. A bare positivity CHECK would
+        let either through and a cumulative split scale would then carry it into
+        every corrected price as NaN. `-Infinity` needs no clause — `> 0` has it.
+        """
+        series_id = _new_series(ebull_test_conn, f"STAMP{bad[:3].upper()}")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            ebull_test_conn.execute(
+                "INSERT INTO research_price_daily (series_id, bar_date, close, split_factor)"
+                " VALUES (%s, '2023-01-05', 1.25, %s::numeric)",
+                (series_id, bad),
+            )
+        ebull_test_conn.rollback()

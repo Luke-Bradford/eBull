@@ -57,7 +57,7 @@ from __future__ import annotations
 import csv
 import logging
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -145,6 +145,16 @@ class ArchiveProvenance:
     #: coverage still read as current.
     quarantine_as_of: date
 
+    #: Whether this archive publishes per-bar corporate-action stamps, written
+    #: verbatim to ``research_price_series.corporate_action_stamps``.
+    #:
+    #: ⚠ ``absent`` means the archive's corporate actions are UNKNOWN, not nil.
+    #: It is a distinct state from "no event on this bar" and it has to be,
+    #: because ``COALESCE(split_factor, 1)`` reads the two identically — see
+    #: sql/405 §3. Defaulted to ``absent`` so a new archive is presumed
+    #: stampless until somebody measures otherwise.
+    corporate_action_stamps: str = "absent"
+
 
 #: ⚠ ``split_adjusted`` is VERIFIED for this archive, not assumed. sql/251's
 #: header carries the evidence: AAPL 2020-08-27 close = 125.01 against an
@@ -183,6 +193,11 @@ INTRADER_ARCHIVE = ArchiveProvenance(
     #: bars provisional across 7,693 series, which is a corpus change needing
     #: its own A/B, not a tidy-up.
     quarantine_as_of=date(2024, 9, 27),
+    #: MEASURED on the full mirror, not read off a dataset card: 22,879 CSVs,
+    #: 50,134,060 rows, every one of them 9 fields wide, 9,354 split factors
+    #: that are not 1 across 4,219 series, and zero non-positive, unparseable
+    #: or duplicated stamps (#2834 §7 item 2, sql/405 §1).
+    corporate_action_stamps="vendor_supplied",
 )
 
 #: Every archive the scheduled re-quarantine covers, in run order.
@@ -218,6 +233,33 @@ class LoadCensus:
     #: NOT NULL. This is absence of data, NOT a price judgement — no floor, no
     #: threshold. Counted so the drop is never silent.
     rows_without_close: int = 0
+
+    #: Bars whose split factor is not 1 — the entities this load newly admits.
+    #: Only counted for an archive declaring ``vendor_supplied``; for the
+    #: Parquet archive the correct value is 0 and it means "no stamps shipped",
+    #: which ``corporate_action_stamps`` is what actually records.
+    split_events: int = 0
+
+    #: Bars carrying a non-zero cash distribution. Stored, consumed by nothing
+    #: (#2834 §4 wants a price return); counted so the column's coverage is a
+    #: measured fact rather than an assumption the first reader inherits.
+    dividend_stamps: int = 0
+
+    #: Bars where a ``vendor_supplied`` archive produced NO factor — either
+    #: unparseable or non-positive, both read as absent by ``_split_factor``.
+    #: ⚠ MUST be 0. A non-zero value means those bars cannot be corrected, and
+    #: every downstream ``COALESCE(split_factor, 1)`` would turn them into "no
+    #: split". Their SERIES are written ``absent`` rather than the archive's
+    #: declared value, so the marker stays truthful either way; this counter is
+    #: what makes the downgrade visible rather than silent.
+    split_stamps_absent: int = 0
+
+    #: The same, for the dividend half of the marker's contract. sql/405 says
+    #: ``vendor_supplied`` means BOTH columns are populated on every bar, so an
+    #: absent dividend falsifies the marker exactly as an absent factor does —
+    #: and it is a different defect, because ``_csv_decimal`` is the only gate
+    #: on this field (there is no sign or range rule to reject it).
+    dividend_stamps_absent: int = 0
 
     #: (symbol, date) pairs the archive repeats. Drained via ON CONFLICT, so
     #: the last one wins; counted so a vendor-side duplication is visible.
@@ -423,6 +465,12 @@ class _Row:
     close: Decimal | None
     volume: int | None
     adj_close: Decimal | None
+    #: Per-bar corporate-action stamps, where the archive publishes them.
+    #: ``None`` is "this archive ships no stamp column" — NOT "no event here",
+    #: which is ``Decimal(1)`` / ``Decimal(0)``. Defaulted so the Parquet
+    #: archive, which has neither column, keeps constructing rows unchanged.
+    split_factor: Decimal | None = None
+    dividend: Decimal | None = None
 
 
 def iter_archive_symbols(paths: Sequence[Path]) -> Iterator[str]:
@@ -542,6 +590,25 @@ def _share_volume(value: str) -> int | None:
     return int(parsed)
 
 
+def _split_factor(value: str) -> Decimal | None:
+    """CSV field → a split ratio, or absent.
+
+    ⚠ A non-positive factor is read as ABSENT rather than stored, and that is
+    the same provenance-check shape as ``_share_volume`` above rather than a
+    data filter. The derivation this column exists for DIVIDES by a product of
+    these values (``close / scale``), so a 0 is a division by zero and a
+    negative flips the sign of every price before the event. Absent is
+    nullable, visible in the census and refusable; a stored -3 is none of those.
+
+    The full mirror contains **zero** non-positive and zero unparseable factors
+    across 50,134,060 rows, so this branch is unreachable from today's archive
+    and is here for the next publication of it. sql/405 carries the matching
+    CHECK for the next WRITER.
+    """
+    parsed = _csv_decimal(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
 def parse_intrader_rows(symbol: str, lines: Iterator[str]) -> Iterator[_Row]:
     """Parse one Intrader CSV into bars.
 
@@ -570,6 +637,13 @@ def parse_intrader_rows(symbol: str, lines: Iterator[str]) -> Iterator[_Row]:
             close=_csv_decimal(fields[4]),
             volume=_share_volume(fields[5]),
             adj_close=_csv_decimal(fields[8]),
+            split_factor=_split_factor(fields[6]),
+            # ⚠ No sign guard, deliberately, and it is not an oversight: AGII
+            # 2016-05-27 publishes -4.80545454545455 (one row in 460,693
+            # non-zero dividends). Nothing consumes this column yet, so the
+            # honest treatment is to store what the vendor published and let
+            # whoever first READS it decide what a negative distribution means.
+            dividend=_csv_decimal(fields[7]),
         )
 
 
@@ -617,7 +691,9 @@ CREATE TEMP TABLE _stg_research_bars (
     low           NUMERIC,
     close         NUMERIC NOT NULL,
     volume        BIGINT,
-    adj_close     NUMERIC
+    adj_close     NUMERIC,
+    split_factor  NUMERIC,
+    dividend      NUMERIC
 ) ON COMMIT DROP
 """
 
@@ -633,20 +709,23 @@ CREATE TEMP TABLE _stg_research_bars (
 # the vendor republishes with one, and then it takes out a 25.8M-row load.
 _DRAIN_SQL = """
 INSERT INTO research_price_daily
-    (series_id, bar_date, open, high, low, close, volume, adj_close)
+    (series_id, bar_date, open, high, low, close, volume, adj_close, split_factor, dividend)
 SELECT DISTINCT ON (s.series_id, g.bar_date)
-       s.series_id, g.bar_date, g.open, g.high, g.low, g.close, g.volume, g.adj_close
+       s.series_id, g.bar_date, g.open, g.high, g.low, g.close, g.volume, g.adj_close,
+       g.split_factor, g.dividend
 FROM _stg_research_bars g
 JOIN research_price_series s
   ON s.vendor = %(vendor)s AND s.vendor_symbol = g.vendor_symbol
 ORDER BY s.series_id, g.bar_date, g.row_ordinal DESC
 ON CONFLICT (series_id, bar_date) DO UPDATE SET
-    open      = EXCLUDED.open,
-    high      = EXCLUDED.high,
-    low       = EXCLUDED.low,
-    close     = EXCLUDED.close,
-    volume    = EXCLUDED.volume,
-    adj_close = EXCLUDED.adj_close
+    open         = EXCLUDED.open,
+    high         = EXCLUDED.high,
+    low          = EXCLUDED.low,
+    close        = EXCLUDED.close,
+    volume       = EXCLUDED.volume,
+    adj_close    = EXCLUDED.adj_close,
+    split_factor = EXCLUDED.split_factor,
+    dividend     = EXCLUDED.dividend
 """
 
 
@@ -773,6 +852,12 @@ def load_archive(
     # prove nothing.
     stats: dict[str, tuple[date, date, int]] = {}
 
+    #: Symbols whose bars did NOT all carry both stamps. They are written
+    #: ``absent`` regardless of what the archive declares — the marker must
+    #: never claim coverage the bars do not have, and a post-hoc refusal in the
+    #: CLI cannot undo committed batches (Codex checkpoint 2).
+    incomplete_symbols: set[str] = set()
+
     batch: list[tuple[Any, ...]] = []
 
     def flush() -> None:
@@ -782,7 +867,8 @@ def load_archive(
             cur.execute(_STAGE_DDL)
             copy_sql = (
                 "COPY _stg_research_bars "
-                "(vendor_symbol, bar_date, open, high, low, close, volume, adj_close) "
+                "(vendor_symbol, bar_date, open, high, low, close, volume, adj_close, "
+                "split_factor, dividend) "
                 "FROM STDIN"
             )
             with cur.copy(copy_sql) as copy:
@@ -816,15 +902,45 @@ def load_archive(
                 row.close,
                 row.volume,
                 row.adj_close,
+                row.split_factor,
+                row.dividend,
             )
         )
         census.bars_copied += 1
+        if provenance.corporate_action_stamps == "vendor_supplied":
+            # ⚠ Counted HERE rather than left to a post-load query, because a
+            # missing stamp is the one defect the stored table cannot report
+            # about itself: NULL is how the OTHER vendor's bars legitimately
+            # read, so a query cannot tell "the parser rejected this factor"
+            # from "this archive ships no stamps" without the marker it is
+            # trying to validate. The load knows.
+            #
+            # ⚠ BOTH columns, because the marker's contract is both. sql/405
+            # says `vendor_supplied` means split_factor AND dividend are
+            # populated on every bar, so an absent dividend falsifies it just
+            # as an absent factor does (Codex checkpoint 2).
+            if row.split_factor is None:
+                census.split_stamps_absent += 1
+                incomplete_symbols.add(row.symbol)
+            elif row.split_factor != 1:
+                census.split_events += 1
+            if row.dividend is None:
+                census.dividend_stamps_absent += 1
+                incomplete_symbols.add(row.symbol)
+            elif row.dividend:
+                census.dividend_stamps += 1
         if len(batch) >= batch_rows:
             flush()
             logger.info("  %s bars loaded", f"{census.bars_copied:,}")
     flush()
 
-    _write_census(conn, stats, provenance.vendor)
+    _write_census(
+        conn,
+        stats,
+        provenance.vendor,
+        provenance.corporate_action_stamps,
+        incomplete_symbols,
+    )
     census.duplicate_bar_rows = reconcile_census(conn, provenance.vendor)
     return census
 
@@ -833,6 +949,8 @@ def _write_census(
     conn: psycopg.Connection[Any],
     stats: dict[str, tuple[date, date, int]],
     vendor: str = VENDOR,
+    corporate_action_stamps: str = "absent",
+    incomplete_symbols: Collection[str] = (),
 ) -> None:
     """Set the denormalised census columns from the load accumulator.
 
@@ -840,7 +958,31 @@ def _write_census(
     bars" has exactly one spelling, all three NULL. A symbol whose every row
     lacked a close therefore never appears in ``stats`` and keeps its NULLs,
     which is the correct state and not a gap.
+
+    ⚠ ``corporate_action_stamps`` is written HERE, at the end of the bar pass,
+    and not beside ``adjustment_basis`` in ``upsert_series``. The marker's whole
+    job is to let a reader tell "no stamps shipped" from "no event on this bar"
+    (sql/405 §3), so it must never claim stamps that were not written: a load
+    that dies mid-way leaves it at ``absent``, which understates coverage and
+    cannot mislead a divider. Set in the symbol pass it would fail the other
+    way. It rides on ``stats`` for the same reason the census columns do —
+    those are exactly the symbols whose bars reached the table.
+
+    ⚠ And it is written PER SERIES, downgraded to ``absent`` for any symbol in
+    ``incomplete_symbols``. An earlier draft wrote the archive's declared value
+    uniformly and left the refusal to the CLI's exit code — which cannot roll
+    back batches that are already committed, so a load that detected a missing
+    stamp still published a marker saying every bar had one. The marker is only
+    worth having if it can never overstate; downgrading here is the only place
+    that holds, because it is the only place that both knows and still writes.
     """
+    incomplete = frozenset(incomplete_symbols)
+    if incomplete:
+        logger.warning(
+            "%d series carry an incomplete stamp and are marked 'absent' rather than %r",
+            len(incomplete),
+            corporate_action_stamps,
+        )
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -848,19 +990,24 @@ def _write_census(
                 vendor_symbol TEXT NOT NULL,
                 first_bar     DATE NOT NULL,
                 last_bar      DATE NOT NULL,
-                bar_count     INTEGER NOT NULL
+                bar_count     INTEGER NOT NULL,
+                stamps        TEXT NOT NULL
             ) ON COMMIT DROP
             """
         )
-        with cur.copy("COPY _stg_research_census (vendor_symbol, first_bar, last_bar, bar_count) FROM STDIN") as copy:
+        with cur.copy(
+            "COPY _stg_research_census (vendor_symbol, first_bar, last_bar, bar_count, stamps) FROM STDIN"
+        ) as copy:
             for symbol, (first, last, count) in stats.items():
-                copy.write_row((symbol, first, last, count))
+                stamps = "absent" if symbol in incomplete else corporate_action_stamps
+                copy.write_row((symbol, first, last, count, stamps))
         cur.execute(
             """
             UPDATE research_price_series s
                SET first_bar = g.first_bar,
                    last_bar  = g.last_bar,
                    bar_count = g.bar_count,
+                   corporate_action_stamps = g.stamps,
                    updated_at = now()
               FROM _stg_research_census g
              WHERE s.vendor = %(vendor)s

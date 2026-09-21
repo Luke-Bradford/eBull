@@ -88,6 +88,11 @@ def load(conn: psycopg.Connection[tuple], mirror: Path) -> int:
     print(f"    unresolved          : {census.unresolved_series:,}   <- eToro-listing-bias measure")
     print(f"    ambiguous symbols   : {len(census.ambiguous_symbols):,}")
     print(f"  bars loaded           : {census.bars_copied:,}")
+    print(f"  corporate_action_stamps: {provenance.corporate_action_stamps}  <- written at the END of the bar pass")
+    print(f"  split stamps <> 1     : {census.split_events:,}")
+    print(f"  dividend stamps <> 0  : {census.dividend_stamps:,}")
+    print(f"  split stamps ABSENT   : {census.split_stamps_absent:,}  <- MUST be 0 for a vendor_supplied archive")
+    print(f"  dividend stamps ABSENT: {census.dividend_stamps_absent:,}  <- MUST be 0 for a vendor_supplied archive")
     print(f"  rows without a close  : {census.rows_without_close:,}  (dropped, counted, no floor)")
     print(f"  duplicate vendor rows : {census.duplicate_bar_rows:,}")
     print(f"  {census.reuse_guard_note}")
@@ -96,6 +101,19 @@ def load(conn: psycopg.Connection[tuple], mirror: Path) -> int:
 
     if drift:
         logger.error("census drift is %d, expected 0 — the load is NOT done", drift)
+        return 1
+    if census.split_stamps_absent or census.dividend_stamps_absent:
+        # `load_archive` has ALREADY written those series' marker as 'absent',
+        # so the stored state is truthful whatever happens here — this exit
+        # code exists so the operator learns the archive changed shape, not as
+        # the thing protecting the corpus. An exit code cannot roll back a
+        # committed batch and must never be the only guard (#2834, ckpt-2).
+        logger.error(
+            "vendor_supplied archive produced %d bars with no split stamp and %d with no dividend "
+            "— those series are marked 'absent'; the archive's shape has changed",
+            census.split_stamps_absent,
+            census.dividend_stamps_absent,
+        )
         return 1
     return 0
 
