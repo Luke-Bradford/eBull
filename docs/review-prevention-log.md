@@ -9946,5 +9946,59 @@ original, because the gate now *looked* like a bound.
   `getByText` assertion, not a grep — which is exactly what the loop's own FE-QA step
   exists for, and it worked here only because the pass ran after the merge rather than not
   at all.
+- ⚠⚠ **FOURTH occurrence, 2026-09-21 (#3274) — and it is the sharpest one, because the fix
+  for occurrence 3 embedded the too-narrow grep as its own verification recipe.** The
+  surviving sentence became *"a £ sign in the positions table is the broker's own label
+  carried through unchanged, not a conversion this engine performed"*, justified by the
+  assignment site `app/api/strategies.py:3362`, `currency=broker_position.currency`. Both
+  halves are false. `_position_from_payload` reads **no** currency key off eToro's position
+  payload; the value is `display_currency` from `get_runtime_config`, and
+  `app/api/portfolio.py`'s `if native_ccy != display_currency:` block converts all seven
+  money fields before this route ever sees them. Measured: stored `open_rate 759.86` USD ×
+  stored `0.74939` = the `569.43` the route returns.
+  - **The doc written to prevent recurrence shipped the command that hid it** —
+    `rg … app/api/strategies.py app/services/account_equity_evidence.py`, which names only
+    the two files the claim was written from, under a heading asserting one converting call
+    on the whole route. A search scoped to the sources that agree with a claim cannot
+    falsify it; it launders the claim into evidence.
+  - **The new tell, one level past the grammatical one above:** the evidence's subject was a
+    single ASSIGNMENT EXPRESSION (`x=y.z`), and the claim's subject was the VALUE. `y.z` is
+    a passthrough of `y`, never of `y`'s ultimate source. Reading `x=y.z` as "unchanged"
+    requires following `y` to where it was built — here two files away, in another router's
+    service function that `/strategies` imports at line 19.
+  - Prevention, in addition to "render it and read it": for a claim about a value, **name
+    the PRODUCER, not the assignment**. Mechanical form — `rg -n '^from app\.' <route file>`
+    first, then search the converting vocabulary across every file that returns, before
+    writing any "carried through" / "unconverted" / "only converting call" sentence.
+- ⚠⚠⚠ **The fix for occurrence 4 committed occurrence 5 against itself, and this is the part
+  worth reading.** The correction replaced "ONE converting call on this route" with "**TWO**
+  converting paths" — the same unestablished exhaustive claim with a different integer — and
+  ckpt-1 produced a third within one pass: `app/api/sse_quotes.py`, which `StrategyPositions.tsx`
+  subscribes to itself and which overrides the CURRENT and GAIN/LOSS cells at a rate snapshotted
+  per connection. **It is invisible to every grep of the route's imports, because the route does
+  not import it — the component fetches it.** Two more sites (`load_owned_pnl` ×
+  `open_conversion_rate`, the mark substitution × `close_conversion_rate`) are bare
+  multiplications that no `convert(`-shaped search finds.
+  - Three more claims in the same commit failed the same way and were cut before push: a cited
+    function name that does not exist (`_position_from_payload`; it is `_parse_direct_position`
+    — **grep-before-cite, violated while writing the entry about not citing loosely**), "the
+    broker never sends a currency on a position at all" (we can only say our parser maps none;
+    `raw_payload` would retain it), and "a rate nothing was transacted at" (a universal
+    historical negative — a household funding or withdrawal may have used the same published
+    rate). A fourth, "only as fresh as the last FX refresh", was wrong in the **unsafe
+    direction**: the SSE snapshot makes a cell potentially OLDER than that.
+  - **The generalisation: replacing a wrong count with a right-sounding count is not a fix, it
+    is the same defect re-armed.** A count is a claim about the whole search space; the reason
+    the first one was wrong is that nobody had bounded that space, and writing "two" does not
+    bound it either. Prose that survives says **"the paths established so far"** and names who
+    would have to draw the boundary — or states no count at all.
+  - ⚠ Note what caught it: **Codex ckpt-1 on the FRAMING, on a diff the ladder scores as
+    narrow** (one string constant, two comments, test pins, two docs). The rung is right about
+    the CODE risk and blind to the artefact — the deliverable here was a factual claim, and
+    that is the judgement-artefact rung however few lines carry it. When the thing being
+    shipped is a sentence asserting something about the system, rung by CLAIM, not by diff size.
 - Enforced in: this entry; `app/api/strategies.py::CoreSleeveResponse.household_currency_caveat`
-  (comment + the negative test pins in `tests/test_2603_core_mandate_api.py`); issue #3274.
+  (comment + the negative test pins in `tests/test_2603_core_mandate_api.py`); the inline
+  comment at the `currency=broker_position.currency` site itself; the rewritten "conversion
+  boundary" section of `docs/proposals/ta/2026-09-21-core-sleeve-currency-caveat.md`;
+  issue #3274.
