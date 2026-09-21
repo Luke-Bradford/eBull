@@ -10217,3 +10217,45 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry; `scripts/measure_2834_armb_correction_policy.py` (`harm_direction`,
   and the closing banner that now refuses to read a displacement as a benefit);
   `docs/proposals/ta/2026-09-21-armb-correction-policy-verdict.md` §3.5 and §5 item 3.
+
+## A nullable column added for ONE vendor makes `COALESCE(x, <neutral>)` a silent lie — absence needs its own stored state (#2834, 2026-09-21)
+
+- First seen in: #2834 §7 item 2 (2026-09-21), while adding
+  `research_price_daily.split_factor` for `icyDenev/Intrader`. The column has to be
+  nullable: the corpus's other loaded vendor is a Parquet archive with no stamp column at
+  all, so 25.8M of its bars are NULL by construction.
+- Symptom: the first thing any reader writes is `COALESCE(split_factor, 1)`, because 1 is
+  the factor's identity element and the expression looks like ordinary defensive SQL. It is
+  not. It converts *"this vendor's corporate actions are unknown"* into *"this vendor had no
+  corporate actions"* — and does it in the one place the reader trusts, silently, on the
+  vendor for which the answer is most wrong. The same collapse in Python is
+  `params_for("equity")` returning the strict default `2` because `'equity'` is not a key
+  (same ticket, a day earlier): **a default answers a question you did not ask, and the
+  answer is plausible.**
+- The general shape: a neutral value (1 for a ratio, 0 for a count, `""` for a label) and
+  "no data" are DIFFERENT states, and every defaulting construct — `COALESCE`, `dict.get`,
+  `getattr(o, k, d)`, a dataclass default, `?? `, `or` — fuses them. It is invisible in
+  review precisely because the neutral element is arithmetically correct for the case that
+  *does* have data.
+- Prevention: when a nullable column's NULL means "not supplied by this source" rather than
+  "known to be nothing", the two states need a SEPARATE stored marker that a reader must
+  consult — not a convention, not a docstring. Here:
+  `research_price_series.corporate_action_stamps IN ('vendor_supplied','absent')`, with the
+  contract written into the column COMMENT of the nullable column itself, so the
+  `COALESCE`-writer meets it at the point of use.
+- ⚠ Write the marker AFTER the data it describes, not before. `corporate_action_stamps` is
+  set at the end of the bar pass (`_write_census`) and deliberately NOT beside
+  `adjustment_basis` in the symbol pass: a load that dies between the two passes then leaves
+  the marker at `absent`, which understates coverage and cannot mislead a divider. The other
+  ordering fails in the dangerous direction — the marker claims stamps that were never
+  written, and every `COALESCE` downstream reads those bars as event-free.
+- Test to apply: for each nullable column you are adding, say out loud what NULL means. If
+  the sentence contains "this source doesn't supply it", you owe a marker. If it contains
+  "there genuinely wasn't one", a default is fine.
+- Enforced in: `sql/405_research_corpus_split_stamps.sql` §3 and both column COMMENTs;
+  `app/services/research_corpus_ingest.py` (`ArchiveProvenance.corporate_action_stamps`
+  defaulting to `absent`, `_write_census` writing it last, `LoadCensus.split_stamps_absent`
+  failing the load when a `vendor_supplied` archive produces a bar without one);
+  `tests/test_research_corpus_ingest.py::test_an_ordinary_bar_stamps_one_not_none` and
+  `::test_a_new_archive_is_presumed_stampless`;
+  `tests/test_research_corpus_schema.py::TestCorporateActionStamps`.

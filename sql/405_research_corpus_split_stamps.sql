@@ -81,18 +81,36 @@
 -- One stamp per bar needs no new constraint: `research_price_daily`'s primary
 -- key is already `(series_id, bar_date)`.
 
+-- ⚠ Same lock discipline as sql/400, and for the same reason: this table is
+-- 9.3 GB / 76.0M rows and a long reader on it is the NORMAL state, not an
+-- unlucky collision. `lock_timeout` turns an unbounded stall-everything wait
+-- into a clean, retryable LockNotAvailable — and since the FastAPI lifespan
+-- runs migrations, a locked-out migration fails the boot loudly instead of
+-- hanging it.
+SET LOCAL lock_timeout = '5s';
+
 ALTER TABLE research_price_daily
     ADD COLUMN IF NOT EXISTS split_factor NUMERIC,
     ADD COLUMN IF NOT EXISTS dividend     NUMERIC;
 
+-- NOT VALID, and it costs nothing to be — sql/400's idiom, same shape.
+-- A validated CHECK scans all 76.0M rows while still holding the ACCESS
+-- EXCLUSIVE lock the column ALTER just took, to discover nothing: every
+-- pre-existing row receives NULL for a column added in this same statement, so
+-- the constraint is satisfied by construction. NOT VALID still enforces on
+-- every INSERT and UPDATE from here on, which is the whole point — the
+-- re-load's 50.1M writes go through it. No follow-up VALIDATE is needed.
 DO $$
 BEGIN
-    ALTER TABLE research_price_daily
-        ADD CONSTRAINT research_price_daily_split_factor_positive
-        CHECK (split_factor IS NULL OR split_factor > 0);
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'research_price_daily_split_factor_positive'
+    ) THEN
+        ALTER TABLE research_price_daily
+            ADD CONSTRAINT research_price_daily_split_factor_positive
+            CHECK (split_factor IS NULL OR split_factor > 0) NOT VALID;
+    END IF;
+END
 $$;
 
 COMMENT ON COLUMN research_price_daily.split_factor IS
@@ -122,14 +140,21 @@ COMMENT ON COLUMN research_price_daily.dividend IS
 ALTER TABLE research_price_series
     ADD COLUMN IF NOT EXISTS corporate_action_stamps TEXT NOT NULL DEFAULT 'absent';
 
+-- Validated, not NOT VALID: 30,591 rows, and every one of them was just given
+-- the DEFAULT by the statement above, so the scan is instant and there is
+-- nothing to repair. The NOT VALID treatment above is about 76.0M rows, not
+-- about the constraint being weaker.
 DO $$
 BEGIN
-    ALTER TABLE research_price_series
-        ADD CONSTRAINT research_price_series_corporate_action_stamps
-        CHECK (corporate_action_stamps IN ('vendor_supplied', 'absent'));
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'research_price_series_corporate_action_stamps'
+    ) THEN
+        ALTER TABLE research_price_series
+            ADD CONSTRAINT research_price_series_corporate_action_stamps
+            CHECK (corporate_action_stamps IN ('vendor_supplied', 'absent'));
+    END IF;
+END
 $$;
 
 COMMENT ON COLUMN research_price_series.corporate_action_stamps IS
