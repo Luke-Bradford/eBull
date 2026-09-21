@@ -10275,3 +10275,32 @@ original, because the gate now *looked* like a bound.
   `::test_a_series_missing_a_stamp_is_marked_absent_not_vendor_supplied` and
   `::test_an_absent_dividend_downgrades_the_marker_too`;
   `tests/test_research_corpus_schema.py::TestCorporateActionStamps`.
+
+### A band table whose shares do not sum to 100% reports its own exclusions as agreement
+
+- First seen in: PR for #2834 §7 item 2 slice B (the split-only correction). Self-caught
+  on the first full-population run, before review.
+- Symptom: the harness bucketed 12,546,227 corrected bars into relative-error bands against
+  a denominator of "bars the correction moves". The printed table read
+  `<= 1e-12  11,906,203  94.90%` and **zero in every other band, including `worse`**. The
+  missing 5.10% was not a band — it was 640,024 bars the loop never measured, skipped by an
+  `if volume:` guard because a zero or absent volume makes the relative error undefined.
+  Every band was honest and the table as a whole was not: a reader sums six bands, finds
+  100% of nothing missing, and concludes the population was covered.
+- ⚠ The danger is specific to the shape. A COUNT that is too low looks wrong immediately;
+  a PERCENTAGE computed against an aspirational denominator looks precise. And the
+  direction of the error is the flattering one — the skipped rows are exactly the ones a
+  guard skipped because they were awkward, which correlates with being the interesting ones.
+- ⚠ It is the same defect as the loop prompt's "no silent caps" rule (`log()` what was
+  dropped, because silent truncation reads as "covered everything") arriving in a
+  measurement script rather than in an orchestration. Recorded here because the prompt's
+  version is scoped to workflows and this one was written in plain Python.
+- Test to apply: **after printing any distribution, add its bands and check the total
+  against the denominator in the same breath.** If they differ, the gap is a bucket — name
+  it and print it, never let it be inferred by subtraction. Equivalently: the denominator of
+  a band table is the set that was MEASURED, not the set that was eligible, and any
+  difference between the two is itself a reportable figure.
+- Enforced in: this prevention log;
+  `scripts/measure_2834_split_adjustment.py::derive` (`totals["turnover_undefined"]`
+  counted in the same branch that skips, printed immediately under the band table, with the
+  band denominator reduced to the measured set).

@@ -127,6 +127,10 @@ def derive(conn: psycopg.Connection[Any]) -> int:
     refusals: list[str] = []
     band_hits = Counter[str]()
     turnover_bands = Counter[str]()
+    #: Arm 4's GAIN SIDE, by series. A disagreement rate is not inspectable as a
+    #: percentage — the full-population rule is to look at what moved.
+    disagreeing = Counter[str]()
+    bar_span: dict[str, tuple[int, int]] = {}
     worst: tuple[Decimal, str] | None = None
     scale_extremes: list[tuple[Decimal, str]] = []
 
@@ -161,6 +165,11 @@ def derive(conn: psycopg.Connection[Any]) -> int:
                 return
             totals["series_derived"] += 1
             totals["bars"] += len(rows)
+            if rows:
+                # Calendar span in days against bars actually shipped — the
+                # discriminator for a SPARSE series, whose missing bars take
+                # their stamps with them.
+                bar_span[symbol] = ((rows[-1][1] - rows[0][1]).days, len(rows))
             if scales and scales[-1] != 1:
                 totals["terminal_scale_not_one"] += 1
                 refusals.append(f"{symbol}: last bar scales to {scales[-1]}, not 1")
@@ -185,13 +194,19 @@ def derive(conn: psycopg.Connection[Any]) -> int:
                     # Arm 3: turnover, on the bars the correction MOVES. A bar
                     # at scale 1 is invariant by construction, so measuring it
                     # would be comparing a number to itself 50 million times.
-                    if volume:
+                    #
+                    # ⚠⚠ THE SKIP IS COUNTED. A zero or absent volume makes the
+                    # relative error undefined, and a band table whose shares do
+                    # not sum to 100% reads as full coverage when it is not —
+                    # the silent-truncation defect. Excluded, named, printed.
+                    raw = close * Decimal(volume) if volume else Decimal(0)
+                    if raw:
                         left = corrected_price(close, scale)
                         right = corrected_volume(volume, scale)
                         assert left is not None and right is not None
-                        raw = close * Decimal(volume)
-                        if raw:
-                            turnover_bands[_band(abs(left * right - raw) / abs(raw))] += 1
+                        turnover_bands[_band(abs(left * right - raw) / abs(raw))] += 1
+                    else:
+                        totals["turnover_undefined"] += 1
 
                 # Arm 4: corroboration on the dividend-free suffix only.
                 if clean_suffix and adj_close is not None and adj_close > 0:
@@ -200,8 +215,10 @@ def derive(conn: psycopg.Connection[Any]) -> int:
                     assert derived is not None
                     error = abs(derived - adj_close) / adj_close
                     band_hits[_band(error)] += 1
-                    if error > _BANDS[-1] and (worst is None or error > worst[0]):
-                        worst = (error, f"{symbol} {rows[index][1]} close={close} scale={scale} adj={adj_close}")
+                    if error > _BANDS[-1]:
+                        disagreeing[symbol] += 1
+                        if worst is None or error > worst[0]:
+                            worst = (error, f"{symbol} {rows[index][1]} close={close} scale={scale} adj={adj_close}")
                 if dividend:
                     clean_suffix = False
 
@@ -237,12 +254,26 @@ def derive(conn: psycopg.Connection[Any]) -> int:
             share = 100.0 * count / denominator if denominator else 0.0
             print(f"    {band:>10s}  {count:>12,}  {share:6.2f}%")
 
-    _report("=== arm 3: corrected turnover vs raw turnover, on moved bars ===", turnover_bands, totals["bars_moved"])
+    measured = totals["bars_moved"] - totals["turnover_undefined"]
+    _report("=== arm 3: corrected turnover vs raw turnover, on moved bars ===", turnover_bands, measured)
+    print(f"  excluded (zero or absent volume, error undefined): {totals['turnover_undefined']:,}")
     print("  ⚠ The residual is the QUOTIENT'S ROUNDING, not a defect — see the module docstring.")
+
     _report("=== arm 4: corroboration against the vendor's own adj_close ===", band_hits, totals["corroborable"])
     if worst is not None:
         print(f"  worst: rel err {worst[0]:.3e} at {worst[1]}")
-    print("  ⚠ An implementation check, NOT an adjudicator — both sides descend from one Yahoo observation.")
+    print(f"  disagreeing series: {len(disagreeing):,} of {totals['series_derived']:,}")
+    print(f"  {'symbol':10s} {'bars':>8s} {'span(d)':>9s} {'bars/yr':>9s} {'disagreeing':>12s}")
+    for symbol, count in disagreeing.most_common(15):
+        span, bars = bar_span.get(symbol, (0, 0))
+        per_year = bars / (span / 365.25) if span else 0.0
+        print(f"  {symbol:10s} {bars:>8,} {span:>9,} {per_year:>9.1f} {count:>12,}")
+    print(
+        "\n  ⚠ An implementation check, NOT an adjudicator — both sides descend from one\n"
+        "  Yahoo observation. ⚠⚠ A series shipping far fewer than ~252 bars/yr is SPARSE,\n"
+        "  and a bar the vendor never shipped took its stamp with it: `vendor_supplied`\n"
+        "  guarantees a stamp on every STORED bar, never a complete EVENT set."
+    )
 
     # ⚠ The refusal is on the INVARIANTS only. A disagreement band is a
     # measurement of two processings and is reported, never asserted — §5's
