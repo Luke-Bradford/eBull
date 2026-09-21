@@ -996,6 +996,19 @@ Issue #2260 exists because a plausible number met none of these and was believed
     signals/fills/levels while `adj_close` governs strategy wealth and the
     buy-and-hold hurdle (#2429). `price_series_break` segments (402 rows) are
     `not_evaluable`, never spanned.
+    ⚠⚠ **CORRECTED 2026-09-21 (#2834): "the research corpus supplies
+    split-adjusted OHLC" is true of ONE of its two vendors.** It holds for
+    `paperswithbacktest/Stocks-Daily-Price` (sql/251, and not uniformly even
+    there — see the verdict's §3). It is FALSE for `icyDenev/Intrader`, whose
+    OHLC carry neither the split nor the dividend adjustment
+    (`research_corpus_ingest.py:165`) — and that is the vendor
+    `BACKTEST_UNIVERSE = "survivorship_free"` pins, so every signal scored on
+    that universe reads a raw traded level across splits. Measured consequence:
+    15.00% of s2's top decile changes with the price column (#3278), 14.30%
+    against a split-only basis (#2834). The corpus-wide sentence above is what
+    licensed s2's `close`; read it per vendor.
+    **Basis verdict + the split-only construction:**
+    `docs/proposals/ta/2026-09-21-armb-split-only-basis-verdict.md`.
 11. **Strategy identity = code + config + data contract.** ⚠ Hashing parameters
     alone does not prevent overfitting: the same parameters with changed filter
     logic, universe definition, cost model, ranking tie-break or execution

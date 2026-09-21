@@ -9637,6 +9637,17 @@ original, because the gate now *looked* like a bound.
   module — unless an identity rotation is intended and its evidence disposition is part of
   the change. Self-review prompt: a diff touching `app/services/strategies/**` whose PR
   description says "comment only" or "doc only" is the tell.
+- ⚠ **Re-committed the NEXT DAY (2026-09-21, #2834), by the rule's own author-adjacent session.**
+  Having found that s2's docstring cites a source rule verified on the wrong vendor, I wrote the
+  correction straight into `s2_cross_sectional_momentum.py` — a pure prose edit that would have
+  rotated the identity of the one strategy this ticket is measuring, inside a PR whose stated point
+  is that the strategy is NOT changed yet. Caught by grepping `hashlib` in the file *after* editing
+  it, not before. **The rule failed at the moment of noticing a defect**: a correction feels like
+  maintenance rather than a change, and the tell the entry names ("comment only") is written from
+  the reviewer's side, not the author's. Author-side form: *the trigger is the PATH, before the
+  edit* — `app/services/strategies/**` is read-only for documentation, and the correction goes in
+  the spec with a pointer. The fix landed in
+  `docs/proposals/ta/2026-09-21-armb-split-only-basis-verdict.md` §7 instead.
 - Enforced in: this entry;
   `docs/proposals/ta/2026-09-21-2840-carrier-source-selection-tripwire.md` §4 (carries the
   verified before/after hashes and the ledger evidence).
@@ -10041,3 +10052,44 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this entry; the "premise under test" and "THE CAUSE IS DELIBERATELY NOT
   DECOMPOSED" blocks in `scripts/measure_2834_armb_signal_basis.py`;
   `docs/proposals/ta/2026-09-21-armb-signal-basis-blocker.md` §2 and §4.
+
+## A derived column cannot validate the stamp it was derived from (2026-09-21, #2834)
+
+- Symptom: `icyDenev/Intrader`'s CSVs carry a per-bar split ratio (field 6, semantics fixed by the
+  archive's own `TickerData.h::BaseIndicators` and `IntraderEngine::SplitCheck()`). To check the
+  field before building a split-only basis on it, I compared it against the vendor's own
+  `adj_close`: across a split date the cumulative adjustment `close / adj_close` must step by
+  exactly the stamped factor. It does, on **99.14%** of 8,042 events — and that number is close to
+  worthless, because `adj_close` is produced by the same pipeline that wrote the stamp. Measured,
+  not argued: of the 383 events a second processing disagrees with, **364 pass the internal check**.
+  The worked case is COO 2024-02-20 — `372.01 → 95.70` is a 4:1 against a stamped **16**, and the
+  vendor back-adjusted its own `adj_close` by 16 too (`23.25 → 95.70`), so the check sees a perfect
+  match on a factor wrong by 4×.
+- **The generalisation: agreement between two columns is only evidence when they have independent
+  derivations.** A back-adjusted price, a cumulative factor, a restated total and a stored rollup
+  are all *functions of* the field under test, so they reproduce its errors faithfully. The test to
+  apply before trusting a consistency check: **what would have to be true for this check to fail?**
+  If the answer is "the pipeline would have to be inconsistent with itself", the check measures
+  tidiness, not correctness.
+- ⚠ The same session then nearly shipped the second half of the same error. The cross-vendor check
+  was written up as "independent confirmation" against `paperswithbacktest/Stocks-Daily-Price` —
+  and `research_corpus_ingest.py`'s own provenance record for the vendor says the opposite, in
+  terms: *"A Yahoo redistribution like the HF archive, so the two are ONE observation and agreement
+  between them is circular, never corroborating."* It sits ~330 lines above the column tuple the
+  script imports. **Grep the provenance record of every source you are about to call independent**
+  — in a multi-vendor corpus "second vendor" and "second observation" are different claims, and the
+  repo usually already knows which one it has. Caught by Codex ckpt-1, not by any gate.
+- ⚠ Corollary on gates: the first version of the script made the circular check its **exit-code
+  gate**, at an invented "95% of events agree" bar, while its own docstring called the check
+  insufficient. A script whose gate contradicts its own caveat will be read by its exit code. The
+  fix was a parameter-free criterion — *does applying the stamp increase agreement with the other
+  processing?* — which asks whether the field carries information at all, and leaves the residual
+  rate as a reported quality figure rather than a pass mark.
+- ⚠ Also corrected on the same document, and worth naming because it is a recurring shape: **"no
+  reference bar pair" was written as "the delisted half"**. The census says 3,709 of 3,835 unmatched
+  events are symbols the reference vendor does not serve at all and only **716 (18.7%)** sit on a
+  series carrying delisting evidence. A join's failure mode is a measurement, not a synonym for the
+  population you expected to be missing.
+- Enforced in: this entry; `scripts/measure_2834_armb_split_only_basis.py` (the B1 circularity
+  block, the parameter-free gate, `unmatched_census`);
+  `docs/proposals/ta/2026-09-21-armb-split-only-basis-verdict.md` §3–§4.
