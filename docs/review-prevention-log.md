@@ -10002,3 +10002,42 @@ original, because the gate now *looked* like a bound.
   comment at the `currency=broker_position.currency` site itself; the rewritten "conversion
   boundary" section of `docs/proposals/ta/2026-09-21-core-sleeve-currency-caveat.md`;
   issue #3274.
+
+## A source rule verified on one vendor is not a source rule for another (2026-09-21, #2834)
+
+- Symptom: `s2_cross_sectional_momentum.py` scores momentum on `close` and defends the choice
+  with a **source rule** — *"the corpus agrees by construction: `research_price_daily.close` is
+  the SPLIT-adjusted close … while the dividend-adjusted series lives in `adj_close`
+  (sql/251)"*. `sql/251` does say that, and verified it: `AAPL 2020-08-27 close 125.01`. But it
+  verified it on `paperswithbacktest/Stocks-Daily-Price`, and s2 runs on
+  `BACKTEST_UNIVERSE = "survivorship_free"`, which `universe_selection.py` pins to
+  `icyDenev/Intrader` — where `research_corpus_ingest.py:165` had **separately measured the
+  opposite** (*"this archive's OHLC carry NEITHER the split nor the dividend adjustment …
+  consumers computing returns must read `adj_close`"*). Same bar, same day: 125.01 in one
+  archive, **500.04** in the other. Measured consequence: **15.00% of s2's top decile changes
+  with the price column**, across 312 formations and 121,601 decile slots, in every decade
+  (`scripts/measure_2834_armb_signal_basis.py`).
+- **Neither document is wrong.** Both are correct about the vendor they measured. The defect is
+  a citation that crossed a vendor boundary without re-checking, and it is invisible to every
+  ordinary review: the cited source exists, says what it is quoted as saying, and is right.
+- **The generalisation: a source rule about STORED DATA is scoped to the population it was
+  measured on, and a multi-vendor corpus makes that scope a live variable.** A reg or a
+  published formulation travels; *"column X on our corpus means Y"* does not, because it is a
+  measurement and the corpus has more than one producer. Test: when citing a data-shape rule,
+  name the vendor/source it was verified against and check that it is the one this code path
+  reads. If the citing module and the verifying document name different producers, the rule has
+  not been established for the caller.
+- ⚠ Corollary that cost a withdrawn figure in the same session: **an attribution by each unit's
+  own attribute is not causal when units compete for a fixed number of slots.** Having measured
+  the displacement, I decomposed it into "split-scale" and "dividend-scale" by each displaced
+  name's own `close/adj_close` factor change, and reported ≈8.2% as split-attributable. Invalid
+  — a name leaves the decile because a **competitor's** score moved, so an entirely unadjusted
+  name displaced by a split-corrected rival was labelled "dividend-scale". Caught by Codex on
+  the verdict, not by any gate. Ranking, top-N and quota selections all have this shape.
+- ⚠ Also corrected in the same pass, and worth naming because it survived two drafts: *"a split
+  follows a run-up, so the error has a sign"*. **Reverse splits move it the other way** (a
+  1-for-4 inflates an unchanged name's raw gross return 4×), so the displacement is
+  bidirectional. A mechanism story that explains only half the event class is not a mechanism.
+- Enforced in: this entry; the "premise under test" and "THE CAUSE IS DELIBERATELY NOT
+  DECOMPOSED" blocks in `scripts/measure_2834_armb_signal_basis.py`;
+  `docs/proposals/ta/2026-09-21-armb-signal-basis-blocker.md` §2 and §4.
