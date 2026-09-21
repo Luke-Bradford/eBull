@@ -606,6 +606,11 @@ def _resume_operation(
                     "WHERE strategy_trade_id=%s",
                     (owned.strategy_trade_id,),
                 )
+        # ⚠ Bound ONCE and shared with the recorder below, not repeated at each call site:
+        # the streak's `last_refusal_reason` and the returned `reason_code` must be the
+        # same string, and two copies of a literal are two things to rename.
+        resumed_state: Literal["applied", "reconcile_required"] = "applied" if landed else "reconcile_required"
+        resumed_reason = "broker_state_matches_intent" if landed else "crash_before_submission_identity"
         # #3284 item 4a — recorded HERE rather than at the caller, because this function
         # holds the exact position it already fetched. See `_record_resumed_repair_visit`.
         _record_resumed_repair_visit(
@@ -613,15 +618,15 @@ def _resume_operation(
             owned=owned,
             operation_type=str(operation["operation_type"]),
             position=position,
-            state="applied" if landed else "reconcile_required",
-            reason_code="broker_state_matches_intent" if landed else "crash_before_submission_identity",
+            state=resumed_state,
+            reason_code=resumed_reason,
             observed_at=observed_at,
         )
         return PositionManagerResult(
             owned.strategy_trade_id,
             owned.broker_position_id,
-            "applied" if landed else "reconcile_required",
-            "broker_state_matches_intent" if landed else "crash_before_submission_identity",
+            resumed_state,
+            resumed_reason,
             operation_id,
         )
     if operation["operation_type"] == "close":
@@ -682,31 +687,33 @@ def _resume_operation(
         # the operation, so a submitted edit whose levels never arrive returns `pending`
         # here forever while `idx_strategy_position_one_unresolved_operation` blocks any
         # fresh repair. Unrecorded, that is a permanently naked position reading zero.
+        pending_reason = "broker_edit_pending"
         _record_resumed_repair_visit(
             conn,
             owned=owned,
             operation_type=str(operation["operation_type"]),
             position=position,
             state="pending",
-            reason_code="broker_edit_pending",
+            reason_code=pending_reason,
             observed_at=observed_at,
         )
         return PositionManagerResult(
-            owned.strategy_trade_id, owned.broker_position_id, "pending", "broker_edit_pending", operation_id
+            owned.strategy_trade_id, owned.broker_position_id, "pending", pending_reason, operation_id
         )
     with conn.transaction():
         _terminal(conn, operation_id=operation_id, status="applied")
+    applied_reason = "broker_edit_applied"
     _record_resumed_repair_visit(
         conn,
         owned=owned,
         operation_type=str(operation["operation_type"]),
         position=position,
         state="applied",
-        reason_code="broker_edit_applied",
+        reason_code=applied_reason,
         observed_at=observed_at,
     )
     return PositionManagerResult(
-        owned.strategy_trade_id, owned.broker_position_id, "applied", "broker_edit_applied", operation_id
+        owned.strategy_trade_id, owned.broker_position_id, "applied", applied_reason, operation_id
     )
 
 
