@@ -235,7 +235,17 @@ def equivalence() -> bool:
                 regime=unconstrained_regime(len(series)),
                 price_basis=from_undeclared_source(series=series),
             )
-            want_member = s2_member(series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=MASKED_REASON)
+            # `ratio_basis=series` mirrors `_s2_member`'s own declaration about the
+            # live corpus — see its comment (#2834 §7 slice C). This arm compares the
+            # manifest adapter against a direct call, so it must make the SAME
+            # declaration or it would measure the basis rather than the wiring.
+            want_member = s2_member(
+                series,
+                ratio_basis=series,
+                panel_rebalance_dates=dates,
+                universe=UNIVERSE,
+                close_reason=MASKED_REASON,
+            )
             if (
                 got_member.dates != want_member.dates
                 or got_member.decision_indices != want_member.decision_indices

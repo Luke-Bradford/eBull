@@ -52,6 +52,7 @@ from app.config import settings
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION, load_masked_series
+from app.services.research_split_corrected_reader import load_ratio_basis
 from app.services.strategies.s2_cross_sectional_momentum import (
     DECILE,
     ELIGIBILITY_BARS,
@@ -282,6 +283,14 @@ class _PanelRun:
     masked_decision_bars: int = 0
     listed_but_silent: int = 0
     boundary_ties: int = 0
+    #: #2834 §7 slice C. ⚠ How each series reached its ratio basis, COUNTED and
+    #: not inferred: `split_corrected` and `vendor_already_adjusted` both leave
+    #: series whose two bases happen to be equal, and reporting the corpus as
+    #: "corrected" when half of it was merely already adjusted would credit this
+    #: change for work the vendor did.
+    ratio_basis_methods: Counter[str] = field(default_factory=Counter)
+    #: Bars the correction actually moved (scale != 1), summed over the panel.
+    correction_moved_bars: int = 0
 
 
 def _stream_panel(conn: psycopg.Connection[tuple], *, progress: bool = True) -> _PanelRun:
@@ -343,7 +352,22 @@ def _stream_panel(conn: psycopg.Connection[tuple], *, progress: bool = True) -> 
         series = BarSeries(dates=tuple(b.bar_date for b in masked.bars), rows=tuple(rows))
         run.bars += len(series)
 
-        member = s2_member(series, panel_rebalance_dates=rebals, universe=UNIVERSE, close_reason="quarantined_bar")
+        # #2834 §7 slice C — the momentum ratio reads the split-corrected basis,
+        # the floor and every level test read these as-traded bars. On the
+        # `split_adjusted` half of the corpus the two are the same object, and
+        # `method` records which happened so the census can report the split
+        # rather than infer it from an equality that has two meanings.
+        corrected, method = load_ratio_basis(conn, series_id, series)
+        run.ratio_basis_methods[method] += 1
+        run.correction_moved_bars += corrected.moved_bars
+
+        member = s2_member(
+            series,
+            ratio_basis=corrected.ratio_basis,
+            panel_rebalance_dates=rebals,
+            universe=UNIVERSE,
+            close_reason="quarantined_bar",
+        )
         staged = stage_cross_sectional_member(member)
         for verdict in staged.verdicts:
             if verdict is None:
@@ -422,6 +446,15 @@ def census() -> int:
     print(f"  series with bars  {run.series_with_bars}   (fail-closed empties: {run.empty_series})")
     print(f"  bars              {run.bars}")
     print(f"  masked closes     {run.return_masked}")
+    # #2834 §7 slice C. ⚠ Printed as a DENOMINATED pair, never as a bare
+    # "corrected" count: the two methods partition the panel and the share that
+    # took each one is what says how much of this corpus the correction reaches.
+    methods_total = sum(run.ratio_basis_methods.values())
+    print(f"  ratio basis       {methods_total} series")
+    for method, count in sorted(run.ratio_basis_methods.items()):
+        share = 100.0 * count / methods_total if methods_total else 0.0
+        print(f"      {method:<24} {count:>8,}  {share:6.2f}%")
+    print(f"      bars moved by the correction {run.correction_moved_bars:,} of {run.bars:,}")
     print("  verdicts:")
     for verdict in ("fired", "not_fired", "not_evaluable"):
         count = run.verdicts[verdict]
@@ -451,8 +484,21 @@ _RANKING_SQL = """
 WITH bars AS (
     SELECT d.series_id,
            d.bar_date,
-           CASE WHEN COALESCE(q.return_usable, TRUE) THEN d.close END AS close
+           CASE WHEN COALESCE(q.return_usable, TRUE) THEN d.close END AS close,
+           -- #2834 §7 slice C. ⚠ ROUTED, not COALESCEd: `split_factor` is NULL
+           -- across every bar of the `split_adjusted` vendor, so a bare
+           -- COALESCE(...,1) would read "this vendor ships no stamps"
+           -- identically to "no split on this bar". Only an `unadjusted` series
+           -- carrying `vendor_supplied` stamps is corrected; everything else
+           -- takes a literal 1, which is the same routing
+           -- `research_split_corrected_reader.ratio_basis_method_for` applies.
+           CASE
+               WHEN s.adjustment_basis = 'unadjusted' AND s.corporate_action_stamps = 'vendor_supplied'
+               THEN d.split_factor
+               ELSE 1
+           END AS split_factor
     FROM research_price_daily d
+    JOIN research_price_series s ON s.series_id = d.series_id
     JOIN research_price_quarantine_coverage cov
       ON cov.series_id = d.series_id
      AND cov.rule_set_version = %(version)s
@@ -478,6 +524,23 @@ windowed AS (
            close,
            lag(close, %(skip)s) OVER s      AS c_skip,
            lag(close, %(lookback)s) OVER s  AS c_back,
+           -- The corrected ratio equals the as-traded ratio times the product
+           -- of the factors in the HALF-OPEN interval (back, skip] — every
+           -- factor after `skip` appears in both scales and cancels. In row
+           -- terms that is rows i-lookback+1 .. i-skip, i.e. this frame.
+           --
+           -- ⚠ exp(sum(ln)) because Postgres has no product aggregate. For an
+           -- unsplit window every factor is exactly 1, ln(1) is exactly 0 and
+           -- the sum is exactly 0, so this is EXACT wherever the correction
+           -- does nothing and carries ~1e-15 relative error only where it
+           -- does. That is a float tolerance on the ORACLE, not on the
+           -- strategy: the comparison below is on decile MEMBERSHIP, and an
+           -- exact score tie at the cut is counted separately as a boundary
+           -- tie rather than silently resolved by drift.
+           exp(sum(ln(split_factor)) OVER (
+               PARTITION BY series_id ORDER BY bar_date
+               ROWS BETWEEN %(lookback)s - 1 PRECEDING AND %(skip)s PRECEDING
+           )) AS window_scale,
            row_number() OVER s              AS rn,
            count(*) OVER (PARTITION BY series_id) AS n_bars
     FROM bars
@@ -491,7 +554,7 @@ eligible AS (
     -- rebalance dates (1989-01-03, 1999-10-01) where the decile cut lands on an
     -- EXACT tie — 0.5 and 1.0 in both arithmetics, so not float drift, a
     -- different tie-break key. The arm was wrong; the strategy was not.
-    SELECT ps.instrument_id, w.bar_date, w.c_skip / w.c_back - 1 AS score
+    SELECT ps.instrument_id, w.bar_date, (w.c_skip / w.c_back) * w.window_scale - 1 AS score
     FROM windowed w
     JOIN rebalances r ON r.bar_date = w.bar_date
     JOIN research_price_series ps ON ps.series_id = w.series_id

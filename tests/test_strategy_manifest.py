@@ -417,7 +417,9 @@ class TestUniformInvocationEqualsTheDirectCall:
             regime=unconstrained_regime(len(series)),
             price_basis=from_archive_basis("unadjusted", series=series),
         )
-        expected = s2_member(series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=REASON)
+        expected = s2_member(
+            series, ratio_basis=series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=REASON
+        )
         assert via_manifest.dates == expected.dates
         assert via_manifest.decision_indices == expected.decision_indices
         assert via_manifest.score.values == expected.score.values
