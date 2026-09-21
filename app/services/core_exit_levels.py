@@ -127,6 +127,17 @@ CORE_EXIT_MAX_QUOTE_AGE_SECONDS: Final[int] = CORE_MAX_QUOTE_AGE_SECONDS
 CORE_EXIT_POLICY_VERSION: Final[str] = "core-exit-v2"
 
 
+class CoreExitLevelsUnderivable(ValueError):
+    """No valid stop/target pair exists for this anchor.
+
+    A ``ValueError`` subclass rather than a new hierarchy, so every existing caller that
+    catches ``ValueError`` keeps working.  It exists so the executor can catch THIS and
+    not everything: a bare ``except ValueError`` around :func:`core_exit_levels` would
+    silently map any future failure in it to the same operator-facing refusal, which is
+    the reassuring direction (review bot, PR #3289).
+    """
+
+
 @dataclass(frozen=True)
 class CoreExitLevels:
     """The two absolute rates for one core entry price."""
@@ -147,7 +158,7 @@ def core_exit_levels(entry_rate: Decimal) -> CoreExitLevels:
     one, which is the direction a reader would not expect from a "rounding" step.
     """
     if not entry_rate.is_finite() or entry_rate <= 0:
-        raise ValueError("a core entry rate must be finite and positive")
+        raise CoreExitLevelsUnderivable("a core entry rate must be finite and positive")
     hundred = Decimal("100")
     stop = (entry_rate * (hundred - CORE_STOP_LOSS_PCT) / hundred).quantize(CORE_EXIT_RATE_QUANTUM, rounding=ROUND_DOWN)
     take = (entry_rate * (hundred + CORE_TAKE_PROFIT_PCT) / hundred).quantize(CORE_EXIT_RATE_QUANTUM, rounding=ROUND_UP)
@@ -155,7 +166,7 @@ def core_exit_levels(entry_rate: Decimal) -> CoreExitLevels:
     # `assert`: `python -O` strips those, and a stop of 0 or a target below the stop is
     # a body eToro would either reject or -- worse -- accept.
     if stop <= 0 or take <= stop:
-        raise ValueError("core exit levels must be positive with the target above the stop")
+        raise CoreExitLevelsUnderivable("core exit levels must be positive with the target above the stop")
     return CoreExitLevels(stop_loss_rate=stop, take_profit_rate=take)
 
 
@@ -178,6 +189,7 @@ __all__ = [
     "CORE_STOP_LOSS_PCT",
     "CORE_TAKE_PROFIT_PCT",
     "CoreExitLevels",
+    "CoreExitLevelsUnderivable",
     "core_exit_level_satisfied",
     "core_exit_levels",
 ]

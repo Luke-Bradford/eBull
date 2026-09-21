@@ -19,7 +19,7 @@ from app.providers.broker import (
     BrokerOrderSubmissionUncertain,
     BrokerProvider,
 )
-from app.services.core_exit_levels import core_exit_levels
+from app.services.core_exit_levels import CoreExitLevelsUnderivable, core_exit_levels
 from app.services.strategy_control_plane import link_strategy_order, load_paper_pool
 from app.services.strategy_core_allocator import evaluate_core_rebalance
 from app.services.strategy_core_broker_preflight import (
@@ -862,7 +862,12 @@ def execute_core_rebalance(
                 return _result("refused", "core_exit_anchor_unavailable", intent_id=intent_id)
             try:
                 exit_levels = core_exit_levels(anchor_rate)
-            except ValueError:
+            except CoreExitLevelsUnderivable:
+                # ⚠ The SPECIFIC exception, not a bare `ValueError` -- a bare catch would map
+                # any future failure inside `core_exit_levels` to this same refusal, which
+                # reads as a handled condition when it is an unhandled one (review bot,
+                # PR #3289).
+                #
                 # ⚠ A REFUSAL, not an exception, and the case is real rather than defensive:
                 # `core_exit_levels` quantizes the stop DOWN to a cent, so any anchor under
                 # two cents derives a stop of 0.00 and raises.  SPY cannot reach there, but
