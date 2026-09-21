@@ -10509,3 +10509,38 @@ written CONFIDENTLY and each failed silently in the reassuring direction.
   with its query, and the superseded levels named as superseded);
   `tests/test_3284_core_exit_levels.py::test_the_live_position_reproduces_the_levels_the_operator_set_by_hand`
   (asserts the pair READ BACK from `broker_positions`, and says so).
+
+## 2026-09-21 — a value that an idempotent REPLAY must reproduce belongs to the committed authority, never to the submission (#3284 item 1)
+
+- Where it bit: the core sleeve's open body has to carry `stopLossRate` / `takeProfitRate`
+  so no position is ever born naked. The obvious implementation is to derive them from a
+  quote at submit time, next to the call that uses them. That is wrong here, and the reason
+  is not visible from the submit site: `load_core_resume_authority` re-reads a crashed
+  authority and **replays the same `request_id`**. eToro's rates are ABSOLUTE and anchored on
+  a quote, so a fresh derivation on the resume path sends a **different body under an
+  already-accepted idempotency key** — the one thing an idempotency key exists to forbid.
+- The shape that is safe: derive BEFORE the durable write, persist the derived values in the
+  same transaction as the authority (`sql/407`, `strategy_core_entry_exit_levels`), and have
+  the submit path READ them. The submission then becomes a pure function of committed state,
+  so first attempt and replay are byte-identical by construction rather than by care.
+- **The general test, and it is cheap: for every field in a request body, ask "would a replay
+  recompute this to the same value?"** A constant (`leverage`, `orderCurrency`) is safe. A
+  value read from the authority row (`requested_amount`) is safe. Anything derived from a
+  CLOCK, a QUOTE, a random source or current market state is NOT, and must be captured at the
+  moment the authority commits. ⚠ The tell is that the unsafe version looks *better* at the
+  submit site — fresher data, fewer columns, no migration.
+- ⚠ Second half, on reading it back: join the store with a **LEFT JOIN plus an explicit
+  raise**, never an INNER JOIN. An INNER JOIN makes an authority whose values were never
+  committed *invisible* — the loader reports "nothing to resume" while a durable unresolved
+  order sits at the broker. Both are failures, but only one is silent, and the silent one is
+  the one a monitoring dashboard agrees with.
+- ⚠ Third half, on the shape: make the new fields **REQUIRED on the dataclass, never
+  optional-with-a-default**. Required fields turn the type checker into the enumerator of
+  every construction site — pyright listed all 11 immediately. A default compiles silently at
+  every one of them and leaves the unsafe shape reachable forever.
+- Enforced in: `sql/407_core_entry_exit_levels.sql`; `app/providers/broker.py::BrokerCoreOrder`
+  (required rates + an inverted-pair check); `app/services/strategy_core_executor.py`
+  (derive-before-commit, the LEFT JOIN and its raise, and "from the AUTHORITY, never
+  re-derived here" at the submit site);
+  `tests/test_3284_core_exit_levels.py::TestItem1NoNakedOpen`;
+  `tests/test_2603_core_executor.py::test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target`.

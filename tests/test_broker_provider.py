@@ -919,7 +919,12 @@ class TestDemoCoreOrder:
             broker._http_write = MagicMock()
             broker._http_write.post.return_value = response
             result = broker.place_demo_core_order(
-                BrokerCoreOrder(instrument_id=3417, amount=Decimal("250")),
+                BrokerCoreOrder(
+                    instrument_id=3417,
+                    amount=Decimal("250"),
+                    stop_loss_rate=Decimal("379.93"),
+                    take_profit_rate=Decimal("2279.58"),
+                ),
                 request_id=request_id,
             )
             call = broker._http_write.post.call_args
@@ -935,6 +940,9 @@ class TestDemoCoreOrder:
             "leverage": 1,
             "amount": 250.0,
             "orderCurrency": "usd",
+            "stopLossRate": 379.93,
+            "takeProfitRate": 2279.58,
+            "stopLossType": "fixed",
         }
         assert result.broker_order_ref == "13902598"
         assert result.reference_id == request_id
@@ -946,7 +954,12 @@ class TestDemoCoreOrder:
             broker._http_write = MagicMock()
             with pytest.raises(BrokerOrderSubmissionError, match="represented exactly"):
                 broker.place_demo_core_order(
-                    BrokerCoreOrder(instrument_id=3417, amount=Decimal("9007199254.740991")),
+                    BrokerCoreOrder(
+                        instrument_id=3417,
+                        amount=Decimal("9007199254.740991"),
+                        stop_loss_rate=Decimal("379.93"),
+                        take_profit_rate=Decimal("2279.58"),
+                    ),
                     request_id=uuid4(),
                 )
             broker._http_write.post.assert_not_called()
@@ -955,7 +968,12 @@ class TestDemoCoreOrder:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:
             with pytest.raises(BrokerOrderSubmissionError, match="demo credentials"):
                 broker.place_demo_core_order(
-                    BrokerCoreOrder(instrument_id=3417, amount=Decimal("250")),
+                    BrokerCoreOrder(
+                        instrument_id=3417,
+                        amount=Decimal("250"),
+                        stop_loss_rate=Decimal("379.93"),
+                        take_profit_rate=Decimal("2279.58"),
+                    ),
                     request_id=uuid4(),
                 )
 
@@ -971,7 +989,12 @@ class TestDemoCoreOrder:
             broker._http_write.post.return_value = response
             with pytest.raises(BrokerOrderSubmissionUncertain, match="does not match"):
                 broker.place_demo_core_order(
-                    BrokerCoreOrder(instrument_id=3417, amount=Decimal("250")),
+                    BrokerCoreOrder(
+                        instrument_id=3417,
+                        amount=Decimal("250"),
+                        stop_loss_rate=Decimal("379.93"),
+                        take_profit_rate=Decimal("2279.58"),
+                    ),
                     request_id=uuid4(),
                 )
 

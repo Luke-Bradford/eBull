@@ -9,10 +9,12 @@ fact that the constants themselves are guarded.
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
-from app.providers.broker import BrokerPosition
+from app.providers.broker import BrokerCoreOrder, BrokerPosition
 from app.services.core_exit_levels import (
     CORE_EXIT_MAX_QUOTE_AGE_SECONDS,
     CORE_EXIT_RATE_TOLERANCE,
@@ -20,6 +22,10 @@ from app.services.core_exit_levels import (
     CORE_TAKE_PROFIT_PCT,
     core_exit_level_satisfied,
     core_exit_levels,
+)
+from app.services.strategy_core_executor import (
+    StrategyCoreExecutionError,
+    load_core_resume_authority,
 )
 from app.services.strategy_core_preflight import CORE_MAX_QUOTE_AGE_SECONDS
 from app.services.strategy_position_manager import _edit_landed, _OwnedPosition
@@ -244,3 +250,102 @@ def test_the_declared_percentages_are_the_ones_the_operator_chose() -> None:
     rule is to compute it or cite where it is computed — never to duplicate it.
     """
     assert (CORE_STOP_LOSS_PCT, CORE_TAKE_PROFIT_PCT) == (Decimal("50"), Decimal("200"))
+
+
+class TestItem1NoNakedOpen:
+    """#3284 item 1 — the shape and the resume path, the two places a naked core
+    order could still be constructed once the derivation is correct."""
+
+    def test_a_core_order_cannot_be_built_without_its_exit_levels(self) -> None:
+        """The dataclass is the enforcement point, not a caller's discipline.
+
+        Required fields rather than optional-with-default is the whole design: a
+        default compiles silently at every construction site, whereas a required field
+        makes the type checker enumerate them.
+        """
+        with pytest.raises(TypeError):
+            BrokerCoreOrder(instrument_id=3417, amount=Decimal("250"))  # type: ignore[call-arg]
+
+    @pytest.mark.parametrize(
+        ("stop", "take"),
+        [
+            (Decimal("0"), Decimal("2279.58")),
+            (Decimal("379.93"), Decimal("0")),
+            (Decimal("-1"), Decimal("2279.58")),
+        ],
+    )
+    def test_a_non_positive_rate_is_refused(self, stop: Decimal, take: Decimal) -> None:
+        with pytest.raises(ValueError, match="rates are required"):
+            BrokerCoreOrder(instrument_id=3417, amount=Decimal("250"), stop_loss_rate=stop, take_profit_rate=take)
+
+    def test_an_inverted_pair_is_refused(self) -> None:
+        """Both rates positive and the target UNDER the stop is the dangerous shape.
+
+        Each rate passes its own check, so only the relational one catches a swapped
+        pair — and a swapped pair is a body eToro may accept, stopping the sleeve out
+        at +200% and targeting it at -50%.
+        """
+        with pytest.raises(ValueError, match="take-profit must sit above"):
+            BrokerCoreOrder(
+                instrument_id=3417,
+                amount=Decimal("250"),
+                stop_loss_rate=Decimal("2279.58"),
+                take_profit_rate=Decimal("379.93"),
+            )
+
+    def test_an_authority_with_no_committed_levels_raises_rather_than_resuming(self) -> None:
+        """The LEFT JOIN's NULL must be loud.
+
+        An INNER JOIN would have reported "nothing to resume" while a durable authority
+        sat unresolved — the silent direction. Raising is the correct one: the only
+        two acceptable outcomes for a levels-less authority are 'reported' and
+        'repaired', never 'submitted' and never 'skipped'.
+        """
+        row = (
+            11,
+            21,
+            31,
+            3417,
+            Decimal("49.9"),
+            UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+            None,
+            7,
+            UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"),
+            UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"),
+            UUID("f7306e0b-9494-415e-85fd-97874510cc83"),
+            None,
+            None,
+        )
+        conn = SimpleNamespace(
+            execute=lambda *_a, **_k: SimpleNamespace(fetchone=lambda: row),
+            commit=lambda: None,
+        )
+        with pytest.raises(StrategyCoreExecutionError, match="incomplete"):
+            load_core_resume_authority(conn)  # type: ignore[arg-type]
+
+    def test_a_complete_authority_carries_its_levels_through(self) -> None:
+        row = (
+            11,
+            21,
+            31,
+            3417,
+            Decimal("49.9"),
+            UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+            None,
+            7,
+            UUID("73d8ad78-3062-4ef5-8f0a-7428865e23d7"),
+            UUID("ba39f751-d4bd-4553-ab25-d9acbb73fbe8"),
+            UUID("f7306e0b-9494-415e-85fd-97874510cc83"),
+            Decimal("379.93"),
+            Decimal("2279.58"),
+        )
+        conn = SimpleNamespace(
+            execute=lambda *_a, **_k: SimpleNamespace(fetchone=lambda: row),
+            commit=lambda: None,
+        )
+        authority = load_core_resume_authority(conn)  # type: ignore[arg-type]
+        assert authority is not None
+        assert (authority.stop_loss_rate, authority.take_profit_rate) == (
+            Decimal("379.93"),
+            Decimal("2279.58"),
+        )

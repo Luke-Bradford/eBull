@@ -167,14 +167,27 @@ class BrokerStrategyOrder:
 
 @dataclass(frozen=True)
 class BrokerCoreOrder:
-    """The fixed, buy-only order shape for the deterministic core sleeve."""
+    """The fixed, buy-only order shape for the deterministic core sleeve.
+
+    ⚠ The two rates are REQUIRED, and that is #3284 item 1's whole mechanism: the
+    operator's decision is a stop and target "at all times", and a shape that can
+    express a naked core order is a shape some future caller will eventually build.
+    Making them required means the window between fill and the first repair cycle
+    cannot exist, because the order cannot be constructed without them.
+    """
 
     instrument_id: int
     amount: Decimal
+    stop_loss_rate: Decimal
+    take_profit_rate: Decimal
 
     def __post_init__(self) -> None:
         if self.instrument_id <= 0 or self.amount <= 0:
             raise ValueError("core order instrument and amount must be positive")
+        if self.stop_loss_rate <= 0 or self.take_profit_rate <= 0:
+            raise ValueError("core order stop-loss and take-profit rates are required")
+        if self.take_profit_rate <= self.stop_loss_rate:
+            raise ValueError("a core order's take-profit must sit above its stop-loss")
 
 
 @dataclass(frozen=True)

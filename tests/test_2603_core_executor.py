@@ -85,6 +85,14 @@ class FakeConn:
             assert isinstance(_params, tuple)
             self.events.append(f"order_action={_params[1]}")
             return FakeResult((31,))
+        if normalized.startswith("INSERT INTO strategy_core_entry_exit_levels"):
+            # #3284 item 1. Asserted on the BOUND parameters, for #3003's reason: the
+            # statement text carries no rates, so matching on it would pass for a body
+            # submitted with the wrong pair.
+            self.events.append("persist_exit_levels")
+            assert isinstance(_params, tuple)
+            self.events.append(f"exit_levels={_params[3]}/{_params[4]}")
+            return FakeResult()
         if normalized.startswith("INSERT INTO strategy_order_reconciliation_state"):
             self.events.append("persist_reconciliation")
             # The authority transaction DECLARES the phase; nothing else may.
@@ -105,6 +113,7 @@ class FakeBroker:
     def __init__(self, events: list[str], submission: object) -> None:
         self.events = events
         self.submission = submission
+        self.last_order: object | None = None
 
     def get_account_risk_snapshot(self) -> object:
         self.events.append("read_snapshot")
@@ -116,6 +125,7 @@ class FakeBroker:
 
     def place_demo_core_order(self, _order: object, *, request_id: UUID) -> BrokerCoreOrderSubmission:
         assert request_id is not None
+        self.last_order = _order
         assert "persist_order" in self.events
         assert "persist_reconciliation" in self.events
         self.events.append("broker_submit")
@@ -148,6 +158,9 @@ def _run(
     drawdown_refusal: str | None = None,
     authority_error: Exception | None = None,
     usage_error: Exception | None = None,
+    preflight_price: Decimal | None = Decimal("759.86"),
+    preflight_quoted_at: datetime | None = None,
+    broker_sink: list[object] | None = None,
 ) -> tuple[CoreExecutionResult, list[str]]:
     events: list[str] = []
     conn = FakeConn(events)
@@ -164,7 +177,14 @@ def _run(
     decision = _decision(action)
     intent = SimpleNamespace(core_rebalance_intent_id=11, decision=decision)
     admission = SimpleNamespace(admitted=True, eligibility_proof_id=7, reason_code=None)
-    db_preflight = SimpleNamespace(admitted=True, reason_code=None)
+    # #3284 item 1. The exit anchor is the preflight's own ask -- the double carries it
+    # because the executor reads it, not because the test needs a number.
+    db_preflight = SimpleNamespace(
+        admitted=True,
+        reason_code=None,
+        price=preflight_price,
+        quoted_at=preflight_quoted_at or datetime.now(UTC),
+    )
     broker_preflight = SimpleNamespace(
         admitted=True,
         reason_code=None,
@@ -221,9 +241,12 @@ def _run(
         ),
     ):
         kwargs = {} if clock is None else {"clock": clock}
+        broker = FakeBroker(events, submission)
+        if broker_sink is not None:
+            broker_sink.append(broker)
         result = execute_core_rebalance(
             conn,  # type: ignore[arg-type]
-            broker=FakeBroker(events, submission),  # type: ignore[arg-type]
+            broker=broker,  # type: ignore[arg-type]
             operator_id=OPERATOR,
             api_key_credential_id=API_CREDENTIAL,
             user_key_credential_id=USER_CREDENTIAL,
@@ -311,6 +334,55 @@ def test_a_sell_refuses_at_the_write_even_when_every_upstream_gate_admits() -> N
     assert result.order_id is None
     assert result.trade_id is None
     assert "persist_trade" not in events
+    assert "persist_order" not in events
+    assert "broker_submit" not in events
+
+
+def test_a_core_entry_reaches_the_broker_carrying_its_stop_and_target() -> None:
+    """#3284 item 1 -- no window exists in which a core position is naked.
+
+    The three assertions are one claim each and all three are load-bearing: the levels
+    are COMMITTED (so a crash mid-submit resumes with the same body), they are committed
+    BEFORE the broker call (so they are never a fact the broker knew first), and the
+    submitted order carries the SAME pair that was stored (so the durable record is the
+    body, not a parallel opinion about it).
+    """
+    sink: list[object] = []
+    result, events = _run(
+        BrokerCoreOrderSubmission(
+            broker_order_ref="9001",
+            reference_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+            response_digest="a" * 64,
+        ),
+        broker_sink=sink,
+    )
+
+    assert result.state == "submitted"
+    # 759.86 is the live core entry; -50% / +200% under `core-exit-v2`.
+    assert "exit_levels=379.93/2279.58" in events
+    assert events.index("persist_exit_levels") < events.index("broker_submit")
+    order = sink[0].last_order  # type: ignore[attr-defined]
+    assert (order.stop_loss_rate, order.take_profit_rate) == (Decimal("379.93"), Decimal("2279.58"))
+
+
+@pytest.mark.parametrize("price", [None, Decimal("0"), Decimal("-1")])
+def test_an_unusable_exit_anchor_refuses_before_durable_order_authority(price: Decimal | None) -> None:
+    """A core order that cannot derive its stop must not become an order at all.
+
+    Refusing AFTER the `orders` INSERT would leave a durable authority that
+    `load_core_resume_authority` then has to raise on forever, so the refusal has to
+    precede the write -- which is what the absent `persist_order` asserts.
+    """
+    result, events = _run(
+        BrokerCoreOrderSubmission(
+            broker_order_ref="9001",
+            reference_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
+            response_digest="a" * 64,
+        ),
+        preflight_price=price,
+    )
+
+    assert (result.state, result.reason_code) == ("refused", "core_exit_anchor_unavailable")
     assert "persist_order" not in events
     assert "broker_submit" not in events
 
@@ -440,6 +512,8 @@ def test_resume_keeps_the_committed_authority_unresolved_when_not_found() -> Non
         order_id=31,
         instrument_id=3417,
         amount=Decimal("49.9"),
+        stop_loss_rate=Decimal("379.93"),
+        take_profit_rate=Decimal("2279.58"),
         request_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
         broker_order_ref=None,
         eligibility_proof_id=7,
@@ -507,6 +581,8 @@ def test_resume_reconciles_a_found_order_without_resubmitting() -> None:
         order_id=31,
         instrument_id=3417,
         amount=Decimal("49.9"),
+        stop_loss_rate=Decimal("379.93"),
+        take_profit_rate=Decimal("2279.58"),
         request_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
         broker_order_ref=None,
         eligibility_proof_id=7,
@@ -537,6 +613,8 @@ def test_resume_lookup_miss_never_reaches_fresh_safety_or_resubmission() -> None
         order_id=31,
         instrument_id=3417,
         amount=Decimal("49.9"),
+        stop_loss_rate=Decimal("379.93"),
+        take_profit_rate=Decimal("2279.58"),
         request_id=UUID("bd779053-d550-4bb4-9f8d-f3b2fa5633ac"),
         broker_order_ref=None,
         eligibility_proof_id=7,

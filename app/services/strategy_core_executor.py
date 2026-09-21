@@ -19,6 +19,7 @@ from app.providers.broker import (
     BrokerOrderSubmissionUncertain,
     BrokerProvider,
 )
+from app.services.core_exit_levels import core_exit_levels
 from app.services.strategy_control_plane import link_strategy_order, load_paper_pool
 from app.services.strategy_core_allocator import evaluate_core_rebalance
 from app.services.strategy_core_broker_preflight import (
@@ -118,6 +119,14 @@ class CoreResumeAuthority:
     operator_id: UUID
     api_key_credential_id: UUID
     user_key_credential_id: UUID
+    stop_loss_rate: Decimal
+    take_profit_rate: Decimal
+    """#3284 item 1.  Part of the AUTHORITY, not of the submission, and the resume path
+    is why: it replays the same ``request_id``, and eToro's open body takes absolute
+    rates anchored on a quote.  Re-deriving them at submit time would send a different
+    body under an already-accepted idempotency key.  Read back from
+    ``strategy_core_entry_exit_levels``; an authority that has no row there is
+    incomplete and raises rather than submitting naked."""
 
 
 def _result(
@@ -203,13 +212,15 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
                o.instrument_id, o.requested_amount, o.strategy_request_id,
                o.broker_order_ref, proof.core_eligibility_proof_id,
                proof.operator_id, proof.api_key_credential_id,
-               proof.user_key_credential_id
+               proof.user_key_credential_id,
+               lv.stop_loss_rate, lv.take_profit_rate
         FROM strategy_order_reconciliation_state state
         JOIN orders o ON o.order_id=state.order_id
         JOIN strategy_trade_orders link ON link.order_id=o.order_id
         JOIN strategy_trades t ON t.strategy_trade_id=link.strategy_trade_id
         JOIN strategy_core_eligibility_proofs proof
           ON proof.core_eligibility_proof_id=t.core_eligibility_proof_id
+        LEFT JOIN strategy_core_entry_exit_levels lv ON lv.order_id=o.order_id
         WHERE t.core_rebalance_intent_id IS NOT NULL
           AND state.state NOT IN ('resolved','rejected')
         ORDER BY state.first_unresolved_at, state.order_id
@@ -219,7 +230,12 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
     conn.commit()
     if row is None:
         return None
-    if row[0] is None or row[4] is None or row[5] is None:
+    # ⚠ LEFT JOIN plus an explicit raise, never an INNER JOIN.  An INNER JOIN would make
+    # a levels-less authority INVISIBLE -- it would report "no authority to resume" while
+    # a durable one sat unresolved, which is the silent direction of this failure.  The
+    # loud one is correct: an authority whose exit levels were never committed must be
+    # reported, not skipped and not submitted naked (#3284 item 1).
+    if row[0] is None or row[4] is None or row[5] is None or row[11] is None or row[12] is None:
         raise StrategyCoreExecutionError("core resume authority is incomplete")
     return CoreResumeAuthority(
         intent_id=int(row[0]),
@@ -233,6 +249,8 @@ def load_core_resume_authority(conn: psycopg.Connection[Any]) -> CoreResumeAutho
         operator_id=row[8],
         api_key_credential_id=row[9],
         user_key_credential_id=row[10],
+        stop_loss_rate=Decimal(str(row[11])),
+        take_profit_rate=Decimal(str(row[12])),
     )
 
 
@@ -483,7 +501,15 @@ def _submit_core_authority_locked(
     mark_core_submission_entered(conn, order_id=authority.order_id)
     try:
         submission = broker.place_demo_core_order(
-            BrokerCoreOrder(instrument_id=authority.instrument_id, amount=authority.amount),
+            BrokerCoreOrder(
+                instrument_id=authority.instrument_id,
+                amount=authority.amount,
+                # ⚠ From the AUTHORITY, never re-derived here.  This line runs on the
+                # resume path too, replaying `authority.request_id`; a fresh derivation
+                # would put a different body under an accepted idempotency key.
+                stop_loss_rate=authority.stop_loss_rate,
+                take_profit_rate=authority.take_profit_rate,
+            ),
             request_id=authority.request_id,
         )
     except BrokerOrderSubmissionError as exc:
@@ -785,6 +811,33 @@ def execute_core_rebalance(
                 return _result("refused", "core_submission_action_unbuilt", intent_id=intent_id)
             order_action, order_purpose = order_shape
 
+            # #3284 item 1 -- the exit levels are derived BEFORE the durable authority
+            # exists, so a body that cannot carry them is never committed.
+            #
+            # ⚠ The anchor is `db_preflight.price`, which for `buy_core` is the ASK, read
+            # inside THIS hold of `core_submission_lock` and already refused as
+            # `core_quote_stale` beyond `CORE_MAX_QUOTE_AGE_SECONDS` -- the very constant
+            # `CORE_EXIT_MAX_QUOTE_AGE_SECONDS` re-exports.  So the anchor's freshness
+            # bound and the repair's are ONE policy rather than two that happen to agree,
+            # and no second quote read is needed.  This mirrors the signal arm, which
+            # anchors on `intent.ask` (`strategy_paper_executor`).
+            #
+            # ⚠ The anchor is NOT the fill.  A market order fills where it fills, so the
+            # submitted stop is approximately -50% of the fill rather than exactly; the
+            # five-minute repair re-anchors on `broker_positions.open_price` (the true
+            # fill) and corrects it. That approximation is the price of protecting the
+            # position from the first instant, and it is the right trade: the alternative
+            # is exactness with a naked window.
+            anchor_rate = db_preflight.price
+            anchor_quoted_at = db_preflight.quoted_at
+            # An admitted verdict always carries both -- `_age_ok` cannot pass on a NULL
+            # `quoted_at` and the price refusals precede it.  Re-checked anyway, because
+            # "cannot happen" is how a naked position gets opened: the refusal costs one
+            # cycle, the alternative is an unguarded `None` reaching the INSERT.
+            if anchor_rate is None or not anchor_rate.is_finite() or anchor_rate <= 0 or anchor_quoted_at is None:
+                return _result("refused", "core_exit_anchor_unavailable", intent_id=intent_id)
+            exit_levels = core_exit_levels(anchor_rate)
+
             amount = broker_verdict.amount
             request_id = uuid4()
             trade_row = conn.execute(
@@ -813,6 +866,26 @@ def execute_core_rebalance(
             if order_row is None:
                 raise StrategyCoreExecutionError("core order INSERT did not return an id")
             order_id = int(order_row[0])
+            # ⚠ INSIDE the authority transaction, with the order and the reconciliation
+            # row.  All three commit together or none do, so "a durable core authority
+            # exists" and "its exit levels are known" are the same fact -- which is what
+            # lets the submit path read them rather than re-derive them (#3284 item 1).
+            conn.execute(
+                """
+                INSERT INTO strategy_core_entry_exit_levels (
+                    order_id, anchor_rate, anchor_quoted_at,
+                    stop_loss_rate, take_profit_rate, policy_version
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    order_id,
+                    anchor_rate,
+                    anchor_quoted_at,
+                    exit_levels.stop_loss_rate,
+                    exit_levels.take_profit_rate,
+                    exit_levels.policy_version,
+                ),
+            )
             link_strategy_order(conn, strategy_trade_id=trade_id, order_id=order_id, purpose=order_purpose)
             # ⚠ `submission_phase` is declared HERE, in the authority transaction,
             # and advanced by `mark_core_submission_entered` in a SEPARATE commit
@@ -843,6 +916,8 @@ def execute_core_rebalance(
                 operator_id=operator_id,
                 api_key_credential_id=api_key_credential_id,
                 user_key_credential_id=user_key_credential_id,
+                stop_loss_rate=exit_levels.stop_loss_rate,
+                take_profit_rate=exit_levels.take_profit_rate,
             ),
         )
 
