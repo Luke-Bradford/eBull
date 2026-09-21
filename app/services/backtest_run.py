@@ -3423,9 +3423,17 @@ def _rank_cross_section(
             masked_reason="quarantined_bar",
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
             regime=regime_provider.for_dates(series.dates),
-            price_basis=from_archive_basis(
-                corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None,
-                series=series,
+            # ⚠ The same consumer routing as ``_signals_for`` (#2840 §8b). The
+            # RANKING pass reaches ``segmented_member``, whose two callers — S-2
+            # and S-10 — both discard the carrier, so certifying here would pay
+            # the full per-bar binding and an immediate re-check for nothing.
+            price_basis=(
+                from_archive_basis(
+                    corpus.liquidity_policy.adjustment_basis if corpus.liquidity_policy is not None else None,
+                    series=series,
+                )
+                if entry.strategy_id in PRICE_BASIS_CONSUMERS
+                else from_undeclared_source(series=series)
             ),
             leg=leg,
         )
