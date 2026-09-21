@@ -104,9 +104,9 @@ from app.services.universe_selection import load_universe_selection
 # back-adjustment. Re-deriving any of them here would be a second implementation
 # of the same rule, and the two would drift.
 from scripts.measure_2834_armb_split_only_basis import (
-    _ELIGIBILITY_BARS,
-    _WINDOW_END,
-    _WINDOW_START,
+    ELIGIBILITY_BARS,
+    WINDOW_END,
+    WINDOW_START,
     EventCheck,
     SplitEvent,
     back_adjust_scale,
@@ -330,12 +330,12 @@ def measure_pairs(
     """One panel pass; every arm scored, every pair compared."""
     params: dict[str, Any] = {
         "series_ids": list(names),
-        "window_start": _WINDOW_START,
-        "window_end": _WINDOW_END,
+        "window_start": WINDOW_START,
+        "window_end": WINDOW_END,
         "version": RULE_SET_VERSION,
         "skip": SKIP_BARS,
         "lookback": LOOKBACK_BARS,
-        "eligibility": _ELIGIBILITY_BARS,
+        "eligibility": ELIGIBILITY_BARS,
         "floor": MIN_CLOSE,
         "decile": DECILE,
         "min_cross_section": MIN_CROSS_SECTION,
@@ -534,9 +534,9 @@ def harm_direction(checks: list[EventCheck]) -> dict[str, int]:
     # formation itself. Bounded in CALENDAR days at 7/5 the bar count — a loose
     # bound deliberately, because a tight one would need each series' own
     # calendar and would understate reach on a halted or thinly traded name.
-    reach_start = _WINDOW_START - timedelta(days=int(LOOKBACK_BARS * 7 / 5) + 14)
-    in_reach = [c for c in checks if reach_start <= c.event.bar_date < _WINDOW_END]
-    refuted_in_reach = [c for c in refuted if reach_start <= c.event.bar_date < _WINDOW_END]
+    reach_start = WINDOW_START - timedelta(days=int(LOOKBACK_BARS * 7 / 5) + 14)
+    in_reach = [c for c in checks if reach_start <= c.event.bar_date < WINDOW_END]
+    refuted_in_reach = [c for c in refuted if reach_start <= c.event.bar_date < WINDOW_END]
     return {
         "checked": len(checks),
         "forward": sum(1 for c in checks if c.event.factor > 1),
@@ -662,7 +662,7 @@ def _report_arms(checks: list[EventCheck], arms: dict[str, list[SplitEvent]], *,
 
 def _report_pairs(formations: list[PairFormation], *, stream: TextIO) -> dict[tuple[str, str], float]:
     print("\nArm 2 — decile displacement between policies", file=stream)
-    print(f"  window     {_WINDOW_START} .. {_WINDOW_END} (exclusive)", file=stream)
+    print(f"  window     {WINDOW_START} .. {WINDOW_END} (exclusive)", file=stream)
     print(f"  quarantine {RULE_SET_VERSION}", file=stream)
     print(f"  formations {len(formations):,}", file=stream)
     pooled: dict[tuple[str, str], float] = {}
