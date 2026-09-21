@@ -1100,6 +1100,32 @@ class CoreSleeveResponse(BaseModel):
         "Compare an ISA elsewhere using personal tax, FX and dealing costs, and expected turnover; "
         "#2915's £50,000 sensitivity was mixed, not a universal ISA advantage."
     )
+    #: #2833's caveat (b), not carried verbatim. "On a GBP account" is dropped
+    #: because the evidence cannot support it: the NULL-``account_currency_id``
+    #: rows of ``broker_account_equity_snapshots`` are the assumed ``'USD'``
+    #: literal ``sql/341`` exists to stop us reading as evidence. ⚠ That makes the
+    #: clause UNSUPPORTABLE, not false, so both of its claims are kept. Why the
+    #: opening is conditional, and the rest of the rationale, on PR #3272.
+    #:
+    #: "reports no sterling figure" is the checkable form of the original's
+    #: "unhedged" -- ``strategy_core_mandate_events.base_currency`` is
+    #: ``CHECK (base_currency = 'USD')`` (``sql/336``). ⚠ An earlier draft cited
+    #: the declaration's ``fx_rule`` here instead; that rule is about
+    #: instrument-currency-to-USD conversion, a different pair from the
+    #: household's, and it does not support this sentence.
+    #:
+    #: The cost clause is the declaration's ``all_in_cost_rule``
+    #: (``docs/proposals/ta/2026-08-24-core-selection-declaration.json``): p75
+    #: round-trip spread plus a documented 0 bps entry-sizing markup, so funding
+    #: and withdrawal conversion sits outside it.
+    household_currency_caveat: str = (
+        "Sterling is not the unit here. Where the core sleeve holds a USD-quoted "
+        "instrument, a household measuring it in GBP carries GBP/USD exposure on the "
+        "whole position value and not only on its return, and this engine neither "
+        "hedges that exposure nor reports any sterling figure. Converting when you "
+        "fund or withdraw is a household cost that the preregistered ceiling, which "
+        "prices round-trip spread, does not include."
+    )
 
 
 def _core_pool_activation_ready(

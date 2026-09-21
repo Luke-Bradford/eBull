@@ -645,7 +645,8 @@ export function StrategyPortfolioLens() {
               </div>
               <CoreCandidateCoverageTable sleeve={coreSleeve.data} />
               <p className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
-                Demo only · buy only · no alpha signal. {coreSleeve.data.household_tax_caveat}
+                Demo only · buy only · no alpha signal. {coreSleeve.data.household_tax_caveat}{" "}
+                {coreSleeve.data.household_currency_caveat}
               </p>
               <CoreSleeveControl
                 sleeve={coreSleeve.data}

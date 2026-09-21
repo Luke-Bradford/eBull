@@ -3098,6 +3098,7 @@ export interface CoreSleeveResponse {
   buy_only: boolean;
   alpha_input_used: boolean;
   household_tax_caveat: string;
+  household_currency_caveat: string;
 }
 
 export interface CoreMandateUpdate {
