@@ -171,6 +171,18 @@ def test_collecting_state_reports_cash_and_server_derived_coverage(monkeypatch: 
     assert "No supported public-API route into eToro's Stocks & Shares ISA" in response.household_tax_caveat
     assert "#2915's £50,000 sensitivity was mixed" in response.household_tax_caveat
     assert "tax-dominates" not in response.household_tax_caveat
+    # #2833's caveat (b), and this assertion block is deliberately about the three
+    # claims rather than the prose. The state under test is `evidence_collecting`,
+    # where NO sleeve is held -- so the currency clause must stay conditional or it
+    # is simply false here, which is what the first assertion pins.
+    assert "Where the core sleeve holds a USD-quoted instrument" in response.household_currency_caveat
+    assert "neither hedges nor models" in response.household_currency_caveat
+    assert "does not include" in response.household_currency_caveat
+    # "On a GBP account" is dropped because `broker_account_equity_snapshots` is
+    # demo-only, and its NULL-`account_currency_id` rows are the assumed `'USD'`
+    # literal `sql/341` exists to stop us reading as evidence. Pinned negatively,
+    # like the "tax-dominates" line above, so it cannot be restored unexamined.
+    assert "GBP account" not in response.household_currency_caveat
     assert [blocker.code for blocker in response.blockers] == [
         "core_paper_pool_unconfigured",
         "core_evidence_collecting",
