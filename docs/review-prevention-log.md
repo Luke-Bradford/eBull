@@ -10381,3 +10381,88 @@ original, because the gate now *looked* like a bound.
 - Enforced in: this prevention log;
   `app/services/research_split_corrected_reader.py` (the contract (a) decision lives there,
   with the reason it is not in `price_quarantine` stated in the docstring itself).
+
+## 2026-09-21 — a guard justified by "no such row can exist today" becomes an evidence-destroyer the moment you make it exist (#3284)
+
+- Symptom: `strategy_position_manager._resume_operation` refused every non-`close`
+  operation on a core ownership as `core_mandate_position_exempt`, and its comment stated
+  the premise out loud: *"No such operation can be created today (nothing writes an edit on
+  the core arm), so this is refused rather than handled: a row that cannot legitimately
+  exist should stop the cycle for that position, not be interpreted."* That was correct and
+  well-reasoned when written. #3284 makes the core arm write exactly that row
+  (`fixed_exit_repair`), which falsifies the premise — and the guard does not know.
+- The defect, had it been kept as belt-and-braces: `_resume_operation` runs IMMEDIATELY
+  after load, before any gate, so it would have caught every core stop-repair that crashed
+  mid-flight and terminalised it `_terminal(status="rejected")` — **including one the broker
+  had already APPLIED**. Recording an applied broker mutation as rejected is the worst
+  outcome on this path: our audit trail says no stop exists, the next cycle re-derives the
+  same gap, and the position's real broker-side stop is invisible to us. The guard was
+  written to prevent an unauthorised mutation and would instead have hidden an authorised
+  one.
+- ⚠ The tell is textual and cheap to grep for: a refusal whose justification is the
+  ABSENCE of a writer. `git grep -nE "cannot (legitimately )?exist|no such .* (can|is) (be )?created|nothing writes"`
+  over `app/` finds them. Each is a dated claim about the rest of the codebase, not an
+  invariant, and it silently expires when a later ticket adds the writer.
+- Test to apply: **when a ticket makes you ADD a writer, grep for guards whose stated
+  premise was that nothing writes it — before writing the writer.** Then decide explicitly:
+  is the guard now wrong (delete it, and say so in the test that asserted it), or is it
+  still right for a narrower case (re-state the premise)? Do not keep it "just in case" —
+  a guard whose premise is false does not degrade to inert, it degrades to wrong, and here
+  it degraded in the direction that destroys evidence rather than the direction that
+  refuses.
+- ⚠ Second half, same ticket: the test that asserted the old behaviour
+  (`test_a_non_close_operation_on_a_core_position_is_refused_not_interpreted`) was itself
+  the artefact most likely to make a later session "restore" the guard, because a passing
+  test reads as a specification. A reversal must rewrite the test's DOCSTRING to say what
+  was reversed and why, not merely flip its assertions.
+- Enforced in: this prevention log;
+  `app/services/strategy_position_manager.py::_resume_operation` (the removal, with the
+  falsified premise named);
+  `tests/test_2949_core_close_recovery_db.py::test_an_interrupted_core_stop_repair_is_resumed_not_refused`.
+
+## 2026-09-21 — three ways a "safe" constant or guard was wrong, all caught by Codex ckpt-2 (#3284)
+
+One round, three distinct shapes. Grouped because the common thread is that each was
+written CONFIDENTLY and each failed silently in the reassuring direction.
+
+- **A "by construction" bound is only honest once you have grepped for a measured one.**
+  `core_exit_levels` first defined its own `CORE_EXIT_MAX_QUOTE_AGE_SECONDS = 300`, reasoned
+  from the paper cycle's 300 s rotation and labelled "by construction" — which reads as
+  rigour. The core sleeve already had `strategy_core_preflight.CORE_MAX_QUOTE_AGE_SECONDS`
+  = 750, DERIVED (`_freshness_bound(300, tolerated_missed_fires=1)`) and frozen in
+  `CORE_PREFLIGHT_POLICY_VERSION`. Worse, that function's own docstring says a bound BELOW
+  one producer period is "a recurring false refusal by construction" — immediately before
+  each refresh the newest possible row is one full period old — so 300 would have refused
+  `fixed_exit_quote_unsafe` in the TAIL OF EVERY CYCLE, leaving the position unprotected
+  precisely when asked to protect it. And #3157 measured that the producer loses fires
+  (2 of 352 slots), which the tolerated-miss term exists for and an invented constant
+  cannot know. ⚠ Test: before writing any freshness / staleness / age bound, `git grep -n
+  "MAX_.*_AGE_SECONDS\|_freshness_bound"` for the same producer. "By construction" is not a
+  licence to skip the reuse check; it is the thing you say AFTER it.
+- **Writing the warning does not protect you from the error — only a form that cannot
+  express it does.** The same docstring warned, correctly and at length, that an N-day move
+  needs N days of MOVEMENT and that `ROWS BETWEEN (N-1) PRECEDING AND CURRENT ROW` spans N
+  bars but only N-1 movements. Three lines later it computed the 10-day figure with
+  `ROWS BETWEEN 9 PRECEDING AND CURRENT ROW` — nine movements — and reported -24.95%. The
+  real 10-day worst is **-26.77%**, which INVERTED the conclusion: the sentence claimed the
+  -25% stop sat outside every measured window when it sits inside the 10-, 15- and 20-day
+  ones. ⚠ Test: express a multi-period return as `lag(close, N)`, never as a ROWS window
+  plus a comment. The window form requires the reader to re-derive an off-by-one on every
+  read; `lag(close, N)` cannot be got wrong. A prose warning next to a fragile form is not
+  a control — it is documentation of the trap you then fell into.
+- **A de-duplication fix at the QUERY layer is incomplete while a UNIQUE INDEX enforces the
+  same rule.** `_prior_same_edit` was fixed so an `applied` core repair no longer blocks a
+  later identical one (#3284's acceptance is "clearing the stop at the broker is detected
+  and repaired", and core desired rates are a pure function of entry, so they RECUR by
+  design). The re-repair still failed —
+  `idx_strategy_position_operation_material_identity` (`sql/289`) made the material intent
+  unique PERMANENTLY, so the INSERT raised `UniqueViolation` and the position stayed naked.
+  The query fix alone would have shipped a mechanism that provably cannot do what its ticket
+  says. ⚠ Test: when relaxing a uniqueness/dedup rule in code, `\d <table>` (or
+  `select indexdef from pg_indexes`) for a unique index over the same tuple BEFORE deciding
+  the fix is complete. The failure surfaces as an exception rather than silently, but only
+  on the path nobody exercises until production — here, a broker-side clear.
+- Enforced in: this prevention log; `app/services/core_exit_levels.py` (the re-export, with
+  both errors named); `sql/406_core_exit_material_identity.sql`;
+  `tests/test_3284_core_exit_levels.py::test_the_quote_freshness_bound_is_the_sleeve_s_existing_measured_one`;
+  `tests/test_2949_core_close_recovery_db.py::test_an_applied_core_repair_does_not_block_a_later_one`.

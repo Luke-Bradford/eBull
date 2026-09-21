@@ -67,6 +67,7 @@ import psycopg
 import pytest
 
 from app.providers.broker import BrokerProvider
+from app.services.core_exit_levels import core_exit_levels
 from app.services.strategy_core_executor import execute_core_rebalance
 from app.services.strategy_engine_capital import (
     EngineCapitalObservationError,
@@ -887,29 +888,34 @@ def test_a_close_lookup_outage_is_a_delay_and_not_a_terminal_state(
     assert broker.read()["close_calls"] == 1
 
 
-def test_a_non_close_operation_on_a_core_position_is_refused_not_interpreted(
+def test_an_interrupted_core_stop_repair_is_resumed_not_refused(
     ebull_test_conn: psycopg.Connection[Any],
     core_world: Path,
 ) -> None:
-    """Round 6 — the core exemption itself, which had no test anywhere.
+    """Round 6, REWRITTEN for #3284 — the core exemption this asserted is reversed.
 
-    ``manage_owned_position`` refuses any non-``close`` operation on a core
-    position: ``owned.is_core and operation["operation_type"] != "close"`` →
-    ``core_mandate_position_exempt`` (`strategy_position_manager.py:500-514`).
-    The guard exists because such a row *cannot legitimately exist* — nothing
-    writes a stop repair or a ratchet on the core arm — and the code's stated
-    choice is to stop the cycle for that position rather than interpret it.
+    This test previously asserted that a ``fixed_exit_repair`` on a core ownership is
+    refused as ``core_mandate_position_exempt``, on the guard's own stated premise that
+    such a row *cannot legitimately exist* because "nothing writes a stop repair on the
+    core arm". #3284 makes the core arm write exactly that row, so the premise is gone
+    and the refusal with it (operator decision 2026-09-21: a stop and target on every
+    engine-held position, at all times).
 
-    ⚠ Which is exactly why it needs a test and cannot get one from ordinary use:
-    the only way to reach it is to seed the illegitimate row, which is what this
-    does. Left untested, a refactor that dropped the clause would surface as a
-    core position being edited on the strength of a row nobody meant to write.
+    ⚠⚠ **Why removing the refusal was not optional, and why this is the test for it.**
+    Kept as a belt-and-braces guard it would have caught every core repair that crashed
+    mid-flight and terminalised it ``rejected`` — including one the broker had already
+    APPLIED. Recording an applied broker mutation as rejected is the single worst
+    outcome available on this path: the next cycle would re-derive the same gap, and the
+    position's real stop would be invisible to our own audit trail.
+
+    So the assertion inverts: the interrupted repair is now RESUMED, and resolved by
+    comparing the broker's exact position against the persisted intent. The seeded
+    intent wants a stop of 1 and this broker reports no stop at all, so the honest
+    outcome is ``reconcile_required`` — not a guess, and not a fresh mutation.
 
     ⚠ ``fixed_exit_repair``, not ``'edit'``: `sql/289`'s CHECK admits only
     ``fixed_exit_repair``/``stop_ratchet``/``close``, so "the edit path" is those
-    first two. `rg` over `tests/` finds no coverage of `broker_edit_rejected` or
-    `broker_edit_uncertain` either; those belong to the ALPHA arm, are
-    unreachable from this core world by this very guard, and stay out of scope.
+    first two.
     """
     coordinates = _own_one_core_position(ebull_test_conn, core_world)
     broker = _restarted_engine_broker(core_world)
@@ -937,32 +943,105 @@ def test_a_non_close_operation_on_a_core_position_is_refused_not_interpreted(
     assert seeded is not None
     seeded_operation_id = int(seeded[0])
 
-    refused = _manage(ebull_test_conn, broker, coordinates)
-    assert refused.state == "rejected"
-    assert refused.reason_code == "core_mandate_position_exempt"
+    resumed = _manage(ebull_test_conn, broker, coordinates)
+    assert resumed.state == "reconcile_required"
+    assert resumed.reason_code == "crash_before_submission_identity"
 
     report = close_state_report(ebull_test_conn)
-    # Untouched: the guard stops the cycle, it does not act on the position.
+    # The POSITION is untouched — resuming resolves the operation's identity, it does
+    # not act on the holding. What changes is the trade's status, which is the flag
+    # asking for a human look at a stop whose fate is genuinely unknown.
     assert report["active_ownership"] == 1
     assert report["released_ownership"] == 0
-    assert report["trade_statuses"] == ["open"]
+    assert report["trade_statuses"] == ["reconcile_required"]
     assert report["close_operations"] == 0
-    # And no broker verb of any kind was entered on the strength of that row.
+    # ⚠ The load-bearing assertion, and the one that survives the reversal unchanged:
+    # a crash-recovery path must never enter a broker verb. Resuming an edit is a
+    # READ of the position plus a local decision; re-submitting under a fresh key is
+    # what it must not do.
     state = broker.read()
     assert state["close_calls"] == 0
     assert state.get("close_lookup_calls", 0) == 0
     assert state["mutation_calls"] == 1, "the entry that established the position, and nothing since"
 
-    # The refused row is terminal, so the next cycle is clean rather than stuck
-    # on the same illegitimate operation.
-    # Keyed on the id this test seeded, not on "the newest row" — the assertion is
-    # about THAT operation, and an ordering-based fetch would quietly follow any
-    # row a future cycle happened to write.
+    # Terminal either way, so the next cycle is not stuck re-resolving the same
+    # operation. Keyed on the id this test seeded, not on "the newest row" — the
+    # assertion is about THAT operation, and an ordering-based fetch would quietly
+    # follow any row a later cycle happened to write.
     terminal = ebull_test_conn.execute(
         "SELECT status, last_error_code FROM strategy_position_operations WHERE position_operation_id=%s",
         (seeded_operation_id,),
     ).fetchone()
     ebull_test_conn.commit()
     assert terminal is not None
-    assert terminal[0] == "rejected"
-    assert terminal[1] == "core_mandate_position_exempt"
+    assert terminal[0] == "reconcile_required"
+    assert terminal[1] == "crash_before_submission_identity"
+
+
+def test_an_applied_core_repair_does_not_block_a_later_one(
+    ebull_test_conn: psycopg.Connection[Any],
+    core_world: Path,
+) -> None:
+    """#3284 item 3 — "clearing the stop at the broker is detected and repaired".
+
+    The core arm's desired rates are a pure function of the position's entry, so they
+    are STABLE across cycles: a repair that applied last week matches today's intent
+    byte for byte. ``_prior_same_edit`` keys on exactly that pair, so before this fix it
+    would find the old ``applied`` row and return ``rejected`` /
+    ``prior_material_operation`` — and the position would stay NAKED indefinitely while
+    reporting a terminal state. Found by Codex checkpoint 2.
+
+    ⚠ This asserts the NEGATIVE, deliberately: what matters is that the applied row no
+    longer short-circuits the cycle. Where the cycle then lands depends on broker
+    eligibility and quote freshness in this fixture world, and pinning that would test
+    the fixture rather than the fix.
+
+    ⚠ A ``rejected`` prior MUST still block — re-entering a verb the broker refused,
+    every five minutes, is hammering rather than repair. Asserted in the same test so
+    the two halves cannot drift apart.
+    """
+    coordinates = _own_one_core_position(ebull_test_conn, core_world)
+    broker = _restarted_engine_broker(core_world)
+    ownership = ebull_test_conn.execute(
+        "SELECT ownership_id FROM strategy_position_ownership WHERE status='active'"
+    ).fetchone()
+    ebull_test_conn.commit()
+    assert ownership is not None
+
+    # The rates this position's entry derives, so the seeded rows collide with the
+    # intent the next cycle forms — computed, never hand-copied.
+    position = next(row for row in _provider(broker).get_portfolio().positions if row.position_id == coordinates[1])
+    levels = core_exit_levels(position.open_price)
+
+    def _seed_operation(status: str, resolved: bool) -> int:
+        row = ebull_test_conn.execute(
+            """
+            INSERT INTO strategy_position_operations (
+                ownership_id, operation_type, trigger_code, request_id, status,
+                desired_stop_rate, desired_take_profit_rate, resolved_at
+            ) VALUES (%s, 'fixed_exit_repair', 'entry_exit_gap', gen_random_uuid(), %s, %s, %s,
+                      CASE WHEN %s THEN now() ELSE NULL END)
+            RETURNING position_operation_id
+            """,
+            (
+                int(ownership[0]),
+                status,
+                levels.stop_loss_rate,
+                levels.take_profit_rate,
+                resolved,
+            ),
+        ).fetchone()
+        ebull_test_conn.commit()
+        assert row is not None
+        return int(row[0])
+
+    _seed_operation("applied", resolved=True)
+    after_applied = _manage(ebull_test_conn, broker, coordinates)
+    assert after_applied.reason_code != "prior_material_operation", (
+        "an applied repair must not make a re-cleared stop unrepairable"
+    )
+
+    # Now the other half: a REJECTED prior on the same pair still short-circuits.
+    _seed_operation("rejected", resolved=True)
+    after_rejected = _manage(ebull_test_conn, broker, coordinates)
+    assert after_rejected.state == "rejected"
