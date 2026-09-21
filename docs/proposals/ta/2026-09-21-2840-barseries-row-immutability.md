@@ -425,8 +425,41 @@ undefined, so any regression would have satisfied it:
 | 1.25x – 2x | ship, and record the figure in the module comment beside the per-bar cost |
 | > 2x | do **not** ship this construction; add a sanctioned sub-series constructor that skips the re-freeze because it knows the rows are already ours (a provenance `__post_init__` cannot establish but a dedicated method can), and re-measure |
 
-⚠ The per-bar prices remain: **0.060 µs from a dict, 0.275 µs from an already-frozen
-proxy**, against a current constructor cost of 0.034 µs/bar.
+### Measured — full population, both arms, 2026-09-21
+
+```
+eligible 5,797 · corpus 1a0e9f6b921efa77 (3,400,992 bars) — IDENTICAL in both arms
+constructions 288,469 series · 166,080,502 bars copied — identical in both arms
+baseline  b9b2a1e5   2286.18 s real   max RSS 123.0 MB
+candidate 47b2affe   2339.61 s real   max RSS 122.7 MB
+```
+
+| figure | value |
+| --- | --- |
+| wall-clock multiplier | **1.023x** (+53.4 s) |
+| cost per copied bar, end to end | **0.322 µs** |
+| peak RSS | **0.997x** — the candidate is marginally *lower* |
+| harness amplification | **48.8x** corpus bars |
+
+⇒ **decision rule band 1: ship as is** (≤ 1.25x). The rule was fixed before the numbers
+were read.
+
+⚠ The 0.322 µs/bar is the whole diff, not just the copy — it includes the float caches
+becoming tuples and `setflags(write=False)`. It is one paired sample with the two arms
+contending for CPU, so treat it as an upper bound on a small effect rather than a precise
+constant. It is consistent with, and slightly above, the 0.275 µs microbenchmark ceiling.
+
+⚠ The 48.8x is the **harness**, which evaluates 96 cells per instrument where production
+evaluates one. It is not production's amplification and must not be quoted as one.
+
+⚠ The per-bar microbenchmark prices remain: **0.060 µs from a dict, 0.275 µs from an
+already-frozen proxy**, against a current constructor cost of 0.034 µs/bar.
+
+⚠⚠ This figure is recorded HERE and in the PR, deliberately **not** in
+`indicator_series.py`. A comment edit to that module rotates `RULE_SET_VERSION` and
+therefore all 12 `strategy_version`s (the lesson `ac107806` recorded), which would mean
+the A/B above was run against a version string that never merged. Evidence taken, then
+the measured file left alone.
 
 ⚠ Not covered, and named rather than implied: `price_segments.segment_for_index` can
 copy a whole segment per lookup, and the backtest and outcome paths construct
