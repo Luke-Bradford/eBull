@@ -10275,3 +10275,75 @@ original, because the gate now *looked* like a bound.
   `::test_a_series_missing_a_stamp_is_marked_absent_not_vendor_supplied` and
   `::test_an_absent_dividend_downgrades_the_marker_too`;
   `tests/test_research_corpus_schema.py::TestCorporateActionStamps`.
+
+### A band table whose shares do not sum to 100% reports its own exclusions as agreement
+
+- First seen in: PR for #2834 §7 item 2 slice B (the split-only correction). Self-caught
+  on the first full-population run, before review.
+- Symptom: the harness bucketed 12,546,227 corrected bars into relative-error bands against
+  a denominator of "bars the correction moves". The printed table read
+  `<= 1e-12  11,906,203  94.90%` and **zero in every other band, including `worse`**. The
+  missing 5.10% was not a band — it was 640,024 bars the loop never measured, skipped by an
+  `if volume:` guard because a zero or absent volume makes the relative error undefined.
+  Every band was honest and the table as a whole was not: a reader sums six bands, finds
+  100% of nothing missing, and concludes the population was covered.
+- ⚠ The danger is specific to the shape. A COUNT that is too low looks wrong immediately;
+  a PERCENTAGE computed against an aspirational denominator looks precise. And the
+  direction of the error is the flattering one — the skipped rows are exactly the ones a
+  guard skipped because they were awkward, which correlates with being the interesting ones.
+- ⚠ It is the same defect as the loop prompt's "no silent caps" rule (`log()` what was
+  dropped, because silent truncation reads as "covered everything") arriving in a
+  measurement script rather than in an orchestration. Recorded here because the prompt's
+  version is scoped to workflows and this one was written in plain Python.
+- Test to apply: **after printing any distribution, add its bands and check the total
+  against the denominator in the same breath.** If they differ, the gap is a bucket — name
+  it and print it, never let it be inferred by subtraction. Equivalently: the denominator of
+  a band table is the set that was MEASURED, not the set that was eligible, and any
+  difference between the two is itself a reportable figure.
+- Enforced in: this prevention log;
+  `scripts/measure_2834_split_adjustment.py::derive` (`totals["turnover_undefined"]`
+  counted in the same branch that skips, printed immediately under the band table, with the
+  band denominator reduced to the measured set).
+
+### A falsy check is not a non-positive check — and the negative case is usually unpopulated, so it passes
+
+- First seen in: PR #3283 (#2834 §7 item 2 slice B). Review bot, second round, WARNING +
+  PREVENTION. The first round's NITPICK on the same branch had already moved it once.
+- Symptom: a measurement excluded bars whose turnover is undefined, in two named branches —
+  `if not volume: ... elif not close: ...` — under a comment that explicitly stated the
+  invariant as `close <= 0`. **`not close` is true only for zero.** A NEGATIVE close would
+  fall through to the `else` and be measured as an ordinary bar, under a branch whose
+  sibling claims to have excluded it, and `abs()` in the error term would have kept the
+  result looking sane.
+- ⚠⚠ **The reason this survives review is that the negative case is almost always
+  unpopulated.** Measured 2026-09-21: `select count(*) from research_price_daily where
+  close <= 0` returns **3**, and all three are exactly `0` with volume `0`. So every figure
+  the falsy check produced was correct, the tests passed, and the full-population run
+  agreed — because the data never exercised the gap. **A guard that is right by accident is
+  still wrong**, and the accident is a property of today's corpus, not of the rule.
+- ⚠ **A second lesson fell out of getting that number wrong once.** The first draft of the
+  code comment said "returns 2", taken from
+  `s2_cross_sectional_momentum`'s docstring — *"Measured 2026-08-06 on the full population:
+  two `research_price_daily` bars have `close <= 0`"*. Re-running the query the docstring
+  itself supplies returns 3. The docstring is a **hardcoded derived statistic that went
+  stale silently**, which is the failure `.claude/CLAUDE.md` already forbids ("never
+  hardcode a derived statistic into prose — compute it, or omit it"), and it went stale in
+  the place a reader trusts most: next to the reproduction command that falsifies it.
+  ⚠ It is NOT corrected here — `_source_hash()` hashes that whole module, so editing the
+  docstring rotates every stored s2 identity. Owed to the slice that mints the new id
+  (#2834 §7 item 2 slice C), with the two other stale claims in the same file.
+- ⚠ Test to apply, second half: **quoting a figure from a neighbouring docstring is not a
+  measurement.** If the docstring carries the query, run it; a stored number's age is
+  invisible and its neighbours make it look fresh.
+- ⚠ Same family as `sql/405`'s `split_factor > 0` admitting `NaN` and `Infinity` in Postgres
+  (slice A, Codex ckpt-2), and the two fail in OPPOSITE directions — `> 0` is too permissive
+  at the top, `not x` is too permissive at the bottom. Neither is a spelling of "positive".
+- Test to apply: **when a comment, docstring or sibling branch states a `<= 0` / `>= 0` /
+  "non-positive" invariant, grep that branch for the COMPARISON.** If what is there is a
+  truthiness test (`not x`, `if x:`), the sign half of the invariant is unenforced. State
+  the comparison you mean; never let a falsy test stand in for an ordering one. Corollary:
+  do not accept "the measurement agreed" as evidence the guard is right — check whether the
+  population contains a case that would have disagreed.
+- Enforced in: this prevention log;
+  `scripts/measure_2834_split_adjustment.py::derive` (`elif close <= 0:` with the measured
+  population note beside it).
