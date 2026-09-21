@@ -292,6 +292,58 @@ def test_an_accepted_edit_that_never_lands_keeps_accruing_refusals(
     broker.edit_demo_strategy_position.assert_called_once()
 
 
+def test_a_manually_tightened_stop_never_accrues_refusals_though_it_resumes_pending(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3284 item 4a — the P2 Codex checkpoint 2 raised against the first fix.
+
+    `_edit_landed` is EXACT equality on the signal arm, so a stop manually tightened above
+    the one we requested (submitted 95, broker shows 100) resumes ``pending`` on every
+    visit forever. The gap logic correctly calls that position PROTECTED — a tighter stop
+    is not a gap — so counting the `pending` state alone would accrue refusals against a
+    position carrying a perfectly good stop, and item 4b would alert that the safety net is
+    broken on the one position that is over-protected.
+
+    The fix resolves `pending` against the SAME `_exit_intent` the repair arm uses, which
+    is why this asserts a ZERO streak while its sibling test above asserts a climbing one:
+    the two differ only in whether a real gap remains.
+    """
+    conn = ebull_test_conn
+    trade_id, _, broker, manual = _opened_trade(conn, monkeypatch)
+    ownership = conn.execute(
+        "SELECT ownership_id FROM strategy_position_ownership WHERE strategy_trade_id=%s", (trade_id,)
+    ).fetchone()
+    assert ownership is not None
+    conn.commit()
+
+    assert (
+        manage_owned_position(
+            conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
+        ).state
+        == "submitted"
+    )
+
+    # Someone tightens the stop by hand at the broker: 100 is STRICTER than the 95 we asked
+    # for, so the position is better protected than the intent requires.
+    broker.get_portfolio.return_value = BrokerPortfolio(
+        positions=(_position(_POSITION_ID, stop=Decimal("100"), take=Decimal("110")), manual),
+        available_cash=Decimal("500"),
+        raw_payload={},
+    )
+    for _ in range(3):
+        stalled = manage_owned_position(
+            conn, broker=broker, strategy_trade_id=trade_id, broker_position_id=_POSITION_ID, now=_NOW
+        )
+        assert (stalled.state, stalled.reason_code) == ("pending", "broker_edit_pending")
+
+    streak = conn.execute(
+        "SELECT consecutive_refusals, last_refusal_reason FROM strategy_position_repair_streaks WHERE ownership_id=%s",
+        (ownership[0],),
+    ).fetchone()
+    conn.commit()
+    assert streak == (0, None)
+
+
 def test_rejected_patch_is_a_single_material_event_not_a_retry_heap(
     ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

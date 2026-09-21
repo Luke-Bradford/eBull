@@ -956,9 +956,84 @@ def _submit_close(
     )
 
 
+@dataclass(frozen=True)
+class _ExitIntent:
+    """The desired exit pair for one owned position, and whether the broker is short of it.
+
+    One function so there is ONE gap policy. It is needed in two places — the repair arm
+    and #3284 item 4a's resume-path recorder — and Codex checkpoint 2 caught the cost of
+    letting the second place infer it: the signal arm's ``_edit_landed`` is exact equality,
+    so a position whose stop was manually TIGHTENED above the requested one resumes
+    ``pending`` forever while this logic rightly calls it protected.
+    """
+
+    current_stop: Decimal | None
+    desired_stop: Decimal
+    desired_take: Decimal | None
+    max_quote_age_seconds: int
+    stop_gap: bool
+    take_gap: bool
+
+    @property
+    def has_gap(self) -> bool:
+        return self.stop_gap or self.take_gap
+
+
+def _exit_intent(*, owned: _OwnedPosition, position: BrokerPosition) -> _ExitIntent:
+    """Derive the desired stop/target pair and the gap, per arm. Moved verbatim (#3284)."""
+    if owned.is_core:
+        # The anchor is the position's OWN entry, read back from the broker, and
+        # that choice is what makes #3284 item 2 ("re-apply after every change")
+        # fall out with no extra machinery: eToro re-weights ``open_price`` when
+        # units are added, so the next cycle derives the new levels unprompted.
+        levels = core_exit_levels(position.open_price)
+        current_stop = position.stop_loss_rate
+        desired_stop = levels.stop_loss_rate
+        desired_take: Decimal | None = levels.take_profit_rate
+        # ⚠ NO `max(current_stop, ...)` CLAMP ON THIS ARM, deliberately.  The
+        # signal arm's clamp is a ratchet: a stop there only ever tightens.  A
+        # mandate stop is a pure function of the current weighted entry, and
+        # #3284 item 2 requires it to be re-applied to that value -- so an ADD at
+        # a lower price must be allowed to move the stop DOWN.  Clamping would
+        # silently keep a stop computed from a previous, higher entry.
+        return _ExitIntent(
+            current_stop=current_stop,
+            desired_stop=desired_stop,
+            desired_take=desired_take,
+            max_quote_age_seconds=CORE_EXIT_MAX_QUOTE_AGE_SECONDS,
+            stop_gap=position.is_no_stop_loss
+            or not core_exit_level_satisfied(observed=current_stop, desired=desired_stop),
+            take_gap=position.is_no_take_profit
+            or not core_exit_level_satisfied(observed=position.take_profit_rate, desired=desired_take),
+        )
+    # Past this point the signal arm is guaranteed by _LOAD_OWNED_SQL's
+    # witnesses: a loaded non-core position has a preflight and an execution
+    # policy, so these are non-null.
+    #
+    # ⚠ `raise`, NOT `assert`. `python -O` strips asserts, and this guard is
+    # what stands between a mis-witnessed load predicate and a `NoneType`
+    # comparison inside the stop/take-profit arithmetic below. Stripped, the
+    # failure mode is not "no check" but "a confusing TypeError three lines
+    # later, in the code that decides where a stop goes".
+    if owned.entry_stop is None or owned.entry_take_profit is None or owned.max_quote_age_seconds is None:
+        raise StrategyPositionManagerError(
+            "a non-core owned position must carry its entry preflight and execution policy"
+        )
+    current_stop = position.stop_loss_rate
+    return _ExitIntent(
+        current_stop=current_stop,
+        desired_stop=max(current_stop, owned.entry_stop) if current_stop is not None else owned.entry_stop,
+        desired_take=owned.entry_take_profit,
+        max_quote_age_seconds=owned.max_quote_age_seconds,
+        stop_gap=position.is_no_stop_loss or current_stop is None or current_stop < owned.entry_stop,
+        take_gap=position.is_no_take_profit or position.take_profit_rate != owned.entry_take_profit,
+    )
+
+
 def _record_resumed_repair_visit(
     conn: psycopg.Connection[Any],
     *,
+    broker: BrokerProvider,
     owned: _OwnedPosition,
     resumed: PositionManagerResult,
     observed_at: datetime,
@@ -980,6 +1055,20 @@ def _record_resumed_repair_visit(
     as a stop refusal would alert that the safety net is broken on a position being
     deliberately closed.  A ``stop_ratchet`` is excluded for the same reason: a ratchet
     that has not moved leaves the position protected at its existing stop.
+
+    ⚠⚠ A ``pending`` RESUME IS NOT BY ITSELF A REFUSAL, and Codex checkpoint 2 caught the
+    version that assumed it was.  ``_edit_landed`` is EXACT equality on the signal arm, so a
+    position whose stop was manually TIGHTENED above the requested one (submitted 95, broker
+    shows 100) resumes ``pending`` on every visit forever — while ``_exit_intent`` correctly
+    calls it PROTECTED, because a tighter stop is not a gap.  Counting that would accrue
+    refusals against a position carrying a perfectly good stop.  So ``pending`` is resolved
+    against the SAME gap policy the repair arm uses: a real gap is the refusal, no gap is
+    protection.
+
+    ⚠ The unresolved operation row in that scenario is a REAL defect — it stays ``submitted``
+    and ``idx_strategy_position_one_unresolved_operation`` then blocks later repairs — but it
+    is a DIFFERENT one, and "the stop cannot be set" is the wrong thing to say about a
+    position whose stop is set.  Noted on the PR rather than conflated with this counter.
     """
     if resumed.position_operation_id is None:
         return
@@ -990,11 +1079,20 @@ def _record_resumed_repair_visit(
     conn.commit()
     if row is None or row[0] != "fixed_exit_repair":
         return
+    state, reason_code = resumed.state, resumed.reason_code
+    if state == "pending":
+        position = _exact_broker_position(broker, owned)
+        if position is None:
+            # Nothing to judge the gap against. The resume path owns that case; recording a
+            # refusal here would be an inference, not an observation.
+            return
+        if not _exit_intent(owned=owned, position=position).has_gap:
+            state, reason_code = "no_change", "position_protected_operation_unresolved"
     record_repair_visit(
         conn,
         ownership_id=owned.ownership_id,
-        state=resumed.state,
-        reason_code=resumed.reason_code,
+        state=state,
+        reason_code=reason_code,
         observed_at=observed_at,
     )
 
@@ -1102,7 +1200,7 @@ def manage_owned_position(
             # never-landing edit is only ever observed from. See
             # `_record_resumed_repair_visit` for why omitting it left the worst case with
             # a zero streak.
-            _record_resumed_repair_visit(conn, owned=owned, resumed=resumed, observed_at=observed_at)
+            _record_resumed_repair_visit(conn, broker=broker, owned=owned, resumed=resumed, observed_at=observed_at)
             return resumed
         position = _exact_broker_position(broker, owned)
         if position is None:
@@ -1172,48 +1270,15 @@ def manage_owned_position(
         # ratchet is unreachable on this arm by data rather than by a second branch.
         # That matters -- ratcheting a mandate holding's stop upward on strength is
         # precisely the market-timing behaviour the price-only steer cut.
-        if owned.is_core:
-            # The anchor is the position's OWN entry, read back from the broker, and
-            # that choice is what makes #3284 item 2 ("re-apply after every change")
-            # fall out with no extra machinery: eToro re-weights ``open_price`` when
-            # units are added, so the next cycle derives the new levels unprompted.
-            levels = core_exit_levels(position.open_price)
-            current_stop = position.stop_loss_rate
-            desired_stop = levels.stop_loss_rate
-            desired_take: Decimal | None = levels.take_profit_rate
-            max_quote_age_seconds = CORE_EXIT_MAX_QUOTE_AGE_SECONDS
-            # ⚠ NO `max(current_stop, ...)` CLAMP ON THIS ARM, deliberately.  The
-            # signal arm's clamp is a ratchet: a stop there only ever tightens.  A
-            # mandate stop is a pure function of the current weighted entry, and
-            # #3284 item 2 requires it to be re-applied to that value -- so an ADD at
-            # a lower price must be allowed to move the stop DOWN.  Clamping would
-            # silently keep a stop computed from a previous, higher entry.
-            stop_gap = position.is_no_stop_loss or not core_exit_level_satisfied(
-                observed=current_stop, desired=desired_stop
-            )
-            take_gap = position.is_no_take_profit or not core_exit_level_satisfied(
-                observed=position.take_profit_rate, desired=desired_take
-            )
-        else:
-            # Past this point the signal arm is guaranteed by _LOAD_OWNED_SQL's
-            # witnesses: a loaded non-core position has a preflight and an execution
-            # policy, so these are non-null.
-            #
-            # ⚠ `raise`, NOT `assert`. `python -O` strips asserts, and this guard is
-            # what stands between a mis-witnessed load predicate and a `NoneType`
-            # comparison inside the stop/take-profit arithmetic below. Stripped, the
-            # failure mode is not "no check" but "a confusing TypeError three lines
-            # later, in the code that decides where a stop goes".
-            if owned.entry_stop is None or owned.entry_take_profit is None or owned.max_quote_age_seconds is None:
-                raise StrategyPositionManagerError(
-                    "a non-core owned position must carry its entry preflight and execution policy"
-                )
-            current_stop = position.stop_loss_rate
-            desired_stop = max(current_stop, owned.entry_stop) if current_stop is not None else owned.entry_stop
-            desired_take = owned.entry_take_profit
-            max_quote_age_seconds = owned.max_quote_age_seconds
-            stop_gap = position.is_no_stop_loss or current_stop is None or current_stop < owned.entry_stop
-            take_gap = position.is_no_take_profit or position.take_profit_rate != desired_take
+        # ⚠ Derived by `_exit_intent`, which the resume-path recorder ALSO calls.  #3284
+        # item 4a needs the gap answer in two places, and Codex checkpoint 2 caught what
+        # happens when only one of them has it: a signal-arm position whose stop was
+        # manually TIGHTENED above the requested one resumes `pending` forever (the signal
+        # arm's `_edit_landed` is exact equality) while this logic considers it protected.
+        # Two gap tests that agree today is the shape that drifts; one function is not.
+        intent = _exit_intent(owned=owned, position=position)
+        current_stop = intent.current_stop
+        max_quote_age_seconds = intent.max_quote_age_seconds
         # ⚠⚠ THE TWO `record_repair_visit` CALLS ARE THE WHOLE OF #3284 ITEM 4a, and the
         # arm above is extracted into `_repair_fixed_exit` PRECISELY so there is exactly
         # ONE of them on the repair side.  Before this, both refusals returned straight
@@ -1222,16 +1287,16 @@ def manage_owned_position(
         # repair on every visit was indistinguishable from one that needed none.  Adding
         # a third refusal inside the extracted arm is now counted automatically; four
         # separate call sites would not have that property.
-        if stop_gap or take_gap:
+        if intent.has_gap:
             result = _repair_fixed_exit(
                 conn,
                 broker=broker,
                 owned=owned,
                 observed_at=observed_at,
-                current_stop=current_stop,
-                desired_stop=desired_stop,
-                desired_take=desired_take,
-                max_quote_age_seconds=max_quote_age_seconds,
+                current_stop=intent.current_stop,
+                desired_stop=intent.desired_stop,
+                desired_take=intent.desired_take,
+                max_quote_age_seconds=intent.max_quote_age_seconds,
             )
             record_repair_visit(
                 conn,
@@ -1296,7 +1361,7 @@ def manage_owned_position(
             owned=owned,
             operation_type="stop_ratchet",
             desired_stop=candidate,
-            desired_take=desired_take,
+            desired_take=intent.desired_take,
             bar=ratchet_bar,
         )
         conn.commit()
@@ -1310,7 +1375,7 @@ def manage_owned_position(
                 trigger_code="causal_resistance_break",
                 prior_stop=current_stop,
                 desired_stop=candidate,
-                desired_take=desired_take,
+                desired_take=intent.desired_take,
                 bar=ratchet_bar,
             )
         return _submit_edit(
@@ -1320,7 +1385,7 @@ def manage_owned_position(
             operation_id=operation_id,
             request_id=request_id,
             desired_stop=candidate,
-            desired_take=desired_take,
+            desired_take=intent.desired_take,
         )
 
 
