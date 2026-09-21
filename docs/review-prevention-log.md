@@ -10184,3 +10184,36 @@ original, because the gate now *looked* like a bound.
   `params_for(ASSET_CLASS)` rather than restated);
   `docs/proposals/ta/2026-09-21-armb-correction-policy-verdict.md` §4;
   `docs/proposals/ta/strategy-catalogue-and-backtest-validity.md` §4 rule 10.
+
+## A set-distance percentage is not a harm measurement — on a ONE-SIDED selection rule, the error's DIRECTION decides (#2834, 2026-09-21)
+
+- Symptom: a policy choice between two data-correction rules was argued from how much the two
+  rules' top deciles differ — **0.50% of 121,601 decile slots** — and written up as "small, not
+  zero, and not worth its dependency". The number is real and reproducible. It cannot support
+  the conclusion, and nothing about its presentation said so.
+- What was missing: the strategy selects the **top decile only**, so its two error directions
+  have different consequences. An error that inflates a score buys a POSITION; an error that
+  depresses one causes a MISS. A symmetric set distance counts both as one displaced slot.
+- Measured once the question was asked, on the same run: `suppress_all` is exposed to **2,728
+  real reverse splits** (2,122 inside the scoring window) — leaving `c_back` too low inflates
+  the momentum ratio, so the name is selected IN. `apply_all` is exposed to **228 refuted
+  forward stamps** (158 in reach). An order of magnitude apart, in the direction the set
+  distance could not show, and it changed the *reason* for the verdict rather than the verdict.
+- **The generalisation: before comparing two treatments by how much their output sets differ,
+  ask what the consumer DOES with the set.** A rank-and-take-the-top rule, a threshold alert, a
+  filter that only ever excludes — each is one-sided, and for each the two error directions
+  have different costs. Symmetric metrics (set overlap, displacement %, disagreement rate,
+  accuracy) are only faithful when the consumer is symmetric, which a selection rule never is.
+- Test to apply: write the 2×2 of {error direction} × {effect on the consumer's decision}. If
+  the diagonal is not "equally bad", a displacement percentage cannot rank the treatments and
+  you owe a directional count.
+- ⚠ Do NOT restate this as "the error has a sign" — that exact claim was withdrawn on
+  `b65abd9c` a day earlier, because reverse splits move the error the opposite way to forward
+  ones. There is no global sign. What survives is a **partition**: one direction per class,
+  counted. A lesson that generalises a withdrawn claim re-ships it.
+- ⚠ The directional count is an **exposure bound, not contamination**: an event only reaches a
+  score if a formation's lookback spans it, and only enters the decile if the inflation is
+  large enough. Both were left unmeasured and the verdict says so rather than implying a count.
+- Enforced in: this entry; `scripts/measure_2834_armb_correction_policy.py` (`harm_direction`,
+  and the closing banner that now refuses to read a displacement as a benefit);
+  `docs/proposals/ta/2026-09-21-armb-correction-policy-verdict.md` §3.5 and §5 item 3.

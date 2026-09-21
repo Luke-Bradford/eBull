@@ -48,11 +48,19 @@ why all four are computed in one panel pass and compared pairwise.
 ``quarantine`` is the fifth candidate and is deliberately NOT an arm here. It
 does not change a score, it removes SERIES, so its effect is a universe cost and
 a displacement percentage computed against a different cross-section would not
-mean the same thing as the other three. It is reported as what it deletes.
+mean the same thing as the other three. It is reported as what it deletes — in
+ONE narrow form, "delete the series if any stamp is refuted". Event-level
+quarantine, segmenting at the disputed bar and per-class treatment are unmeasured
+alternatives, not refused ones.
 
-``re_date`` is reported as a BOUND rather than an arm: it can only touch events
-whose step appears on a nearby bar, and ``find_offset_steps`` already measures
-that population.
+``re_date`` is reported as a probe HIT COUNT rather than an arm. ⚠ It is not a
+bound in either direction: false matches inflate it, and it only looks +/-3 bars
+on the events the reference can adjudicate at all.
+
+⚠⚠ Arm 5 exists because the other arms cannot see DIRECTION. s2 selects the TOP
+decile, so an error that inflates a score buys a position and an error that
+depresses one causes a miss — the two are not equally bad, and a set-distance
+percentage treats them identically.
 
 ⚠ The eligibility floor stays on RAW ``close`` in every arm
 -----------------------------------------------------------
@@ -73,7 +81,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Final, TextIO
 
@@ -389,9 +397,30 @@ def containment_reachability(
        consumes them. ``backtest_run.py:4170-4175`` names its three reads and
        that table is not among them.
 
-    Returns the linkage counts; the T3 verdict counts come from the census view.
+    ⚠ Two limits on what these counts prove, both load-bearing:
+
+    * ``instrument_id IS NULL`` is a MISSING STORED LINK, not proof that no
+      matching instrument exists. It is sufficient for the claim being made
+      (``price_series_break`` cannot key the row TODAY) and not for a stronger
+      one.
+    * Clause 2 is established by GREP, not by this query — ``rg
+      research_transition_quarantine app sql`` returns the ingest writer and the
+      ``research_quarantine_census`` view and nothing else. The counts below say
+      how much the unread verdict would have had to say, not that it is unread.
+
+    Coverage is returned alongside so the denominators are this run's own: a
+    verdict row only exists inside an evaluated range, so "T3 fired N times"
+    means nothing without the evaluated population beside it.
     """
     ids = sorted(admitted)
+    coverage_row = conn.execute(
+        "SELECT count(*), coalesce(sum(transitions_evaluated), 0)"
+        " FROM research_price_quarantine_coverage"
+        " WHERE series_id = ANY(%s) AND rule_set_version = %s",
+        (ids, RULE_SET_VERSION),
+    ).fetchone()
+    covered = 0 if coverage_row is None else int(coverage_row[0])
+    transitions_evaluated = 0 if coverage_row is None else int(coverage_row[1])
     linked_row = conn.execute(
         "SELECT count(*) FROM research_price_series WHERE series_id = ANY(%s) AND instrument_id IS NOT NULL",
         (ids,),
@@ -409,20 +438,24 @@ def containment_reachability(
     # bar that first prints the post-split level — the same bar. So the join is
     # equality, not an offset.
     on_event = sum(1 for e in events if (e.series_id, e.bar_date) in t3_keys)
-    # ⚠ Most stamped events CANNOT fire T3 and that is the rule working, not a
-    # gap: the trigger is |ratio| >= magnitude_threshold, which is 2 on every
-    # class this universe carries, so a 1.5-for-1 or a 5% stock dividend is
-    # below it by construction. Reporting the reachable subset separately stops
-    # "T3 sees 10% of splits" being read as a defect in T3.
-    reachable = [e for e in events if max(e.factor, 1 / e.factor) >= _T3_TRIGGER_MAGNITUDE]
+    # ⚠⚠ T3's predicate is on the OBSERVED ratio — ``max(close/prev, prev/close)
+    # >= magnitude_threshold`` (``price_quarantine.py:478-495``) — NOT on the
+    # stamped factor. So this is the LARGE-STAMPED-FACTOR subset and is only a
+    # proxy for what T3 can see: a real move can push a small-factor event over
+    # the trigger, and a stamped factor whose price step is absent stays under
+    # it. The run demonstrates the first direction (T3 fires on a handful of
+    # events outside this subset), which is why it is not called "reachable".
+    large_factor = [e for e in events if max(e.factor, 1 / e.factor) >= _T3_TRIGGER_MAGNITUDE]
     return {
         "admitted_series": len(ids),
+        "covered_series": covered,
+        "transitions_evaluated": transitions_evaluated,
         "instrument_linked": linked,
         "t3_transitions": len(t3_keys),
         "t3_on_stamped_event": on_event,
         "stamped_events": len(events),
-        "t3_reachable_events": len(reachable),
-        "t3_on_reachable_event": sum(1 for e in reachable if (e.series_id, e.bar_date) in t3_keys),
+        "large_factor_events": len(large_factor),
+        "t3_on_large_factor_event": sum(1 for e in large_factor if (e.series_id, e.bar_date) in t3_keys),
     }
 
 
@@ -464,6 +497,91 @@ def quarantine_cost(
     }
 
 
+def harm_direction(checks: list[EventCheck]) -> dict[str, int]:
+    """Which errors can put a name INTO the top decile, and how many are there?
+
+    ⚠⚠ This is the asymmetry the pairwise displacement table cannot show. s2
+    selects the TOP decile only, and the back-adjustment divides the bars BEFORE
+    an event by the scale. So for a scoring window that spans the event:
+
+    * applying a factor > 1 that is not really there divides ``c_back`` and
+      INFLATES ``c_skip / c_back`` — manufactured positive momentum, and the name
+      is selected IN;
+    * failing to apply a real factor < 1 (a reverse split) leaves ``c_back`` too
+      LOW and inflates the same ratio — also selected in;
+    * the other two combinations DEPRESS the score, and a depressed score on a
+      long top-decile strategy is a MISS, not a contaminated holding.
+
+    So the two candidate policies are exposed to different populations, and the
+    comparison is a count, not an argument:
+
+    * ``apply_all`` is exposed to **refuted forward** stamps (factor > 1);
+    * ``suppress_all`` is exposed to **real reverse** stamps (factor < 1).
+
+    ⚠ This is NOT the *"the error has a sign"* mechanism story withdrawn on
+    ``b65abd9c`` — that claim was withdrawn precisely because reverse splits move
+    the error the other way. The partition below is what survives: no global
+    sign, one direction per class, counted rather than reasoned.
+
+    ⚠ "Exposed" is an upper bound on contamination, never a count of it. A
+    spurious factor only reaches a score if a formation's lookback window spans
+    the event date, and the magnitude decides whether the inflated score actually
+    reaches the decile. Neither is established here.
+    """
+    refuted = [c for c in checks if c.split_error is not None and not c.agrees]
+    # The scoring window can only reach an event if the event lies inside it:
+    # LOOKBACK_BARS of trading days before the last formation, through the last
+    # formation itself. Bounded in CALENDAR days at 7/5 the bar count — a loose
+    # bound deliberately, because a tight one would need each series' own
+    # calendar and would understate reach on a halted or thinly traded name.
+    reach_start = _WINDOW_START - timedelta(days=int(LOOKBACK_BARS * 7 / 5) + 14)
+    in_reach = [c for c in checks if reach_start <= c.event.bar_date < _WINDOW_END]
+    refuted_in_reach = [c for c in refuted if reach_start <= c.event.bar_date < _WINDOW_END]
+    return {
+        "checked": len(checks),
+        "forward": sum(1 for c in checks if c.event.factor > 1),
+        "reverse": sum(1 for c in checks if c.event.factor < 1),
+        "refuted": len(refuted),
+        "refuted_forward": sum(1 for c in refuted if c.event.factor > 1),
+        "refuted_reverse": sum(1 for c in refuted if c.event.factor < 1),
+        "in_reach": len(in_reach),
+        "in_reach_reverse": sum(1 for c in in_reach if c.event.factor < 1),
+        "refuted_in_reach": len(refuted_in_reach),
+        "refuted_in_reach_forward": sum(1 for c in refuted_in_reach if c.event.factor > 1),
+    }
+
+
+def _report_harm(harm: dict[str, int], *, stream: TextIO) -> None:
+    print("\nArm 5 — direction of harm: which errors can be SELECTED IN", file=stream)
+    print(
+        f"  checked events {harm['checked']:,}   forward (factor > 1) {harm['forward']:,}"
+        f"   reverse (factor < 1) {harm['reverse']:,}",
+        file=stream,
+    )
+    print(
+        f"  inside the scoring reach of the window  {harm['in_reach']:,}"
+        f"  ({_pct(harm['in_reach'], harm['checked']):.2f}%)",
+        file=stream,
+    )
+    print(f"\n  {'policy':<16} {'exposed population':<38} {'events':>8} {'in reach':>9}", file=stream)
+    print(
+        f"  {'apply_all':<16} {'refuted FORWARD stamps applied':<38}"
+        f" {harm['refuted_forward']:>8,} {harm['refuted_in_reach_forward']:>9,}",
+        file=stream,
+    )
+    print(
+        f"  {'suppress_all':<16} {'real REVERSE splits left uncorrected':<38}"
+        f" {harm['reverse']:>8,} {harm['in_reach_reverse']:>9,}",
+        file=stream,
+    )
+    print(
+        "  ⚠ Upper bounds on exposure, not counts of contamination: a spurious factor only\n"
+        "    reaches a score if a formation's lookback spans it, and only enters the decile if\n"
+        "    the inflated score is large enough. Neither is established here.",
+        file=stream,
+    )
+
+
 def _pct(numerator: int, denominator: int) -> float:
     return 0.0 if denominator <= 0 else 100.0 * numerator / denominator
 
@@ -484,7 +602,12 @@ def _report_containment(reach: dict[str, int], *, stream: TextIO) -> None:
         file=stream,
     )
     print(
-        f"\n  T3 transitions stored, this universe {reach['t3_transitions']:,}"
+        f"\n  series with a coverage row           {reach['covered_series']:,}"
+        f"   transitions evaluated {reach['transitions_evaluated']:,}",
+        file=stream,
+    )
+    print(
+        f"  T3 transitions stored, this universe {reach['t3_transitions']:,}"
         "   (research_transition_quarantine; no backtest reader)",
         file=stream,
     )
@@ -494,13 +617,19 @@ def _report_containment(reach: dict[str, int], *, stream: TextIO) -> None:
         file=stream,
     )
     print(
-        f"  stamped events T3 can REACH          {reach['t3_reachable_events']:,}"
-        f"  (|factor| >= {_T3_TRIGGER_MAGNITUDE}, the rule's own trigger)",
+        f"  stamped events of large FACTOR       {reach['large_factor_events']:,}"
+        f"  (|factor| >= {_T3_TRIGGER_MAGNITUDE}; a proxy — T3 tests the OBSERVED ratio)",
         file=stream,
     )
     print(
-        f"  ... of which T3 fired on             {reach['t3_on_reachable_event']:,}"
-        f"  ({_pct(reach['t3_on_reachable_event'], reach['t3_reachable_events']):.2f}%)",
+        f"  ... of which T3 fired on             {reach['t3_on_large_factor_event']:,}"
+        f"  ({_pct(reach['t3_on_large_factor_event'], reach['large_factor_events']):.2f}%)",
+        file=stream,
+    )
+    outside = reach["t3_on_stamped_event"] - reach["t3_on_large_factor_event"]
+    print(
+        f"  ... and T3 fired on                  {outside:,} stamped events OUTSIDE that subset,"
+        "\n      which is why the subset is a proxy and not a reachability bound",
         file=stream,
     )
 
@@ -611,6 +740,14 @@ def _report_redate(checks: list[EventCheck], offsets: dict[tuple[int, date], Dec
 
 def main() -> int:
     with psycopg.connect(settings.database_url) as conn:
+        # ⚠ REPEATABLE READ so every arm reads ONE snapshot. "One transaction" is
+        # not the same guarantee: under READ COMMITTED each statement takes a
+        # fresh snapshot, so a concurrent ingest could move the panel between the
+        # arms' scale build and the overlap query, and the displacement between
+        # two arms would silently include it.
+        # ⚠ NOT `read_only` — a PostgreSQL read-only transaction forbids CREATE,
+        # which includes the TEMP tables this measurement builds.
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         conn.execute("SET statement_timeout = 1800000")
         selection = _selection(conn)
         ids = [row.series_id for row in selection.admitted]
@@ -644,6 +781,8 @@ def main() -> int:
         refuted_checks = [c for c in checks if c.split_error is not None and not c.agrees]
         _report_redate(checks, find_offset_steps(conn, refuted_checks), stream=sys.stdout)
 
+        _report_harm(harm_direction(checks), stream=sys.stdout)
+
     if not formations:
         print("\nREFUSED: no formation cleared the cross-section floor; nothing was compared.", file=sys.stdout)
         return 2
@@ -654,9 +793,11 @@ def main() -> int:
         f"\nMEASURED. Correcting at all moves {control:.2f}% of the top decile against the status quo.\n"
         f"Adjudicating the disputes on top of that moves {refine:.2f}% (apply -> apply_unless_refuted)\n"
         f"and gating on corroboration moves {gate:.2f}% (apply -> apply_only_corroborated).\n"
-        f"⚠ NOT a verdict on which policy is RIGHT. No non-circular adjudicator exists (#3280), so "
-        "these are the SIZES of the choices, not their correctness. The selection and its rationale "
-        "belong in the follow-on spec, fixed by construction and frozen there.",
+        "⚠ These are SET DISTANCES, not benefits: a displacement percentage says how far two "
+        "deciles differ, never which is right, and they are not additive. Arm 5 is the only "
+        "thing here that speaks to the DIRECTION of harm, and it bounds exposure rather than "
+        "counting contamination. No adjudicator has cleared a control arm (#3280 measured one "
+        "candidate and it did not), so nothing in this output establishes correctness.",
         file=sys.stdout,
     )
     return 0
