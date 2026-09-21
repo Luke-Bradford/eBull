@@ -1100,46 +1100,24 @@ class CoreSleeveResponse(BaseModel):
         "Compare an ISA elsewhere using personal tax, FX and dealing costs, and expected turnover; "
         "#2915's £50,000 sensitivity was mixed, not a universal ISA advantage."
     )
-    #: #2833's second adoption caveat. Its "On pass" clause asks for both caveats
-    #: "verbatim", and the field above is already the precedent for why that means
-    #: the INTENT and not the characters: #2915's measurement turned "strictly
-    #: tax-dominates" into "mixed". Recording the deviation explicitly, because a
-    #: prior deviation does not silently redefine an acceptance clause.
+    #: #2833's second adoption caveat, not carried verbatim. Why, and what each
+    #: surviving clause is anchored in -- the rationale is on PR #3272:
     #:
-    #: ⚠ The verbatim text is *"unhedged USD exposure on a GBP account"*. What is
-    #: NOT carried is the words "on a GBP account", and ONLY because they name an
-    #: account whose denomination we cannot state:
-    #:
-    #:     SELECT environment, currency, account_currency_id, count(*)
-    #:     FROM broker_account_equity_snapshots GROUP BY 1, 2, 3;
-    #:
-    #: Rows with a non-NULL ``account_currency_id`` are broker-OBSERVED USD; rows
-    #: with NULL are not observations at all but the pre-migration ``'USD'``
-    #: literal ``sql/341`` exists to stop us reading as evidence
-    #: (``account_currency_assumed_not_observed``). Every such row is also DEMO, so
-    #: none of it establishes a real account's currency either way.
-    #:
-    #: ⚠⚠ So this does NOT refute the original. "On a GBP account" plausibly meant
-    #: valuation exposure rather than a per-trade conversion, and refuting a
-    #: mechanism the ticket never asserted would be the error this programme keeps
-    #: repeating. The sentence simply drops a clause it cannot support and keeps
-    #: every claim it can, which is why the exposure and the conversion COST both
-    #: survive below.
-    #:
-    #: Each surviving clause and where it is checkable:
-    #:
-    #: * "Where ... holds a USD-quoted instrument" is conditional on purpose -- this
+    #: * "on a GBP account" is DROPPED, and only those words. Every row of
+    #:   ``broker_account_equity_snapshots`` is demo, and its NULL
+    #:   ``account_currency_id`` rows are the assumed ``'USD'`` literal ``sql/341``
+    #:   exists to stop us reading as evidence. ⚠ That makes the clause
+    #:   unsupportable, NOT false -- it plausibly meant valuation exposure, so
+    #:   nothing here refutes it and both surviving claims are kept.
+    #: * "Where ... holds a USD-quoted instrument" is conditional on purpose: this
     #:   response is also served in ``cash``, ``evidence_collecting`` and
-    #:   ``unavailable``, where no sleeve is held and an unconditional sentence
-    #:   would be false.
-    #: * "neither hedges nor models" is the declaration's own ``fx_rule``: an
+    #:   ``unavailable``, where no sleeve is held.
+    #: * "neither hedges nor models" is the declaration's ``fx_rule`` -- an
     #:   observation whose ``conversion_rate`` is not exactly 1 fails
-    #:   ``fx_unmodelled`` rather than being converted. That is how candidate 3075
-    #:   (IUSA.L) failed.
-    #: * The ceiling's scope is the declaration's ``all_in_cost_rule`` --
+    #:   ``fx_unmodelled`` rather than being converted (how 3075 IUSA.L failed).
+    #: * The ceiling's scope is its ``all_in_cost_rule``:
     #:   ``p75_full_round_trip_spread_bps`` plus a documented 0 bps entry-sizing
-    #:   markup. Funding and withdrawal conversion is not in it, which is the half
-    #:   of #2833's spike step 3 the measured verdict never priced.
+    #:   markup, so funding/withdrawal conversion sits outside it.
     household_currency_caveat: str = (
         "Sterling is not the unit here. Where the core sleeve holds a USD-quoted "
         "instrument, a household measuring it in GBP carries GBP/USD exposure on the "
