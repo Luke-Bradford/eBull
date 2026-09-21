@@ -910,15 +910,23 @@ def _report_events(
         # close actually has relative to the reference (``implied_factor``).
         # Only two of them are candidate-1 error, and only the last is invisible
         # to B1.
-        ref_unadjusted = [c for c in disagreeing if c.reference_is_unadjusted]
-        no_step = [
-            c
-            for c in disagreeing
-            if c not in ref_unadjusted
-            and c.implied_factor is not None
-            and abs(c.implied_factor - 1) <= _EVENT_TOLERANCE
-        ]
-        magnitude = [c for c in disagreeing if c not in ref_unadjusted and c not in no_step]
+        # ⚠ Partitioned in ONE pass on the predicates themselves, not by list
+        # membership. `c not in ref_unadjusted` would be an O(n) scan per item
+        # using dataclass equality — and equality here compares four Decimals,
+        # so two genuinely distinct events with identical errors could collide.
+        # The predicates are exhaustive and ordered, so a single walk is both
+        # faster and exactly mutually exclusive by construction.
+        ref_unadjusted: list[EventCheck] = []
+        no_step: list[EventCheck] = []
+        magnitude: list[EventCheck] = []
+        for check in disagreeing:
+            implied = check.implied_factor
+            if check.reference_is_unadjusted:
+                ref_unadjusted.append(check)
+            elif implied is not None and abs(implied - 1) <= _EVENT_TOLERANCE:
+                no_step.append(check)
+            else:
+                magnitude.append(check)
         internally_ok = [c for c in disagreeing if c.internal_agrees]
         uncorroborated = no_step + magnitude
         recoverable = [
