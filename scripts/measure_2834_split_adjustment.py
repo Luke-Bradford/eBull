@@ -210,13 +210,23 @@ def derive(conn: psycopg.Connection[Any]) -> int:
                     #
                     # ⚠ Volume and close are DISTINCT causes and an earlier
                     # draft reported both as "zero or absent volume" (review-bot
-                    # NITPICK). `close` is NOT NULL but not positive-constrained:
-                    # `select count(*) from research_price_daily where close <= 0`
-                    # returns 2. Naming the wrong cause for an exclusion is the
+                    # NITPICK). Naming the wrong cause for an exclusion is the
                     # same defect as not naming it, one step smaller.
+                    #
+                    # ⚠⚠ `close <= 0`, NOT `not close` — the second review round
+                    # caught that a falsy test excludes only ZERO, so a NEGATIVE
+                    # close would fall through and be measured as an ordinary
+                    # bar under a branch whose sibling claims to exclude
+                    # "non-positive close". `abs()` in the error term would have
+                    # hidden it. Measured corpus-wide: 3 bars have `close <= 0`
+                    # (one Intrader, two on the other vendor) and all three are
+                    # exactly 0 with volume 0 — so the negative case is
+                    # UNPOPULATED here, which is why a falsy check passed every
+                    # figure it produced. A guard that is right by accident is
+                    # still a guard that is wrong.
                     if not volume:
                         totals["turnover_undefined_volume"] += 1
-                    elif not close:
+                    elif close <= 0:
                         totals["turnover_undefined_close"] += 1
                     else:
                         raw = close * Decimal(volume)
