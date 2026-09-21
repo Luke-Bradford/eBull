@@ -24,10 +24,13 @@ condition nobody measured", and it is right — so **no verdict counted here is
 evidence about any strategy**. It is chosen because it maximises the number of
 bars that reach arithmetic, which is the only property an A/B wants from it.
 
-⚠ The permitted-change set is ``strategy_version`` AND
-``input_rule_set_versions["indicator_series"]``. Editing this module's source
-rotates both by construction; naming only the first would make the comparison
-fail for the one reason that is expected.
+⚠ THE PERMITTED-CHANGE SET HAS THREE MEMBERS, and the first draft named one.
+``strategy_version`` (all 12, both universes), ``INPUT_RULE_SETS
+["indicator_series"]`` — and ``PRICE_BASIS_RULE_VERSION``, because the diff
+widens ``bind_bar``'s annotation and ``strategy_price_basis.py``'s bytes are
+inside it, which is inside S-12's params. Each is asserted to have ACTUALLY
+rotated: a rotation that did not happen means the edit never reached the
+identity, which is its own defect (prevention-log #3017).
 
 COVERAGE, ASSERTED RATHER THAN ASSUMED
 --------------------------------------
@@ -218,19 +221,64 @@ def _measure(limit: int) -> dict[str, Any]:
     finally:
         BarSeries.__init__ = _original_init  # type: ignore[method-assign]
 
+    versions = {
+        sid: {u: entry.identity(universe=u, cost_model_id=COST_MODEL_ID).version for u in _UNIVERSES}
+        for sid, entry in sorted(STRATEGY_MANIFEST.items())
+    }
     return {
         "eligible": len(eligible),
         "corpus": _digest(corpus),
         "corpus_bars": len(corpus),
         "indicator_series_rule_set": INPUT_RULE_SETS["indicator_series"],
-        "strategy_versions": {
-            sid: {u: entry.identity(universe=u, cost_model_id=COST_MODEL_ID).version for u in _UNIVERSES}
-            for sid, entry in sorted(STRATEGY_MANIFEST.items())
-        },
+        "price_basis_rule": _price_basis_rule(),
+        "strategy_versions": versions,
+        "attachment": _attachment_census(versions),
         "cells": {key: _digest(parts) for key, parts in sorted(cells.items())},
         "evaluated": dict(sorted(evaluated.items())),
         "constructions": dict(_CONSTRUCTIONS),
     }
+
+
+def _price_basis_rule() -> str:
+    """⚠ A SECOND permitted identity change, and it was missed at first.
+
+    This diff widens ``bind_bar``'s annotation, which changes
+    ``strategy_price_basis.py``'s bytes, which is inside
+    ``PRICE_BASIS_RULE_VERSION``, which is inside S-12's params. Naming only
+    ``indicator_series`` in the permitted set would have made the comparison
+    fail for a change that is expected.
+    """
+    from app.services.strategy_price_basis import PRICE_BASIS_RULE_VERSION
+
+    return PRICE_BASIS_RULE_VERSION
+
+
+def _attachment_census(versions: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """How much stored evidence hangs off THIS arm's identities.
+
+    ⚠⚠ RUN PER ARM, AND THAT IS THE WHOLE POINT. ``indicator_series`` hashes
+    its own source, so a census taken from the CANDIDATE checkout reports zero
+    attachment by construction — the edit already detached everything, and the
+    query cannot tell that apart from "there was never anything attached". Only
+    the BASELINE arm's number answers the question the disposition needs, which
+    is why this travels with the measurement and its commit rather than being
+    quoted loose.
+    """
+    wanted = {
+        (strategy_id, version) for strategy_id, per_universe in versions.items() for version in per_universe.values()
+    }
+    census: dict[str, Any] = {}
+    with psycopg.connect(settings.database_url) as conn, conn.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        for table in ("strategy_signals", "strategy_signal_observations", "strategy_scan_watermark"):
+            cur.execute(f"select strategy_id, strategy_version, count(*) from {table} group by 1, 2")  # noqa: S608
+            rows = cur.fetchall()
+            census[table] = {
+                "rows": sum(int(n) for _, _, n in rows),
+                "groups": len(rows),
+                "attached_rows": sum(int(n) for sid, ver, n in rows if (sid, ver) in wanted),
+            }
+    return census
 
 
 def _compare(baseline: dict[str, Any], candidate: dict[str, Any]) -> int:
@@ -255,8 +303,26 @@ def _compare(baseline: dict[str, Any], candidate: dict[str, Any]) -> int:
     # The two PERMITTED changes, asserted to have actually happened. A rotation
     # that did NOT occur would mean the edit never reached the identity, which is
     # its own defect (prevention-log #3017).
-    if baseline["indicator_series_rule_set"] == candidate["indicator_series_rule_set"]:
-        problems.append("indicator_series rule set did NOT rotate — the edit never reached the identity")
+    for name in ("indicator_series_rule_set", "price_basis_rule"):
+        if baseline[name] == candidate[name]:
+            problems.append(f"{name} did NOT rotate — the edit never reached the identity")
+
+    # ⚠ The disposition that matters comes from the BASELINE arm, not this one.
+    # A candidate-side census reports zero by construction.
+    attached = {
+        table: figures["attached_rows"] for table, figures in baseline["attachment"].items() if figures["attached_rows"]
+    }
+    if attached:
+        # NOT a failure — a rotation that detaches live evidence is a real
+        # decision, not an error. It must be stated and disposed of on the PR
+        # rather than discovered after merge.
+        logger.warning(
+            "⚠ the rotation DETACHES stored evidence at the baseline: %s. "
+            "Record the disposition on the PR before merging.",
+            attached,
+        )
+    else:
+        logger.info("baseline attachment: 0 rows on any current identity — the rotation detaches nothing")
     rotated = sum(
         1
         for sid, versions in candidate["strategy_versions"].items()
