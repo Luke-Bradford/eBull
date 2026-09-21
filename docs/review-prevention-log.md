@@ -9874,3 +9874,41 @@ original, because the gate now *looked* like a bound.
   it, rather than as prose recording that the last round failed.
 - Enforced in: this entry;
   `docs/proposals/ta/2026-09-21-2840-price-basis-state-recording.md` §2.1.
+
+### Read the CONSUMER of a value before calling it a defect — the producer only tells you what is stored (#2965/#2602, 2026-09-21)
+
+- Symptom: two designs were written and killed at checkpoint 1 **in the same session**, both
+  because the function a ticket cites was read and the function that *consumes* its output
+  was not.
+  - #2965 (`b10ebeeb`): the ticket frames the conflict as "the claim vs the reader" and
+    quotes `strategy_engine_capital.py:278-280`. Twelve lines below, `:354` raises the
+    **opposite** way — `resolved core trade … has no active exact ownership`. The two pin a
+    biconditional, so declining to claim a closed execution merely moved the wedge from the
+    pending branch to the resolved branch. Designs A (2026-09-13) and C died in the same
+    place.
+  - #2602: the successor design claimed an exposure double-count from
+    `load_engine_capital_authority`, which was read in full. Exposure is not resolved there.
+    `resolve_engine_capital_usage:414-418` already raises
+    `engine_capital_ownership_unwitnessed` for exactly that state and builds `core_committed`
+    from the broker snapshot's own `row.amount`. The class was already covered, loudly and
+    fail-closed; the proposed guard was a second gate on a covered class.
+- ⚠ The part worth the entry: the second one happened **after** the first was written up as
+  a process lesson and merged, hours earlier, in this same session. Recording a lesson does
+  not apply it — the same session re-committed its sibling while the wording was still on
+  screen. This is working-order step 3c turned on one's own output, and it is the third
+  recurrence of the #2840 pattern *"a new gate for a class an existing gate already covers"*.
+- Related and independently fatal on #2602: `trade_events` writes **one close row per slice**
+  (`trade_events.py:191-197`, and `uq_trade_events_close` is unique on
+  `(position_id, executed_at)`), so "a close event exists" does **not** mean the position
+  closed. Keying a release on it is fail-open. A predicate over an event table needs its
+  cardinality per entity checked before it is treated as a state.
+- Prevention: before writing "silently", "double-counted" or "never checked" about a computed
+  value, **grep the returned dataclass field for its readers and read them** — the producer
+  says what is stored, only the consumer says whether anything is wrong with it. Where a
+  ticket frames a conflict as A-versus-B, read B *completely*: a one-sided invariant is
+  usually half of a biconditional. And for any predicate built on an event table, run
+  `select <entity_id>, count(*) … group by 1 having count(*) > 1` before treating one row as
+  a terminal state.
+- Enforced in: this entry;
+  `docs/proposals/execution/2026-09-21-closed-execution-ownership-claim.md`;
+  `docs/proposals/execution/2026-09-21-externally-closed-ownership-release.md`.
